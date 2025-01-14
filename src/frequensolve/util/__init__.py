@@ -1,0 +1,9 @@
+from .input_parser     import *  # noqa
+from .report_builder   import *  # noqa
+
+try:
+   from .paraview_wrapper import *
+except ModuleNotFoundError as e:
+   print("paraview_wrapper requires calling with pvpython (packaged with Paraview)")
+except BaseException as e:
+   print(f"Exception: {type(e).__name__}")
