@@ -1,10 +1,12 @@
+"""Python wrapper for automating ParaView visualization"""
+
 #import paraview
 #paraview.compatibility.major = 5
 #paraview.compatibility.minor = 13
 
 import os, sys
 import numpy as np
-from paraview.simple import *
+from paraview.simple import * # noqa
 
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -29,20 +31,22 @@ cmaps = {
 }
 
 def read_xmf(file):
-   """
-   @brief   Read XMF files using the XDMFReader.
-   @param   file  Path to the XMF file.
-   @return  An XDMFReader object linked to the file.
+   """Read XMF files using the XDMFReader.
+
+   Attributes:
+      file (str): Path to the XMF file.
+      An XDMFReader object linked to the file.
    """
    return XDMFReader(registrationName=f"{file}*", FileNames=[file])
 
 def get_labels(x0, x1, dx):
-   """
-   @brief   Generate axis labels within the range [x0, x1] with step dx.
-   @param   x0  Lower bound of the range.
-   @param   x1  Upper bound of the range.
-   @param   dx  Step size for labels.
-   @return  A list of float labels spanning [x0, x1].
+   """Generate axis labels within the range [x0, x1] with step dx.
+
+      Attributes:
+      x0 (float): Lower bound of the range.
+      x1 (float): Upper bound of the range.
+      dx (float): Step size for labels.
+      A list of float labels spanning [x0, x1].
    """
    X0 = np.floor(x0 / dx) * dx
    X1 = np.ceil(x1 / dx) * dx + dx / 2.0
@@ -51,17 +55,18 @@ def get_labels(x0, x1, dx):
 
 @dataclass
 class ColorMapManager:
-   """
-   @class   ColorMapManager
-   @brief   Manages color mapping for ParaView fields.
-   @details Allows applying presets, inverting, opacity control, and LUT rescaling.
+   """Manages color mapping for ParaView fields.
+
+   Attributes:
+      Allows applying presets, inverting, opacity control, and LUT rescaling.
    """
    def apply_colormap(self, fieldLUT, colormap, invert=False):
-      """
-      @brief   Apply a color map preset to a field LUT.
-      @param   fieldLUT   The LookUpTable for the field.
-      @param   colormap   A string key to look up in cmaps.
-      @param   invert     If True, the map is inverted after applying.
+      """Apply a color map preset to a field LUT.
+
+      Attributes:
+         fieldLUT (LookUpTable): The LookUpTable for the field.
+         colormap (str): A string key to look up in cmaps.
+         invert (bool): If True, the map is inverted after applying.
       """
       if invert:
          colormap = colormap[:-2]
@@ -70,18 +75,20 @@ class ColorMapManager:
          fieldLUT.InvertTransferFunction()
 
    def configure_opacity(self, fieldLUT, enable_opacity):
-      """
-      @brief   Enable or disable opacity mapping.
-      @param   fieldLUT       The LookUpTable for the field.
-      @param   enable_opacity True to enable opacity, False otherwise.
+      """Enable or disable opacity mapping.
+
+      Attributes:
+         fieldLUT (LookUpTable): The LookUpTable for the field.
+         enable_opacity (bool): True to enable opacity, False otherwise.
       """
       fieldLUT.EnableOpacityMapping = 1 if enable_opacity else 0
 
    def rescale_lut(self, fieldLUT, limits):
-      """
-      @brief   Rescale LUT to provided limits or data range.
-      @param   fieldLUT  The LookUpTable for the field.
-      @param   limits    Either None or (min, max) for explicit LUT scaling.
+      """Rescale LUT to provided limits or data range.
+
+      Attributes:
+         fieldLUT (LookUpTable): The LookUpTable for the field.
+         limits (Optional[Tuple[float, float]]): Either None or (min, max) for explicit LUT scaling.
       """
       if limits:
          fieldLUT.RescaleTransferFunction(limits[0], limits[1])
@@ -90,23 +97,25 @@ class ColorMapManager:
 
 
 class DataManager:
-   """
-   @class   DataManager
-   @brief   Parses the input file and reads in simulation data for Paraview.
-   @details Loads field, source, and receiver data (if available) as XMF.
+   """Parses the input file and reads in simulation data for Paraview.
+
+   Attributes:
+      Loads field, source, and receiver data (if available) as XMF.
    """
    def __init__(self, input_file):
-      """
-      @brief Constructor for DataManager.
-      @param input_file Path to the input configuration file.
+      """Constructor for DataManager.
+
+      Attributes:
+         input_file (str): Path to the input configuration file.
       """
       self.input_file = input_file
       self._initialize_input_data()
 
    def _initialize_input_data(self):
-      """
-      @brief   Parse input file and set relevant data properties (dimension, bounds, etc.).
-      @details Also reads the main field, sources, and receivers if available.
+      """Parse input file and set relevant data properties (dimension, bounds, etc.).
+
+      Attributes:
+         Also reads the main field, sources, and receivers if available.
       """
       input = InputParser.read(self.input_file)
       self.dim = int(input.get_block("Problem").args["dimension"])
@@ -148,9 +157,19 @@ class DataManager:
 
 @dataclass
 class ColorbarSetter:
-   """
-   @class  ColorbarSetter
-   @brief  Manages and applies colorbar properties (title, size, font, etc.).
+   """Manages and applies colorbar properties (title, size, font, etc.).
+
+   Attributes:
+      font (str): Font name or path.
+      fontsize (int): Font size.
+      bold (int): 1 if bold, 0 otherwise.
+      thickness (int): Bar thickness in pixels.
+      length (float): Bar length in normalized coordinates [0,1].
+      location_x (float): X position in normalized display coordinates.
+      location_y (float): Y position in normalized display coordinates.
+      format (Optional[str]): Custom label format or None for automatic.
+      labels (Optional[List[float]]): Custom label list or None for auto-generation.
+      title (Optional[str]): Colorbar title or None.
    """
    font:       str   = 'Arial'
    fontsize:   int   = 30
@@ -164,11 +183,12 @@ class ColorbarSetter:
    title:      Optional[str]       = None
          
    def apply(self, field, title, renderView):
-      """
-      @brief   Apply colorbar settings to the given field in the specified renderView.
-      @param   field       The name of the field to which the colorbar applies.
-      @param   title       The colorbar title (if any).
-      @param   renderView  The ParaView render view object.
+      """Apply colorbar settings to the given field in the specified renderView.
+
+      Attributes:
+         field (str): The name of the field to which the colorbar applies.
+         title (str): The colorbar title (if any).
+         renderView (ParaView render view object): The ParaView render view object.
       """
       fieldLUT = GetColorTransferFunction(field)
       colorBar = GetScalarBar(fieldLUT, renderView)
@@ -180,10 +200,11 @@ class ColorbarSetter:
       self.set_labels(field, colorBar)
 
    def set_title(self, colorBar, title):
-      """
-      @brief   Set the colorbar title and remove component title.
-      @param   colorBar Colorbar proxy object.
-      @param   title    Title text to display.
+      """Set the colorbar title and remove component title.
+
+      Attributes:
+         colorBar (Colorbar proxy object): The colorbar proxy object.
+         title (str): Title text to display.
       """
       if title:
          colorBar.Title = title
@@ -193,12 +214,13 @@ class ColorbarSetter:
                 font: Optional[str] = None,
                 size: Optional[int] = None,
                 bold: Optional[int] = None):
-      """
-      @brief Set colorbar font properties.
-      @param colorBar Colorbar proxy object.
-      @param font     Font name or path.
-      @param size     Font size.
-      @param bold     1 if bold, 0 otherwise.
+      """Set colorbar font properties.
+
+      Attributes:
+         colorBar (Colorbar proxy object): The colorbar proxy object.
+         font (Optional[str]): Font name or path.
+         size (Optional[int]): Font size.
+         bold (Optional[int]): 1 if bold, 0 otherwise.
       """
       if font is None:
          font = self.font
@@ -224,11 +246,12 @@ class ColorbarSetter:
    def set_size(self, colorBar,
                 thickness: Optional[int] = None,
                 length: Optional[float] = None):
-      """
-      @brief Set colorbar thickness and length.
-      @param colorBar   Colorbar proxy object.
-      @param thickness  Bar thickness in pixels.
-      @param length     Bar length in normalized coordinates [0,1].
+      """Set colorbar thickness and length.
+
+      Attributes:
+         colorBar (Colorbar proxy object): The colorbar proxy object.
+         thickness (Optional[int]): Bar thickness in pixels.
+         length (Optional[float]): Bar length in normalized coordinates [0,1].
       """
       if thickness is None:
          thickness = self.thickness
@@ -240,10 +263,11 @@ class ColorbarSetter:
       
    def set_location(self, colorBar,
                     location: Optional[List[float]] = None):
-      """
-      @brief   Set colorbar location in the render view.
-      @param   colorBar  Colorbar proxy object.
-      @param   location  [x, y] positions in normalized display coordinates.
+      """Set colorbar location in the render view.
+
+      Attributes:
+         colorBar (Colorbar proxy object): The colorbar proxy object.
+         location (Optional[List[float]]): [x, y] positions in normalized display coordinates.
       """
       if location is None:
          location = [self.location_x, self.location_y]
@@ -252,11 +276,12 @@ class ColorbarSetter:
       colorBar.Position       = location
       
    def set_labels(self, field, colorBar, labels: Optional[List[float]] = None):
-      """
-      @brief   Define custom labels or generate them automatically.
-      @param   field    Field name to label.
-      @param   colorBar The colorbar proxy object.
-      @param   labels   Custom label list or None for auto-generation.
+      """Define custom labels or generate them automatically.
+
+      Attributes:
+         field (str): Field name to label.
+         colorBar (Colorbar proxy object): The colorbar proxy object.
+         labels (Optional[List[float]]): Custom label list or None for auto-generation.
       """
       if labels is None:
          # Create custom labels
@@ -290,10 +315,19 @@ class ColorbarSetter:
 
 @dataclass
 class AxesManager:
-   """
-   @class  AxesManager
-   @brief  Controls the appearance and labeling of axes in the render view.
-   @details Includes custom font, bold, color, and labeling for X, Y, Z axes.
+   """Controls the appearance and labeling of axes in the render view.
+
+   Attributes:
+      dim (int): The dimension of the problem.
+      font (str): The font to use for the axes.
+      fontsize (int): The font size to use for the axes.
+      bold (int): 1 if bold, 0 otherwise.
+      units (str): The units to use for the axes.
+      precision (int): The precision to use for the axes.
+      titles (Optional[List[str]]): The titles to use for the axes.
+      labels (Optional[List[List[float]]]): The labels to use for the axes.
+      color (List[float]): The color to use for the axes.
+      axes_to_label (int): The axes to label (bitmask).
    """
    dim:        int
    font:       str   = 'Arial'
@@ -307,8 +341,7 @@ class AxesManager:
    axes_to_label: int   = 7
    
    def __post_init__(self):
-      """
-      @brief   Called automatically after dataclass __init__ to set default titles and labels.
+      """Called automatically after dataclass __init__ to set default titles and labels.
       """
       if self.titles is None:
          if self.dim == 2:
@@ -324,9 +357,10 @@ class AxesManager:
          self.labels = [None, None, None]
 
    def apply(self, renderView):
-      """
-      @brief Apply configured axes properties (titles, labels, font, color, etc.) to a render view.
-      @param renderView The ParaView render view object.
+      """Apply configured axes properties (titles, labels, font, color, etc.) to a render view.
+
+      Attributes:
+         renderView (ParaView render view object): The ParaView render view object.
       """
       self.set_titles(renderView)
       self.set_labels(renderView)
@@ -336,30 +370,33 @@ class AxesManager:
       self.set_axes_to_label(renderView)
       
    def set_color(self, renderView, color: Optional[List[float]] = None):
-      """
-      @brief Set the axes grid color in the render view.
-      @param renderView  The ParaView render view object.
-      @param color       [R, G, B] color list or None for default.
+      """Set the axes grid color in the render view.
+
+      Attributes:
+         renderView (ParaView render view object): The ParaView render view object.
+         color (Optional[List[float]]): [R, G, B] color list or None for default.
       """
       if color is None:
          color = self.color
       renderView.AxesGrid.GridColor = color
       
    def set_axes_to_label(self, renderView, axes_to_label: Optional[int] = None):
-      """
-      @brief Configure which axes to label (bitmask).
-      @param renderView     The ParaView render view object.
-      @param axes_to_label  e.g., 7 means show X, Y, Z labels (1+2+4).
+      """Configure which axes to label (bitmask).
+
+      Attributes:
+         renderView (ParaView render view object): The ParaView render view object.
+         axes_to_label (Optional[int]): e.g., 7 means show X, Y, Z labels (1+2+4).
       """
       if axes_to_label is None:
          axes_to_label = self.axes_to_label
       renderView.AxesGrid.AxesToLabel = axes_to_label
 
    def set_titles(self, renderView, titles: Optional[List[str]] = None):
-      """
-      @brief Set custom or default titles for X, Y, Z axes.
-      @param renderView The ParaView render view object.
-      @param titles     A list of three titles [XTitle, YTitle, ZTitle].
+      """Set custom or default titles for X, Y, Z axes.
+
+      Attributes:
+         renderView (ParaView render view object): The ParaView render view object.
+         titles (Optional[List[str]]): A list of three titles [XTitle, YTitle, ZTitle].
       """
       if titles is None:
          titles = self.titles
@@ -369,11 +406,12 @@ class AxesManager:
       renderView.AxesGrid.ZTitle = titles[2]
       
    def set_labels(self, renderView, labels: Optional[List] = None, precision: Optional[int] = None):
-      """
-      @brief Set custom axis labels for X, Y, Z.
-      @param renderView  The ParaView render view object.
-      @param labels      e.g. [[x_labels], [y_labels], [z_labels]] or None if auto.
-      @param precision   Decimal precision to apply if custom labels are used.
+      """Set custom axis labels for X, Y, Z.
+
+      Attributes:
+         renderView (ParaView render view object): The ParaView render view object.
+         labels (Optional[List]): e.g. [[x_labels], [y_labels], [z_labels]] or None if auto.
+         precision (Optional[int]): Decimal precision to apply if custom labels are used.
       """
       if labels is None:
          labels = self.labels
@@ -405,11 +443,12 @@ class AxesManager:
          renderView.AxesGrid.ZAxisLabels          = labels[2]
       
    def set_font(self, renderView, font: Optional[str] = None, size: Optional[int] = None):
-      """
-      @brief Set font family and size for X, Y, Z axis titles and labels.
-      @param renderView The ParaView render view object.
-      @param font       Font name or path.
-      @param size       Font size.
+      """Set font family and size for X, Y, Z axis titles and labels.
+
+      Attributes:
+         renderView (ParaView render view object): The ParaView render view object.
+         font (Optional[str]): Font name or path.
+         size (Optional[int]): Font size.
       """
       if font is None:
          font = self.font
@@ -450,10 +489,11 @@ class AxesManager:
       renderView.AxesGrid.ZLabelFontSize = size
       
    def set_bold(self, renderView, bold_flag: Optional[int] = None):
-      """
-      @brief Make axis titles and labels bold if bold_flag = 1.
-      @param renderView  The ParaView render view object.
-      @param bold_flag   1 for bold, 0 otherwise.
+      """Make axis titles and labels bold if bold_flag = 1.
+
+      Attributes:
+         renderView (ParaView render view object): The ParaView render view object.
+         bold_flag (Optional[int]): 1 for bold, 0 otherwise.
       """
       if bold_flag is None:
          bold_flag = self.bold
@@ -469,10 +509,19 @@ class AxesManager:
 
 @dataclass
 class RenderManager:
-   """
-   @class   RenderManager
-   @brief   Creates and configures ParaView render views, including 2D/3D setups and axes.
-   @details Uses the AxesManager internally to label axes and set fonts/colors.
+   """Creates and configures ParaView render views, including 2D/3D setups and axes.
+
+   Attributes:
+      dim (int): The dimension of the problem.
+      x0 (np.ndarray): The minimum coordinates of the problem.
+      x1 (np.ndarray): The maximum coordinates of the problem.
+      units (str): The units to use for the axes.
+      rx (int): The resolution of the render view in the x-direction.
+      ry (int): The resolution of the render view in the y-direction.
+      font (str): The font to use for the axes.
+      fontsize (int): The font size to use for the axes.
+      bold (int): 1 if bold, 0 otherwise.
+      axes (Optional[AxesManager]): The axes manager to use for labeling and settings.
    """
    dim:      int
    x0:       np.ndarray
@@ -486,9 +535,10 @@ class RenderManager:
    axes:     Optional[AxesManager] = None
    
    def create_render_view(self):
-      """
-      @brief Create and configure a ParaView render view (2D or 3D).
-      @return The newly created render view.
+      """Create and configure a ParaView render view (2D or 3D).
+
+      Attributes:
+         The newly created render view.
       """
       renderView = GetActiveViewOrCreate('RenderView')
       renderView.ViewSize = [self.rx, self.ry]
@@ -521,9 +571,10 @@ class RenderManager:
       return renderView
 
    def _configure_2d_view(self, renderView):
-      """
-      @brief Configure settings for a 2D view.
-      @param renderView The ParaView render view object.
+      """Configure settings for a 2D view.
+
+      Attributes:
+         renderView (ParaView render view object): The ParaView render view object.
       """
       renderView.InteractionMode = '2D'
       renderView.OrientationAxesZVisibility = 0
@@ -547,16 +598,15 @@ class RenderManager:
 
 
 class ParaviewManager:
-   """
-   @class   ParaviewManager
-   @brief   High-level manager for ParaView workflows:
-            data reading, rendering, colorbars, sources/receivers, and screenshots.
+   """High-level manager for ParaView workflows:
+      data reading, rendering, colorbars, sources/receivers, and screenshots.
    """
    def __init__(self, input_file, **kwargs):
-      """
-      @brief Constructor for ParaviewManager.
-      @param input_file  Path to input configuration file.
-      @param kwargs      Additional settings (font, fontsize, bold, etc.).
+      """Constructor for ParaviewManager.
+
+      Attributes:
+         input_file (str): Path to input configuration file.
+         kwargs (dict): Additional settings (font, fontsize, bold, etc.).
       """
       fs_dir = os.environ["FREQUENSOL_DIR"]
       default_font = os.path.join(fs_dir, "trunk/files/misc/fonts/roboto/Roboto-Condensed.ttf")
@@ -597,15 +647,18 @@ class ParaviewManager:
       self.active_field = None
 
    def show_field(self, field, comp=None, colorbar=False, **kwargs):
-      """
-      @brief  Display a specific field in the render view, optionally with a colorbar and vector component.
-      @param  field     Name of the field to show.
-      @param  comp      Vector component ('X','Y','Z','Magnitude') if applicable.
-      @param  colorbar  Whether to show a colorbar.
-      @param  kwargs    Additional optional arguments:
+      """Display a specific field in the render view, optionally with a colorbar and vector component.
+
+      Attributes:
+         field (str): Name of the field to show.
+         comp (Optional[str]): Vector component ('X','Y','Z','Magnitude') if applicable.
+         colorbar (bool): Whether to show a colorbar.
+         kwargs (dict): Additional optional arguments:
                         - 'show_pml' (bool)
                         - 'colormap', 'opacity', 'limits', 'title'
-      @return display   A handle to the displayed object.
+      
+      Returns:
+         display (ParaView display object): A handle to the displayed object.
       """
       Hide(self.active_field)
       
@@ -656,9 +709,10 @@ class ParaviewManager:
       return display
 
    def _create_clipped_display(self):
-      """
-      @brief Create a clipped display for the field (for hiding PML, etc.).
-      @return The Clip object display.
+      """Create a clipped display for the field (for hiding PML, etc.).
+
+      Returns:
+         clip1 (ParaView clip object): A handle to the clipped display.
       """
       clip1 = Clip(registrationName='Clip1', Input=self.data_manager.field_XMF)
       clip1.ClipType = 'Box'
@@ -683,11 +737,14 @@ class ParaviewManager:
       return display
 
    def _configure_colormap(self, field, kwargs):
-      """
-      @brief Configure color map for the specified field using ColorMapManager.
-      @param field   Field name.
-      @param kwargs  Dictionary that may contain keys like 'colormap', 'opacity', 'limits'.
-      @return fieldLUT The resulting LookUpTable after applying color settings.
+      """Configure color map for the specified field using ColorMapManager.
+
+      Attributes:
+         field (str): Field name.
+         kwargs (dict): Dictionary that may contain keys like 'colormap', 'opacity', 'limits'.
+         
+      Returns:
+         fieldLUT (ParaView LookUpTable): The resulting LookUpTable after applying color settings.
       """
       fieldLUT = GetColorTransferFunction(field)
       colormap = kwargs.get("colormap", "YGB_r")
@@ -702,22 +759,29 @@ class ParaviewManager:
       return fieldLUT
 
    def show_axes(self):
-      """
-      @brief Make the axes grid visible in the current render view.
+      """Make the axes grid visible in the current render view.
+
+      Attributes:
+         self.renderView (ParaView render view object): The ParaView render view object.
       """
       self.renderView.AxesGrid.Visibility = 1
 
    def hide_axes(self):
-      """
-      @brief Hide the axes grid in the current render view.
+      """Hide the axes grid in the current render view.
+
+      Attributes:
+         self.renderView (ParaView render view object): The ParaView render view object.
       """
       self.renderView.AxesGrid.Visibility = 0
 
    def show_receivers(self, **kwargs):
-      """
-      @brief Display receiver markers in the scene, if available.
-      @param kwargs Optional settings such as 'size', 'color', 'opacity'.
-      @return display The display object if the receivers exist, else None.
+      """Display receiver markers in the scene, if available.
+
+      Attributes:
+         kwargs (dict): Optional settings such as 'size', 'color', 'opacity'.
+         
+      Returns:
+         display (ParaView display object): The display object if the receivers exist, else None.
       """
       if self.data_manager.receiver_XMF:
          display = Show(self.data_manager.receiver_XMF, self.renderView, 'UnstructuredGridRepresentation')
@@ -743,17 +807,23 @@ class ParaviewManager:
       return None
       
    def hide_receivers(self):
-      """
-      @brief Hide receiver markers if present.
+      """Hide receiver markers if present.
+
+      Attributes:
+         self.data_manager.receiver_XMF (ParaView display object): The ParaView display object.
+         self.renderView (ParaView render view object): The ParaView render view object.
       """
       if self.data_manager.receiver_XMF:
          Hide(self.data_manager.receiver_XMF, self.renderView)
       
    def show_sources(self, **kwargs):
-      """
-      @brief Display source markers in the scene, if available.
-      @param kwargs Optional settings such as 'size', 'color', 'opacity'.
-      @return display The display object if the sources exist, else None.
+      """Display source markers in the scene, if available.
+
+      Attributes:
+         kwargs (dict): Optional settings such as 'size', 'color', 'opacity'.
+         
+      Returns:
+         display (ParaView display object): The display object if the sources exist, else None.
       """
       if self.data_manager.source_XMF:
          display = Show(self.data_manager.source_XMF, self.renderView, 'UnstructuredGridRepresentation')
@@ -778,16 +848,20 @@ class ParaviewManager:
       return None
       
    def hide_sources(self):
-      """
-      @brief Hide source markers if present.
+      """Hide source markers if present.
+
+      Attributes:
+         self.data_manager.source_XMF (ParaView display object): The ParaView display object.
+         self.renderView (ParaView render view object): The ParaView render view object.
       """
       if self.data_manager.source_XMF:
          Hide(self.data_manager.source_XMF, self.renderView)
       
    def screenshot(self, file):
-      """
-      @brief  Take a screenshot or export the scene to a file.
-      @param  file  Path to the output image or vector file (.png, .jpg, .tiff, .svg, .pdf).
+      """Take a screenshot or export the scene to a file.
+
+      Attributes:
+         file (str): Path to the output image or vector file (.png, .jpg, .tiff, .svg, .pdf).
       """
       self.renderView.Update()
       if file.endswith(".png") or file.endswith(".jpg") or file.endswith(".tiff"):

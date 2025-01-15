@@ -1,89 +1,49 @@
-"""SLURM executor implementation for HPC job submission and management."""
+"""Local HPC executor implementation for running on compute nodes directly."""
 
 import os
-import re
 import time
-import tempfile
 import subprocess
-from typing import List, Optional, Dict
+from typing import List, Optional
 from pathlib import Path
 
 from .executor_base import ExecutorBase, ExecutionStatus
 from .resource_config import ResourceConfig
 
 
-class SlurmExecutor(ExecutorBase):
-   """SLURM-based executor for HPC job submission and management.
+class LocalHPCExecutor(ExecutorBase):
+   """Executor for running commands directly on HPC compute nodes.
    
-   Handles job submission, monitoring, and file operations on SLURM-based clusters.
+   This executor is designed for cases where you're already logged into 
+   a compute node and want to run MPI jobs directly without going through
+   a job scheduler.
    """
 
    def __init__(
       self,
       resource_config: ResourceConfig,
       work_dir: Optional[str] = None,
-      partition: str = "debug",
-      account: Optional[str] = None
+      mpi_wrapper: str = "mpirun",
+      hostfile: Optional[str] = None
    ):
-      """Initialize SLURM executor.
+      """Initialize Local HPC executor.
       
       Args:
          resource_config: Resource requirements for jobs.
          work_dir: Working directory for job execution.
-         partition: SLURM partition/queue to use.
-         account: Optional SLURM account for billing.
+         mpi_wrapper: MPI launch command (e.g., 'mpirun', 'mpiexec', 'ibrun').
+         hostfile: Optional path to MPI hostfile/machinefile.
       """
       self.config = resource_config
-      self.partition = partition
-      self.account = account
+      self.mpi_wrapper = mpi_wrapper
+      self.hostfile = hostfile
       
       self.home_dir = os.path.expanduser("~")
       self.work_dir = work_dir or os.getcwd()
-      self.os_type = "unix"  # SLURM only runs on Unix-like systems
+      self.os_type = "unix"
       self.is_initialized = True
 
-   def _create_job_script(self, command: str, **kwargs) -> str:
-      """Create a SLURM job submission script.
-      
-      Args:
-         command: Command to execute.
-         **kwargs: Additional SLURM directives.
-      
-      Returns:
-         str: Path to generated job script.
-      """
-      job_name = kwargs.get("job_name", "slurm_job")
-      
-      script = [
-         "#!/bin/bash",
-         f"#SBATCH --job-name={job_name}",
-         f"#SBATCH --partition={self.partition}",
-      ]
-      
-      if self.account:
-         script.append(f"#SBATCH --account={self.account}")
-      
-      if self.config.max_duration_in_seconds:
-         minutes = self.config.max_duration_in_seconds // 60
-         script.append(f"#SBATCH --time={minutes}")
-      
-      if self.config.memory_per_rank_in_MB:
-         script.append(f"#SBATCH --mem-per-cpu={self.config.memory_per_rank_in_MB}")
-      
-      script.extend([
-         f"cd {self.work_dir}",
-         command
-      ])
-      
-      # Write script to temp file
-      fd, path = tempfile.mkstemp(suffix='.sh', prefix='slurm_', dir=self.work_dir)
-      with os.fdopen(fd, 'w') as f:
-         f.write('\n'.join(script))
-      
-      return path
-
    def execute_command(self, command: str, *args, **kwargs) -> ExecutionStatus:
-      """Execute a command through SLURM batch submission.
+      """Execute a command on the compute node.
       
       Args:
          command: Command to execute.
@@ -93,62 +53,44 @@ class SlurmExecutor(ExecutorBase):
       Returns:
          ExecutionStatus: Execution results and status.
       """
-      script_path = self._create_job_script(command, **kwargs)
-      
       try:
          start_time = time.time()
-         result = subprocess.run(
-            ["sbatch", script_path],
-            capture_output=True,
+         process = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=self.work_dir,
             text=True,
-            check=True
+            bufsize=1,
+            universal_newlines=True
          )
          
-         # Extract job ID from sbatch output
-         job_id = re.search(r"Submitted batch job (\d+)", result.stdout)
-         if not job_id:
-            raise ValueError("Failed to get job ID from sbatch output")
+         # Store process ID for potential cancellation
+         job_id = str(process.pid)
          
-         job_id = job_id.group(1)
-         
-         # Wait for job completion if requested
-         if kwargs.get("wait", True):
-            while True:
-               status = self.get_job_status(job_id)
-               if status in ["COMPLETED", "FAILED"]:
-                  break
-               time.sleep(self.refresh_rate)
-         
+         stdout, stderr = process.communicate()
          end_time = time.time()
          
-         # Get job output if available
-         stdout = stderr = ""
-         out_file = f"slurm-{job_id}.out"
-         if os.path.exists(out_file):
-            with open(out_file) as f:
-               stdout = f.read()
-         
          return ExecutionStatus(
-            status=status,
-            job_id=job_id,
+            status="COMPLETED" if process.returncode == 0 else "FAILED",
+            return_code=process.returncode,
             stdout=stdout,
             stderr=stderr,
+            job_id=job_id,
             start_time=start_time,
             end_time=end_time,
             working_dir=self.work_dir
          )
-         
       except Exception as e:
          return ExecutionStatus(
             status="FAILED",
             error_msg=str(e),
             working_dir=self.work_dir
          )
-      finally:
-         os.unlink(script_path)
 
    def launch_mpi_job(self, command: str, nproc: int, *args, **kwargs) -> ExecutionStatus:
-      """Launch a single MPI job through SLURM.
+      """Launch a single MPI job on compute node.
       
       Args:
          command: Command to execute.
@@ -159,11 +101,22 @@ class SlurmExecutor(ExecutorBase):
       Returns:
          ExecutionStatus: Execution results and status.
       """
-      mpi_cmd = f"srun -n {nproc} {command}"
-      return self.execute_command(mpi_cmd, *args, **kwargs)
+      mpi_cmd = [self.mpi_wrapper, "-n", str(nproc)]
+      
+      if self.hostfile:
+         if self.mpi_wrapper == "mpirun":
+            mpi_cmd.extend(["--hostfile", self.hostfile])
+         elif self.mpi_wrapper == "mpiexec":
+            mpi_cmd.extend(["-f", self.hostfile])
+         elif self.mpi_wrapper == "ibrun":
+            # ibrun typically uses SLURM/PBS node allocation
+            pass
+      
+      mpi_cmd.extend(command.split())
+      return self.execute_command(" ".join(mpi_cmd), *args, **kwargs)
 
    def launch_mpi_jobs(self, commands: List[str], nproc: int, *args, **kwargs) -> List[ExecutionStatus]:
-      """Launch multiple MPI jobs through SLURM.
+      """Launch multiple MPI jobs sequentially.
       
       Args:
          commands: List of commands to execute.
@@ -177,54 +130,48 @@ class SlurmExecutor(ExecutorBase):
       return [self.launch_mpi_job(cmd, nproc, *args, **kwargs) for cmd in commands]
 
    def cancel_job(self, job_id: str) -> bool:
-      """Cancel a SLURM job.
+      """Cancel a running job by process ID.
       
       Args:
-         job_id: SLURM job ID to cancel.
+         job_id: Process ID to terminate.
       
       Returns:
-         bool: True if job was cancelled successfully.
+         bool: True if process was terminated successfully.
       """
       try:
-         subprocess.run(["scancel", job_id], check=True)
+         # Try graceful termination first
+         os.kill(int(job_id), 15)  # SIGTERM
+         time.sleep(2)
+         
+         # Force kill if still running
+         try:
+            os.kill(int(job_id), 9)  # SIGKILL
+         except ProcessLookupError:
+            pass  # Process already terminated
+            
          return True
-      except subprocess.CalledProcessError:
+      except (ProcessLookupError, ValueError):
          return False
 
    def get_job_status(self, job_id: str) -> str:
-      """Get status of a SLURM job.
+      """Get status of a job by process ID.
       
       Args:
-         job_id: SLURM job ID to check.
+         job_id: Process ID to check.
       
       Returns:
-         str: Job status from SLURM (e.g., "PENDING", "RUNNING", "COMPLETED", "FAILED").
+         str: "RUNNING" if process exists, "COMPLETED" otherwise.
       """
       try:
-         result = subprocess.run(
-            ["sacct", "-j", job_id, "--format=State", "--noheader"],
-            capture_output=True,
-            text=True,
-            check=True
-         )
-         status = result.stdout.strip().split()[0]
-         
-         # Map SLURM states to our status values
-         status_map = {
-            "PENDING": "PENDING",
-            "RUNNING": "RUNNING",
-            "COMPLETED": "COMPLETED",
-            "FAILED": "FAILED",
-            "CANCELLED": "FAILED",
-            "TIMEOUT": "FAILED"
-         }
-         return status_map.get(status, "UNKNOWN")
-         
-      except subprocess.CalledProcessError:
+         os.kill(int(job_id), 0)  # Check if process exists
+         return "RUNNING"
+      except ProcessLookupError:
+         return "COMPLETED"
+      except ValueError:
          return "UNKNOWN"
 
    def remote_exists(self, path: str) -> bool:
-      """Check if a path exists on the SLURM cluster.
+      """Check if a path exists on the compute node.
       
       Args:
          path: Path to check.
@@ -235,7 +182,7 @@ class SlurmExecutor(ExecutorBase):
       return os.path.exists(path)
 
    def remote_listdir(self, path: str) -> List[str]:
-      """List contents of directory on SLURM cluster.
+      """List contents of directory on compute node.
       
       Args:
          path: Directory to list.
@@ -246,7 +193,7 @@ class SlurmExecutor(ExecutorBase):
       return os.listdir(path)
 
    def remote_mkdir(self, path: str, parents: bool = False) -> bool:
-      """Create a directory on SLURM cluster.
+      """Create a directory on compute node.
       
       Args:
          path: Directory to create.
@@ -265,7 +212,7 @@ class SlurmExecutor(ExecutorBase):
          return False
 
    def remote_rmdir(self, path: str) -> bool:
-      """Remove a directory on SLURM cluster.
+      """Remove a directory on compute node.
       
       Args:
          path: Directory to remove.
@@ -280,7 +227,7 @@ class SlurmExecutor(ExecutorBase):
          return False
 
    def safe_remote_rmdir(self, path: str) -> bool:
-      """Safely remove a directory on SLURM cluster with additional checks.
+      """Safely remove a directory on compute node with additional checks.
       
       Verifies that:
          1. Path exists and is a directory
@@ -306,13 +253,11 @@ class SlurmExecutor(ExecutorBase):
          return False
 
    def remote_put(self, local_path: str, remote_path: str) -> bool:
-      """Copy a file to SLURM cluster.
-      
-      For local SLURM, this is just a file copy.
+      """Copy a file on compute node.
       
       Args:
-         local_path: Source path on local machine.
-         remote_path: Destination path on cluster.
+         local_path: Source path.
+         remote_path: Destination path.
       
       Returns:
          bool: True if file was copied successfully.
@@ -324,13 +269,11 @@ class SlurmExecutor(ExecutorBase):
          return False
 
    def remote_get(self, remote_path: str, local_path: str) -> bool:
-      """Copy a file from SLURM cluster.
-      
-      For local SLURM, this is just a file copy.
+      """Copy a file on compute node.
       
       Args:
-         remote_path: Source path on cluster.
-         local_path: Destination path on local machine.
+         remote_path: Source path.
+         local_path: Destination path.
       
       Returns:
          bool: True if file was copied successfully.
@@ -338,7 +281,7 @@ class SlurmExecutor(ExecutorBase):
       return self.remote_put(remote_path, local_path)
 
    def is_folder_writeable(self, path: str) -> bool:
-      """Check if a folder is writeable on SLURM cluster.
+      """Check if a folder is writeable on compute node.
       
       Args:
          path: Path to check.
@@ -346,4 +289,4 @@ class SlurmExecutor(ExecutorBase):
       Returns:
          bool: True if folder exists and is writeable.
       """
-      return os.access(path, os.W_OK)
+      return os.access(path, os.W_OK) 

@@ -15,18 +15,21 @@ __all__ = ['TaperFunction', 'Wavelet']
 # ----------------------------------------------------------------------
 @dataclass
 class TaperFunction:
-   """
-   @class   TaperFunction
-   @brief   Wrapper for specifying a Gaussian taper function
-   @details The taper is defined using a normal PDF with mean=0.5 and std=sigma.
+   """Wrapper for specifying a Gaussian taper function
+
+   Attributes:
+      sigma (float): The standard deviation of the Gaussian taper.
    """
    sigma: float
 
    def get(self, n: int) -> np.ndarray:
-      """
-      @brief Generate a normalized Gaussian taper of length n.
-      @param n  Number of points in the taper.
-      @return   Taper array in [0,1].
+      """Generate a normalized Gaussian taper of length n.
+
+      Args:
+         n (int): Number of points in the taper.
+
+      Returns:
+         np.ndarray: Taper array in [0,1].
       """
       vals = norm.pdf(np.linspace(0, 1, n), 0.5, self.sigma)
       mx = np.max(vals)
@@ -42,12 +45,12 @@ class TaperFunction:
 # ----------------------------------------------------------------------
 @dataclass
 class Wavelet:
+   """Data container for wavelets in time and frequency domains.
+
+   Attributes:
+      times (np.ndarray): The time samples.
+      signal (np.ndarray): The wavelet signal.
    """
-   @class Wavelet
-   @brief Data container for wavelets in time and frequency domains.
-   """
-   times:    np.ndarray
-   signal:   np.ndarray
 
    @classmethod
    def generate(cls,
@@ -57,14 +60,17 @@ class Wavelet:
                 offset: int = 0,
                 sigma:  Optional[float] = None,
                 causal: bool = True) -> "Wavelet":
-      """
-      @brief Generate a wavelet using built-in wavelet functions (Ricker, Ormsby, Klauder).
-      @param kind   Wavelet type ('Ricker', 'Ormsby', 'Klauder').
-      @param f_pts  Frequencies for the wavelet (depends on the wavelet kind).
-      @param times  Time array for final wavelet.
-      @param offset Sample shift (in index units) to apply after generation.
-      @param sigma  Gaussian taper parameter (optional).
-      @return       A Wavelet object.
+      """Generate a wavelet using built-in wavelet functions (Ricker, Ormsby, Klauder).
+
+      Args:
+         kind (str): Wavelet type ('Ricker', 'Ormsby', 'Klauder').
+         f_pts (List[float]): Frequencies for the wavelet (depends on the wavelet kind).
+         times (np.ndarray): Time array for final wavelet.
+         offset (int): Sample shift (in index units) to apply after generation.
+         sigma (Optional[float]): Gaussian taper parameter (optional).
+
+      Returns:
+         Wavelet: The created Wavelet object.
       """
       
       # Create a taper function if requested
@@ -109,21 +115,29 @@ class Wavelet:
       
    @property
    def spectrum(self):
+      """Compute the frequency-domain representation of the wavelet.
+
+      Returns:
+         np.ndarray: The frequency-domain representation of the wavelet.
+      """
       spec = np.fft.rfft(self.signal)
       return spec.astype(np.complex64)
    
    
    @property
    def frequencies(self):
+      """Compute the frequencies for the wavelet.
+
+      Returns:
+         np.ndarray: The frequencies for the wavelet.
+      """
       n  = len(self.signal)
       dt = self.times[1] - self.times[0]
       return np.fft.rfftfreq(n, d=dt).astype(np.float32)
 
 
    def plot(self) -> None:
-      """
-      @brief Plot the time-domain and spectrum of the wavelet.
-      """
+      """Plot the time-domain and spectrum of the wavelet."""
       import matplotlib.pyplot as plt
 
       # Plot time-domain

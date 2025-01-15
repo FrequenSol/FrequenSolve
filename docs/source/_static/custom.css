@@ -1,0 +1,5 @@
+dl.py.property > dt > .property,
+dl.py.property > dt > .sig-name {
+   color: #123951 !important;  /* Nice blue */
+   font-style: italic;
+}

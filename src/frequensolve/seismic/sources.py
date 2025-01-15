@@ -9,7 +9,6 @@ from .wavelet            import *  # noqa
 
 __all__ = ['SourceGroup','Source']
 
-
 @dataclass
 class Source:
    kind:        Literal["explosive", "viberator"]
@@ -20,7 +19,15 @@ class Source:
 
    @classmethod
    def from_block(cls, input: InputParser, block: InputBlock):
-      
+      """Create a Source object from an input block.
+
+      Args:
+         input (InputParser): The input parser.
+         block (InputBlock): The input block.
+
+      Returns:
+         Source: The created Source object.
+      """
       name = block.name
       args = block.args
       
@@ -38,6 +45,11 @@ class Source:
       )
                  
    def __str__(self) -> str:
+      """Convert the Source object to a string representation.
+
+      Returns:
+         str: The string representation of the Source object.
+      """
       coords    = " ".join(map(str, self.coords))
       direction = " ".join(map(str, self.direction))
       
@@ -56,17 +68,26 @@ class Source:
       
 @dataclass
 class SourceGroup:
+   """A group of sources with a (optional) common signature.
+
+   Attributes:
+      signatures (Optional[Signature]): The signature for the sources.
+      sources (List[Source]): The list of sources.
    """
-   @class Source
-   @brief Lists source information
-   @param signature   A Signature object describing the source wavelet or shape.
-   """
-   signatures:    Optional[Signature] = None
    sources:       List[Source] = field(default_factory=list)
+   signatures:    Optional[Signature] = None
 
    @classmethod
    def from_block(cls, input: InputParser, block: InputBlock):
-      
+      """Create a SourceGroup object from an input block.
+
+      Args:
+         input (InputParser): The input parser.
+         block (InputBlock): The input block.
+
+      Returns:
+         SourceGroup: The created SourceGroup object.
+      """
       name = block.name
       args = block.args
       
@@ -93,10 +114,13 @@ class SourceGroup:
    
    
    def signature(self, isrc: int):
-      """
-      @brief Retrieve a source signature by index
-      @param isrc Source number (1-based).
-      @return The Source object at that index.
+      """Retrieve a source signature by index.
+
+      Args:
+         isrc (int): Source number (1-based).
+
+      Returns:
+         Signature: The signature for the source.
       """
       if self.signatures:
          return self.signatures.get(isrc)
@@ -105,6 +129,11 @@ class SourceGroup:
 
 
    def __str__(self) -> str:
+      """Convert the SourceGroup object to a string representation.
+
+      Returns:
+         str: The string representation of the SourceGroup object.
+      """
       if not self.sources:
          return ""
       out = "[Source]\n"

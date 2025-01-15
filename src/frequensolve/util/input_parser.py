@@ -8,27 +8,23 @@ __all__ = ['InputBlock', 'InputParser', 'str_to_array']
 
 @dataclass
 class InputBlock:
-   """
-   @class  InputBlock
-   @brief  Data structure for organizing input blocks (hierarchical sections).
-   @details Each block can contain:
-            - A name
-            - A dictionary of key-value arguments
-            - A list of sub-blocks (nested blocks)
+   """Data structure for organizing input blocks (hierarchical sections).
 
-   @param name        Block name (e.g., "Problem", "Mesh").
-   @param args        Key-value pairs specifying named arguments.
-   @param sub_blocks  Nested blocks of type InputBlock.
+   Attributes:
+      name (str): Block name (e.g., "Problem", "Mesh").
+      args (dict): Key-value pairs specifying named arguments.
+      sub_blocks (List[InputBlock]): Nested blocks of type InputBlock.
    """
    name: str
    args: dict = field(default_factory=dict)
    sub_blocks: List['InputBlock'] = field(default_factory=list)
 
    def find_block(self, name: str) -> Optional['InputBlock']:
-      """
-      @brief  Recursively search for a sub-block matching the given name.
-      @param  name  The block name to find.
-      @return A reference to the matching InputBlock or None if not found.
+      """Recursively search for a sub-block matching the given name.
+
+      Attributes:
+         name (str): The block name to find.
+         A reference to the matching InputBlock or None if not found.
       """
       if self.name == name:
          return self
@@ -43,38 +39,42 @@ class InputBlock:
 # Block Parsing Helpers
 # ----------------------------------------------------------------------
 def is_begin_block(line: str) -> bool:
-   """
-   @brief  Determine if a line marks the start of a block.
-   @param  line  A line of text to parse.
-   @return True if the line starts a block, False otherwise.
+   """Determine if a line marks the start of a block.
+
+   Attributes:
+      line (str): A line of text to parse.
+      True if the line starts a block, False otherwise.
    """
    return bool(re.match(r'^\s*\[\s*[a-zA-Z][a-zA-Z0-9_]*\s*\]', line))
 
 def is_end_block(line: str) -> bool:
-   """
-   @brief  Determine if a line marks the end of a block (i.e. "[]").
-   @param  line  A line of text to parse.
-   @return True if the line is "[]", False otherwise.
+   """Determine if a line marks the end of a block (i.e. "[]").
+
+   Attributes:
+      line (str): A line of text to parse.
+      True if the line is "[]", False otherwise.
    """
    return bool(re.match(r'^\s*\[\s*\]', line))
 
 def is_arg_line(line: str) -> bool:
-   """
-   @brief  Check if a line contains a key-value pair (with '=').
-   @param  line  A line of text to parse.
-   @return True if '=' appears in the line, False otherwise.
+   """Check if a line contains a key-value pair (with '=').
+
+   Attributes:
+      line (str): A line of text to parse.
+      True if '=' appears in the line, False otherwise.
    """
    return "=" in line
 
 def read_block(lines: List[str], istart: int) -> Tuple[int, 'InputBlock']:
-   """
-   @brief  Recursively read and parse a block from the list of lines.
-   @param  lines   List of lines from the input file.
-   @param  istart  Index from which to begin parsing the block.
-   @return (offset, block)
-           offset: The total number of lines consumed by this block.
-           block:  The parsed InputBlock.
-   @throws ValueError if block start syntax is invalid.
+   """Recursively read and parse a block from the list of lines.
+
+   Attributes:
+      lines (List[str]): List of lines from the input file.
+      istart (int): Index from which to begin parsing the block.
+      (offset, block):
+         offset (int): The total number of lines consumed by this block.
+         block (InputBlock): The parsed InputBlock.
+      ValueError: If block start syntax is invalid.
    """
    i = istart
    name_match = re.match(r'^\s*\[\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\]', lines[i])
@@ -106,28 +106,23 @@ def read_block(lines: List[str], istart: int) -> Tuple[int, 'InputBlock']:
 
 @dataclass
 class InputParser:
-   """
-   @class  InputParser
-   @brief  Parser that reads an input file and organizes data into blocks.
-   @details The parser loads the file, processes comments, expands variables/sub-files,
-            and provides query methods to retrieve blocks and arguments.
+   """Parser that reads an input file and organizes data into blocks.
 
-   @param file    Path to the input file.
-   @param blocks  Top-level blocks parsed from the file (list of InputBlock).
+   Attributes:
+      file (str): Path to the input file.
+      blocks (List[InputBlock]): Top-level blocks parsed from the file.
+
    """
    file: str
    blocks: List[InputBlock] = field(default_factory=list)
    
    @classmethod
    def read(cls, input_file: str) -> 'InputParser':
-      """
-      @brief   Class method to parse an input file and return an InputParser instance.
-      @details - Removes comments (#...)
-               - Substitutes global variables (e.g. {NAME})
-               - Includes sub-files (lines with '>> <filename>')
-               - Collects blocks ([Name], [SubName], etc.)
-      @param   input_file  Path to the input file.
-      @return  An initialized InputParser instance with parsed blocks.
+      """Class method to parse an input file and return an InputParser instance.
+
+      Attributes:
+         input_file (str): Path to the input file.
+         An initialized InputParser instance with parsed blocks.
       """
       with open(input_file, 'r') as fin:
          txt = fin.read()
@@ -169,11 +164,12 @@ class InputParser:
       return cls(file = input_file, blocks = iblocks)
 
    def get_block(self, block_name: str) -> InputBlock:
-      """
-      @brief  Retrieve a block by name, searching sub-blocks recursively.
-      @param  block_name  The name of the block to find.
-      @return The matching InputBlock.
-      @throws ValueError if no block with the given name is found.
+      """Retrieve a block by name, searching sub-blocks recursively.
+
+      Attributes:
+         block_name (str): The name of the block to find.
+         The matching InputBlock.
+         ValueError: If no block with the given name is found.
       """
       for block in self.blocks:
          result = block.find_block(block_name)
@@ -182,21 +178,26 @@ class InputParser:
       raise ValueError(f"Block with name '{block_name}' not found.")
 
    def get_block_args(self, block_name: str) -> dict:
-      """
-      @brief  Convenience method to retrieve a dictionary of arguments from a named block.
-      @param  block_name  The name of the block.
-      @return A dictionary of arguments for that block.
-      @throws ValueError if the block is not found.
+      """Convenience method to retrieve a dictionary of arguments from a named block.
+
+      Attributes:
+         block_name (str): The name of the block.
+         A dictionary of arguments for that block.
+         ValueError: If the block is not found.
       """
       block = self.get_block(block_name)
       return block.args
 
    @property
    def sweep_params(self) -> Tuple[float, float, float]:
-      """
-      @brief Parse the parameter sweep block for frequency sweep parameters.
-      @return (f_min, f_max, df)
-      @throws ValueError if 'freq' has an invalid format.
+      """Parse the parameter sweep block for frequency sweep parameters.
+
+      Attributes:
+         (f_min, f_max, df):
+            f_min (float): Minimum frequency.
+            f_max (float): Maximum frequency.
+            df (float): Frequency step size.
+         ValueError: If 'freq' has an invalid format.
       """
       block = self.get_block("ParameterSweep")
       freq_range = re.search(r'{([\d:.]*)}', block.args["freq"])

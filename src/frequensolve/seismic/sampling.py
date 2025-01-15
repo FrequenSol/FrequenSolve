@@ -8,19 +8,14 @@ __all__ = ['Sampling']
 
 @dataclass
 class Sampling:
+   """Sampling parameters for a seismic study.
 
+   Attributes:
+      f_min (float): Minimum frequency (Hz).
+      f_max (float): Maximum frequency (Hz).
+      df (float):    Frequency spacing (Hz).
+      upscale (int): Integer multiple for upscaling the time-sampling rate.
    """
-   @class   Sampling
-   @brief   Computes time- and frequency-domain sampling parameters from
-            frequency sweep (f_min, f_max, df)
-   @details If upscale > 1, Sampling.Times gives upscaled times. Upscaling simply
-            zero-pads frequencies, increasing the time-domain sampling rate
-   @param   f_min   Minimum frequency (Hz)
-   @param   f_min   Maximum frequency (Hz)
-   @param   df      Frequency spacing (Hz)
-   @param   upscale Increases time-sampling by integer multiple
-   """
-    
    f_min: float
    f_max: float
    df:    float
@@ -72,6 +67,14 @@ class Sampling:
      return self.T / self.nTime
      
    def cutoff(self, Tf: Optional[float] = None):
+      """Cutoff the time-domain sampling to a specified maximum time.
+
+      Args:
+         Tf (float, optional): Maximum time (s). Defaults to None.
+
+      Returns:
+         tuple: The number of time samples and the maximum time.
+      """
       if Tf:
          Tl  = self.Times
          nTf = np.searchsorted(Tl, Tf, side='left')
@@ -79,10 +82,34 @@ class Sampling:
          return nTf, Tl[nTf]
       else:
          return self.nTime, self.T
+      
+   def to_dict(self) -> dict:
+      """Convert sampling parameters to a dictionary.
+
+      Returns:
+         dict: Dictionary containing sampling parameters with keys:
+            f_min: Minimum frequency (Hz)
+            f_max: Maximum frequency (Hz)
+            df: Frequency spacing (Hz)
+            upscale: Upscaling factor
+      """
+      return {
+         "f_min": self.f_min,
+         "f_max": self.f_max,
+         "df": self.df,
+         "upscale": self.upscale,
+      }
+   
+   @classmethod
+   def from_dict(cls, data: dict) -> 'Sampling':
+      return cls(f_min = data["f_min"], 
+                 f_max = data["f_max"], 
+                 df    = data["df"],
+                 upscale = data.get("upscale",1))
 
    def __str__(self) -> str:
       out =  "[Study]\n"
       out += "   [ParameterSweep]\n"
-      out += "      freq = {" + f"{self.f_min}:{self.f_max}:{self.df}" + "}"
+      out += "      freq = {" + f"{self.f_min}:{self.f_max}:{self.df}" + "}\n"
       out += "   []\n"
       out += "[]\n\n"

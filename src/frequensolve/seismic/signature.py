@@ -1,4 +1,5 @@
 import numpy as np
+import re
 
 from dataclasses  import dataclass, field
 from typing       import Optional, List, Literal, Tuple
@@ -14,6 +15,12 @@ __all__ = ['Signature', 'GeneratedSignature', 'SignatureFromFile']
 # ----------------------------------------------------------------------
 @dataclass
 class Signature:
+   """Base class for seismic signatures.
+
+   Attributes:
+      kind (Literal["from_file","Ricker","Klauder","Ormsby"]): The type of signature.
+      samples_out (np.ndarray): The output time samples.
+   """
    kind:          Literal["from_file","Ricker","Klauder","Ormsby"]
    samples_out:   np.ndarray
    
@@ -26,9 +33,12 @@ class Signature:
 
 @dataclass
 class GeneratedSignature(Signature):
-   """
-   @class   GeneratedSignature
-   @brief   Wrapper object for getting wavelet at each source
+   """Wrapper object for getting wavelet at each source
+
+   Attributes:
+      f_pts (List[float]): The frequencies for the wavelet.
+      offset (int): The time offset for the wavelet.
+      sigma (Optional[float]): The width of the wavelet taper.
    """
    f_pts:   List[float] = field(default_factory=list)
    offset:  int = 0
@@ -36,6 +46,15 @@ class GeneratedSignature(Signature):
    
    @classmethod
    def from_block(cls, input: "InputParser", block: "InputBlock") -> "Wavelet":
+      """Create a GeneratedSignature from an input block.
+
+      Args:
+         input (InputParser): The input parser.
+         block (InputBlock): The input block.
+
+      Returns:
+         GeneratedSignature: The generated signature.
+      """
 
       # Get samples from frequency sweep
       f_min, f_max, df = input.sweep_params
@@ -65,10 +84,13 @@ class GeneratedSignature(Signature):
       )
    
    def get(self, i: int):
-      """
-      @brief   Generate wavelet for given source at specified samples
-      @param   isrc     Source number
-      @return  A new Wavelet instance.
+      """Generate wavelet for given source at specified samples.
+
+      Args:
+         i (int): The source number.
+
+      Returns:
+         A new Wavelet instance.
       """
       return Wavelet.generate(
          kind    = self.kind,
@@ -94,9 +116,13 @@ class GeneratedSignature(Signature):
             
 @dataclass
 class SignatureFromFile(Signature):
-   """
-   @class   SignatureFromFile
-   @brief   Wrapper object for getting wavelet for sources (and adjoint sources)
+   """Wrapper object for getting wavelet for sources (and adjoint sources)
+
+   Attributes:
+      file_format (str): The format of the file.
+      file (str): The path to the file.
+      interval (Optional[float]): The interval between samples.
+      samples (Optional[np.ndarray]): The samples to use for the wavelet.
    """
    file_format:   str
    file:          str
@@ -110,7 +136,15 @@ class SignatureFromFile(Signature):
    
    @classmethod
    def from_block(cls, input: "InputParser", block: "InputBlock") -> "Wavelet":
+      """Create a SignatureFromFile from an input block.
 
+      Args:
+         input (InputParser): The input parser.
+         block (InputBlock): The input block.
+
+      Returns:
+         SignatureFromFile: The signature from file.
+      """
       # Get samples from frequency sweep
       f_min, f_max, df = input.sweep_params
       samples = Sampling(f_min, f_max, df)
@@ -124,7 +158,7 @@ class SignatureFromFile(Signature):
       assert kind == "from_file"
       if not file:
          raise ValueError("Wavelet block with kind='file' must specify 'file' path.")
-      if not fmt:
+      if not format:
          raise ValueError("Wavelet block with kind='file' must specify 'format'.")
          
       sig = cls(samples_out = times,
@@ -136,21 +170,20 @@ class SignatureFromFile(Signature):
       return sig
    
    def __post_init__(self):
-   
       match = re.search("(\{)\w([:\w]*\})", self.file)
       self.id_format = (match[0], match[1] + match[2])
       
       try:
          id = self.id_format[1].format(64)
-      except Error as e:
+      except BaseException as e:
          raise ValueError( "Invalid format specified in signature file. "
                            "Format may be blank, but if specified (for padding, etc.) "
                            "it must be a valid python integer format.\n\n"
-                          f"Format '{self.id_format[1]}' extracted from '{file}' raised error: {e}")
+                          f"Format '{self.id_format[1]}' extracted from '{self.file}' raised error: {e}")
                           
       if self.samples is None:
          if self.interval is not None:
-            n = len(signal)
+            n = len(self.signal)
             T = (n - 1) * self.interval
             self.samples = np.linspace(0, T, n)
          elif self.file_format == "SEGY":
@@ -159,10 +192,13 @@ class SignatureFromFile(Signature):
       
    
    def get(self, i: int):
-      """
-      @brief   Read wavelet from file and evaluate at specified samples
-      @param   isrc     Source number
-      @return  A new Wavelet instance.
+      """Read wavelet from file and evaluate at specified samples.
+
+      Args:
+         i (int): The source number.
+
+      Returns:
+         A new Wavelet instance.
       """
       
       id = self.id_format[1].format(i)
@@ -171,10 +207,14 @@ class SignatureFromFile(Signature):
 
 
    def read(self, fname, **kwargs) -> np.ndarray:
-      """
-      @brief   Read signal data from file
-      @param   fname    Path to file (may include dataset name for HDF5).
-      @param   kwargs   Additional arguments (e.g. 'trace' for SEG-Y).
+      """Read signal data from file.
+
+      Args:
+         fname (str): Path to file (may include dataset name for HDF5).
+         kwargs (dict): Additional arguments (e.g. 'trace' for SEG-Y).
+
+      Returns:
+         np.ndarray: The signal data.
       """
       if self.format == "HDF5":
          return self.read_hdf5(fname)
@@ -191,16 +231,20 @@ class SignatureFromFile(Signature):
 
 
    def read_hdf5(self, fname: str) -> np.ndarray:
-      """
-      @brief Read data from an HDF5 file/dataset.
-      @param fname  Path like 'file.h5:dataset_name'
+      """Read data from an HDF5 file/dataset.
+
+      Args:
+         fname (str): Path like 'file.h5:dataset_name'.
+
+      Returns:
+         np.ndarray: The signal data.
       """
       import h5py
 
-      if ":" not in key:
+      if ":" not in fname:
          raise ValueError(
             "HDF5 file reader expects 'file.h5:dataset_name'. "
-            f"Received: '{key}'."
+            f"Received: '{fname}'."
          )
 
       h5file, dset = fname.split(":", 1)
@@ -211,40 +255,43 @@ class SignatureFromFile(Signature):
 
 
    def read_segy(self, fname: str, trace: int = 0) -> np.ndarray:
-      """
-      @brief Read data from a SEG-Y file.
-      @param file  Path to SEG-Y file.
-      @param trace Trace index to read (if multiple traces).
+      """Read data from a SEG-Y file.
+
+      Args:
+         file (str): Path to SEG-Y file.
+         trace (int): Trace index to read (if multiple traces).
       """
       # For now, raise an error if this is unimplemented.
       raise NotImplementedError("SEGY reading is not yet implemented.")
 
 
    def read_csv(self, fname: str, sep: str = ",") -> np.ndarray:
-      """
-      @brief Read data from a CSV-like text file.
-      @param file Path to file.
-      @param sep  Delimiter for CSV data.
+      """Read data from a CSV-like text file.
+
+      Args:
+         file (str): Path to file.
+         sep (str): Delimiter for CSV data.
       """
       try:
          return np.fromfile(file=fname, dtype=float, sep=sep)
       except OSError as e:
-         raise ValueError(f"Failed to read CSV file '{file}': {e}")
+         raise ValueError(f"Failed to read CSV file '{self.file}': {e}")
 
 
    def read_binary(self,
-                   fname:   str,
+                   fname:  str,
                    dtype:  str = "float",
                    count:  int = -1,
                    offset: int = 0,
                    sep:    str = "") -> np.ndarray:
-      """
-      @brief Read data from a binary file.
-      @param file   Path to binary file.
-      @param dtype  Data type (e.g. 'float32', 'int32').
-      @param count  Number of items to read (-1 means read all).
-      @param offset Byte offset in the file.
-      @param sep    Delimiter (if empty, means pure binary).
+      """Read data from a binary file.
+
+      Args:
+         file (str): Path to binary file.
+         dtype (str): Data type (e.g. 'float32', 'int32').
+         count (int): Number of items to read (-1 means read all).
+         offset (int): Byte offset in the file.
+         sep (str): Delimiter (if empty, means pure binary).
       """
       try:
          return np.fromfile(
@@ -255,14 +302,17 @@ class SignatureFromFile(Signature):
             offset = offset
          )
       except OSError as e:
-         raise ValueError(f"Failed to read binary file '{file}': {e}")
+         raise ValueError(f"Failed to read binary file '{self.file}': {e}")
 
 
    def interp_signal(self, signal, interp: str = "cubic") -> "Wavelet":
-      """
-      @brief Interpolate signal onto a new time grid.
-      @param interp  Interpolation method ('linear' or 'cubic').
-      @return A Wavelet object with the interpolated signal.
+      """Interpolate signal onto a new time grid.
+
+      Args:
+         interp (str): Interpolation method ('linear' or 'cubic').
+
+      Returns:
+         A Wavelet object with the interpolated signal.
       """
 
       if self.samples is None:
@@ -277,12 +327,15 @@ class SignatureFromFile(Signature):
                    file:   str,
                    interp: str = "cubic",
                    **kwargs) -> "Wavelet":
-      """
-      @brief Read a signal from file and interpolate onto a time grid.
-      @param file    Path to file (with optional dataset name for HDF5).
-      @param times   Target time array.
-      @param interp  'linear' or 'cubic'.
-      @return        A Wavelet object.
+      """Read a signal from file and interpolate onto a time grid.
+
+      Args:
+         file (str): Path to file (with optional dataset name for HDF5).
+         times (np.ndarray): Target time array.
+         interp (str): Interpolation method ('linear' or 'cubic').
+
+      Returns:
+         A Wavelet object.
       """
       if not file:
          raise ValueError("No file path provided to SignatureReader.get_wavelet.")
@@ -295,13 +348,16 @@ class SignatureFromFile(Signature):
                    x:      np.ndarray,
                    y:      np.ndarray,
                    kind:   str) -> np.ndarray:
-      """
-      @brief Interpolate y(x) onto x_new using the specified method.
-      @param x_new   New sample poitns.
-      @param x       Original sample points.
-      @param y       Original values.
-      @param kind    'linear' or 'cubic'.
-      @return        Values at new sample positions
+      """Interpolate y(x) onto x_new using the specified method.
+
+      Args:
+         x_new (np.ndarray): New sample poitns.
+         x (np.ndarray): Original sample points.
+         y (np.ndarray): Original values.
+         kind (str): Interpolation method ('linear' or 'cubic').
+
+      Returns:
+         np.ndarray: Values at new sample positions
       """
       if kind == "linear":
          return np.interp(x_new, x, y, left=0.0, right=0.0)

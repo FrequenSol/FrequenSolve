@@ -64,8 +64,9 @@ class ConstantMaterial(MaterialBase):
     """
     def __init__(self, mat_name: str, properties: Dict[str, float]):
         """
-        :param mat_name: name of the material
-        :param properties: { property_name -> value }
+        Attributes:
+            mat_name (str): name of the material
+            properties (dict): { property_name -> value }
         """
         self._name = mat_name
         self._properties = properties
@@ -82,8 +83,8 @@ class ConstantMaterial(MaterialBase):
     def to_hdf(self, hdf_group: h5py.Group) -> None:
         """
         Store:
-         - material class name (so we know how to load it)
-         - property dictionary as a JSON (or separate datasets).
+            material class name (so we know how to load it)
+            property dictionary as a JSON (or separate datasets).
         """
         hdf_group.attrs["class_type"] = "ConstantMaterial"
         # Save the name

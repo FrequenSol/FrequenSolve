@@ -10,6 +10,7 @@ from typing import List
 
 @dataclass
 class Figure:
+   """A figure in a report."""
    title:   str = ""
    caption: str = ""
    image:   str = ""
@@ -17,24 +18,17 @@ class Figure:
 
 @dataclass
 class Section:
+   """A section of a report."""
    title:   str = ""
    figures: List[Figure] = field(default_factory=list)
 
    def add_figure(self, figure: Figure) -> Figure:
-      """
-      @brief   Adds a Figure object to the section
-      @param   figure   Figure to add
-      """
+      """Adds a Figure object to the section."""
       self.figures.append(figure)
       return self.figures[-1]
 
    def new_figure(self, title="", caption="", image="") -> Figure:
-      """
-      @brief   Adds an empty figure to the section or initializes with given values
-      @param   title    Figure title
-      @param   caption  Figure caption
-      @param   image    Figure graphics
-      """
+      """Adds an empty figure to the section or initializes with given values."""
       fig = Figure(title=title, caption=caption, image=image)
       self.figures.append(fig)
       return fig
@@ -48,27 +42,30 @@ class Report:
    sections: List[Section] = field(default_factory=list)
 
    def add_section(self, section: Section) -> Section:
-      """
-      @brief   Adds a section to report.
-      @param   section  Section object to add
+      """Adds a section to report
+
+      Attributes:
+         section (Section): The section to add
       """
       self.sections.append(section)
       return self.sections[-1]
 
    def new_section(self, title="") -> Section:
-      """
-      @brief   Adds an empty section to report.
-      @param   title    Section title
+      """Adds an empty section to report
+
+      Attributes:
+         title (str): Title of the section
       """
       sec = Section(title=title)
       self.sections.append(sec)
       return sec
       
    def generate(self,path, timeout=15):
-      """
-      @brief   Compiles PDF from LaTeX
-      @param   path     Where PDF will be saved
-      @param   timeout  Timeout for compilation command (stalls on error)
+      """Compiles PDF from LaTeX
+
+      Attributes:
+         path (str): Where PDF will be saved
+         timeout (int): Timeout for compilation command (stalls on error)
       """
       current_dir = os.getcwd()
       
@@ -131,6 +128,7 @@ class Report:
 
 # Utility functions
 def setup_work_directory(work_dir):
+   """Sets up the work directory for the report."""
    fs_dir = os.environ["FREQUENSOL_DIR"]
 
    # Get template directory
