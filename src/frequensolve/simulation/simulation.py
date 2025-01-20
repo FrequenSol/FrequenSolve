@@ -24,6 +24,7 @@ class Simulation(SimulationConfig):
       output (OutputManager):          Output configuration.
       acquisition (Acquisition):       Acquisition configuration.
       numerics (NumericsManager):      Numerics configuration.
+      tf_domain (str):                 Frequency- or time-domain simulation.
    """
    model: ModelBase              = field(default_factory=ModelBase)
    mesh: MeshManager             = field(default_factory=MeshManager)
@@ -43,6 +44,7 @@ class Simulation(SimulationConfig):
             - directory: Output directory
             - workflow: Workflow type
             - order: Initial mesh order
+            - tf_domain: Frequency- or time-domain simulation
             - model: Model configuration
             - mesh: Mesh configuration
             - bcs: Boundary condition configuration
@@ -57,12 +59,13 @@ class Simulation(SimulationConfig):
          "directory":   self.directory,
          "workflow":    self.workflow,
          "order":       self.order,
-         "model":       self.model.to_dict(),
-         "mesh":        self.mesh.to_dict(),
-         "bcs":         self.bcs.to_dict(),
-         "output":      self.output.to_dict(),
-         "acquisition": self.acquisition.to_dict(),
-         "numerics":    self.numerics.to_dict()
+         "tf_domain":   self.tf_domain,
+         "Model":       self.model.to_dict(),
+         "Mesh":        self.mesh.to_dict(),
+         "BCs":         self.bcs.to_dict(),
+         "Output":      self.output.to_dict(),
+         "Acquisition": self.acquisition.to_dict(),
+         "Numerics":    self.numerics.to_dict()
       }
 
 
@@ -78,6 +81,7 @@ class Simulation(SimulationConfig):
             - directory:   Output directory
             - workflow:    Workflow type
             - order:       Initial mesh order (optional)
+            - tf_domain:   Frequency- or time-domain simulation
             - model:       Model configuration
             - mesh:        Mesh configuration
             - bcs:         Boundary condition configuration
@@ -95,15 +99,16 @@ class Simulation(SimulationConfig):
          dimension=config.dimension,
          directory=config.directory,
          workflow=config.workflow,
-         order=config.order
+         order=config.order,
+         tf_domain=config.tf_domain
       )
 
-      sim.model = ModelBase.from_dict(data["model"])
-      sim.mesh = MeshManager.from_dict(sim, data["mesh"])
-      sim.bcs = BoundaryConditionManager.from_dict(data["bcs"])
-      sim.output = OutputManager.from_dict(data["output"])
-      sim.acquisition = Acquisition.from_dict(data["acquisition"])
-      sim.numerics = NumericsManager.from_dict(data["numerics"])
+      sim.model = ModelBase.from_dict(data["Model"])
+      sim.mesh = MeshManager.from_dict(sim, data["Mesh"])
+      sim.bcs = BoundaryConditionManager.from_dict(data["BCs"])
+      sim.output = OutputManager.from_dict(data["Output"])
+      sim.acquisition = Acquisition.from_dict(data["Acquisition"])
+      sim.numerics = NumericsManager.from_dict(data["Numerics"])
 
       return sim
    

@@ -1,70 +1,71 @@
 import numpy as np
 import re
 
+from pathlib import Path
 from dataclasses  import dataclass, field
-from typing       import Optional, List, Literal, Tuple
+from typing       import Optional, List, Literal, Tuple, Dict, Union
 
 from ..util.input_parser import *  # noqa
-from .sampling    import *  # noqa
-from .wavelet     import *  # noqa
+from ..simulation.sampling           import *  # noqa
+from .wavelet            import *  # noqa
+from ..simulation.config import *  # noqa
 
-__all__ = ['Signature', 'GeneratedSignature', 'SignatureFromFile']
+__all__ = ['Waveform', 'AnalyticalWaveform', 'WaveformFromFile']
 
 # ----------------------------------------------------------------------
-# Signature
+# Waveform 
 # ----------------------------------------------------------------------
-@dataclass
-class Signature:
-   """Base class for seismic signatures.
+@dataclass(kw_only=True)
+class Waveform:
+   """Base class for seismic waveforms.
 
    Attributes:
-      kind (Literal["from_file","Ricker","Klauder","Ormsby"]): The type of signature.
+      kind (Literal["from_file","analytical"]): The type of waveforms.
       samples_out (np.ndarray): The output time samples.
    """
-   kind:          Literal["from_file","Ricker","Klauder","Ormsby"]
+   domain_out:    Literal["time","frequency"]
    samples_out:   np.ndarray
+   phase:         Optional[Literal["causal","zero"]] = None
    
    def get(self, i: int):
+      raise NotImplementedError("This class must be overwritten by subclasses.")
+   
+   def to_dict(self):
+      raise NotImplementedError("This class must be overwritten by subclasses.")
+   
+   @classmethod
+   def from_dict(cls, data: Dict, sim: SimulationConfig):
       raise NotImplementedError("This class must be overwritten by subclasses.")
       
    def __str__(self):
       raise NotImplementedError("This class must be overwritten by subclasses.")
 
 
-@dataclass
-class GeneratedSignature(Signature):
-   """Wrapper object for getting wavelet at each source
+@dataclass(kw_only=True)
+class AnalyticalWaveform(Waveform):
+   """Wrapper object for getting analytical wavelet at each source
 
    Attributes:
       f_pts (List[float]): The frequencies for the wavelet.
       offset (int): The time offset for the wavelet.
       sigma (Optional[float]): The width of the wavelet taper.
    """
+   kind:    Literal["Ricker","Klauder","Ormsby"]
+   type:    Literal["analytical"] = "analytical"
    f_pts:   List[float] = field(default_factory=list)
    offset:  int = 0
    sigma:   Optional[float] = None
    
    @classmethod
-   def from_block(cls, input: "InputParser", block: "InputBlock") -> "Wavelet":
-      """Create a GeneratedSignature from an input block.
+   def from_dict(cls, data: Dict, sim: SimulationConfig) -> "AnalyticalWaveform":
+      kind = data["kind"]
+      f_pts = data["f_pts"]
 
-      Args:
-         input (InputParser): The input parser.
-         block (InputBlock): The input block.
-
-      Returns:
-         GeneratedSignature: The generated signature.
-      """
-
-      # Get samples from frequency sweep
-      f_min, f_max, df = input.sweep_params
-      samples = Sampling(f_min, f_max, df)
-      times   = samples.times
-
-      kind        = block.args.get("kind")
-      f_pts       = str_to_array(block.args.get("f"))
-      taper_sigma = float(block.args.get("taper_width"))
-      offset      = int(block.args.get("offset", 0))
+      domain = sim.tf_domain
+      if domain == "time":
+         samples = sim.samples.times
+      else:
+         samples = sim.samples.frequencies
 
       assert kind in ["Ricker", "Ormsby", "Klauder"]
       if f_pts is None:
@@ -74,17 +75,20 @@ class GeneratedSignature(Signature):
             "  Klauder: f=[f1, f2]\n"
             "  Ormsby:  f=[f1, f2, f3, f4]"
          )
-         
+
       return cls(
-         samples_out = times,
+         domain_out  = domain,
+         samples_out = samples,
          kind        = kind,
          f_pts       = f_pts,
-         sigma       = taper_sigma,
-         offset      = offset
+         sigma       = data["sigma"] if "sigma" in data else None,
+         offset      = data["offset"] if "offset" in data else 0,
+         phase       = data.get("phase")
       )
    
+
    def get(self, i: int):
-      """Generate wavelet for given source at specified samples.
+      """Generate waveform for given source at specified samples.
 
       Args:
          i (int): The source number.
@@ -97,77 +101,88 @@ class GeneratedSignature(Signature):
          f_pts   = self.f_pts,
          times   = self.samples_out,
          offset  = self.offset,
-         sigma   = self.sigma
+         sigma   = self.sigma,
+         phase   = self.phase
       )
-            
+   
+   def to_dict(self):
+      return {
+         "type": self.type,
+         "kind": self.kind,
+         "f_pts": self.f_pts,
+         "sigma": self.sigma,
+         "offset": self.offset,
+         **({"phase": self.phase} if self.phase else {})
+      }
+   
    def __str__(self):
-      f = " ".join(map(str, self.f_pts))
+      f_pts = " ".join(map(str, self.f_pts))
       out = (
-         "   [Signature]\n"
+         "   [Waveform]\n"
         f"      kind   = {self.kind}\n",
-        f"      f      = {f}\n"
+        f"      f_pts  = {f_pts}\n"
         f"      offset = {self.offset}\n"
       )
       if self.sigma:
          out += f"      taper_sigma = {self.sigma}\n"
+      if self.phase:
+         out += f"      phase      = {self.phase}\n"
       out += "   []\n"
       return out
             
             
-@dataclass
-class SignatureFromFile(Signature):
-   """Wrapper object for getting wavelet for sources (and adjoint sources)
+@dataclass(kw_only=True)
+class WaveformFromFile(Waveform):
+   """Wrapper object for getting waveform for sources (and adjoint sources)
 
    Attributes:
       file_format (str): The format of the file.
       file (str): The path to the file.
       interval (Optional[float]): The interval between samples.
-      samples (Optional[np.ndarray]): The samples to use for the wavelet.
+      samples (Optional[np.ndarray]): The samples to use for the waveform.
    """
-   file_format:   str
-   file:          str
+   type:          Literal["from_file"] = "from_file"
+   file_format:   Literal["HDF5","SEGY"]
+   file:          Union[str,Path]
    interval:      Optional[float]      = None
-   # TODO: allow specifying file or numpy array for samples (or specifying trace number in SEGY file)
-   samples:       Optional[np.ndarray] = None
-   
-   # Derived in __post_init__
-   id_format:     Tuple[str,str]         = ("","")
-   
+   domain_in:     Literal["time","frequency"]
+   samples_in:    Optional[np.ndarray] = None
+   id_format:     Tuple[str,str]       = ("","")
    
    @classmethod
-   def from_block(cls, input: "InputParser", block: "InputBlock") -> "Wavelet":
-      """Create a SignatureFromFile from an input block.
+   def from_dict(cls, data: Dict, sim: SimulationConfig) -> "WaveformFromFile":
+      """Create a WaveformFromFile from a dictionary.
 
       Args:
-         input (InputParser): The input parser.
-         block (InputBlock): The input block.
+         data (Dict): The dictionary.
+         sim (SimulationConfig): The simulation configuration.
 
       Returns:
-         SignatureFromFile: The signature from file.
+         WaveformFromFile: The waveform from file.
       """
-      # Get samples from frequency sweep
-      f_min, f_max, df = input.sweep_params
-      samples = Sampling(f_min, f_max, df)
-      times   = samples.times
-      
-      kind     = block.args.get("kind")
-      interval = block.args.get("interval")
-      format   = block.args.get("file_format")
-      file     = block.args.get("file")
+      file       = data["file"]
+      format     = data["file_format"]
+      interval   = data.get("interval")
+      phase      = data.get("phase")
 
-      assert kind == "from_file"
-      if not file:
-         raise ValueError("Wavelet block with kind='file' must specify 'file' path.")
-      if not format:
-         raise ValueError("Wavelet block with kind='file' must specify 'format'.")
-         
-      sig = cls(samples_out = times,
-                kind        = kind,
-                interval    = interval,
-                file_format = format,
-                file        = file)
-      sig.__post_init__()
-      return sig
+      domain_in  = data["domain"]
+      samples_in = data.get("samples")
+
+      domain_out = sim.tf_domain
+      if domain_out == "time":
+         samples_out = sim.samples.times
+      else:
+         samples_out = sim.samples.frequencies
+
+      return cls(domain_out  = domain_out,
+                 samples_out = samples_out,
+                 domain_in   = domain_in,
+                 samples_in  = samples_in,
+                 interval    = interval,
+                 file_format = format,
+                 file        = file,
+                 phase       = phase)
+
    
    def __post_init__(self):
       match = re.search("(\{)\w([:\w]*\})", self.file)
@@ -176,23 +191,27 @@ class SignatureFromFile(Signature):
       try:
          id = self.id_format[1].format(64)
       except BaseException as e:
-         raise ValueError( "Invalid format specified in signature file. "
+         raise ValueError( "Invalid format specified in waveform file. "
                            "Format may be blank, but if specified (for padding, etc.) "
                            "it must be a valid python integer format.\n\n"
                           f"Format '{self.id_format[1]}' extracted from '{self.file}' raised error: {e}")
                           
-      if self.samples is None:
+      if self.samples_in is None:
          if self.interval is not None:
             n = len(self.signal)
             T = (n - 1) * self.interval
-            self.samples = np.linspace(0, T, n)
+            self.samples_in = np.linspace(0, T, n)
          elif self.file_format == "SEGY":
-            # TODO: read_segy_samples(self.file)
-            pass
+            import segyio
+            with segyio.open(self.file, ignore_geometry=True) as f:
+               self.samples_in = f.samples
+         else:
+            raise ValueError("Input sampling could not be determined from file and"
+                             "an explicit 'interval' was not specified.")
       
    
    def get(self, i: int):
-      """Read wavelet from file and evaluate at specified samples.
+      """Read waveform from file and evaluate at specified samples.
 
       Args:
          i (int): The source number.
@@ -206,12 +225,11 @@ class SignatureFromFile(Signature):
       return self.get_wavelet(fname, self.samples_out)
 
 
-   def read(self, fname, **kwargs) -> np.ndarray:
+   def read(self, fname) -> np.ndarray:
       """Read signal data from file.
 
       Args:
-         fname (str): Path to file (may include dataset name for HDF5).
-         kwargs (dict): Additional arguments (e.g. 'trace' for SEG-Y).
+         fname (str): Path to file (e.g. "file.h5:[dataset]" or "file.segy:[trace]")
 
       Returns:
          np.ndarray: The signal data.
@@ -219,22 +237,17 @@ class SignatureFromFile(Signature):
       if self.format == "HDF5":
          return self.read_hdf5(fname)
       elif self.format == "SEGY":
-         trace = kwargs.get("trace", 0)
-         return self.read_segy(fname, trace=trace)
-      elif self.format == "CSV":
-         return self.read_csv(fname,**kwargs)
-      elif self.format == "binary":
-         return self.read_binary(fname,**kwargs)
+         return self.read_segy(fname)
       else:
          raise ValueError(f"Unknown format: '{self.format}'. "
-                          "Supported formats: HDF5, SEGY, CSV, binary.")
+                          "Supported formats: HDF5, SEGY.")
 
 
    def read_hdf5(self, fname: str) -> np.ndarray:
       """Read data from an HDF5 file/dataset.
 
       Args:
-         fname (str): Path like 'file.h5:dataset_name'.
+         fname (str): Path like 'file.h5:[dataset_name]'.
 
       Returns:
          np.ndarray: The signal data.
@@ -254,55 +267,17 @@ class SignatureFromFile(Signature):
          return f[dset][()]
 
 
-   def read_segy(self, fname: str, trace: int = 0) -> np.ndarray:
+   def read_segy(self, fname: str) -> np.ndarray:
       """Read data from a SEG-Y file.
 
       Args:
-         file (str): Path to SEG-Y file.
-         trace (int): Trace index to read (if multiple traces).
+         file (str): Path to SEG-Y file like "file.segy:[trace]"
       """
-      # For now, raise an error if this is unimplemented.
-      raise NotImplementedError("SEGY reading is not yet implemented.")
+      import segyio
 
-
-   def read_csv(self, fname: str, sep: str = ",") -> np.ndarray:
-      """Read data from a CSV-like text file.
-
-      Args:
-         file (str): Path to file.
-         sep (str): Delimiter for CSV data.
-      """
-      try:
-         return np.fromfile(file=fname, dtype=float, sep=sep)
-      except OSError as e:
-         raise ValueError(f"Failed to read CSV file '{self.file}': {e}")
-
-
-   def read_binary(self,
-                   fname:  str,
-                   dtype:  str = "float",
-                   count:  int = -1,
-                   offset: int = 0,
-                   sep:    str = "") -> np.ndarray:
-      """Read data from a binary file.
-
-      Args:
-         file (str): Path to binary file.
-         dtype (str): Data type (e.g. 'float32', 'int32').
-         count (int): Number of items to read (-1 means read all).
-         offset (int): Byte offset in the file.
-         sep (str): Delimiter (if empty, means pure binary).
-      """
-      try:
-         return np.fromfile(
-            file   = fname,
-            dtype  = np.dtype(dtype),
-            count  = count,
-            sep    = sep,
-            offset = offset
-         )
-      except OSError as e:
-         raise ValueError(f"Failed to read binary file '{self.file}': {e}")
+      trace = int(fname.split(":")[1])
+      with segyio.open(fname, ignore_geometry=True) as f:
+         return f.trace[trace]
 
 
    def interp_signal(self, signal, interp: str = "cubic") -> "Wavelet":
@@ -316,7 +291,7 @@ class SignatureFromFile(Signature):
       """
 
       if self.samples is None:
-         raise ValueError("No sampling specified. Signature should be "
+         raise ValueError("No sampling specified. Waveform should be "
                           "initialized with either 'samples' or 'interval'.")
 
       sig_interp = self.interpolate(self.samples_out, self.samples, signal, interp)
@@ -338,7 +313,7 @@ class SignatureFromFile(Signature):
          A Wavelet object.
       """
       if not file:
-         raise ValueError("No file path provided to SignatureReader.get_wavelet.")
+         raise ValueError("No file path provided to WaveformFromFile.get_wavelet.")
       signal = self.read(file, **kwargs)
       return self.interp_signal(signal, interp)
 
@@ -371,9 +346,8 @@ class SignatureFromFile(Signature):
                           "Use 'linear' or 'cubic'.")
 
    def __str__(self):
-      f = " ".join(map(str, self.f_pts))
       out = (
-         "   [Signature]\n"
+         "   [Waveform]\n"
         f"      kind        = from_file\n",
         f"      file_format = {self.file_format}\n"
         f"      file        = {self.file}\n"

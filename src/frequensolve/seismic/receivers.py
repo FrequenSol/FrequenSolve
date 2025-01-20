@@ -1,4 +1,8 @@
-import os
+"""Receiver definitions and coordinate systems.
+
+This module defines the various types of receivers and their locations.
+"""
+
 import numpy as np
 import h5py
 import xarray as xr
@@ -10,7 +14,7 @@ from abc          import ABC, abstractmethod
 
 from ..geometry.grids    import *  # noqa
 from ..util.input_parser import *  # noqa
-from .signature          import *  # noqa
+from .waveform           import *  # noqa
 from .wavelet            import *  # noqa
 
 __all__ = ['ReceiverComponent', 'ReceiverGroup', 'ReceiverCoordinates', 'ReceiverDevice',
@@ -116,7 +120,7 @@ class ReceiverDevice:
       return out
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ReceiverNodeArray(ReceiverDevice):
    """Defines a group of nodes on a single channel; defined by list of offsets.
    
@@ -176,7 +180,7 @@ class ReceiverNodeArray(ReceiverDevice):
       return out
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ReceiverNode(ReceiverDevice):
    """Defines a node receiver."""
    def to_dict(self) -> dict:
@@ -189,7 +193,7 @@ class ReceiverNode(ReceiverDevice):
 
 
    @classmethod
-   def from_dict(cls, data: dict) -> 'Node':
+   def from_dict(cls, data: dict) -> 'ReceiverNode':
       """Create Node from dictionary representation.
       
       Args:
@@ -211,7 +215,7 @@ class ReceiverNode(ReceiverDevice):
       return super().__str__()
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ReceiverFiber(ReceiverDevice):
    """Defines a fiber receiver."""
    L_gauge: float
@@ -276,7 +280,7 @@ class ReceiverFiber(ReceiverDevice):
 # ----------------------------------------------------------------------
 # Receiver Coordinates
 # ----------------------------------------------------------------------
-@dataclass
+@dataclass(kw_only=True)
 class ReceiverCoordinates(ABC):
    """Base class for receiver coordinates.
    
@@ -329,13 +333,13 @@ class ReceiverCoordinates(ABC):
       pass
 
 
-@dataclass 
+@dataclass(kw_only=True)
 class FileCoordinates(ReceiverCoordinates):
    """Receiver coordinates stored in a file.
    
    Attributes:
-      path (Union[str, Path]): Path to coordinate file.
-      format (str): File format ('hdf5', 'asdf', or 'segy').
+      path (Union[str, Path]):   Path to coordinate file.
+      format (str):              File format ('hdf5', 'asdf', or 'segy').
    """
    path: Union[str, Path]
    format: Literal["hdf5", "asdf", "segy"]
@@ -405,8 +409,11 @@ class FileCoordinates(ReceiverCoordinates):
                # Get source/receiver coordinates in ft or m
                coords[i,0] = f.header[idx][segyio.TraceField.SourceX]
                coords[i,1] = f.header[idx][segyio.TraceField.SourceY]
-               coords[i,2] = f.header[idx][segyio.TraceField.SourceZ]
-            
+               # coords[i,2] = f.header[idx][segyio.TraceField.SourceZ]
+
+# TODO: get receiver depth from SEGY header
+# TODO: add unit system and convert to project units
+
             # Convert to km if in m, or kft if in ft
             if f.header[0][segyio.TraceField.CoordinateUnits] == 1: # m
                coords /= 1000.0  # Convert m to km
@@ -438,7 +445,7 @@ class FileCoordinates(ReceiverCoordinates):
       )
 
 
-@dataclass
+@dataclass(kw_only=True)
 class GridCoordinates(ReceiverCoordinates):
    """Receiver coordinates defined by a Cartesian grid.
    
@@ -519,7 +526,7 @@ class GridCoordinates(ReceiverCoordinates):
       )
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ArrayCoordinates(ReceiverCoordinates):
    """Receiver coordinates stored as an xarray/numpy array.
    
@@ -587,7 +594,7 @@ class ArrayCoordinates(ReceiverCoordinates):
 # ----------------------------------------------------------------------
 # Receiver Groups
 # ----------------------------------------------------------------------
-@dataclass
+@dataclass(kw_only=True)
 class ReceiverGroup:
    """A group of multi-component receivers with shared output settings.
    
@@ -596,20 +603,21 @@ class ReceiverGroup:
    written to the same output file.
    
    Attributes:
-      name (str): String identifier for this receiver group. 
-      device (ReceiverDevice): Device defining receiver type and components.
-      frame (str): Coordinate frame for measurements ("physical" or "reference").
-      coordinates (ReceiverCoordinates): Coordinates defining receiver locations.
-      signatures (Optional[Signature]): Optional Signature object for adjoint calculations.
+      name (str):                             String identifier for this receiver group.
+      device (ReceiverDevice):                Device defining receiver type and components.
+      frame (str):                            Coordinate frame for measurements ("physical" or "reference").
+      coordinates (ReceiverCoordinates):      Coordinates defining receiver locations.
+      waveforms (Optional[WaveformFromFile]): Optional waveforms for adjoint calculations.
    """
-   name:             str
-   device:           ReceiverDevice
+   name:             str = field(default="")
+   device:           ReceiverDevice = field(default_factory=ReceiverDevice)
    frame:            Literal["physical", "reference"] = "physical"
-   coordinates:      ReceiverCoordinates
-   signatures:       Optional[SignatureFromFile] = None
+   coordinates:      ReceiverCoordinates = field(default_factory=GridCoordinates)
+   waveforms:        Optional[WaveformFromFile] = None
    
-   def signature(self, irecv: int) -> Wavelet:
-      """Retrieves the signature for a specific receiver.
+
+   def waveform(self, irecv: int) -> Wavelet:
+      """Retrieves the waveform for a specific receiver.
       
       Used in adjoint calculations where receivers act as sources.
       
@@ -617,17 +625,20 @@ class ReceiverGroup:
          irecv (int): 1-based index of the receiver.
          
       Returns:
-         Wavelet: The signature/wavelet associated with the specified receiver.
+         Wavelet: The waveform associated with the specified receiver.
       """
-      return self.signatures.get(irecv)
+      return self.waveforms.get(irecv)
       
 
    @property
    def size(self):
-      return np.shape(self.coords)[0]
+      return self.coordinates.size()
 
+
+   # TODO: option to correct signature for device response
    # TODO: method to define receviers
-   # TODO: method to attach signatures
+   # TODO: method to attach waveforms
+
 
    def to_dict(self) -> Dict:
       return {
@@ -635,8 +646,9 @@ class ReceiverGroup:
          "device": self.device.to_dict(),
          "frame": self.frame,
          "coordinates": self.coordinates.to_dict(),
-         **({"signatures": self.signatures.to_dict()} if self.signatures else {})
+         **({"waveforms": self.waveforms.to_dict()} if self.waveforms else {})
       }
+
 
    @classmethod
    def from_dict(cls, data: Dict) -> 'ReceiverGroup':
@@ -656,6 +668,6 @@ class ReceiverGroup:
          device      = ReceiverDevice.from_dict(data["device"]),
          frame       = data["frame"],
          coordinates = coordinates,
-         signatures  = SignatureFromFile.from_dict(data["signatures"]) if "signatures" in data else None
+         waveforms   = WaveformFromFile.from_dict(data["waveforms"]) if "waveforms" in data else None
       )
    

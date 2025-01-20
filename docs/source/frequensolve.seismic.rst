@@ -33,18 +33,10 @@ Receivers
    :show-inheritance:
    :noindex:
 
-Sampling
---------
-
-.. automodule:: frequensolve.seismic.sampling
-   :members:
-   :show-inheritance:
-   :noindex:
-
-Signature
+Waveform
 ---------
 
-.. automodule:: frequensolve.seismic.signature
+.. automodule:: frequensolve.seismic.waveform
    :members:
    :show-inheritance:
    :noindex:

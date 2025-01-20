@@ -1,23 +1,34 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Dict
+
+from .sampling import Sampling
 
 @dataclass
 class SimulationConfig:
    """Container for simulation configuration.
    
    Args:
-      name (str):       The name of the simulation.
-      physics (str):    The physics type for the simulation.
-      dimension (int):  The dimension of the simulation (2D or 3D).
-      directory (str):  The subdirectory for simulation outputs.
-      workflow (str):   The workflow type for the simulation.
-      order (int):      The initial order of the mesh.
+      name (str):       Name of the simulation.
+      physics (str):    Physics type for the simulation.
+      dimension (int):  Dimension of the simulation (2D or 3D).
+      directory (str):  Subdirectory for simulation outputs.
+      workflow (str):   Workflow type for the simulation.
+      order (int):      Initial order of the mesh.
+      tf_domain (str):  Frequency- or time-domain simulation.
+
+      :Note:
+         FrequenSolve only operates in the frequency-domain; time-domain
+         simulations are produced by uniformly sampling frequencies and then
+         performing a Fourier transform.
    """
-   name: str
-   physics: Literal["acoustic", "elastic", "plasma"]
+   name:      str
+   physics:   Literal["acoustic", "elastic", "plasma"]
    dimension: Literal[2, 3]
    directory: str
-   workflow: str
+   workflow:  str
+   tf_domain: Literal["time","frequency"]
+   sampling:  Sampling = field(default_factory=Sampling)
+
    order: int = 2
    def to_dict(self) -> Dict:
       """Converts the simulation configuration to a dictionary representation.
@@ -30,6 +41,8 @@ class SimulationConfig:
             - directory: Output directory
             - workflow: Workflow type
             - order: Initial mesh order
+            - tf_domain: Frequency- or time-domain simulation
+            - sampling: Sampling configuration
       """
       return {
          "name": self.name,
@@ -37,7 +50,9 @@ class SimulationConfig:
          "dimension": self.dimension,
          "directory": self.directory,
          "workflow": self.workflow,
-         "order": self.order
+         "order": self.order,
+         "tf_domain": self.tf_domain,
+         "sampling": self.sampling.to_dict()
       }
 
    @classmethod
@@ -62,17 +77,21 @@ class SimulationConfig:
          dimension=data["dimension"],
          directory=data["directory"],
          workflow=data["workflow"],
-         order=data.get("order", 2)
+         order=data.get("order", 2),
+         tf_domain=data.get("tf_domain", "frequency"),
+         sampling=Sampling.from_dict(data["sampling"])
       )
 
    def __str__(self) -> str:
       return(
          f"[Simulation]\n"
-         f"   Physics: {self.physics}\n"
-         f"   Dimension: {self.dimension}D\n" 
-         f"   Directory: {self.directory}\n"
-         f"   Workflow: {self.workflow}\n"
-         f"   Order: {self.order}\n"
+         f"   physics: {self.physics}\n"
+         f"   dimension: {self.dimension}D\n" 
+         f"   directory: {self.directory}\n"
+         f"   workflow: {self.workflow}\n"
+         f"   order: {self.order}\n"
+         f"   tf_domain: {self.tf_domain}\n"
+         f"   {str(self.sampling)}\n"
          f"[]\n\n"
       )
 

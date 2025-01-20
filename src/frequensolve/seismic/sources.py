@@ -4,8 +4,7 @@ from dataclasses  import dataclass, field
 from typing    import List, Optional, Literal
 
 from ..util.input_parser import *  # noqa
-from .signature          import *  # noqa
-from .wavelet            import *  # noqa
+from .waveform           import *  # noqa
 
 __all__ = ['SourceGroup','Source']
 
@@ -68,14 +67,14 @@ class Source:
       
 @dataclass
 class SourceGroup:
-   """A group of sources with a (optional) common signature.
+   """A group of sources with a (optional) common waveform.
 
    Attributes:
-      signatures (Optional[Signature]): The signature for the sources.
+      waveforms (Optional[Waveform]): The waveform for the sources.
       sources (List[Source]): The list of sources.
    """
    sources:       List[Source] = field(default_factory=list)
-   signatures:    Optional[Signature] = None
+   waveforms:     Optional[Waveform] = None
 
    @classmethod
    def from_block(cls, input: InputParser, block: InputBlock):
@@ -91,41 +90,48 @@ class SourceGroup:
       name = block.name
       args = block.args
       
-      # Identify signature block
+      # Identify waveform block
       src_blocks = block.sub_blocks
-      sig_block  = block.find_block("Signature")
-      if sig_block:
-         kind = sig_block.args["kind"]
+      wav_block  = block.find_block("Waveform")
+      if wav_block:
+         kind = wav_block.args["kind"]
          if kind == "from_file":
-            sig = SignatureFromFile.from_block(input, sig_block)
+            wav = WaveformFromFile.from_block(input, wav_block)
          elif kind in ["Ricker", "Ormsby", "Klauder"]:
-            sig = GeneratedSignature.from_block(input, sig_block)
+            wav = AnalyticalWaveform.from_block(input, wav_block)
 
-         # Remove the signature block
-         src_blocks.remove(sig_block)
+         # Remove the waveform block
+         src_blocks.remove(wav_block)
       else:
-         sig = None
+         wav = None
       
       # Create source blocks
       srcs = [Source.from_block(input, block) for block in src_blocks]
       
-      return cls(signatures = sig,
-                 sources    = srcs)
+      return cls(waveforms = wav,
+                 sources   = srcs)
+   
+
+   # def from_dict(cls, data: Dict):
+
+
+
+
    
    
-   def signature(self, isrc: int):
-      """Retrieve a source signature by index.
+   # def waveform(self, isrc: int):
+   #    """Retrieve a source waveform by index.
 
-      Args:
-         isrc (int): Source number (1-based).
+   #    Args:
+   #       isrc (int): Source number (1-based).
 
-      Returns:
-         Signature: The signature for the source.
-      """
-      if self.signatures:
-         return self.signatures.get(isrc)
-      else:
-         return None
+   #    Returns:
+   #       Waveform: The waveform for the source.
+   #    """
+   #    if self.waveforms:
+   #       return self.waveforms.get(isrc)
+   #    else:
+   #       return None
 
 
    def __str__(self) -> str:
@@ -137,7 +143,7 @@ class SourceGroup:
       if not self.sources:
          return ""
       out = "[Source]\n"
-      out += str(self.signature)
+      out += str(self.waveforms)
       for src in self.sources:
          out += str(src)
       out += "[]\n\n"

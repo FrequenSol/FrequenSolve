@@ -37,10 +37,6 @@ exclude_patterns = []
 
 autodoc_typehints = "description"  # Show types in the parameter description instead of inline
 autodoc_typehints_format = "short"  # Use short names for type annotations
-autodoc_default_options = {
-   'ignore-module-all': True,
-   'undoc-members': False
-}
 
 
 # -- Options for HTML output -------------------------------------------------
@@ -56,12 +52,9 @@ html_css_files = [
 
 # HTML options
 html_theme_options = {
-   # Collapse navigation by default
    'collapse_navigation': True,
-   # Maximum depth of top-level navigation
    'navigation_depth': 3,
-   # Don't show deeper levels
-   'titles_only': True
+   # 'titles_only': True
 }
 
 # TOC options

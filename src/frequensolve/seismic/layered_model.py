@@ -18,9 +18,9 @@ class Surface:
    """A base class for defining surfaces in a seismic model.
 
    Attributes:
-      name (str): Name identifier for the surface. Defaults to "surface".
+      name (str):              Name identifier for the surface. Defaults to "surface".
       z_ref (float, optional): Reference z-coordinate. Defaults to None.
-      interface (bool): Whether this is an interface surface. Defaults to True.
+      interface (bool):        Whether this is an interface surface. Defaults to True.
    """
    name:         str = "surface"
    z_ref:        Optional[float] = None
@@ -110,7 +110,7 @@ class GridLayer(ModelSubdomain):
 
    Attributes:
       grid (CartesianGrid): The grid defining the layer.
-      file_format (str): The format of the file containing the grid data.
+      file_format (str):    The format of the file containing the grid data.
    """
    grid:         CartesianGrid
    file_format:  str
@@ -120,8 +120,8 @@ class GridLayer(ModelSubdomain):
       
       Returns:
          Dict: Dictionary containing the layer data with keys from parent class and:
-            - type: The type of the subdomain
-            - grid: The grid configuration
+            - type:        The type of the subdomain
+            - grid:        The grid configuration
             - file_format: The format of the file containing the grid data
       """
       base_dict = super().to_dict()
@@ -138,9 +138,9 @@ class ConstantLayer(ModelSubdomain):
    """A constant-property layer in a model.
    
    Attributes:
-      mesh_block_id (int): Unique identifier for the mesh block.
-      name (Optional[str]): Optional name for the mesh block.
-      frame (str): Coordinate frame ("physical" or "computational").
+      mesh_block_id (int):    Unique identifier for the mesh block.
+      name (Optional[str]):   Optional name for the mesh block.
+      frame (str):            Coordinate frame ("physical" or "reference").
       properties (Dict[str, Union[float, str]]): Dictionary of layer properties.
    """
    def to_dict(self) -> Dict:
@@ -165,7 +165,7 @@ class LayerBounds:
    Attributes:
       upper (Surface): The upper bounding surface.
       lower (Surface): The lower bounding surface.
-      layer_id (int): Unique identifier for the layer.
+      layer_id (int):  Unique identifier for the layer.
    """
    upper:      Optional[Surface] = None
    lower:      Optional[Surface] = None
@@ -183,11 +183,11 @@ class LayeredModel(ModelBase):
    Attributes:
       dimension (int): The dimension of the model.
 
-      x_limits (List[float]): The x-limits of the model.
-      y_limits (Optional[List[float]]): The y-limits of the model. Defaults to None.
-      surfaces (List[Surface]): A list of surfaces in the model.
-      ordering (Literal["top_down", "bottom_up"]): The ordering of layers. Defaults to "top_down".
-      interface_flag (bool): Whether to flag interfaces between layers. Defaults to True.
+      x_limits (List[float]):           X-limits of the model.
+      y_limits (Optional[List[float]]): Y-limits of the model. Defaults to None.
+      surfaces (List[Surface]):         List of surfaces in the model.
+      ordering (Literal["top_down", "bottom_up"]): Ordering of layers. Defaults to "top_down".
+      interface_flag (bool):            Whether to flag interfaces between layers. Defaults to True.
 
       Note: 
          A 'surface' must be added at the top and bottom of the model, and at 
@@ -211,12 +211,12 @@ class LayeredModel(ModelBase):
       """Add a layer to the model.
 
       Args:
-         type (str): The type of the layer.
-         name (str): The name of the layer.
-         mesh_block_id (int): The mesh block id of the layer.
-         frame (str): The frame of the layer.
-         properties (dict): The properties of the layer.
-         grid (CartesianGrid): The grid of the layer (for grid layers only).
+         type (str):           Type of the layer.
+         name (str):           Name of the layer.
+         mesh_block_id (int):  Mesh block id of the layer.
+         frame (str):          Frame of the layer.
+         properties (dict):    Properties of the layer.
+         grid (CartesianGrid): Grid of the layer (for grid layers only).
       
       Raises:
          ValueError: If no surfaces have been added before adding a layer

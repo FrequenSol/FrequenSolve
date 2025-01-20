@@ -2,13 +2,39 @@ import os
 import numpy as np
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 
-__all__ = ['Sampling']
+__all__ = ['Sampling', 'DiscreteSampling', 'UniformSweepSampling']
+
 
 @dataclass
 class Sampling:
-   """Sampling parameters for a seismic study.
+   """Base class for sampling parameters."""
+   pass
+
+
+@dataclass
+class DiscreteSampling(Sampling):
+   """Sampling parameters for a seismic study at discrete frequencies.
+
+   Attributes:
+      freq (List[float]): The frequencies.
+   """
+   freq: List[float]
+
+   @property
+   def nfreq(self):
+      return len(self.freq)
+   
+   def to_dict(self) -> dict:
+      return {
+         "freq": self.freq,
+      }
+
+
+@dataclass
+class UniformSweepSampling(Sampling):
+   """Sampling parameters for a seismic study at uniform frequency steps.
 
    Attributes:
       f_min (float): Minimum frequency (Hz).
@@ -113,3 +139,12 @@ class Sampling:
       out += "      freq = {" + f"{self.f_min}:{self.f_max}:{self.df}" + "}\n"
       out += "   []\n"
       out += "[]\n\n"
+
+
+@dataclass
+class LogSweepSampling(Sampling):
+   """Sampling for the log-FFT. Logarithmic (geometric)frequency spacing 
+   in frequency- and time-domain (more dense sampling at low frequencies
+   and early times).
+   """
+   raise NotImplementedError("LogSweepSampling not implemented yet.")

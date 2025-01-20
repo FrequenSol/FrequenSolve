@@ -1,20 +1,19 @@
 
-from typing      import Optional, List
+from typing      import List, Union, Path
 from dataclasses import dataclass, field
+
+from ..simulation.simulation import Simulation
 
 @dataclass
 class Project:
    """Container for storing project information.
 
    Attributes:
-      path (str): The path to the project directory.
-      log_level (int): The logging level.
-      version (str): The version of the project.
-      auto_migrate (bool): Whether to automatically migrate the project.
+      path (str):                      The path to the project directory.
+      simulations (List[Simulation]):  List of simulations in the project.
+      version (str):                   FrequenSolve version for this project.
    """
-   path:             str
-   log_level:        int
-   #problems:         List[Problem] = field(default_factory = list)
-   version:          str
-   auto_migrate:     bool
+   path:           Union[str, Path]
+   simulations:    List[Simulation] = field(default_factory = list)
+   version:        str
 

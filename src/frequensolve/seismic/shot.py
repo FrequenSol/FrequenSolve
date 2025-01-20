@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import numpy as np
 
-from .sampling import Sampling
+from ..simulation.sampling import Sampling
 from .sources import SourceGroup
 from .receivers import ReceiverGroup
 

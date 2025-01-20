@@ -1,16 +1,18 @@
 """Python structures defining seismic acquisition geometry and sampling"""
 
-import os, re
+import os
 import numpy as np
+import warnings
 
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from ..util.input_parser import *  # noqa
-from .sources            import *  # noqa
-from .receivers          import *  # noqa
-from .sampling           import *  # noqa
-from .shot               import *  # noqa
+from ..util.input_parser   import *  # noqa
+from .sources              import *  # noqa
+from .receivers            import *  # noqa
+from ..simulation.sampling import *  # noqa
+from .shot                 import *  # noqa
+from .waveform             import *  # noqa
 
 __all__ = ['Acquisition']
 
@@ -42,7 +44,7 @@ class Acquisition:
          kwargs (dict): Additional arguments, e.g., 'upscale' for Sampling.
 
       Returns:
-         Acquisition: An initialized Acquisition object.
+         Acquisition:      A group of sources and corresponding receivers.
       """
       
       input = InputParser.read(input_file)
@@ -217,27 +219,30 @@ class Acquisition:
          print("h5py not found, skipping frequency-domain data")
          return None
       
-      of = self.samples.ofreq
-      nf = self.samples.nfreq
-      f_max = self.samples.f_max
-      
       group_name, field = key.split(":")
       group = self.receiver_group(group_name)
       nrecv = group.size
-      
-      # Retrieve wavelet
-      wavelet  = self.source_group.signature(isrc)
-      spectrum = wavelet.spectrum
+
+      if isinstance(self.samples, UniformSweepSampling):
+         of = self.samples.ofreq
+         nf = self.samples.nfreq
+         f_max = self.samples.f_max
+
+         wavelet  = self.source_group.signature(isrc)
+         spectrum = wavelet.spectrum
+      else:
+         of = 0
+         spectrum = np.ones([self.samples.nfreq])
       
       u = np.zeros((nf, nrecv), dtype=np.csingle)
       
       # Loop over frequencies and load data
-      for ifreq in range(of, nf):
+      for ifreq, freq in enumerate(self.samples.freqs):
          file = os.path.join(group.directory, f"{group_name}_{ifreq}.h5")
-         i_omega = np.csingle(1j * 2 * np.pi * ifreq / nf * f_max)
+         i_omega = np.csingle(1j * 2 * np.pi * freq)
          
-         if not os.path.exists(file):
-            print(f"Warning: {file} does not exist.")
+         if ifreq >= of and not os.path.exists(file):
+            warnings.warn(f"File {file} does not exist.", UserWarning)
          else:
             with h5py.File(file, "r") as f:
                # Real + imaginary parts
@@ -247,7 +252,7 @@ class Acquisition:
                # Apply wavelet
                u[ifreq, :] *= spectrum[ifreq]
                
-               # For fiber-type receivers, multiply by iω for strain rate
+               # For fiber-type receivers, multiply by iω for strain *rate*
                if group.kind == 'fiber':
                   u[ifreq, :] *= i_omega
                
@@ -272,19 +277,21 @@ class Acquisition:
          Shot: A Shot object containing time-domain data.
       """
       
+      if not isinstance(self.samples,UniformSweepSampling):
+         raise ValueError("Time-domain data is only supported for uniform sweep sampling.")
+      
       try:
          import pyfftw.interfaces.numpy_fft as fft
       except:
          print('pyfftw not found, using numpy for FFT (slow)')
          import numpy.fft as fft
       
-      
       group_name, field = key.split(":")
       group = self.receiver_group(group_name)
       nrecv = group.size
    
       nf = self.samples.nfreq
-      nF = self.samples.nFreq  # upscaled frequency domain size (if any)
+      nF = self.samples.nFreq
       
       fd = self.read_shot_FD(key, isrc)
       

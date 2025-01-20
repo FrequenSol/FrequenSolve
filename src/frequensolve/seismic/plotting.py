@@ -1,4 +1,9 @@
-import os
+"""Plotting functions for seismic data.
+
+This module is primarily for plotting time-domain data, or at least
+uniformly sampled in frequency. 
+"""
+
 import numpy as np
 
 import matplotlib.pyplot as plt
@@ -8,10 +13,8 @@ from .sources     import *    # noqa
 from .receivers   import *    # noqa
 from .acquisition import Shot # noqa
 
-__all__ = [
-   'plot_gather','animate_gather','plot_gather_diff','plot_timelag',
-   'plot_xf','plot_cf'
-]
+__all__ = [ 'plot_gather', 'animate_gather', 'plot_gather_diff',
+            'plot_xf', 'plot_cf', 'plot_timelag' ]
 
 try:
    plt.rcParams["font.family"]     = "sans-serif"
@@ -32,7 +35,7 @@ def plot_gather(shot: Shot, **kwargs):
    and receiver position along the horizontal axis.
    
    Args:
-      shot (Shot): A Shot object of type='TD' containing time-domain data.
+      shot (Shot):     A Shot object of type='TD' containing time-domain data.
    
    Keyword Args:
       A (float):       Amplitude scaling for display (default 1).
@@ -44,7 +47,7 @@ def plot_gather(shot: Shot, **kwargs):
       save (str):      If provided, saves the figure to this path.
    
    Raises:
-      AssertionError: If shot is not a time-domain shot (type != "TD").
+      AssertionError:  If shot is not a time-domain shot (type != "TD").
    """
    assert shot.type == "TD"
    
@@ -106,14 +109,14 @@ def animate_gather(shot: Shot, **kwargs):
       shot (Shot): A Shot object of type='TD'.
 
    Keyword Args:
-      A (float): Amplitude scaling for display (default 1).
-      cmap (str): Matplotlib colormap (default "RdGy").
-      interval (int): Animation interval in milliseconds (default 50).
-      units (str): Length units for labeling X, Z axes (default "km").
-      figsize (tuple): Figure size (width, height).
-      fontsize (int): Font size for labels/ticks.
-      Tf (float): Cutoff time in seconds.
-      save (str): If provided, saves an .mp4 to this path (without extension).
+      A (float):        Amplitude scaling for display (default 1).
+      cmap (str):       Matplotlib colormap (default "RdGy").
+      interval (int):   Animation interval in milliseconds (default 50).
+      units (str):      Length units for labeling X, Z axes (default "km").
+      figsize (tuple):  Figure size (width, height) (default (8,8)).
+      fontsize (int):   Font size for labels/ticks (default 10).
+      Tf (float):       Cutoff time in seconds.
+      save (str):       Path (with extension) to save figure to.
 
    Raises:
       ValueError: If the associated receiver group is not grid-based.
@@ -184,20 +187,20 @@ def plot_gather_diff(shot1: Shot, shot2: Shot, **kwargs):
    Shows the "baseline", "perturbed", and "difference" in a 3-panel figure.
 
    Args:
-      shot1 (Shot): First TD Shot (baseline).
-      shot2 (Shot): Second TD Shot (perturbed).
+      shot1 (Shot):     First TD Shot (baseline).
+      shot2 (Shot):     Second TD Shot (perturbed).
 
    Keyword Args:
-      A (float): Amplitude scaling for display.
-      units (str): Length units for labeling X axis (default "km").
-      cmap (str): Matplotlib colormap (default "grey").
-      figsize (tuple): Figure size (width, height).
-      fontsize (int): Font size for labels/ticks.
-      Tf (float): Cutoff time in seconds.
-      save (str): If provided, saves figure to this path.
+      A (float):        Amplitude scaling for display (default 1.0).
+      units (str):      Length units for labeling X axis (default "km").
+      cmap (str):       Matplotlib colormap (default "grey").
+      figsize (tuple):  Figure size (width, height) (default (15,4)).
+      fontsize (int):   Font size for labels/ticks (default 12).
+      Tf (float):       Cutoff time in seconds.
+      save (str):       Path (with extension) to save figure to.
 
    Raises:
-      AssertionError: If shots are not time-domain or time lengths differ.
+      AssertionError:   If shots are not time-domain or time lengths differ.
    """
    assert shot1.type == "TD" and shot2.type == "TD"
    assert shot1.nTime == shot2.nTime and shot1.T == shot2.T
@@ -277,25 +280,27 @@ def plot_gather_diff(shot1: Shot, shot2: Shot, **kwargs):
    del(fig)
 
 
-def window_first_arrival(signal, signal2, sampling_rate,
-                     threshold_ratio, window_length,
-                     window_type='tukey', alpha=0.5):
+def window_first_arrival(signal: np.ndarray, 
+                         signal2: np.ndarray, 
+                         sampling_rate: float,
+                         threshold_ratio: float, 
+                         window_length: float,
+                         window_type: Literal['tukey', 'gaussian'] = 'tukey', 
+                         alpha: float = 0.5):
    """Window and extract first arrivals from a pair of seismic signals.
    
-   Uses the Hilbert transform to identify first arrivals and applies a smooth window
+   Uses the Hilbert transform to identify first arrivals and apply a smooth window
    around them. This is useful for isolating primary arrivals before cross-correlation
    or other analysis.
    
    Args:
-      signal (np.ndarray): Primary time series to analyze for first arrival.
-      signal2 (np.ndarray): Secondary time series to window (same length as signal).
-      sampling_rate (float): Sampling rate in samples per second.
-      threshold_ratio (float): Fraction of peak envelope amplitude for first-arrival detection.
-      window_length (float): Total length of the time window in seconds.
-      window_type (str, optional): Type of window to apply ('tukey' or 'gaussian'). 
-         Defaults to 'tukey'.
-      alpha (float, optional): Shape parameter for Tukey window. Defaults to 0.5.
-         Only used if window_type='tukey'.
+      signal (np.ndarray):          Primary time series to analyze for first arrival.
+      signal2 (np.ndarray):         Secondary time series to window (same length as signal).
+      sampling_rate (float):        Sampling rate in samples per second (default 1.0).
+      threshold_ratio (float):      Fraction of peak envelope amplitude for first-arrival detection (default 0.2).
+      window_length (float):        Total length of the time window in seconds (default 0.01).
+      window_type ('tukey' or 'gaussian'):  Type of window to apply. (default 'tukey')
+      alpha (float, optional):      Shape parameter for Tukey window (default 0.5).
    
    Returns:
       tuple[np.ndarray, np.ndarray]: A tuple containing:
@@ -348,27 +353,27 @@ def plot_timelag(shot1: Shot, shot2: Shot, **kwargs):
    between baseline and monitor surveys.
    
    Args:
-      shot1 (Shot): First TD Shot (baseline).
-      shot2 (Shot): Second TD Shot (monitor/perturbed).
+      shot1 (Shot):     First TD Shot (baseline).
+      shot2 (Shot):     Second TD Shot (monitor/perturbed).
 
    Keyword Args:
-      A (float): Amplitude scaling for display.
-      units (str): Length units for labeling X axis (default "km").
-      cmap (str): Matplotlib colormap (default "grey").
-      figsize (tuple): Figure size (width, height).
-      fontsize (int): Font size for labels/ticks.
-      Tf (float): Cutoff time in seconds.
-      save (str): If provided, saves figure to this path.
-      max_lag (float): Maximum time lag to consider in seconds.
+      A (float):        Amplitude scaling for display (default 1.0).
+      units (str):      Length units for labeling X axis (default "km").
+      cmap (str):       Matplotlib colormap (default "grey").
+      figsize (tuple):  Figure size (width, height) in inches (default (8,8)).
+      fontsize (int):   Font size for labels/ticks (default 14).
+      Tf (float):       Cutoff time in seconds.
+      save (str):       If provided, saves figure to this path.
+      max_lag (float):  Maximum time lag to consider in seconds (default 1.0).
    
    Raises:
-      AssertionError: If shots are not time-domain or have different geometries.
-      ValueError: If shots have incompatible sampling.
+      AssertionError:   If shots are not time-domain or have different geometries.
+      ValueError:       If shots have incompatible sampling.
    """
    assert shot1.type == "TD" and shot2.type == "TD"
    assert shot1.nTime == shot2.nTime and shot1.T == shot2.T
 
-   A        = kwargs.get("A", 1)
+   A        = kwargs.get("A", 1.0)
    units    = kwargs.get("units","km")
    cmap     = kwargs.get("cmap","grey")
    figsize  = kwargs.get("figsize",(8,8))
@@ -438,18 +443,18 @@ def plot_xf(shot: Shot, **kwargs):
    Useful for analyzing frequency content at different receiver locations.
    
    Args:
-      shot (Shot): A Shot object of type='FD' containing frequency-domain data.
+      shot (Shot):      A Shot object of type='FD' containing frequency-domain data.
 
    Keyword Args:
-      A (float): Amplitude scaling for display (default 1).
-      units (str): Length units for labeling X axis (default "km").
-      cmap (str): Matplotlib colormap name (default "grey").
-      figsize (tuple): Figure size (width, height) (default (8,8)).
-      fontsize (int): Font size for labels/ticks (default 14).
-      save (str): If provided, saves the figure to this path.
+      A (float):        Amplitude scaling for display (default 1).
+      units (str):      Length units for labeling X axis (default "km").
+      cmap (str):       Matplotlib colormap name (default "RdYlBu_r").
+      figsize (tuple):  Figure size (width, height) in inches(default (8,8)).
+      fontsize (int):   Font size for labels/ticks (default 14).
+      save (str):       If provided, saves the figure to this path.
    
    Raises:
-      AssertionError: If shot is not a frequency-domain shot (type != "FD").
+      AssertionError:   If shot is not a frequency-domain shot (type != "FD").
    """
    assert shot.type == "FD"
 
@@ -501,23 +506,23 @@ def plot_cf(shot: Shot, **kwargs):
    to identify dominant wave speeds at each frequency.
    
    Args:
-      shot (Shot): A frequency-domain Shot object.
+      shot (Shot):      A frequency-domain Shot object.
 
    Keyword Args:
-      A (float): Amplitude scaling for color max (default 1).
-      units (str): Label for distance ("km" or "m").
-      cmap (str): Matplotlib colormap (default "RdYlBu_r").
-      figsize (tuple): Figure size (width, height) (default (8,8)).
-      fontsize (int): Font size for labels/ticks (default 14).
-      symm (bool): If True, uses symmetrical approach for half of the array.
-      c_min (float): Minimum wave speed for transform (default 0.5).
-      c_max (float): Maximum wave speed for transform (default 6.0).
-      n_c (int): Number of wave speed samples (default 500).
-      save (str): File path to save figure.
+      A (float):        Amplitude scaling for color max (default 1).
+      units (str):      Label for distance ("km" or "m").
+      cmap (str):       Matplotlib colormap (default "RdYlBu_r").
+      figsize (tuple):  Figure size (width, height) (default (8,8)).
+      fontsize (int):   Font size for labels/ticks (default 14).
+      symm (bool):      If True, uses symmetrical approach for half of the array.
+      c_min (float):    Minimum wave speed for transform (default 0.5).
+      c_max (float):    Maximum wave speed for transform (default 6.0).
+      n_c (int):        Number of wave speed samples (default 500).
+      save (str):       File path to save figure.
    
    Raises:
-      AssertionError: If shot is not a frequency-domain shot (type != "FD").
-      ValueError: If receiver geometry is incompatible with transform.
+      AssertionError:   If shot is not a frequency-domain shot (type != "FD").
+      ValueError:       If receiver geometry is incompatible with transform.
    """
    assert shot.type == "FD"
    from scipy.ndimage import gaussian_filter1d

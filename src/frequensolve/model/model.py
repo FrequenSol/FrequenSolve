@@ -12,8 +12,9 @@ class ModelSubdomain:
    """A subdomain within a model with associated properties.
    
    Attributes:
-      mesh_block_id (int): Unique identifier for the mesh block.
+      mesh_block_id (int):  Unique identifier for the mesh block.
       name (Optional[str]): Optional name for the mesh block.
+      frame (str):          Coordinate frame for mapping subdomain materials ('physical' or 'reference').
       properties (Dict[str, Union[float, str, xarray.DataArray]]): Dictionary of subdomain properties.
          Keys are property names, values can be numeric constants, file paths, or xarray DataArrays.
    """
@@ -65,12 +66,11 @@ class ModelBase:
    Provides common attributes and functionality shared by different model types.
    
    Attributes:
-      name (str): Name identifier for the model.
+      name (str):                Name identifier for the model.
       dimension (Literal[2, 3]): Model dimension (2D or 3D).
-      x_limits (List[float]): Model extent in x-direction [xmin, xmax].
-      y_limits (Optional[List[float]]): Model extent in y-direction [ymin, ymax].
-         Only used for 3D models.
-      z_limits (List[float]): Model extent in z-direction [zmin, zmax].
+      x_limits (List[float]):    Model extent in x-direction [xmin, xmax].
+      y_limits (List[float]):    Model extent in y-direction [ymin, ymax].
+      z_limits (List[float]):    Model extent in z-direction [zmin, zmax].
       properties (Dict[str, Union[float, str]]): Dictionary of model properties.
          Keys are property names, values can be numeric constants or file paths.
    """
@@ -79,14 +79,7 @@ class ModelBase:
    subdomains: List[ModelSubdomain] = field(default_factory=list)
 
    def to_dict(self) -> Dict:
-      """Converts the model to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the model data with keys:
-            - name: Model name
-            - dimension: Model dimension (2 or 3)
-            - subdomains: Dictionary of subdomain data
-      """
+      """Converts the model to a dictionary representation."""
       return {
          "name": self.name,
          "dimension": self.dimension,
@@ -98,17 +91,7 @@ class ModelBase:
 
    @classmethod
    def from_dict(cls, data: Dict) -> "ModelBase":
-      """Creates a ModelBase instance from a dictionary.
-      
-      Args:
-         data (Dict): Dictionary containing model data with keys:
-            - name: Model name
-            - dimension: Model dimension (2 or 3) 
-            - subdomains: Dictionary of subdomain data
-            
-      Returns:
-         ModelBase: A new ModelBase instance populated with the dictionary data.
-      """
+      """Creates a ModelBase instance from a dictionary."""
       return cls(
          name=data["name"],
          dimension=data["dimension"],
@@ -122,7 +105,7 @@ class ModelBase:
       """Adds a subdomain to the model.
 
       Args:
-         id int: Unique mesh block identifier
+         id (int): Unique mesh block identifier
          **kwargs: Additional subdomain parameters.
       """
       self.subdomains[id] = ModelSubdomain(**kwargs)
