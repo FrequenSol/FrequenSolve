@@ -14,6 +14,7 @@ from typing import List, Optional
 
 from .executor_base import ExecutorBase, ExecutionStatus
 
+__all__ = ['LocalExecutor']
 
 class LocalExecutor(ExecutorBase):
    """Local executor that runs commands on the same machine.

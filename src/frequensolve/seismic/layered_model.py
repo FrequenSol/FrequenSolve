@@ -29,9 +29,13 @@ class Surface(ABC):
    z_ref:        Optional[float] = None
    interface:    bool = True
 
-   @abstractmethod
    def to_dict(self):
-      raise NotImplementedError("This class must be overwritten by subclasses.")
+      base_dict = { "name": self.name }
+      if self.z_ref is not None:
+         base_dict["z_ref"] = self.z_ref
+      if not self.interface:
+         base_dict["interface"] = False
+      return base_dict
    
    @abstractmethod
    def from_dict(self):
@@ -96,15 +100,10 @@ class ConstantSurface(Surface):
    
 
    def to_dict(self):
-      base_dict = {
-         "name": self.name,
-         "type": "constant",
+      base_dict = super().to_dict()
+      base_dict.update({
          "z_phys": self.z_phys
-      }
-      if self.z_ref is not None:
-         base_dict["z_ref"] = self.z_ref
-      if not self.interface:
-         base_dict["interface"] = False
+      })
       return base_dict
    
 
@@ -249,9 +248,8 @@ class GridLayer(ModelSubdomain):
       file_format (str):    The format of the file containing the grid data.
    """
    grid:          CartesianGrid
-   file_format:   Literal["binary", "HDF5"]
+   file_format:   Literal["binary", "HDF5"] = "binary"
    data:          Optional[Dict[str, np.ndarray]] = None
-
 
    def read_data(self):
       """Read the data from file."""
@@ -401,7 +399,6 @@ class LayeredModel(ModelBase):
    _last_added:      str = "none"
 
    def add_layer(self,
-                 type:              str = "constant",
                  name:              Optional[str] = None,
                  mesh_block_id:     int = -1,
                  frame:             str = "physical",
@@ -410,7 +407,6 @@ class LayeredModel(ModelBase):
       """Add a layer to the model.
 
       Args:
-         type (str):           Type of the layer.
          name (str):           Name of the layer.
          mesh_block_id (int):  Mesh block id of the layer.
          frame (str):          Frame of the layer.
@@ -428,20 +424,23 @@ class LayeredModel(ModelBase):
       if self._last_added == "layer":
          raise ValueError("Must add a surface between consecutive layers")
 
-      if type == "constant":
+      if grid is None:
+         for prop, val in properties.items():
+            if isinstance(val, str) or isinstance(val, Path):
+               raise ValueError("Must provide grid for grid layers")
          layer = ConstantLayer(
-                     name       = name,
+                     name          = name,
                      mesh_block_id = mesh_block_id,
-                     frame       = frame,
-                     properties = properties
+                     frame         = frame,
+                     properties    = properties
                   )
-      elif type == "grid":
+      elif isinstance(grid, CartesianGrid):
          layer = GridLayer(
-                     name   = name,
+                     name          = name,
                      mesh_block_id = mesh_block_id,
-                     frame  = frame,
-                     grid   = grid,
-                     properties = properties
+                     frame         = frame,
+                     grid          = grid,
+                     properties    = properties
                   )
       else:
          raise ValueError(f"Layer 'type' should be 'constant' or 'grid', provided: {type} ")
@@ -462,7 +461,6 @@ class LayeredModel(ModelBase):
 
 
    def add_surface(self,
-                   type:       str = "constant",
                    name:       str = "surface",
                    z:          Optional[float] = None,
                    z_ref:      Optional[float] = None,
@@ -471,7 +469,6 @@ class LayeredModel(ModelBase):
       """Add a surface to the model.
       
       Args:
-         type (str):           Type of the surface.
          name (str):           Name of the surface.
          z (float):            Physical z-coordinate of the surface.
          z_ref (float):        Reference z-coordinate of the surface.
@@ -481,21 +478,25 @@ class LayeredModel(ModelBase):
 
       # TODO: check that surfaces are added in monotone order
 
-      if type == "constant":
+      if grid is None:
+         if z is None:
+            raise ValueError("Must provide z for 'constant' surfaces")
          if z_ref is None:
             z_ref = z
          surface = ConstantSurface(
                         name       = name,
                         interface  = self.interface_flag,
+                        z_ref      = z_ref,
                         z_phys     = z,
-                        z_ref      = z_ref
                      )
-      elif type == "grid":
+      elif isinstance(grid, CartesianGrid):
+         if file is None:
+            raise ValueError("Must provide file for 'gridded' surfaces")
          surface = GridSurface(
                         name       = name,
                         interface  = self.interface_flag,
-                        grid       = grid,
                         z_ref      = z_ref,
+                        grid       = grid,
                         file       = file
                      )
       self.surfaces.append(surface)

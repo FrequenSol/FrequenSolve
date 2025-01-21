@@ -31,17 +31,17 @@ class Version:
       return False
 
 
-def __init__(self, major: int = 0, minor: int = 0, patch: int = 0):
+def __init__(self, major: int | None = None, minor: int | None = None, patch: int | None = None):
    """Initialize Version object.
    
    Args:
-      major (int): Major version number
-      minor (int): Minor version number 
-      patch (int): Patch version number
+      major (int, optional): Major version number. Defaults to 0.
+      minor (int, optional): Minor version number. Defaults to 0.
+      patch (int, optional): Patch version number. Defaults to 0.
    """
-   self.major = major
-   self.minor = minor 
-   self.patch = patch
+   self.major = major if major is not None else 0
+   self.minor = minor if minor is not None else 0
+   self.patch = patch if patch is not None else 0
 
 
 @classmethod

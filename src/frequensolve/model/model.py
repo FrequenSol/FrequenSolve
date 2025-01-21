@@ -18,7 +18,7 @@ class ModelSubdomain:
       properties (Dict[str, Union[float, str, xarray.DataArray]]): Dictionary of subdomain properties.
          Keys are property names, values can be numeric constants, file paths, or xarray DataArrays.
    """
-   mesh_block_id: int
+   mesh_block_id: int = -1
    name:          Optional[str] = None
    frame:         str = "physical"
    properties:    Dict[str, Union[float, str, "xarray.DataArray"]] = field(default_factory=dict)
@@ -80,13 +80,23 @@ class ModelBase:
 
    def to_dict(self) -> Dict:
       """Converts the model to a dictionary representation."""
+
+      # Label any unlabeled subdomains
+      labels = {}
+      for i,subdomain in enumerate(self.subdomains):
+         labels[subdomain.mesh_block_id] = i
+
+      j = 0
+      for i, subdomain in enumerate(self.subdomains):
+         if subdomain.mesh_block_id == -1:
+            while j in labels:
+               j += 1
+            subdomain.mesh_block_id = j
+
       return {
          "name": self.name,
          "dimension": self.dimension,
-         "subdomains": {
-            subdomain.to_dict() 
-            for subdomain in self.subdomains
-         }
+         "subdomains": [ subdomain.to_dict() for subdomain in self.subdomains]
       }
 
    @classmethod
@@ -101,11 +111,11 @@ class ModelBase:
          }
       )
    
-   def add_subdomain(self, id: int, **kwargs) -> None:
+   def add_subdomain(self, subdomain: ModelSubdomain) -> None:
       """Adds a subdomain to the model.
 
       Args:
          id (int): Unique mesh block identifier
          **kwargs: Additional subdomain parameters.
       """
-      self.subdomains[id] = ModelSubdomain(**kwargs)
+      self.subdomains.append(subdomain)

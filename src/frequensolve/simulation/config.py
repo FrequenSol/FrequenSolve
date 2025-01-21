@@ -4,6 +4,8 @@ from pathlib     import Path
 
 from .sampling   import Sampling
 
+__all__ = ['SimulationConfig']
+
 @dataclass(kw_only=True)
 class SimulationConfig:
    """Container for simulation configuration.
@@ -26,56 +28,29 @@ class SimulationConfig:
    physics:   Literal["acoustic", "elastic", "plasma"]
    dimension: Literal[2, 3]
    directory: Union[str, Path]
-   order:     int = 2
    mode:      Literal["forward", "adjoint", "combined", "gradient"]
    tf_domain: Literal["time","frequency"]
    sampling:  Sampling = field(default_factory=Sampling)
    
    def to_dict(self) -> Dict:
-      """Converts the simulation configuration to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the simulation configuration with keys:
-            - name: Simulation name
-            - physics: Physics type 
-            - dimension: Problem dimension
-            - directory: Output directory
-            - workflow: Workflow type
-            - tf_domain: Frequency- or time-domain simulation
-            - sampling: Sampling configuration
-      """
       return {
          "name": self.name,
          "physics": self.physics,
          "dimension": self.dimension,
          "directory": self.directory,
-         "workflow": self.workflow,
+         "mode": self.mode,
          "tf_domain": self.tf_domain,
          "sampling": self.sampling.to_dict()
       }
 
    @classmethod
    def from_dict(cls, data: Dict) -> 'SimulationConfig':
-      """Creates a Simulation instance from a dictionary.
-      
-      Args:
-         data: Dictionary containing simulation configuration with keys:
-            - name:        Simulation name
-            - physics:     Physics type
-            - dimension:   Problem dimension
-            - directory:   Output directory
-            - workflow:    Workflow type
-            
-      Returns:
-         Simulation: New simulation instance configured from dictionary
-      """
       return cls(
          name=data["name"],
          physics=data["physics"],
          dimension=data["dimension"],
          directory=data["directory"],
-         workflow=data["workflow"],
-         order=data.get("order", 2),
+         mode=data["mode"],
          tf_domain=data.get("tf_domain", "frequency"),
          sampling=Sampling.from_dict(data["sampling"])
       )
@@ -83,10 +58,10 @@ class SimulationConfig:
    def __str__(self) -> str:
       return(
          f"[Simulation]\n"
-         f"   physics: {self.physics}\n"
+         f"   physics:   {self.physics}\n"
          f"   dimension: {self.dimension}D\n" 
          f"   directory: {self.directory}\n"
-         f"   workflow: {self.workflow}\n"
+         f"   mode:      {self.mode}\n"
          f"   tf_domain: {self.tf_domain}\n"
          f"   {str(self.sampling)}\n"
          f"[]\n\n"

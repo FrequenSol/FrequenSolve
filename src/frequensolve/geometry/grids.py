@@ -1,16 +1,50 @@
 import numpy as np
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Dict, Generator
 
-__all__ = ['CartesianGrid']
+__all__ = ['Grid','CartesianGrid']
+
+
+@dataclass
+class Grid(ABC):
+   """Base class for all grid types."""
+
+   @abstractmethod
+   def get_coords(self, slices: Optional[List[slice]] = None) -> np.ndarray:
+      """Gets coordinates for all grid points or a subset defined by slices."""
+      pass
+
+   @abstractmethod
+   def generate_coords(self, slices: Optional[List[slice]] = None) -> Generator[np.ndarray, None, None]:
+      """Generates coordinates for all grid points or a subset defined by slices.
+      
+      Args:
+         slices: Optional list of slice objects defining index ranges for each dimension.
+            If None, generates coordinates for all points. Length must match grid dimensions.
+            
+      Yields:
+         np.ndarray: Coordinates for each grid point.
+      """
+      pass
+   @abstractmethod
+   def to_dict(self) -> Dict:
+      """Converts the grid to a dictionary representation."""
+      pass
+
+   @classmethod
+   @abstractmethod
+   def from_dict(cls, data: Dict) -> "Grid":
+      """Creates a Grid instance from a dictionary."""
+      pass
 
 
 # ----------------------------------------------------------------------
 # Cartesian Grid
 # ----------------------------------------------------------------------
 @dataclass
-class CartesianGrid:
+class CartesianGrid(Grid):
    """A uniform Cartesian grid for defining receiver locations.
    
    This class represents a uniform grid in 2D or 3D space, defined by the number of points,
@@ -23,18 +57,18 @@ class CartesianGrid:
       x1 (List[float]): Ending coordinates in each dimension.
       dx (List[float]): Grid spacing in each dimension.
    """
-   n:  Optional[List[int]]   = field(default_factory=list)
-   x0: List[float]           = field(default_factory=list)
-   x1: Optional[List[float]] = field(default_factory=list)
-   dx: Optional[List[float]] = field(default_factory=list)
+   n:  List[int]   = field(default_factory=list)
+   x0: List[float] = field(default_factory=list)
+   x1: List[float] = field(default_factory=list)
+   dx: List[float] = field(default_factory=list)
 
 
    def __post_init__(self):
-      if self.x1 is None:
+      if len(self.x1) == 0:
          self.x1 = [x0 + (n - 1) * dx for x0, n, dx in zip(self.x0, self.n, self.dx)]
-      elif self.dx is None:
+      elif len(self.dx) == 0:
          self.dx = [(x1 - x0) / (n - 1) for x0, x1, n in zip(self.x0, self.x1, self.n)]
-      elif self.n is None:
+      elif len(self.n) == 0:
          self.n = [int((x1 - x0) / dx + 1) for x0, x1, dx in zip(self.x0, self.x1, self.dx)]
 
 
@@ -86,7 +120,7 @@ class CartesianGrid:
             If None, yields coordinates for all points. Length must match grid dimensions.
       
       Yields:
-         List[float]: Coordinate point [x,y] or [x,y,z] for each grid point.
+         Generator[float]: Coordinate point for each grid point.
       """
       if len(self.n) == 1:
          x = np.linspace(self.x0[0], self.x1[0], self.n[0])
@@ -120,7 +154,36 @@ class CartesianGrid:
       else:
          raise ValueError("Grid must have 1, 2, or 3 dimensions")
       
-      
+   def to_dict(self) -> Dict:
+      """Converts the grid to a dictionary representation.
+
+      Returns:
+         Dict: Dictionary containing the grid parameters.
+      """
+      return {
+         "n": self.n,
+         "x0": self.x0,
+         "x1": self.x1,
+         "dx": self.dx
+      }
+
+   @classmethod 
+   def from_dict(cls, data: Dict) -> "CartesianGrid":
+      """Creates a CartesianGrid instance from a dictionary.
+
+      Args:
+         data (Dict): Dictionary containing the grid parameters.
+
+      Returns:
+         CartesianGrid: A new CartesianGrid instance.
+      """
+      return cls(
+         n  = data["n"],
+         x0 = data["x0"],
+         x1 = data["x1"],
+         dx = data["dx"]
+      )
+
    def __str__(self) -> str:
       n  = " ".join(map(str, self.n ))
       x0 = " ".join(map(str, self.x0))

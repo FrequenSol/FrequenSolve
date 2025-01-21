@@ -11,6 +11,7 @@ from pathlib import Path
 from .executor_base import ExecutorBase, ExecutionStatus
 from .resource_config import ResourceConfig
 
+__all__ = ['SlurmExecutor']
 
 class SlurmExecutor(ExecutorBase):
    """SLURM-based executor for HPC job submission and management.

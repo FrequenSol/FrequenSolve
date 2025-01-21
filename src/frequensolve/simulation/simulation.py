@@ -1,17 +1,34 @@
+import json
 import numpy as np
+from json import JSONEncoder
 
+from pathlib     import Path
 from dataclasses import dataclass
-from typing import Optional, Literal, Union
+from typing      import Optional, Union, Dict
 
 from .config                     import *  # noqa
 from .output_manager             import *  # noqa
 from .numerics_manager           import *  # noqa
 from ..model.model               import *  # noqa
 from ..mesh.mesh_manager         import *  # noqa
-from ..seismic.acquisition       import Acquisition  # noqa
+from ..seismic.acquisition       import *  # noqa
 from ..mesh.boundary_conditions  import *  # noqa
 
-__all__ = ['Simulation']
+__all__ = ['Simulation', 'CustomJSONEncoder']
+
+class CustomJSONEncoder(JSONEncoder):
+   """Custom JSON encoder for Simulation objects."""
+   def default(self, obj):
+      if isinstance(obj, np.integer):
+         return int(obj)
+      if isinstance(obj, np.floating):
+         return float(obj)
+      if isinstance(obj, np.ndarray):
+         return obj.tolist()
+      if isinstance(obj, (np.bool_)):
+         return bool(obj)
+      return super().default(obj)
+   
 
 @dataclass(kw_only=True)
 class Simulation(SimulationConfig):
@@ -20,92 +37,50 @@ class Simulation(SimulationConfig):
    Attributes:
       model (ModelBase):               Model configuration.
       mesh (MeshManager):              Mesh configuration.
-      bcs (BoundaryConditionManager):  Boundary condition configuration.
+      BCs (BoundaryConditionManager):  Boundary condition configuration.
       output (OutputManager):          Output configuration.
       acquisition (Acquisition):       Acquisition configuration.
       numerics (NumericsManager):      Numerics configuration.
       tf_domain (str):                 Frequency- or time-domain simulation.
    """
-   model: ModelBase              = field(default_factory=ModelBase)
-   mesh: MeshManager             = field(default_factory=MeshManager)
-   bcs: BoundaryConditionManager = field(default_factory=BoundaryConditionManager)
-   output: OutputManager         = field(default_factory=OutputManager)
-   acquisition: Acquisition      = field(default_factory=Acquisition)
-   numerics: NumericsManager     = field(default_factory=NumericsManager)
+   model:       Optional[ModelBase]                = None
+   mesh:        Optional[MeshManager]              = None
+   BCs:         Optional[BoundaryConditionManager] = None
+   output:      Optional[OutputManager]            = None
+   acquisition: Optional[Acquisition]              = None
+   numerics:    Optional[NumericsManager]          = None
 
    def to_dict(self) -> Dict:
-      """Converts the simulation to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the simulation configuration with keys:
-            - name: Simulation name
-            - physics: Physics type
-            - dimension: Problem dimension
-            - directory: Output directory
-            - workflow: Workflow type
-            - order: Initial mesh order
-            - tf_domain: Frequency- or time-domain simulation
-            - model: Model configuration
-            - mesh: Mesh configuration
-            - bcs: Boundary condition configuration
-            - output: Output configuration
-            - acquisition: Acquisition configuration
-            - numerics: Numerics configuration
-      """
       return {
-         "name":        self.name,
-         "physics":     self.physics,
-         "dimension":   self.dimension,
-         "directory":   self.directory,
-         "workflow":    self.workflow,
-         "order":       self.order,
-         "tf_domain":   self.tf_domain,
-         "Model":       self.model.to_dict(),
-         "Mesh":        self.mesh.to_dict(),
-         "BCs":         self.bcs.to_dict(),
-         "Output":      self.output.to_dict(),
-         "Acquisition": self.acquisition.to_dict(),
-         "Numerics":    self.numerics.to_dict()
+         **super().to_dict(),
+         **({"Model":       self.model.to_dict()}        if self.model else {}),
+         **({"Mesh":        self.mesh.to_dict()}         if self.mesh else {}),
+         **({"BCs":         self.BCs.to_dict()}          if self.BCs else {}),
+         **({"Output":      self.output.to_dict()}       if self.output else {}),
+         **({"Acquisition": self.acquisition.to_dict()}  if self.acquisition else {}),
+         **({"Numerics":    self.numerics.to_dict()}     if self.numerics else {})
       }
+
+
+   def to_json(self, **kwargs) -> str:
+      return json.dumps(self.to_dict(), cls=CustomJSONEncoder, **kwargs)
+   
+
+   def save(self, path: Union[str, Path], **kwargs) -> str:
+      """Save project to JSON file."""
+      file = Path(path) / f"{self.name}.json"
+      with open(file, "w") as f:
+         json.dump(self.to_dict(), f, cls=CustomJSONEncoder, **kwargs)
 
 
    @classmethod
    def from_dict(cls, data: Dict) -> 'Simulation':
-      """Creates a Simulation instance from a dictionary.
-      
-      Args:
-         data: Dictionary containing simulation configuration with keys:
-            - name:        Simulation name
-            - physics:     Physics type
-            - dimension:   Problem dimension
-            - directory:   Output directory
-            - workflow:    Workflow type
-            - order:       Initial mesh order (optional)
-            - tf_domain:   Frequency- or time-domain simulation
-            - model:       Model configuration
-            - mesh:        Mesh configuration
-            - bcs:         Boundary condition configuration
-            - output:      Output configuration
-            - acquisition: Acquisition configuration
-            - numerics:    Numerics configuration
-            
-      Returns:
-         Simulation: New simulation instance configured from dictionary
-      """
       config = super().from_dict(data)
-      sim = cls(
-         name=config.name,
-         physics=config.physics,
-         dimension=config.dimension,
-         directory=config.directory,
-         workflow=config.workflow,
-         order=config.order,
-         tf_domain=config.tf_domain
-      )
+      sim = cls(**config)
 
       sim.model = ModelBase.from_dict(data["Model"])
       sim.mesh = MeshManager.from_dict(sim, data["Mesh"])
-      sim.bcs = BoundaryConditionManager.from_dict(data["BCs"])
+      sim.BCs = BoundaryConditionManager.from_dict(data["BCs"])
       sim.output = OutputManager.from_dict(data["Output"])
       sim.acquisition = Acquisition.from_dict(data["Acquisition"])
       sim.numerics = NumericsManager.from_dict(data["Numerics"])
@@ -114,16 +89,11 @@ class Simulation(SimulationConfig):
    
 
    def __str__(self) -> str:
-      """Returns a string representation of the simulation.
-      
-      Returns:
-         str: String describing the simulation configuration
-      """
       return (
          f"{super().__str__()}\n"
          f"{str(self.model)}\n"
          f"{str(self.mesh)}\n"
-         f"{str(self.bcs)}\n"
+         f"{str(self.BCs)}\n"
          f"{str(self.numerics)}\n"
          f"{str(self.acquisition)}\n"
          f"{str(self.output)}"

@@ -1,9 +1,12 @@
-"""Mesh class for managing computational meshes."""
+"""Class for managing finite element meshes."""
 
+import numpy as np
+
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set, Union
-import numpy as np
-from pathlib import Path
+
+__all__ = ['Mesh']
 
 try:
    import _mesh         # Optional C++ bindings

@@ -30,10 +30,9 @@ class Acquisition:
       source_group (SourceGroup): A group of source objects describing all shot points.
       receiver_groups (List[ReceiverGroup]): A list of ReceiverGroup objects (stations, geophones, or fibers).
    """
-   
    samples:          Sampling
-   source_group:     SourceGroup
-   receiver_groups:  List[ReceiverGroup] = field(default_factory=list)
+   source_group:     SourceGroup           = field(default_factory=SourceGroup)
+   receiver_groups:  List[ReceiverGroup]   = field(default_factory=list)
 
 
    def to_dict(self) -> Dict:
@@ -108,10 +107,10 @@ class Acquisition:
       
 
    def add_source_group(self,
-                        kind:      str,
-                        coords:    np.ndarray,
-                        direction: np.ndarray,
-                        frame:     str = "phyiscal"):
+                        kind:        str,
+                        coordinates: np.ndarray,
+                        direction:   np.ndarray,
+                        frame:       str = "phyiscal"):
       """Add a group of recievers with common kind, frame, and direction.
       
       Args:
@@ -121,7 +120,7 @@ class Acquisition:
          frame (str): Frame of the receiver group (e.g., "physical", "global").
       """
                         
-      for row in coords:
+      for row in coordinates:
          isrc = len(self.source_group.sources)
          self.source_group.sources.append(
             Source(
@@ -134,7 +133,7 @@ class Acquisition:
          )
          
 
-   def add_reciever_group(self,
+   def add_receiver_group(self,
                           name:        str,
                           device:      ReceiverDevice,
                           coordinates: np.ndarray,
@@ -148,7 +147,7 @@ class Acquisition:
          frame (str): Frame of the receiver group (e.g., "physical", "global").
       """
                         
-      self.reciever_groups.append(
+      self.receiver_groups.append(
          ReceiverGroup(
             name        = name,
             device      = device,

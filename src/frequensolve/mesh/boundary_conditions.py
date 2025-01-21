@@ -6,6 +6,8 @@ from typing      import Optional, List, Literal, Dict
 
 from .mesh import Mesh
 
+__all__ = ['BoundaryCondition', 'BoundaryConditionManager']
+
 @dataclass
 class BoundaryCondition:
    """Defines a single boundary condition type (can be applied to multiple boundaries)
@@ -63,7 +65,7 @@ class BoundaryConditionManager:
             labeled:   Boundaries specified in mesh
       boundary_conditions (List[BoundaryCondition]): List of boundary conditions
    """
-   label_type:            Literal["geometric", "labeled"]
+   label_type:            Literal["geometric", "labeled"] = "geometric"
    boundary_conditions:   List[BoundaryCondition] = field(default_factory=list)
 
    def add_BC(self, bc: BoundaryCondition) -> None:

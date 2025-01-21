@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .executor_base import ExecutorBase, ExecutionStatus
 
+__all__ = ['SSHExecutor']
 
 class SSHExecutor(ExecutorBase):
    """SSH-based executor for remote command execution and file operations.

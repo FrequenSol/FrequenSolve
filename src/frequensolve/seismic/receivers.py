@@ -9,7 +9,7 @@ import xarray as xr
 
 from pathlib      import Path
 from dataclasses  import dataclass, field
-from typing       import Optional, List, Literal, Union, Tuple, Dict
+from typing       import Optional, List, Literal, Union, Tuple, Dict, Any
 from abc          import ABC, abstractmethod
 
 from ..geometry.grids    import *  # noqa
@@ -29,24 +29,26 @@ class ReceiverComponent:
    
    Attributes:
       name (str): String identifier for this receiver component.
-      field (str): Physical field being measured (e.g., "pressure", "velocity").
+      field (str): Physical field being measured
       direction (Optional[List[float]]): Measurement direction for vector fields.
    """
    
    name:      str
-   field:     str = "pressure"
+   field:     Literal["pressure", "velocity", "displacement", "stress", "strain"]
    direction: Optional[List[float]] = None
 
    def to_dict(self) -> dict:
       return {
          "name": self.name,
          "field": self.field,
-         "direction": self.direction
+         **({"direction": self.direction} if self.direction else {})
       }
    
    @classmethod
    def from_dict(cls, data: dict) -> 'ReceiverComponent':
-      return cls(name=data["name"], field=data["field"], direction=data["direction"])
+      return cls(name      = data["name"], 
+                 field     = data["field"], 
+                 direction = data.get("direction"))
    
    def __str__(self) -> str:
       out = f"      [{self.name}]\n" 
@@ -69,13 +71,17 @@ class ReceiverDevice:
    
    Attributes:
       name (str): String identifier for this receiver.
-      kind (str): Type of receiver arrangement ("node", "fiber", or "grid").
-      frame (str): Coordinate frame for measurements ("physical" or "reference").
       components (List[ReceiverComponent]): List of components defining measurements.
+      response (Optional[Wavelet]): Wavelet response of the receiver.
    """
-   name: str
+   name:       str
    components: List[ReceiverComponent] = field(default_factory=list)
    response:   Optional[Wavelet] = None
+
+   def add_component(self, name: str, field: str, direction: Optional[List[float]] = None) -> 'ReceiverComponent':
+      component = ReceiverComponent(name=name, field=field, direction=direction)
+      self.components.append(component)
+      return component
 
    def to_dict(self) -> dict:
       """Convert ReceiverDevice to dictionary representation.
@@ -86,7 +92,7 @@ class ReceiverDevice:
       return {
          "name": self.name,
          "components": [c.to_dict() for c in self.components],
-         "response": self.response
+         **({"response": self.response.to_dict()} if self.response else {})
       }
 
    @classmethod
@@ -289,7 +295,6 @@ class ReceiverCoordinates(ABC):
    Attributes:
       name (str): Identifier for this set of coordinates.
    """
-   name: str
 
    @abstractmethod
    def size(self) -> int:
@@ -339,11 +344,10 @@ class FileCoordinates(ReceiverCoordinates):
    
    Attributes:
       path (Union[str, Path]):   Path to coordinate file.
-      format (str):              File format ('hdf5', 'asdf', or 'segy').
+      format (str):              File format ('HDF5', 'asdf', or 'SEGY').
    """
-   path: Union[str, Path]
-   format: Literal["hdf5", "asdf", "segy"]
-
+   path:   Union[str, Path]
+   format: Literal["HDF5", "asdf", "SEGY"]
 
    def size(self) -> int:
       """Get the total number of receivers.
@@ -351,10 +355,10 @@ class FileCoordinates(ReceiverCoordinates):
       Returns:
          int: Number of receivers.
       """
-      if self.format == "hdf5":
+      if self.format == "HDF5":
          with h5py.File(self.path, 'r') as f:
             return f['coordinates'].shape[0]
-      elif self.format == "segy":
+      elif self.format == "SEGY":
          import segyio
          with segyio.open(self.path, 'r', strict=False) as f:
             return len(f.trace)
@@ -372,11 +376,11 @@ class FileCoordinates(ReceiverCoordinates):
       Returns:
          Tuple[np.ndarray, np.ndarray]: Min and max coordinates.
       """
-      if self.format == "hdf5":
+      if self.format == "HDF5":
          with h5py.File(self.path, 'r') as f:
             coords = f['coordinates']
             return np.min(coords, axis=0), np.max(coords, axis=0)
-      elif self.format == "segy":
+      elif self.format == "SEGY":
          import segyio
          with segyio.open(self.path, 'r', strict=False) as f:
             return np.min(f.trace.x, axis=0), np.max(f.trace.x, axis=0)
@@ -397,10 +401,10 @@ class FileCoordinates(ReceiverCoordinates):
       Returns:
          np.ndarray: Coordinate array for requested receivers.
       """
-      if self.format == "hdf5":
+      if self.format == "HDF5":
          with h5py.File(self.path, 'r') as f:
             return f['coordinates'][indices]
-      elif self.format == "segy":
+      elif self.format == "SEGY":
          import segyio
          with segyio.open(self.path, 'r', strict=False) as f:
             # Get coordinates from trace headers
@@ -431,7 +435,6 @@ class FileCoordinates(ReceiverCoordinates):
    def to_dict(self) -> Dict:
       return {
          "kind": "file",
-         "name": self.name,
          "path": str(self.path),
          "format": self.format
       }
@@ -439,7 +442,6 @@ class FileCoordinates(ReceiverCoordinates):
    @classmethod
    def from_dict(cls, data: Dict) -> 'FileCoordinates':
       return cls(
-         name=data["name"],
          path=data["path"],
          format=data["format"]
       )
@@ -514,14 +516,12 @@ class GridCoordinates(ReceiverCoordinates):
    def to_dict(self) -> Dict:
       return {
          "kind": "grid", 
-         "name": self.name,
          "grid": self.grid.to_dict()
       }
    
    @classmethod
    def from_dict(cls, data: Dict) -> 'GridCoordinates':
       return cls(
-         name=data["name"],
          grid=CartesianGrid.from_dict(data["grid"])
       )
 
@@ -534,50 +534,73 @@ class ArrayCoordinates(ReceiverCoordinates):
       coords (Union[xr.DataArray, np.ndarray]): Coordinate array.
       output_path (Optional[Union[str, Path]]): Path to save coordinates.
    """
-   coords: Union[xr.DataArray, np.ndarray]
-   output_path: Optional[Union[str, Path]] = None
+   coordinates: Union[xr.DataArray, np.ndarray]
 
    def __post_init__(self):
-      if isinstance(self.coords, np.ndarray):
-         self.coords = xr.DataArray(self.coords, 
-                                  dims=['receiver', 'coordinate'],
-                                  coords={'coordinate': ['x', 'y', 'z']})
+      if isinstance(self.coordinates, np.ndarray):
+         if self.coordinates.ndim != 2:
+            raise ValueError("Coordinates array must be 2D with shape (n_receivers, n_coordinates)")
+         if self.coordinates.shape[1] == 2:
+            self.coordinates = xr.DataArray(self.coordinates, 
+                                    dims=['receiver', 'coordinate'],
+                                    coords={'coordinate': ['x', 'z']})
+         elif self.coordinates.shape[1] == 3:
+            self.coordinates = xr.DataArray(self.coordinates, 
+                                    dims=['receiver', 'coordinate'],
+                                    coords={'coordinate': ['x', 'y', 'z']})
+         else:
+            raise ValueError("Coordinates array must have 2 or 3 columns")
 
    def size(self) -> int:
-      return len(self.coords)
+      return len(self.coordinates)
+
 
    def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
-      return (self.coords.min(dim='receiver').values,
-              self.coords.max(dim='receiver').values)
+      return (self.coordinates.min(dim='receiver').values,
+              self.coordinates.max(dim='receiver').values)
+
 
    def slice(self, indices) -> np.ndarray:
-      return self.coords[indices].values
+      return self.coordinates[indices].values
 
-   def to_file(self) -> Dict:
-      """Write coordinates to HDF5 file and return FileCoordinates dict.
+
+   def get(self, indices: int) -> np.ndarray:
+      return self.coordinates[indices].values
+
+
+   def to_file(self, 
+               path: Union[str, Path], 
+               format: Optional[Literal["HDF5", "asdf", "SEGY"]] = None) -> FileCoordinates:
+      """Write coordinates to file and return FileCoordinates object.
       
       Returns:
-         Dict: Dictionary compatible with FileCoordinates.
+         FileCoordinates: FileCoordinates object.
       """
-      if self.output_path is None:
-         raise ValueError("output_path must be set to write coordinates")
+      if format is None:
+         if path.endswith(".h5") or path.endswith(".hdf5"):
+            format = "HDF5"
+         elif path.endswith(".segy"):
+            format = "SEGY"
+         elif path.endswith(".asdf"):
+            format = "asdf"
+         else:
+            raise ValueError(f"Unknown coordinates file extension: {path}")
+
+      if format == "HDF5":
+         with h5py.File(path, 'w') as f:
+            f.create_dataset('coordinates', data=self.coordinates.values)
+      elif format == "SEGY":
+         raise NotImplementedError("SEGY format not implemented")
+      elif format == "asdf":
+         raise NotImplementedError("asdf format not implemented")
          
-      with h5py.File(self.output_path, 'w') as f:
-         f.create_dataset('coordinates', data=self.coords.values)
-         
-      return {
-         "name": self.name,
-         "path": self.output_path,
-         "format": "hdf5"
-      }
+      return FileCoordinates(path=path, format=format)
+
 
    def to_dict(self) -> Dict:
-      if self.output_path:
-         return self.to_file()
       return {
          "kind": "array",
-         "name": self.name, 
-         "coords": self.coords.values.tolist()
+         "coords": self.coordinates.values.tolist()
       }
    
    @classmethod
@@ -609,11 +632,11 @@ class ReceiverGroup:
       coordinates (ReceiverCoordinates):      Coordinates defining receiver locations.
       signals (Optional[SignalFromFile]): Optional signals for adjoint calculations.
    """
-   name:             str = field(default="")
-   device:           ReceiverDevice = field(default_factory=ReceiverDevice)
-   frame:            Literal["physical", "reference"] = "physical"
-   coordinates:      ReceiverCoordinates = field(default_factory=GridCoordinates)
-   signals:          Optional[SignalFromFile] = None
+   name:         str = field(default="")
+   device:       ReceiverDevice = field(default_factory=ReceiverDevice)
+   frame:        Literal["physical", "reference"] = "physical"
+   coordinates:  ReceiverCoordinates = field(default_factory=ReceiverCoordinates)
+   signals:      Optional[SignalFromFile] = None
    
 
    def signal(self, irecv: int) -> Wavelet:
@@ -639,8 +662,40 @@ class ReceiverGroup:
    # TODO: method to define receviers
    # TODO: method to attach signals
 
+   def __init__(self, 
+                name: str, 
+                device: ReceiverDevice, 
+                coordinates: Union[np.ndarray, xr.DataArray, str, Grid], 
+                frame: str = "physical") -> None:
+      self.name = name
+      self.device = device
+      if isinstance(coordinates, list):
+         coordinates = np.array(coordinates)
+      if isinstance(coordinates, np.ndarray) or \
+         isinstance(coordinates, xr.DataArray):
+         self.coordinates = ArrayCoordinates(coordinates=coordinates)
+      elif isinstance(coordinates, str):
+         if coordinates.endswith(".h5") or coordinates.endswith(".hdf5"):
+            self.coordinates = FileCoordinates(path=coordinates, format="HDF5")
+         elif coordinates.endswith(".segy"):
+            self.coordinates = FileCoordinates(path=coordinates, format="SEGY")
+         elif coordinates.endswith(".asdf"):
+            self.coordinates = FileCoordinates(path=coordinates, format="asdf")
+         else:
+            raise ValueError(f"Unknown coordinates file extension: {coordinates}")
+      elif isinstance(coordinates, Grid):
+         self.coordinates = GridCoordinates(grid=coordinates)
+      else:
+         raise ValueError(f"Unknown coordinates type: {type(coordinates)}")
+      self.frame = frame
+
 
    def to_dict(self) -> Dict:
+
+      if isinstance(self.coordinates, ArrayCoordinates):
+         if self.coordinates.size() > 10:
+            self.coordinates = self.coordinates.to_file("./coordinates.h5", "HDF5")
+
       return {
          "name": self.name,
          "device": self.device.to_dict(),
