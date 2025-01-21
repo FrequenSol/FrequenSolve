@@ -28,6 +28,7 @@ class CartesianGrid:
    x1: Optional[List[float]] = field(default_factory=list)
    dx: Optional[List[float]] = field(default_factory=list)
 
+
    def __post_init__(self):
       if self.x1 is None:
          self.x1 = [x0 + (n - 1) * dx for x0, n, dx in zip(self.x0, self.n, self.dx)]
@@ -35,6 +36,7 @@ class CartesianGrid:
          self.dx = [(x1 - x0) / (n - 1) for x0, x1, n in zip(self.x0, self.x1, self.n)]
       elif self.n is None:
          self.n = [int((x1 - x0) / dx + 1) for x0, x1, dx in zip(self.x0, self.x1, self.dx)]
+
 
    def get_coords(self, slices: Optional[List[slice]] = None) -> np.ndarray:
       """Gets coordinates for all grid points or a subset defined by slices.
@@ -69,6 +71,12 @@ class CartesianGrid:
          return np.array([[x_, y_, z_] for x_ in x for y_ in y for z_ in z])
       else:
          raise ValueError("Grid must have 1, 2, or 3 dimensions")
+      
+
+   @property
+   def dimension(self) -> int:
+      return len(self.n)
+   
 
    def generate_coords(self, slices: Optional[List[slice]] = None):
       """Generates coordinates for all grid points or a subset defined by slices.
@@ -111,6 +119,7 @@ class CartesianGrid:
                   yield [x_, y_, z_]
       else:
          raise ValueError("Grid must have 1, 2, or 3 dimensions")
+      
       
    def __str__(self) -> str:
       n  = " ".join(map(str, self.n ))

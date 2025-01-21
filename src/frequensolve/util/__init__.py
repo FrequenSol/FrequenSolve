@@ -1,6 +1,8 @@
 from .input_parser     import *  # noqa
 from .report_builder   import *  # noqa
 
+__all__ = ['input_parser', 'report_builder']
+
 try:
    from .paraview_wrapper import *
 except ModuleNotFoundError as e:

@@ -1,26 +1,26 @@
 import numpy as np
 import re
 
-from pathlib import Path
+from pathlib      import Path
 from dataclasses  import dataclass, field
 from typing       import Optional, List, Literal, Tuple, Dict, Union
 
-from ..util.input_parser import *  # noqa
-from ..simulation.sampling           import *  # noqa
-from .wavelet            import *  # noqa
-from ..simulation.config import *  # noqa
+from ..util.input_parser   import *  # noqa
+from ..simulation.sampling import *  # noqa
+from .wavelet              import *  # noqa
+from ..simulation.config   import *  # noqa
 
-__all__ = ['Waveform', 'AnalyticalWaveform', 'WaveformFromFile']
+__all__ = ['Signal', 'AnalyticalSignal', 'SignalFromFile']
 
 # ----------------------------------------------------------------------
-# Waveform 
+# Signal 
 # ----------------------------------------------------------------------
 @dataclass(kw_only=True)
-class Waveform:
-   """Base class for seismic waveforms.
+class Signal:
+   """Base class for seismic signals.
 
    Attributes:
-      kind (Literal["from_file","analytical"]): The type of waveforms.
+      kind (Literal["from_file","analytical"]): The type of signals.
       samples_out (np.ndarray): The output time samples.
    """
    domain_out:    Literal["time","frequency"]
@@ -34,7 +34,7 @@ class Waveform:
       raise NotImplementedError("This class must be overwritten by subclasses.")
    
    @classmethod
-   def from_dict(cls, data: Dict, sim: SimulationConfig):
+   def from_dict(cls, sim: SimulationConfig, data: Dict):
       raise NotImplementedError("This class must be overwritten by subclasses.")
       
    def __str__(self):
@@ -42,7 +42,7 @@ class Waveform:
 
 
 @dataclass(kw_only=True)
-class AnalyticalWaveform(Waveform):
+class AnalyticalSignal(Signal):
    """Wrapper object for getting analytical wavelet at each source
 
    Attributes:
@@ -57,7 +57,35 @@ class AnalyticalWaveform(Waveform):
    sigma:   Optional[float] = None
    
    @classmethod
-   def from_dict(cls, data: Dict, sim: SimulationConfig) -> "AnalyticalWaveform":
+   def from_block(cls, input: InputParser, block: InputBlock) -> "AnalyticalSignal":
+      kind = block.args["kind"]
+      print(block)
+      f_pts = str_to_array(block.args["f"])
+
+      domain = "time"
+      f_min, f_max, df = input.sweep_params
+      sampling = UniformSweepSampling(f_min, f_max, df)
+      samples = sampling.times
+
+      assert kind in ["Ricker", "Ormsby", "Klauder"]
+      if f_pts is None:
+         raise ValueError(
+            "Generated wavelets require specified frequencies:\n"
+            "  Ricker:  f=[f_central]\n"
+            "  Klauder: f=[f1, f2]\n"
+            "  Ormsby:  f=[f1, f2, f3, f4]"
+         )
+
+      return cls(
+         domain_out  = domain,
+         samples_out = samples,
+         kind        = kind,
+         f_pts       = f_pts,
+      )
+   
+
+   @classmethod
+   def from_dict(cls, sim: SimulationConfig, data: Dict) -> "AnalyticalSignal":
       kind = data["kind"]
       f_pts = data["f_pts"]
 
@@ -86,9 +114,21 @@ class AnalyticalWaveform(Waveform):
          phase       = data.get("phase")
       )
    
+   
+
+   def to_dict(self):
+      return {
+         "type": self.type,
+         "kind": self.kind,
+         "f_pts": self.f_pts,
+         **({"sigma": self.sigma} if self.sigma else {}),
+         **({"offset": self.offset} if self.offset else {}),
+         **({"phase": self.phase} if self.phase else {})
+      }
+   
 
    def get(self, i: int):
-      """Generate waveform for given source at specified samples.
+      """Generate signal for given source at specified samples.
 
       Args:
          i (int): The source number.
@@ -105,20 +145,10 @@ class AnalyticalWaveform(Waveform):
          phase   = self.phase
       )
    
-   def to_dict(self):
-      return {
-         "type": self.type,
-         "kind": self.kind,
-         "f_pts": self.f_pts,
-         "sigma": self.sigma,
-         "offset": self.offset,
-         **({"phase": self.phase} if self.phase else {})
-      }
-   
    def __str__(self):
       f_pts = " ".join(map(str, self.f_pts))
       out = (
-         "   [Waveform]\n"
+         "   [Signal]\n"
         f"      kind   = {self.kind}\n",
         f"      f_pts  = {f_pts}\n"
         f"      offset = {self.offset}\n"
@@ -132,14 +162,14 @@ class AnalyticalWaveform(Waveform):
             
             
 @dataclass(kw_only=True)
-class WaveformFromFile(Waveform):
-   """Wrapper object for getting waveform for sources (and adjoint sources)
+class SignalFromFile(Signal):
+   """Wrapper object for getting signal for sources (and adjoint sources)
 
    Attributes:
       file_format (str): The format of the file.
       file (str): The path to the file.
       interval (Optional[float]): The interval between samples.
-      samples (Optional[np.ndarray]): The samples to use for the waveform.
+      samples (Optional[np.ndarray]): The samples to use for the signal.
    """
    type:          Literal["from_file"] = "from_file"
    file_format:   Literal["HDF5","SEGY"]
@@ -150,15 +180,15 @@ class WaveformFromFile(Waveform):
    id_format:     Tuple[str,str]       = ("","")
    
    @classmethod
-   def from_dict(cls, data: Dict, sim: SimulationConfig) -> "WaveformFromFile":
-      """Create a WaveformFromFile from a dictionary.
+   def from_dict(cls, data: Dict, sim: SimulationConfig) -> "SignalFromFile":
+      """Create a SignalFromFile from a dictionary.
 
       Args:
          data (Dict): The dictionary.
          sim (SimulationConfig): The simulation configuration.
 
       Returns:
-         WaveformFromFile: The waveform from file.
+         SignalFromFile: The Signal from file.
       """
       file       = data["file"]
       format     = data["file_format"]
@@ -183,6 +213,22 @@ class WaveformFromFile(Waveform):
                  file        = file,
                  phase       = phase)
 
+
+   def to_dict(self) -> Dict:
+      """Converts the SignalFromFile to a dictionary representation.
+      
+      Returns:
+         Dict: Dictionary containing the SignalFromFile configuration.
+      """
+      return {
+         "file": str(self.file),
+         "file_format": self.file_format,
+         "domain": self.domain_out,
+         **({"samples": self.samples_out.tolist()} if self.samples_out is not None else {}),
+         **({"interval": self.interval} if self.interval is not None else {}),
+         **({"phase": self.phase} if self.phase else {})
+      }
+
    
    def __post_init__(self):
       match = re.search("(\{)\w([:\w]*\})", self.file)
@@ -191,7 +237,7 @@ class WaveformFromFile(Waveform):
       try:
          id = self.id_format[1].format(64)
       except BaseException as e:
-         raise ValueError( "Invalid format specified in waveform file. "
+         raise ValueError( "Invalid format specified in signal file. "
                            "Format may be blank, but if specified (for padding, etc.) "
                            "it must be a valid python integer format.\n\n"
                           f"Format '{self.id_format[1]}' extracted from '{self.file}' raised error: {e}")
@@ -211,7 +257,7 @@ class WaveformFromFile(Waveform):
       
    
    def get(self, i: int):
-      """Read waveform from file and evaluate at specified samples.
+      """Read Signal from file and evaluate at specified samples.
 
       Args:
          i (int): The source number.
@@ -222,10 +268,10 @@ class WaveformFromFile(Waveform):
       
       id = self.id_format[1].format(i)
       fname = self.file.replace(self.id_format[0],id)
-      return self.get_wavelet(fname, self.samples_out)
+      return self._get_wavelet(fname, self.samples_out)
 
 
-   def read(self, fname) -> np.ndarray:
+   def _read(self, fname: Union[str,Path]) -> np.ndarray:
       """Read signal data from file.
 
       Args:
@@ -234,20 +280,20 @@ class WaveformFromFile(Waveform):
       Returns:
          np.ndarray: The signal data.
       """
-      if self.format == "HDF5":
-         return self.read_hdf5(fname)
-      elif self.format == "SEGY":
-         return self.read_segy(fname)
+      if self.file_format == "HDF5":
+         return self._read_hdf5(fname)
+      elif self.file_format == "SEGY":
+         return self._read_segy(fname)
       else:
-         raise ValueError(f"Unknown format: '{self.format}'. "
+         raise ValueError(f"Unknown format: '{self.file_format}'. "
                           "Supported formats: HDF5, SEGY.")
 
 
-   def read_hdf5(self, fname: str) -> np.ndarray:
+   def _read_hdf5(self, fname: Union[str,Path]) -> np.ndarray:
       """Read data from an HDF5 file/dataset.
 
       Args:
-         fname (str): Path like 'file.h5:[dataset_name]'.
+         fname (Union[str,Path]): Path like 'file.h5:[dataset_name]'.
 
       Returns:
          np.ndarray: The signal data.
@@ -267,7 +313,7 @@ class WaveformFromFile(Waveform):
          return f[dset][()]
 
 
-   def read_segy(self, fname: str) -> np.ndarray:
+   def _read_segy(self, fname: Union[str,Path]) -> np.ndarray:
       """Read data from a SEG-Y file.
 
       Args:
@@ -280,26 +326,8 @@ class WaveformFromFile(Waveform):
          return f.trace[trace]
 
 
-   def interp_signal(self, signal, interp: str = "cubic") -> "Wavelet":
-      """Interpolate signal onto a new time grid.
-
-      Args:
-         interp (str): Interpolation method ('linear' or 'cubic').
-
-      Returns:
-         A Wavelet object with the interpolated signal.
-      """
-
-      if self.samples is None:
-         raise ValueError("No sampling specified. Waveform should be "
-                          "initialized with either 'samples' or 'interval'.")
-
-      sig_interp = self.interpolate(self.samples_out, self.samples, signal, interp)
-      return Wavelet(self.samples_out, sig_interp)
-
-
-   def get_wavelet(self,
-                   file:   str,
+   def _get_wavelet(self,
+                   file:   Union[str,Path],
                    interp: str = "cubic",
                    **kwargs) -> "Wavelet":
       """Read a signal from file and interpolate onto a time grid.
@@ -313,13 +341,31 @@ class WaveformFromFile(Waveform):
          A Wavelet object.
       """
       if not file:
-         raise ValueError("No file path provided to WaveformFromFile.get_wavelet.")
-      signal = self.read(file, **kwargs)
-      return self.interp_signal(signal, interp)
+         raise ValueError("No file path provided to SignalFromFile.get_wavelet.")
+      signal = self._read(file, **kwargs)
+      return self._interp_signal(signal, interp)
+   
+
+   def _interp_signal(self, signal, interp: str = "cubic") -> "Wavelet":
+      """Interpolate signal onto a new time grid.
+
+      Args:
+         interp (str): Interpolation method ('linear' or 'cubic').
+
+      Returns:
+         A Wavelet object with the interpolated signal.
+      """
+
+      if self.samples is None:
+         raise ValueError("No sampling specified. signal should be "
+                          "initialized with either 'samples' or 'interval'.")
+
+      sig_interp = self._interpolate(self.samples_out, self.samples, signal, interp)
+      return Wavelet(self.samples_out, sig_interp)
 
 
    @staticmethod
-   def interpolate(x_new:  np.ndarray,
+   def _interpolate(x_new:  np.ndarray,
                    x:      np.ndarray,
                    y:      np.ndarray,
                    kind:   str) -> np.ndarray:
@@ -347,7 +393,7 @@ class WaveformFromFile(Waveform):
 
    def __str__(self):
       out = (
-         "   [Waveform]\n"
+         "   [Signal]\n"
         f"      kind        = from_file\n",
         f"      file_format = {self.file_format}\n"
         f"      file        = {self.file}\n"

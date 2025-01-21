@@ -5,15 +5,15 @@ from typing import Optional, Literal, Union
 
 from .config                     import *  # noqa
 from .output_manager             import *  # noqa
-from .numeric_manager            import *  # noqa
+from .numerics_manager           import *  # noqa
 from ..model.model               import *  # noqa
 from ..mesh.mesh_manager         import *  # noqa
-from ..seismic.acquisition       import *  # noqa
+from ..seismic.acquisition       import Acquisition  # noqa
 from ..mesh.boundary_conditions  import *  # noqa
 
 __all__ = ['Simulation']
 
-@dataclass 
+@dataclass(kw_only=True)
 class Simulation(SimulationConfig):
    """Container for simulation configuration.
    

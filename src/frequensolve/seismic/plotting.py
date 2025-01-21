@@ -5,9 +5,10 @@ uniformly sampled in frequency.
 """
 
 import numpy as np
-
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+
+from typing import Literal
 
 from .sources     import *    # noqa
 from .receivers   import *    # noqa

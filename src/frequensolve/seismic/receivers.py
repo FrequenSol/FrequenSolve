@@ -14,7 +14,7 @@ from abc          import ABC, abstractmethod
 
 from ..geometry.grids    import *  # noqa
 from ..util.input_parser import *  # noqa
-from .waveform           import *  # noqa
+from .signals           import *  # noqa
 from .wavelet            import *  # noqa
 
 __all__ = ['ReceiverComponent', 'ReceiverGroup', 'ReceiverCoordinates', 'ReceiverDevice',
@@ -607,17 +607,17 @@ class ReceiverGroup:
       device (ReceiverDevice):                Device defining receiver type and components.
       frame (str):                            Coordinate frame for measurements ("physical" or "reference").
       coordinates (ReceiverCoordinates):      Coordinates defining receiver locations.
-      waveforms (Optional[WaveformFromFile]): Optional waveforms for adjoint calculations.
+      signals (Optional[SignalFromFile]): Optional signals for adjoint calculations.
    """
    name:             str = field(default="")
    device:           ReceiverDevice = field(default_factory=ReceiverDevice)
    frame:            Literal["physical", "reference"] = "physical"
    coordinates:      ReceiverCoordinates = field(default_factory=GridCoordinates)
-   waveforms:        Optional[WaveformFromFile] = None
+   signals:          Optional[SignalFromFile] = None
    
 
-   def waveform(self, irecv: int) -> Wavelet:
-      """Retrieves the waveform for a specific receiver.
+   def signal(self, irecv: int) -> Wavelet:
+      """Retrieves the signal for a specific receiver.
       
       Used in adjoint calculations where receivers act as sources.
       
@@ -625,9 +625,9 @@ class ReceiverGroup:
          irecv (int): 1-based index of the receiver.
          
       Returns:
-         Wavelet: The waveform associated with the specified receiver.
+         Wavelet: The signal associated with the specified receiver.
       """
-      return self.waveforms.get(irecv)
+      return self.signals.get(irecv)
       
 
    @property
@@ -637,7 +637,7 @@ class ReceiverGroup:
 
    # TODO: option to correct signature for device response
    # TODO: method to define receviers
-   # TODO: method to attach waveforms
+   # TODO: method to attach signals
 
 
    def to_dict(self) -> Dict:
@@ -646,7 +646,7 @@ class ReceiverGroup:
          "device": self.device.to_dict(),
          "frame": self.frame,
          "coordinates": self.coordinates.to_dict(),
-         **({"waveforms": self.waveforms.to_dict()} if self.waveforms else {})
+         **({"signals": self.signals.to_dict()} if self.signals else {})
       }
 
 
@@ -668,6 +668,6 @@ class ReceiverGroup:
          device      = ReceiverDevice.from_dict(data["device"]),
          frame       = data["frame"],
          coordinates = coordinates,
-         waveforms   = WaveformFromFile.from_dict(data["waveforms"]) if "waveforms" in data else None
+         signals   = SignalFromFile.from_dict(data["signals"]) if "signals" in data else None
       )
    

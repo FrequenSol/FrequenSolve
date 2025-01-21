@@ -139,12 +139,3 @@ class UniformSweepSampling(Sampling):
       out += "      freq = {" + f"{self.f_min}:{self.f_max}:{self.df}" + "}\n"
       out += "   []\n"
       out += "[]\n\n"
-
-
-@dataclass
-class LogSweepSampling(Sampling):
-   """Sampling for the log-FFT. Logarithmic (geometric)frequency spacing 
-   in frequency- and time-domain (more dense sampling at low frequencies
-   and early times).
-   """
-   raise NotImplementedError("LogSweepSampling not implemented yet.")

@@ -1,9 +1,10 @@
 from dataclasses import dataclass, field
-from typing import Literal, Dict
+from typing      import Literal, Dict, Union
+from pathlib     import Path
 
-from .sampling import Sampling
+from .sampling   import Sampling
 
-@dataclass
+@dataclass(kw_only=True)
 class SimulationConfig:
    """Container for simulation configuration.
    
@@ -24,12 +25,12 @@ class SimulationConfig:
    name:      str
    physics:   Literal["acoustic", "elastic", "plasma"]
    dimension: Literal[2, 3]
-   directory: str
-   workflow:  str
+   directory: Union[str, Path]
+   order:     int = 2
+   mode:      Literal["forward", "adjoint", "combined", "gradient"]
    tf_domain: Literal["time","frequency"]
    sampling:  Sampling = field(default_factory=Sampling)
-
-   order: int = 2
+   
    def to_dict(self) -> Dict:
       """Converts the simulation configuration to a dictionary representation.
       
@@ -40,7 +41,6 @@ class SimulationConfig:
             - dimension: Problem dimension
             - directory: Output directory
             - workflow: Workflow type
-            - order: Initial mesh order
             - tf_domain: Frequency- or time-domain simulation
             - sampling: Sampling configuration
       """
@@ -50,7 +50,6 @@ class SimulationConfig:
          "dimension": self.dimension,
          "directory": self.directory,
          "workflow": self.workflow,
-         "order": self.order,
          "tf_domain": self.tf_domain,
          "sampling": self.sampling.to_dict()
       }
@@ -66,7 +65,6 @@ class SimulationConfig:
             - dimension:   Problem dimension
             - directory:   Output directory
             - workflow:    Workflow type
-            - order:       Initial mesh order (optional)
             
       Returns:
          Simulation: New simulation instance configured from dictionary
@@ -89,7 +87,6 @@ class SimulationConfig:
          f"   dimension: {self.dimension}D\n" 
          f"   directory: {self.directory}\n"
          f"   workflow: {self.workflow}\n"
-         f"   order: {self.order}\n"
          f"   tf_domain: {self.tf_domain}\n"
          f"   {str(self.sampling)}\n"
          f"[]\n\n"

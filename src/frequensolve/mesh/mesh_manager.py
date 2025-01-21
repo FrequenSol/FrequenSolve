@@ -48,9 +48,8 @@ class HexMeshGenerator:
       return {
          "type": "hex_mesh_generator",
          "n": self.n,
-         "x_limits": x_limits,
-         **({"y_limits": y_limits} if self.model.dimension == 3 else {}),
-         "z_limits": z_limits
+         "l_bound": l_bound,
+         "u_bound": u_bound,
       }
 
      
@@ -75,6 +74,25 @@ class MeshParallelism:
          **({"ranks_per_part": self.ranks_per_part} if self.ranks_per_part else {}),
          **({"partitioner": self.partitioner} if self.partitioner else {})
       }
+   
+@classmethod
+def from_dict(cls, data: Dict) -> "MeshParallelism":
+   """Creates a MeshParallelism instance from a dictionary.
+   
+   Args:
+      data (Dict): Dictionary containing parallelism settings with keys:
+         - distribute: Whether to distribute mesh
+         - ranks_per_part: Number of ranks per partition (optional)
+         - partitioner: Mesh partitioning method (optional)
+         
+   Returns:
+      MeshParallelism: A new MeshParallelism instance populated with the dictionary data.
+   """
+   return cls(
+      distribute     = data["distribute"],
+      ranks_per_part = data.get("ranks_per_part"),
+      partitioner    = data.get("partitioner")
+   )
 
 
 @dataclass
@@ -119,6 +137,31 @@ class MeshAdaptor:
          **({"jump_factor": self.jump_factor} if self.jump_factor else {}),
          **({"smooth_refs": self.smooth_refs} if self.smooth_refs else {})
       }
+   
+   @classmethod
+   def from_dict(cls, data: Dict) -> "MeshAdaptor":
+      """Creates a MeshAdaptor instance from a dictionary.
+      
+      Args:
+         data (Dict): Dictionary containing adaptor settings with keys:
+            - min_epw: Minimum elements per wavelength
+            - adapt_sources: Source refinement levels (optional)
+            - adapt_receivers: Receiver refinement levels (optional)
+            - jump_tolerance: Material property jump tolerance (optional)
+            - jump_factor: Jump refinement factor (optional)
+            - smooth_refs: Whether to do smoothing refinements (optional)
+            
+      Returns:
+         MeshAdaptor: A new MeshAdaptor instance populated with the dictionary data.
+      """
+      return cls(
+         min_epw         = data["min_epw"],
+         adapt_sources   = data.get("adapt_sources"),
+         adapt_receivers = data.get("adapt_receivers"),
+         jump_tolerance  = data.get("jump_tolerance"),
+         jump_factor     = data.get("jump_factor"),
+         smooth_refs     = data.get("smooth_refs")
+      )
 
 
 @dataclass
@@ -132,6 +175,8 @@ class MeshManager:
       adapt (Optional[MeshAdaptor]): Mesh adaptivity options
    """
    mesh:           Union[Mesh, HexMeshGenerator] = None
+   mesh_file:      Optional[str] = None
+   mesh_format:    Optional[str] = None
    parallel:       Optional[MeshParallelism] = None
    adapt:          Optional[MeshAdaptor]     = None
    
@@ -180,9 +225,11 @@ class MeshManager:
       
       Returns:
          Dict: Dictionary containing the mesh data with keys:
-            - source: Source object dictionary
-            - parallel: Parallel options dictionary (if set)
-            - adapt: Adaptivity options dictionary (if set)
+            - mesh_file:   Mesh file name
+            - mesh_format: Mesh file format
+            - generator:   Mesh gerator object (optional)
+            - parallel:    Parallel options (optional)
+            - adapt:       Adaptivity options (optional)
       """
       if self.adapt is None:
          self.set_adapt(min_epw = 2.0)
@@ -191,11 +238,19 @@ class MeshManager:
          "adapt": self.adapt.to_dict(),
       }
 
+      # Mesh determined by file
+      if self.mesh is None:
+         assert self.mesh_file is not None and self.mesh_format is not None, \
+               "if a mesh or mesh generator has not been provided, " \
+               "'mesh_file' and 'mesh_format' must be provided"
+         mesh_dict["mesh_file"]   = self.mesh.file
+         mesh_dict["mesh_format"] = self.mesh.format
       if isinstance(self.mesh, HexMeshGenerator):
          mesh_dict["generator"] = self.mesh.to_dict()
       elif isinstance(self.mesh, Mesh):
-         # TODO: in Mesh, if mesh has not been written, write it.
-         mesh_dict["mesh"] = self.mesh.to_dict()
+         self.mesh.write_mesh(self.mesh.file, self.mesh.format)
+         mesh_dict["mesh_file"]   = self.mesh.file
+         mesh_dict["mesh_format"] = self.mesh.format
       
       if self.parallel:
          mesh_dict["parallel"] = self.parallel.to_dict()
@@ -208,8 +263,9 @@ class MeshManager:
       
       Args:
          data: Dictionary containing mesh manager configuration with keys:
+            - mesh_file: Mesh file name
+            - mesh_format: Mesh file format
             - generator: HexMeshGenerator configuration (optional)
-            - mesh: Mesh configuration (optional) 
             - parallel: Parallel options (optional)
             - adapt: Adaptivity options (optional)
             
@@ -218,13 +274,20 @@ class MeshManager:
       """
       manager = cls()
       
-      if not "mesh" in data:
-         mesh_file = sim.directory + "/mesh"
-      else:
-         mesh_file = data["mesh"]
+      # From file
+      mesh_file = data.get("mesh_file")
+      mesh_format = data.get("mesh_format")
+      if mesh_file is not None and mesh_format is not None:
+         manager.mesh_file = mesh_file
+         manager.mesh_format = mesh_format
+         manager.mesh = Mesh.read_mesh(mesh_file, mesh_format)
          
-      manager.mesh = Mesh.read_mesh(mesh_file)
+      # From generator
+      if "generator" in data:
+         g = data["generator"]
+         manager.mesh = HexMeshGenerator.from_dict(g)
          
+      # Parallel
       if "parallel" in data:
          p = data["parallel"]
          manager.set_parallel(

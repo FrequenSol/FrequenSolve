@@ -19,9 +19,9 @@ class ModelSubdomain:
          Keys are property names, values can be numeric constants, file paths, or xarray DataArrays.
    """
    mesh_block_id: int
-   name: Optional[str] = None
-   frame: str = "physical"
-   properties: Dict[str, Union[float, str, "xarray.DataArray"]] = field(default_factory=dict)
+   name:          Optional[str] = None
+   frame:         str = "physical"
+   properties:    Dict[str, Union[float, str, "xarray.DataArray"]] = field(default_factory=dict)
 
    def to_dict(self) -> Dict:
       """Converts the model subdomain to a dictionary representation.
@@ -74,8 +74,8 @@ class ModelBase:
       properties (Dict[str, Union[float, str]]): Dictionary of model properties.
          Keys are property names, values can be numeric constants or file paths.
    """
-   dimension: Literal[2, 3]
-   name: str = "model"
+   name:       str = "model"
+   dimension:  Literal[2, 3]
    subdomains: List[ModelSubdomain] = field(default_factory=list)
 
    def to_dict(self) -> Dict:
@@ -109,6 +109,3 @@ class ModelBase:
          **kwargs: Additional subdomain parameters.
       """
       self.subdomains[id] = ModelSubdomain(**kwargs)
-
-
-

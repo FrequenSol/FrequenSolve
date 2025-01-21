@@ -5,14 +5,15 @@ import numpy as np
 import warnings
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from ..util.input_parser   import *  # noqa
 from .sources              import *  # noqa
 from .receivers            import *  # noqa
 from ..simulation.sampling import *  # noqa
+from ..simulation.config   import *  # noqa
 from .shot                 import *  # noqa
-from .waveform             import *  # noqa
+from .signals              import *  # noqa
 
 __all__ = ['Acquisition']
 
@@ -35,6 +36,42 @@ class Acquisition:
    receiver_groups:  List[ReceiverGroup] = field(default_factory=list)
 
 
+   def to_dict(self) -> Dict:
+      """Converts the Acquisition to a dictionary representation.
+      
+      Returns:
+         Dict: Dictionary containing the Acquisition configuration.
+      """
+      return {
+         "source_group": self.source_group.to_dict(),
+         "receiver_groups": [group.to_dict() for group in self.receiver_groups],
+      }
+   
+
+   @classmethod
+   def from_dict(cls, sim: SimulationConfig,dict: Dict) -> 'Acquisition':
+      """Creates an Acquisition instance from a dictionary representation.
+      
+      Args:
+         dict (Dict): Dictionary containing the Acquisition configuration.
+         
+      Returns:
+         Acquisition: A new Acquisition instance.
+      """
+      return cls(
+         source_group    = SourceGroup.from_dict(dict["source_group"]),
+         receiver_groups = [ReceiverGroup.from_dict(group) for group in dict["receiver_groups"]],
+         samples         = sim.sampling
+      )
+      
+   def __str__(self) -> str:
+      out =  str(self.source_group)
+      out += "[Receiver]\n"
+      out += str(self.receiver_group)
+      out += "[]\n\n"
+      return out
+
+
    @classmethod
    def from_file(cls, input_file, **kwargs):
       """Build an Acquisition from a given input file.
@@ -53,7 +90,7 @@ class Acquisition:
       dim = input.get_block("Problem").args.get("dimension")
       
       # Set up sampling with optional upscale
-      samples = Sampling(f_min, f_max, df, upscale = kwargs.get("upscale"))
+      samples = UniformSweepSampling(f_min, f_max, df, upscale = kwargs.get("upscale"))
          
       # Construct source group
       src_block = input.get_block("Source")
@@ -69,6 +106,7 @@ class Acquisition:
          receiver_groups = receivers
       )
       
+
    def add_source_group(self,
                         kind:      str,
                         coords:    np.ndarray,
@@ -83,52 +121,41 @@ class Acquisition:
          frame (str): Frame of the receiver group (e.g., "physical", "global").
       """
                         
-      isrc = len(self.source_group.sources)
       for row in coords:
+         isrc = len(self.source_group.sources)
          self.source_group.sources.append(
             Source(
-               kind      = kind,
-               frame     = frame,
-               coords    = row,
-               direction = direction,
-               name = f"source_{isrc}"
+               kind        = kind,
+               frame       = frame,
+               coordinates = row,
+               direction   = direction,
+               name        = f"source_{isrc}"
             )
          )
          
+
    def add_reciever_group(self,
-                          name:       str,
-                          kind:       str,
-                          coords:     np.ndarray,
-                          components: List[ReceiverComponent],
-                          frame:      str = "phyiscal"):
+                          name:        str,
+                          device:      ReceiverDevice,
+                          coordinates: np.ndarray,
+                          frame:       str = "phyiscal"):
       """Add a group of recievers with common kind, frame, and direction.
 
       Args:
-         name (str): Name of the receiver group.
-         kind (str): Kind of the receiver group (e.g., "station", "geophone", "fiber").
-         coords (np.ndarray): Coordinates of the receiver group.
-         components (List[ReceiverComponent]): Components of the receiver group.
+         name (str):                Name of the receiver group.
+         device (ReceiverDevice):   Device defining receiver type and components.
+         coordinates (np.ndarray):  Coordinates of the receiver group.
          frame (str): Frame of the receiver group (e.g., "physical", "global").
       """
                         
-      isrc = len(self.source_group.sources)
-      for row in coords:
-         self.reciever_groups.append(
-            ReceiverGroup(
-               name       = name,
-               kind       = kind,
-               frame      = frame,
-               coords     = coords,
-               components = components
-            )
+      self.reciever_groups.append(
+         ReceiverGroup(
+            name        = name,
+            device      = device,
+            frame       = frame,
+            coordinates = coordinates
          )
-      
-   def __str__(self) -> str:
-      out =  str(self.source_group)
-      out += "[Receiver]\n"
-      out += str(self.receiver_group)
-      out += "[]\n\n"
-      return out
+      )
 
 
    def list_fields(self, recv_name: str = "") -> List[str]:
@@ -228,7 +255,7 @@ class Acquisition:
          nf = self.samples.nfreq
          f_max = self.samples.f_max
 
-         wavelet  = self.source_group.signature(isrc)
+         wavelet  = self.source_group.signal(isrc)
          spectrum = wavelet.spectrum
       else:
          of = 0
@@ -266,6 +293,7 @@ class Acquisition:
                   field          = field,
                   data           = u)
 
+
    def read_shot_TD(self, key: str, isrc: int) -> Shot:
       """Read time-domain shot data by first reconstructing from the frequency-domain.
 
@@ -300,7 +328,7 @@ class Acquisition:
          FD = np.zeros((nF, nrecv), dtype=np.csingle)
          FD[:nf, :] = fd.data[:nf, :]
          del fd
-         td = fft.irfft(FD, axis=0)  # inverse FFT
+         td = fft.irfft(FD, axis=0)
          del FD
       else:
          td = fft.irfft(fd.data, axis=0)

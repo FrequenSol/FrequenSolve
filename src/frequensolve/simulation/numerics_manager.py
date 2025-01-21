@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
-from typing    import List, Dict, Optional, Union, Literal, Any
+from dataclasses  import dataclass, field
+from typing       import List, Dict, Optional, Literal, Any
 
 __all__ = ['Discretization', 'SolverConfig', 'NumericsManager']
 
@@ -13,10 +13,11 @@ class Discretization:
       DPG_enrich (int): The DPG enrichment parameter, defaults to 1.
       DPG_penalty (float): The DPG penalty parameter (for enforcing constraints like continuity), defaults to 100.
    """
-   method: str = "DPG"
-   DPG_alpha: float = 1.0 
-   DPG_enrich: int = 1
-   DPG_penalty: float = 100
+   method:        str = "DPG"
+   order:         int = 2
+   DPG_alpha:     float = 1.0 
+   DPG_enrich:    int = 1
+   DPG_penalty:   float = 100
 
    def to_dict(self) -> Dict[str, Any]:
       """Convert discretization parameters to dictionary.
@@ -26,6 +27,7 @@ class Discretization:
       """
       return {
          "method": self.method,
+         "order": self.order,
          "DPG_alpha": self.DPG_alpha,
          "DPG_enrich": self.DPG_enrich,
          "DPG_penalty": self.DPG_penalty
@@ -43,6 +45,7 @@ class Discretization:
       """
       return cls(
          method=d.get("method", "DPG"),
+         order=d.get("order", 2),
          DPG_alpha=d.get("DPG_alpha", 1.0),
          DPG_enrich=d.get("DPG_enrich", 1),
          DPG_penalty=d.get("DPG_penalty", 100)
@@ -56,6 +59,7 @@ class Discretization:
       """
       return (f"[Discretization]\n"
               f"   method           = {self.method}\n"
+              f"   order            = {self.order}\n"
               f"   DPG_alpha        = {self.DPG_alpha}\n" 
               f"   DPG_enrich       = {self.DPG_enrich}\n"
               f"   DPG_penalty      = {self.DPG_penalty}\n"
