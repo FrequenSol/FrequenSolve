@@ -183,17 +183,3 @@ class CartesianGrid(Grid):
          x1 = data["x1"],
          dx = data["dx"]
       )
-
-   def __str__(self) -> str:
-      n  = " ".join(map(str, self.n ))
-      x0 = " ".join(map(str, self.x0))
-      x1 = " ".join(map(str, self.x1))
-      dx = " ".join(map(str, self.dx))
-      return (
-         f"   [Grid]\n"
-         f"      n  = {n}\n"
-         f"      x0 = {x0}\n"
-         f"      x1 = {x1}\n"
-         f"      dx = {dx}\n"
-         f"   []\n"
-      )

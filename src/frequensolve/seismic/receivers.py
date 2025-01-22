@@ -12,10 +12,9 @@ from dataclasses  import dataclass, field
 from typing       import Optional, List, Literal, Union, Tuple, Dict, Any
 from abc          import ABC, abstractmethod
 
-from ..geometry.grids    import *  # noqa
-from ..util.input_parser import *  # noqa
+from ..geometry.grids   import *  # noqa
 from .signals           import *  # noqa
-from .wavelet            import *  # noqa
+from .wavelet           import *  # noqa
 
 __all__ = ['ReceiverComponent', 'ReceiverGroup', 'ReceiverCoordinates', 'ReceiverDevice',
            'ReceiverNodeArray', 'ReceiverNode', 'ReceiverFiber']
@@ -49,15 +48,6 @@ class ReceiverComponent:
       return cls(name      = data["name"], 
                  field     = data["field"], 
                  direction = data.get("direction"))
-   
-   def __str__(self) -> str:
-      out = f"      [{self.name}]\n" 
-      out += f"         type = {self.field}\n"
-      if self.direction is not None:
-         dir_str = " ".join(map(str, self.direction))
-         out += f"         direction  = {dir_str}\n"
-      out += "      []\n"
-      return out
 
 
 # ----------------------------------------------------------------------
@@ -84,11 +74,6 @@ class ReceiverDevice:
       return component
 
    def to_dict(self) -> dict:
-      """Convert ReceiverDevice to dictionary representation.
-      
-      Returns:
-         dict: Dictionary containing ReceiverDevice attributes.
-      """
       return {
          "name": self.name,
          "components": [c.to_dict() for c in self.components],
@@ -97,14 +82,6 @@ class ReceiverDevice:
 
    @classmethod
    def from_dict(cls, data: dict) -> 'ReceiverDevice':
-      """Create ReceiverDevice from dictionary representation.
-      
-      Args:
-         data (dict): Dictionary containing ReceiverDevice attributes.
-         
-      Returns:
-         ReceiverDevice: Created ReceiverDevice object.
-      """
       device = cls(
          name=data["name"],
          components=[ReceiverComponent.from_dict(c) for c in data["components"]],
@@ -112,18 +89,34 @@ class ReceiverDevice:
       )
       return device
 
-   def __str__(self) -> str:
-      """Convert ReceiverDevice to string representation.
-      
-      Returns:
-         str: String representation of ReceiverDevice.
-      """
-      out = f"   [Device]\n"
-      out += f"      name = {self.name}\n"
-      for comp in self.components:
-         out += str(comp)
-      out += "   []\n"
-      return out
+
+@dataclass(kw_only=True)
+class ReceiverFiber(ReceiverDevice):
+   """Defines a fiber receiver."""
+   L_gauge: float
+   n_gauge: int
+   radius:  Optional[float] = None
+   pitch:   Optional[float] = None
+
+   def to_dict(self) -> dict:
+      data = super().to_dict()
+      data.update({
+         "L_gauge": self.L_gauge,
+         "n_gauge": self.n_gauge,
+         "radius": self.radius,
+         "pitch": self.pitch
+      })
+      return data
+
+   @classmethod 
+   def from_dict(cls, data: dict) -> 'ReceiverFiber':
+      fiber = super().from_dict(data)
+      fiber.L_gauge = data["L_gauge"]
+      fiber.n_gauge = data["n_gauge"]
+      fiber.radius  = data.get("radius")
+      fiber.pitch   = data.get("pitch")
+      return fiber
+
 
 
 @dataclass(kw_only=True)
@@ -141,11 +134,6 @@ class ReceiverNodeArray(ReceiverDevice):
    offsets: List[List[float]] = field(default_factory=list)
 
    def to_dict(self) -> dict:
-      """Convert NodeArray to dictionary representation.
-      
-      Returns:
-         dict: Dictionary containing NodeArray attributes.
-      """
       return {
          **super().to_dict(),
          "offsets": self.offsets
@@ -153,133 +141,23 @@ class ReceiverNodeArray(ReceiverDevice):
 
    @classmethod 
    def from_dict(cls, data: dict) -> 'ReceiverNodeArray':
-      """Create ReceiverNodeArray from dictionary representation.
-      
-      Args:
-         data (dict): Dictionary containing ReceiverNodeArray attributes.
-         
-      Returns:
-         ReceiverNodeArray: Created ReceiverNodeArray object.
-      """
-      
       node_array = super().from_dict(data)
       node_array.offsets = data["offsets"]
       return node_array
 
-   def __str__(self) -> str:
-      """Convert NodeArray to string representation.
-      
-      Returns:
-         str: String representation of NodeArray.
-      """
-      out = super().__str__()
-      
-      if self.offsets:
-         out = out.replace("   []\n", "")  # Remove closing bracket temporarily
-         out += "      [Offsets]\n"
-         for offset in self.offsets:
-            offset_str = " ".join(map(str, offset))
-            out += f"         {offset_str}\n"
-         out += "      []\n"
-         out += "   []\n"
-         
-      return out
 
 
 @dataclass(kw_only=True)
 class ReceiverNode(ReceiverDevice):
    """Defines a node receiver."""
-   def to_dict(self) -> dict:
-      """Convert Node to dictionary representation.
-      
-      Returns:
-         dict: Dictionary containing Node attributes.
-      """
-      return super().to_dict()
 
+   def to_dict(self) -> dict:
+      return super().to_dict()
 
    @classmethod
    def from_dict(cls, data: dict) -> 'ReceiverNode':
-      """Create Node from dictionary representation.
-      
-      Args:
-         data (dict): Dictionary containing Node attributes.
-         
-      Returns:
-         ReceiverNode: Created Node object.
-      """
       node = super().from_dict(data)
       return node
-   
-
-   def __str__(self) -> str:
-      """Convert Node to string representation.
-      
-      Returns:
-         str: String representation of Node.
-      """
-      return super().__str__()
-
-
-@dataclass(kw_only=True)
-class ReceiverFiber(ReceiverDevice):
-   """Defines a fiber receiver."""
-   L_gauge: float
-   n_gauge: int
-   radius:  Optional[float] = None
-   pitch:   Optional[float] = None
-
-   def to_dict(self) -> dict:
-      """Convert ReceiverFiber to dictionary representation.
-      
-      Returns:
-         dict: Dictionary containing ReceiverFiber attributes.
-      """
-      data = super().to_dict()
-      data.update({
-         "L_gauge": self.L_gauge,
-         "n_gauge": self.n_gauge,
-         "radius": self.radius,
-         "pitch": self.pitch
-      })
-      return data
-
-
-   @classmethod 
-   def from_dict(cls, data: dict) -> 'ReceiverFiber':
-      """Create ReceiverFiber from dictionary representation.
-      
-      Args:
-         data (dict): Dictionary containing ReceiverFiber attributes.
-         
-      Returns:
-         ReceiverFiber: Created ReceiverFiber object.
-      """
-      fiber = super().from_dict(data)
-      fiber.L_gauge = data["L_gauge"]
-      fiber.n_gauge = data["n_gauge"]
-      fiber.radius  = data.get("radius")
-      fiber.pitch   = data.get("pitch")
-      return fiber
-
-
-   def __str__(self) -> str:
-      """Convert ReceiverFiber to string representation.
-      
-      Returns:
-         str: String representation of ReceiverFiber.
-      """
-      out = super().__str__()
-      out = out[:-4]  # Remove closing "[]" to add more attributes
-      out += f"         L_gauge = {self.L_gauge}\n"
-      out += f"         n_gauge = {self.n_gauge}\n"
-      if self.radius is not None:
-         out += f"         radius = {self.radius}\n"
-      if self.pitch is not None:
-         out += f"         pitch = {self.pitch}\n"
-      out += "      []\n"
-      out += "   []\n"
-      return out
 
 
 

@@ -20,11 +20,6 @@ class Discretization:
    DPG_penalty:   float = 100
 
    def to_dict(self) -> Dict[str, Any]:
-      """Convert discretization parameters to dictionary.
-      
-      Returns:
-         Dict[str, Any]: Dictionary of parameters.
-      """
       return {
          "method": self.method,
          "order": self.order,
@@ -35,14 +30,6 @@ class Discretization:
 
    @classmethod
    def from_dict(cls, d: Dict[str, Any]) -> "Discretization":
-      """Create Discretization from dictionary.
-      
-      Args:
-         d (Dict[str, Any]): Dictionary of parameters.
-         
-      Returns:
-         Discretization: New Discretization instance.
-      """
       return cls(
          method=d.get("method", "DPG"),
          order=d.get("order", 2),
@@ -50,20 +37,6 @@ class Discretization:
          DPG_enrich=d.get("DPG_enrich", 1),
          DPG_penalty=d.get("DPG_penalty", 100)
       )
-
-   def __str__(self) -> str:
-      """String representation of discretization parameters.
-      
-      Returns:
-         str: Formatted string of parameters.
-      """
-      return (f"[Discretization]\n"
-              f"   method           = {self.method}\n"
-              f"   order            = {self.order}\n"
-              f"   DPG_alpha        = {self.DPG_alpha}\n" 
-              f"   DPG_enrich       = {self.DPG_enrich}\n"
-              f"   DPG_penalty      = {self.DPG_penalty}\n"
-              f"[]\n\n")
 
 
 
@@ -91,17 +64,9 @@ class SolverConfig:
    _advanced_user_key:     Optional[str] = None
    _advanced_options:      Dict[str, Any] = field(default_factory=dict)
 
+
    @classmethod
    def from_dict(cls, data: Dict) -> "SolverConfig":
-      """Creates a SolverConfig instance from a dictionary.
-
-      Args:
-         data: Dictionary containing solver configuration data.
-
-      Returns:
-         A new SolverConfig instance initialized with the dictionary data.
-      """
-
       return cls(
          solve_on         = data.get("solve_on", "final"),
          max_iter         = data.get("max_iter", 300),
@@ -113,11 +78,6 @@ class SolverConfig:
 
 
    def to_dict(self) -> Dict:
-      """Converts the solver configuration to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the solver configuration data.
-      """
       return {
          "solve_on": self.solve_on,
          "max_iter": self.max_iter,
@@ -129,23 +89,6 @@ class SolverConfig:
             **self._advanced_options} if self._use_advanced else {})
       }
 
-   def __str__(self) -> str:
-      """Returns a string representation of the solver configuration.
-
-      Returns:
-         str: String representation of the solver configuration.
-      """
-      base_str = (
-         "[Solver]\n"
-         f"   solve_on         = {self.solve_on}\n"
-         f"   max_iter         = {self.max_iter}\n" 
-         f"   tolerance        = {self.tolerance}\n"
-         f"   n_grids          = {self.n_grids}\n"
-         f"   refinement_kind  = {self.refinement_kind}\n"
-         f"   refinement_flags = {self.refinement_flags}\n"
-         f"[]\n\n"
-      )
-      return base_str
 
 
 @dataclass
@@ -158,42 +101,18 @@ class NumericsManager:
    """
    solver:         SolverConfig   = field(default_factory=SolverConfig)
    discretization: Discretization = field(default_factory=Discretization)
-   
+
+
    @classmethod
    def from_dict(cls, data: Dict) -> "NumericsManager":
-      """Create a NumericsManager from a dictionary.
-      
-      Args:
-         data (Dict): Dictionary containing numerics configuration.
-         
-      Returns:
-         NumericsManager: A new NumericsManager instance.
-      """
       return cls(
          solver = SolverConfig.from_dict(data["solver"]),
          discretization = Discretization.from_dict(data["discretization"])
       )
-      
+
+
    def to_dict(self) -> Dict:
-      """Convert the numerics configuration to a dictionary.
-      
-      Returns:
-         Dict: Dictionary containing the numerics configuration.
-      """
       return {
          "solver": self.solver.to_dict(),
          "discretization": self.discretization.to_dict()
       }
-      
-   def __str__(self) -> str:
-      """Get string representation of numerics configuration.
-      
-      Returns:
-         str: String representation of the configuration.
-      """
-      return (f"[Numerics]\n"
-              f"{str(self.solver)}\n"
-              f"{str(self.discretization)}\n"
-              f"[]\n\n")
-
-

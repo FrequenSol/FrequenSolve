@@ -5,7 +5,6 @@ from pathlib      import Path
 from dataclasses  import dataclass, field
 from typing       import Optional, List, Literal, Tuple, Dict, Union
 
-from ..util.input_parser   import *  # noqa
 from ..simulation.sampling import *  # noqa
 from .wavelet              import *  # noqa
 from ..simulation.config   import *  # noqa
@@ -36,9 +35,6 @@ class Signal:
    @classmethod
    def from_dict(cls, sim: SimulationConfig, data: Dict):
       raise NotImplementedError("This class must be overwritten by subclasses.")
-      
-   def __str__(self):
-      raise NotImplementedError("This class must be overwritten by subclasses.")
 
 
 @dataclass(kw_only=True)
@@ -55,33 +51,6 @@ class AnalyticalSignal(Signal):
    f_pts:   List[float] = field(default_factory=list)
    offset:  int = 0
    sigma:   Optional[float] = None
-   
-   @classmethod
-   def from_block(cls, input: InputParser, block: InputBlock) -> "AnalyticalSignal":
-      kind = block.args["kind"]
-      print(block)
-      f_pts = str_to_array(block.args["f"])
-
-      domain = "time"
-      f_min, f_max, df = input.sweep_params
-      sampling = UniformSweepSampling(f_min, f_max, df)
-      samples = sampling.times
-
-      assert kind in ["Ricker", "Ormsby", "Klauder"]
-      if f_pts is None:
-         raise ValueError(
-            "Generated wavelets require specified frequencies:\n"
-            "  Ricker:  f=[f_central]\n"
-            "  Klauder: f=[f1, f2]\n"
-            "  Ormsby:  f=[f1, f2, f3, f4]"
-         )
-
-      return cls(
-         domain_out  = domain,
-         samples_out = samples,
-         kind        = kind,
-         f_pts       = f_pts,
-      )
    
 
    @classmethod
@@ -114,7 +83,6 @@ class AnalyticalSignal(Signal):
          phase       = data.get("phase")
       )
    
-   
 
    def to_dict(self):
       return {
@@ -128,14 +96,7 @@ class AnalyticalSignal(Signal):
    
 
    def get(self, i: int):
-      """Generate signal for given source at specified samples.
-
-      Args:
-         i (int): The source number.
-
-      Returns:
-         A new Wavelet instance.
-      """
+      """Generate signal wavelet for given source at specified samples."""
       return Wavelet.generate(
          kind    = self.kind,
          f_pts   = self.f_pts,
@@ -144,21 +105,6 @@ class AnalyticalSignal(Signal):
          sigma   = self.sigma,
          phase   = self.phase
       )
-   
-   def __str__(self):
-      f_pts = " ".join(map(str, self.f_pts))
-      out = (
-         "   [Signal]\n"
-        f"      kind   = {self.kind}\n",
-        f"      f_pts  = {f_pts}\n"
-        f"      offset = {self.offset}\n"
-      )
-      if self.sigma:
-         out += f"      taper_sigma = {self.sigma}\n"
-      if self.phase:
-         out += f"      phase      = {self.phase}\n"
-      out += "   []\n"
-      return out
             
             
 @dataclass(kw_only=True)
@@ -178,48 +124,9 @@ class SignalFromFile(Signal):
    domain_in:     Literal["time","frequency"]
    samples_in:    Optional[np.ndarray] = None
    id_format:     Tuple[str,str]       = ("","")
-   
-   @classmethod
-   def from_dict(cls, data: Dict, sim: SimulationConfig) -> "SignalFromFile":
-      """Create a SignalFromFile from a dictionary.
-
-      Args:
-         data (Dict): The dictionary.
-         sim (SimulationConfig): The simulation configuration.
-
-      Returns:
-         SignalFromFile: The Signal from file.
-      """
-      file       = data["file"]
-      format     = data["file_format"]
-      interval   = data.get("interval")
-      phase      = data.get("phase")
-
-      domain_in  = data["domain"]
-      samples_in = data.get("samples")
-
-      domain_out = sim.tf_domain
-      if domain_out == "time":
-         samples_out = sim.samples.times
-      else:
-         samples_out = sim.samples.frequencies
-
-      return cls(domain_out  = domain_out,
-                 samples_out = samples_out,
-                 domain_in   = domain_in,
-                 samples_in  = samples_in,
-                 interval    = interval,
-                 file_format = format,
-                 file        = file,
-                 phase       = phase)
 
 
    def to_dict(self) -> Dict:
-      """Converts the SignalFromFile to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the SignalFromFile configuration.
-      """
       return {
          "file": str(self.file),
          "file_format": self.file_format,
@@ -257,29 +164,14 @@ class SignalFromFile(Signal):
       
    
    def get(self, i: int):
-      """Read Signal from file and evaluate at specified samples.
-
-      Args:
-         i (int): The source number.
-
-      Returns:
-         A new Wavelet instance.
-      """
-      
+      """Read Signal from file and evaluate at specified samples."""
       id = self.id_format[1].format(i)
       fname = self.file.replace(self.id_format[0],id)
       return self._get_wavelet(fname, self.samples_out)
 
 
    def _read(self, fname: Union[str,Path]) -> np.ndarray:
-      """Read signal data from file.
-
-      Args:
-         fname (str): Path to file (e.g. "file.h5:[dataset]" or "file.segy:[trace]")
-
-      Returns:
-         np.ndarray: The signal data.
-      """
+      """Read signal data from file."""
       if self.file_format == "HDF5":
          return self._read_hdf5(fname)
       elif self.file_format == "SEGY":
@@ -290,14 +182,7 @@ class SignalFromFile(Signal):
 
 
    def _read_hdf5(self, fname: Union[str,Path]) -> np.ndarray:
-      """Read data from an HDF5 file/dataset.
-
-      Args:
-         fname (Union[str,Path]): Path like 'file.h5:[dataset_name]'.
-
-      Returns:
-         np.ndarray: The signal data.
-      """
+      """Read data from an HDF5 file/dataset."""
       import h5py
 
       if ":" not in fname:
@@ -314,11 +199,7 @@ class SignalFromFile(Signal):
 
 
    def _read_segy(self, fname: Union[str,Path]) -> np.ndarray:
-      """Read data from a SEG-Y file.
-
-      Args:
-         file (str): Path to SEG-Y file like "file.segy:[trace]"
-      """
+      """Read data from a SEG-Y file."""
       import segyio
 
       trace = int(fname.split(":")[1])
@@ -390,15 +271,3 @@ class SignalFromFile(Signal):
       else:
          raise ValueError(f"Unsupported interpolation kind: '{kind}'. "
                           "Use 'linear' or 'cubic'.")
-
-   def __str__(self):
-      out = (
-         "   [Signal]\n"
-        f"      kind        = from_file\n",
-        f"      file_format = {self.file_format}\n"
-        f"      file        = {self.file}\n"
-      )
-      if self.interval:
-         out += f"      interval = {self.interval}\n"
-      out += "   []\n"
-      return out

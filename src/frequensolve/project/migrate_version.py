@@ -1,8 +1,5 @@
-from pathlib     import Path
-from typing      import List, Union, Literal
 from dataclasses import dataclass
-
-from .._version import get_versions
+from .._version  import get_versions
 
 __all__ = ['Version']
 

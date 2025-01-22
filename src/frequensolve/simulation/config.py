@@ -55,16 +55,3 @@ class SimulationConfig:
          sampling=Sampling.from_dict(data["sampling"])
       )
 
-   def __str__(self) -> str:
-      return(
-         f"[Simulation]\n"
-         f"   physics:   {self.physics}\n"
-         f"   dimension: {self.dimension}D\n" 
-         f"   directory: {self.directory}\n"
-         f"   mode:      {self.mode}\n"
-         f"   tf_domain: {self.tf_domain}\n"
-         f"   {str(self.sampling)}\n"
-         f"[]\n\n"
-      )
-
-

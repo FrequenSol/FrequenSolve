@@ -90,18 +90,3 @@ class ResourceConfig:
          ResourceConfig: New instance initialized with the dictionary values.
       """
       return cls(**data)
-
-   def __str__(self) -> str:
-      """Create a human-readable string representation.
-      
-      Returns:
-         str: Multi-line description of the configuration.
-      """
-      lines = [f"ResourceConfig: {self.name}"]
-      if self.ranks_per_job is not None:
-         lines.append(f"   Ranks per job: {self.ranks_per_job}")
-      if self.max_duration_in_seconds is not None:
-         lines.append(f"   Max duration: {self.max_duration_in_seconds} seconds")
-      if self.memory_per_rank_in_MB is not None:
-         lines.append(f"   Memory per rank: {self.memory_per_rank_in_MB} MB")
-      return "\n".join(lines) 

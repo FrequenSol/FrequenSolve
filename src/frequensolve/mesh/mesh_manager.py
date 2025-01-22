@@ -1,6 +1,6 @@
 """Python structures defining mesh API"""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing      import List, Dict, Optional, Union
 
 from ..seismic.layered_model import *  # noqa
@@ -23,16 +23,6 @@ class HexMeshGenerator:
    model:   LayeredModel
    
    def to_dict(self) -> Dict:
-      """Converts the mesh generator to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the mesh generator data with keys:
-            - type: Type of mesh generator
-            - n: Number of elements in each direction
-            - x_limits: Lower and upper bounds in x-direction
-            - y_limits: Lower and upper bounds in y-direction (only for 3D models)
-            - z_limits: Lower and upper bounds in z-direction
-      """
       if self.model.dimension == 2:
          x_limits = self.model.x_limits
          z_limits = self.model.z_limits
@@ -60,15 +50,6 @@ class MeshParallelism:
    partitioner:      Optional[str]  = None
 
    def to_dict(self) -> Dict:
-      """Converts the mesh parallelism settings to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the parallelism settings with keys:
-            - distribute: Whether to distribute mesh
-            - ranks_per_part: Number of ranks per partition (if set)
-            - partitioner: Mesh partitioning method (if set)
-      """
-   
       return {
          "distribute": self.distribute,
          **({"ranks_per_part": self.ranks_per_part} if self.ranks_per_part else {}),
@@ -77,17 +58,6 @@ class MeshParallelism:
    
 @classmethod
 def from_dict(cls, data: Dict) -> "MeshParallelism":
-   """Creates a MeshParallelism instance from a dictionary.
-   
-   Args:
-      data (Dict): Dictionary containing parallelism settings with keys:
-         - distribute: Whether to distribute mesh
-         - ranks_per_part: Number of ranks per partition (optional)
-         - partitioner: Mesh partitioning method (optional)
-         
-   Returns:
-      MeshParallelism: A new MeshParallelism instance populated with the dictionary data.
-   """
    return cls(
       distribute     = data["distribute"],
       ranks_per_part = data.get("ranks_per_part"),
@@ -118,17 +88,6 @@ class MeshAdaptor:
 #   f_med:            float = 8.0
 
    def to_dict(self) -> Dict:
-      """Converts the mesh adaptor settings to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the adaptor settings with keys:
-            - min_epw: Minimum elements per wavelength
-            - adapt_sources: Source refinement levels (if set)
-            - adapt_receivers: Receiver refinement levels (if set) 
-            - jump_tolerance: Material property jump tolerance (if set)
-            - jump_factor: Jump refinement factor (if set)
-            - smooth_refs: Whether to do smoothing refinements (if set)
-      """
       return {
          "min_epw": self.min_epw,
          **({"adapt_sources": self.adapt_sources} if self.adapt_sources else {}),
@@ -140,20 +99,6 @@ class MeshAdaptor:
    
    @classmethod
    def from_dict(cls, data: Dict) -> "MeshAdaptor":
-      """Creates a MeshAdaptor instance from a dictionary.
-      
-      Args:
-         data (Dict): Dictionary containing adaptor settings with keys:
-            - min_epw: Minimum elements per wavelength
-            - adapt_sources: Source refinement levels (optional)
-            - adapt_receivers: Receiver refinement levels (optional)
-            - jump_tolerance: Material property jump tolerance (optional)
-            - jump_factor: Jump refinement factor (optional)
-            - smooth_refs: Whether to do smoothing refinements (optional)
-            
-      Returns:
-         MeshAdaptor: A new MeshAdaptor instance populated with the dictionary data.
-      """
       return cls(
          min_epw         = data["min_epw"],
          adapt_sources   = data.get("adapt_sources"),
@@ -190,13 +135,13 @@ class MeshManager:
       """Sets mesh adaptivity options
 
       Attributes:
-         min_epw (float): Minimum # of elements per wavelength.
-         adapt_sources (Optional[int]): Number of additional refinements near sources
-         adapt_receivers (Optional[int]): Number of additional refinements near receivers
+         min_epw (float):                  Minimum # of elements per wavelength.
+         adapt_sources (Optional[int]):    Number of additional refinements near sources
+         adapt_receivers (Optional[int]):  Number of additional refinements near receivers
          jump_tolerance (Optional[float]): Maximum relative change in wavespeed that consitutes
-                               a "jump" in material properties
-         jump_factor (Optional[float]): Multiplicative factor for min_epw on "jump" elements
-         smooth_refs (Optional[bool]): Do additional refinements to unconstrain element DOFs
+                                           a "jump" in material properties
+         jump_factor (Optional[float]):    Multiplicative factor for min_epw on "jump" elements
+         smooth_refs (Optional[bool]):     Do additional refinements to unconstrain element DOFs
       """
       self.adapt = MeshAdaptor(min_epw         = min_epw,
                                adapt_sources   = adapt_sources,
@@ -212,25 +157,15 @@ class MeshManager:
       """Sets mesh parallel options
 
       Attributes:
-         distribute (bool): Fully distribute mesh
-         ranks_per_part (Optional[int]): Number of ranks per partition
-         partitioner (Optional[str]): Partitioner type
+         distribute (bool):               Distribute mesh
+         ranks_per_part (Optional[int]):  Number of ranks per mesh part
+         partitioner (Optional[str]):     Partitioner type
       """
       self.parallel = MeshParallelism(distribute     = distribute,
                                       ranks_per_part = ranks_per_part,
                                       partitioner    = partitioner)
 
    def to_dict(self) -> Dict:
-      """Converts the mesh manager to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the mesh data with keys:
-            - mesh_file:   Mesh file name
-            - mesh_format: Mesh file format
-            - generator:   Mesh gerator object (optional)
-            - parallel:    Parallel options (optional)
-            - adapt:       Adaptivity options (optional)
-      """
       if self.adapt is None:
          self.set_adapt(min_epw = 2.0)
          
@@ -259,19 +194,6 @@ class MeshManager:
    
    @classmethod
    def from_dict(cls, sim: SimulationConfig, data: Dict) -> 'MeshManager':
-      """Creates a MeshManager instance from a dictionary.
-      
-      Args:
-         data: Dictionary containing mesh manager configuration with keys:
-            - mesh_file: Mesh file name
-            - mesh_format: Mesh file format
-            - generator: HexMeshGenerator configuration (optional)
-            - parallel: Parallel options (optional)
-            - adapt: Adaptivity options (optional)
-            
-      Returns:
-         MeshManager: New mesh manager instance configured from dictionary
-      """
       manager = cls()
       
       # From file

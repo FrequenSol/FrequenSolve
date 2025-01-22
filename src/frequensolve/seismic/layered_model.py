@@ -45,10 +45,6 @@ class Surface(ABC):
    def plot(self, **kwargs):
       raise NotImplementedError("This class must be overwritten by subclasses.")
 
-   @abstractmethod
-   def __str__(self):
-      raise NotImplementedError("This class must be overwritten by subclasses.")
-
 
 @dataclass(kw_only=True)
 class ConstantSurface(Surface):
@@ -116,23 +112,6 @@ class ConstantSurface(Surface):
          z_ref      = data.get("z_ref", data["z_phys"])
       )
 
-
-   def __str__(self) -> str:
-      """Converts this surface to a formatted string block.
-
-      Returns:
-         str: A formatted string block representing the surface.
-      """
-      out  = f"   [{self.name}]\n"
-      out += f"      type   = constant\n"
-      out += f"      frame  = {self.frame}\n"
-      out += f"      z_phys = {self.z_phys}\n"
-      if self.z_ref:
-         out += f"      z_ref  = {self.z_ref}\n"
-      if not self.interface:
-         out += f"      interface = false\n"
-      out += "   []\n\n"
-      return out
 
 
 @dataclass(kw_only=True)
@@ -219,24 +198,6 @@ class GridSurface(Surface):
       })
       return base_dict
    
-   
-   def __str__(self) -> str:
-      """Converts this surface to a formatted string block.
-
-      Returns:
-         str: A formatted string block representing the surface.
-      """
-      out  = f"   [{self.name}]\n"
-      out += f"      type   = grid\n"
-      out += f"      frame  = {self.frame}\n"
-      out += f"      file   = {self.file}\n"
-      if self.z_ref is not None:
-         out += f"      z_ref  = {self.z_ref}\n"
-      if not self.interface:
-         out += f"      interface = false\n"
-      out += str(self.grid)
-      out += "   []\n\n"
-      return out
    
    
 @dataclass(kw_only=True)

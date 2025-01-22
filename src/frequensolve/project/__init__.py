@@ -1,6 +1,6 @@
 from .project import *  # noqa
-from .migration import *  # noqa
+from .migrate_version import *  # noqa
 
-__all__ = ['project', 'migration']
+__all__ = ['project', 'migrate_version']
 __all__ += project.__all__
-__all__ += migration.__all__
+__all__ += migrate_version.__all__

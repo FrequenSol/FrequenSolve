@@ -7,7 +7,6 @@ import warnings
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict
 
-from ..util.input_parser   import *  # noqa
 from .sources              import *  # noqa
 from .receivers            import *  # noqa
 from ..simulation.sampling import *  # noqa
@@ -63,48 +62,6 @@ class Acquisition:
          samples         = sim.sampling
       )
       
-   def __str__(self) -> str:
-      out =  str(self.source_group)
-      out += "[Receiver]\n"
-      out += str(self.receiver_group)
-      out += "[]\n\n"
-      return out
-
-
-   @classmethod
-   def from_file(cls, input_file, **kwargs):
-      """Build an Acquisition from a given input file.
-
-      Args:
-         input_file (str): Path to the input file or an existing InputParser.
-         kwargs (dict): Additional arguments, e.g., 'upscale' for Sampling.
-
-      Returns:
-         Acquisition:      A group of sources and corresponding receivers.
-      """
-      
-      input = InputParser.read(input_file)
-      f_min, f_max, df = input.sweep_params
-      
-      dim = input.get_block("Problem").args.get("dimension")
-      
-      # Set up sampling with optional upscale
-      samples = UniformSweepSampling(f_min, f_max, df, upscale = kwargs.get("upscale"))
-         
-      # Construct source group
-      src_block = input.get_block("Source")
-      sources   = SourceGroup.from_block(input, src_block)
-      
-      # Construct receiver groups
-      recv_blocks = input.get_block("Receiver").sub_blocks
-      receivers   = [ReceiverGroup.from_block(input, block) for block in recv_blocks]
-
-      return cls(
-         samples         = samples,
-         source_group    = sources,
-         receiver_groups = receivers
-      )
-      
 
    def add_source_group(self,
                         kind:        str,
@@ -158,17 +115,7 @@ class Acquisition:
 
 
    def list_fields(self, recv_name: str = "") -> List[str]:
-      """List available fields for a specified receiver group or for all groups.
-
-      If a receiver group name is provided, only that group is searched. Otherwise,
-      all receiver groups are included.
-
-      Args:
-         recv_name (str): Name of the receiver group (optional).
-
-      Returns:
-         List[str]: A list of strings representing the form "groupName:fieldName".
-      """
+      """List available fields for a specified receiver group or for all groups. """
       field_list = []
       
       if recv_name:
@@ -187,23 +134,12 @@ class Acquisition:
       
       
    def list_sources(self) -> List[int]:
-      """Get a list of source numbers.
-
-      Returns:
-         List[int]: A list of integers [1..N] where N is the number of sources.
-      """
+      """List valid source numbers."""
       return list(range(1, len(self.source_group.sources) + 1))
            
            
    def receiver_group(self, name: str) -> Optional[ReceiverGroup]:
-      """Retrieve a named receiver group by its block name.
-
-      Args:
-         name (str): The receiver group name.
-
-      Returns:
-         ReceiverGroup: The matching ReceiverGroup, or None if not found.
-      """
+      """Retrieve a named receiver group by its block name."""
       for group in self.receiver_groups:
          if group.name == name:
             return group
@@ -211,17 +147,7 @@ class Acquisition:
       
       
    def source(self, isrc: int) -> Source:
-      """Retrieve a source by index.
-
-      Args:
-         isrc (int): Source number (1-based).
-
-      Returns:
-         Source: The Source object at that index.
-
-      Raises:
-         IndexError: If isrc is out of range.
-      """
+      """Retrieve a source by index."""
       try:
          return self.source_group.sources[isrc-1]
       except IndexError:

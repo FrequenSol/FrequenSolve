@@ -24,15 +24,6 @@ class ModelSubdomain:
    properties:    Dict[str, Union[float, str, "xarray.DataArray"]] = field(default_factory=dict)
 
    def to_dict(self) -> Dict:
-      """Converts the model subdomain to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the subdomain data with keys:
-            - mesh_block_id: The block ID
-            - name: The block name (if set)
-            - frame: The coordinate frame
-            - properties: Dictionary of property values
-      """
       return {
          "mesh_block_id": self.mesh_block_id,
          "name": self.name,
@@ -42,20 +33,6 @@ class ModelSubdomain:
    
    @classmethod
    def from_dict(cls, data: Dict) -> "ModelSubdomain":
-      """Creates a ModelSubdomain instance from a dictionary.
-      
-      Args:
-         data (Dict): Dictionary containing subdomain data with keys:
-            - mesh_block_id: The block ID
-            - mesh_block_name: The block name (optional)
-            - properties: Dictionary of property values
-            
-      Returns:
-         ModelSubdomain: A new ModelSubdomain instance populated with the dictionary data.
-            
-      Raises:
-         NotImplementedError: Subclasses must implement from_dict()
-      """
       raise NotImplementedError("Subclasses must implement from_dict()")
 
 
@@ -79,7 +56,6 @@ class ModelBase:
    subdomains: List[ModelSubdomain] = field(default_factory=list)
 
    def to_dict(self) -> Dict:
-      """Converts the model to a dictionary representation."""
 
       # Label any unlabeled subdomains
       labels = {}
@@ -101,7 +77,6 @@ class ModelBase:
 
    @classmethod
    def from_dict(cls, data: Dict) -> "ModelBase":
-      """Creates a ModelBase instance from a dictionary."""
       return cls(
          name=data["name"],
          dimension=data["dimension"],

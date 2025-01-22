@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from ..simulation.simulation  import *  # noqa
 from ..simulation.sampling    import *  # noqa
-from .migration               import *  # noqa
+from .migrate_version         import *  # noqa
 
 __all__ = ['Project']
 
@@ -76,20 +76,18 @@ class Project:
          self.save()
 
 
-   def new_TD_simulation(self, 
-                         name:      str, 
-                         mode:      Literal["forward","adjoint","combined","gradient"], 
-                         physics:   Literal["coupled","acoustic","elastic"], 
-                         dimension: Literal[2, 3], 
-                         f_min:     float, 
-                         f_max:     float, 
-                         df:        float, 
-                         **kwargs) -> Simulation:
+   def new_TD_simulator(self, 
+                        name:      str, 
+                        physics:   Literal["coupled","acoustic","elastic"], 
+                        dimension: Literal[2, 3], 
+                        f_min:     float, 
+                        f_max:     float, 
+                        df:        float, 
+                        **kwargs) -> Simulation:
       """Create a new time-domain simulation and add it to the project.
 
       Args:
          name (str):      Simulation name.
-         mode (str):      Simulation mode (forward, adjoint, gradient)
          physics (str):   Simulation physics (coupled, acoustic, elastic)
          dimension (int): Simulation dimension (2, 3)
          f_min (float):   Minimum frequency (Hz).
@@ -107,25 +105,23 @@ class Project:
                        physics   = physics,
                        dimension = dimension,
                        directory = os.path.join(self.path,name),
-                       mode      = mode,
+                       mode      = "forward",
                        tf_domain = tf_domain, 
                        sampling  = sampling)
       self.simulations.append(sim)
       return sim
    
 
-   def new_FD_simulation(self, 
-                         name:      str, 
-                         mode:      Literal["forward","adjoint","combined","gradient"], 
-                         physics:   Literal["coupled","acoustic","elastic"], 
-                         dimension: Literal[2, 3], 
-                         f_list:    List[float], 
-                         **kwargs) -> Simulation:
+   def new_FD_simulator(self, 
+                        name:      str, 
+                        physics:   Literal["coupled","acoustic","elastic"], 
+                        dimension: Literal[2, 3], 
+                        f_list:    List[float], 
+                        **kwargs) -> Simulation:
       """Create a new frequency-domain simulation and add it to the project.
 
       Args:
          name (str):      Simulation name.
-         mode (str):      Simulation mode (forward, adjoint, gradient)
          physics (str):   Simulation physics (coupled, acoustic, elastic)
          dimension (int): Simulation dimension (2, 3)
          f_list (List[float]): List of frequencies (Hz).
@@ -141,7 +137,7 @@ class Project:
                        physics   = physics,
                        dimension = dimension,
                        directory = os.path.join(self.path,name),
-                       mode      = mode,
+                       mode      = "forward",
                        tf_domain = tf_domain, 
                        sampling  = sampling)
       self.simulations.append(sim)

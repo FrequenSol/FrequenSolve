@@ -92,6 +92,7 @@ class UniformSweepSampling(Sampling):
    def dT(self):
      return self.T / self.nTime
      
+     
    def cutoff(self, Tf: Optional[float] = None):
       """Cutoff the time-domain sampling to a specified maximum time.
 
@@ -109,16 +110,8 @@ class UniformSweepSampling(Sampling):
       else:
          return self.nTime, self.T
       
-   def to_dict(self) -> dict:
-      """Convert sampling parameters to a dictionary.
 
-      Returns:
-         dict: Dictionary containing sampling parameters with keys:
-            f_min: Minimum frequency (Hz)
-            f_max: Maximum frequency (Hz)
-            df: Frequency spacing (Hz)
-            upscale: Upscaling factor
-      """
+   def to_dict(self) -> dict:
       return {
          "f_min": self.f_min,
          "f_max": self.f_max,
@@ -126,6 +119,7 @@ class UniformSweepSampling(Sampling):
          "upscale": self.upscale,
       }
    
+
    @classmethod
    def from_dict(cls, data: dict) -> 'Sampling':
       return cls(f_min = data["f_min"], 
@@ -133,9 +127,3 @@ class UniformSweepSampling(Sampling):
                  df    = data["df"],
                  upscale = data.get("upscale",1))
 
-   def __str__(self) -> str:
-      out =  "[Study]\n"
-      out += "   [ParameterSweep]\n"
-      out += "      freq = {" + f"{self.f_min}:{self.f_max}:{self.df}" + "}\n"
-      out += "   []\n"
-      out += "[]\n\n"

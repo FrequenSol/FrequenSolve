@@ -41,7 +41,6 @@ class Simulation(SimulationConfig):
       output (OutputManager):          Output configuration.
       acquisition (Acquisition):       Acquisition configuration.
       numerics (NumericsManager):      Numerics configuration.
-      tf_domain (str):                 Frequency- or time-domain simulation.
    """
    model:       Optional[ModelBase]                = None
    mesh:        Optional[MeshManager]              = None
@@ -86,15 +85,3 @@ class Simulation(SimulationConfig):
       sim.numerics = NumericsManager.from_dict(data["Numerics"])
 
       return sim
-   
-
-   def __str__(self) -> str:
-      return (
-         f"{super().__str__()}\n"
-         f"{str(self.model)}\n"
-         f"{str(self.mesh)}\n"
-         f"{str(self.BCs)}\n"
-         f"{str(self.numerics)}\n"
-         f"{str(self.acquisition)}\n"
-         f"{str(self.output)}"
-      )

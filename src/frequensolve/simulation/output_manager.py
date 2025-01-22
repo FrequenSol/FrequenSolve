@@ -24,11 +24,6 @@ class ParaviewOutput:
    upscale: int = 1
 
    def to_dict(self) -> Dict:
-      """Converts the Paraview output settings to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the Paraview output settings.
-      """
       return {
          "directory": self.directory,
          "components": self.components,
@@ -44,14 +39,6 @@ class ParaviewOutput:
          prefix=dict["prefix"],
          upscale=dict["upscale"]
       )
-   
-   def __str__(self) -> str:
-      return (f"[Paraview]\n"
-              f"   directory = {self.directory}\n"
-              f"   components = {self.components}\n"
-              f"   prefix = {self.prefix}\n"
-              f"   upscale = {self.upscale}\n"
-              f"[]\n\n")
 
 @dataclass
 class ReflectivityImage:
@@ -76,13 +63,6 @@ class ReflectivityImage:
          type=dict["type"],
          grid=CartesianGrid.from_dict(dict["grid"])
       )
-   
-   def __str__(self) -> str:
-      return (f"[ReflectivityImage]\n"
-              f"   path = {self.path}\n"
-              f"   type = {self.type}\n"
-              f"   {str(self.grid)}\n"
-              f"[]\n\n")
 
 
 @dataclass
@@ -106,11 +86,6 @@ class OutputManager:
 
 
    def to_dict(self) -> Dict:
-      """Converts the Output settings to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the Output settings.
-      """
       return {
          "paraview_output": [pv_out.to_dict() for pv_out in self.paraview_outputs],
          "reflectivity_images": [ri.to_dict() for ri in self.reflectivity_images]
@@ -119,24 +94,8 @@ class OutputManager:
 
    @classmethod
    def from_dict(cls, dict: Dict) -> None:
-      """Loads the Output settings from a dictionary representation.
-      
-      Args:
-         dict (Dict): Dictionary containing the Output settings.
-      """
       paraview_outputs = [ParaviewOutput.from_dict(pv_out) for pv_out in dict["paraview_output"]]
       reflectivity_images = [ReflectivityImage.from_dict(ri) for ri in dict["reflectivity_images"]]
       return cls(paraview_outputs=paraview_outputs, reflectivity_images=reflectivity_images)
-   
 
-   def __str__(self) -> str:
-      out = "[Output]\n"
-      if self.paraview_outputs:
-         for pv_out in self.paraview_outputs:
-            out += str(pv_out)
-      if self.reflectivity_images:
-         for ri in self.reflectivity_images:
-            out += str(ri)
-      out += "[]\n\n"
-      return out
    

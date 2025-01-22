@@ -1,17 +1,11 @@
 """Python wrapper for automating ParaView visualization"""
 
-#import paraview
-#paraview.compatibility.major = 5
-#paraview.compatibility.minor = 13
-
 import os, sys
 import numpy as np
 from paraview.simple import * # noqa
 
 from dataclasses import dataclass, field
 from typing import List, Optional
-
-from .input_parser import *
 
 paraview.simple._DisableFirstRenderCameraReset()
 

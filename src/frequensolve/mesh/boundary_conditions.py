@@ -14,7 +14,7 @@ class BoundaryCondition:
 
    Attributes:
       name (str): BC name
-      kind (Literal["dirichlet", "neumann", "pml", "symmetric", "custom"]): BC type
+      kind (Literal["dirichlet", "neumann", "pml", "symmetric"]): BC type
       boundaries (List[str]): List of boundaries where BC should be applied
       pml_wavelengths (float): PML width in wavelengths
       pml_exponent (float): PML complex stretching exponent
@@ -25,25 +25,25 @@ class BoundaryCondition:
         sufficient to avoid reflections.
    """
    name:        str
-   kind:        Literal["dirichlet", "neumann", "pml", "symmetric", "custom"]
+   kind:        Literal["dirichlet", "neumann", "pml", "symmetric"]
    boundaries:  List[str] = field(default_factory=list)
    
    pml_wavelengths:  float =  2.0
    pml_exponent:     float =  3.0
    pml_constant:     float = 20.0
 
+   @classmethod
+   def from_dict(cls, data: Dict) -> 'BoundaryCondition':
+      return cls(
+         name             = data["name"],
+         kind             = data["kind"],
+         boundaries       = data["boundaries"],
+         pml_wavelengths  = data.get("pml_wavelengths", 2.0),
+         pml_exponent     = data.get("pml_exponent", 3.0),
+         pml_constant     = data.get("pml_constant", 20.0)
+      )
+
    def to_dict(self) -> Dict:
-      """Converts the boundary condition to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the boundary condition data with keys:
-            - name: BC name
-            - kind: BC type
-            - boundaries: List of boundaries
-            - pml_wavelengths: PML width in wavelengths
-            - pml_exponent: PML exponent
-            - pml_constant: PML constant
-      """
       bc_dict = {
          "name": self.name,
          "kind": self.kind,
@@ -71,9 +71,10 @@ class BoundaryConditionManager:
    def add_BC(self, bc: BoundaryCondition) -> None:
       """Adds a boundary condition to the manager.
 
-      :param bc (BoundaryCondition): The boundary condition to add
+      Args:
+         bc (BoundaryCondition): The boundary condition to add
 
-      :note:
+      Notes:
          - A BC can be applied to multiple boundaries, but each boundary can only be
            assigned one BC.
       """
@@ -88,6 +89,11 @@ class BoundaryConditionManager:
          raise ValueError(f"Boundaries {overlap} already assigned another boundary condition")
          
       self.boundary_conditions.append(bc)
+
+   def __iadd__(self, bc: BoundaryCondition) -> "BoundaryConditionManager":
+      """Overrides += operator to invoke add_BC"""
+      self.add_BC(bc)
+      return self
 
    
    def verify(self, mesh: Mesh) -> None:
@@ -110,15 +116,15 @@ class BoundaryConditionManager:
             if boundary not in self.boundary_conditions:
                raise ValueError(f"Boundary {boundary} is not assigned a BC")
 
-   def to_dict(self) -> Dict:
-      """Converts the boundary condition manager to a dictionary representation.
-      
-      Returns:
-         Dict: Dictionary containing the boundary condition data with keys:
-            - label_type: Type of boundary labels
-            - boundary_conditions: List of boundary condition dictionaries
-      """
 
+   @classmethod
+   def from_dict(cls, data: Dict) -> "BoundaryConditionManager":
+      label_type = data["label_type"]
+      boundary_conditions = [BoundaryCondition.from_dict(bc_data) for bc_data in data["boundary_conditions"]]
+      return cls(label_type=label_type, boundary_conditions=boundary_conditions)
+
+
+   def to_dict(self) -> Dict:
       return {
          "label_type": self.label_type,
          "boundary_conditions": [bc.to_dict() for bc in self.boundary_conditions]
