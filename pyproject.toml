@@ -26,8 +26,11 @@ dependencies = [
 
 
 [tool.poetry]
-packages = [{ include = "frequensolve", from = "src" }]
+name = "frequensolve"
 version = "0.1.0"
+description = "Python API for FrequenSolve finite element modeling tool"
+authors = ["Jacob Badger <jcbadger@utexas.edu>"]
+packages = [{ include = "frequensolve", from = "src" }]
 classifiers = ["Development Status :: 4 - Beta"]
 
 
