@@ -14,7 +14,7 @@ class Discretization:
       DPG_penalty (float): The DPG penalty parameter (for enforcing constraints like continuity), defaults to 100.
    """
    method:        str = "DPG"
-   order:         int = 2
+   order:         int = 3
    DPG_alpha:     float = 1.0
    DPG_enrich:    int = 1
    DPG_penalty:   float = 100
@@ -23,7 +23,7 @@ class Discretization:
    def from_dict(cls, d: Dict[str, Any]) -> "Discretization":
       return cls(
          method=d.get("method", "DPG"),
-         order=d.get("order", 2),
+         order=d.get("order", 3),
          DPG_alpha=d.get("DPG_alpha", 1.0),
          DPG_enrich=d.get("DPG_enrich", 1),
          DPG_penalty=d.get("DPG_penalty", 100)

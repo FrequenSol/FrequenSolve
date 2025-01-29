@@ -50,7 +50,11 @@ class Version:
       Returns:
          Version: New Version object
       """
-      major, minor, patch = map(int, version_str.split("."))
+      try:
+         major, minor, patch = map(int, version_str.split("."))
+      except Exception as e:
+         print(major, minor, patch)
+         raise ValueError(e)
       return cls(major, minor, patch)
 
 

@@ -261,6 +261,8 @@ class SeismicSimulation(BaseSimulation):
          self.model._set_path(self._proj_path, self._rel_path)
       if self.mesh:
          self.mesh._set_path(self._proj_path, self._rel_path)
+      if self.outputs:
+         self.outputs._set_path(self._proj_path, self._rel_path)
 
    @property
    def _path(self) -> Path:

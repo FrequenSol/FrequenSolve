@@ -104,7 +104,7 @@ class Project:
                version        = version,
                load_if_exists = False,
             )
-            project.check_version()
+            # project.check_version()
 
             # Change directory to project path for loading files
             current_dir = os.getcwd()
