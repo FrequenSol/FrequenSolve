@@ -1,11 +1,16 @@
 """Model base classes for managing simulation models."""
 
-import xarray
+from xarray import DataArray, Dataset
 
-from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Union, Literal
+from pathlib               import Path
+from dataclasses           import dataclass, field, asdict
+from typing                import Optional, List, Dict, Union, Literal, Tuple
+
+from ..util.class_registry import *
 
 __all__ = ['ModelSubdomain', 'ModelBase']
+
+# TODO: Convert properties to xr.Dataset (will have to update my code, etc.)
 
 @dataclass(kw_only=True)
 class ModelSubdomain:
@@ -21,21 +26,34 @@ class ModelSubdomain:
    mesh_block_id: int = -1
    name:          Optional[str] = None
    frame:         str = "physical"
-   properties:    Dict[str, Union[float, str, "xarray.DataArray"]] = field(default_factory=dict)
+   properties:    Dict[str, Union[float, str, DataArray]] = field(default_factory=dict)
+   _proj_path:    Optional[Path] = None
+   _rel_path:     Optional[Path] = None
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
+      if isinstance(self.properties, xr.Dataset):
+         raise NotImplementedError("Subdomains with xr.Dataset properties are not supported yet")
       return {
          "mesh_block_id": self.mesh_block_id,
-         "name": self.name,
-         "frame": self.frame,
-         "properties": self.properties
+         "name":          self.name,
+         "frame":         self.frame,
+         "properties":    self.properties,
       }
    
    @classmethod
    def from_dict(cls, data: Dict) -> "ModelSubdomain":
       raise NotImplementedError("Subclasses must implement from_dict()")
 
+   def _set_path(self, proj_path: Path, rel_path: Path):
+      self._proj_path = proj_path
+      self._rel_path = rel_path
 
+   @property
+   def _path(self) -> Path:
+      return self._proj_path/self._rel_path
+
+
+@register_class
 @dataclass(kw_only=True)
 class ModelBase:
    """Base class for simulation models.
@@ -54,37 +72,39 @@ class ModelBase:
    name:       str = "model"
    dimension:  Literal[2, 3]
    subdomains: List[ModelSubdomain] = field(default_factory=list)
+   _proj_path: Optional[Path] = None
+   _rel_path:  Optional[Path] = None
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
 
       # Label any unlabeled subdomains
       labels = {}
       for i,subdomain in enumerate(self.subdomains):
          labels[subdomain.mesh_block_id] = i
 
-      j = 0
+      j = 1
       for i, subdomain in enumerate(self.subdomains):
          if subdomain.mesh_block_id == -1:
             while j in labels:
                j += 1
+            labels[j] = i
             subdomain.mesh_block_id = j
 
       return {
+         "_type": self.__class__.__name__,
          "name": self.name,
          "dimension": self.dimension,
-         "subdomains": [ subdomain.to_dict() for subdomain in self.subdomains]
+         "subdomains": [subdomain.__dict__() for subdomain in self.subdomains]
       }
 
    @classmethod
    def from_dict(cls, data: Dict) -> "ModelBase":
-      return cls(
-         name=data["name"],
-         dimension=data["dimension"],
-         subdomains={
-            id: ModelSubdomain.from_dict(subdomain_data)
-            for id, subdomain_data in data["subdomains"].items()
-         }
-      )
+      class_name = data["_type"]
+      if class_name in class_registry:
+         model_class = class_registry[class_name]
+         return model_class.from_dict(data)
+      else:
+         raise ValueError(f"Unknown model class: {class_name}")
    
    def add_subdomain(self, subdomain: ModelSubdomain) -> None:
       """Adds a subdomain to the model.
@@ -94,3 +114,13 @@ class ModelBase:
          **kwargs: Additional subdomain parameters.
       """
       self.subdomains.append(subdomain)
+
+   def _set_path(self, proj_path: Path, rel_path: Path):
+      self._proj_path = proj_path
+      self._rel_path = rel_path/self.name
+      for subdomain in self.subdomains:
+         subdomain._set_path(proj_path, self._rel_path)
+
+   @property
+   def _path(self) -> Path:
+      return self._proj_path/self._rel_path

@@ -12,14 +12,14 @@ from dataclasses  import dataclass, field
 from typing       import Optional, List, Literal, Union, Tuple, Dict, Any
 from abc          import ABC, abstractmethod
 
-from ..geometry.grids   import *  # noqa
-from .signals           import *  # noqa
-from .wavelet           import *  # noqa
+from ..geometry.grids      import *  # noqa
+from .wavelet              import *  # noqa
+from ..util.class_registry import *  # noqa
 
 __all__ = ['ReceiverComponent', 'ReceiverGroup', 'ReceiverCoordinates', 'ReceiverDevice',
            'ReceiverNodeArray', 'ReceiverNode', 'ReceiverFiber']
 
-@dataclass
+@dataclass(kw_only=True)
 class ReceiverComponent:
    """Defines a single component/measurement type for a receiver.
    
@@ -31,16 +31,15 @@ class ReceiverComponent:
       field (str): Physical field being measured
       direction (Optional[List[float]]): Measurement direction for vector fields.
    """
-   
-   name:      str
+   name:      str = "name"
    field:     Literal["pressure", "velocity", "displacement", "stress", "strain"]
    direction: Optional[List[float]] = None
 
-   def to_dict(self) -> dict:
+   def __dict__(self) -> dict:
       return {
          "name": self.name,
          "field": self.field,
-         **({"direction": self.direction} if self.direction else {})
+         **({"direction": self.direction} if self.direction is not None else {})
       }
    
    @classmethod
@@ -53,7 +52,8 @@ class ReceiverComponent:
 # ----------------------------------------------------------------------
 # Devices
 # ----------------------------------------------------------------------
-@dataclass
+@register_class
+@dataclass(kw_only=True)
 class ReceiverDevice:
    """Defines a single receiver.
    
@@ -73,23 +73,25 @@ class ReceiverDevice:
       self.components.append(component)
       return component
 
-   def to_dict(self) -> dict:
+   def __dict__(self) -> dict:
       return {
          "name": self.name,
-         "components": [c.to_dict() for c in self.components],
-         **({"response": self.response.to_dict()} if self.response else {})
+         "components": [c.__dict__() for c in self.components],
+         **({"response": self.response.__dict__()} if self.response is not None else {})
       }
 
    @classmethod
    def from_dict(cls, data: dict) -> 'ReceiverDevice':
-      device = cls(
-         name=data["name"],
-         components=[ReceiverComponent.from_dict(c) for c in data["components"]],
-         response=data.get("response")
-      )
-      return device
+      class_name = data["_type"]
+      if class_name in class_registry:
+         device_class = class_registry[class_name]
+         return device_class.from_dict(data)
+      else:
+         raise ValueError(f"Unknown receiver device class: {class_name}")
 
 
+
+@register_class
 @dataclass(kw_only=True)
 class ReceiverFiber(ReceiverDevice):
    """Defines a fiber receiver."""
@@ -98,27 +100,30 @@ class ReceiverFiber(ReceiverDevice):
    radius:  Optional[float] = None
    pitch:   Optional[float] = None
 
-   def to_dict(self) -> dict:
-      data = super().to_dict()
-      data.update({
+   def __dict__(self) -> dict:
+      return {
+         "_type": self.__class__.__name__,
+         **super().__dict__(),
          "L_gauge": self.L_gauge,
          "n_gauge": self.n_gauge,
-         "radius": self.radius,
-         "pitch": self.pitch
-      })
-      return data
+         "radius":  self.radius,
+         "pitch":   self.pitch,
+      }
 
    @classmethod 
    def from_dict(cls, data: dict) -> 'ReceiverFiber':
-      fiber = super().from_dict(data)
-      fiber.L_gauge = data["L_gauge"]
-      fiber.n_gauge = data["n_gauge"]
-      fiber.radius  = data.get("radius")
-      fiber.pitch   = data.get("pitch")
-      return fiber
+      return cls( 
+                  name       = data["name"],
+                  components = [ReceiverComponent.from_dict(c) for c in data["components"]],
+                  response   = data.get("response"),
+                  L_gauge    = data["L_gauge"],
+                  n_gauge    = data["n_gauge"],
+                  radius     = data.get("radius"),
+                  pitch      = data.get("pitch"),
+               )
+   
 
-
-
+@register_class
 @dataclass(kw_only=True)
 class ReceiverNodeArray(ReceiverDevice):
    """Defines a group of nodes on a single channel; defined by list of offsets.
@@ -133,37 +138,48 @@ class ReceiverNodeArray(ReceiverDevice):
    """
    offsets: List[List[float]] = field(default_factory=list)
 
-   def to_dict(self) -> dict:
+   def __dict__(self) -> dict:
       return {
-         **super().to_dict(),
+         "_type": self.__class__.__name__,
+         **super().__dict__(),
          "offsets": self.offsets
       }
 
    @classmethod 
    def from_dict(cls, data: dict) -> 'ReceiverNodeArray':
-      node_array = super().from_dict(data)
-      node_array.offsets = data["offsets"]
-      return node_array
+      return cls( 
+                  name       = data["name"],
+                  components = [ReceiverComponent.from_dict(c) for c in data["components"]],
+                  response   = data.get("response"),
+                  offsets    = data["offsets"],
+               )
 
 
-
+@register_class
 @dataclass(kw_only=True)
 class ReceiverNode(ReceiverDevice):
    """Defines a node receiver."""
 
-   def to_dict(self) -> dict:
-      return super().to_dict()
+   def __dict__(self) -> dict:
+      return {
+         "_type": self.__class__.__name__,
+         **super().__dict__()
+      }
 
    @classmethod
    def from_dict(cls, data: dict) -> 'ReceiverNode':
-      node = super().from_dict(data)
-      return node
+      return cls( 
+                  name       = data["name"], 
+                  components = [ReceiverComponent.from_dict(c) for c in data["components"]], 
+                  response   = data.get("response")
+               )
 
 
 
 # ----------------------------------------------------------------------
 # Receiver Coordinates
 # ----------------------------------------------------------------------
+@register_class
 @dataclass(kw_only=True)
 class ReceiverCoordinates(ABC):
    """Base class for receiver coordinates.
@@ -205,17 +221,30 @@ class ReceiverCoordinates(ABC):
       pass
 
    @abstractmethod
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       """Convert coordinates to dictionary representation."""
       pass
 
    @classmethod
-   @abstractmethod
    def from_dict(cls, data: Dict) -> 'ReceiverCoordinates':
-      """Create coordinates from dictionary representation."""
-      pass
+      class_name = data["_type"]
+      if class_name in class_registry:
+         coord_class = class_registry[class_name]
+         return coord_class.from_dict(data)
+      else:
+         raise ValueError(f"Unknown receiver coordinates class: {class_name}")
+      
+   def _set_path(self, proj_path: Path, rel_path: Path):
+         self._proj_path = proj_path
+         self._rel_path  = rel_path
+
+   @property
+   def _path(self) ->Path:
+      return self._proj_path/self._rel_path
 
 
+
+@register_class
 @dataclass(kw_only=True)
 class FileCoordinates(ReceiverCoordinates):
    """Receiver coordinates stored in a file.
@@ -224,8 +253,19 @@ class FileCoordinates(ReceiverCoordinates):
       path (Union[str, Path]):   Path to coordinate file.
       format (str):              File format ('HDF5', 'asdf', or 'SEGY').
    """
-   path:   Union[str, Path]
-   format: Literal["HDF5", "asdf", "SEGY"]
+   path:       Union[str, Path]
+   format:     Literal["HDF5", "asdf", "SEGY"]
+   _proj_path: Optional[Path] = None
+   _rel_path:  Optional[Path] = None
+
+   @classmethod
+   def from_dict(cls, data: Dict) -> 'FileCoordinates':
+      return cls(
+         path   = data["path"],
+         format = data["format"]
+      )
+
+
 
    def size(self) -> int:
       """Get the total number of receivers.
@@ -233,6 +273,7 @@ class FileCoordinates(ReceiverCoordinates):
       Returns:
          int: Number of receivers.
       """
+      self.path = self.path.resolve()
       if self.format == "HDF5":
          with h5py.File(self.path, 'r') as f:
             return f['coordinates'].shape[0]
@@ -246,14 +287,14 @@ class FileCoordinates(ReceiverCoordinates):
             return len(ds.coordinates)
       else:
          raise NotImplementedError(f"Format {self.format} not implemented")
-
-
+      
    def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
       """Get coordinate bounds without loading full dataset.
       
       Returns:
          Tuple[np.ndarray, np.ndarray]: Min and max coordinates.
       """
+      self.path = self.path.resolve()
       if self.format == "HDF5":
          with h5py.File(self.path, 'r') as f:
             coords = f['coordinates']
@@ -269,7 +310,6 @@ class FileCoordinates(ReceiverCoordinates):
       else:
          raise NotImplementedError(f"Format {self.format} not implemented")
 
-
    def get(self, indices) -> np.ndarray:
       """Get coordinates for specified indices.
       
@@ -279,30 +319,32 @@ class FileCoordinates(ReceiverCoordinates):
       Returns:
          np.ndarray: Coordinate array for requested receivers.
       """
+      self.path = self.path.resolve()
       if self.format == "HDF5":
          with h5py.File(self.path, 'r') as f:
             return f['coordinates'][indices]
       elif self.format == "SEGY":
-         import segyio
-         with segyio.open(self.path, 'r', strict=False) as f:
-            # Get coordinates from trace headers
-            coords = np.zeros((len(indices), 3))
-            for i, idx in enumerate(indices):
-               # Get source/receiver coordinates in ft or m
-               coords[i,0] = f.header[idx][segyio.TraceField.SourceX]
-               coords[i,1] = f.header[idx][segyio.TraceField.SourceY]
-               # coords[i,2] = f.header[idx][segyio.TraceField.SourceZ]
+         raise NotImplementedError("SEGY format not implemented")
+#          import segyio
+#          with segyio.open(self.path, 'r', strict=False) as f:
+#             # Get coordinates from trace headers
+#             coords = np.zeros((len(indices), 3))
+#             for i, idx in enumerate(indices):
+#                # Get source/receiver coordinates in ft or m
+#                coords[i,0] = f.header[idx][segyio.TraceField.SourceX]
+#                coords[i,1] = f.header[idx][segyio.TraceField.SourceY]
+#                # coords[i,2] = f.header[idx][segyio.TraceField.SourceZ]
 
-# TODO: get receiver depth from SEGY header
-# TODO: add unit system and convert to project units
+# # TODO: get receiver depth from SEGY header
+# # TODO: add unit system and convert to project units
 
-            # Convert to km if in m, or kft if in ft
-            if f.header[0][segyio.TraceField.CoordinateUnits] == 1: # m
-               coords /= 1000.0  # Convert m to km
-            else: # ft
-               coords /= 1000.0  # Convert ft to kft
+#             # Convert to km if in m, or kft if in ft
+#             if f.header[0][segyio.TraceField.CoordinateUnits] == 1: # m
+#                coords /= 1000.0  # Convert m to km
+#             else: # ft
+#                coords /= 1000.0  # Convert ft to kft
                
-            return coords
+#             return coords
       elif self.format == "asdf":
          import pyasdf
          with pyasdf.ASDFDataSet(self.path, mode='r') as ds:
@@ -310,21 +352,16 @@ class FileCoordinates(ReceiverCoordinates):
       else:
          raise NotImplementedError(f"Format {self.format} not implemented")
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
+      rel_path = self.path.relative_to(self._proj_path)
       return {
-         "kind": "file",
-         "path": str(self.path),
+         "_type":  self.__class__.__name__,
+         "path":   str(rel_path),
          "format": self.format
       }
 
-   @classmethod
-   def from_dict(cls, data: Dict) -> 'FileCoordinates':
-      return cls(
-         path=data["path"],
-         format=data["format"]
-      )
 
-
+@register_class
 @dataclass(kw_only=True)
 class GridCoordinates(ReceiverCoordinates):
    """Receiver coordinates defined by a Cartesian grid.
@@ -346,10 +383,10 @@ class GridCoordinates(ReceiverCoordinates):
       
       Args:
          indices: Can be:
-            - None: Return all coordinates
-            - int: Single flat index into the coordinate array
-            - slice: Slice of flat indices
-            - List[int]: List of flat indices
+            - None:        Return all coordinates
+            - int:         Single flat index into the coordinate array
+            - slice:       Slice of flat indices
+            - List[int]:   List of flat indices
             - List[slice]: Tensor indices directly into the grid dimensions
             
       Returns:
@@ -391,10 +428,10 @@ class GridCoordinates(ReceiverCoordinates):
       else:
          raise ValueError("Invalid indices type")
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       return {
-         "kind": "grid", 
-         "grid": self.grid.to_dict()
+         "_type": self.__class__.__name__,
+         "grid":  self.grid.__dict__()
       }
    
    @classmethod
@@ -404,6 +441,7 @@ class GridCoordinates(ReceiverCoordinates):
       )
 
 
+@register_class
 @dataclass(kw_only=True)
 class ArrayCoordinates(ReceiverCoordinates):
    """Receiver coordinates stored as an xarray/numpy array.
@@ -432,22 +470,17 @@ class ArrayCoordinates(ReceiverCoordinates):
    def size(self) -> int:
       return len(self.coordinates)
 
-
    def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
       return (self.coordinates.min(dim='receiver').values,
               self.coordinates.max(dim='receiver').values)
 
-
    def slice(self, indices) -> np.ndarray:
       return self.coordinates[indices].values
-
 
    def get(self, indices: int) -> np.ndarray:
       return self.coordinates[indices].values
 
-
-   def to_file(self, 
-               path: Union[str, Path], 
+   def to_file(self, file_name: Union[str, Path],
                format: Optional[Literal["HDF5", "asdf", "SEGY"]] = None) -> FileCoordinates:
       """Write coordinates to file and return FileCoordinates object.
       
@@ -455,15 +488,19 @@ class ArrayCoordinates(ReceiverCoordinates):
          FileCoordinates: FileCoordinates object.
       """
       if format is None:
-         if path.endswith(".h5") or path.endswith(".hdf5"):
+         if file_name.endswith(".h5") or file_name.endswith(".hdf5"):
             format = "HDF5"
-         elif path.endswith(".segy"):
+         elif file_name.endswith(".segy"):
             format = "SEGY"
-         elif path.endswith(".asdf"):
+         elif file_name.endswith(".asdf"):
             format = "asdf"
          else:
-            raise ValueError(f"Unknown coordinates file extension: {path}")
+            raise ValueError(f"Unknown coordinates file extension: {file_name}")
 
+      path = self._path/file_name
+      if not path.parent.exists():
+         path.parent.mkdir(parents=True)
+      
       if format == "HDF5":
          with h5py.File(path, 'w') as f:
             f.create_dataset('coordinates', data=self.coordinates.values)
@@ -474,10 +511,9 @@ class ArrayCoordinates(ReceiverCoordinates):
          
       return FileCoordinates(path=path, format=format)
 
-
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       return {
-         "kind": "array",
+         "_type": self.__class__.__name__,
          "coords": self.coordinates.values.tolist()
       }
    
@@ -504,103 +540,227 @@ class ReceiverGroup:
    written to the same output file.
    
    Attributes:
-      name (str):                             String identifier for this receiver group.
-      device (ReceiverDevice):                Device defining receiver type and components.
-      frame (str):                            Coordinate frame for measurements ("physical" or "reference").
-      coordinates (ReceiverCoordinates):      Coordinates defining receiver locations.
-      signals (Optional[SignalFromFile]): Optional signals for adjoint calculations.
+      name (str):                            String identifier for this receiver group.
+      device (ReceiverDevice):               Device defining receiver type and components.
+      frame (str):                           Coordinate frame for measurements ("physical" or "reference").
+      coordinates (ReceiverCoordinates):     Coordinates defining receiver locations.
    """
    name:         str = field(default="")
    device:       ReceiverDevice = field(default_factory=ReceiverDevice)
    frame:        Literal["physical", "reference"] = "physical"
    coordinates:  ReceiverCoordinates = field(default_factory=ReceiverCoordinates)
-   signals:      Optional[SignalFromFile] = None
-   
-
-   def signal(self, irecv: int) -> Wavelet:
-      """Retrieves the signal for a specific receiver.
-      
-      Used in adjoint calculations where receivers act as sources.
-      
-      Args:
-         irecv (int): 1-based index of the receiver.
-         
-      Returns:
-         Wavelet: The signal associated with the specified receiver.
-      """
-      return self.signals.get(irecv)
-      
+   _proj_path:   Optional[Path] = None
+   _rel_path:    Optional[Path] = None
 
    @property
    def size(self):
       return self.coordinates.size()
 
-
    # TODO: option to correct signature for device response
    # TODO: method to define receviers
-   # TODO: method to attach signals
 
    def __init__(self, 
                 name: str, 
                 device: ReceiverDevice, 
-                coordinates: Union[np.ndarray, xr.DataArray, str, Grid], 
+                coordinates: Union[np.ndarray, xr.DataArray, str, Grid, ReceiverCoordinates], 
                 frame: str = "physical") -> None:
+      coords = self._clean_coordinates(coordinates)
       self.name = name
       self.device = device
-      if isinstance(coordinates, list):
-         coordinates = np.array(coordinates)
-      if isinstance(coordinates, np.ndarray) or \
-         isinstance(coordinates, xr.DataArray):
-         self.coordinates = ArrayCoordinates(coordinates=coordinates)
-      elif isinstance(coordinates, str):
-         if coordinates.endswith(".h5") or coordinates.endswith(".hdf5"):
-            self.coordinates = FileCoordinates(path=coordinates, format="HDF5")
-         elif coordinates.endswith(".segy"):
-            self.coordinates = FileCoordinates(path=coordinates, format="SEGY")
-         elif coordinates.endswith(".asdf"):
-            self.coordinates = FileCoordinates(path=coordinates, format="asdf")
-         else:
-            raise ValueError(f"Unknown coordinates file extension: {coordinates}")
-      elif isinstance(coordinates, Grid):
-         self.coordinates = GridCoordinates(grid=coordinates)
-      else:
-         raise ValueError(f"Unknown coordinates type: {type(coordinates)}")
       self.frame = frame
+      self.coordinates = coords
 
+   @staticmethod
+   def _clean_coordinates(coords):
+      if isinstance(coords, list):
+         coords = np.array(coords)
 
-   def to_dict(self) -> Dict:
+      # Allow coordinates to be defined either as a ReceiverCoordinates object 
+      # various other reasonble ways:
+      if isinstance(coords, ReceiverCoordinates):
+         return coords
+      elif isinstance(coords, np.ndarray) or \
+         isinstance(coords, xr.DataArray):
+         out = ArrayCoordinates(coordinates=coords)
+      elif isinstance(coords, str):
+         if coords.endswith(".h5") or coords.endswith(".hdf5"):
+            out = FileCoordinates(path=coords, format="HDF5")
+         elif coords.endswith(".segy"):
+            out = FileCoordinates(path=coords, format="SEGY")
+         elif coords.endswith(".asdf"):
+            out = FileCoordinates(path=coords, format="asdf")
+         else:
+            raise ValueError(f"Unknown coordinates file extension: {coords}")
+      elif isinstance(coords, Grid):
+         out = GridCoordinates(grid=coords) 
+      else:
+         raise ValueError(f"Unknown coordinates type: {type(coords)}")
+      return out
 
-      if isinstance(self.coordinates, ArrayCoordinates):
-         if self.coordinates.size() > 10:
-            self.coordinates = self.coordinates.to_file("./coordinates.h5", "HDF5")
+   def __dict__(self) -> Dict:
+      coords = self.coordinates
+      if isinstance(coords, ArrayCoordinates):
+         if coords.size() > 10:
+            dump = coords.to_file(file_name ='coords.h5', 
+                                  format    = "HDF5")
+            dump._set_path(proj_path = self._proj_path, 
+                           rel_path  = self._rel_path/self.name)
+            self.coordinates = dump
 
       return {
-         "name": self.name,
-         "device": self.device.to_dict(),
-         "frame": self.frame,
-         "coordinates": self.coordinates.to_dict(),
-         **({"signals": self.signals.to_dict()} if self.signals else {})
+         "name":        self.name,
+         "device":      self.device.__dict__(),
+         "frame":       self.frame,
+         "coordinates": self.coordinates.__dict__(),
       }
-
 
    @classmethod
    def from_dict(cls, data: Dict) -> 'ReceiverGroup':
-      # Create coordinates based on kind
-      coord_data = data["coordinates"]
-      if coord_data["kind"] == "file":
-         coordinates = FileCoordinates.from_dict(coord_data)
-      elif coord_data["kind"] == "grid":
-         coordinates = GridCoordinates.from_dict(coord_data)  
-      elif coord_data["kind"] == "array":
-         coordinates = ArrayCoordinates.from_dict(coord_data)
-      else:
-         raise ValueError(f"Unknown coordinates kind: {coord_data['kind']}")
+      coordinates = ReceiverCoordinates.from_dict(data["coordinates"])
          
       return cls(
          name        = data["name"],
          device      = ReceiverDevice.from_dict(data["device"]),
          frame       = data["frame"],
          coordinates = coordinates,
-         signals   = SignalFromFile.from_dict(data["signals"]) if "signals" in data else None
       )
+   
+   def _set_path(self, proj_path: Path, rel_path: Path):
+      self._proj_path = proj_path
+      self._rel_path  = rel_path/self.name
+      if isinstance(self.coordinates, ReceiverCoordinates):
+         self.coordinates._set_path(proj_path = proj_path, 
+                                    rel_path  = rel_path/self.name)
+
+   @property
+   def _path(self) -> Path:
+      return self._proj_path/self._rel_path
+
+
+
+
+# class ReceiverPlotter:
+#    """Class for plotting receiver groups and devices."""
+   
+#    def plot_group(self, 
+#                   group: ReceiverGroup, 
+#                   ax: Optional[plt.Axes] = None,
+#                   projection: Optional[Literal['2d', '3d']] = None,
+#                   **kwargs) -> plt.Axes:
+#       """Plot receiver locations for a single group.
+      
+#       Args:
+#          group: ReceiverGroup to plot.
+#          ax: Matplotlib axes to plot on. If None, a new figure will be created.
+#          projection: '2d' or '3d'. If None, will be inferred from coordinates.
+#          **kwargs: Additional keyword arguments to pass to the scatter function.
+         
+#       Returns:
+#          Matplotlib axes containing the plot.
+#       """
+#       if ax is None:
+#          fig = plt.figure()
+#          if projection is None:
+#             projection = '3d' if group.coordinates.coordinates.shape[1] == 3 else '2d'
+#          if projection == '2d':
+#             ax = fig.add_subplot()
+#          else:
+#             ax = fig.add_subplot(projection='3d')
+      
+#       coords = group.coordinates.coordinates
+#       if isinstance(coords, xr.DataArray):
+#          coords = coords.values
+      
+#       if coords.shape[1] == 2:
+#          ax.scatter(coords[:,0], coords[:,1], **kwargs)
+#          ax.set_xlabel('X')
+#          ax.set_ylabel('Z')
+#       else:
+#          ax.scatter(coords[:,0], coords[:,1], coords[:,2], **kwargs)
+#          ax.set_xlabel('X')
+#          ax.set_ylabel('Y')  
+#          ax.set_zlabel('Z')
+         
+#       ax.set_title(f"Receiver Group: {group.name}")
+      
+#       return ax
+
+#    def plot_groups(self,
+#                    groups: List[ReceiverGroup],
+#                    ax: Optional[plt.Axes] = None,
+#                    projection: Optional[Literal['2d', '3d']] = None,
+#                    **kwargs) -> plt.Axes:
+#       """Plot receiver locations for multiple groups.
+      
+#       Args:
+#          groups: List of ReceiverGroups to plot.
+#          ax: Matplotlib axes to plot on. If None, a new figure will be created.  
+#          projection: '2d' or '3d'. If None, will be inferred from coordinates.
+#          **kwargs: Additional keyword arguments to pass to the scatter function.
+         
+#       Returns:  
+#          Matplotlib axes containing the plot.
+#       """
+#       if ax is None:
+#          fig = plt.figure()
+#          if projection is None:
+#             projection = '3d' if groups[0].coordinates.coordinates.shape[1] == 3 else '2d'
+#          if projection == '2d':  
+#             ax = fig.add_subplot()
+#          else:
+#             ax = fig.add_subplot(projection='3d')
+            
+#       for group in groups:
+#          self.plot_group(group, ax=ax, **kwargs)
+         
+#       ax.set_title("Receiver Groups")
+      
+#       return ax
+
+#    def plot_device(self,
+#                    device: ReceiverDevice,
+#                    ax: Optional[plt.Axes] = None,
+#                    **kwargs) -> plt.Axes:  
+#       """Plot a schematic of a receiver device.
+      
+#       Args:
+#          device: ReceiverDevice to plot.
+#          ax: Matplotlib axes to plot on. If None, a new figure will be created.
+#          **kwargs: Additional keyword arguments to pass to the plotting functions.
+         
+#       Returns:
+#          Matplotlib axes containing the plot.  
+#       """
+#       if ax is None:
+#          fig, ax = plt.subplots()
+         
+#       if isinstance(device, ReceiverNode):
+#          # Plot a point for a node receiver  
+#          ax.scatter(0, 0, **kwargs)
+#       elif isinstance(device, ReceiverNodeArray):
+#          # Plot points for each node in the array
+#          for offset in device.offsets:
+#             ax.scatter(offset[0], offset[1], **kwargs) 
+#       elif isinstance(device, ReceiverFiber):
+#          # Plot a line for a fiber
+#          x = [0, device.L_gauge]
+#          y = [0, 0]  
+#          ax.plot(x, y, **kwargs)
+         
+#          # Add points for each gauge  
+#          dx = device.L_gauge / (device.n_gauge - 1)
+#          for i in range(device.n_gauge):
+#             ax.scatter(i*dx, 0, color='red', **kwargs)
+#       else:
+#          raise ValueError(f"Unknown receiver device type: {type(device)}")
+         
+#       # Set title and labels  
+#       ax.set_title(f"Receiver Device: {device.name}")  
+#       ax.set_xlabel('X')
+#       ax.set_ylabel('Y')
+      
+#       # Set equal aspect ratio 
+#       ax.set_aspect('equal')
+      
+#       return ax
    

@@ -28,6 +28,8 @@ try:
 except ImportError:
     distro = None
 
+__all__ = ["SystemInfo"]
+
 # Configure logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -47,11 +49,7 @@ class SystemInfo:
     A class to gather system information such as OS, CPU, GPU, and
     certain pre-installed software versions.
     """
-
     def __init__(self):
-        """
-        Constructor.
-        """
         logger.debug("Initializing SystemInfo...")
 
     def get_os_info(self) -> Dict[str, str]:

@@ -1,5 +1,5 @@
-from .project import *  # noqa
-from .migrate_version import *  # noqa
+from .project           import *  # noqa
+from .migrate_version   import *  # noqa
 
 __all__ = ['project', 'migrate_version']
 __all__ += project.__all__

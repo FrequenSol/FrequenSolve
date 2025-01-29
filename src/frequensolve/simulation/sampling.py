@@ -20,15 +20,15 @@ class DiscreteSampling(Sampling):
    Attributes:
       freq (List[float]): The frequencies.
    """
-   freq: List[float]
+   f_list: List[float]
 
    @property
    def nfreq(self):
-      return len(self.freq)
+      return len(self.freqs)
    
-   def to_dict(self) -> dict:
+   def __dict__(self) -> dict:
       return {
-         "freq": self.freq,
+         "f_list": self.f_list,
       }
 
 
@@ -64,11 +64,11 @@ class UniformSweepSampling(Sampling):
       return int(2*(self.nfreq - 1))
       
    @property
-   def times(self):
+   def t_list(self):
       return np.linspace(0,self.T,self.ntime+1)
       
    @property
-   def freq(self):
+   def f_list(self):
       return np.linspace(0,self.f_max,self.nfreq)
       
    @property
@@ -85,14 +85,14 @@ class UniformSweepSampling(Sampling):
       return int(2*(self.nFreq - 1))
       
    @property
-   def Times(self):
+   def T_list(self):
       return np.linspace(0,self.T,self.nTime+1)
       
    @property
    def dT(self):
      return self.T / self.nTime
      
-     
+
    def cutoff(self, Tf: Optional[float] = None):
       """Cutoff the time-domain sampling to a specified maximum time.
 
@@ -103,7 +103,7 @@ class UniformSweepSampling(Sampling):
          tuple: The number of time samples and the maximum time.
       """
       if Tf:
-         Tl  = self.Times
+         Tl  = self.T_list
          nTf = np.searchsorted(Tl, Tf, side='left')
          nTf = np.minimum(nTf,self.nTime)
          return nTf, Tl[nTf]
@@ -111,7 +111,7 @@ class UniformSweepSampling(Sampling):
          return self.nTime, self.T
       
 
-   def to_dict(self) -> dict:
+   def __dict__(self) -> dict:
       return {
          "f_min": self.f_min,
          "f_max": self.f_max,

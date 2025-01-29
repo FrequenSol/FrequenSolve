@@ -5,6 +5,7 @@ __all__ = ['input_parser', 'report_builder']
 
 try:
    from .paraview_wrapper import *
+   __all__ += ["paraview_wrapper"]
 except ModuleNotFoundError as e:
    #print("paraview_wrapper requires calling with pvpython (packaged with Paraview)")
    pass

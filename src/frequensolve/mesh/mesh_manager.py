@@ -1,46 +1,14 @@
 """Python structures defining mesh API"""
 
 from dataclasses import dataclass
-from typing      import List, Dict, Optional, Union
+from typing      import List, Dict, Optional, Union, Tuple
+from pathlib     import Path
 
 from ..seismic.layered_model import *  # noqa
-from ..simulation.config     import *  # noqa
 from .mesh                   import *  # noqa
+from .mesh_generators        import *  # noqa
 
-__all__ = ['HexMeshGenerator','MeshParallelism',
-           'MeshAdaptor','MeshManager']
-
-
-@dataclass
-class HexMeshGenerator:
-   """Generates a hexahedral mesh
-
-   Attributes:
-      n (List[int]): number of elements in each direction
-      model (LayeredModel): The model to use for generating the mesh
-   """
-   n:       List[int]
-   model:   LayeredModel
-   
-   def to_dict(self) -> Dict:
-      if self.model.dimension == 2:
-         x_limits = self.model.x_limits
-         z_limits = self.model.z_limits
-         l_bound = [x_limits[0], z_limits[0]]
-         u_bound = [x_limits[1], z_limits[1]]
-      else:
-         x_limits = self.model.x_limits
-         y_limits = self.model.y_limits
-         z_limits = self.model.z_limits
-         l_bound = [x_limits[0], y_limits[0], z_limits[0]]
-         u_bound = [x_limits[1], y_limits[1], z_limits[1]]
-
-      return {
-         "type": "hex_mesh_generator",
-         "n": self.n,
-         "l_bound": l_bound,
-         "u_bound": u_bound,
-      }
+__all__ = ['MeshParallelism','MeshAdaptor','MeshManager']
 
      
 @dataclass
@@ -49,7 +17,7 @@ class MeshParallelism:
    ranks_per_part:   Optional[int]  = None
    partitioner:      Optional[str]  = None
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       return {
          "distribute": self.distribute,
          **({"ranks_per_part": self.ranks_per_part} if self.ranks_per_part else {}),
@@ -78,23 +46,23 @@ class MeshAdaptor:
       smooth_refs (Optional[bool]): Do additional refinements to unconstrain element DOFs
    """
    min_epw:          float
-   adapt_sources:    Optional[int  ] = None # 2
-   adapt_receivers:  Optional[int  ] = None # 0
+   adapt_sources:    Optional[int]   = None # 2
+   adapt_receivers:  Optional[int]   = None # 0
    jump_tolerance:   Optional[float] = None # 0.2
    jump_factor:      Optional[float] = None # 1.0
-   smooth_refs:      Optional[bool ] = None # False
+   smooth_refs:      Optional[bool]  = None # False
 #   adapt_order:      bool  = False
 #   f_low:            float = 4.0
 #   f_med:            float = 8.0
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       return {
          "min_epw": self.min_epw,
-         **({"adapt_sources": self.adapt_sources} if self.adapt_sources else {}),
+         **({"adapt_sources":   self.adapt_sources}   if self.adapt_sources   else {}),
          **({"adapt_receivers": self.adapt_receivers} if self.adapt_receivers else {}),
-         **({"jump_tolerance": self.jump_tolerance} if self.jump_tolerance else {}),
-         **({"jump_factor": self.jump_factor} if self.jump_factor else {}),
-         **({"smooth_refs": self.smooth_refs} if self.smooth_refs else {})
+         **({"jump_tolerance":  self.jump_tolerance}  if self.jump_tolerance  else {}),
+         **({"jump_factor":     self.jump_factor}     if self.jump_factor     else {}),
+         **({"smooth_refs":     self.smooth_refs}     if self.smooth_refs     else {})
       }
    
    @classmethod
@@ -115,16 +83,17 @@ class MeshManager:
 
    Attributes:
       mesh (Optional[Mesh]): The mesh object
-      mesh_generator (Optional[HexMeshGenerator]): The mesh generator object
+      mesh_generator (Optional[BaseMeshGenerator]): The mesh generator object
       parallel (Optional[MeshParallelism]): Mesh parallelism options
       adapt (Optional[MeshAdaptor]): Mesh adaptivity options
    """
-   mesh:           Union[Mesh, HexMeshGenerator] = None
-   mesh_file:      Optional[str] = None
-   mesh_format:    Optional[str] = None
+   mesh:           Optional[Union[Mesh, BaseMeshGenerator]] = None
+   mesh_file:      Optional[str]             = None
+   mesh_format:    Optional[str]             = None
    parallel:       Optional[MeshParallelism] = None
    adapt:          Optional[MeshAdaptor]     = None
-   
+   _proj_path:     Optional[Path]            = None
+   _rel_path:      Optional[Path]            = None
    def set_adapt(self,
                  min_epw:         float,
                  adapt_sources:   Optional[int]   = None,
@@ -164,13 +133,51 @@ class MeshManager:
       self.parallel = MeshParallelism(distribute     = distribute,
                                       ranks_per_part = ranks_per_part,
                                       partitioner    = partitioner)
+      
+   @classmethod
+   def from_dict(cls, data: Dict) -> 'MeshManager':
+      manager = cls()
+      
+      # From file
+      mesh_file = data.get("mesh_file")
+      mesh_format = data.get("mesh_format")
+      if mesh_file is not None and mesh_format is not None:
+         manager.mesh_file   = mesh_file
+         manager.mesh_format = mesh_format
+         manager.mesh        = Mesh.read_mesh(mesh_file, mesh_format)
+         
+      # From generator
+      if "generator" in data:
+         manager.mesh = BaseMeshGenerator.from_dict(data["generator"])
+         
+      # Parallel
+      if "parallel" in data:
+         p = data["parallel"]
+         manager.set_parallel(
+            distribute     = p["distribute"],
+            ranks_per_part = p.get("ranks_per_part"),
+            partitioner    = p.get("partitioner")
+         )
+         
+      if "adapt" in data:
+         a = data["adapt"]
+         manager.set_adapt(
+            min_epw         = a["min_epw"],
+            adapt_sources   = a.get("adapt_sources", 0),
+            adapt_receivers = a.get("adapt_receivers", 0), 
+            jump_tolerance  = a.get("jump_tolerance"),
+            jump_factor     = a.get("jump_factor"),
+            smooth_refs     = a.get("smooth_refs", False)
+         ) 
+         
+      return manager
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       if self.adapt is None:
          self.set_adapt(min_epw = 2.0)
          
       mesh_dict = {
-         "adapt": self.adapt.to_dict(),
+         "adapt": self.adapt.__dict__(),
       }
 
       # Mesh determined by file
@@ -180,53 +187,27 @@ class MeshManager:
                "'mesh_file' and 'mesh_format' must be provided"
          mesh_dict["mesh_file"]   = self.mesh.file
          mesh_dict["mesh_format"] = self.mesh.format
-      if isinstance(self.mesh, HexMeshGenerator):
-         mesh_dict["generator"] = self.mesh.to_dict()
+
+      # Mesh determined by generator (defined in backend)
+      elif isinstance(self.mesh, BaseMeshGenerator):
+         mesh_dict["generator"] = self.mesh.__dict__()
+
+      # Write mesh to file (if mesh is a Mesh object)
       elif isinstance(self.mesh, Mesh):
-         self.mesh.write_mesh(self.mesh.file, self.mesh.format)
-         mesh_dict["mesh_file"]   = self.mesh.file
-         mesh_dict["mesh_format"] = self.mesh.format
+         path = self._path/"mesh"
+         self.mesh.write_mesh(path,"hp3d")
+         mesh_dict["mesh_file"]   = path.relative_to(self._proj_path)
+         mesh_dict["mesh_format"] = "hp3d"
       
       if self.parallel:
-         mesh_dict["parallel"] = self.parallel.to_dict()
+         mesh_dict["parallel"] = self.parallel.__dict__()
          
       return mesh_dict
    
-   @classmethod
-   def from_dict(cls, sim: SimulationConfig, data: Dict) -> 'MeshManager':
-      manager = cls()
-      
-      # From file
-      mesh_file = data.get("mesh_file")
-      mesh_format = data.get("mesh_format")
-      if mesh_file is not None and mesh_format is not None:
-         manager.mesh_file = mesh_file
-         manager.mesh_format = mesh_format
-         manager.mesh = Mesh.read_mesh(mesh_file, mesh_format)
-         
-      # From generator
-      if "generator" in data:
-         g = data["generator"]
-         manager.mesh = HexMeshGenerator.from_dict(g)
-         
-      # Parallel
-      if "parallel" in data:
-         p = data["parallel"]
-         manager.set_parallel(
-            distribute=p["distribute"],
-            ranks_per_part=p.get("ranks_per_part"),
-            partitioner=p.get("partitioner")
-         )
-         
-      if "adapt" in data:
-         a = data["adapt"]
-         manager.set_adapt(
-            min_epw=a["min_epw"],
-            adapt_sources=a.get("adapt_sources", False),
-            adapt_receivers=a.get("adapt_receivers", False), 
-            jump_tolerance=a.get("jump_tolerance"),
-            jump_factor=a.get("jump_factor"),
-            smooth_refs=a.get("smooth_refs", False)
-         )
-         
-      return manager
+   def _set_path(self, proj_path: Path, rel_path: Path):
+      self._proj_path = proj_path
+      self._rel_path = rel_path
+   
+   @property
+   def _path(self) -> Path:
+      return self._proj_path/self._rel_path

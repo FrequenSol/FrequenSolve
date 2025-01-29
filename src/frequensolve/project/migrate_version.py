@@ -9,6 +9,18 @@ class Version:
    minor: int
    patch: int
 
+   def __init__(self, major: int | None = None, minor: int | None = None, patch: int | None = None):
+      """Initialize Version object.
+      
+      Args:
+         major (int, optional): Major version number. Defaults to 0.
+         minor (int, optional): Minor version number. Defaults to 0.
+         patch (int, optional): Patch version number. Defaults to 0.
+      """
+      self.major = major if major is not None else 0
+      self.minor = minor if minor is not None else 0
+      self.patch = patch if patch is not None else 0
+
    def __lt__(self, other: "Version") -> bool:
       """Compare two versions.
 
@@ -28,46 +40,27 @@ class Version:
       return False
 
 
-def __init__(self, major: int | None = None, minor: int | None = None, patch: int | None = None):
-   """Initialize Version object.
-   
-   Args:
-      major (int, optional): Major version number. Defaults to 0.
-      minor (int, optional): Minor version number. Defaults to 0.
-      patch (int, optional): Patch version number. Defaults to 0.
-   """
-   self.major = major if major is not None else 0
-   self.minor = minor if minor is not None else 0
-   self.patch = patch if patch is not None else 0
-
-
-@classmethod
-def from_string(cls, version_str: str) -> "Version":
-   """Create Version from string.
-   
-   Args:
-      version_str (str): Version string in format "major.minor.patch"
+   @classmethod
+   def from_string(cls, version_str: str) -> "Version":
+      """Create Version from string.
       
-   Returns:
-      Version: New Version object
-   """
-   major, minor, patch = map(int, version_str.split("."))
-   return cls(major, minor, patch)
+      Args:
+         version_str (str): Version string in format "major.minor.patch"
+         
+      Returns:
+         Version: New Version object
+      """
+      major, minor, patch = map(int, version_str.split("."))
+      return cls(major, minor, patch)
 
 
-def current() -> Version:
-   """Get the current version.
+   def current() -> "Version":
+      """Get the current version.
+      
+      Returns:
+         Version: The current version.
+      """
+      return Version.from_string(get_versions()['version'])
    
-   Returns:
-      Version: The current version.
-   """
-   return Version.from_string(get_versions()['version'])
-
-
-def __str__(self) -> str:
-   """Convert Version to string.
-   
-   Returns:
-      str: Version string in format "major.minor.patch"
-   """
-   return f"{self.major}.{self.minor}.{self.patch}"
+   def __str__(self) -> str:
+      return f"{self.major}.{self.minor}.{self.patch}"

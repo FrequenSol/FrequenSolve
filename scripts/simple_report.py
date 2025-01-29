@@ -1,4 +1,5 @@
 import os, sys
+from frequensolve_flat import *
 
 try:
    def add_model_section(section):

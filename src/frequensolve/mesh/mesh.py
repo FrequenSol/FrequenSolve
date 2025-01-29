@@ -3,8 +3,8 @@
 import numpy as np
 
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Set, Union
+from dataclasses import dataclass, field, asdict
+from typing import List, Dict, Optional, Union
 
 __all__ = ['Mesh']
 
@@ -24,7 +24,7 @@ class Vertex:
    """
    coords: np.ndarray
    
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       return {
          "coords": self.coords.tolist()
       }
@@ -86,13 +86,8 @@ class Element:
          raise ValueError(f"Invalid element kind: {self.kind}")
 
    
-   def to_dict(self) -> Dict:
-      return {
-         "vertices": self.vertices,
-         "domain": self.domain,
-         "active": self.active,
-         "kind": self.kind
-      }
+   def __dict__(self) -> Dict:
+      return asdict(self)
 
 
 class Mesh:
@@ -470,3 +465,54 @@ class Mesh:
                i += 1
          else:
             i += 1
+
+
+# import matplotlib.pyplot as plt
+# import matplotlib.collections as mc
+   # def plot(self, ax=None, **kwargs):
+   #    """Plot the mesh.
+      
+   #    Args:
+   #       ax (matplotlib.axes.Axes, optional): Axes to plot on. If not provided, a new figure will be created.
+   #       **kwargs: Additional keyword arguments passed to matplotlib plotting functions.
+   #    """
+   #    if ax is None:
+   #       fig, ax = plt.subplots()
+      
+   #    # Get vertices and elements
+   #    if HAS_CPP:
+   #       vertices = self._cpp_mesh.get_vertices()
+   #       elements = self._cpp_mesh.get_elements()
+   #    else:
+   #       vertices = self._vertices
+   #       elements = self._elements
+      
+   #    # Plot elements
+   #    coords = np.array([v.coords for v in vertices])
+   #    if self.dimension == 2:
+   #       # Collect edges for each subdomain
+   #       edges_by_domain = {}
+   #       for elem in elements:
+   #          if elem.kind == 1:  # Edge
+   #             domain = elem.domain
+   #             if domain not in edges_by_domain:
+   #                edges_by_domain[domain] = []
+   #             edges_by_domain[domain].append(coords[np.array(elem.vertices)-1])
+         
+   #       # Plot edges for each subdomain with shading
+   #       for domain, edges in edges_by_domain.items():
+   #          edge_collection = mc.LineCollection(edges, colors=f"C{domain}", **kwargs)
+   #          ax.add_collection(edge_collection)
+            
+   #    elif self.dimension == 3:
+   #       raise NotImplementedError("3D mesh plotting not yet implemented")
+      
+   #    # Plot vertices
+   #    ax.plot(coords[:,0], coords[:,1], 'ko', markersize=2)
+      
+   #    ax.set_aspect('equal')
+   #    ax.set_xlabel('x')
+   #    ax.set_ylabel('y')
+   #    ax.set_title('Mesh')
+      
+   #    return ax

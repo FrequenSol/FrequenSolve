@@ -43,7 +43,7 @@ class BoundaryCondition:
          pml_constant     = data.get("pml_constant", 20.0)
       )
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       bc_dict = {
          "name": self.name,
          "kind": self.kind,
@@ -124,8 +124,8 @@ class BoundaryConditionManager:
       return cls(label_type=label_type, boundary_conditions=boundary_conditions)
 
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       return {
          "label_type": self.label_type,
-         "boundary_conditions": [bc.to_dict() for bc in self.boundary_conditions]
+         "boundary_conditions": [bc.__dict__() for bc in self.boundary_conditions]
       }

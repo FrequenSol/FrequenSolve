@@ -1,6 +1,7 @@
-from dataclasses import dataclass, field
-from typing      import List, Dict, Optional, Union
-from pathlib     import Path
+from abc          import ABC, abstractmethod
+from dataclasses  import dataclass, field
+from typing       import List, Dict, Optional, Union
+from pathlib      import Path
 
 from ..geometry.grids import * # noqa
 
@@ -8,7 +9,22 @@ __all__ = ['OutputManager', 'ParaviewOutput', 'ReflectivityImage']
 
 
 @dataclass
-class ParaviewOutput:
+class Output(ABC):
+   """Base class for all outputs."""
+   
+
+   @abstractmethod
+   def __dict__(self) -> Dict:
+      pass
+
+   @classmethod
+   @abstractmethod
+   def from_dict(cls, dict: Dict) -> 'Output':
+      pass
+
+
+@dataclass
+class ParaviewOutput(Output):
    """
    Represents the Paraview subsection in the Output section.
 
@@ -18,42 +34,67 @@ class ParaviewOutput:
       prefix (str): The prefix for the Paraview output files.
       upscale (int): The upscale factor for the Paraview output.
    """
-   directory: str = "../output/paraview/"
+   name:       str = "paraview"
+   path:       Optional[Union[str, Path]] = None
    components: List[str] = field(default_factory=lambda: ["pressure"])
-   prefix: str = "paraview"
-   upscale: int = 1
+   upscale:    int = 1
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       return {
-         "directory": self.directory,
+         "name": self.name,
+         "path": self.path,
          "components": self.components,
-         "prefix": self.prefix,
-         "upscale": self.upscale
+         "upscale": self.upscale,
       }
    
    @classmethod
    def from_dict(cls, dict: Dict) -> 'ParaviewOutput':
+      return cls(**dict)
+
+
+@dataclass
+class WavefieldOutput:
+   """
+   Represents the WavefieldOutput subsection in the Output section.
+   """
+   name: str = "wavefield"
+   path: Optional[Union[str, Path]] = None
+   type: str = "grid"
+   grid: CartesianGrid = field(default_factory=CartesianGrid)
+
+   def __dict__(self) -> Dict:
+      return {
+         "name": self.name,
+         "path": self.path,
+         "type": self.type,
+         "grid": self.grid.__dict__()
+      }
+
+   @classmethod
+   def from_dict(cls, dict: Dict) -> 'WavefieldOutput':
       return cls(
-         directory=dict["directory"],
-         components=dict["components"],
-         prefix=dict["prefix"],
-         upscale=dict["upscale"]
+         path=dict["path"],
+         type=dict["type"],
+         grid=CartesianGrid.from_dict(dict["grid"])
       )
+
 
 @dataclass
 class ReflectivityImage:
    """
    Represents the ReflectivityImage subsection in the Output section.
    """
-   path: Union[str, Path]
+   name: str = "reflectivity"
+   path: Union[str, Path] = None
    type: str = "grid"
    grid: CartesianGrid = field(default_factory=CartesianGrid)
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       return {
+         "name": self.name,
          "path": self.path,
          "type": self.type,
-         "grid": self.grid.to_dict()
+         "grid": self.grid.__dict__()
       }
    
    @classmethod
@@ -68,34 +109,32 @@ class ReflectivityImage:
 @dataclass
 class OutputManager:
    """
-   Handles paraview outputs (for now, extensions intended)
+   Manages FrequenSolve outputs.
 
    Attributes:
-      paraview_output (Optional[ParaviewOutput]): The Paraview output configuration. 
+      outputs (List[Output]): List of outputs
    """
-   paraview_outputs: List[ParaviewOutput] = field(default_factory=list)
-   reflectivity_images: List[ReflectivityImage] = field(default_factory=list)
+   outputs: List[Output] = field(default_factory=list)
+
+   def __iadd__(self, output: Output) -> "OutputManager":
+      """Overrides += operator to add output"""
+      self.outputs.append(output)
+      return self
 
 
-   def add_paraview_output(self, pv_out: ParaviewOutput) -> None:
-      self.paraview_outputs.append(pv_out)
-
-
-   def add_reflectivity_image(self, ri: ReflectivityImage) -> None:
-      self.reflectivity_images.append(ri)
-
-
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       return {
-         "paraview_output": [pv_out.to_dict() for pv_out in self.paraview_outputs],
-         "reflectivity_images": [ri.to_dict() for ri in self.reflectivity_images]
+         "paraview":     [pv_out.__dict__() for pv_out in self.outputs if isinstance(pv_out, ParaviewOutput)],
+         "wavefield":    [wf_out.__dict__() for wf_out in self.outputs if isinstance(wf_out, WavefieldOutput)],
+         "reflectivity": [ri_out.__dict__() for ri_out in self.outputs if isinstance(ri_out, ReflectivityImage)]
       }
    
 
    @classmethod
    def from_dict(cls, dict: Dict) -> None:
-      paraview_outputs = [ParaviewOutput.from_dict(pv_out) for pv_out in dict["paraview_output"]]
-      reflectivity_images = [ReflectivityImage.from_dict(ri) for ri in dict["reflectivity_images"]]
-      return cls(paraview_outputs=paraview_outputs, reflectivity_images=reflectivity_images)
+      outputs  = [ParaviewOutput.from_dict(pv_out) for pv_out in dict["paraview"]]
+      outputs += [WavefieldOutput.from_dict(wf_out) for wf_out in dict["wavefield"]]
+      outputs += [ReflectivityImage.from_dict(ri_out) for ri_out in dict["reflectivity"]]
+      return cls(outputs = outputs)
 
    

@@ -28,8 +28,9 @@ class Grid(ABC):
          np.ndarray: Coordinates for each grid point.
       """
       pass
+
    @abstractmethod
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       """Converts the grid to a dictionary representation."""
       pass
 
@@ -154,7 +155,7 @@ class CartesianGrid(Grid):
       else:
          raise ValueError("Grid must have 1, 2, or 3 dimensions")
       
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       """Converts the grid to a dictionary representation.
 
       Returns:

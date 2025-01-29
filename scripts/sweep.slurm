@@ -56,7 +56,7 @@ mkdir -p ./jobs
 for j in $(seq 1 $n_job); do
    off=$((tasks_per_job * ((j-1) % nhosts)))
    echo "ibrun -n $tasks_per_job -o $off ./FS_seismic -nthreads $threads -i $input_file -j $j "
-   ibrun -n $tasks_per_job -o $off ./FS_seismic -nthreads 28 -i $1 -j $j >> ./jobs/job${j}.txt 2>&1 &
+   ibrun -n $tasks_per_job -o $off task_affinity ./FS_seismic -nthreads 28 -i $1 -j $j >> ./jobs/job${j}.txt 2>&1 &
    if [[ $((($j - 1) % nhosts)) -eq $((nhosts - 1)) ]]; then
       wait
       echo "Group done"

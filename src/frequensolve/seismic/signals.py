@@ -29,7 +29,7 @@ class Signal:
    def get(self, i: int):
       raise NotImplementedError("This class must be overwritten by subclasses.")
    
-   def to_dict(self):
+   def __dict__(self):
       raise NotImplementedError("This class must be overwritten by subclasses.")
    
    @classmethod
@@ -60,7 +60,7 @@ class AnalyticalSignal(Signal):
 
       domain = sim.tf_domain
       if domain == "time":
-         samples = sim.samples.times
+         samples = sim.samples.t_list
       else:
          samples = sim.samples.frequencies
 
@@ -84,14 +84,14 @@ class AnalyticalSignal(Signal):
       )
    
 
-   def to_dict(self):
+   def __dict__(self):
       return {
          "type": self.type,
          "kind": self.kind,
          "f_pts": self.f_pts,
-         **({"sigma": self.sigma} if self.sigma else {}),
-         **({"offset": self.offset} if self.offset else {}),
-         **({"phase": self.phase} if self.phase else {})
+         **({"sigma": self.sigma} if self.sigma is not None else {}),
+         **({"offset": self.offset} if self.offset > 0 else {}),
+         **({"phase": self.phase} if self.phase is not None else {})
       }
    
 
@@ -126,7 +126,7 @@ class SignalFromFile(Signal):
    id_format:     Tuple[str,str]       = ("","")
 
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       return {
          "file": str(self.file),
          "file_format": self.file_format,

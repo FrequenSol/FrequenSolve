@@ -5,19 +5,19 @@ from ..simulation.sampling import Sampling
 from .sources import SourceGroup
 from .receivers import ReceiverGroup
 
-__all__ = ['Shot']
+__all__ = ['ShotRecord']
 
 @dataclass
-class Shot:
+class ShotRecord:
    """Container for storing a shot record, including source, receiver info, and field data.
 
-   A Shot may represent frequency-domain (FD) or time-domain (TD) data, along with the
+   A ShotRecord may represent frequency-domain (FD) or time-domain (TD) data, along with the
    sampling info. It is aware of the source, receiver configuration, and raw data arrays.
 
    Attributes:
       type (str): "FD" or "TD" indicating frequency- or time-domain data.
       number (int): Shot number (e.g., source index).
-      samples (Sampling): A Sampling object describing frequency/time ranges.
+      sampling (Sampling): A Sampling object describing frequency/time ranges.
       source (Source): The associated Source object for this shot.
       receiver_group (ReceiverGroup): The associated ReceiverGroup object.
       field (str): Field name (e.g. "pressure", "displacement").
@@ -26,7 +26,7 @@ class Shot:
 
    type:           str
    number:         int
-   samples:        Sampling
+   sampling:       Sampling
    source:         SourceGroup
    receiver_group: ReceiverGroup
    field:          str
@@ -76,11 +76,11 @@ class Shot:
       
       # Optional cutoff time
       Tf = kwargs.get("Tf", None)
-      nTf, Tf = self.samples.cutoff(Tf)  # number of time samples after cutoff
+      nTf, Tf = self.sampling.cutoff(Tf)  # number of time samples after cutoff
       
       n_traces       = group.size
       n_samples      = nTf
-      interval       = int(self.samples.dT * 1e6)  # sample interval in microseconds
+      interval       = int(self.sampling.dT * 1e6)  # sample interval in microseconds
       trace_datetime = datetime.datetime.now()
       
       # Build SEG-Y config

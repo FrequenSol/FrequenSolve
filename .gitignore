@@ -24,6 +24,9 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Depricated
+depricated/
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
@@ -57,7 +60,7 @@ docs/jupyter_execute/
 target/
 
 # Jupyter Notebook
-.ipynb_checkpoints
+#.ipynb_checkpoints
 
 # IPython
 profile_default/

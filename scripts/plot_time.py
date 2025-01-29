@@ -17,8 +17,8 @@ if __name__ == '__main__':
          print(field, source)
          
          if "field" in field:
-            shot = acq.read_shot_TD(field,source)
-            animate_gather( shot,
+            shot_record = acq.read_shot_TD(field,source)
+            animate_gather( shot_record,
                             A     = A,
                             Tf    = 40,
                             cmap  = "RdGy",
@@ -26,13 +26,13 @@ if __name__ == '__main__':
                             figsize = (8,4),
                             interval = 10,
                             save = "movie" )
-            del shot
+            del shot_record
          else:
-               shot = acq.read_shot_TD(field,source)
-               plot_gather(shot,
-                           A     = A,
-                           Tf    = 3.2,
-                           cmap  = 'binary_r',
-                           units = "km" )
-               del shot
+            shot_record = acq.read_shot_TD(field,source)
+            plot_gather(shot_record,
+                        A     = A,
+                        Tf    = 3.2,
+                        cmap  = 'binary_r',
+                        units = "km" )
+            del shot_record
 

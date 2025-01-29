@@ -7,6 +7,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List
 
+__all__ = ["Report", "Figure", "Section"]
+
 
 @dataclass
 class Figure:

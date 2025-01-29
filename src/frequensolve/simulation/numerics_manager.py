@@ -1,4 +1,4 @@
-from dataclasses  import dataclass, field
+from dataclasses  import dataclass, field, asdict
 from typing       import List, Dict, Optional, Literal, Any
 
 __all__ = ['Discretization', 'SolverConfig', 'NumericsManager']
@@ -15,19 +15,10 @@ class Discretization:
    """
    method:        str = "DPG"
    order:         int = 2
-   DPG_alpha:     float = 1.0 
+   DPG_alpha:     float = 1.0
    DPG_enrich:    int = 1
    DPG_penalty:   float = 100
-
-   def to_dict(self) -> Dict[str, Any]:
-      return {
-         "method": self.method,
-         "order": self.order,
-         "DPG_alpha": self.DPG_alpha,
-         "DPG_enrich": self.DPG_enrich,
-         "DPG_penalty": self.DPG_penalty
-      }
-
+   
    @classmethod
    def from_dict(cls, d: Dict[str, Any]) -> "Discretization":
       return cls(
@@ -37,13 +28,16 @@ class Discretization:
          DPG_enrich=d.get("DPG_enrich", 1),
          DPG_penalty=d.get("DPG_penalty", 100)
       )
+   
+   def __dict__(self) -> Dict[str, Any]:
+      return asdict(self)
 
 
 
 @dataclass
 class SolverConfig:
    """
-   Defines solver configuration for the simulation.
+   Defines solver configuration.
 
    Attributes:
       solve_on (Literal["final", "all"]): Whether to solve on the final or all time steps.
@@ -77,7 +71,7 @@ class SolverConfig:
       )
 
 
-   def to_dict(self) -> Dict:
+   def __dict__(self) -> Dict:
       return {
          "solve_on": self.solve_on,
          "max_iter": self.max_iter,
@@ -111,8 +105,5 @@ class NumericsManager:
       )
 
 
-   def to_dict(self) -> Dict:
-      return {
-         "solver": self.solver.to_dict(),
-         "discretization": self.discretization.to_dict()
-      }
+   def __dict__(self) -> Dict:
+      return asdict(self)
