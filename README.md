@@ -33,9 +33,21 @@ FrequenSolve is a fast frequency-domain finite element solver for seismic wave p
    poetry install
    ```
 
-4. Activate the virtual environment:
+4. Create the virtual environment with Python 3.10:
+   ```
+   poetry env use 3.10
+   ```
+
+
+5. Run a shell with the virtual environment activated::
    ```
    poetry shell
+   ```
+
+   If you encounter the error 'The command "shell" does not exist.', install the shell plugin:
+   
+   ```
+   poetry self add poetry-plugin-shell
    ```
 
 ### Installing ParaView (optional)
@@ -46,7 +58,7 @@ ParaView is recommended for visualizing simulation results. Download and install
 
 The project documentation can be built using Sphinx. I'll work on hosting it on readthedocs or similar; for now you can build it on your local machine by:
 
-1. Ensure you have the dependencies installed (via Poetry) and activate the poetry virtual environment (`poetry shell`) or, if you do not wish to activate the virtual environment, prepend `poetry run ` to the following commands.
+1. Ensure you have the dependencies installed (via Poetry using `poetry install --with=dev`) and activate the poetry virtual environment (`poetry shell`) or, if you do not wish to activate the virtual environment, prepend `poetry run ` to the following commands.
 
 2. Navigate to the `docs` directory:
    ```

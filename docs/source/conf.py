@@ -12,7 +12,8 @@ import sys
 project = 'FrequenSolve'
 copyright = '2025, Jacob Badger'
 author = 'Jacob Badger'
-release = '0.1'
+version = '0.1'  # Major + Minor version number
+release = '0.1.1'  # Full version number
 
 # -- Path setup --------------------------------------------------------------
 # If your modules are in src/frequensolve, for example:
@@ -54,6 +55,8 @@ html_css_files = [
 html_theme_options = {
    'collapse_navigation': True,
    'navigation_depth': 3,
+   'display_version': True,
+   'version_dropdown': True,
    # 'titles_only': True
 }
 
