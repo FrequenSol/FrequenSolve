@@ -14,7 +14,7 @@ import logging
 import platform
 import subprocess
 import sys
-from typing import Dict, Union, Optional
+from typing import Dict, Optional, Union
 
 try:
     import psutil
@@ -37,9 +37,7 @@ logger.setLevel(logging.DEBUG)
 # You can configure logging handlers/formatters as needed:
 ch = logging.StreamHandler(sys.stdout)
 ch.setLevel(logging.INFO)
-formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
@@ -49,6 +47,7 @@ class SystemInfo:
     A class to gather system information such as OS, CPU, GPU, and
     certain pre-installed software versions.
     """
+
     def __init__(self):
         logger.debug("Initializing SystemInfo...")
 
@@ -87,12 +86,14 @@ class SystemInfo:
         cpu_info = {}
         cpu_info["machine"] = platform.machine()  # e.g., 'x86_64'
         cpu_info["processor"] = platform.processor()  # e.g., 'Intel(R) Core(TM) i7-...'
-        
+
         # psutil can give more detailed info if installed
         if psutil:
             cpu_info["physical_cores"] = psutil.cpu_count(logical=False)
             cpu_info["logical_cores"] = psutil.cpu_count(logical=True)
-            cpu_info["cpu_freq"] = psutil.cpu_freq()._asdict() if psutil.cpu_freq() else {}
+            cpu_info["cpu_freq"] = (
+                psutil.cpu_freq()._asdict() if psutil.cpu_freq() else {}
+            )
         else:
             # Fallback if psutil is not installed
             logger.warning("psutil not found. CPU details might be limited.")
@@ -115,9 +116,7 @@ class SystemInfo:
         # Try to detect NVIDIA GPU with nvidia-smi
         try:
             cmd = ["nvidia-smi", "-L"]
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, check=False
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 # Sample output might be:
                 # "GPU 0: GeForce GTX 1080 Ti (UUID: GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
@@ -127,7 +126,9 @@ class SystemInfo:
             else:
                 logger.warning("nvidia-smi returned non-zero exit code.")
         except FileNotFoundError:
-            logger.warning("nvidia-smi not found. No NVIDIA GPU detected or driver not installed.")
+            logger.warning(
+                "nvidia-smi not found. No NVIDIA GPU detected or driver not installed."
+            )
         except Exception as e:
             logger.warning(f"Failed to run nvidia-smi: {e}")
 
@@ -172,10 +173,7 @@ class SystemInfo:
         # We can capture both
         try:
             result = subprocess.run(
-                [command_name, "--version"],
-                capture_output=True,
-                text=True,
-                check=False
+                [command_name, "--version"], capture_output=True, text=True, check=False
             )
             if result.returncode == 0:
                 # Many commands show version in stdout, but some in stderr
@@ -201,7 +199,7 @@ class SystemInfo:
             "os_info": self.get_os_info(),
             "cpu_info": self.get_cpu_info(),
             "gpu_info": self.get_gpu_info(),
-            "software_versions": self.get_software_versions()
+            "software_versions": self.get_software_versions(),
         }
         return info
 
@@ -226,4 +224,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

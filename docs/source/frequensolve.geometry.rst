@@ -8,4 +8,3 @@ Frame
    :members:
    :show-inheritance:
    :noindex:
-

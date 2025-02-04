@@ -24,7 +24,7 @@ if [ ! -z "$SLURM_NNODES" ]; then
       module list
       pwd
       date
-   
+
       nodes=$SLURM_NNODES
       tasks=$SLURM_NTASKS
    else
