@@ -1,6 +1,6 @@
+import datetime
 import os
 import sys
-import datetime
 
 # Configuration file for the Sphinx documentation builder.
 #
@@ -10,11 +10,11 @@ import datetime
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
-project = 'FrequenSolve'
-copyright = f'{datetime.datetime.now().year}, Jacob Badger'
-author = 'Jacob Badger'
-version = '0.1'  # Major + Minor version number
-release = '0.1.1'  # Full version number
+project = "FrequenSolve"
+copyright = f"{datetime.datetime.now().year}, Jacob Badger"
+author = "Jacob Badger"
+version = "0.1"  # Major + Minor version number
+release = "0.1.1"  # Full version number
 
 # -- Path setup --------------------------------------------------------------
 # If your modules are in src/frequensolve, for example:
@@ -25,14 +25,14 @@ sys.path.insert(0, os.path.abspath("../../src"))
 
 extensions = [
     "sphinx.ext.autodoc",
-    "sphinx.ext.napoleon",   # For Google/NumPy-style docstrings
-    "sphinx.ext.viewcode",    # Add source code links
-    "sphinx.ext.intersphinx", # Link to other project's documentation
-    "sphinx.ext.mathjax",     # Better math support
-    "sphinx.ext.todo",        # Support for TODO items
-    "myst_parser",           # If you use Markdown
-    "sphinx_copybutton",      # Add copy button to code blocks
-    "sphinx.ext.autosectionlabel", # Allow referring to sections by name
+    "sphinx.ext.napoleon",  # For Google/NumPy-style docstrings
+    "sphinx.ext.viewcode",  # Add source code links
+    "sphinx.ext.intersphinx",  # Link to other project's documentation
+    "sphinx.ext.mathjax",  # Better math support
+    "sphinx.ext.todo",  # Support for TODO items
+    "myst_parser",  # If you use Markdown
+    "sphinx_copybutton",  # Add copy button to code blocks
+    "sphinx.ext.autosectionlabel",  # Allow referring to sections by name
 ]
 
 napoleon_google_docstring = True
@@ -50,9 +50,9 @@ autodoc_typehints_format = "short"  # Use short names for type annotations
 
 # Intersphinx configuration
 intersphinx_mapping = {
-    'python': ('https://docs.python.org/3', None),
-    'numpy': ('https://numpy.org/doc/stable/', None),
-    'scipy': ('https://docs.scipy.org/doc/scipy/', None),
+    "python": ("https://docs.python.org/3", None),
+    "numpy": ("https://numpy.org/doc/stable/", None),
+    "scipy": ("https://docs.scipy.org/doc/scipy/", None),
 }
 
 # -- Options for HTML output -------------------------------------------------
@@ -67,21 +67,21 @@ html_css_files = [
 ]
 
 html_js_files = [
-    'custom.js',
+    "custom.js",
 ]
 
 # HTML options
 html_theme_options = {
-    'logo_only': False,
-    'prev_next_buttons_location': 'bottom',
-    'style_external_links': True,
-    'style_nav_header_background': '#2980B9',
+    "logo_only": False,
+    "prev_next_buttons_location": "bottom",
+    "style_external_links": True,
+    "style_nav_header_background": "#2980B9",
     # Theme options
-    'collapse_navigation': False,
-    'sticky_navigation': True,
-    'navigation_depth': 4,
-    'includehidden': True,
-    'titles_only': False
+    "collapse_navigation": False,
+    "sticky_navigation": True,
+    "navigation_depth": 4,
+    "includehidden": True,
+    "titles_only": False,
 }
 
 # TOC options

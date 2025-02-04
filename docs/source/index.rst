@@ -12,7 +12,7 @@ Key Features
 ------------
 
 - High-performance finite element modeling
-- Support for time-domain and frequency-domain simulations 
+- Support for time-domain and frequency-domain simulations
 - Flexible model building and meshing capabilities
 - Integration with popular data formats and visualization tools
 - Cloud and HPC deployment support
@@ -29,7 +29,7 @@ If you're new to FrequenSolve, we recommend starting with:
 .. toctree::
    :maxdepth: 2
    :caption: User Guide
-   
+
    installation
    quickstart
    tutorials/index
@@ -40,11 +40,11 @@ If you're new to FrequenSolve, we recommend starting with:
    :caption: API Reference
 
    frequensolve
-   
+
 .. toctree::
    :maxdepth: 1
    :caption: Development
-   
+
    contributing
    changelog
 

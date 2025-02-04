@@ -1,16 +1,18 @@
 """Python wrapper for automating ParaView visualization"""
 
-import os, sys
+import os
+import sys
+
 import numpy as np
 
 try:
-   from paraview.simple import * # noqa
+    from paraview.simple import *  # noqa
 except ImportError:
-   raise ImportError(
-      "ParaView is not installed or the ParaView Python API is "
-      "not available. Please install ParaView or add the "
-      f"ParaView Python library to your Python path: {sys.path}"
-   )
+    raise ImportError(
+        "ParaView is not installed or the ParaView Python API is "
+        "not available. Please install ParaView or add the "
+        f"ParaView Python library to your Python path: {sys.path}"
+    )
 
 from dataclasses import dataclass, field
 from typing import List, Optional

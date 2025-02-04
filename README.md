@@ -82,7 +82,7 @@ This library provides a Python API for setting up and running the FrequenSolve s
    > ```console
    > $ poetry self add poetry-plugin-shell
    > ```
-   
+
    > [!WARNING]
    > `poetry shell` doesn't seem to work on some systems, if it fails instead run:
    >

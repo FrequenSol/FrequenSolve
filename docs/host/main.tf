@@ -39,11 +39,11 @@ resource "aws_cloudfront_distribution" "docs" {
   depends_on = [aws_acm_certificate.docs]
   enabled             = true
   default_root_object = "index.html"
-  
+
   origin {
     domain_name = aws_s3_bucket_website_configuration.docs.website_endpoint
     origin_id   = "S3-${aws_s3_bucket.docs.id}"
-    
+
     custom_origin_config {
       http_port              = 80
       https_port             = 443
@@ -51,13 +51,13 @@ resource "aws_cloudfront_distribution" "docs" {
       origin_ssl_protocols   = ["TLSv1.2"]
     }
   }
-  
+
   default_cache_behavior {
     allowed_methods        = ["GET", "HEAD"]
     cached_methods         = ["GET", "HEAD"]
     target_origin_id       = "S3-${aws_s3_bucket.docs.id}"
     viewer_protocol_policy = "redirect-to-https"
-    
+
     forwarded_values {
       query_string = false
       cookies {
@@ -65,13 +65,13 @@ resource "aws_cloudfront_distribution" "docs" {
       }
     }
   }
-  
+
   restrictions {
     geo_restriction {
       restriction_type = "none"
     }
   }
-  
+
   viewer_certificate {
     acm_certificate_arn      = aws_acm_certificate.docs.arn
     ssl_support_method       = "sni-only"
