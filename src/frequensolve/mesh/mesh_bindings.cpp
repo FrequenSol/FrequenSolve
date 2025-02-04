@@ -30,11 +30,11 @@ PYBIND11_MODULE(_mesh, m) {
          std::vector<double> c(r.data(0), r.data(0) + r.shape(0));
          m.add_vertex(c);
       })
-      .def("add_element", [](mesh& m, const std::string& type, 
+      .def("add_element", [](mesh& m, const std::string& type,
                             const std::vector<int>& vertices, int domain) {
          if (type == "edge")
             m.add_element<edge>(vertices, domain);
-         else if (type == "triangle") 
+         else if (type == "triangle")
             m.add_element<triangle>(vertices, domain);
          else if (type == "quad")
             m.add_element<quad>(vertices, domain);
@@ -49,4 +49,4 @@ PYBIND11_MODULE(_mesh, m) {
       .def("get_elements", [](const mesh& m) {
          return m.getElements();
       });
-} 
+}

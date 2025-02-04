@@ -32,7 +32,7 @@ Registry
    :members:
    :show-inheritance:
    :noindex:
-   
+
 Report Builder
 --------------
 

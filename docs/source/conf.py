@@ -39,11 +39,13 @@ napoleon_google_docstring = True
 napoleon_numpy_docstring = False  # or True if you prefer NumPy-style
 napoleon_include_init_with_doc = True
 
-templates_path = ['_templates']
+templates_path = ["_templates"]
 
 exclude_patterns = []
 
-autodoc_typehints = "description"  # Show types in the parameter description instead of inline
+autodoc_typehints = (
+    "description"  # Show types in the parameter description instead of inline
+)
 autodoc_typehints_format = "short"  # Use short names for type annotations
 
 # Intersphinx configuration
@@ -61,7 +63,7 @@ html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]
 
 html_css_files = [
-   "custom.css",  # Relative to the _static directory
+    "custom.css",  # Relative to the _static directory
 ]
 
 html_js_files = [
@@ -84,7 +86,7 @@ html_theme_options = {
 
 # TOC options
 toc_object_entries = True
-toc_object_entries_show_parents = 'hide'
+toc_object_entries_show_parents = "hide"
 
 # Sidebar logo
 html_logo = "_static/logo.png"

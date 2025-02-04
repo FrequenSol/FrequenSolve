@@ -56,4 +56,3 @@ Wavelet
    :members:
    :show-inheritance:
    :noindex:
-

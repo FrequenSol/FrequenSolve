@@ -8,4 +8,3 @@ Model
    :members:
    :show-inheritance:
    :noindex:
-

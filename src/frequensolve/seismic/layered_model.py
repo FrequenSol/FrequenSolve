@@ -1,690 +1,840 @@
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Literal, Optional, Tuple, Union
+
 import numpy as np
 import xarray as xr
+from numpy.typing import ArrayLike
 
-from pathlib      import Path
-from abc          import ABC, abstractmethod
-from dataclasses  import dataclass, field
-from typing       import Optional, List, Literal, Union, Dict
+from frequensolve.geometry.grids import *  # noqa
+from frequensolve.model.model import *  # noqa
+from frequensolve.model.property import *  # noqa
+from frequensolve.util.class_registry import *  # noqa
+from frequensolve.util.named_list import *  # noqa
 
-from ..geometry.grids      import * # noqa
-from ..model.model         import * # noqa
-from ..util.class_registry import *  # noqa
+__all__ = ["SimpleSurface", "Layer", "LayeredModel"]
 
-__all__ = ['Surface', 'ConstantSurface', 'GridSurface',
-            'ConstantLayer','GridLayer','LayeredModel']
+
+# TODO: make a way to work in depth or elevation coordinates
 
 
 # ----------------------------------------------------------------------
 # Surfaces
 # ----------------------------------------------------------------------
-@register_class
 @dataclass(kw_only=True)
-class Surface(ABC):
-   """A base class for defining surfaces in a seismic model.
+class SimpleSurface:
+    """A base class for defining surfaces in a seismic model.
 
-   Attributes:
-      name (str):              Name identifier for the surface. Defaults to "surface".
-      z_ref (float, optional): Reference z-coordinate. Defaults to None.
-      interface (bool):        Whether this is an interface surface. Defaults to True.
-   """
-   name:         str = "surface"
-   z_ref:        Optional[float] = None
-   interface:    bool = True
-   _proj_path:   Optional[Path] = None
-   _rel_path:    Optional[Path] = None
+    Attributes:
+       name (str):
+          Name identifier for the surface.
+       interface (bool):
+          Whether this is an interface surface.
+       elevation_ref (float, optional):
+          Reference elevation.
+       z_phys (Property):
+          Depth of the surface.
+    """
 
-   def __dict__(self):
-      base_dict = { "name": self.name }
-      if self.z_ref is not None:
-         base_dict["z_ref"] = self.z_ref
-      if not self.interface:
-         base_dict["interface"] = False
-      return base_dict
+    name: str = "surface"
+    interface: bool = True
+    z_ref: Optional[float] = None
+    z_phys: Property = field(default_factory=Property)
+    _proj_path: Optional[Path] = None
+    _rel_path: Optional[Path] = None
 
-   @classmethod
-   def from_dict(cls, data: Dict) -> "Surface":
-      class_name = data["_type"]
-      if class_name in class_registry:
-         surface_class = class_registry[class_name]
-         return surface_class.from_dict(data)
-      else:
-         raise ValueError(f"Unknown surface class: {class_name}")
-      
-   def _set_path(self, proj_path: Path, rel_path: Path):
-      self._proj_path = proj_path
-      self._rel_path = rel_path
+    def __init__(
+        self,
+        name: str,
+        interface: bool,
+        z_ref: Optional[float],
+        z_phys: Property,
+        xarr: Optional[xr.DataArray] = None,
+    ):
+        self.name = name
+        self.interface = interface
+        self.z_ref = z_ref
+        self.z_phys = Property(data=z_phys, xarr=xarr)
 
-   @property
-   def _path(self) -> Path:
-      return self._proj_path / self._rel_path
+    @classmethod
+    def from_dict(cls, dict: Dict) -> "SimpleSurface":
+        data = dict["z_phys"]
+        if isinstance(data, float):
+            xarr = None
+        else:
+            xarr = CartesianGrid.from_dict(dict["grid"]).as_xarray()
+        return cls(
+            name=dict["name"],
+            interface=dict.get("interface", True),
+            z_ref=dict.get("z_ref"),
+            z_phys=data,
+            xarr=xarr,
+        )
 
-@register_class
-@dataclass(kw_only=True)
-class ConstantSurface(Surface):
-   """A constant surface defined by a single z-coordinate.
+    def __dict__(self):
+        if self.z_phys.is_constant:
+            type = "ConstantSurface"
+            z_phys = self.z_phys.get()
+        else:
+            type = "GridSurface"
+            file = self._path / (self.name + ".bin")
+            self.z_phys.write(file)
+            z_phys = file.relative_to(self._proj_path)
 
-   Attributes:
-      z_phys (float): The physical z-coordinate of the surface.
-   """   
-   z_phys:   float
+            grid = self.z_phys.grid
 
-   def evaluate(self, x: List[float]):
-      return self.z_phys
-      
-   def get_limits(self):
-      """Get the limits of the surface.
+            # TODO: This is again a nasty hack to get around not specifying dims in Grid
+            #       update both codes to use named dimensions
+            if len(grid.n) == 3:
+                grid.n = grid.n[:1]
+                grid.dx = grid.dx[:1]
+                grid.x0 = grid.x0[:1]
+                grid.x1 = grid.x1[:1]
 
-      Returns:
-         tuple: A tuple containing the minimum and maximum z-coordinates.
-      """
-      return self.z_phys, self.z_phys
-   
-   def plot(self, limits: Optional[List[float]] = None, **kwargs):
-      """Plot the surface."""
-      import matplotlib.pyplot as plt
+        return {
+            "_type": type,
+            "name": self.name,
+            "z_phys": z_phys,
+            **({"z_ref": self.z_ref} if self.z_ref is not None else {}),
+            **({"interface": self.interface} if not self.interface else {}),
+            **({"grid": grid} if not self.z_phys.is_constant else {}),
+        }
 
-      dim = self.grid.dimension
-      if dim == 1:
-         if limits is None:
-            ax = kwargs.get("ax", plt.gca())
-            limits = ax.get_xlim()
-         coords = np.array([x for x in np.linspace(limits[0], limits[1], 100)])
-         plt.plot(coords[:,0], self.data)
-      elif dim == 2:
-         if limits is None:
-            ax = kwargs.get("ax", plt.gca())
-            xlim = ax.get_xlim()
-            ylim = ax.get_ylim()
-         else:
-            limits = np.array(limits).flatten()
-            xlim = limits[0:2]
-            ylim = limits[2:4]
-         coords = np.array([[x, y] for x in np.linspace(xlim[0], xlim[1], 100) 
-                                    for y in np.linspace(ylim[0], ylim[1], 100)])
-         z = np.full(coords.shape[0], self.z_phys)
-         plt.plot_surface(coords[:,0], coords[:,1], z)
-   
-   def __dict__(self):
-      return {
-         "_type": self.__class__.__name__,
-         "name": self.name,
-         "z_phys": self.z_phys,
-         **({"z_ref": self.z_ref} if self.z_ref is not None else {}),
-         **({"interface": self.interface} if not self.interface else {})
-      }
-   
-   @classmethod
-   def from_dict(cls, data: Dict):
-      return cls(
-         name       = data.get("name", "surface"),
-         interface  = data.get("interface", True),
-         z_phys     = data["z_phys"],
-         z_ref      = data.get("z_ref", data["z_phys"])
-      )
+    @property
+    def data(self):
+        return self.z_phys.data
 
-# TODO: method to perturb data
-# TODO: make flag to note if data needs to be written/rewritten
-@register_class
-@dataclass(kw_only=True)
-class GridSurface(Surface):
-   grid:        CartesianGrid
-   file:        Optional[Union[str, Path]]       = None
-   file_format: Optional[Literal["raw", "HDF5"]] = None
-   data:        Optional[np.ndarray]             = None
+    @property
+    def extrema(self):
+        """Get the extreme values (min, max) of the surface.
 
-   def evaluate(self, x: List[float]):
-      raise NotImplementedError("TODO: GridSurface.evaluate")
+        Returns:
+           tuple: A tuple containing the minimum and maximum z-coordinates.
+        """
+        min, max = self.z_phys.extrema
+        min = min.values
+        max = max.values
+        return min, max
 
-   def get_limits(self):
-      """Get the limits of the surface.
+    def _set_path(self, proj_path: Path, rel_path: Path):
+        self._proj_path = proj_path
+        self._rel_path = rel_path
 
-      Returns:
-         tuple: A tuple containing the minimum and maximum z-coordinates.
-      """
-      if self.data is None:
-         self.data = self.read_data()
-      return np.min(self.data), np.max(self.data)
-   
-   def read_data(self):
-      """Read the data from file."""
+    @property
+    def _path(self) -> Path:
+        return self._proj_path / self._rel_path
 
-      if self.file_format is None:
-         if self.file.endswith(".h5"):
-            self.file_format = "HDF5"
-         elif self.file.endswith(".bin"):
-            self.file_format = "raw"
-         else:
-            raise ValueError(f"Unknown file format for {self.file}")
-         
-      if self.file_format == "raw":
-         self.data = np.fromfile(self.file, dtype=np.float32).reshape(self.grid.n)
-      elif self.file_format == "HDF5":
-         import h5py
-         file, dset = self.file.split(":")
-         self.data = h5py.File(file, "r")[dset][()]
+    def perturb(
+        self,
+        std: float,
+        xarr: Optional[xr.DataArray] = None,
+        L0: float = 1.0,
+        nu: float = 1.0,
+        seed: Optional[int] = None,
+    ) -> None:
+        """Perturb the dataset by a Von Karmanstochastic field.
 
-      return self.data
-   
-   def plot(self, **kwargs):
-      """Plot the surface."""
-      import matplotlib.pyplot as plt
+        std (float):
+           Standard deviation of the perturbation
+        xarr (xr.DataArray):
+           Xarray with final shape of the perturbation
+        L0 (float):
+           Characteristic length scale of the perturbation
+        nu (float):
+           Stochastic field smoothness parameter
+           (nu -> 0: less smooth, nu -> 1 more smoother)
+        seed (int):
+           Random seed (for reproducibility)
+        """
+        self.z_phys.stochastic_perturbation(
+            std=std, method="von_karman", xarr=xarr, k0=1 / L0, nu=nu, seed=seed
+        )
 
-      dim = self.grid.dimension
-      if dim == 1:
-         coords = self.grid.get_coords()
-         self.read_data()
-         plt.plot(coords[:,0], self.data)
-      elif dim == 2:
-         coords = self.grid.get_coords()
-         x = coords[:,0].reshape(self.grid.n)
-         y = coords[:,1].reshape(self.grid.n)
-         if self.data is None:
-            data = self.read_data()
-         
-         if "ax" in kwargs:
-            ax = kwargs["ax"]
-         else:
-            fig = plt.figure()
-            ax = fig.add_subplot(111, projection='3d')
-         surf = ax.plot_surface(x, y, self.data, **kwargs)
-         fig.colorbar(surf)
-         ax.set_xlabel('X')
-         ax.set_ylabel('Y') 
-         # ax.set_zlabel('Z')
+    def plot(self, limits: Dict[str, ArrayLike], **kwargs):
+        """Plot the surface."""
+        import matplotlib.pyplot as plt
 
-      if "ax" not in kwargs:
-         plt.show()
+        if self.z_phys.is_constant:
+            dims = sorted(limits.keys())
+            xarr = xr.DataArray(dims=dims, coords=limits)
+            surf = self.z_phys.get(xarr=xarr)
+        else:
+            surf = self.z_phys.get()
 
-   @classmethod
-   def from_dict(cls, data: Dict):
-      return cls(
-         name       = data["name"],
-         interface  = data["interface"],
-         grid       = CartesianGrid.from_dict(data["grid"]),
-         file       = data["file"]
-      )
-   
-   def dump_to_file(self):
-      """Dump the surface data to file."""
-
-      # Write data to file
-      format = self.file_format if self.file_format is not None else "raw"
-      if format == "raw":
-
-         # Get file name, make sure directory exists
-         if self.file is None:
-            self.file = self._path / (self.name + ".bin")
-         if not self.file.parent.exists():
-            self.file.parent.mkdir(parents=True)
-
-         # write data to file
-         self.data.astype(np.float32).tofile(self.file)
-      elif format == "HDF5":
-         import h5py
-
-         # Get file name, make sure directory exists
-         if self.file is None:
-            self.file = self._path / ".h5:" + self.name
-         if not self.file.parent.exists():
-            self.file.parent.mkdir(parents=True)
-
-         file, dset = self.file.split(":")
-         with h5py.File(file, "wa") as f:
-            f.create_dataset(dset, data=self.data.astype(np.float32))
-
-   def __dict__(self):
-      # TODO: check if data needs to be written/rewritten first
-      self.dump_to_file()
-
-      return {
-         "_type":       self.__class__.__name__,
-         "name":        self.name,
-         "interface":   self.interface,
-         "grid":        self.grid.__dict__(),
-         "file":        self.file,
-      }
-   
-   
-# TODO: enable xr.Dataset properties
-@register_class
-@dataclass(kw_only=True)
-class GridLayer(ModelSubdomain):
-   """A layer sampled on a uniform grid.
-
-   Attributes:
-      grid (CartesianGrid): The grid defining the layer.
-      file_format (str):    The format of the file containing the grid data.
-   """
-   grid:          CartesianGrid
-   file_format:   Optional[Literal["raw", "HDF5"]] = None
-   data:          Optional[Dict[str, Union[np.ndarray, xr.DataArray]]] = None
-
-   def read_data(self):
-      """Read the data from file."""
-      import h5py
-
-      if self.file_format is None:
-         if self.file.endswith(".h5"):
-            self.file_format = "HDF5"
-         elif self.file.endswith(".bin"):
-            self.file_format = "raw"
-         else:
-            raise ValueError(f"Unknown file format for {self.file}")
-         
-      if self.data is None:
-         self.data = {}
-      for prop, val in self.properties.items():
-         if isinstance(val, str) or isinstance(val, Path):
-            file, dset = val.split(":")
-            self.data[prop] = h5py.File(file, "r")[dset][()]
-      return self.data
-
-   @classmethod
-   def from_dict(cls, data: Dict):
-      return cls(
-         name          = data["name"],
-         mesh_block_id = data["mesh_block_id"],
-         frame         = data["frame"],
-         properties    = data["properties"],
-         grid          = CartesianGrid.from_dict(data["grid"]),
-         file_format   = data["file_format"]
-      )
-
-   def __dict__(self) -> Dict:
-
-      # If layer defined by array, write to file before writing.
-      if isinstance(self.properties, xr.Dataset):
-         raise NotImplementedError("GridLayer with xr.Dataset properties not yet supported")
-      elif isinstance(self.properties, dict):
-         for prop, val in self.properties.items():
-            if isinstance(val, np.ndarray):
-               self.file_format = "raw"
-
-               file = self._path / (self.name + "__" + prop + ".bin")
-               if not file.parent.exists():
-                  file.parent.mkdir(parents=True)
-
-               val.astype(np.float32).tofile(file)
-
-               # Update property with file path
-               self.properties[prop] = file
-            elif isinstance(val, xr.DataArray):
-               import h5py
-               self.file_format = "HDF5"
-
-               file, dset = self._path / ".h5", self.name + "__" + prop
-               if not file.parent.exists():
-                  file.parent.mkdir(parents=True)
-
-               with h5py.File(file, "wa") as f:
-                  f.create_dataset(dset, data=val.values.astype(np.float32))
-
-               # Update property with file path
-               self.properties[prop] = file
+        show = True
+        if len(surf.dims) == 1:
+            if "ax" in kwargs:
+                ax = kwargs.pop("ax")
+                show = False
             else:
-               raise ValueError(f"Invalid property type: {type(val)}")
-      else:
-         raise ValueError(f"Invalid property type: {type(self.properties)}")
+                fig = plt.figure()
+                ax = fig.gca()
+            ax.plot(surf.coords["x"].values, surf.values, **kwargs)
+        elif len(surf.dims) == 2:
+            x = surf.coords["x"].values
+            y = surf.coords["y"].values
+            z = surf.values
 
-      return {
-         "_type":          self.__class__.__name__,
-         "name":           self.name,
-         "mesh_block_id":  self.mesh_block_id,
-         "frame":          self.frame,
-         "properties":     self.properties,
-         "grid":           self.grid.__dict__(),
-         "file_format":    self.file_format,
-      }
+            if "ax" in kwargs:
+                ax = kwargs.pop("ax")
+                show = False
+            else:
+                fig = plt.figure()
+                ax = fig.add_subplot(111, projection="3d")
 
+            surf = ax.plot_surface(x, y, z, **kwargs)
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            ax.set_zlabel("Z")
 
-@register_class
-@dataclass(kw_only=True)
-class ConstantLayer(ModelSubdomain):
-
-   @classmethod
-   def from_dict(cls, data: Dict):
-      properties = data["properties"]
-      
-      # Verify all property values are floats
-      for name, value in properties.items():
-         if not isinstance(value, (int, float)):
-            raise ValueError(f"Property '{name}' has non-numeric value: {value}")
-            
-      return cls(
-         name          = data["name"],
-         mesh_block_id = data["mesh_block_id"],
-         frame         = data["frame"],
-         properties    = properties
-      )
-
-   def __dict__(self) -> Dict:
-      return {
-         "_type": self.__class__.__name__,
-         "name": self.name,
-         "mesh_block_id": self.mesh_block_id,
-         "frame": self.frame,
-         "properties": self.properties,
-      }
-
-
+        if show:
+            plt.show()
 
 
 # ----------------------------------------------------------------------
 # Model
 # ----------------------------------------------------------------------
-# Helper class for LayeredModel
-@dataclass(kw_only=True)
-class LayerBounds:
-   """Defines the bounding surfaces of a model layer.
+class Layer(ModelSubdomain):
 
-   Attributes:
-      upper (Surface): The upper bounding surface.
-      lower (Surface): The lower bounding surface.
-      layer_id (int):  Unique identifier for the layer.
-   """
-   upper:      Optional[Surface] = None
-   lower:      Optional[Surface] = None
-   layer:      ModelSubdomain
+    def perturb(
+        self,
+        property: Union[str, List[str]],
+        std: float,
+        xarr: Optional[xr.DataArray] = None,
+        L0: float = 1.0,
+        nu: float = 0.5,
+        anisotropy: Optional[List[float]] = None,
+        seed: Optional[int] = None,
+    ) -> None:
+        """Perturb the dataset by a Von Karmanstochastic field.
+
+        This just wraps the stochastic_perturbation method of Property.
+
+        Args:
+           property (str):
+              Name of the property to perturb
+           std (float):
+              Standard deviation of the perturbation
+           xarr (xr.DataArray):
+              Xarray with final shape of the perturbation
+           L0 (float):
+              Characteristic length scale of the perturbation
+           nu (float):
+              Stochastic field smoothness parameter
+              (nu -> 0: less smooth, nu -> 1 more smoother)
+           anisotropy (List[float]):
+              Anisotropic stretching factor for each dimension
+           seed (int):
+              Random seed (for reproducibility)
+        """
+
+        if isinstance(property, str):
+            properties = [property]
+        else:
+            properties = property
+
+        for property in properties:
+            if property not in self.properties:
+                raise ValueError(f"Property '{property}' not found in layer")
+
+            if anisotropy is None:
+                anisotropy = [1.0] * len(self.properties[property].data.dims)
+            self.properties[property].stochastic_perturbation(
+                std=std,
+                method="von_karman",
+                xarr=xarr,
+                k0=1 / L0,
+                nu=nu,
+                anisotropy=anisotropy,
+                seed=seed,
+            )
+
+
+# Helper class for LayeredModel
+@dataclass(kw_only=True, slots=True)
+class LayerBounds:
+    """Defines the bounding surfaces of a model layer.
+
+    Attributes:
+       upper (Surface): The upper bounding surface.
+       lower (Surface): The lower bounding surface.
+       layer_id (int):  Unique identifier for the layer.
+    """
+
+    upper: Optional[SimpleSurface] = None
+    lower: Optional[SimpleSurface] = None
+    layer: Layer
+
+    def __str__(self):
+        out = f"Layer {self.layer.name}\n"
+
+        if self.upper is not None:
+            out += f"  upper: {self.upper.name} (z_ref = {self.upper.z_ref})\n"
+        else:
+            out += "  upper: None\n"
+
+        if self.lower is not None:
+            out += f"  lower: {self.lower.name} (z_ref = {self.lower.z_ref})\n"
+        else:
+            out += "  lower: None\n"
+        return out
+
+    def __repr__(self):
+        return str(self)
 
 
 @register_class
 @dataclass(kw_only=True)
 class LayeredModel(ModelBase):
-   """A class for representing a layered seismic model.  
+    """A class for representing a layered seismic model.
 
-   Attributes:
-      name (str):                         The name of the model.
-      dimension (int):                    Dimension of the model.
-      subdomains (List[ModelSubdomain]):  Model layers.
-      x_limits (List[float]):             X-limits of the model.
-      y_limits (Optional[List[float]]):   Y-limits of the model. (3D only)
-      surfaces (List[Surface]):           Model (simple) surfaces.
-      interface_flag (bool):              Whether to flag interfaces between layers.
-      ordering (Literal["top_down", "bottom_up"]): 
-         Ordering of layers. Defaults to "top_down".
+    Attributes:
+       name (str):                         The name of the model.
+       dimension (int):                    Dimension of the model.
+       subdomains (List[ModelSubdomain]):  Model layers.
+       surfaces (List[Surface]):           Model (simple) surfaces.
+       x_limits (List[float]):             X-limits of the model.
+       y_limits (Optional[List[float]]):   Y-limits of the model. (3D only)
+       interface_flag (bool):              Whether to flag interfaces between layers.
+       ordering (Literal["top_down", "bottom_up"]):
+          Ordering of layers. Defaults to "top_down".
 
-      Note: 
-         A 'surface' must be added at the top and bottom of the model, and at 
-         least one surface must be added between 'layers'.
-   """
-   x_limits:         List[float]
-   y_limits:         Optional[List[float]]           = None
-   surfaces:         List[Surface]                   = field(default_factory=list)
-   ordering:         Literal["top_down","bottom_up"] = "top_down"
-   interface_flag:   bool                            = True
-   _layer_to_surfs:  List[LayerBounds]               = field(default_factory=list)
-   _last_added:      str                             = "none"
-   _proj_path:       Optional[Path] = None
-   _rel_path:        Optional[Path] = None
+       Note:
+          A 'surface' must be added at the top and bottom of the model, and at
+          least one surface must be added between 'layers'.
+    """
 
-   def add_layer(self,
-                 name:              Optional[str] = None,
-                 mesh_block_id:     int = -1,
-                 frame:             str = "physical",
-                 properties:        Optional[dict] = None,
-                 grid:              Optional[CartesianGrid] = None) -> None:
-      """Add a layer to the model.
+    x_limits: List[float]
+    y_limits: Optional[List[float]] = None
+    surfaces: NamedList = field(default_factory=NamedList)
+    ordering: Literal["top_down", "bottom_up"] = "top_down"
+    interface_flag: bool = True
+    _layer_to_surfs: List[LayerBounds] = field(default_factory=list)
+    _last_added: str = "none"
+    _proj_path: Optional[Path] = None
+    _rel_path: Optional[Path] = None
+    _names: List[str] = field(default_factory=list)
 
-      Raises:
-         ValueError: If no surfaces have been added before adding a layer
-         ValueError: If trying to add a layer without adding a surface first
-         ValueError: If trying to add consecutive layers without surfaces between them
-      """
-      if len(self.surfaces) == 0:
-         raise ValueError("Must add at least one surface before adding layers")
-         
-      if self._last_added == "layer":
-         raise ValueError("Must add a surface between consecutive layers")
+    def add_layer(
+        self,
+        name: Optional[str] = None,
+        mesh_block_id: int = -1,
+        frame: str = "physical",
+        properties: Optional[dict] = None,
+        xarr: Optional[xr.DataArray] = None,
+    ) -> None:
+        """Add a layer to the model.
 
-      if grid is None:
-         for prop, val in properties.items():
-            if isinstance(val, str) or isinstance(val, Path):
-               raise ValueError("Must provide grid for grid layers")
-         layer = ConstantLayer(
-                     name          = name,
-                     mesh_block_id = mesh_block_id,
-                     frame         = frame,
-                     properties    = properties
-                  )
-      elif isinstance(grid, CartesianGrid):
-         layer = GridLayer(
-                     name          = name,
-                     mesh_block_id = mesh_block_id,
-                     frame         = frame,
-                     grid          = grid,
-                     properties    = properties
-                  )
-      else:
-         raise ValueError(f"Layer 'type' should be 'constant' or 'grid', provided: {type} ")
-      self.add_subdomain(layer)
-      self.interface_flag = True
+        Args:
+           name (str):
+              Name of the layer.
+           mesh_block_id (int):
+              Unique identifier for the layer.
+           frame (str):
+              Frame of the layer.
+           properties (dict):
+              Properties of the layer.
+           xarr (xr.DataArray, optional):
+              Xarray with final shape of the layer (required for reading file formats
+              where grid is not stored with data)
+        """
+        layer = Layer(
+            name=name,
+            mesh_block_id=mesh_block_id,
+            frame=frame,
+            properties=properties,
+            xarr=xarr,
+        )
+        self += layer
 
-      if self.ordering == "top_down":
-         self._layer_to_surfs.append(LayerBounds(
-            upper = self.surfaces[-1],
-            layer = layer,
-         ))
-      else:
-         self._layer_to_surfs.append(LayerBounds(
-            lower = self.surfaces[-1],
-            layer = layer,
-         ))
-      self._last_added = "layer"
+    def add_surface(
+        self,
+        z: Union[float, str, Path, xr.DataArray],
+        name: str = "surface",
+        z_ref: Optional[float] = None,
+        xarr: Optional[xr.DataArray] = None,
+    ):
+        """Add a surface to the model.
 
+        Args:
+           z (float, str, Path, xr.DataArray):
+              Coordinates of the surface. Can be defined as a float (constant surface),
+              via a file, or as an xr.DataArray (gridded surface).
+           name (str):
+              Name of the surface.
+           z_ref (float):
+              Reference z-coordinate of the surface.
+           xarr (xr.DataArray, optional):
+              Xarray with final shape of the surface.
+        """
 
-   def add_surface(self,
-                   name:       str = "surface",
-                   z:          Optional[float] = None,
-                   z_ref:      Optional[float] = None,
-                   file:       Optional[Union[str, Path]] = None,
-                   grid:       Optional[CartesianGrid] = None) -> None:
-      """Add a surface to the model.
-      
-      Args:
-         name (str):           Name of the surface.
-         z (float):            Physical z-coordinate of the surface.
-         z_ref (float):        Reference z-coordinate of the surface.
-         file (str):           File containing the surface data.
-         grid (CartesianGrid): Grid of the surface (for grid surfaces only).
-      """
+        surface = SimpleSurface(
+            name=name, interface=self.interface_flag, z_ref=z_ref, z_phys=z, xarr=xarr
+        )
+        if z_ref is None:
+            if surface.z_phys.is_constant:
+                surface.z_ref = surface.z_phys.get()
+            else:
+                surface.z_ref = surface.z_phys.mean().values
+        self += surface
 
-      # TODO: check that surfaces are added in monotone order
+    @property
+    def surface_names(self):
+        return [surf.name for surf in self.surfaces]
 
-      if grid is None:
-         if z is None:
-            raise ValueError("Must provide z for 'constant' surfaces")
-         if z_ref is None:
-            z_ref = z
-         surface = ConstantSurface(
-                        name       = name,
-                        interface  = self.interface_flag,
-                        z_ref      = z_ref,
-                        z_phys     = z,
-                     )
-      elif isinstance(grid, CartesianGrid):
-         if file is None:
-            raise ValueError("Must provide file for 'gridded' surfaces")
-         surface = GridSurface(
-                        name       = name,
-                        interface  = self.interface_flag,
-                        z_ref      = z_ref,
-                        grid       = grid,
-                        file       = file
-                     )
-      self.surfaces.append(surface)
-      self.interface_flag = False
+    @property
+    def layer_names(self):
+        return [layer.name for layer in self.layers]
 
-      if self._last_added == "layer":
-         if self.ordering == "top_down":  
-            self._layer_to_surfs.append(LayerBounds(
-               lower = surface,
-               layer = self.subdomains[-1],
-            ))
-         else:
-            self._layer_to_surfs.append(LayerBounds(
-               upper = surface,
-               layer = self.subdomains[-1],
-            ))
+    @property
+    def layers(self):
+        return self.subdomains
 
-      self._last_added = "surface"
-      
-   
-   @property
-   def z_limits(self):
-      z0,_ = self.surfaces[0].get_limits()
-      _,z1 = self.surfaces[-1].get_limits()
-      return [z0, z1]
-                   
+    @property
+    def z_limits(self):
+        z0, _ = self.surfaces[0].extrema
+        _, z1 = self.surfaces[-1].extrema
+        return [z0, z1]
 
-   def add_constant_surfaces(self, z: Union[float, list[float]] = None) -> None:
-      """Add constant surfaces located at listed depths."""
-      if isinstance(z, float):
-         z = [z]
-      for z_phys in z:
-         surface = ConstantSurface(
-                        z = z_phys,
-                        interface = self.interface_flag,
-                     )
-         self.surfaces.append(surface)
-         self.interface_flag = False
-         self._last_added = "surface"
-   
+    def extreme_values(self, property: str) -> Tuple[float, float]:
+        vmin = 1.0e8
+        vmax = -1.0e8
+        for layer in self.layers:
+            if property not in layer.properties:
+                continue
+            min, max = layer.properties[property].extrema
+            vmin = min if min < vmin else vmin
+            vmax = max if max > vmax else vmax
+        return vmin, vmax
 
-   def upper_surface(self, layer: Optional[Union[str, int, ModelSubdomain]] = None) -> Surface:
-      """Returns the top surface of the model or specified layer.
-      
-      Args:
-         layer (str, optional): Name of layer to get top surface for.
-                                If None, returns topmost model surface.
-      
-      Returns:
-         Surface: The top surface.
-      
-      Raises:
-         ValueError: If specified layer is not found.
-      """
-      if layer is None:
-         if self.ordering == "top_down":
-            return self.surfaces[0]
-         else:
-            return self.surfaces[-1]
-      
-      for layer_bounds in self._layer_to_surfs:
-         if isinstance(layer, int):
-            if layer_bounds.layer.mesh_block_id == layer:
-               return layer_bounds.upper
-         elif isinstance(layer, str):
-            if layer_bounds.layer.name == layer:
-               return layer_bounds.upper
-         elif isinstance(layer, ModelSubdomain):
-            if layer_bounds.layer == layer:
-               return layer_bounds.upper
-         else:
-            raise ValueError(f"Layer '{layer}' not found")
+    @classmethod
+    def from_dict(cls, data: Dict) -> "LayeredModel":
+        """Creates a LayeredModel instance from a dictionary representation.
 
-   def lower_surface(self, layer: Optional[Union[str, int, ModelSubdomain]] = None) -> Surface:
-      """Returns the bottom surface of the model or specified layer.
-      
-      Args:
-         layer (str, optional): Name of layer to get bottom surface for.
-                                If None, returns bottommost model surface.
-      
-      Returns:
-         Surface: The bottom surface.
-      
-      Raises:
-         ValueError: If specified layer is not found.
-      """
-      if layer is None:
-         if self.ordering == "top_down":
-            return self.surfaces[-1]
-         else:
-            return self.surfaces[0]
-      
-      for layer_bounds in self._layer_to_surfs:
-         if isinstance(layer, int):
-            if layer_bounds.layer.mesh_block_id == layer:
-               return layer_bounds.lower
-         elif isinstance(layer, str):
-            if layer_bounds.layer.name == layer:
-               return layer_bounds.lower
-         elif isinstance(layer, ModelSubdomain):
-            if layer_bounds.layer == layer:
-               return layer_bounds.lower
-         else:
-            raise ValueError(f"Layer '{layer}' not found")
-         
-   @classmethod
-   def from_dict(cls, data: Dict) -> "LayeredModel":
-      """Creates a LayeredModel instance from a dictionary representation.
-      
-      Args:
-         data (Dict): Dictionary containing model data with:
-            - surfaces: List of surface dictionaries
-            - All parent class dict fields
-      
-      Returns:
-         LayeredModel: New LayeredModel instance created from dictionary data.
-      """
-      # Create copy and remove surfaces to pass rest to parent
-      data_copy = data.copy()
-      surface_dicts = data_copy.pop("surfaces")
-      layer_dicts = data_copy.pop("subdomains")
+        Args:
+           data (Dict): Dictionary containing model data with:
+              - surfaces: List of surface dictionaries
+              - All parent class dict fields
 
-      name      = data["name"]     
-      dimension = data["dimension"]
-      x_limits  = data["x_limits"]
-      y_limits  = data.get("y_limits")
-      ordering  = data.get("ordering", "top_down")
-      model = LayeredModel(name      = name, 
-                           dimension = dimension, 
-                           x_limits  = x_limits, 
-                           y_limits  = y_limits, 
-                           ordering  = ordering)
-      
-      # Add layers
-      for layer_dict in layer_dicts:
-         class_name = layer_dict["_type"]
-         if class_name in class_registry:
-            model_class = class_registry[class_name]
-            layer = model_class.from_dict(layer_dict)
-         else:
-            raise ValueError(f"Unknown model class: {class_name}")
-         model.add_subdomain(layer)
-      
-      # Add surfaces
-      for surface_dict in surface_dicts:
-         class_name = surface_dict["_type"]
-         if class_name in class_registry:
-            model_class = class_registry[class_name]
-            surface = model_class.from_dict(surface_dict)
-         else:
-            raise ValueError(f"Unknown surface class: {class_name}")
-         model.surfaces.append(surface)
-      return model
-   
-   def __dict__(self) -> Dict:
-      base_dict = super().__dict__()
-      base_dict.update({
-         "_type": self.__class__.__name__,
-         "x_limits": self.x_limits,
-         **({"y_limits": self.y_limits} if self.y_limits is not None else {}),
-         "ordering": self.ordering,
-         "surfaces": [surface.__dict__() for surface in self.surfaces]
-      })
-      return base_dict
-   
-   def _set_path(self, proj_path: Path, rel_path: Path):
-      self._proj_path = proj_path
-      self._rel_path = rel_path/self.name
-      for subdomain in self.subdomains:
-         subdomain._set_path(proj_path, self._rel_path)
-      for surface in self.surfaces:
-         surface._set_path(proj_path, self._rel_path)
+        Returns:
+           LayeredModel: New LayeredModel instance created from dictionary data.
+        """
+        # Create copy and remove surfaces to pass rest to parent
+        data_copy = data.copy()
+        surfs = data_copy.pop("surfaces")
+        layers = data_copy.pop("subdomains")
 
-   @property
-   def _path(self) -> Path:
-      return self._proj_path/self._rel_path
+        name = data["name"]
+        dimension = data["dimension"]
+        x_limits = data["x_limits"]
+        y_limits = data.get("y_limits")
+        ordering = data.get("ordering", "top_down")
+        model = LayeredModel(
+            name=name,
+            dimension=dimension,
+            x_limits=x_limits,
+            y_limits=y_limits,
+            ordering=ordering,
+        )
+
+        model += SimpleSurface.from_dict(surfs[0])
+
+        nsurfs = len(surfs)
+        nlayers = len(layers)
+        isurf = 1
+        ilayer = 0
+        while isurf < nsurfs:
+
+            # Add any non-interface surfaces (surfaces not between layers)
+            while surfs[isurf].get("interface", True) == False:
+                model += SimpleSurface.from_dict(surfs[isurf])
+                isurf += 1
+
+            # Add layer
+            model += Layer.from_dict(layers[ilayer])
+            ilayer += 1
+
+            # Add surface
+            model += SimpleSurface.from_dict(surfs[isurf])
+            isurf += 1
+
+        return model
+
+    def __dict__(self) -> Dict:
+        base_dict = super().__dict__()
+        base_dict.update(
+            {
+                "_type": self.__class__.__name__,
+                "x_limits": self.x_limits,
+                **({"y_limits": self.y_limits} if self.y_limits is not None else {}),
+                "ordering": self.ordering,
+                "surfaces": [surface.__dict__() for surface in self.surfaces],
+            }
+        )
+        return base_dict
+
+    def __iadd__(self, other):
+        if isinstance(other, SimpleSurface):
+
+            # TODO: check that surfaces are added in monotone order
+
+            # Add surface
+            self.surfaces.append(other)
+            self.interface_flag = False
+
+            # Build layer-to-surface mapping
+            if self._last_added == "layer":
+                if self.ordering == "top_down":
+                    self._layer_to_surfs[-1].lower = other
+                else:
+                    self._layer_to_surfs[-1].upper = other
+            self._last_added = "surface"
+
+        elif isinstance(other, Layer):
+
+            # Check that surfaces sandwiching layers
+            if len(self.surfaces) == 0:
+                raise ValueError("Must add at least one surface before adding layers")
+            if self._last_added == "layer":
+                raise ValueError("Must add a surface between consecutive layers")
+
+            # Add layer
+            self.add_subdomain(other)
+            self.interface_flag = True
+
+            # Build layer-to-surface mapping
+            if self.ordering == "top_down":
+                if len(self.layers) == 1:
+                    prev_lower = self.upper_surface()
+                else:
+                    prev_lower = self.lower_surface(self.layers[-2])
+
+                self._layer_to_surfs.append(
+                    LayerBounds(
+                        upper=prev_lower,
+                        layer=other,
+                    )
+                )
+            else:
+                if len(self.layers) == 1:
+                    prev_upper = self.lower_surface()
+                else:
+                    prev_upper = self.upper_surface(self.layers[-2])
+
+                self._layer_to_surfs.append(
+                    LayerBounds(
+                        lower=prev_upper,
+                        layer=other,
+                    )
+                )
+            self._last_added = "layer"
+        else:
+            raise ValueError(f"Cannot add {type(other)} to LayeredModel")
+        return self
+
+    def upper_surface(
+        self, layer: Optional[Union[str, int, ModelSubdomain]] = None
+    ) -> SimpleSurface:
+        """Returns the top surface of the model or specified layer.
+
+        Args:
+           layer (str, optional): Name of layer to get top surface for.
+                                  If None, returns topmost model surface.
+
+        Returns:
+           Surface: The top surface.
+
+        Raises:
+           ValueError: If specified layer is not found.
+        """
+        if layer is None:
+            if self.ordering == "top_down":
+                return self.surfaces[0]
+            else:
+                return self.surfaces[-1]
+
+        for layer_bounds in self._layer_to_surfs:
+            if isinstance(layer, int):
+                if layer_bounds.layer.mesh_block_id == layer:
+                    return layer_bounds.upper
+            elif isinstance(layer, str):
+                if layer_bounds.layer.name == layer:
+                    return layer_bounds.upper
+            elif isinstance(layer, ModelSubdomain):
+                if layer_bounds.layer == layer:
+                    return layer_bounds.upper
+            else:
+                raise ValueError(f"Layer '{layer}' not found")
+
+    def lower_surface(
+        self, layer: Optional[Union[str, int, ModelSubdomain]] = None
+    ) -> SimpleSurface:
+        """Returns the bottom surface of the model or specified layer.
+
+        Args:
+           layer (str, optional): Name of layer to get bottom surface for.
+                                  If None, returns bottommost model surface.
+
+        Returns:
+           Surface: The bottom surface.
+
+        Raises:
+           ValueError: If specified layer is not found.
+        """
+        if layer is None:
+            if self.ordering == "top_down":
+                return self.surfaces[-1]
+            else:
+                return self.surfaces[0]
+
+        for layer_bounds in self._layer_to_surfs:
+            if isinstance(layer, int):
+                if layer_bounds.layer.mesh_block_id == layer:
+                    return layer_bounds.lower
+            elif isinstance(layer, str):
+                if layer_bounds.layer.name == layer:
+                    return layer_bounds.lower
+            elif isinstance(layer, ModelSubdomain):
+                if layer_bounds.layer == layer:
+                    return layer_bounds.lower
+            else:
+                raise ValueError(f"Layer '{layer}' not found")
+
+    def plot(self, property: str, **kwargs):
+        """Plot the model."""
+        import matplotlib.pyplot as plt
+
+        if self.dimension == 2:
+            x = np.linspace(self.x_limits[0], self.x_limits[1], 1000)
+            z = np.linspace(self.z_limits[0], self.z_limits[1], 1000)
+            samples = xr.DataArray(dims=["x", "z"], coords={"x": x, "z": z})
+        elif self.dimension == 3:
+            raise NotImplementedError("3D plotting not implemented")
+
+        if self.ordering == "top_down":
+            self._layer_to_surfs[-1].lower = self.lower_surface()
+        else:
+            self._layer_to_surfs[-1].upper = self.upper_surface()
+
+        if "ax" in kwargs:
+            ax = kwargs.pop("ax")
+            show = False
+        else:
+            fig = plt.figure()
+            ax = fig.gca()
+
+        units = kwargs.pop("units", "km/s")
+        label = kwargs.pop("label", property)
+        origin = kwargs.pop("origin", "upper")
+        axes_names = kwargs.pop("axes_names", {"x": "X", "z": "Depth"})
+        axes_units = kwargs.pop("axes_units", {"x": "km", "z": "km"})
+
+        if units is not None:
+            samples.attrs["units"] = units
+        if label is not None:
+            samples.attrs["long_name"] = label
+        if axes_names is not None:
+            samples.coords["x"].attrs["long_name"] = axes_names["x"]
+            samples.coords["z"].attrs["long_name"] = axes_names["z"]
+            if axes_units is not None:
+                samples.coords["x"].attrs["units"] = axes_units["x"]
+                samples.coords["z"].attrs["units"] = axes_units["z"]
+
+        vmin, vmax = self.extreme_values(property)
+        vmin = kwargs.pop("vmin", vmin)
+        vmax = kwargs.pop("vmax", vmax)
+
+        vrange = vmax - vmin
+        vmin -= 0.1 * vrange
+        vmax += 0.1 * vrange
+
+        for layer in self.layers:
+
+            if property not in layer.properties:
+                continue
+
+            upper = self.upper_surface(layer)
+            lower = self.lower_surface(layer)
+
+            prop = layer.properties[property]
+
+            if layer.frame == "reference":
+                if self.ordering == "top_down":
+                    limits["z_min"] = upper.z_ref
+                    limits["z_max"] = lower.z_ref
+                else:
+                    limits["z_max"] = upper.z_ref
+                    limits["z_min"] = lower.z_ref
+
+                if prop.is_constant:
+                    xgrid = samples.coords["x"]
+                else:
+                    xgrid = data.coords["x"]
+
+                mask = (samples.coords["z"].values > limits["z_min"]) & (
+                    samples.coords["z"].values < limits["z_max"]
+                )
+                zgrid = samples.coords["z"].values[mask]
+
+                # Get surface values at xgrid
+                if self.ordering == "top_down":
+                    z0 = upper.z_phys.get(xgrid)
+                    z1 = lower.z_phys.get(xgrid)
+                else:
+                    z1 = lower.z_phys.get(xgrid)
+                    z0 = upper.z_phys.get(xgrid)
+
+                z0p = limits["z_min"]
+                z1p = limits["z_max"]
+
+                tmp = xr.DataArray(
+                    dims=["z", "x"], coords={"x": xgrid, "z": [z0p, z1p]}, data=[z0, z1]
+                )
+                zvals = tmp.interp(coords={"x": xgrid, "z": zgrid})
+
+                samp = xr.Dataset(
+                    {
+                        property: prop.get(zvals),
+                    }
+                )
+                samp = samp.assign_coords(
+                    {
+                        "Xcoord": (("x", "z"), xgrid.broadcast_like(zvals).values.T),
+                        "Zcoord": (("x", "z"), zvals.values.T),
+                    }
+                )
+
+                plt.pcolormesh(
+                    samp.coords["Xcoord"].values,
+                    samp.coords["Zcoord"].values,
+                    samp[property].values,
+                    shading="gouraud",
+                    vmin=vmin,
+                    vmax=vmax,
+                    **kwargs,
+                )
+
+                # from scipy.interpolate import griddata
+
+                # # Interpolate the curvilinear grid to a uniform grid defined by 'samples'
+                # Xcurv = samp.coords["Xcoord"].values.ravel()
+                # Zcurv = samp.coords["Zcoord"].values.ravel()
+                # data_curv = samp[property].values.ravel()
+
+                # # Create a uniform grid using the 'samples' DataArray coordinates
+                # x_uniform = samples.coords["x"].values
+                # z_uniform = samples.coords["z"].values
+                # Xuniform, Zuniform = np.meshgrid(x_uniform, z_uniform, indexing="ij")
+
+                # interp_data = griddata((Xcurv, Zcurv), data_curv, (Xuniform, Zuniform), method='linear')
+
+                # # Plot the interpolated data on a uniform grid
+                # plt.pcolormesh(Xuniform, Zuniform, interp_data, shading='gouraud', **kwargs)
+
+            else:
+                data = prop.get()
+
+                limits = {}
+                limits["x_min"] = self.x_limits[0]
+                limits["x_max"] = self.x_limits[1]
+                if self.y_limits is not None:
+                    limits["y_min"] = self.y_limits[0]
+                    limits["y_max"] = self.y_limits[1]
+
+                if prop.is_constant:
+                    xgrid = samples.coords["x"]
+                else:
+                    xgrid = data.coords["x"]
+
+                if self.ordering == "top_down":
+                    limits["z_min"] = upper.z_phys.get(xgrid)
+                    limits["z_max"] = lower.z_phys.get(xgrid)
+                else:
+                    limits["z_max"] = upper.z_phys.get(xgrid)
+                    limits["z_min"] = lower.z_phys.get(xgrid)
+
+                if prop.is_constant:
+                    data = xr.full_like(samples, data)
+                    # For constant properties, create a mask based on the sample grid coordinates
+                    mask = (
+                        (data.z < limits["z_max"])
+                        & (data.z > limits["z_min"])
+                        & (data.x < limits["x_max"])
+                        & (data.x > limits["x_min"])
+                    )
+
+                    da = data.where(mask)
+                    samples.data = np.where(~np.isnan(da), da, samples.data)
+                else:
+                    # Create mask for the samples grid
+                    mask = (
+                        (data.z < limits["z_max"])
+                        & (data.z > limits["z_min"])
+                        & (data.x < limits["x_max"])
+                        & (data.x > limits["x_min"])
+                    )
+
+                    # Interpolate data onto samples grid
+                    da = prop.get()
+                    da = da.where(mask)
+                    ds = da.interp(coords=samples.coords)
+                    samples.data = np.where(~np.isnan(ds), ds, samples.data)
+        # except Exception as e:
+        #    print(f"Error plotting {property} for layer {layer.name}: {e}")
+
+        samples.plot.imshow(ax=ax, x="x", vmin=vmin, vmax=vmax, **kwargs)
+
+        # Get surface plotting kwargs
+        line_color = kwargs.pop("line_color", "k")
+        line_style = kwargs.pop("line_style", "-")
+        line_width = kwargs.pop("line_width", 1.5)
+
+        for surf in self.surfaces:
+            limits = {}
+            limits["x"] = self.x_limits
+            if self.y_limits is not None:
+                limits["y"] = self.y_limits
+
+            surf.plot(
+                limits=limits,
+                ax=ax,
+                color=line_color,
+                linestyle=line_style,
+                linewidth=line_width,
+                **kwargs,
+            )
+
+            # Set limits
+        ax.set_xlim(self.x_limits)
+        if self.y_limits is None:
+            zlim = self.z_limits
+            zL = zlim[1] - zlim[0]
+            zlim[0] = zlim[0] - 0.01 * zL
+            zlim[1] = zlim[1] + 0.01 * zL
+            ax.set_ylim(zlim)
+        else:
+            raise NotImplementedError("2D plotting not implemented")
+
+        if origin == "upper":
+            ax.invert_yaxis()
+
+        ax.set_aspect("equal")
+
+        plt.show()
+
+    def _set_path(self, proj_path: Path, rel_path: Path):
+        self._proj_path = proj_path
+        self._rel_path = rel_path / self.name
+        for subdomain in self.subdomains:
+            subdomain._set_path(proj_path, self._rel_path)
+        for surface in self.surfaces:
+            surface._set_path(proj_path, self._rel_path)
+
+    @property
+    def _path(self) -> Path:
+        return self._proj_path / self._rel_path
+
 
 # TODO: info functions like this:
 #     max_elevation()
