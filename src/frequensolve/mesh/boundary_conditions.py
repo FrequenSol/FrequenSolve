@@ -2,10 +2,10 @@
 """Python structures defining boundary conditions"""
 
 from dataclasses import dataclass, field
-from typing      import Optional, List, Literal, Dict
+from typing      import List, Literal, Dict, Union
 
 from .mesh import Mesh
-
+from ..util.printing import print_warn
 __all__ = ['BoundaryCondition', 'BoundaryConditionManager']
 
 @dataclass
@@ -55,6 +55,9 @@ class BoundaryCondition:
       return bc_dict
 
 
+# TODO: Make class for geometric labels (since right now it accepts multiple values)
+
+
 @dataclass
 class BoundaryConditionManager:
    """Manages boundary conditions.
@@ -67,6 +70,7 @@ class BoundaryConditionManager:
    """
    label_type:            Literal["geometric", "labeled"] = "geometric"
    boundary_conditions:   List[BoundaryCondition] = field(default_factory=list)
+   _boundaries:           set[Union[str, int]] = field(default_factory=set)
 
    def add_BC(self, bc: BoundaryCondition) -> None:
       """Adds a boundary condition to the manager.
@@ -78,17 +82,16 @@ class BoundaryConditionManager:
          - A BC can be applied to multiple boundaries, but each boundary can only be
            assigned one BC.
       """
-      # Check for duplicate boundaries
-      existing_boundaries = set()
-      for existing_bc in self.boundary_conditions:
-         existing_boundaries.update(existing_bc.boundaries)
-         
-      # Check for overlap with new boundaries
-      overlap = set(bc.boundaries) & existing_boundaries
+      overlap = set(bc.boundaries) & self._boundaries
       if overlap:
-         raise ValueError(f"Boundaries {overlap} already assigned another boundary condition")
+         for boundary in overlap:
+            bc.boundaries.remove(boundary)
+            print_warn(f"Warning: Boundary {boundary} already assigned a boundary condition;"
+                        "duplicate definition has been ignored.")
+      self._boundaries.update(bc.boundaries)
          
       self.boundary_conditions.append(bc)
+
 
    def __iadd__(self, bc: BoundaryCondition) -> "BoundaryConditionManager":
       """Overrides += operator to invoke add_BC"""
@@ -123,7 +126,7 @@ class BoundaryConditionManager:
       boundary_conditions = [BoundaryCondition.from_dict(bc_data) for bc_data in data["boundary_conditions"]]
       return cls(label_type=label_type, boundary_conditions=boundary_conditions)
 
-
+# TODO: change to to_dict
    def __dict__(self) -> Dict:
       return {
          "label_type": self.label_type,

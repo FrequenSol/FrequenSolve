@@ -2,9 +2,9 @@
 
 import os
 
-from typing import Union, Optional, List
-from pathlib import Path
-from abc import ABC, abstractmethod
+from typing    import Union, Optional, List
+from pathlib   import Path
+from abc       import ABC, abstractmethod
 
 __all__ = ['BaseJob']
 

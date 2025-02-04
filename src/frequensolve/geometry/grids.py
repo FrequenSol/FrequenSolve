@@ -1,12 +1,14 @@
 import numpy as np
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Generator
+from abc          import ABC, abstractmethod
+from dataclasses  import dataclass, field
+from typing       import Optional, List, Dict, Generator
+
+from ..util.class_registry import *    # noqa
 
 __all__ = ['Grid','CartesianGrid']
 
-
+@register_class
 @dataclass
 class Grid(ABC):
    """Base class for all grid types."""
@@ -35,15 +37,20 @@ class Grid(ABC):
       pass
 
    @classmethod
-   @abstractmethod
-   def from_dict(cls, data: Dict) -> "Grid":
-      """Creates a Grid instance from a dictionary."""
-      pass
+   def from_dict(cls, data: Dict) -> 'Grid':  
+      class_name = data["_type"]
+      if class_name in class_registry:
+         grid_class = class_registry[class_name]
+         return grid_class.from_dict(data)
+      else:
+         raise ValueError(f"Unknown grid class: {class_name}")
+
 
 
 # ----------------------------------------------------------------------
 # Cartesian Grid
 # ----------------------------------------------------------------------
+@register_class
 @dataclass
 class CartesianGrid(Grid):
    """A uniform Cartesian grid for defining receiver locations.
@@ -63,7 +70,6 @@ class CartesianGrid(Grid):
    x1: List[float] = field(default_factory=list)
    dx: List[float] = field(default_factory=list)
 
-
    def __post_init__(self):
       if len(self.x1) == 0:
          self.x1 = [x0 + (n - 1) * dx for x0, n, dx in zip(self.x0, self.n, self.dx)]
@@ -72,6 +78,10 @@ class CartesianGrid(Grid):
       elif len(self.n) == 0:
          self.n = [int((x1 - x0) / dx + 1) for x0, x1, dx in zip(self.x0, self.x1, self.dx)]
 
+   def __eq__(self, other):
+      g1 = np.array([self.x0, self.x1, self.n])
+      g2 = np.array([other.x0, other.x1, other.n])
+      return np.allclose(g1, g2)
 
    def get_coords(self, slices: Optional[List[slice]] = None) -> np.ndarray:
       """Gets coordinates for all grid points or a subset defined by slices.
@@ -93,7 +103,7 @@ class CartesianGrid(Grid):
          if slices is not None:
             x = x[slices[0]]
             y = y[slices[1]]
-         return np.array([[x_, y_] for x_ in x for y_ in y])
+         return np.array([[y_, x_] for y_ in y for x_ in x])
       
       elif len(self.n) == 3:
          x = np.linspace(self.x0[0], self.x1[0], self.n[0])
@@ -103,16 +113,71 @@ class CartesianGrid(Grid):
             x = x[slices[0]]
             y = y[slices[1]] 
             z = z[slices[2]]
-         return np.array([[x_, y_, z_] for x_ in x for y_ in y for z_ in z])
+         return np.array([[z_, y_, x_] for z_ in z for y_ in y for x_ in x])
       else:
          raise ValueError("Grid must have 1, 2, or 3 dimensions")
       
+   def as_xarray(self):
+      """Converts the grid to an xarray Dataset (without variables)."""
+      from xarray import DataArray
+      ndim = len(self.n)
+      if ndim == 1:
+         dims = ["x"]
+         coords = {"x": np.linspace(self.x0[0], self.x1[0], self.n[0])}
+      elif ndim == 2:
+         dims = ["x", "z"]
+         coords = {"x": np.linspace(self.x0[0], self.x1[0], self.n[0]),
+                   "z": np.linspace(self.x0[1], self.x1[1], self.n[1])}
+      elif ndim == 3:
+         dims = ["x", "y", "z"]
+         coords = {"x": np.linspace(self.x0[0], self.x1[0], self.n[0]),
+                   "y": np.linspace(self.x0[1], self.x1[1], self.n[1]),
+                   "z": np.linspace(self.x0[2], self.x1[2], self.n[2])}
+      return DataArray(dims=dims, coords=coords)
+   
+   @classmethod
+   def from_xarray(cls, xarr):
+      """Converts the grid to an xarray Dataset (without variables)."""
+      from xarray import Dataset
+
+      # TODO: This is a gnarly hack since the Fortran code assumes all indices present.
+      dims = sorted(xarr.coords.dims)
+      coords = xarr.coords
+      if "y" in dims:
+         intended = ["x", "y", "z"]
+      elif "z" in dims:
+         intended = ["x", "z"]
+      else:
+         intended = ["x"]
+
+      for dim in intended:
+         if dim not in dims:
+            coords[dim] = [0]
+      dims = intended
+
+      n  = [coords[dim].size for dim in dims]
+      x0 = [float(coords[dim].values.min()) for dim in dims]
+      x1 = [float(coords[dim].values.max()) for dim in dims]
+
+      grid =  cls(
+         n  = n,
+         x0 = x0,
+         x1 = x1
+      )
+
+      for i,dim in enumerate(dims):
+         if len(coords[dim]) > 1:
+            coords2 = np.linspace(grid.x0[i], grid.x1[i], grid.n[i])
+            if not np.allclose(coords2, coords[dim].values):
+               raise ValueError(f"Grid coordinates do not align with xarray coordinates for {dim}")
+            
+      return grid
 
    @property
    def dimension(self) -> int:
       return len(self.n)
-   
 
+# TODO: indexing below is confusing to align with fortran definition, should be changed
    def generate_coords(self, slices: Optional[List[slice]] = None):
       """Generates coordinates for all grid points or a subset defined by slices.
       
@@ -136,9 +201,10 @@ class CartesianGrid(Grid):
          if slices is not None:
             x = x[slices[0]]
             y = y[slices[1]]
-         for x_ in x:
-            for y_ in y:
-               yield [x_, y_]
+         
+         for y_ in y:
+            for x_ in x:
+               yield [y_, x_]
                
       elif len(self.n) == 3:
          x = np.linspace(self.x0[0], self.x1[0], self.n[0])
@@ -148,10 +214,10 @@ class CartesianGrid(Grid):
             x = x[slices[0]]
             y = y[slices[1]]
             z = z[slices[2]]
-         for x_ in x:
+         for z_ in z:
             for y_ in y:
-               for z_ in z:
-                  yield [x_, y_, z_]
+               for x_ in x:
+                  yield [z_, y_, x_]
       else:
          raise ValueError("Grid must have 1, 2, or 3 dimensions")
       
@@ -162,6 +228,7 @@ class CartesianGrid(Grid):
          Dict: Dictionary containing the grid parameters.
       """
       return {
+         "_type": self.__class__.__name__,  
          "n": self.n,
          "x0": self.x0,
          "x1": self.x1,

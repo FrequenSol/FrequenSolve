@@ -13,17 +13,19 @@ class SimulationConfig:
       physics (str):    Physics type for the simulator.
       dimension (int):  Dimension of the simulator (2D or 3D).
    """
-   name:      str
-   physics:   Literal["acoustic", "elastic", "plasma"]
-   dimension: Literal[2, 3]
+   name:       str
+   physics:    Literal["acoustic", "elastic", "plasma"]
+   dimension:  Literal[2, 3]
    _proj_path: Optional[Path] = None
-   _rel_path:  Optional[Path] = None
+   _rel_path:  Optional[Path] = None   
+   _file:      Optional[Path] = None
    
    def __dict__(self) -> Dict:
       return {
-         "name": self.name,
-         "physics": self.physics,
-         "dimension": self.dimension,
+         "name":          self.name,
+         "physics":       self.physics,
+         "dimension":     self.dimension,
+         "project_path":  str(self._proj_path),
       }
 
    @classmethod
