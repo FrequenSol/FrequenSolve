@@ -1,50 +1,52 @@
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Dict, Generator, List, Optional
+
 import numpy as np
 
-from abc          import ABC, abstractmethod
-from dataclasses  import dataclass, field
-from typing       import Optional, List, Dict, Generator
+from ..util.class_registry import *  # noqa
 
-from ..util.class_registry import *    # noqa
+__all__ = ["Grid", "CartesianGrid"]
 
-__all__ = ['Grid','CartesianGrid']
 
 @register_class
 @dataclass
 class Grid(ABC):
-   """Base class for all grid types."""
+    """Base class for all grid types."""
 
-   @abstractmethod
-   def get_coords(self, slices: Optional[List[slice]] = None) -> np.ndarray:
-      """Gets coordinates for all grid points or a subset defined by slices."""
-      pass
+    @abstractmethod
+    def get_coords(self, slices: Optional[List[slice]] = None) -> np.ndarray:
+        """Gets coordinates for all grid points or a subset defined by slices."""
+        pass
 
-   @abstractmethod
-   def generate_coords(self, slices: Optional[List[slice]] = None) -> Generator[np.ndarray, None, None]:
-      """Generates coordinates for all grid points or a subset defined by slices.
-      
-      Args:
-         slices: Optional list of slice objects defining index ranges for each dimension.
-            If None, generates coordinates for all points. Length must match grid dimensions.
-            
-      Yields:
-         np.ndarray: Coordinates for each grid point.
-      """
-      pass
+    @abstractmethod
+    def generate_coords(
+        self, slices: Optional[List[slice]] = None
+    ) -> Generator[np.ndarray, None, None]:
+        """Generates coordinates for all grid points or a subset defined by slices.
 
-   @abstractmethod
-   def __dict__(self) -> Dict:
-      """Converts the grid to a dictionary representation."""
-      pass
+        Args:
+           slices: Optional list of slice objects defining index ranges for each dimension.
+              If None, generates coordinates for all points. Length must match grid dimensions.
 
-   @classmethod
-   def from_dict(cls, data: Dict) -> 'Grid':  
-      class_name = data["_type"]
-      if class_name in class_registry:
-         grid_class = class_registry[class_name]
-         return grid_class.from_dict(data)
-      else:
-         raise ValueError(f"Unknown grid class: {class_name}")
+        Yields:
+           np.ndarray: Coordinates for each grid point.
+        """
+        pass
 
+    @abstractmethod
+    def __dict__(self) -> Dict:
+        """Converts the grid to a dictionary representation."""
+        pass
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "Grid":
+        class_name = data["_type"]
+        if class_name in class_registry:
+            grid_class = class_registry[class_name]
+            return grid_class.from_dict(data)
+        else:
+            raise ValueError(f"Unknown grid class: {class_name}")
 
 
 # ----------------------------------------------------------------------
@@ -53,201 +55,204 @@ class Grid(ABC):
 @register_class
 @dataclass
 class CartesianGrid(Grid):
-   """A uniform Cartesian grid for defining receiver locations.
-   
-   This class represents a uniform grid in 2D or 3D space, defined by the number of points,
-   starting coordinates, ending coordinates, and/or grid spacing in each dimension.
-   Only two of n, dx, and x1 need to be specified - the third will be calculated.
-   
-   Attributes:
-      n  (List[int]):   Number of points in each dimension.
-      x0 (List[float]): Starting coordinates in each dimension.
-      x1 (List[float]): Ending coordinates in each dimension.
-      dx (List[float]): Grid spacing in each dimension.
-   """
-   n:  List[int]   = field(default_factory=list)
-   x0: List[float] = field(default_factory=list)
-   x1: List[float] = field(default_factory=list)
-   dx: List[float] = field(default_factory=list)
+    """A uniform Cartesian grid for defining receiver locations.
 
-   def __post_init__(self):
-      if len(self.x1) == 0:
-         self.x1 = [x0 + (n - 1) * dx for x0, n, dx in zip(self.x0, self.n, self.dx)]
-      elif len(self.dx) == 0:
-         self.dx = [(x1 - x0) / (n - 1) for x0, x1, n in zip(self.x0, self.x1, self.n)]
-      elif len(self.n) == 0:
-         self.n = [int((x1 - x0) / dx + 1) for x0, x1, dx in zip(self.x0, self.x1, self.dx)]
+    This class represents a uniform grid in 2D or 3D space, defined by the number of points,
+    starting coordinates, ending coordinates, and/or grid spacing in each dimension.
+    Only two of n, dx, and x1 need to be specified - the third will be calculated.
 
-   def __eq__(self, other):
-      g1 = np.array([self.x0, self.x1, self.n])
-      g2 = np.array([other.x0, other.x1, other.n])
-      return np.allclose(g1, g2)
+    Attributes:
+       n  (List[int]):   Number of points in each dimension.
+       x0 (List[float]): Starting coordinates in each dimension.
+       x1 (List[float]): Ending coordinates in each dimension.
+       dx (List[float]): Grid spacing in each dimension.
+    """
 
-   def get_coords(self, slices: Optional[List[slice]] = None) -> np.ndarray:
-      """Gets coordinates for all grid points or a subset defined by slices.
-      
-      Args:
-         slices (Optional[List[slice]]): List of slice objects defining index ranges for each dimension.
-            If None, returns coordinates for all points. Length must match grid dimensions.
-      
-      Returns:
-         np.ndarray: Array of coordinate points [x,y] or [x,y,z] for each grid point.
-            Returns empty array if grid dimensions are not 2 or 3.
-      """
-      if len(self.n) == 1:
-         return np.array([np.linspace(self.x0[0], self.x1[0], self.n[0])])
-      
-      elif len(self.n) == 2:
-         x = np.linspace(self.x0[0], self.x1[0], self.n[0])
-         y = np.linspace(self.x0[1], self.x1[1], self.n[1])
-         if slices is not None:
-            x = x[slices[0]]
-            y = y[slices[1]]
-         return np.array([[y_, x_] for y_ in y for x_ in x])
-      
-      elif len(self.n) == 3:
-         x = np.linspace(self.x0[0], self.x1[0], self.n[0])
-         y = np.linspace(self.x0[1], self.x1[1], self.n[1])
-         z = np.linspace(self.x0[2], self.x1[2], self.n[2])
-         if slices is not None:
-            x = x[slices[0]]
-            y = y[slices[1]] 
-            z = z[slices[2]]
-         return np.array([[z_, y_, x_] for z_ in z for y_ in y for x_ in x])
-      else:
-         raise ValueError("Grid must have 1, 2, or 3 dimensions")
-      
-   def as_xarray(self):
-      """Converts the grid to an xarray Dataset (without variables)."""
-      from xarray import DataArray
-      ndim = len(self.n)
-      if ndim == 1:
-         dims = ["x"]
-         coords = {"x": np.linspace(self.x0[0], self.x1[0], self.n[0])}
-      elif ndim == 2:
-         dims = ["x", "z"]
-         coords = {"x": np.linspace(self.x0[0], self.x1[0], self.n[0]),
-                   "z": np.linspace(self.x0[1], self.x1[1], self.n[1])}
-      elif ndim == 3:
-         dims = ["x", "y", "z"]
-         coords = {"x": np.linspace(self.x0[0], self.x1[0], self.n[0]),
-                   "y": np.linspace(self.x0[1], self.x1[1], self.n[1]),
-                   "z": np.linspace(self.x0[2], self.x1[2], self.n[2])}
-      return DataArray(dims=dims, coords=coords)
-   
-   @classmethod
-   def from_xarray(cls, xarr):
-      """Converts the grid to an xarray Dataset (without variables)."""
-      from xarray import Dataset
+    n: List[int] = field(default_factory=list)
+    x0: List[float] = field(default_factory=list)
+    x1: List[float] = field(default_factory=list)
+    dx: List[float] = field(default_factory=list)
 
-      # TODO: This is a gnarly hack since the Fortran code assumes all indices present.
-      dims = sorted(xarr.coords.dims)
-      coords = xarr.coords
-      if "y" in dims:
-         intended = ["x", "y", "z"]
-      elif "z" in dims:
-         intended = ["x", "z"]
-      else:
-         intended = ["x"]
+    def __post_init__(self):
+        if len(self.x1) == 0:
+            self.x1 = [x0 + (n - 1) * dx for x0, n, dx in zip(self.x0, self.n, self.dx)]
+        elif len(self.dx) == 0:
+            self.dx = [
+                (x1 - x0) / (n - 1) for x0, x1, n in zip(self.x0, self.x1, self.n)
+            ]
+        elif len(self.n) == 0:
+            self.n = [
+                int((x1 - x0) / dx + 1) for x0, x1, dx in zip(self.x0, self.x1, self.dx)
+            ]
 
-      for dim in intended:
-         if dim not in dims:
-            coords[dim] = [0]
-      dims = intended
+    def __eq__(self, other):
+        g1 = np.array([self.x0, self.x1, self.n])
+        g2 = np.array([other.x0, other.x1, other.n])
+        return np.allclose(g1, g2)
 
-      n  = [coords[dim].size for dim in dims]
-      x0 = [float(coords[dim].values.min()) for dim in dims]
-      x1 = [float(coords[dim].values.max()) for dim in dims]
+    def get_coords(self, slices: Optional[List[slice]] = None) -> np.ndarray:
+        """Gets coordinates for all grid points or a subset defined by slices.
 
-      grid =  cls(
-         n  = n,
-         x0 = x0,
-         x1 = x1
-      )
+        Args:
+           slices (Optional[List[slice]]): List of slice objects defining index ranges for each dimension.
+              If None, returns coordinates for all points. Length must match grid dimensions.
 
-      for i,dim in enumerate(dims):
-         if len(coords[dim]) > 1:
-            coords2 = np.linspace(grid.x0[i], grid.x1[i], grid.n[i])
-            if not np.allclose(coords2, coords[dim].values):
-               raise ValueError(f"Grid coordinates do not align with xarray coordinates for {dim}")
-            
-      return grid
+        Returns:
+           np.ndarray: Array of coordinate points [x,y] or [x,y,z] for each grid point.
+              Returns empty array if grid dimensions are not 2 or 3.
+        """
+        if len(self.n) == 1:
+            return np.array([np.linspace(self.x0[0], self.x1[0], self.n[0])])
 
-   @property
-   def dimension(self) -> int:
-      return len(self.n)
+        elif len(self.n) == 2:
+            x = np.linspace(self.x0[0], self.x1[0], self.n[0])
+            y = np.linspace(self.x0[1], self.x1[1], self.n[1])
+            if slices is not None:
+                x = x[slices[0]]
+                y = y[slices[1]]
+            return np.array([[y_, x_] for y_ in y for x_ in x])
 
-# TODO: indexing below is confusing to align with fortran definition, should be changed
-   def generate_coords(self, slices: Optional[List[slice]] = None):
-      """Generates coordinates for all grid points or a subset defined by slices.
-      
-      Args:
-         slices (Optional[List[slice]]): List of slice objects defining index ranges for each dimension.
-            If None, yields coordinates for all points. Length must match grid dimensions.
-      
-      Yields:
-         Generator[float]: Coordinate point for each grid point.
-      """
-      if len(self.n) == 1:
-         x = np.linspace(self.x0[0], self.x1[0], self.n[0])
-         if slices is not None:
-            x = x[slices[0]]
-         for x_ in x:
-            yield [x_]
-            
-      elif len(self.n) == 2:
-         x = np.linspace(self.x0[0], self.x1[0], self.n[0])
-         y = np.linspace(self.x0[1], self.x1[1], self.n[1])
-         if slices is not None:
-            x = x[slices[0]]
-            y = y[slices[1]]
-         
-         for y_ in y:
+        elif len(self.n) == 3:
+            x = np.linspace(self.x0[0], self.x1[0], self.n[0])
+            y = np.linspace(self.x0[1], self.x1[1], self.n[1])
+            z = np.linspace(self.x0[2], self.x1[2], self.n[2])
+            if slices is not None:
+                x = x[slices[0]]
+                y = y[slices[1]]
+                z = z[slices[2]]
+            return np.array([[z_, y_, x_] for z_ in z for y_ in y for x_ in x])
+        else:
+            raise ValueError("Grid must have 1, 2, or 3 dimensions")
+
+    def as_xarray(self):
+        """Converts the grid to an xarray Dataset (without variables)."""
+        from xarray import DataArray
+
+        ndim = len(self.n)
+        if ndim == 1:
+            dims = ["x"]
+            coords = {"x": np.linspace(self.x0[0], self.x1[0], self.n[0])}
+        elif ndim == 2:
+            dims = ["x", "z"]
+            coords = {
+                "x": np.linspace(self.x0[0], self.x1[0], self.n[0]),
+                "z": np.linspace(self.x0[1], self.x1[1], self.n[1]),
+            }
+        elif ndim == 3:
+            dims = ["x", "y", "z"]
+            coords = {
+                "x": np.linspace(self.x0[0], self.x1[0], self.n[0]),
+                "y": np.linspace(self.x0[1], self.x1[1], self.n[1]),
+                "z": np.linspace(self.x0[2], self.x1[2], self.n[2]),
+            }
+        return DataArray(dims=dims, coords=coords)
+
+    @classmethod
+    def from_xarray(cls, xarr):
+        """Converts the grid to an xarray Dataset (without variables)."""
+        from xarray import Dataset
+
+        # TODO: This is a gnarly hack since the Fortran code assumes all indices present.
+        dims = sorted(xarr.coords.dims)
+        coords = xarr.coords
+        if "y" in dims:
+            intended = ["x", "y", "z"]
+        elif "z" in dims:
+            intended = ["x", "z"]
+        else:
+            intended = ["x"]
+
+        for dim in intended:
+            if dim not in dims:
+                coords[dim] = [0]
+        dims = intended
+
+        n = [coords[dim].size for dim in dims]
+        x0 = [float(coords[dim].values.min()) for dim in dims]
+        x1 = [float(coords[dim].values.max()) for dim in dims]
+
+        grid = cls(n=n, x0=x0, x1=x1)
+
+        for i, dim in enumerate(dims):
+            if len(coords[dim]) > 1:
+                coords2 = np.linspace(grid.x0[i], grid.x1[i], grid.n[i])
+                if not np.allclose(coords2, coords[dim].values):
+                    raise ValueError(
+                        f"Grid coordinates do not align with xarray coordinates for {dim}"
+                    )
+
+        return grid
+
+    @property
+    def dimension(self) -> int:
+        return len(self.n)
+
+    # TODO: indexing below is confusing to align with fortran definition, should be changed
+    def generate_coords(self, slices: Optional[List[slice]] = None):
+        """Generates coordinates for all grid points or a subset defined by slices.
+
+        Args:
+           slices (Optional[List[slice]]): List of slice objects defining index ranges for each dimension.
+              If None, yields coordinates for all points. Length must match grid dimensions.
+
+        Yields:
+           Generator[float]: Coordinate point for each grid point.
+        """
+        if len(self.n) == 1:
+            x = np.linspace(self.x0[0], self.x1[0], self.n[0])
+            if slices is not None:
+                x = x[slices[0]]
             for x_ in x:
-               yield [y_, x_]
-               
-      elif len(self.n) == 3:
-         x = np.linspace(self.x0[0], self.x1[0], self.n[0])
-         y = np.linspace(self.x0[1], self.x1[1], self.n[1])
-         z = np.linspace(self.x0[2], self.x1[2], self.n[2])
-         if slices is not None:
-            x = x[slices[0]]
-            y = y[slices[1]]
-            z = z[slices[2]]
-         for z_ in z:
+                yield [x_]
+
+        elif len(self.n) == 2:
+            x = np.linspace(self.x0[0], self.x1[0], self.n[0])
+            y = np.linspace(self.x0[1], self.x1[1], self.n[1])
+            if slices is not None:
+                x = x[slices[0]]
+                y = y[slices[1]]
+
             for y_ in y:
-               for x_ in x:
-                  yield [z_, y_, x_]
-      else:
-         raise ValueError("Grid must have 1, 2, or 3 dimensions")
-      
-   def __dict__(self) -> Dict:
-      """Converts the grid to a dictionary representation.
+                for x_ in x:
+                    yield [y_, x_]
 
-      Returns:
-         Dict: Dictionary containing the grid parameters.
-      """
-      return {
-         "_type": self.__class__.__name__,  
-         "n": self.n,
-         "x0": self.x0,
-         "x1": self.x1,
-         "dx": self.dx
-      }
+        elif len(self.n) == 3:
+            x = np.linspace(self.x0[0], self.x1[0], self.n[0])
+            y = np.linspace(self.x0[1], self.x1[1], self.n[1])
+            z = np.linspace(self.x0[2], self.x1[2], self.n[2])
+            if slices is not None:
+                x = x[slices[0]]
+                y = y[slices[1]]
+                z = z[slices[2]]
+            for z_ in z:
+                for y_ in y:
+                    for x_ in x:
+                        yield [z_, y_, x_]
+        else:
+            raise ValueError("Grid must have 1, 2, or 3 dimensions")
 
-   @classmethod 
-   def from_dict(cls, data: Dict) -> "CartesianGrid":
-      """Creates a CartesianGrid instance from a dictionary.
+    def __dict__(self) -> Dict:
+        """Converts the grid to a dictionary representation.
 
-      Args:
-         data (Dict): Dictionary containing the grid parameters.
+        Returns:
+           Dict: Dictionary containing the grid parameters.
+        """
+        return {
+            "_type": self.__class__.__name__,
+            "n": self.n,
+            "x0": self.x0,
+            "x1": self.x1,
+            "dx": self.dx,
+        }
 
-      Returns:
-         CartesianGrid: A new CartesianGrid instance.
-      """
-      return cls(
-         n  = data["n"],
-         x0 = data["x0"],
-         x1 = data["x1"],
-         dx = data["dx"]
-      )
+    @classmethod
+    def from_dict(cls, data: Dict) -> "CartesianGrid":
+        """Creates a CartesianGrid instance from a dictionary.
+
+        Args:
+           data (Dict): Dictionary containing the grid parameters.
+
+        Returns:
+           CartesianGrid: A new CartesianGrid instance.
+        """
+        return cls(n=data["n"], x0=data["x0"], x1=data["x1"], dx=data["dx"])

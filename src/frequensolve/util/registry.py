@@ -14,10 +14,11 @@ Usage:
 """
 
 import abc
-import logging
 import bisect
 import json
-from typing import Dict, Any, List, Tuple, Union
+import logging
+from typing import Any, Dict, List, Tuple, Union
+
 import h5py
 
 # Configure logging
@@ -28,11 +29,13 @@ logging.basicConfig(level=logging.INFO)
 # -------------------------------------------------------------------
 # 1) Base Classes and Concrete Material Implementations
 
+
 class MaterialBase(abc.ABC):
     """
     Abstract base class for materials. Requires a method to get properties
     for a given state, plus methods to read/write from HDF5 for persistence.
     """
+
     @abc.abstractmethod
     def get_property_for_state(self, prop_name: str, state: Dict[str, float]) -> float:
         pass
@@ -62,6 +65,7 @@ class ConstantMaterial(MaterialBase):
     """
     A simple material with constant property values.
     """
+
     def __init__(self, mat_name: str, properties: Dict[str, float]):
         """
         Attributes:
@@ -102,5 +106,3 @@ class ConstantMaterial(MaterialBase):
         props_json = hdf_group["properties_json"][()].decode("utf-8")
         properties = json.loads(props_json)
         return cls(mat_name, properties)
-
-
