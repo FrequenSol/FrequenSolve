@@ -94,6 +94,7 @@ class MeshManager:
    adapt:          Optional[MeshAdaptor]     = None
    _proj_path:     Optional[Path]            = None
    _rel_path:      Optional[Path]            = None
+
    def set_adapt(self,
                  min_epw:         float,
                  adapt_sources:   Optional[int]   = None,
@@ -139,7 +140,7 @@ class MeshManager:
       manager = cls()
       
       # From file
-      mesh_file = data.get("mesh_file")
+      mesh_file   = data.get("mesh_file")
       mesh_format = data.get("mesh_format")
       if mesh_file is not None and mesh_format is not None:
          manager.mesh_file   = mesh_file
@@ -174,7 +175,8 @@ class MeshManager:
 
    def __dict__(self) -> Dict:
       if self.adapt is None:
-         self.set_adapt(min_epw = 2.0)
+         self.set_adapt(min_epw = 2.0,
+                        adapt_sources = 1)
          
       mesh_dict = {
          "adapt": self.adapt.__dict__(),
@@ -207,6 +209,8 @@ class MeshManager:
    def _set_path(self, proj_path: Path, rel_path: Path):
       self._proj_path = proj_path
       self._rel_path = rel_path
+      if isinstance(self.mesh, BaseMeshGenerator):
+         self.mesh._set_path(proj_path, rel_path)
    
    @property
    def _path(self) -> Path:

@@ -9,11 +9,12 @@ __all__ = ['SourceGroup', 'Source', 'RuptureSource', 'PointSource']
 
 
 @register_class
+@dataclass
 class Source(ABC):
 
    @classmethod
    def from_dict(cls, data: Dict) -> "Source":
-      class_name = data["_type"]
+      class_name = data.pop("_type")
       if class_name in class_registry:
          source_class = class_registry[class_name]
          return source_class.from_dict(data)
@@ -89,7 +90,7 @@ class SourceGroup:
 
    @classmethod
    def from_dict(cls, data: Dict):
-      sources = data.get("sources", [])
+      sources = [Source.from_dict(source) for source in data.get("sources", [])]
       return cls(sources=sources)
 
    def __dict__(self) -> Dict:

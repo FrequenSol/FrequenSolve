@@ -1,16 +1,18 @@
 """Model base classes for managing simulation models."""
 
-from xarray import DataArray, Dataset
+import xarray as xr
 
 from pathlib               import Path
 from dataclasses           import dataclass, field, asdict
-from typing                import Optional, List, Dict, Union, Literal, Tuple
+from typing                import Optional, List, Dict, Union, Literal
+from numpy.typing          import ArrayLike
 
-from ..util.class_registry import *
+from frequensolve.util.class_registry import *
+from frequensolve.util.named_list import NamedList
+from frequensolve.model.property import Property
+from frequensolve.geometry.grids import CartesianGrid
 
 __all__ = ['ModelSubdomain', 'ModelBase']
-
-# TODO: Convert properties to xr.Dataset (will have to update my code, etc.)
 
 @dataclass(kw_only=True)
 class ModelSubdomain:
@@ -26,23 +28,107 @@ class ModelSubdomain:
    mesh_block_id: int = -1
    name:          Optional[str] = None
    frame:         str = "physical"
-   properties:    Dict[str, Union[float, str, DataArray]] = field(default_factory=dict)
+   properties:    Dict[str, Property] = field(default_factory=dict)
    _proj_path:    Optional[Path] = None
    _rel_path:     Optional[Path] = None
 
+   def __init__(self, 
+                mesh_block_id: int, 
+                name: Optional[str] = None, 
+                frame: str = "physical", 
+                properties: Dict[str, Union[float, str, Path, xr.DataArray]] = {},
+                xarr: Optional[xr.DataArray] = None):
+      self.mesh_block_id = mesh_block_id
+      self.name = name
+      self.frame = frame
+      self._properties = {}
+      if xarr is not None:
+         for key, val in properties.items():
+            self._properties[key] = Property(data=val, xarr=xarr)
+      else:
+         self._properties = {key: Property(data=val) for key, val in properties.items()}
+
+   @property
+   def properties(self) -> Dict[str, Property]:
+      if self._properties is None:
+         raise ValueError("Properties not set for subdomain")
+      return self._properties
+
+   @properties.setter
+   def properties(self, dict: Dict[str, Union[float, str, Path, xr.DataArray]]):
+      self._properties = {key: Property(data=val) for key, val in dict.items()}
+
+   def __getitem__(self, key: str):
+      return self.properties[key].get()
+
+# TODO: This is nasty to be compatible with the solver code;
+#       need to implement TensorStore for zarr or HDF5 format.
    def __dict__(self) -> Dict:
-      if isinstance(self.properties, xr.Dataset):
-         raise NotImplementedError("Subdomains with xr.Dataset properties are not supported yet")
+      props = {}
+      grid = None
+      all_constant = True
+      for key, prop in self._properties.items():
+         if not prop.is_constant:
+            all_constant = False
+      if all_constant:
+         type = "ConstantLayer"
+         props = {key: prop.get() for key, prop in self._properties.items()}
+      else:
+         type = "GridLayer"
+         for key, prop in self._properties.items():
+            if prop.is_constant:
+               props[key] = {"value": self._properties[key].get()}
+            else:
+               dims = sorted(self.properties[key].darr.dims)
+               file = self._path / (f"layer_{self.mesh_block_id}_{key}.bin")
+               file.parent.mkdir(parents=True, exist_ok=True)
+               self.properties[key].darr = self.properties[key].darr.transpose(*dims[::-1])
+               self.properties[key].write(file)
+               props[key] = {"file": file.relative_to(self._proj_path)}
+
+      # TODO: Update Fortran code to accept different grids for different properties
+      #       (and update format so Grid doesn't need to be passed separately)
+               if grid is not None:
+                  if grid != self.properties[key].grid:
+                     raise ValueError("All properties must be defined on the same grid")
+               grid = self.properties[key].grid
       return {
+         "_type":         type,
          "mesh_block_id": self.mesh_block_id,
          "name":          self.name,
          "frame":         self.frame,
-         "properties":    self.properties,
+         "properties":    props,
+         **({"grid": grid.__dict__()} if grid is not None else {})
       }
    
    @classmethod
    def from_dict(cls, data: Dict) -> "ModelSubdomain":
-      raise NotImplementedError("Subclasses must implement from_dict()")
+      if data["_type"] == "ConstantLayer":
+         props = data["properties"]
+         xarr = None
+      elif data["_type"] == "GridLayer":
+         xarr = CartesianGrid.from_dict(data["grid"]).as_xarray()
+         props = {}
+         for key, prop in data["properties"].items():
+            if "file" in prop:
+               props[key] = Path(prop["file"])
+            else:
+               props[key] = prop["value"]
+      else:
+         raise ValueError(f"Unknown subdomain type: {data['_type']}")
+      
+      return cls(mesh_block_id=data["mesh_block_id"],
+                 name=data["name"],
+                 frame=data["frame"],
+                 properties=props,
+                 xarr=xarr)
+   
+   def like(self, xarr: xr.DataArray) -> None:
+      for key, prop in self._properties.items():
+         if prop.data.dims == xarr.dims:
+            self._properties[key]._like(xarr)
+         else:
+            raise ValueError(f"Property {key} does not match dimensions of xarr")
 
    def _set_path(self, proj_path: Path, rel_path: Path):
       self._proj_path = proj_path
@@ -70,12 +156,14 @@ class ModelBase:
          Keys are property names, values can be numeric constants or file paths.
    """
    name:       str = "model"
-   dimension:  Literal[2, 3]
-   subdomains: List[ModelSubdomain] = field(default_factory=list)
+   dimension:  Literal[0, 2, 3] = 0 # 0 is used as an invalid value.
+   subdomains: NamedList = field(default_factory=NamedList)
    _proj_path: Optional[Path] = None
    _rel_path:  Optional[Path] = None
 
    def __dict__(self) -> Dict:
+
+      assert self.dimension in [0, 2, 3], "Dimension must be 0, 2, or 3"
 
       # Label any unlabeled subdomains
       labels = {}

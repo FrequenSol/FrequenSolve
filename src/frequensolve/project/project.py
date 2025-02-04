@@ -3,13 +3,14 @@ import json, toml, yaml
 
 from abc         import ABC, abstractmethod
 from pathlib     import Path
-from typing      import List, Union, Optional, Literal, Dict
+from typing      import Union, Optional, Dict
 from dataclasses import dataclass, field
 
-from ..simulation.simulation  import *  # noqa
-from ..simulation.sampling    import *  # noqa
-from .migrate_version         import *  # noqa
-from .workflows               import *  # noqa
+from frequensolve.simulation.simulation   import *  # noqa
+from frequensolve.simulation.sampling     import *  # noqa
+from frequensolve.project.migrate_version import *  # noqa
+from frequensolve.project.workflows       import *  # noqa
+from frequensolve.util.named_list         import NamedList
 
 __all__ = ['Project', 'BaseProjectComponent']
 
@@ -42,23 +43,24 @@ class Project:
    pretty_name:      Optional[str] = None
    path:             Union[str, Path]
    version:          Version = field(default_factory=Version)
-   load_if_exists:   bool = True
+   load_if_exists:   bool = False
    auto_migrate:     bool = False
    site:             Optional[str] = None
-   simulations:      List[BaseSimulation] = field(default_factory=list)
-   workflows:        Dict[str, BaseWorkflow] = field(default_factory=dict)
+   simulations:      NamedList[BaseSimulation]       = field(default_factory=NamedList)
+   workflows:        Dict[str, BaseWorkflow]         = field(default_factory=dict)
    extras:           Dict[str, BaseProjectComponent] = field(default_factory=dict)
 
    def __post_init__(self):
       """Load project from file and check version."""
+      self.path = Path(self.path)
       if self.load_if_exists:
-         found = self.load(self.path)
-         if found:
-            self.check_version()
-      if isinstance(self.path, str):
-         self.path = Path(self.path)
+         if self.path.exists() and self.path.suffix == ".json":
+            self = Project.load(self.path)
+
       if not self.path.exists():
          self.path.mkdir(parents=True, exist_ok=True)
+
+      self._set_path_deep()
 
    def check_version(self):
       """Check project version against current version and migrate if necessary."""
@@ -69,9 +71,41 @@ class Project:
             self.version = current_version
             self.save()
          else:
-            # TODO: show user changes
+            # TODO: show changes to user
             pass
 
+   @classmethod
+   def copy(cls, src: Union[str, Path], dest: Union[str, Path], **kwargs):
+      load_if_exists = kwargs.get("load_if_exists", False)
+
+      if load_if_exists:
+         if Path(dest).exists():
+            json_files = list(Path(dest).glob("*.json"))
+            if len(json_files) == 1:
+               return cls.load(json_files[0])
+
+      dest = Path(dest).resolve()
+      dest.mkdir(parents=True, exist_ok=True)
+
+      old = Project.load(src)
+
+      name = kwargs.get("name", old.name)
+      pretty_name = kwargs.get("pretty_name", old.pretty_name)
+      version = kwargs.get("version", old.version)
+      
+      new = Project(name = name,
+                    pretty_name = pretty_name,
+                    path = dest,
+                    version = version,
+                    simulations = old.simulations,
+                    workflows = old.workflows,
+                    extras = old.extras)
+      new.save()
+      del new, old
+
+      return Project.load(dest / f"{name}.json")
+
+   
    @classmethod
    def load(cls, file: Union[str, Path], auto_migrate: bool = False) -> "Project":
       """Load project from JSON file."""
@@ -136,6 +170,10 @@ class Project:
 
    def save(self, file: Optional[Union[str, Path]] = None, **kwargs) -> str:
       """Save project to JSON file."""
+
+      self._set_path_deep()   
+
+# TODO: file does nothing right now
       if file is None:
          file = Path(self.path) / f"{self.name}.json"
       else:

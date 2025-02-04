@@ -36,6 +36,20 @@ class Acquisition:
       )
    
    def __dict__(self) -> Dict:
+      from ..util.printing import print_warn
+
+      # Ensure receiver groups have unique names
+      names = {}
+      for group in self.receiver_groups:
+         name = group.name
+         if name in names:
+            i = 1
+            while f"{name}_{i}" in names:
+               i += 1   
+            group.name = f"{name}_{i}"
+            print_warn(f"Duplicate reciever group names detected. Renaming receiver group {name} to {group.name}")
+         names[group.name] = group.name
+
       return {
          "source_group": self.source_group.__dict__(),
          "receiver_groups": [group.__dict__() for group in self.receiver_groups],
@@ -45,7 +59,7 @@ class Acquisition:
                         kind:        str,
                         coords:      np.ndarray,
                         direction:   Optional[np.ndarray] = None,
-                        frame:       str = "phyiscal"):
+                        frame:       str = "physical"):
       """Add a group of recievers with common kind, frame, and direction.
       
       Args:
@@ -72,7 +86,7 @@ class Acquisition:
                           name:   str,
                           device: ReceiverDevice,
                           coords: np.ndarray,
-                          frame:  str = "phyiscal"):
+                          frame:  str = "physical"):
       """Add a group of recievers with common kind, frame, and direction.
 
       Args:

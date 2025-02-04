@@ -1,5 +1,6 @@
 """Python structures defining mesh API"""
 
+from pathlib     import Path
 from abc         import ABC, abstractmethod
 from dataclasses import dataclass
 from typing      import List, Dict, Optional
@@ -15,6 +16,9 @@ __all__ = ['BaseMeshGenerator', 'HexMeshGenerator']
 class BaseMeshGenerator(ABC):
    """Base class for mesh generators"""
 
+   _proj_path: Path = Path()
+   _rel_path: Path = Path()
+
    @classmethod
    def from_dict(cls, data: Dict) -> 'BaseMeshGenerator':
       class_name = data["_type"]
@@ -23,6 +27,14 @@ class BaseMeshGenerator(ABC):
          return mesh_class.from_dict(data)
       else:
          raise ValueError(f"Unknown mesh generator class: {class_name}")
+      
+   def _set_path(self, proj_path: Path, rel_path: Path):
+      self._proj_path = proj_path
+      self._rel_path = rel_path
+
+   @property
+   def _path(self) -> Path:
+      return self._proj_path/self._rel_path
 
 
 @register_class
@@ -67,8 +79,9 @@ class HexMeshGenerator(BaseMeshGenerator):
          self.n = [16] * self.model.dimension
 
       return {
-         "_type": self.__class__.__name__,
-         "n": self.n,
+         "_type":   self.__class__.__name__,
+         "path":    self._rel_path,
+         "n":       self.n,
          "l_bound": l_bound,
          "u_bound": u_bound,
       }

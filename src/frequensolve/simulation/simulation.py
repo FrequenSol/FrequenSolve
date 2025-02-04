@@ -24,11 +24,15 @@ __all__ = ['CustomJSONEncoder','BaseSimulation', 'SeismicSimulation', 'CustomTOM
 class CustomJSONEncoder(json.JSONEncoder):
    """Custom JSON encoder for Simulation objects."""
    def default(self, obj):
+      from numpy import ndarray
+      from xarray import DataArray
       import numpy as np
       if isinstance(obj, (np.integer, np.floating, np.bool_)):
          return obj.item()
-      if isinstance(obj, np.ndarray):
+      if isinstance(obj, ndarray):
          return obj.tolist()
+      if isinstance(obj, DataArray):
+         return obj.values.tolist()
       if isinstance(obj, Path):
          return str(obj)
       if hasattr(obj, '__dict__'):
@@ -51,14 +55,14 @@ class CustomTOMLEncoder(toml.TomlEncoder):
       super().__init__()
       
    def dump_value(self, obj):
-      import xarray as xr
-      import numpy as np
+      from numpy import ndarray, integer, floating, bool_
+      from xarray import DataArray
       
-      if isinstance(obj, (np.integer, np.floating, np.bool_)):
+      if isinstance(obj, (integer, floating, bool_)):
          return obj.item()
-      if isinstance(obj, np.ndarray):
+      if isinstance(obj, ndarray):
          return obj.tolist()
-      if isinstance(obj, xr.DataArray):
+      if isinstance(obj, DataArray):
          return obj.values.tolist()
       if isinstance(obj, Path):
          return str(obj)
@@ -99,23 +103,23 @@ class BaseSimulation(SimulationConfig):
          raise ValueError(f"Unknown simulation class: {class_name}")
       
    def __post_init__(self):
-      from ..util.ansi_colors import ANSIColorCodes as c
+      from ..util.printing import print_note
       if isinstance(self.mesh, Mesh) or \
          isinstance(self.mesh, BaseMeshGenerator):
-         print(f"{c.note}Note: Simulation was initialized with a Mesh or MeshGenerator; specifying the mesh via a\n"
-                "the 'MeshManager' class is recommended as it specifies mesh parallelism and adaptivity parameters.\n"
-                "We've specified a default MeshManager for you but for fine grained control you'll want to specify\n"
-               f"your own.{c.none}")
+         print_note(f"Simulation was initialized with a Mesh or MeshGenerator; specifying the mesh via a\n"
+                     "the 'MeshManager' class is recommended as it specifies mesh parallelism and adaptivity parameters.\n"
+                     "We've specified a default MeshManager for you but for fine grained control you'll want to specify\n"
+                     f"your own.")
          self.mesh = MeshManager(self.mesh)
 
    def __dict__(self) -> Dict:
-      from ..util.ansi_colors import ANSIColorCodes as c
+      from ..util.printing import print_note
       if isinstance(self.mesh, Mesh) or \
          isinstance(self.mesh, BaseMeshGenerator):
-         print(f"{c.note}Note: Simulation was initialized with a Mesh or MeshGenerator; specifying the mesh via a\n"
-                "the 'MeshManager' class is recommended as it specifies mesh parallelism and adaptivity parameters.\n"
-                "We've specified a default MeshManager for you but for fine grained control you'll want to specify\n"
-               f"your own.{c.none}")  
+         print_note(f"Simulation was initialized with a Mesh or MeshGenerator; specifying the mesh via a\n"
+                     "the 'MeshManager' class is recommended as it specifies mesh parallelism and adaptivity parameters.\n"
+                     "We've specified a default MeshManager for you but for fine grained control you'll want to specify\n"
+                     f"your own.")
          self.mesh = MeshManager(self.mesh)
       return {
          "_type": self.__class__.__name__,
@@ -147,14 +151,18 @@ class SeismicSimulation(BaseSimulation):
    name:           str
    physics:        Literal["acoustic", "elastic", "plasma"]
    dimension:      Literal[2, 3]
-   model:          Optional[ModelBase]      = None
-   mesh:           Optional[MeshManager]    = None
+   model:          ModelBase                = field(default_factory=ModelBase)
+   mesh:           MeshManager              = field(default_factory=MeshManager)
    BCs:            BoundaryConditionManager = field(default_factory=BoundaryConditionManager)
    solver:         SolverConfig             = field(default_factory=SolverConfig)
    discretization: Discretization           = field(default_factory=Discretization)  
    outputs:        OutputManager            = field(default_factory=OutputManager) 
-   acquisition:    Optional[Acquisition]    = None
+   acquisition:    Acquisition              = field(default_factory=Acquisition)
 
+
+   def __post_init__(self):
+      if self.model.dimension == 0:
+         self.model.dimension = self.dimension
 
    @classmethod
    def from_dict(cls, data: Dict) -> "SeismicSimulation":
@@ -162,7 +170,9 @@ class SeismicSimulation(BaseSimulation):
       physics   = data["physics"]
       dimension = data["dimension"]
 
-      sim = cls(name=name, physics=physics, dimension=dimension)
+      sim = cls(name=name,
+                physics=physics, 
+                dimension=dimension)
 
       if "Model" in data:
          sim.model = ModelBase.from_dict(data["Model"])
@@ -187,7 +197,9 @@ class SeismicSimulation(BaseSimulation):
 
       with open(path, "r") as f:
          data = json.load(f)
-         return cls.from_dict(data)
+         sim = cls.from_dict(data)
+         sim._file = path
+         return sim
 
    def __dict__(self) -> Dict:
       dict = super().__dict__()
@@ -196,16 +208,40 @@ class SeismicSimulation(BaseSimulation):
          **({"Acquisition":    self.acquisition.__dict__()}    if self.acquisition else {}),
       })
       return dict
+   
+   def __iadd__(self, other):
+      if isinstance(other, ModelBase):
+         self.model = other
+      elif isinstance(other, MeshManager):
+         self.mesh = other
+      elif isinstance(other, BaseMeshGenerator) or isinstance(other, Mesh):
+         self.mesh = MeshManager(other)
+      elif isinstance(other, BoundaryConditionManager):
+         self.BCs = other
+      elif isinstance(other, SolverConfig):
+         self.solver = other
+      elif isinstance(other, Discretization):
+         self.discretization = other
+      elif isinstance(other, OutputManager):
+         self.outputs = other
+      elif isinstance(other, Acquisition):
+         self.acquisition = other
+      else:
+         raise ValueError(f"Cannot add {type(other)} to simulation")
+      return self
 
    def as_json(self, **kwargs) -> str:
+      """Convert simulation to JSON string."""
       indent = kwargs.get("indent", 3)
       return json.dumps(self.__dict__(), cls=CustomJSONEncoder, indent=indent, **kwargs)
 
    def as_toml(self, **kwargs) -> str:
+      """Convert simulation to TOML string."""
       indent = kwargs.get("indent", 3)
       return toml.dumps(self.__dict__(), encoder=CustomTOMLEncoder(), indent=indent, **kwargs)
    
    def as_yaml(self, **kwargs) -> str:
+      """Convert simulation to YAML string."""
 
       def numpy_representer(dumper, data):
          """Convert numpy values to native Python types."""
@@ -232,11 +268,12 @@ class SeismicSimulation(BaseSimulation):
 
    def save(self, path: Union[str, Path], **kwargs) -> str:
       """Save seismic simulation to JSON file."""
-      file = (Path(path) / f"{self.name}.json").resolve()
+      file = (Path(path) / f"{self.name}").with_suffix(".json").resolve()
 
       if not file.parent.exists():
          file.parent.mkdir(parents=True, exist_ok=True)
 
+      self._file = file
       indent = kwargs.get("indent", 3)
       with open(file, "w") as f:
          json.dump(self.__dict__(), f, cls=CustomJSONEncoder, indent=indent, **kwargs)
@@ -262,7 +299,8 @@ class SeismicSimulation(BaseSimulation):
       if self.mesh:
          self.mesh._set_path(self._proj_path, self._rel_path)
       if self.outputs:
-         self.outputs._set_path(self._proj_path, self._rel_path)
+         path = self._proj_path / Path("outputs") / self.name
+         self.outputs._set_path(self._proj_path, path)
 
    @property
    def _path(self) -> Path:
@@ -282,150 +320,3 @@ class SeismicSimulation(BaseSimulation):
    # def get_material_mesh(self, f_max: float) -> MaterialMesh:
    #    """Get the mesh the material model is defined on given the maximum frequency."""
    #    pass
-
-
-
-
-
-
-
-  # TODO: add checkpointing for FWI so that even when job is killed we can restart from where we left off
-
-   # def load_shot_FD(self, key: str, isrc: int) -> Shot:
-   #    """Read frequency-domain shot data, then apply the wavelet signature.
-
-   #    Args:
-   #       key (str): A string like "groupName:fieldName".
-   #       isrc (int): The source number (1-based).
-
-   #    Returns:
-   #       Shot: A Shot object containing FD data.
-   #    """
-      
-   #    try:
-   #       import h5py
-   #    except:
-   #       print("h5py not found, skipping frequency-domain data")
-   #       return None
-      
-   #    group_name, field = key.split(":")
-   #    group = self.receiver_group(group_name)
-   #    nrecv = group.size
-
-   #    if isinstance(self.sampling, UniformSweepSampling):
-   #       of = self.sampling.ofreq
-   #       nf = self.sampling.nfreq
-   #       f_max = self.sampling.f_max
-
-   #       wavelet  = self.source_group.signal(isrc)
-   #       spectrum = wavelet.spectrum
-   #    else:
-   #       of = 0
-   #       spectrum = np.ones([self.sampling.nfreq])
-      
-   #    u = np.zeros((nf, nrecv), dtype=np.csingle)
-      
-   #    # Loop over frequencies and load data
-   #    for ifreq, freq in enumerate(self.sampling.freqs):
-   #       file = os.path.join(group.directory, f"{group_name}_{ifreq}.h5")
-   #       i_omega = np.csingle(1j * 2 * np.pi * freq)
-         
-   #       if ifreq >= of and not os.path.exists(file):
-   #          warnings.warn(f"File {file} does not exist.", UserWarning)
-   #       else:
-   #          with h5py.File(file, "r") as f:
-   #             # Real + imaginary parts
-   #             u[ifreq, :] += np.csingle(1j) * f[f"{field}_{isrc}_im"][()]
-   #             u[ifreq, :] +=              f[f"{field}_{isrc}_re"][()]
-               
-   #             # Apply wavelet
-   #             u[ifreq, :] *= spectrum[ifreq]
-               
-   #             # For fiber-type receivers, multiply by iω for strain *rate*
-   #             if group.kind == 'fiber':
-   #                u[ifreq, :] *= i_omega
-               
-   #             f.close()
-         
-   #    return ShotRecord(type           = "FD",
-   #                      number         = isrc,
-   #                      sampling       = self.sampling,
-   #                      source         = self.source(isrc),
-   #                      receiver_group = group,
-   #                      field          = field,
-   #                      data           = u)
-
-
-   # def read_shot_TD(self, key: str, isrc: int) -> Shot:
-   #    """Read time-domain shot data by first reconstructing from the frequency-domain.
-
-   #    Args:
-   #       key (str): A string like "groupName:fieldName".
-   #       isrc (int): The source number (1-based).
-
-   #    Returns:
-   #       Shot: A Shot object containing time-domain data.
-   #    """
-      
-   #    if not isinstance(self.sampling,UniformSweepSampling):
-   #       raise ValueError("Time-domain data is only supported for uniform sweep sampling.")
-      
-   #    try:
-   #       import pyfftw.interfaces.numpy_fft as fft
-   #    except:
-   #       print('pyfftw not found, using numpy for FFT (slow)')
-   #       import numpy.fft as fft
-      
-   #    group_name, field = key.split(":")
-   #    group = self.receiver_group(group_name)
-   #    nrecv = group.size
-   
-   #    nf = self.sampling.nfreq
-   #    nF = self.sampling.nFreq
-      
-   #    fd = self.read_shot_FD(key, isrc)
-      
-   #    # If upscaled, create a bigger array for inverse transform
-   #    if nF > nf:
-   #       FD = np.zeros((nF, nrecv), dtype=np.csingle)
-   #       FD[:nf, :] = fd.data[:nf, :]
-   #       del fd
-   #       td = fft.irfft(FD, axis=0)
-   #       del FD
-   #    else:
-   #       td = fft.irfft(fd.data, axis=0)
-   #       del fd
-         
-   #    return Shot(type           = "TD",
-   #                number         = isrc,
-   #                sampling       = self.sampling,
-   #                source         = self.source(isrc),
-   #                receiver_group = group,
-   #                field          = field,
-   #                data           = td)
-   
-
-
-
-
-   # def signal(self, irecv: int) -> Wavelet:
-   #    """Retrieves the signal for a specific receiver.
-      
-   #    Used in adjoint calculations where receivers act as sources.
-      
-   #    Args:
-   #       irecv (int): 1-based index of the receiver.
-         
-   #    Returns:
-   #       Wavelet: The signal associated with the specified receiver.
-   #    """
-   #    return self.signals.get(irecv)
-   
-   
-   # def signature(self, isrc: int):
-   #    if self.signals:
-   #       return self.signals.get(isrc)
-   #    else:
-   #       return None
-
-

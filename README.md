@@ -1,8 +1,11 @@
-# NOTE: I'm not quite finished with the initial version yet. Feel free to explore, offer suggestions, and contribute if you wish, but the code is going to be changing quickly over the next few days. I'll send out instructions on how to install the FrequenSolve executable, etc. in the next few days.
-
 # FrequenSolve (Python API)
 
-FrequenSolve is a fast frequency-domain finite element solver for seismic wave propagation. It can be used for both time-domain and frequency-domain simulations. This library provides a Python API for setting up and running (running isn't quite ready yet) with the FrequenSolve solver.
+FrequenSolve is a fast frequency-domain finite element solver for seismic wave propagation.
+It can be used for both time-domain and frequency-domain simulations.
+This library provides a Python API for setting up and running the FrequenSolve solver.
+
+> [!WARNING]
+> This is a work in progress, the API is not yet stable and will change frequently.
 
 ## Features
 
@@ -15,28 +18,70 @@ FrequenSolve is a fast frequency-domain finite element solver for seismic wave p
 
 ### Prerequisites
 
-- Python 3.10 (recommended for compatibility with the python package shipped with ParaView 5.13)
-- FrequenSolve executable (required for running simulations)
+- A Unix-like operating system (Linux, macOS, etc.); ***FrequenSolve doesn't currently support Windows.***
+- Python >=3.10
+
+   > [!NOTE]
+   > FrequenSolve has tools to automate ParaView visualization. Some of these tools can be run
+   > with ParaView's interanl Python build (pvpython), but for full integration with FrequenSolve
+   > you'll need to ensure that the Python version used for the installation is the same as the
+   > one used for building FrequenSolve.
+
+   > [!TIP]
+   > If you've already built FrequenSolve with a different Python version, you can create a new
+   > Poetry virtual environment with the desired Python version and rebuild FrequenSolve. Assuming you
+   > have Python 3.10 installed, you can do the following:
+   >
+   > ```console
+   > $ poetry env use python3.10         # Create a new virtual environment with Python 3.10
+   > $ poetry install                    # Install the dependencies in the virtual environment
+   > $ poetry env list                   # List the virtual environments
+   > ```
+   >
+   > To toggle between virtual environments, run `poetry env use <python-version>`.
+
+- The FrequenSolve Python API has a rich set of tools for model building, parallel visualization, etc.
+   that can be used on their own, free of charge. However, running simulations requires
+   state-of-the-art solver libraries developed by FrequenSol, LLC.; these can either be licensed on
+   your own on-site hardware or run on the cloud. For more information on how to obtain a license or
+   run on the cloud, see ***TODO***.
 
 ### Installing with Poetry
 
 1. Install Poetry (instructions at https://python-poetry.org/docs/#installation)
 
 2. Clone the repository:
-   ```
-   git clone git@github.com:FrequenSol/FrequenSolve.git
-   cd frequensolve
+
+   ```console
+   $ git clone git@github.com:FrequenSol/FrequenSolve.git
+   $ cd frequensolve
    ```
 
 3. Install the package and its dependencies using Poetry:
-   ```
-   poetry install
+
+   ```console
+   $ poetry install
    ```
 
 4. Activate the virtual environment:
+
+   ```console
+   $ poetry shell
    ```
-   poetry shell
-   ```
+
+   > [!WARNING]
+   > `poetry shell` doesn't seem to work on some systems, if it fails instead run:
+   >
+   > ```console
+   > $ source $(poetry env info --path)/bin/activate
+   > ```
+
+   > [!TIP]
+   > You can deactivate the virtual environment with:
+   >
+   > ```console
+   > $ deactivate
+   > ```
 
 ### Installing ParaView (optional)
 
@@ -44,21 +89,37 @@ ParaView is recommended for visualizing simulation results. Download and install
 
 ## Building Documentation
 
+> [!Note]
+> You'll need the development dependencies installed to build the documentation install them with:
+>
+> ```console
+> $ poetry install --with dev
+> ```
+
 The project documentation can be built using Sphinx. I'll work on hosting it on readthedocs or similar; for now you can build it on your local machine by:
 
-1. Ensure you have the dependencies installed (via Poetry) and activate the poetry virtual environment (`poetry shell`) or, if you do not wish to activate the virtual environment, prepend `poetry run ` to the following commands.
+1. Ensure you have the dependencies installed (via Poetry) and activate the poetry virtual environment (`poetry shell`) or, if you do not wish to activate the virtual environment, prepend `poetry run` to the following commands.
 
 2. Navigate to the `docs` directory:
-   ```
-   cd docs
+
+   ```console
+   $ cd docs
    ```
 
 3. Build the documentation:
-   ```
-   make html
+
+   ```console
+   $ make html
    ```
 
-The generated documentation will be available in the `docs/_build/html` directory.
+The generated documentation will be available in `docs/build/html` directory, to open in your default
+ web browser **in macOS**:
+
+```console
+$ open docs/build/html/index.html
+```
+
+For linux, substitute `open` with `xdg-open`.
 
 ## Usage
 

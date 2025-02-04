@@ -1,5 +1,13 @@
 __all__ = ["ANSIColorCodes"]
 
+
+def print_note(msg: str):
+   print(f"{ANSIColorCodes.note}Note: {msg}{ANSIColorCodes.none}")
+
+def print_warn(msg: str):
+   print(f"{ANSIColorCodes.warn}Warning: {msg}{ANSIColorCodes.none}")
+
+
 class ANSIColorCodes:
       """Class for storing ANSI color codes."""
 
@@ -39,6 +47,7 @@ class ANSIColorCodes:
 
       # Used colors  
       none   = "\033[0m" 
+      warn   = fg_br_Yellow
       note   = "\033[38;5;139m"
       faint  = "\033[38;5;244m"   
       error  = fg_br_Red
