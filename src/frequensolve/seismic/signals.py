@@ -141,7 +141,7 @@ class SignalFromFile(Signal):
         }
 
     def __post_init__(self):
-        match = re.search("(\{)\w([:\w]*\})", self.file)
+        match = re.search(r"(\{)\w([:\w]*\})", self.file)
         self.id_format = (match[0], match[1] + match[2])
 
         try:
