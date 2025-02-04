@@ -7,17 +7,16 @@ import numpy as np
 
 try:
     from paraview.simple import *  # noqa
+
+    HAS_PARAVIEW = True
 except ImportError:
-    raise ImportError(
-        "ParaView is not installed or the ParaView Python API is "
-        "not available. Please install ParaView or add the "
-        f"ParaView Python library to your Python path: {sys.path}"
-    )
+    HAS_PARAVIEW = False
 
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-paraview.simple._DisableFirstRenderCameraReset()
+if HAS_PARAVIEW:
+    paraview.simple._DisableFirstRenderCameraReset()
 
 __all__ = ["ParaviewManager"]
 

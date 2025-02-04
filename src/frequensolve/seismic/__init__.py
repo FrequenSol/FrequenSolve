@@ -1,3 +1,14 @@
+from . import (
+    acquisition,
+    layered_model,
+    plotting,
+    receivers,
+    shot_record,
+    signals,
+    sources,
+    survey,
+    wavelet,
+)
 from .acquisition import *  # noqa
 from .layered_model import *  # noqa
 from .plotting import *  # noqa
