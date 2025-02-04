@@ -54,6 +54,15 @@ FrequenSolve is a fast frequency-domain finite element solver for seismic wave p
 
 ParaView is recommended for visualizing simulation results. Download and install (ParaView 5.13 recommended) from the official ParaView website: https://www.paraview.org/download/
 
+Some components of this package (particularly visualization tools) rely on Python modules that are installed with ParaView. You'll need to add the ParaView Python library location to your Python path. The location varies by operating system. On MacOS, the path is likely something similar to `/Applications/ParaView-5.13.0.app/Contents/Python/`
+You can add this to your Python path by setting the PYTHONPATH environment variable:
+
+```bash
+# Linux/macOS
+export PYTHONPATH="/path/to/paraview/python:$PYTHONPATH"
+```
+
+
 ## Building Documentation
 
 The project documentation can be built using Sphinx. I'll work on hosting it on readthedocs or similar; for now you can build it on your local machine by:
