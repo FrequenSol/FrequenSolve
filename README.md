@@ -77,6 +77,13 @@ This library provides a Python API for setting up and running the FrequenSolve s
    ```
 
    > [!WARNING]
+   > If you encounter the error 'The command "shell" does not exist.', install the shell plugin:
+   >
+   > ```console
+   > $ poetry self add poetry-plugin-shell
+   > ```
+   
+   > [!WARNING]
    > `poetry shell` doesn't seem to work on some systems, if it fails instead run:
    >
    > ```console
@@ -89,12 +96,6 @@ This library provides a Python API for setting up and running the FrequenSolve s
    > ```console
    > $ deactivate
    > ```
-
-   If you encounter the error 'The command "shell" does not exist.', install the shell plugin:
-   
-   ```
-   poetry self add poetry-plugin-shell
-   ```
 
 ### Installing ParaView (optional)
 
