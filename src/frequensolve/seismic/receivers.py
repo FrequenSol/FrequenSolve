@@ -6,15 +6,15 @@ This module defines the various types of receivers and their locations.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import h5py
 import numpy as np
 import xarray as xr
 
-from ..geometry.grids import *  # noqa
-from ..util.class_registry import *  # noqa
-from .wavelet import *  # noqa
+from frequensolve.geometry.grids import CartesianGrid, Grid
+from frequensolve.seismic.wavelet import Wavelet
+from frequensolve.util.class_registry import class_registry, register_class
 
 __all__ = [
     "ReceiverComponent",
@@ -633,10 +633,10 @@ class ReceiverGroup:
     def _path(self) -> Path:
         return self._proj_path / self._rel_path
 
-    def plot(**kwargs):
-        # if "a" # NOTE: This is invalid syntax, so I commented it out.
-        fig = plt.figure()
-        ax = plt.gca()
+    # def plot(**kwargs):
+    #     # if "a"
+    #     fig = plt.figure()
+    #     ax = plt.gca()
 
 
 # class ReceiverPlotter:

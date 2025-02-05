@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
-from ..seismic.layered_model import *  # noqa
 from .mesh import *  # noqa
 from .mesh_generators import *  # noqa
 
