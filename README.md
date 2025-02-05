@@ -21,24 +21,24 @@ This library provides a Python API for setting up and running the FrequenSolve s
 - A Unix-like operating system (Linux, macOS, etc.); ***FrequenSolve doesn't currently support Windows.***
 - Python >=3.10
 
-   > [!NOTE]
-   > FrequenSolve has tools to automate ParaView visualization. Some of these tools can be run
-   > with ParaView's interanl Python build (pvpython), but for full integration with FrequenSolve
-   > you'll need to ensure that the Python version used for the installation is the same as the
-   > one used for building FrequenSolve.
+> [!NOTE]
+> FrequenSolve has tools to automate ParaView visualization. Some of these tools can be run
+> with ParaView's interanl Python build (pvpython), but for full integration with FrequenSolve
+> you'll need to ensure that the Python version used for the installation is the same as the
+> one used for building FrequenSolve.
 
-   > [!TIP]
-   > If you've already built FrequenSolve with a different Python version, you can create a new
-   > Poetry virtual environment with the desired Python version and rebuild FrequenSolve. Assuming you
-   > have Python 3.10 installed, you can do the following:
-   >
-   > ```console
-   > $ poetry env use python3.10         # Create a new virtual environment with Python 3.10
-   > $ poetry install                    # Install the dependencies in the virtual environment
-   > $ poetry env list                   # List the virtual environments
-   > ```
-   >
-   > To toggle between virtual environments, run `poetry env use <python-version>`.
+> [!TIP]
+> If you've already built FrequenSolve with a different Python version, you can create a new
+> Poetry virtual environment with the desired Python version and rebuild FrequenSolve. Assuming you
+> have Python 3.10 installed, you can do the following:
+>
+> ```console
+> $ poetry env use python3.10         # Create a new virtual environment with Python 3.10
+> $ poetry install                    # Install the dependencies in the virtual environment
+> $ poetry env list                   # List the virtual environments
+> ```
+>
+> To toggle between virtual environments, run `poetry env use <python-version>`.
 
 - The FrequenSolve Python API has a rich set of tools for model building, parallel visualization, etc.
    that can be used on their own, free of charge. However, running simulations requires
@@ -69,19 +69,19 @@ This library provides a Python API for setting up and running the FrequenSolve s
    $ poetry shell
    ```
 
-   > [!WARNING]
-   > `poetry shell` doesn't seem to work on some systems, if it fails instead run:
-   >
-   > ```console
-   > $ source $(poetry env info --path)/bin/activate
-   > ```
+> [!WARNING]
+> `poetry shell` doesn't seem to work on some systems, if it fails instead run:
+>
+> ```console
+> $ source $(poetry env info --path)/bin/activate
+> ```
 
-   > [!TIP]
-   > You can deactivate the virtual environment with:
-   >
-   > ```console
-   > $ deactivate
-   > ```
+> [!TIP]
+> You can deactivate the virtual environment with:
+>
+> ```console
+> $ deactivate
+> ```
 
 ### Installing ParaView (optional)
 
