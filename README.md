@@ -40,11 +40,11 @@ This library provides a Python API for setting up and running the FrequenSolve s
 >
 > To toggle between virtual environments, run `poetry env use <python-version>`.
 
-- The FrequenSolve Python API has a rich set of tools for model building, parallel visualization, etc.
+<!-- - The FrequenSolve Python API has a rich set of tools for model building, parallel visualization, etc.
    that can be used on their own, free of charge. However, running simulations requires
    state-of-the-art solver libraries developed by FrequenSol, LLC.; these can either be licensed on
    your own on-site hardware or run on the cloud. For more information on how to obtain a license or
-   run on the cloud, see ***TODO***.
+   run on the cloud, see ***TODO***. -->
 
 ### Installing with Poetry
 
