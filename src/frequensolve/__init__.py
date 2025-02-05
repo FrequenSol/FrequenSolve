@@ -1,11 +1,17 @@
-from . import _version
-from .geometry import *  # noqa
-from .mesh import *  # noqa
-from .model import *  # noqa
-from .orchestrator import *  # noqa
-from .project import *  # noqa
-from .seismic import *  # noqa
-from .simulation import *  # noqa
-from .util import *  # noqa
+# First, import version info
+from frequensolve._version import get_versions
 
-__version__ = _version.get_versions()["version"]
+__version__ = get_versions()["version"]
+
+from frequensolve.geometry import *
+from frequensolve.mesh import *
+
+# Then import in dependency order
+from frequensolve.model import *
+from frequensolve.orchestrator import *
+from frequensolve.project import *
+from frequensolve.seismic import *
+from frequensolve.simulation import *
+
+# Core imports that don't depend on others
+from frequensolve.util import *
