@@ -633,10 +633,10 @@ class ReceiverGroup:
     def _path(self) -> Path:
         return self._proj_path / self._rel_path
 
-    def plot(**kwargs):
-        # if "a" # NOTE: This is invalid syntax, so I commented it out.
-        fig = plt.figure()
-        ax = plt.gca()
+    # def plot(**kwargs):
+    #     # if "a"
+    #     fig = plt.figure()
+    #     ax = plt.gca()
 
 
 # class ReceiverPlotter:

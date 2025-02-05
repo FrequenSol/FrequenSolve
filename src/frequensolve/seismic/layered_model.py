@@ -7,11 +7,11 @@ import numpy as np
 import xarray as xr
 from numpy.typing import ArrayLike
 
-from frequensolve.geometry.grids import *  # noqa
-from frequensolve.model.model import *  # noqa
-from frequensolve.model.property import *  # noqa
-from frequensolve.util.class_registry import *  # noqa
-from frequensolve.util.named_list import *  # noqa
+from ..geometry.grids import *  # noqa
+from ..model.model import *  # noqa
+from ..model.property import *  # noqa
+from ..util.class_registry import *  # noqa
+from ..util.named_list import *  # noqa
 
 __all__ = ["SimpleSurface", "Layer", "LayeredModel"]
 
