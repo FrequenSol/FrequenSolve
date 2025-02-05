@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from .._version import get_versions
+from frequensolve._version import get_versions
 
 __all__ = ["Version"]
 

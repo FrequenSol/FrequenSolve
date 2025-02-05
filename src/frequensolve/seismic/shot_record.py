@@ -2,9 +2,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..simulation.sampling import Sampling
-from .receivers import ReceiverGroup
-from .sources import SourceGroup
+from frequensolve.seismic.receivers import ReceiverGroup
+from frequensolve.seismic.sources import SourceGroup
+from frequensolve.simulation.sampling import Sampling
 
 __all__ = ["ShotRecord"]
 

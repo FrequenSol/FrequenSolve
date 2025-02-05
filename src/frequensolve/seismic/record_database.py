@@ -17,10 +17,9 @@ import h5py
 import numpy as np
 import segyio
 
-from ..seismic.acquisition import *  # noqa
-from ..simulation.sampling import *  # noqa
-from ..simulation.simulation import *  # noqa
-from .shot_record import ShotRecord
+from frequensolve.seismic.shot_record import ShotRecord
+from frequensolve.simulation.sampling import UniformSweepSampling
+from frequensolve.simulation.simulation import SeismicSimulation
 
 
 @dataclass

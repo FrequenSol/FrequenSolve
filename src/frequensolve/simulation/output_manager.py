@@ -3,8 +3,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-from ..geometry.grids import *  # noqa
-from ..util.class_registry import *  # noqa
+from frequensolve.geometry.grids import CartesianGrid
+from frequensolve.util.class_registry import class_registry, register_class
 
 __all__ = [
     "Output",
@@ -277,7 +277,7 @@ class OutputManager:
     def from_dict(cls, dict: Dict) -> None:
         receivers = dict.get("receivers")
         paraview = [
-            ParaviewOutput.from_dict(pv_out) for pv_out in dict.get("paraview", [])
+            ParaviewOutput.from_dict(pv_out) for pv_out in dict.get("ParaView", [])
         ]
         wavefields = [
             WavefieldOutput.from_dict(wf_out) for wf_out in dict.get("wavefields", [])

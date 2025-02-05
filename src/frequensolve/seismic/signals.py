@@ -5,9 +5,8 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 
-from ..simulation.config import *  # noqa
-from ..simulation.sampling import *  # noqa
-from .wavelet import *  # noqa
+from frequensolve.seismic.wavelet import Wavelet
+from frequensolve.simulation.config import SimulationConfig
 
 __all__ = ["Signal", "AnalyticalSignal", "SignalFromFile"]
 

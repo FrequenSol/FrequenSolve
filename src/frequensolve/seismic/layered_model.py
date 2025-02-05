@@ -1,4 +1,3 @@
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple, Union
@@ -7,11 +6,12 @@ import numpy as np
 import xarray as xr
 from numpy.typing import ArrayLike
 
-from ..geometry.grids import *  # noqa
-from ..model.model import *  # noqa
-from ..model.property import *  # noqa
-from ..util.class_registry import *  # noqa
-from ..util.named_list import *  # noqa
+from frequensolve.geometry.grids import CartesianGrid
+from frequensolve.mesh.mesh_generators import HexMeshGenerator
+from frequensolve.model.model import ModelBase, ModelSubdomain
+from frequensolve.model.property import Property
+from frequensolve.util.class_registry import register_class
+from frequensolve.util.named_list import NamedList
 
 __all__ = ["SimpleSurface", "Layer", "LayeredModel"]
 
@@ -51,11 +51,12 @@ class SimpleSurface:
         z_ref: Optional[float],
         z_phys: Property,
         xarr: Optional[xr.DataArray] = None,
+        scale: float = 1.0,
     ):
         self.name = name
         self.interface = interface
         self.z_ref = z_ref
-        self.z_phys = Property(data=z_phys, xarr=xarr)
+        self.z_phys = Property(data=z_phys, xarr=xarr, scale=scale)
 
     @classmethod
     def from_dict(cls, dict: Dict) -> "SimpleSurface":
@@ -296,7 +297,6 @@ class LayeredModel(ModelBase):
        surfaces (List[Surface]):           Model (simple) surfaces.
        x_limits (List[float]):             X-limits of the model.
        y_limits (Optional[List[float]]):   Y-limits of the model. (3D only)
-       interface_flag (bool):              Whether to flag interfaces between layers.
        ordering (Literal["top_down", "bottom_up"]):
           Ordering of layers. Defaults to "top_down".
 
@@ -309,7 +309,6 @@ class LayeredModel(ModelBase):
     y_limits: Optional[List[float]] = None
     surfaces: NamedList = field(default_factory=NamedList)
     ordering: Literal["top_down", "bottom_up"] = "top_down"
-    interface_flag: bool = True
     _layer_to_surfs: List[LayerBounds] = field(default_factory=list)
     _last_added: str = "none"
     _proj_path: Optional[Path] = None
@@ -354,6 +353,7 @@ class LayeredModel(ModelBase):
         name: str = "surface",
         z_ref: Optional[float] = None,
         xarr: Optional[xr.DataArray] = None,
+        scale: float = 1.0,
     ):
         """Add a surface to the model.
 
@@ -369,8 +369,14 @@ class LayeredModel(ModelBase):
               Xarray with final shape of the surface.
         """
 
+        interface = len(self.surfaces) == 0
         surface = SimpleSurface(
-            name=name, interface=self.interface_flag, z_ref=z_ref, z_phys=z, xarr=xarr
+            name=name,
+            interface=interface,
+            z_ref=z_ref,
+            z_phys=z,
+            xarr=xarr,
+            scale=scale,
         )
         if z_ref is None:
             if surface.z_phys.is_constant:
@@ -407,6 +413,17 @@ class LayeredModel(ModelBase):
             vmin = min if min < vmin else vmin
             vmax = max if max > vmax else vmax
         return vmin, vmax
+
+    def hex_mesh_generator(self, n: Optional[List[int]] = None) -> HexMeshGenerator:
+
+        if self.dimension == 2:
+            l_bound = [self.x_limits[0], self.z_limits[0]]
+            u_bound = [self.x_limits[1], self.z_limits[1]]
+        else:
+            l_bound = [self.x_limits[0], self.y_limits[0], self.z_limits[0]]
+            u_bound = [self.x_limits[1], self.y_limits[1], self.z_limits[1]]
+
+        return HexMeshGenerator(l_bound=l_bound, u_bound=u_bound, n=n)
 
     @classmethod
     def from_dict(cls, data: Dict) -> "LayeredModel":
@@ -445,15 +462,14 @@ class LayeredModel(ModelBase):
         isurf = 1
         ilayer = 0
         while isurf < nsurfs:
+            # Add layer
+            model += Layer.from_dict(layers[ilayer])
+            ilayer += 1
 
             # Add any non-interface surfaces (surfaces not between layers)
             while surfs[isurf].get("interface", True) == False:
                 model += SimpleSurface.from_dict(surfs[isurf])
                 isurf += 1
-
-            # Add layer
-            model += Layer.from_dict(layers[ilayer])
-            ilayer += 1
 
             # Add surface
             model += SimpleSurface.from_dict(surfs[isurf])
@@ -462,6 +478,10 @@ class LayeredModel(ModelBase):
         return model
 
     def __dict__(self) -> Dict:
+
+        # Mark bottom surface as interface
+        self.surfaces[-1].interface = True
+
         base_dict = super().__dict__()
         base_dict.update(
             {
@@ -481,10 +501,9 @@ class LayeredModel(ModelBase):
 
             # Add surface
             self.surfaces.append(other)
-            self.interface_flag = False
 
             # Build layer-to-surface mapping
-            if self._last_added == "layer":
+            if len(self.surfaces) > 1:
                 if self.ordering == "top_down":
                     self._layer_to_surfs[-1].lower = other
                 else:
@@ -501,7 +520,8 @@ class LayeredModel(ModelBase):
 
             # Add layer
             self.add_subdomain(other)
-            self.interface_flag = True
+            if len(self.surfaces) > 1:
+                self.surfaces[-1].interface = True
 
             # Build layer-to-surface mapping
             if self.ordering == "top_down":
@@ -601,14 +621,14 @@ class LayeredModel(ModelBase):
             else:
                 raise ValueError(f"Layer '{layer}' not found")
 
-    def plot(self, property: str, **kwargs):
+    def plot(self, property: str, resolution: List[int] = [500, 500], **kwargs):
         """Plot the model."""
         import matplotlib.pyplot as plt
 
         if self.dimension == 2:
-            x = np.linspace(self.x_limits[0], self.x_limits[1], 1000)
-            z = np.linspace(self.z_limits[0], self.z_limits[1], 1000)
-            samples = xr.DataArray(dims=["x", "z"], coords={"x": x, "z": z})
+            x = np.linspace(self.x_limits[0], self.x_limits[1], resolution[0])
+            z = np.linspace(self.z_limits[0], self.z_limits[1], resolution[1])
+            samples = xr.DataArray(dims=["x", "z"], coords={"z": z, "x": x})
         elif self.dimension == 3:
             raise NotImplementedError("3D plotting not implemented")
 
@@ -617,18 +637,26 @@ class LayeredModel(ModelBase):
         else:
             self._layer_to_surfs[-1].upper = self.upper_surface()
 
+        figsize = kwargs.pop("figsize", None)
+        fontsize = kwargs.pop("fontsize", 12)
+        units = kwargs.pop("units", "km/s")
+        label = kwargs.pop("label", property)
+        origin = kwargs.pop("origin", "upper")
+        aspect = kwargs.pop("aspect", None)
+        axes_names = kwargs.pop("axes_names", {"x": "X", "z": "Depth"})
+        axes_units = kwargs.pop("axes_units", {"x": "km", "z": "km"})
+
+        plt.rcParams.update({"font.size": fontsize})
+
         if "ax" in kwargs:
             ax = kwargs.pop("ax")
             show = False
         else:
-            fig = plt.figure()
+            if figsize is not None:
+                fig = plt.figure(figsize=figsize)
+            else:
+                fig = plt.figure()
             ax = fig.gca()
-
-        units = kwargs.pop("units", "km/s")
-        label = kwargs.pop("label", property)
-        origin = kwargs.pop("origin", "upper")
-        axes_names = kwargs.pop("axes_names", {"x": "X", "z": "Depth"})
-        axes_units = kwargs.pop("axes_units", {"x": "km", "z": "km"})
 
         if units is not None:
             samples.attrs["units"] = units
@@ -660,6 +688,11 @@ class LayeredModel(ModelBase):
             prop = layer.properties[property]
 
             if layer.frame == "reference":
+                data = prop.get().transpose()
+                dims = sorted(data.dims)
+                data = data.transpose(*dims)
+
+                limits = {}
                 if self.ordering == "top_down":
                     limits["z_min"] = upper.z_ref
                     limits["z_max"] = lower.z_ref
@@ -693,11 +726,7 @@ class LayeredModel(ModelBase):
                 )
                 zvals = tmp.interp(coords={"x": xgrid, "z": zgrid})
 
-                samp = xr.Dataset(
-                    {
-                        property: prop.get(zvals),
-                    }
-                )
+                samp = xr.Dataset({property: prop.get(zvals)})
                 samp = samp.assign_coords(
                     {
                         "Xcoord": (("x", "z"), xgrid.broadcast_like(zvals).values.T),
@@ -734,6 +763,8 @@ class LayeredModel(ModelBase):
 
             else:
                 data = prop.get()
+                if prop.is_constant:
+                    data = xr.full_like(samples, data)
 
                 limits = {}
                 limits["x_min"] = self.x_limits[0]
@@ -755,8 +786,6 @@ class LayeredModel(ModelBase):
                     limits["z_min"] = lower.z_phys.get(xgrid)
 
                 if prop.is_constant:
-                    data = xr.full_like(samples, data)
-                    # For constant properties, create a mask based on the sample grid coordinates
                     mask = (
                         (data.z < limits["z_max"])
                         & (data.z > limits["z_min"])
@@ -775,9 +804,7 @@ class LayeredModel(ModelBase):
                         & (data.x > limits["x_min"])
                     )
 
-                    # Interpolate data onto samples grid
-                    da = prop.get()
-                    da = da.where(mask)
+                    da = data.where(mask)
                     ds = da.interp(coords=samples.coords)
                     samples.data = np.where(~np.isnan(ds), ds, samples.data)
         # except Exception as e:
@@ -819,7 +846,8 @@ class LayeredModel(ModelBase):
         if origin == "upper":
             ax.invert_yaxis()
 
-        ax.set_aspect("equal")
+        if aspect == "equal":
+            ax.set_aspect("equal")
 
         plt.show()
 

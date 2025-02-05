@@ -1,23 +1,22 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, Literal, Optional, Union
 
 import toml
 import yaml
 
-from ..mesh.boundary_conditions import *  # noqa
-from ..mesh.mesh import *  # noqa
-from ..mesh.mesh_generators import *  # noqa
-from ..mesh.mesh_manager import *  # noqa
-from ..model.model import *  # noqa
-from ..orchestrator.jobs.base_job import BaseJob
-from ..seismic.acquisition import *  # noqa
-from ..util.class_registry import *  # noqa
-from ..util.memoization import *  # noqa
-from .config import *  # noqa
-from .numerics_manager import *  # noqa
-from .output_manager import *  # noqa
+from frequensolve.mesh.boundary_conditions import BoundaryConditionManager
+from frequensolve.mesh.mesh import Mesh
+from frequensolve.mesh.mesh_generators import BaseMeshGenerator
+from frequensolve.mesh.mesh_manager import MeshManager
+from frequensolve.model.model import ModelBase
+from frequensolve.seismic.acquisition import Acquisition
+from frequensolve.simulation.config import SimulationConfig
+from frequensolve.simulation.numerics_manager import Discretization, SolverConfig
+from frequensolve.simulation.output_manager import OutputManager
+from frequensolve.util.class_registry import class_registry, register_class
+from frequensolve.util.memoization import memoized_func, quantize
 
 __all__ = [
     "CustomJSONEncoder",
@@ -113,7 +112,7 @@ class BaseSimulation(SimulationConfig):
             raise ValueError(f"Unknown simulation class: {class_name}")
 
     def __post_init__(self):
-        from ..util.printing import print_note
+        from frequensolve.util.printing import print_note
 
         if isinstance(self.mesh, Mesh) or isinstance(self.mesh, BaseMeshGenerator):
             print_note(
@@ -125,7 +124,7 @@ class BaseSimulation(SimulationConfig):
             self.mesh = MeshManager(self.mesh)
 
     def __dict__(self) -> Dict:
-        from ..util.printing import print_note
+        from frequensolve.util.printing import print_note
 
         if isinstance(self.mesh, Mesh) or isinstance(self.mesh, BaseMeshGenerator):
             print_note(

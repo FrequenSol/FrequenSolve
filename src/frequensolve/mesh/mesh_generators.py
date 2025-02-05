@@ -1,13 +1,11 @@
 """Python structures defining mesh API"""
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from ..seismic.layered_model import *  # noqa
-from ..util.class_registry import *  # noqa
-from .mesh import *  # noqa
+from ..util.class_registry import class_registry, register_class
 
 __all__ = ["BaseMeshGenerator", "HexMeshGenerator"]
 
@@ -44,41 +42,26 @@ class HexMeshGenerator(BaseMeshGenerator):
     """Generates a hexahedral mesh
 
     Attributes:
-       model (LayeredModel):
-          Model to use for generating the mesh
+       l_bound (List[float]):
+          The lower bounds of a 'box' domain
+       u_bound (List[float]):
+          The upper bounds of a 'box' domain
        n (List[int]):
           Number of elements in each direction
-       l_bound (List[float], optional):
-          The lower bounds of the mesh (optional, can be inferred from model)
-       u_bound (List[float], optional):
-          The upper bounds of the mesh (optional, can be inferred from model)
     """
 
-    n: Optional[List[int]] = None
-    model: Optional[LayeredModel] = None
     l_bound: Optional[List[float]] = None
     u_bound: Optional[List[float]] = None
+    n: Optional[List[int]] = None
 
     def __dict__(self) -> Dict:
         if self.l_bound is not None:
             assert self.u_bound is not None
             l_bound = self.l_bound
             u_bound = self.u_bound
-        elif self.model is not None:
-            if self.model.dimension == 2:
-                x_limits = self.model.x_limits
-                z_limits = self.model.z_limits
-                l_bound = [x_limits[0], z_limits[0]]
-                u_bound = [x_limits[1], z_limits[1]]
-            else:
-                x_limits = self.model.x_limits
-                y_limits = self.model.y_limits
-                z_limits = self.model.z_limits
-                l_bound = [x_limits[0], y_limits[0], z_limits[0]]
-                u_bound = [x_limits[1], y_limits[1], z_limits[1]]
 
         if self.n is None:
-            self.n = [16] * self.model.dimension
+            self.n = [8] * len(self.l_bound)
 
         return {
             "_type": self.__class__.__name__,

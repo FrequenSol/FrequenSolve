@@ -1,13 +1,13 @@
 import json
-from abc import ABC, abstractmethod
+from abc import ABC
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
 from numpy import arange
 
-from ..util.class_registry import *
-from .simulation import *
+from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
+from frequensolve.util.class_registry import class_registry, register_class
 
 __all__ = ["SimulationJob", "FrequencyDomainJob", "TimeDomainJob"]
 

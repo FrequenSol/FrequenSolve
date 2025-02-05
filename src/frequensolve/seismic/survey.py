@@ -20,13 +20,11 @@ shot_subset = ds.where(ds.source_x > 1500, drop=True)
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import List, Optional, Union
 
-import bitarray as bits
 import numpy as np
 import xarray as xr
-from scipy.spatial.distance import pdist, squareform
-from sklearn.cluster import KMeans
+from bitarray import bitarray
 
 __all__ = ["SeismicSurvey"]
 
@@ -588,6 +586,8 @@ class SeismicSurvey:
         can thus reduce the required patch size (or when using a DD-approach for inversion it could also
         be beneficial to have the sources close together).
         """
+        from sklearn.cluster import KMeans
+
         n_clusters = self.n_source // cluster_size
         if self.dim == 2:
             points = self.spatialDB.source_x.values
@@ -616,6 +616,9 @@ class SeismicSurvey:
         between source groups is relatively mild. So we spread the sources over n_clusters and then simulate
         each group with a different frequency.
         """
+        from scipy.spatial.distance import pdist, squareform
+        from sklearn.cluster import KMeans
+
         if self.dim == 2:
             points = self.spatialDB.source_x.values
         elif self.dim == 3:
@@ -692,7 +695,7 @@ class SeismicSurvey:
                 db = self._get_clusterDB(cluster)
 
             recv_list = self._get_unique_receivers(cluster)
-            mask = [bits.bitarray(db.source.size) for _ in range(len(recv_list))]
+            mask = [bitarray(db.source.size) for _ in range(len(recv_list))]
 
             src_indices = db.source.values
             recv_indices = self.source_to_receivers.isel(source=src_indices).values

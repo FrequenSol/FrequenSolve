@@ -6,8 +6,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .receivers import *  # noqa
-from .sources import *  # noqa
+from frequensolve.seismic.receivers import ReceiverDevice, ReceiverGroup
+from frequensolve.seismic.sources import PointSource, Source, SourceGroup
+from frequensolve.util.named_list import NamedList
 
 __all__ = ["Acquisition"]
 
@@ -25,7 +26,7 @@ class Acquisition:
     """
 
     source_group: SourceGroup = field(default_factory=SourceGroup)
-    receiver_groups: List[ReceiverGroup] = field(default_factory=list)
+    receiver_groups: NamedList = field(default_factory=NamedList)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
 
@@ -33,9 +34,9 @@ class Acquisition:
     def from_dict(cls, dict: Dict) -> "Acquisition":
         return cls(
             source_group=SourceGroup.from_dict(dict["source_group"]),
-            receiver_groups=[
-                ReceiverGroup.from_dict(group) for group in dict["receiver_groups"]
-            ],
+            receiver_groups=NamedList(
+                [ReceiverGroup.from_dict(group) for group in dict["receiver_groups"]]
+            ),
         )
 
     def __dict__(self) -> Dict:
@@ -127,13 +128,6 @@ class Acquisition:
     def list_sources(self) -> List[int]:
         """List valid source numbers."""
         return list(range(1, len(self.source_group.sources) + 1))
-
-    def receiver_group(self, name: str) -> Optional[ReceiverGroup]:
-        """Retrieve a named receiver group by its block name."""
-        for group in self.receiver_groups:
-            if group.name == name:
-                return group
-        return None
 
     def source(self, isrc: int) -> Source:
         """Retrieve a source by index."""

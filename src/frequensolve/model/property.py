@@ -65,6 +65,7 @@ class Property:
         self,
         data: Union[float, str, Path, xr.DataArray] = 0.0,
         xarr: Optional[xr.DataArray] = None,
+        scale: float = 1.0,
     ):
 
         if isinstance(data, str):
@@ -78,6 +79,9 @@ class Property:
             self.darr = data
         else:
             raise ValueError(f"Unknown property type: {type(data)}")
+
+        if scale != 1.0:
+            self.darr.values = self.darr.values / scale
 
     @property
     def is_constant(self) -> bool:
@@ -177,7 +181,10 @@ class Property:
     def _bin_reader(file: Path, xarr: xr.DataArray) -> xr.DataArray:
         """Read a binary file."""
         data = np.fromfile(file, dtype=np.float32).reshape(xarr.shape)
-        return xr.DataArray(data, coords=xarr.coords, dims=xarr.dims)
+        da = xr.DataArray(data, coords=xarr.coords, dims=xarr.dims)
+        dims = sorted(xarr.dims)
+        da = da.transpose(*dims)
+        return da
 
     @staticmethod
     def _h5_reader(file: Path, **kwargs) -> xr.DataArray:

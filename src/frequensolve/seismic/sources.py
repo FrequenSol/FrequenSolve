@@ -3,7 +3,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
 
-from ..util.class_registry import *  # noqa
+from frequensolve.util.class_registry import class_registry, register_class
 
 __all__ = ["SourceGroup", "Source", "RuptureSource", "PointSource"]
 
