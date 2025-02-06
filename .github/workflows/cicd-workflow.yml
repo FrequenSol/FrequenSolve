@@ -121,7 +121,7 @@ jobs:
       - name: Deploy documentation
         working-directory: docs/host
         run: |
-          make deploy-all
+          make init deploy-all
 
   build:
     needs: test
