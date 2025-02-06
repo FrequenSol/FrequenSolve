@@ -49,7 +49,9 @@ resource "aws_iam_role_policy" "github_actions" {
         ]
         Resource = [
           aws_s3_bucket.docs.arn,
-          "${aws_s3_bucket.docs.arn}/python/*"
+          "${aws_s3_bucket.docs.arn}/python/*",
+          aws_s3_bucket.terraform_state.arn,
+          "${aws_s3_bucket.terraform_state.arn}/*"
         ]
       },
       {
@@ -60,6 +62,15 @@ resource "aws_iam_role_policy" "github_actions" {
           "cloudfront:ListInvalidations"
         ]
         Resource = aws_cloudfront_distribution.docs.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem"
+        ]
+        Resource = aws_dynamodb_table.terraform_locks.arn
       }
     ]
   })
