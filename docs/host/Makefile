@@ -5,16 +5,13 @@ DOCS_BUILD_DIR ?= ../build/html
 BUCKET_NAME := $(shell terraform output -raw bucket_name)
 CLOUDFRONT_DOMAIN := $(shell terraform output -raw cloudfront_domain)
 
-.PHONY: init plan apply deploy invalidate clean help
+.PHONY: plan apply deploy invalidate clean help
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
 	@echo ''
 	@echo 'Targets:'
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
-
-init: ## Initialize Terraform
-	terraform init
 
 plan: ## Show Terraform plan
 	terraform plan
