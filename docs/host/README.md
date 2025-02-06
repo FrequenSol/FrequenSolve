@@ -2,6 +2,8 @@
 
 This directory contains the Terraform configuration for hosting the FrequenSolve Python documentation on AWS.
 
+The hosted docs can be found at https://docs.frequensol.com/python/.
+
 ## Infrastructure Overview
 
 The documentation is hosted using:
