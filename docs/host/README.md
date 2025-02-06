@@ -30,22 +30,17 @@ User → docs.frequensol.com/python/ → CloudFront → S3 bucket
 
 1. **Prerequisites**:
    - AWS CLI configured
-   - Terraform installed
+   - Terraform installed and initialized (`terraform init`)
    - Access to Bluehost DNS settings
    - GNU Make installed
    - GitHub repository access
 
-2. **Initialize Terraform**:
-   ```bash
-   make init
-   ```
-
-3. **Apply Configuration**:
+2. **Apply Configuration**:
    ```bash
    make apply
    ```
 
-4. **Configure GitHub Actions**:
+3. **Configure GitHub Actions**:
    - Get the IAM role ARN from Terraform output:
      ```bash
      terraform output github_actions_role_arn
@@ -54,7 +49,7 @@ User → docs.frequensol.com/python/ → CloudFront → S3 bucket
      - `AWS_ROLE_ARN`: The role ARN from above
      - `AWS_REGION`: "us-east-1" (or your configured region)
 
-5. **DNS Configuration in Bluehost**:
+4. **DNS Configuration in Bluehost**:
    - Add ACM validation CNAME record (provided by Terraform output)
    - Add CNAME record pointing docs.frequensol.com to CloudFront domain
 
