@@ -21,17 +21,18 @@ class SimulationJob(ABC):
     _file: Optional[Path] = None
 
     @classmethod
-    def from_dict(cls, d: dict) -> "SimulationJob":
+    def from_dict(cls, d: dict, project_dir: Optional[Path] = None) -> "SimulationJob":
         class_name = d["_type"]
         if class_name in class_registry:
             job_class = class_registry[class_name]
-            return job_class.from_dict(d)
+            return job_class.from_dict(d, project_dir=project_dir)
         else:
             raise ValueError(f"Unknown job class: {class_name}")
 
     @classmethod
     def load(cls, path: Path):
-        job = cls.from_dict(json.loads(path.read_text()))
+        project_dir = Path(path).parent.parent
+        job = cls.from_dict(json.loads(path.read_text()), project_dir=project_dir)
         job._file = path
         return job
 
@@ -41,6 +42,7 @@ class SimulationJob(ABC):
 
         return {
             "_type": self.__class__.__name__,
+            "name": self.name,
             "simulation": str(self.simulation._file),
             "f_list": self.f_list,
         }
@@ -50,6 +52,10 @@ class SimulationJob(ABC):
             sim_file = str(self.simulation._file)
             parent = Path(sim_file.replace("simulations/", "jobs/")).parent
         else:
+            raise ValueError(
+                "Directory hierarchy is currently somewhat rigid;"
+                "for now specifying save path not supported."
+            )
             parent = path.parent
         parent.mkdir(parents=True, exist_ok=True)
 
@@ -60,6 +66,10 @@ class SimulationJob(ABC):
         self._file = file
         return file
 
+    @property
+    def n_tasks(self):
+        return len(self.f_list)
+
 
 @register_class
 class FrequencyDomainJob(SimulationJob):
@@ -69,10 +79,10 @@ class FrequencyDomainJob(SimulationJob):
         self.f_list = f_list
 
     @classmethod
-    def from_dict(cls, d: dict):
+    def from_dict(cls, d: dict, project_dir: Optional[Path] = None):
         return cls(
             name=d["name"],
-            simulation=BaseSimulation.load(d["simulation"]),
+            simulation=BaseSimulation.load(d["simulation"], project_dir=project_dir),
             f_list=d["f_list"],
         )
 
@@ -102,9 +112,9 @@ class TimeDomainJob(SimulationJob):
         self.f_list = f_list
 
     @classmethod
-    def from_dict(cls, d: dict):
+    def from_dict(cls, d: dict, project_dir: Optional[Path] = None):
         return cls(
             name=d["name"],
-            simulation=BaseSimulation.load(d["simulation"]),
+            simulation=BaseSimulation.load(d["simulation"], project_dir=project_dir),
             f_list=d["f_list"],
         )

@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Literal, Optional, Union
@@ -102,15 +103,6 @@ class BaseSimulation(SimulationConfig):
     discretization: Discretization = field(default_factory=Discretization)
     outputs: OutputManager = field(default_factory=OutputManager)
 
-    @classmethod
-    def from_dict(cls, data: Dict) -> "BaseSimulation":
-        class_name = data["_type"]
-        if class_name in class_registry:
-            simulation_class = class_registry[class_name]
-            return simulation_class.from_dict(data)
-        else:
-            raise ValueError(f"Unknown simulation class: {class_name}")
-
     def __post_init__(self):
         from frequensolve.util.printing import print_note
 
@@ -122,6 +114,22 @@ class BaseSimulation(SimulationConfig):
                 f"your own."
             )
             self.mesh = MeshManager(self.mesh)
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "BaseSimulation":
+        class_name = data["_type"]
+        if class_name in class_registry:
+            simulation_class = class_registry[class_name]
+            return simulation_class.from_dict(data)
+        else:
+            raise ValueError(f"Unknown simulation class: {class_name}")
+
+    @classmethod
+    def load(cls, path: Union[str, Path], **kwargs) -> "SeismicSimulation":
+        """Load seismic simulation from JSON file."""
+        with open(path, "r") as f:
+            data = json.load(f)
+            return cls.from_dict(data)
 
     def __dict__(self) -> Dict:
         from frequensolve.util.printing import print_note
@@ -182,28 +190,43 @@ class SeismicSimulation(BaseSimulation):
             self.model.dimension = self.dimension
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "SeismicSimulation":
+    def from_dict(
+        cls, data: Dict, project_dir: Optional[Path] = None
+    ) -> "SeismicSimulation":
         name = data["name"]
         physics = data["physics"]
         dimension = data["dimension"]
-
         sim = cls(name=name, physics=physics, dimension=dimension)
 
-        if "Model" in data:
-            sim.model = ModelBase.from_dict(data["Model"])
-        if "Mesh" in data:
-            sim.mesh = MeshManager.from_dict(data["Mesh"])
-        if "BCs" in data:
-            sim.BCs = BoundaryConditionManager.from_dict(data["BCs"])
-        if "Solver" in data:
-            sim.solver = SolverConfig.from_dict(data["Solver"])
-        if "Discretization" in data:
-            sim.discretization = Discretization.from_dict(data["Discretization"])
-        if "Outputs" in data:
-            sim.outputs = OutputManager.from_dict(data["Outputs"])
-        if "Acquisition" in data:
-            sim.acquisition = Acquisition.from_dict(data["Acquisition"])
+        # TODO: this path stuff is sloppy; need to make better way to manage all of this.
+        if project_dir is None:
+            project_dir = Path(data["project_path"])
+        else:
+            project_dir = project_dir
 
+        # Load simulation from project directory
+        if os.getcwd() != project_dir:
+            cwd = os.getcwd()
+            os.chdir(project_dir)
+
+            if "Model" in data:
+                sim.model = ModelBase.from_dict(data["Model"])
+            if "Mesh" in data:
+                sim.mesh = MeshManager.from_dict(data["Mesh"])
+            if "BCs" in data:
+                sim.BCs = BoundaryConditionManager.from_dict(data["BCs"])
+            if "Solver" in data:
+                sim.solver = SolverConfig.from_dict(data["Solver"])
+            if "Discretization" in data:
+                sim.discretization = Discretization.from_dict(data["Discretization"])
+            if "Outputs" in data:
+                sim.outputs = OutputManager.from_dict(data["Outputs"])
+            if "Acquisition" in data:
+                sim.acquisition = Acquisition.from_dict(data["Acquisition"])
+
+            os.chdir(cwd)
+
+        sim._set_path(project_dir, Path("simulations"))
         return sim
 
     @classmethod
@@ -212,9 +235,10 @@ class SeismicSimulation(BaseSimulation):
 
         with open(path, "r") as f:
             data = json.load(f)
-            sim = cls.from_dict(data)
-            sim._file = path
-            return sim
+        project_dir = Path(path).parent.parent
+        sim = cls.from_dict(data, project_dir=project_dir)
+        sim._file = path
+        return sim
 
     def __dict__(self) -> Dict:
         dict = super().__dict__()

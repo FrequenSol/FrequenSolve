@@ -4,7 +4,7 @@
 #SBATCH -e ./{{ name }}.e%j
 #SBATCH -N {{ nhost }}
 #SBATCH -n {{ nproc }}
-#SBATCH -p {{ partition }}
+#SBATCH -p {{ queue }}
 {% if account %}
 #SBATCH -A {{ account }}
 {% endif %}

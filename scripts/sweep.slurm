@@ -1,20 +1,6 @@
 #!/bin/bash
 #
-#SBATCH -J sweep
-#SBATCH -o ./sweep.o%j
-#SBATCH -e ./sweep.e%j
-#SBATCH -p development
-#SBATCH -N 40
-#SBATCH -n 80
-#SBATCH -t 02:00:00
-#SBATCH -A EAR24002
 
-# Usage
-#  When called directly:
-#     ./sweep.slurm <Input_file> <tasks_per_job> <# of Nodes>
-#
-#  When called via SLURM:
-#     ./sweep.slurm <Input_file> <tasks_per_job>
 
 input_file=$1
 tasks_per_job=$2
@@ -43,7 +29,6 @@ fi
 
 nhosts=$((tasks / tasks_per_job))
 tasks_per_node=$((tasks / nodes))
-threads=$((56 / tasks_per_node))
 
 # Let code know we're doing a parallel sweep (disable paraview output, etc.)
 export FREQUENSOL_SWEEP=1

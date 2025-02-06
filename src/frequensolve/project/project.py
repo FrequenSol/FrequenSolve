@@ -126,6 +126,20 @@ class Project:
 
         return Project.load(dest / f"{name}.json")
 
+    def transfer(self, remote_dir: Optional[Union[str, Path]] = None):
+        if remote_dir is None:
+            remote = (self.site.work_dir / "FrequenSolve") / self.path.name
+        else:
+            remote = remote_dir
+
+        proj_file = Path(self.path) / f"{self.name}.json"
+        sim_dir = Path(self.path) / "simulations"
+
+        if proj_file.exists():
+            self.site.put(proj_file, remote / f"{self.name}.json")
+        if sim_dir.exists():
+            self.site.put(sim_dir, remote / "simulations")
+
     @classmethod
     def load(cls, file: Union[str, Path], auto_migrate: bool = False) -> "Project":
         """Load project from JSON file."""
@@ -293,68 +307,3 @@ class Project:
 
     def __repr__(self) -> str:
         return f"Project(name='{self.name}', path='{self.path}')"
-
-    # def new_TD_simulation(self,
-    #                       name:      str,
-    #                       physics:   Literal["coupled","acoustic","elastic"],
-    #                       dimension: Literal[2, 3],
-    #                       **kwargs) -> BaseSimulation:
-    #    """Create a new time-domain simulation and add it to the project.
-
-    #    Args:
-    #       name (str):      Simulation name.
-    #       mode (str):      Simulation mode (forward, adjoint, gradient)
-    #       physics (str):   Simulation physics (coupled, acoustic, elastic)
-    #       dimension (int): Simulation dimension (2, 3)
-    #       f_min (float):   Minimum frequency (Hz).
-    #       f_max (float):   Maximum frequency (Hz).
-    #       df (float):      Frequency step (Hz).
-    #       **kwargs: Additional keyword arguments to pass to the Simulation constructor.
-
-    #    Returns:
-    #       Simulation: The newly created simulation.
-    #    """
-    #    tf_domain = "time"
-    #    sampling = UniformSweepSampling(f_min = f_min, f_max = f_max, df = df)
-
-    #    sim = SeismicSimulation(name      = name,
-    #                            physics   = physics,
-    #                            dimension = dimension,
-    #                            directory = os.path.join(self.path,name),
-    #                            tf_domain = tf_domain,
-    #                            sampling  = sampling)
-    #    self.simulations.append(sim)
-    #    return sim
-
-    # def new_FD_simulation(self,
-    #                       name:      str,
-    #                       mode:      Literal["forward","adjoint","combined","gradient"],
-    #                       physics:   Literal["coupled","acoustic","elastic"],
-    #                       dimension: Literal[2, 3],
-    #                       f_list:    List[float],
-    #                       **kwargs) -> Simulation:
-    #    """Create a new frequency-domain simulation and add it to the project.
-
-    #    Args:
-    #       name (str):      Simulation name.
-    #       mode (str):      Simulation mode (forward, adjoint, gradient)
-    #       physics (str):   Simulation physics (coupled, acoustic, elastic)
-    #       dimension (int): Simulation dimension (2, 3)
-    #       f_list (List[float]): List of frequencies (Hz).
-    #       **kwargs: Additional keyword arguments to pass to the Simulation constructor.
-
-    #    Returns:
-    #       Simulation: The newly created simulation.
-    #    """
-    #    tf_domain = "frequency"
-    #    sampling = DiscreteSampling(freq = f_list)
-
-    #    sim = Simulation(name      = name,
-    #                     physics   = physics,
-    #                     dimension = dimension,
-    #                     directory = os.path.join(self.path,name),
-    #                     mode      = mode,
-    #                     tf_domain = tf_domain,
-    #                     sampling  = sampling)
-    #    self.simulations.append(sim)
-    #    return sim

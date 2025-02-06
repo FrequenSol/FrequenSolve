@@ -15,14 +15,14 @@ from dask_jobqueue import SLURMCluster
 from jinja2 import Environment, FileSystemLoader
 from paramiko import AutoAddPolicy, SFTPClient, SSHClient, SSHException
 
-from frequensolve.orchestrator.jobs.base_job import BaseJob
 from frequensolve.orchestrator.sites.base_site import (
     BaseSite,
     BaseSiteConfig,
     SiteStatus,
 )
+from frequensolve.orchestrator.tasks.base_task import BaseTask
 
-__all__ = ["HPCSiteConfig", "HPCSite"]
+__all__ = ["HPCSiteConfig", "HPCSite", "HPCSiteCredentials"]
 
 
 @dataclass
@@ -498,7 +498,7 @@ class HPCSite(BaseSite):
             return SiteStatus(status="failed", return_code=-1, stdout="", stderr=str(e))
 
     # TODO: neet to add run_mpi_flux method, etc.
-    def submit_jobs(self, jobs: List[BaseJob]) -> None:
+    def submit_jobs(self, jobs: List[BaseTask]) -> None:
         """Submit a job to the scheduler."""
 
         # Could also just use Dask's map feature
@@ -511,7 +511,7 @@ class HPCSite(BaseSite):
             futures.append(fut)
         return futures
 
-    def cancel_jobs(self, jobs: List[BaseJob]) -> None:
+    def cancel_jobs(self, jobs: List[BaseTask]) -> None:
         """Cancel a submitted flux job."""
         for job in jobs:
             self._client.submit(job.cancel_mpi_flux, job.job_id)

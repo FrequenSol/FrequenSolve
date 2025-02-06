@@ -41,6 +41,14 @@ class SiteStatus:
     start_time: Optional[float] = None
 
     @property
+    def is_queued(self) -> bool:
+        return self.status == "pending"
+
+    @property
+    def is_running(self) -> bool:
+        return self.status == "running"
+
+    @property
     def is_complete(self) -> bool:
         return self.status in ["completed", "failed"]
 
@@ -50,31 +58,11 @@ class SiteStatus:
 
 
 class BaseSiteConfig(ABC):
-    """Site configuration for job execution."""
-
-    @abstractmethod
-    def load(self, name: str) -> "BaseSiteConfig":
-        pass
-
-    @abstractmethod
-    def save(self, name: str) -> None:
-        pass
+    pass
 
 
 class BaseSite(ABC):
     """Base class for site configuration."""
-
-    @abstractmethod
-    def __init__(self, config: BaseSiteConfig):
-        pass
-
-    # @abstractmethod
-    # def __enter__(self):
-    #    pass
-
-    # @abstractmethod
-    # def __exit__(self, exc_type, exc_value, traceback):
-    #    pass
 
     @abstractmethod
     def provision(self):
@@ -85,7 +73,7 @@ class BaseSite(ABC):
         pass
 
     @abstractmethod
-    def check_status(self):
+    def update_status(self):
         """Check the status of the site."""
         pass
 
