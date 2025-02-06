@@ -63,17 +63,24 @@ This library provides a Python API for setting up and running the FrequenSolve s
    $ poetry install
    ```
 
-4. Activate the virtual environment:
+
+4. Create the virtual environment with Python 3.10:
+   ```console
+   poetry env use 3.10
+   ```
+
+
+5. Run a shell with the virtual environment activated::
 
    ```console
    $ poetry shell
    ```
 
 > [!WARNING]
-> `poetry shell` doesn't seem to work on some systems, if it fails instead run:
+> If you encounter the error 'The command "shell" does not exist.', install the shell plugin:
 >
 > ```console
-> $ source $(poetry env info --path)/bin/activate
+> $ poetry self add poetry-plugin-shell
 > ```
 
 > [!TIP]
@@ -87,6 +94,15 @@ This library provides a Python API for setting up and running the FrequenSolve s
 
 ParaView is recommended for visualizing simulation results. Download and install (ParaView 5.13 recommended) from the official ParaView website: https://www.paraview.org/download/
 
+Some components of this package (particularly visualization tools) rely on Python modules that are installed with ParaView. You'll need to add the ParaView Python library location to your Python path. The location varies by operating system. On MacOS, the path is likely something similar to `/Applications/ParaView-5.13.0.app/Contents/Python/`
+You can add this to your Python path by setting the PYTHONPATH environment variable:
+
+```bash
+# Linux/macOS
+export PYTHONPATH="/path/to/paraview/python:$PYTHONPATH"
+```
+
+
 ## Building Documentation
 
 > [!Note]
@@ -98,7 +114,7 @@ ParaView is recommended for visualizing simulation results. Download and install
 
 The project documentation can be built using Sphinx. I'll work on hosting it on readthedocs or similar; for now you can build it on your local machine by:
 
-1. Ensure you have the dependencies installed (via Poetry) and activate the poetry virtual environment (`poetry shell`) or, if you do not wish to activate the virtual environment, prepend `poetry run` to the following commands.
+1. Ensure you have the dependencies installed (via Poetry using `poetry install --with=dev`) and activate the poetry virtual environment (`poetry shell`) or, if you do not wish to activate the virtual environment, prepend `poetry run ` to the following commands.
 
 2. Navigate to the `docs` directory:
 
