@@ -3,8 +3,8 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-FrequenSolve Documentation
-==========================
+FrequenSolve Documentation (TEST)
+=================================
 
 Welcome to FrequenSolve's documentation. FrequenSolve is a high-performance finite element solver for seismic wave propagation, supporting both time-domain and frequency-domain simulations.
 

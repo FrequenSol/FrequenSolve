@@ -38,10 +38,5 @@ invalidate: ## Invalidate CloudFront cache
 	@echo "Invalidating CloudFront cache for $(CLOUDFRONT_DOMAIN)..."
 	aws cloudfront --no-cli-pager create-invalidation --distribution-id $(shell aws cloudfront list-distributions --query "DistributionList.Items[?DomainName=='$(CLOUDFRONT_DOMAIN)'].Id" --output text) --paths "/python/*"
 
-clean: ## Remove Terraform state files
-	rm -rf .terraform
-	rm -f .terraform.lock.hcl
-	rm -f terraform.tfstate*
-
 deploy-all: deploy invalidate ## Deploy docs and invalidate cache
 	@echo "Deployment complete!"
