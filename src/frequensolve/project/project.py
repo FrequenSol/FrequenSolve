@@ -8,10 +8,14 @@ from typing import Dict, Optional, Union
 import toml
 import yaml
 
-from frequensolve.project.migrate_version import *  # noqa
-from frequensolve.project.workflows import *  # noqa
-from frequensolve.simulation.sampling import *  # noqa
-from frequensolve.simulation.simulation import *  # noqa
+from frequensolve.project.migrate_version import Version
+from frequensolve.project.workflows import BaseWorkflow
+from frequensolve.simulation.simulation import (
+    BaseSimulation,
+    CustomJSONEncoder,
+    CustomTOMLEncoder,
+    SeismicSimulation,
+)
 from frequensolve.util.named_list import NamedList
 
 __all__ = ["Project", "BaseProjectComponent"]
@@ -79,6 +83,9 @@ class Project:
 
     @classmethod
     def copy(cls, src: Union[str, Path], dest: Union[str, Path], **kwargs):
+        """Copy a project from an existing project."""
+        from shutil import copytree
+
         load_if_exists = kwargs.get("load_if_exists", False)
 
         if load_if_exists:
@@ -87,10 +94,19 @@ class Project:
                 if len(json_files) == 1:
                     return cls.load(json_files[0])
 
+        src = Path(src).resolve()
+        old = Project.load(src)
+
         dest = Path(dest).resolve()
         dest.mkdir(parents=True, exist_ok=True)
 
-        old = Project.load(src)
+        # TODO: optionally simlink instead.
+        if (src.parent / "simulations").exists():
+            copytree(
+                src.parent / "simulations", dest / "simulations", dirs_exist_ok=True
+            )
+        if (src.parent / "jobs").exists():
+            copytree(src.parent / "jobs", dest / "jobs", dirs_exist_ok=True)
 
         name = kwargs.get("name", old.name)
         pretty_name = kwargs.get("pretty_name", old.pretty_name)

@@ -3,21 +3,24 @@ import os
 import re
 import subprocess
 import tempfile
-import threading
 import time
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from typing import Any, Dict, List, Literal, Optional, Union
 
-import paramiko
 from dask.distributed import Client
 from dask_jobqueue import SLURMCluster
 from jinja2 import Environment, FileSystemLoader
+from paramiko import AutoAddPolicy, SFTPClient, SSHClient, SSHException
 
-from ..jobs.base_job import *
-from .base_site import *
+from frequensolve.orchestrator.jobs.base_job import BaseJob
+from frequensolve.orchestrator.sites.base_site import (
+    BaseSite,
+    BaseSiteConfig,
+    SiteStatus,
+)
 
 __all__ = ["HPCSiteConfig", "HPCSite"]
 
@@ -104,8 +107,8 @@ class HPCSite(BaseSite):
     work_dir: Optional[Union[str, Path]] = None
     tmp_dir: Optional[Union[str, Path]] = None
     status: SiteStatus = field(default_factory=lambda: SiteStatus(status="unknown"))
-    _sftp: Optional[paramiko.SFTPClient] = None
-    _ssh_client: Optional[paramiko.SSHClient] = None
+    _sftp: Optional[SFTPClient] = None
+    _ssh_client: Optional[SSHClient] = None
     _dask_client: Optional[Client] = None
 
     def __init__(self, config_file: str, credential_file: str):
@@ -258,7 +261,7 @@ class HPCSite(BaseSite):
                             break
                         time.sleep(self.config.poll_interval)
 
-                threading.Thread(target=monitor_job, daemon=True).start()
+                Thread(target=monitor_job, daemon=True).start()
 
             except Exception as e:
                 self.status.status = "failed"
@@ -326,7 +329,7 @@ class HPCSite(BaseSite):
                             break
                         time.sleep(self.config.poll_interval)
 
-                threading.Thread(target=monitor_remote_job, daemon=True).start()
+                Thread(target=monitor_remote_job, daemon=True).start()
 
             except Exception as e:
                 self.status.status = "failed"
@@ -340,26 +343,24 @@ class HPCSite(BaseSite):
         """Establish an SSH connection and set up port forwarding.
 
         Returns:
-           paramiko.SSHClient: The SSH client object.
+           SSHClient: The SSH client object.
 
         Raises:
            ValueError: If 'hostname' or 'username' is not provided in kwargs.
-           paramiko.SSHException: If there is an error connecting via SSH.
+           SSHException: If there is an error connecting via SSH.
         """
         if "hostname" not in kwargs or "username" not in kwargs:
             raise ValueError(
                 "Both 'hostname' and 'username' must be provided in kwargs"
             )
 
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh = SSHClient()
+        ssh.set_missing_host_key_policy(AutoAddPolicy())
 
         try:
             ssh.connect(kwargs["hostname"], username=kwargs["username"])
-        except paramiko.SSHException as e:
-            raise paramiko.SSHException(
-                f"Failed to connect to {kwargs['hostname']}: {str(e)}"
-            )
+        except SSHException as e:
+            raise SSHException(f"Failed to connect to {kwargs['hostname']}: {str(e)}")
 
         cmd = f"ssh -N -L 8786:localhost:8786 {self.credentials.username}@{self.config.hostname}"
         stdin, stdout, stderr = ssh.exec_command(cmd)
@@ -375,7 +376,7 @@ class HPCSite(BaseSite):
         """Jump from login to compute.
 
         Returns:
-           paramiko.SSHClient: The SSH client object.
+           SSHClient: The SSH client object.
 
         Raises:
            ConnectionError: If the SSH connection is not active.

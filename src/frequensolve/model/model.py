@@ -9,7 +9,7 @@ from numpy.typing import ArrayLike
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.property import Property
-from frequensolve.util.class_registry import *
+from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.named_list import NamedList
 
 __all__ = ["ModelSubdomain", "ModelBase"]
@@ -48,7 +48,17 @@ class ModelSubdomain:
         self._properties = {}
         if xarr is not None:
             for key, val in properties.items():
-                self._properties[key] = Property(data=val, xarr=xarr)
+                if isinstance(val, str) or isinstance(val, Path):
+                    split = str(val).split("|")
+                    if len(split) == 2:
+                        path, scale = split
+                        self._properties[key] = Property(
+                            data=path, xarr=xarr, scale=float(scale)
+                        )
+                    else:
+                        self._properties[key] = Property(data=val, xarr=xarr)
+                else:
+                    self._properties[key] = Property(data=val)
         else:
             self._properties = {
                 key: Property(data=val) for key, val in properties.items()
