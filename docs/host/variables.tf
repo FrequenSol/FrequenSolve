@@ -9,3 +9,9 @@ variable "domain_name" {
   type        = string
   default     = "docs.frequensol.com"
 }
+
+variable "github_repository" {
+  description = "GitHub repository in format 'owner/repo'"
+  type        = string
+  default     = "FrequenSol/FrequenSolve"
+}
