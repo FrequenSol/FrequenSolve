@@ -4,6 +4,7 @@
 DOCS_BUILD_DIR ?= ../build/html
 BUCKET_NAME := $(shell terraform output -raw bucket_name)
 CLOUDFRONT_DOMAIN := $(shell terraform output -raw cloudfront_domain)
+CLOUDFRONT_DISTRIBUTION_ID := $(shell terraform output -raw cloudfront_distribution_id)
 
 .PHONY: plan apply deploy invalidate clean help
 
@@ -33,7 +34,7 @@ invalidate: ## Invalidate CloudFront cache
 		exit 1; \
 	fi
 	@echo "Invalidating CloudFront cache for $(CLOUDFRONT_DOMAIN)..."
-	aws cloudfront --no-cli-pager create-invalidation --distribution-id $(shell aws cloudfront list-distributions --query "DistributionList.Items[?DomainName=='$(CLOUDFRONT_DOMAIN)'].Id" --output text) --paths "/python/*"
+	aws cloudfront --no-cli-pager create-invalidation --distribution-id $(CLOUDFRONT_DISTRIBUTION_ID) --paths "/python/*"
 
 deploy-all: deploy invalidate ## Deploy docs and invalidate cache
 	@echo "Deployment complete!"
