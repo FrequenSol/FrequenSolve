@@ -1,8 +1,22 @@
-from abc import ABC, abstractmethod
+import time
+from abc import ABC
 from dataclasses import dataclass
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 
 __all__ = ["BaseSiteConfig", "BaseSite", "SiteStatus"]
+
+
+def _wait_for_path(
+    path: Union[str, Path], timeout: float = 5.0, poll_interval: float = 0.2
+) -> bool:
+    """Wait for the given path to exist."""
+    waited = 0.0
+    path = Path(path)
+    while not path.exists() and waited < timeout:
+        time.sleep(poll_interval)
+        waited += poll_interval
+    return path.exists()
 
 
 @dataclass
@@ -64,20 +78,4 @@ class BaseSiteConfig(ABC):
 class BaseSite(ABC):
     """Base class for site configuration."""
 
-    @abstractmethod
-    def provision(self):
-        pass
-
-    @abstractmethod
-    def deprovision(self):
-        pass
-
-    @abstractmethod
-    def update_status(self):
-        """Check the status of the site."""
-        pass
-
-    @abstractmethod
-    def wait_provisioned(self):
-        """Wait for the site to be provisioned."""
-        pass
+    pass

@@ -122,8 +122,11 @@ class ReceiverFiber(ReceiverDevice):
             **super().__dict__(),
             "L_gauge": self.L_gauge,
             "n_gauge": self.n_gauge,
-            "radius": self.radius,
-            "pitch": self.pitch,
+            **(
+                {"pitch": self.pitch, "radius": self.radius}
+                if self.pitch is not None
+                else {}
+            ),
         }
 
     @classmethod

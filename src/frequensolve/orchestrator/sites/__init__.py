@@ -1,9 +1,9 @@
 from .base_site import *  # noqa
+from .frontera import *  # noqa
 from .local import *  # noqa
 
 try:
     from .aws import *  # noqa
-    from .frontera import *  # noqa
     from .hpc import *  # noqa
 except ModuleNotFoundError as e:
     print(

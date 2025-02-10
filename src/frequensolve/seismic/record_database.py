@@ -229,7 +229,7 @@ class RecordDatabase:
     #          u[ifreq, :] +=              f[f"{field}_{shot_number}_re"][()]
 
     #          # For fiber-type receivers, multiply by iω for strain *rate*
-    #          if group.kind == 'fiber':
+    #          if group.device._type == 'ReceiverFiber':
     #             i_omega = np.csingle(1j * 2 * np.pi * freq)
     #             u[ifreq, :] *= i_omega
 

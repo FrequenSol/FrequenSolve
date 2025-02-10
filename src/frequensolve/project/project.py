@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from frequensolve.simulation.simulation import (
     SeismicSimulation,
 )
 from frequensolve.util.named_list import NamedList
+from frequensolve.util.setup_logger import disable_jupyter_logging, set_log_level
 
 __all__ = ["Project", "BaseProjectComponent"]
 
@@ -50,6 +52,8 @@ class Project:
     pretty_name: Optional[str] = None
     path: Union[str, Path]
     version: Version = field(default_factory=Version)
+    log_level: int = logging.INFO
+    jupyter_logging: bool = True
     load_if_exists: bool = False
     auto_migrate: bool = False
     site: Optional[str] = None
@@ -59,10 +63,15 @@ class Project:
 
     def __post_init__(self):
         """Load project from file and check version."""
-        self.path = Path(self.path)
+        self.path = Path(self.path).resolve()
         if self.load_if_exists:
             if self.path.exists() and self.path.suffix == ".json":
                 self = Project.load(self.path)
+
+        set_log_level(self.log_level)
+
+        if not self.jupyter_logging:
+            disable_jupyter_logging()
 
         if not self.path.exists():
             self.path.mkdir(parents=True, exist_ok=True)
@@ -126,19 +135,70 @@ class Project:
 
         return Project.load(dest / f"{name}.json")
 
-    def transfer(self, remote_dir: Optional[Union[str, Path]] = None):
-        if remote_dir is None:
-            remote = (self.site.work_dir / "FrequenSolve") / self.path.name
-        else:
-            remote = remote_dir
+    def transfer(self):
+        """Transfer project files to remote site with path substitution."""
+        remote = self.site.work_dir
 
-        proj_file = Path(self.path) / f"{self.name}.json"
+        proj_file = (Path(self.path) / f"{self.name}").with_suffix(".json")
         sim_dir = Path(self.path) / "simulations"
 
         if proj_file.exists():
-            self.site.put(proj_file, remote / f"{self.name}.json")
+            self.site.put(proj_file, (remote / f"{self.name}").with_suffix(".json"))
+
         if sim_dir.exists():
+            # Create temporary modified simulation files
+            temp_files = []
+            for sim in self.simulations:
+                if hasattr(sim, "_file") and sim._file:
+                    # Load simulation file
+                    with open(sim._file, "r") as f:
+                        sim_data = json.load(f)
+
+                    # Create temporary file with modified project_path
+                    if "project_path" in sim_data:
+                        temp_file = Path(sim._file).with_suffix(".temp.json")
+                        sim_data["project_path"] = str(remote)
+                        with open(temp_file, "w") as f:
+                            json.dump(sim_data, f, cls=CustomJSONEncoder, indent=3)
+                        temp_files.append(
+                            (temp_file, Path(sim._file).relative_to(self.path))
+                        )
+
+            # Transfer simulation directory
             self.site.put(sim_dir, remote / "simulations")
+
+            # Transfer modified simulation files
+            for temp_file, rel_path in temp_files:
+                self.site.put(temp_file, remote / rel_path)
+                temp_file.unlink()  # Clean up temporary file
+
+    def _prepare_for_transfer(self) -> Path:
+        """Prepare a temporary project file with substituted paths for transfer.
+
+        Returns:
+            Path: Path to temporary project file with substituted paths
+        """
+        # Create temporary copy of project
+        temp_dict = self.__dict__()
+
+        # Substitute project path in simulation files
+        for sim in self.simulations:
+            sim_dict = sim.__dict__()
+            # Replace absolute project path with relative path
+            if "_file" in sim_dict and sim_dict["_file"]:
+                sim_path = Path(sim_dict["_file"])
+                rel_path = sim_path.relative_to(self.path)
+                sim_dict["_file"] = str(rel_path)
+            temp_sims.append(sim_dict)
+
+        temp_dict["simulations"] = temp_sims
+
+        # Save temporary project file
+        temp_file = Path(self.path) / f"{self.name}_temp.json"
+        with open(temp_file, "w") as f:
+            json.dump(temp_dict, f, cls=CustomJSONEncoder, indent=3)
+
+        return temp_file
 
     @classmethod
     def load(cls, file: Union[str, Path], auto_migrate: bool = False) -> "Project":

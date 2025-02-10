@@ -2,7 +2,7 @@ import json
 from abc import ABC
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from numpy import arange
 
@@ -61,6 +61,25 @@ class SimulationJob(ABC):
 
         file = (parent / self.name).with_suffix(".json")
         file.write_text(json.dumps(self.__dict__(), cls=CustomJSONEncoder, indent=3))
+
+        # Save the file name
+        self._file = file
+        return file
+
+    def save_for_remote(self, remote_proj: Union[Path, str]):
+        sim_file = str(self.simulation._file)
+        parent = Path(sim_file.replace("simulations/", "jobs/")).parent
+        if not parent.exists():
+            parent.mkdir(parents=True, exist_ok=True)
+
+        data = self.__dict__()
+        proj_dir = str(self.simulation._file.parent.parent)
+        print(proj_dir)
+        print(remote_proj)
+        data["simulation"] = data["simulation"].replace(proj_dir, str(remote_proj))
+
+        file = (parent / self.name).with_suffix(".json")
+        file.write_text(json.dumps(data, cls=CustomJSONEncoder, indent=3))
 
         # Save the file name
         self._file = file
