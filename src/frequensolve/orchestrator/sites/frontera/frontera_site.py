@@ -299,8 +299,10 @@ class FronteraSite(BaseSite):
             suffix=".sh", prefix="slurm_", dir=self.work_dir
         )
         logger.debug("Temporary SLURM script created at %s", script_path)
-        fd.write(script)
-        fd.close()
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
+        os.chmod(script_path, 0o700)
+
         start_event = Event()
 
         try:
@@ -688,9 +690,13 @@ class FronteraSite(BaseSite):
 
         fd, script_path = tempfile.mkstemp(suffix=".sh", prefix="sweep", dir="./")
         logger.debug("Temporary sweep script created at %s", script_path)
-        fd.write(script)
-        fd.close()
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
         os.chmod(script_path, 0o700)
+
+        # Print file permissions for the sweep script
+        ls_output = subprocess.check_output(["ls", "-l", script_path]).decode("utf-8")
+        logger.debug("Sweep script permissions: %s", ls_output.strip())
 
         remote_script = (self.work_dir / "sweep").with_suffix(".sh")
         logger.debug("Transferring sweep script to remote path: %s", remote_script)
@@ -702,6 +708,14 @@ class FronteraSite(BaseSite):
         remote_job = ((self.work_dir / "jobs") / job.name).with_suffix(".json")
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(file), Path(remote_job))
+
+        # Print file permissions for the remote sweep script
+        ls_output = self.run_compute_cmd(f"ls -l {remote_script}")[1]
+        logger.debug("Remote sweep script permissions: %s", ls_output.strip())
+
+        # Print file permissions for the remote job file
+        ls_output = self.run_compute_cmd(f"ls -l {remote_job}")[1]
+        logger.debug("Remote job file permissions: %s", ls_output.strip())
 
         return remote_script, remote_job
 
