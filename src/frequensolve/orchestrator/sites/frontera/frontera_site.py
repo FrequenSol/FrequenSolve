@@ -123,6 +123,7 @@ class FronteraSite(BaseSite):
         self.remote_env = {"PWD": str(self._work_dir), "OLDPWD": str(self._work_dir)}
 
         self.pool = PoolInfo()
+        self._is_notebook = self._check_if_notebook()
 
         logger.info(
             "FronteraSite initialized successfully with work_dir: %s", self._work_dir

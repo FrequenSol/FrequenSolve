@@ -1,6 +1,6 @@
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
@@ -75,8 +75,11 @@ class BaseSiteConfig(ABC):
     pass
 
 
+@dataclass
 class BaseSite(ABC):
     """Base class for site configuration."""
+
+    _is_notebook: bool = field(init=False)
 
     @abstractmethod
     def cancel_job(self, job_id: str) -> None:
@@ -95,3 +98,16 @@ class BaseSite(ABC):
             str: The job ID
         """
         pass
+
+    def _check_if_notebook(self):
+        """Check if we're running in a Jupyter notebook."""
+        try:
+            shell = get_ipython().__class__.__name__
+            if shell == "ZMQInteractiveShell":
+                return True  # Jupyter notebook or qtconsole
+            elif shell == "TerminalInteractiveShell":
+                return False  # Terminal running IPython
+            else:
+                return False  # Other type
+        except NameError:
+            return False  # Probably standard Python interpreter

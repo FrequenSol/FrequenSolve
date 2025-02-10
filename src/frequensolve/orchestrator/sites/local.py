@@ -45,7 +45,6 @@ class LocalSite(BaseSite):
     executable: str = field(init=False)
     env: dict = field(default_factory=dict)
     _futures: list = field(default_factory=list)
-    _is_notebook: bool = field(init=False)
 
     def __post_init__(self):
         self.status = SiteStatus(status="running")
@@ -54,19 +53,6 @@ class LocalSite(BaseSite):
         self.env = os.environ.copy()
         self.env["FREQUENSOLVE_DIR"] = os.getenv("FS_SOLVER_PATH")
         self._is_notebook = self._check_if_notebook()
-
-    def _check_if_notebook(self):
-        """Check if we're running in a Jupyter notebook."""
-        try:
-            shell = get_ipython().__class__.__name__
-            if shell == "ZMQInteractiveShell":
-                return True  # Jupyter notebook or qtconsole
-            elif shell == "TerminalInteractiveShell":
-                return False  # Terminal running IPython
-            else:
-                return False  # Other type
-        except NameError:
-            return False  # Probably standard Python interpreter
 
     def _get_solver_path(self) -> str:
         """Get the solver path."""
