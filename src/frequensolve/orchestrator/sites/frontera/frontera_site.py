@@ -299,8 +299,8 @@ class FronteraSite(BaseSite):
             suffix=".sh", prefix="slurm_", dir=self.work_dir
         )
         logger.debug("Temporary SLURM script created at %s", script_path)
-        with os.fdopen(fd, "w") as f:
-            f.write(script)
+        fd.write(script)
+        fd.close()
         start_event = Event()
 
         try:
@@ -687,10 +687,10 @@ class FronteraSite(BaseSite):
         script = self._sweep_script(job.n_tasks)
 
         fd, script_path = tempfile.mkstemp(suffix=".sh", prefix="sweep", dir="./")
-        os.chmod(script_path, 0o700)
         logger.debug("Temporary sweep script created at %s", script_path)
-        with os.fdopen(fd, "w") as f:
-            f.write(script)
+        fd.write(script)
+        fd.close()
+        os.chmod(script_path, 0o700)
 
         remote_script = (self.work_dir / "sweep").with_suffix(".sh")
         logger.debug("Transferring sweep script to remote path: %s", remote_script)
