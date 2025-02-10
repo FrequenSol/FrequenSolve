@@ -56,7 +56,6 @@ class SimulationJob(ABC):
                 "Directory hierarchy is currently somewhat rigid;"
                 "for now specifying save path not supported."
             )
-            parent = path.parent
         parent.mkdir(parents=True, exist_ok=True)
 
         file = (parent / self.name).with_suffix(".json")
@@ -74,8 +73,6 @@ class SimulationJob(ABC):
 
         data = self.__dict__()
         proj_dir = str(self.simulation._file.parent.parent)
-        print(proj_dir)
-        print(remote_proj)
         data["simulation"] = data["simulation"].replace(proj_dir, str(remote_proj))
 
         file = (parent / self.name).with_suffix(".json")

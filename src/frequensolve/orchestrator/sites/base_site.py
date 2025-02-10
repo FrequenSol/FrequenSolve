@@ -1,5 +1,5 @@
 import time
-from abc import ABC
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
@@ -78,4 +78,20 @@ class BaseSiteConfig(ABC):
 class BaseSite(ABC):
     """Base class for site configuration."""
 
-    pass
+    @abstractmethod
+    def cancel_job(self, job_id: str) -> None:
+        """Cancel a running job.
+
+        Args:
+            job_id: The ID of the job to cancel
+        """
+        pass
+
+    @abstractmethod
+    def submit(self, **kwargs) -> str:
+        """Submit a job and return its ID.
+
+        Returns:
+            str: The job ID
+        """
+        pass

@@ -32,12 +32,14 @@ __all__ = ["SystemInfo"]
 
 # Configure logging
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 # You can configure logging handlers/formatters as needed:
 ch = logging.StreamHandler(sys.stdout)
 ch.setLevel(logging.INFO)
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+formatter = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s"
+)
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
@@ -129,19 +131,17 @@ class SystemInfo:
             cmd = ["nvidia-smi", "-L"]
             result = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if result.returncode == 0:
-                # Sample output might be:
-                # "GPU 0: GeForce GTX 1080 Ti (UUID: GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
                 lines = result.stdout.strip().split("\n")
                 for idx, line in enumerate(lines):
                     gpu_info[f"GPU_{idx}"] = line
             else:
-                logger.warning("nvidia-smi returned non-zero exit code.")
+                logger.debug("nvidia-smi returned non-zero exit code.")
         except FileNotFoundError:
-            logger.warning(
+            logger.debug(
                 "nvidia-smi not found. No NVIDIA GPU detected or driver not installed."
             )
         except Exception as e:
-            logger.warning(f"Failed to run nvidia-smi: {e}")
+            logger.debug(f"Failed to run nvidia-smi: {e}")
 
         return gpu_info
 

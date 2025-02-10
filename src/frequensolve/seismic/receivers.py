@@ -509,7 +509,9 @@ class CoordsArray(ReceiverCoords):
 
         if format == "HDF5":
             with h5py.File(path, "w") as f:
-                f.create_dataset("coords", data=self.coordinates.values)
+                dset = f.create_dataset(
+                    "coords", data=(self.coordinates.values).astype(np.float64)
+                )
         else:
             raise NotImplementedError(f"Format {format} not implemented")
 

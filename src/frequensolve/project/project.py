@@ -1,10 +1,11 @@
+import asyncio
 import json
 import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import toml
 import yaml
@@ -60,6 +61,9 @@ class Project:
     simulations: NamedList[BaseSimulation] = field(default_factory=NamedList)
     workflows: Dict[str, BaseWorkflow] = field(default_factory=dict)
     extras: Dict[str, BaseProjectComponent] = field(default_factory=dict)
+    _active_jobs: Dict[str, Any] = field(
+        default_factory=dict
+    )  # job_name -> future/job_id
 
     def __post_init__(self):
         """Load project from file and check version."""
@@ -367,3 +371,34 @@ class Project:
 
     def __repr__(self) -> str:
         return f"Project(name='{self.name}', path='{self.path}')"
+
+    def terminate_jobs(self):
+        """Terminate all running jobs associated with this project."""
+        if not self.site:
+            return
+
+        for job_name, future in list(self._active_jobs.items()):
+            try:
+                if hasattr(future, "cancel"):  # Dask future
+                    future.cancel()
+                else:  # Job ID
+                    self.site.cancel_job(future)
+                logging.info(f"Terminated job {job_name}")
+            except Exception as e:
+                logging.error(f"Failed to terminate job {job_name}: {e}")
+
+            self._active_jobs.pop(job_name)
+
+    def __del__(self):
+        """Cleanup method called when project object is destroyed."""
+        self.terminate_jobs()
+
+    def submit_job(self, job, **kwargs) -> list:
+        """Submit job and block until completion."""
+        return self.site.submit(job, **kwargs)
+
+    def submit_job_async(self, job, **kwargs) -> asyncio.Future:
+        """Submit job asynchronously and return a future."""
+        future = self.site.submit_async(job, **kwargs)
+        self._active_jobs[job.name] = future
+        return future

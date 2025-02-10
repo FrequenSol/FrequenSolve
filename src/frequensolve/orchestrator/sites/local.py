@@ -1,8 +1,8 @@
 import asyncio
 import os
+import signal
 import subprocess
 import sys
-from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -78,15 +78,38 @@ class LocalSite(BaseSite):
             raise FileNotFoundError(f"Solver executable not found at {executable}")
         return executable
 
-    def submit(self, job: SimulationJob) -> asyncio.Future:
-        """Submit job and return an awaitable future."""
-        loop = asyncio.get_event_loop()
+    def submit(self, job: SimulationJob) -> list:
+        """Submit job and block until completion."""
+        if self._is_notebook:
+            import nest_asyncio
+
+            nest_asyncio.apply()
+
+        # Create and run event loop for synchronous operation
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            future = self.submit_async(job)
+            return loop.run_until_complete(future)
+        finally:
+            loop.close()
+
+    def submit_async(self, job: SimulationJob) -> asyncio.Future:
+        """Submit job asynchronously and return a future."""
+        # Get or create event loop
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
         future = loop.create_future()
 
         async def run_tasks():
             try:
                 results = []
                 for i in range(job.n_tasks):
+                    print(f"Running task {i+1}")
                     result = await self._run_single_task(job, i)
                     results.append(result)
                 future.set_result(results)
@@ -98,7 +121,7 @@ class LocalSite(BaseSite):
 
             nest_asyncio.apply()
 
-        asyncio.create_task(run_tasks())
+        loop.create_task(run_tasks())
         self._futures.append(future)
         return future
 
@@ -117,11 +140,7 @@ class LocalSite(BaseSite):
             str(task_id + 1),
         ]
 
-        if self._is_notebook:
-            from IPython.display import clear_output
-
         try:
-            # Run process asynchronously with line buffering
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
@@ -129,31 +148,24 @@ class LocalSite(BaseSite):
                 env=self.env,
             )
 
-            # Print header for this task
-            print(f"\nOutput from task {task_id+1}:")
-
             # Collect output for result
             output_lines = []
 
             # Read stdout and stderr concurrently
-            async def read_stream(stream, is_stderr=False):
+            async def read_stream(stream):
                 while True:
                     line = await stream.readline()
                     if not line:
                         break
                     line = line.decode().rstrip()
-                    if is_stderr:
-                        print("Error:", line, file=sys.stderr)
-                    else:
-                        print(line, flush=True)
-                        output_lines.append(line)
+                    print(line, flush=True)
+                    output_lines.append(line)
 
             # Create tasks for reading both streams
             stdout_task = asyncio.create_task(read_stream(proc.stdout))
-            stderr_task = asyncio.create_task(read_stream(proc.stderr, True))
 
             # Wait for process to complete and streams to be fully read
-            await asyncio.gather(stdout_task, stderr_task)
+            await asyncio.gather(stdout_task)
             await proc.wait()
 
             if proc.returncode != 0:
@@ -178,6 +190,19 @@ class LocalSite(BaseSite):
         for future in self._futures:
             if not future.done():
                 future.cancel()
+
+    def cancel_job(self, job_id: str):
+        """Cancel a running job.
+
+        Args:
+            job_id: The ID of the job to cancel
+        """
+        try:
+            os.kill(int(job_id), signal.SIGTERM)
+        except ProcessLookupError:
+            pass  # Process already terminated
+        except ValueError:
+            raise ValueError(f"Invalid process ID: {job_id}")
 
     async def wait(self) -> list:
         """Wait for all submitted tasks to complete.

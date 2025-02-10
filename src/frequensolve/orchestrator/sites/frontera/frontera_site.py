@@ -12,12 +12,11 @@ import subprocess
 import tempfile
 import time
 from asyncio import Future, create_task
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from threading import Event, Thread
-from typing import Optional, TextIO, Union
+from typing import Literal, Optional, TextIO, Union
 
 from dask.distributed import Client
 from dask_jobqueue import SLURMCluster
@@ -87,6 +86,7 @@ class FronteraSite(BaseSite):
     pool: PoolInfo
     executable: str
     remote_env: dict
+    transfer_method: Literal["rsync", "sftp"] = "rsync"
     _login_client: SSHClientClass
     _compute_client: Optional[SSHClientClass] = None
     _work_dir: Path
@@ -412,7 +412,19 @@ class FronteraSite(BaseSite):
                 f"Job {self.pool.id} is not queued or running: {self.pool.status}"
             )
 
-    def submit(self, job: SimulationJob) -> Future:
+    def submit(self, job: SimulationJob) -> list:
+        """Submit job and block until completion."""
+        if self._is_notebook:
+            import nest_asyncio
+
+            nest_asyncio.apply()
+
+        loop = asyncio.get_event_loop()
+        future = self.submit_async(job)
+        return loop.run_until_complete(future)
+
+    def submit_async(self, job: SimulationJob) -> Future:
+        """Submit job asynchronously and return a future."""
         remote_script, remote_job = self._transfer_job(job)
 
         nproc = self.pool.nproc
@@ -797,7 +809,7 @@ class FronteraSite(BaseSite):
             return s.getsockname()[1]
 
     def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
-        """Transfer files from local path to remote path on Frontera using rsync.
+        """Transfer files from local path to remote path on Frontera.
 
         Args:
             local_path: Local path to transfer from
@@ -812,43 +824,82 @@ class FronteraSite(BaseSite):
         local_path = Path(local_path)
         remote_path = Path(remote_path)
 
-        # Construct remote path with username and hostname
-        remote_str = (
-            f"{self.credentials.username}@frontera.tacc.utexas.edu:{remote_path}"
-        )
-
         try:
             # Create parent directory on remote
             parent_path = str(remote_path.parent)
             self.run_login(f"mkdir -p {parent_path}")
 
-            # Use rsync to transfer files
-            # -a: archive mode (recursive, preserve permissions, etc)
-            # -z: compress during transfer
-            # -P: show progress and allow partial transfers
-            # --delete: delete extraneous files in destination
-            rsync_cmd = ["rsync", "-azP"]
-
-            if local_path.is_dir():
-                local_str = f"{local_path}/"
-                logger.info("Transferring directory %s to %s", local_path, remote_path)
+            if self.transfer_method == "sftp":
+                # Use SFTP through existing connection
+                logger.debug("Using SFTP for file transfer")
+                sftp = self.login_client.open_sftp()
+                try:
+                    if local_path.is_dir():
+                        logger.info(
+                            "Transferring directory %s to %s", local_path, remote_path
+                        )
+                        self._put_dir(sftp, local_path, remote_path)
+                    else:
+                        logger.info(
+                            "Transferring file %s to %s", local_path, remote_path
+                        )
+                        sftp.put(str(local_path), str(remote_path))
+                finally:
+                    sftp.close()
             else:
-                local_str = str(local_path)
-                logger.info("Transferring file %s to %s", local_path, remote_path)
+                # Use rsync
+                logger.debug("Using rsync for file transfer")
+                remote_str = f"{self.credentials.username}@frontera.tacc.utexas.edu:{remote_path}"
+                rsync_cmd = ["rsync", "-azP"]
 
-            result = subprocess.run(
-                [*rsync_cmd, local_str, remote_str], capture_output=True, text=True
-            )
+                if local_path.is_dir():
+                    local_str = f"{local_path}/"
+                    logger.info(
+                        "Transferring directory %s to %s", local_path, remote_path
+                    )
+                else:
+                    local_str = str(local_path)
+                    logger.info("Transferring file %s to %s", local_path, remote_path)
 
-            if result.returncode != 0:
-                logger.error("rsync failed with output: %s", result.stderr)
-                raise RuntimeError(f"rsync failed: {result.stderr}")
+                result = subprocess.run(
+                    [*rsync_cmd, local_str, remote_str], capture_output=True, text=True
+                )
+
+                if result.returncode != 0:
+                    logger.error("rsync failed with output: %s", result.stderr)
+                    raise RuntimeError(f"rsync failed: {result.stderr}")
 
             logger.info("Transfer completed successfully")
 
         except Exception as e:
             logger.exception("Error during file transfer: %s", str(e))
             raise
+
+    def _put_dir(self, sftp, local_dir: Path, remote_dir: Path):
+        """Transfer directory by compressing, sending single file, then extracting."""
+        import tarfile
+        import tempfile
+
+        # Create temporary tar file
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz") as tmp:
+            # Compress directory
+            with tarfile.open(tmp.name, "w:gz") as tar:
+                tar.add(local_dir, arcname=local_dir.name)
+
+            # Upload compressed file
+            remote_tar = str(remote_dir.parent / f"{remote_dir.name}.tar.gz")
+            sftp.put(tmp.name, remote_tar)
+
+            # Extract on remote side
+            _, stdout, stderr = self.run_login_cmd(
+                f"cd {remote_dir.parent} && tar xzf {remote_dir.name}.tar.gz && rm {remote_dir.name}.tar.gz"
+            )
+
+            # Check for errors
+            err = stderr.read().decode().strip()
+            if err:
+                logger.error("Error extracting directory on remote: %s", err)
+                raise RuntimeError(f"Failed to extract directory on remote: {err}")
 
     # def _decode_hosts(self, hosts: str) -> List[str]:
     #     """Decode the hosts string into a list of hostnames."""

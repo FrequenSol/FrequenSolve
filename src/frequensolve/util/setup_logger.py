@@ -77,7 +77,6 @@ def disable_jupyter_logging():
         logging.disable(logging.CRITICAL)
 
 
-# Example usage:
 if __name__ == "__main__":
     logger = init_logger()
     logger.debug("This is a debug message.")

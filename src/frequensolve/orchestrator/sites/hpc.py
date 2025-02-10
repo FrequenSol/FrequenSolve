@@ -5,12 +5,14 @@ import subprocess
 import tempfile
 import time
 import warnings
+from concurrent.futures import Future
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from dask.distributed import Client
+from dask.distributed import Future as DaskFuture
 from dask_jobqueue import SLURMCluster
 from jinja2 import Environment, FileSystemLoader
 from paramiko import AutoAddPolicy, SFTPClient, SSHClient, SSHException
@@ -497,24 +499,46 @@ class HPCSite(BaseSite):
         except Exception as e:
             return SiteStatus(status="failed", return_code=-1, stdout="", stderr=str(e))
 
-    # TODO: neet to add run_mpi_flux method, etc.
-    def submit_jobs(self, jobs: List[BaseTask]) -> None:
-        """Submit a job to the scheduler."""
+    def submit(self, job, **kwargs) -> Union[Future, DaskFuture]:
+        """Submit a job and return a future.
 
-        # Could also just use Dask's map feature
+        Args:
+            job: The job to submit
+            **kwargs: Additional submission arguments
 
-        futures = []
-        for job in jobs:
-            fut = self._client.submit(
+        Returns:
+            Future: A future representing the running job
+        """
+        if self._dask_client:
+            # Submit via Dask
+            future = self._dask_client.submit(
                 job.run_mpi_flux, job.nodes, job.ranks_per_node, job.cmd
             )
-            futures.append(fut)
-        return futures
+            return future
+        else:
+            # Submit via SLURM directly
+            future = Future()
+            try:
+                job_id = self._submit_slurm(job, **kwargs)
+                future.set_result(job_id)
+            except Exception as e:
+                future.set_exception(e)
+            return future
 
-    def cancel_jobs(self, jobs: List[BaseTask]) -> None:
-        """Cancel a submitted flux job."""
-        for job in jobs:
-            self._client.submit(job.cancel_mpi_flux, job.job_id)
+    def cancel_job(self, future_or_id):
+        """Cancel a running job.
+
+        Args:
+            future_or_id: Either a Future object or job ID string
+        """
+        if isinstance(future_or_id, (Future, DaskFuture)):
+            future_or_id.cancel()
+        else:  # Assume it's a job ID
+            try:
+                self.run_command(f"scancel {future_or_id}")
+            except Exception as e:
+                logging.error(f"Failed to cancel job {future_or_id}: {e}")
+                raise
 
     def provision_dask_jobqueue(
         self, nhost: int, nproc: int, duration: Optional[str] = None, **kwargs
