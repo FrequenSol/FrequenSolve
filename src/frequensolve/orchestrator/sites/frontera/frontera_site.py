@@ -710,12 +710,12 @@ class FronteraSite(BaseSite):
         self.put(Path(file), Path(remote_job))
 
         # Print file permissions for the remote sweep script
-        ls_output = self.run_compute_cmd(f"ls -l {remote_script}")[1]
-        logger.debug("Remote sweep script permissions: %s", ls_output.strip())
+        ls_output = self.run_compute(f"ls -l {remote_script}")
+        logger.debug("Remote sweep script permissions: %s", ls_output)
 
         # Print file permissions for the remote job file
-        ls_output = self.run_compute_cmd(f"ls -l {remote_job}")[1]
-        logger.debug("Remote job file permissions: %s", ls_output.strip())
+        ls_output = self.run_compute(f"ls -l {remote_job}")
+        logger.debug("Remote job file permissions: %s", ls_output)
 
         return remote_script, remote_job
 
