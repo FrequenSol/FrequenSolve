@@ -14,6 +14,7 @@ import time
 from asyncio import Future, create_task
 from dataclasses import dataclass
 from functools import cached_property
+from logging import DEBUG, INFO
 from pathlib import Path
 from threading import Event, Thread
 from typing import Literal, Optional, TextIO, Union
@@ -694,9 +695,11 @@ class FronteraSite(BaseSite):
             f.write(script)
         os.chmod(script_path, 0o700)
 
-        # Print file permissions for the sweep script
-        ls_output = subprocess.check_output(["ls", "-l", script_path]).decode("utf-8")
-        logger.debug("Sweep script permissions: %s", ls_output.strip())
+        if logger.getEffectiveLevel() <= DEBUG:
+            ls_output = subprocess.check_output(["ls", "-l", script_path]).decode(
+                "utf-8"
+            )
+            logger.debug("Sweep script permissions: %s", ls_output.strip())
 
         remote_script = (self.work_dir / "sweep").with_suffix(".sh")
         logger.debug("Transferring sweep script to remote path: %s", remote_script)
@@ -706,16 +709,21 @@ class FronteraSite(BaseSite):
 
         file = job.save_for_remote(self.work_dir)
         remote_job = ((self.work_dir / "jobs") / job.name).with_suffix(".json")
+
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(file), Path(remote_job))
 
-        # Print file permissions for the remote sweep script
-        ls_output = self.run_compute(f"ls -l {remote_script}")
-        logger.debug("Remote sweep script permissions: %s", ls_output)
+        ls_output = self.run_compute(f"chmod 700 {remote_script}")
+        logger.debug("Changed sweep script permissions: %s", ls_output)
 
-        # Print file permissions for the remote job file
-        ls_output = self.run_compute(f"ls -l {remote_job}")
-        logger.debug("Remote job file permissions: %s", ls_output)
+        if logger.getEffectiveLevel() <= DEBUG:
+            # Print file permissions for the remote sweep script
+            ls_output = self.run_compute(f"ls -l {remote_script}")
+            logger.debug("Remote sweep script permissions: %s", ls_output)
+
+            # Print file permissions for the remote job file
+            ls_output = self.run_compute(f"ls -l {remote_job}")
+            logger.debug("Remote job file permissions: %s", ls_output)
 
         return remote_script, remote_job
 
