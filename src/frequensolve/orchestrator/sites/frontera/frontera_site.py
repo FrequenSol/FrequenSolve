@@ -96,6 +96,7 @@ class FronteraSite(BaseSite):
     def __init__(
         self,
         rel_path: Union[str, Path],
+        transfer_method: Literal["rsync", "sftp"] = "rsync",
         queue: str = "debug",
     ):
         logger.info(
@@ -107,6 +108,7 @@ class FronteraSite(BaseSite):
         # Get Frontera credentials and configuration
         self.credentials = TACCLoginCredentials()
         self.config = FronteraConfig(queue=queue)
+        self.transfer_method = transfer_method
 
         # SSH into Frontera
         self._login_client = SSHClientClass(self.authenticate())
