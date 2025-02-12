@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-__all__ = ["BaseSiteConfig", "BaseSite", "SiteStatus"]
+__all__ = ["BaseSite", "SiteStatus"]
 
 
 def _wait_for_path(
@@ -69,10 +69,6 @@ class SiteStatus:
     @property
     def is_successful(self) -> bool:
         return self.status == "completed" and self.return_code == 0
-
-
-class BaseSiteConfig(ABC):
-    pass
 
 
 @dataclass

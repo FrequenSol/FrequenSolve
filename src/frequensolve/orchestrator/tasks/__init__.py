@@ -1,1 +1,1 @@
-from .base_task import *  # noqa
+from .base import *  # noqa

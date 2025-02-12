@@ -32,12 +32,11 @@ mkdir -p ./jobs/out/
 for i in $(seq 1 $nfreq); do
    off=$((ranks_per_job * ((i-1) % nnodes)))
    echo "{{ mpi }} -n $ranks_per_job -o $off {{ executable }} -nthreads {{ nthread }} -j $input_file -i $i "
-   {{ mpi }} -n $ranks_per_job -o $off task_affinity {{ executable }} -nthreads {{ nthread }} -j $1 -i $i #>> ./jobs/out/j${i}.txt 2>&1 &
+   {{ mpi }} -n $ranks_per_job -o $off task_affinity {{ executable }} -nthreads {{ nthread }} -j $1 -i $i >> ./jobs/out/j${i}.txt 2>&1 &
    if [[ $((($i - 1) % nnodes)) -eq $((nnodes - 1)) ]]; then
       wait
       echo "Group done"
    fi
 done
-wait
 
 echo "Sweep Complete"

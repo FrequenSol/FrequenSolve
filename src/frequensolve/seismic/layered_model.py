@@ -762,9 +762,9 @@ class LayeredModel(ModelBase):
                 # plt.pcolormesh(Xuniform, Zuniform, interp_data, shading='gouraud', **kwargs)
 
             else:
-                data = prop.get()
-                if prop.is_constant:
-                    data = xr.full_like(samples, data)
+                data = prop.get(samples)
+                # if prop.is_constant:
+                #     data = xr.full_like(samples, data)
 
                 limits = {}
                 limits["x_min"] = self.x_limits[0]
@@ -773,10 +773,11 @@ class LayeredModel(ModelBase):
                     limits["y_min"] = self.y_limits[0]
                     limits["y_max"] = self.y_limits[1]
 
-                if prop.is_constant:
-                    xgrid = samples.coords["x"]
-                else:
-                    xgrid = data.coords["x"]
+                xgrid = samples.coords["x"]
+                # if prop.is_constant:
+                #     xgrid = samples.coords["x"]
+                # else:
+                #     xgrid = data.coords["x"]
 
                 if self.ordering == "top_down":
                     limits["z_min"] = upper.z_phys.get(xgrid)
@@ -805,8 +806,7 @@ class LayeredModel(ModelBase):
                     )
 
                     da = data.where(mask)
-                    ds = da.interp(coords=samples.coords)
-                    samples.data = np.where(~np.isnan(ds), ds, samples.data)
+                    samples.data = np.where(~np.isnan(da), da, samples.data)
         # except Exception as e:
         #    print(f"Error plotting {property} for layer {layer.name}: {e}")
 

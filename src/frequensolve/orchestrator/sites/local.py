@@ -8,32 +8,15 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from frequensolve.orchestrator.sites.base_site import (
+from frequensolve.orchestrator.config.local import LocalSiteConfig
+from frequensolve.orchestrator.sites.base import (
     BaseSite,
-    BaseSiteConfig,
     SiteStatus,
     _wait_for_path,
 )
 from frequensolve.simulation.jobs import SimulationJob
-from frequensolve.util.system_info import SystemInfo
 
-__all__ = ["LocalSiteConfig", "LocalSite"]
-
-
-@dataclass
-class LocalSiteConfig(BaseSiteConfig):
-    """Local site configuration."""
-
-    cores: int
-    memory: int
-    mpi_wrapper: str = "mpirun"
-
-    def __init__(self):
-        system_info = SystemInfo()
-        info = system_info.gather_all_info()
-        self.cores = info["cpu"]["physical_cores"]
-        self.memory = info["cpu"]["memory"]
-        self.mpi_wrapper = "mpirun"
+__all__ = ["LocalSite"]
 
 
 @dataclass
@@ -54,6 +37,12 @@ class LocalSite(BaseSite):
         self.env["FREQUENSOLVE_DIR"] = os.getenv("FS_SOLVER_PATH")
         self._is_notebook = self._check_if_notebook()
 
+    def __del__(self):
+        """Cleanup when object is destroyed."""
+        for future in self._futures:
+            if not future.done():
+                future.cancel()
+
     def _get_solver_path(self) -> str:
         """Get the solver path."""
         load_dotenv()
@@ -71,24 +60,25 @@ class LocalSite(BaseSite):
 
             nest_asyncio.apply()
 
-        # Create and run event loop for synchronous operation
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            future = self.submit_async(job)
-            return loop.run_until_complete(future)
-        finally:
-            loop.close()
-
-    def submit_async(self, job: SimulationJob) -> asyncio.Future:
-        """Submit job asynchronously and return a future."""
-        # Get or create event loop
+        # Use existing loop if available, otherwise create new one
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
+        try:
+            future = self.submit_async(job)
+            return loop.run_until_complete(future)
+        finally:
+            # Don't close the loop if we didn't create it
+            if not loop.is_running():
+                loop.close()
+
+    def submit_async(self, job: SimulationJob) -> asyncio.Future:
+        """Submit job asynchronously and return a future."""
+        # Use the current event loop
+        loop = asyncio.get_event_loop()
         future = loop.create_future()
 
         async def run_tasks():
@@ -97,8 +87,11 @@ class LocalSite(BaseSite):
                 for i in range(job.n_tasks):
                     print(f"Running task {i+1}")
                     result = await self._run_single_task(job, i)
-                    results.append(result)
-                future.set_result(results)
+
+                    # TODO: once HPC side matches, update this
+                    if result is not None:
+                        results.append(result)
+                future.set_result(job.records)
             except Exception as e:
                 future.set_exception(e)
 
@@ -117,9 +110,12 @@ class LocalSite(BaseSite):
         _wait_for_path(job_file)
 
         args = [
+            "mpirun",
+            "-np",
+            "2",
             self.executable,
             "-nthreads",
-            str(self.config.cores - 2),
+            str(self.config.cores // 2 - 1),
             "-j",
             str(job_file),
             "-i",
@@ -155,12 +151,16 @@ class LocalSite(BaseSite):
             await proc.wait()
 
             if proc.returncode != 0:
+                # Create task for reading stderr stream
+                stderr_task = asyncio.create_task(read_stream(proc.stderr))
+                await stderr_task
+
                 raise subprocess.CalledProcessError(
                     proc.returncode, args, "\n".join(output_lines), None
                 )
 
-            # Return collected output
-            return {"task_id": task_id, "output": "\n".join(output_lines)}
+            return
+            # return job.records
 
         except Exception as e:
             print(f"Task {task_id+1} failed: {str(e)}", file=sys.stderr)
@@ -171,11 +171,8 @@ class LocalSite(BaseSite):
                 sys.stdout.flush()
                 sys.stderr.flush()
 
-    def __del__(self):
-        """Cleanup when object is destroyed."""
-        for future in self._futures:
-            if not future.done():
-                future.cancel()
+    def transfer():
+        pass
 
     def cancel_job(self, job_id: str):
         """Cancel a running job.

@@ -19,7 +19,7 @@ class Discretization:
     order: int = 3
     DPG_alpha: float = 1.0
     DPG_enrich: int = 1
-    DPG_penalty: float = 100
+    DPG_penalty: float = 100.0
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Discretization":
@@ -44,13 +44,13 @@ class SolverConfig:
        solve_on (Literal["final", "all"]): Whether to solve on the final or all time steps.
        max_iter (int): The maximum number of iterations.
        tolerance (float): The tolerance for the solver.
-       n_grids (Optional[int]): The number of grids to use.
+       grids (Optional[int]): The number of grids to use.
     """
 
     solve_on: Literal["final", "all"] = "final"
     max_iter: int = 300
     tolerance: float = 1.0e-5
-    n_grids: int = 4
+    grids: int = 4
     refinement_kind: Literal["uniform", "adapt_indicator", "adapt_wavespeed"] = (
         "adapt_wavespeed"
     )
@@ -68,7 +68,7 @@ class SolverConfig:
             solve_on=data.get("solve_on", "final"),
             max_iter=data.get("max_iter", 300),
             tolerance=data.get("tolerance", 1.0e-5),
-            n_grids=data.get("n_grids", 4),
+            grids=data.get("grids", 4),
             refinement_kind=data.get("refinement_kind", "adapt_wavespeed"),
             refinement_flags=data.get("refinement_flags", []),
         )
@@ -78,7 +78,7 @@ class SolverConfig:
             "solve_on": self.solve_on,
             "max_iter": self.max_iter,
             "tolerance": self.tolerance,
-            "n_grids": self.n_grids,
+            "grids": self.grids,
             "refinement_kind": self.refinement_kind,
             "refinement_flags": self.refinement_flags,
             **(

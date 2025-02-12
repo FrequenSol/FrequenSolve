@@ -5,11 +5,14 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import toml
 import yaml
+from numpy import max as npmax
 
+from frequensolve.orchestrator.sites.frontera import FronteraSite
+from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project.migrate_version import Version
 from frequensolve.project.workflows import BaseWorkflow
 from frequensolve.simulation.simulation import (
@@ -53,7 +56,7 @@ class Project:
     pretty_name: Optional[str] = None
     path: Union[str, Path]
     version: Version = field(default_factory=Version)
-    log_level: int = logging.INFO
+    log_level: int = logging.DEBUG
     jupyter_logging: bool = True
     load_if_exists: bool = False
     auto_migrate: bool = False
@@ -141,6 +144,10 @@ class Project:
 
     def transfer(self):
         """Transfer project files to remote site with path substitution."""
+
+        if isinstance(self.site, LocalSite):
+            return
+
         remote = self.site.work_dir
 
         proj_file = (Path(self.path) / f"{self.name}").with_suffix(".json")
@@ -176,33 +183,25 @@ class Project:
                 self.site.put(temp_file, remote / rel_path)
                 temp_file.unlink()  # Clean up temporary file
 
-    def _prepare_for_transfer(self) -> Path:
-        """Prepare a temporary project file with substituted paths for transfer.
+    def get_records(self, results: dict) -> RecordDatabase:
+        """Get records from Frontera.
 
-        Returns:
-            Path: Path to temporary project file with substituted paths
+        Args:
+            results: A dictionary of results from a Frontera job.
         """
-        # Create temporary copy of project
-        temp_dict = self.__dict__()
 
-        # Substitute project path in simulation files
-        for sim in self.simulations:
-            sim_dict = sim.__dict__()
-            # Replace absolute project path with relative path
-            if "_file" in sim_dict and sim_dict["_file"]:
-                sim_path = Path(sim_dict["_file"])
-                rel_path = sim_path.relative_to(self.path)
-                sim_dict["_file"] = str(rel_path)
-            temp_sims.append(sim_dict)
+        if self.site is None:
+            raise ValueError("No site specified for project")
+        elif isinstance(self.site, LocalSite):
+            pass
+        elif isinstance(self.site, FronteraSite):
+            self.site.download_records(results, self.path.resolve())
+        else:
+            raise NotImplementedError(
+                f"Site type {type(self.site)} not supported (yet)"
+            )
 
-        temp_dict["simulations"] = temp_sims
-
-        # Save temporary project file
-        temp_file = Path(self.path) / f"{self.name}_temp.json"
-        with open(temp_file, "w") as f:
-            json.dump(temp_dict, f, cls=CustomJSONEncoder, indent=3)
-
-        return temp_file
+        return recs
 
     @classmethod
     def load(cls, file: Union[str, Path], auto_migrate: bool = False) -> "Project":

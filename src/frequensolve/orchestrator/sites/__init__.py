@@ -1,4 +1,4 @@
-from .base_site import *  # noqa
+from .base import *  # noqa
 from .frontera import *  # noqa
 from .local import *  # noqa
 

@@ -63,13 +63,15 @@ class Property:
 
     def __init__(
         self,
-        data: Union[float, str, Path, xr.DataArray] = 0.0,
+        data: Union[int, float, str, Path, xr.DataArray] = 0.0,
         xarr: Optional[xr.DataArray] = None,
         scale: float = 1.0,
     ):
 
         if isinstance(data, str):
             data = Path(data)
+        if isinstance(data, int):
+            data = float(data)
 
         if isinstance(data, float):
             self.darr = xr.DataArray(data=data)
@@ -174,6 +176,8 @@ class Property:
             return Property._h5_reader
         elif file.suffix == ".zarr":
             return Property._zarr_reader
+        elif file.suffix == ".nc":
+            return Property._netcdf_reader
         else:
             raise ValueError(f"Unknown file format for {file}")
 
@@ -195,7 +199,7 @@ class Property:
 
         with h5py.File(fname, "r") as f:
             if "coords" not in f:
-                if "coords" not in kwargs:
+                if "xarr" not in kwargs:
                     raise ValueError(
                         "Coords not found in h5 file, must be provided via 'coords' keyword argument"
                     )
@@ -206,6 +210,17 @@ class Property:
                 dims = f["coords"].attrs["dims"]
                 coords = {dim: f["coords"][dim][()] for dim in dims}
             return xr.DataArray(f[dset], coords=coords, dims=dims)
+
+    def _netcdf_reader(file: Path, **kwargs) -> xr.DataArray:
+        """Read a netcdf file."""
+        xarr = kwargs.pop("xarr", None)
+        ds = xr.open_dataset(file, **kwargs)
+        da = ds[list(ds.data_vars)[0]]
+
+        if xarr is not None:
+            return da.interp(coords=xarr.coords)
+        else:
+            return da
 
     @staticmethod
     def _zarr_reader(file: Path, **kwargs) -> xr.DataArray:

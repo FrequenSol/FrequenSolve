@@ -14,7 +14,6 @@
 
 cd {{ work_dir }}
 
-
 {{ mpi }} flux start --boot
 
 scheduler=dask-scheduler --host 0.0.0.0

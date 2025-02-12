@@ -2,8 +2,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 
-from ..tasks.base_task import BaseTask
-from .base_site import BaseSite, BaseSiteConfig
+from frequensolve.orchestrator.config.base import BaseSiteConfig
+from frequensolve.orchestrator.sites.base import BaseSite
+from frequensolve.orchestrator.tasks.base import BaseTask
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
 

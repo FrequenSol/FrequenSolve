@@ -17,12 +17,9 @@ from dask_jobqueue import SLURMCluster
 from jinja2 import Environment, FileSystemLoader
 from paramiko import AutoAddPolicy, SFTPClient, SSHClient, SSHException
 
-from frequensolve.orchestrator.sites.base_site import (
-    BaseSite,
-    BaseSiteConfig,
-    SiteStatus,
-)
-from frequensolve.orchestrator.tasks.base_task import BaseTask
+from frequensolve.orchestrator.config.base import BaseSiteConfig
+from frequensolve.orchestrator.sites.base import BaseSite, SiteStatus
+from frequensolve.orchestrator.tasks.base import BaseTask
 
 __all__ = ["HPCSiteConfig", "HPCSite", "HPCSiteCredentials"]
 

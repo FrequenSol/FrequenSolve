@@ -9,12 +9,13 @@ import os
 import re
 import socket
 import subprocess
+import tarfile
 import tempfile
 import time
 from asyncio import Future, create_task
 from dataclasses import dataclass
 from functools import cached_property
-from logging import DEBUG, INFO
+from logging import DEBUG
 from pathlib import Path
 from threading import Event, Thread
 from typing import Literal, Optional, TextIO, Union
@@ -30,14 +31,14 @@ from paramiko import (
     Transport,
 )
 
-from frequensolve.orchestrator.credentials import Credentials
-from frequensolve.orchestrator.pool import PoolInfo, PoolStatus
-from frequensolve.orchestrator.sites.base_site import BaseSite, _wait_for_path
-from frequensolve.orchestrator.sites.frontera.config import (
+from frequensolve.orchestrator.config.frontera import (
     FronteraConfig,
     _hms_to_seconds,
     _seconds_to_hms,
 )
+from frequensolve.orchestrator.credentials import Credentials
+from frequensolve.orchestrator.pool import PoolInfo, PoolStatus
+from frequensolve.orchestrator.sites.base import BaseSite, _wait_for_path
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
 
@@ -63,8 +64,9 @@ class SSHClientClass:
 
     def __init__(self, client: SSHClient):
         self.client = client
-        _, stdout, stderr = self.client.exec_command("echo $HOSTNAME")
-        self._hostname = stdout.read().decode().strip().split("@")[0]
+        _, stdout, _ = self.client.exec_command("echo $HOSTNAME")
+        out = stdout.read().decode().strip()
+        self._hostname = out.split("@")[0] if "@" in out else out.split(".")[0]
 
     @property
     def hostname(self) -> str:
@@ -101,9 +103,7 @@ class FronteraSite(BaseSite):
         queue: str = "debug",
     ):
         logger.info(
-            "Initializing FronteraSite with rel_path: %s, queue: %s",
-            rel_path,
-            queue,
+            "Initializing FronteraSite with rel_path: %s, queue: %s", rel_path, queue
         )
 
         # Get Frontera credentials and configuration
@@ -176,25 +176,6 @@ class FronteraSite(BaseSite):
         if self._login_client:
             self.login_client.close()
             logger.debug("SSH client closed in __del__.")
-
-    def _get_solver_path(self) -> str:
-        """Get the solver path."""
-        load_dotenv()
-        return os.getenv("FRONTERA_SOLVER_EXECUTABLE")
-
-    def _get_FS_path(self) -> str:
-        """Get the Frequensolve path."""
-        load_dotenv()
-        path = Path(os.getenv("FS_PYTHON_PATH"))
-        if not path.exists():
-            logger.error(
-                "FS_PYTHON_PATH environment variable not set or path does not exist: %s",
-                path,
-            )
-            raise FileNotFoundError(
-                f"environment variable FS_PYTHON_PATH {path} does not appear to be set"
-            )
-        return path
 
     def authenticate(self, host: str = "frontera.tacc.utexas.edu"):
         """Connects to Frontera Login Node using Paramiko's built-in authentication mechanisms."""
@@ -418,8 +399,9 @@ class FronteraSite(BaseSite):
                 f"Job {self.pool.id} is not queued or running: {self.pool.status}"
             )
 
-    def submit(self, job: SimulationJob) -> list:
+    def submit(self, job: SimulationJob):
         """Submit job and block until completion."""
+
         if self._is_notebook:
             import nest_asyncio
 
@@ -437,51 +419,63 @@ class FronteraSite(BaseSite):
         nitems = job.n_tasks
         ntasks_per_item = max(2, nproc // nitems)
 
-        _, stdout, stderr = self.run_compute_cmd(
-            f"{remote_script} {remote_job} {ntasks_per_item}"
-        )
+        # Run via interactive (stateful) shell to inherit SLURM environment
+        interactive = self.login_client.invoke_shell()
+        interactive.send(f"ssh {self.compute_host} && cd {self.work_dir}\n")
+        time.sleep(1)
+
+        cmd = f"{remote_script} {remote_job} {ntasks_per_item}\n"
+        logger.debug("Sending command: %s", cmd)
+        interactive.send(cmd)
+
         future = Future()
 
         async def monitor_output():
             try:
-                logger.info("Monitoring output of the sweep job.")
-
-                # Create async iterators for stdout/stderr
-                stdout_iter = iter(stdout)
-                stderr_iter = iter(stderr)
+                # Buffer for accumulating output
+                output_buffer = ""
+                error_buffer = ""
 
                 while True:
-                    # Check stdout
-                    try:
-                        line = next(stdout_iter).strip()
-                        logger.info("Sweep output: %s", line)
-                        if "Sweep Complete" in line:
-                            future.set_result(job)
-                            logger.info("Sweep job completed successfully")
-                            return
-                    except StopIteration:
-                        break
+                    # Check if data is available to read
+                    if interactive.recv_ready():
+                        data = interactive.recv(4096).decode("utf-8")
+                        output_buffer += data
 
-                    # Check stderr
-                    try:
-                        error = next(stderr_iter).strip()
-                        logger.error("Sweep error: %s", error)
-                        future.set_exception(RuntimeError(f"Sweep job failed: {error}"))
-                        return
-                    except StopIteration:
-                        pass
+                        # Process complete lines
+                        while "\n" in output_buffer:
+                            line, output_buffer = output_buffer.split("\n", 1)
+                            line = line.strip()
+                            logger.info("Sweep output: %s", line)
+
+                            if "Sweep Complete" in line:
+                                future.set_result(job.records)
+                                logger.info("Sweep job completed successfully")
+                                interactive.close()
+                                return
+
+                    # Check for errors
+                    if interactive.recv_stderr_ready():
+                        error = interactive.recv_stderr(4096).decode("utf-8")
+                        error_buffer += error
+
+                        while "\n" in error_buffer:
+                            line, error_buffer = error_buffer.split("\n", 1)
+                            line = line.strip()
+                            logger.error("Sweep error: %s", line)
+                            future.set_exception(
+                                RuntimeError(f"Sweep job failed: {line}")
+                            )
+                            interactive.close()
+                            return
 
                     # Give other tasks a chance to run
-                    await asyncio.sleep(1)
-
-                # If we get here without setting result/exception
-                future.set_exception(
-                    RuntimeError("Sweep job ended without completion marker")
-                )
+                    await asyncio.sleep(0.5)
 
             except Exception as e:
                 logger.exception("Error in monitor task")
                 future.set_exception(e)
+                interactive.close()
 
         # Create and start the monitor task
         create_task(monitor_output())
@@ -536,9 +530,16 @@ class FronteraSite(BaseSite):
         return self._work_dir
 
     def run_cmd(self, client, cmd: str):
-        """Run a command using exec_command."""
-        logger.info("Executing command on %s: %s", client.hostname, cmd)
-        return client.client.exec_command(cmd)
+        """Run a command using exec_command, passing the captured environment if available."""
+        env = getattr(client, "environ", None)
+        logger.info(
+            "Executing command on %s: %s with environment %s", client.hostname, cmd, env
+        )
+        return (
+            client.client.exec_command(cmd, environment=env)
+            if env
+            else client.client.exec_command(cmd)
+        )
 
     def run_compute_cmd(self, cmd: str):
         """Run a command on compute node using exec_command."""
@@ -586,6 +587,182 @@ class FronteraSite(BaseSite):
         except Exception as e:
             return PoolStatus("failed", -1, "", str(e))
 
+    def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
+        """Transfer files from local path to remote path on Frontera.
+
+        Args:
+            local_path: Local path to transfer from
+            remote_path: Remote path to transfer to
+        """
+        logger.info("Attempting to transfer from %s to %s", local_path, remote_path)
+
+        if not _wait_for_path(local_path):
+            logger.error("Local path %s does not exist", local_path)
+            raise FileNotFoundError(f"Local path {local_path} does not exist")
+
+        local_path = Path(local_path)
+        remote_path = Path(remote_path)
+
+        try:
+            # Create parent directory on remote
+            parent_path = str(remote_path.parent)
+            self.run_login(f"mkdir -p {parent_path}")
+
+            if self.transfer_method == "sftp":
+                # Use SFTP through existing connection
+                logger.debug("Using SFTP for file transfer")
+                sftp = self.login_client.open_sftp()
+                try:
+                    if local_path.is_dir():
+                        logger.info(
+                            "Transferring directory %s to %s", local_path, remote_path
+                        )
+                        self._put_dir(sftp, local_path, remote_path)
+                    else:
+                        logger.info(
+                            "Transferring file %s to %s", local_path, remote_path
+                        )
+                        sftp.put(str(local_path), str(remote_path))
+                finally:
+                    sftp.close()
+            else:
+                # Use rsync
+                logger.debug("Using rsync for file transfer")
+                remote_str = f"{self.credentials.username}@frontera.tacc.utexas.edu:{remote_path}"
+                rsync_cmd = ["rsync", "-azP"]
+
+                if local_path.is_dir():
+                    local_str = f"{local_path}/"
+                    logger.info(
+                        "Transferring directory %s to %s", local_path, remote_path
+                    )
+                else:
+                    local_str = str(local_path)
+                    logger.info("Transferring file %s to %s", local_path, remote_path)
+
+                result = subprocess.run(
+                    [*rsync_cmd, local_str, remote_str], capture_output=True, text=True
+                )
+
+                if result.returncode != 0:
+                    logger.error("rsync failed with output: %s", result.stderr)
+                    raise RuntimeError(f"rsync failed: {result.stderr}")
+
+            logger.info("Transfer completed successfully")
+
+        except Exception as e:
+            logger.exception("Error during file transfer: %s", str(e))
+            raise
+
+    def download_records(self, records: dict, project_dir: Union[str, Path]):
+        """Download records from Frontera.
+
+        Args:
+            records: A dictionary of records to get.
+            project_dir: The directory to download the records to.
+        """
+        project_dir = Path(project_dir)
+        files = records["datasets"].keys()
+        try:
+            # Create temporary directory name for the archive
+            archive_name = f"records_{int(time.time())}"
+            remote_archive = self.work_dir / f"{archive_name}.tar.gz"
+            local_archive = project_dir / f"{archive_name}.tar.gz"
+
+            # Create archive on remote
+            tar_cmd = f"cd {self.work_dir} && tar czf {remote_archive.name} "
+            tar_cmd += " ".join(files)
+            _, _, stderr = self.run_compute_cmd(tar_cmd)
+            err = stderr.read().decode().strip()
+            if err:
+                logger.error("Error creating archive on remote: %s", err)
+                raise RuntimeError(f"Failed to create archive on remote: {err}")
+
+            # Download, extract, and cleanup
+            self.get(remote_archive, local_archive)
+            with tarfile.open(local_archive, "r:gz") as tar:
+                tar.extractall()
+            local_archive.unlink()
+            self.run_login(f"rm {remote_archive}")
+
+            return records
+
+        except Exception as e:
+            logger.exception("Error downloading records: %s", str(e))
+            raise
+
+    def get(
+        self,
+        remote_path: Union[str, Path],
+        local_path: Union[str, Path],
+        overwrite: bool = False,
+    ):
+        """Transfer files from remote path to local path on Frontera.
+
+        Args:
+            remote_path: Remote path to transfer to
+            local_path: Local path to transfer from
+            overwrite: Overwrite existing files
+        """
+        logger.info("Attempting to transfer from %s to %s", remote_path, local_path)
+
+        if not _wait_for_path(remote_path):
+            logger.error("Remote path %s does not exist", remote_path)
+            raise FileNotFoundError(f"Remote path {remote_path} does not exist")
+
+        local_path = Path(local_path)
+        remote_path = Path(remote_path)
+
+        try:
+            parent_path = str(local_path.parent)
+            self.run_login(f"mkdir -p {parent_path}")
+
+            if self.transfer_method == "sftp":
+                # Use SFTP through existing connection
+                logger.debug("Using SFTP for file transfer")
+                sftp = self.login_client.open_sftp()
+                try:
+                    if remote_path.is_dir():
+                        logger.info(
+                            "Transferring directory %s to %s", remote_path, local_path
+                        )
+                        self._get_dir(sftp, remote_path, local_path)
+                    else:
+                        logger.info(
+                            "Transferring file %s to %s", remote_path, local_path
+                        )
+                        sftp.get(str(remote_path), str(local_path))
+                finally:
+                    sftp.close()
+            else:
+                # Use rsync
+                logger.debug("Using rsync for file transfer")
+                remote_str = f"{self.credentials.username}@frontera.tacc.utexas.edu:{remote_path}"
+                rsync_cmd = ["rsync", "-azP"]
+
+                if remote_path.is_dir():
+                    remote_str = f"{remote_path}/"
+                    logger.info(
+                        "Transferring directory %s to %s", remote_path, local_path
+                    )
+                else:
+                    local_str = str(local_path)
+                    logger.info("Transferring file %s to %s", remote_path, local_path)
+
+                result = subprocess.run(
+                    [*rsync_cmd, remote_str, local_str], capture_output=True, text=True
+                )
+
+                if result.returncode != 0:
+                    logger.error("rsync failed with output: %s", result.stderr)
+                    raise RuntimeError(f"rsync failed: {result.stderr}")
+
+            logger.info("Transfer completed successfully")
+
+        except Exception as e:
+            logger.exception("Error during file transfer: %s", str(e))
+            raise
+
     def wait_provisioned(self):
         """Wait for the job to be provisioned."""
         while True:
@@ -593,7 +770,7 @@ class FronteraSite(BaseSite):
             if self.pool.is_running:
                 break
             time.sleep(self.config.poll_interval)
-        self._jump_to_pool_host()
+        self._connect_to_job_host(self.pool.id)
 
     def cancel_job(self, job_id: Optional[str] = None) -> bool:
         """Cancel a job."""
@@ -606,9 +783,27 @@ class FronteraSite(BaseSite):
         """Release HPC resources."""
         self.cancel_job(self.pool.id)
 
+    def _get_solver_path(self) -> str:
+        """Get the solver path."""
+        load_dotenv()
+        return os.getenv("FRONTERA_SOLVER_EXECUTABLE")
+
+    def _get_FS_path(self) -> str:
+        """Get the Frequensolve path."""
+        load_dotenv()
+        path = Path(os.getenv("FS_PYTHON_PATH"))
+        if not path.exists():
+            logger.error(
+                "FS_PYTHON_PATH env var not set or path does not exist: %s", path
+            )
+            raise FileNotFoundError(
+                f"env var FS_PYTHON_PATH {path} does not appear to be set"
+            )
+        return path
+
     def _set_pool_info(self):
         """Get information about the pool."""
-        logger.info("Getting pool information for job %s", self.pool.id)
+        logger.info("Getting pool info for job %s", self.pool.id)
 
         # Get SLURM job details using scontrol
         stdout = self.run_login(f"scontrol show job {self.pool.id}")
@@ -717,11 +912,9 @@ class FronteraSite(BaseSite):
         logger.debug("Changed sweep script permissions: %s", ls_output)
 
         if logger.getEffectiveLevel() <= DEBUG:
-            # Print file permissions for the remote sweep script
             ls_output = self.run_compute(f"ls -l {remote_script}")
             logger.debug("Remote sweep script permissions: %s", ls_output)
 
-            # Print file permissions for the remote job file
             ls_output = self.run_compute(f"ls -l {remote_job}")
             logger.debug("Remote job file permissions: %s", ls_output)
 
@@ -750,7 +943,6 @@ class FronteraSite(BaseSite):
             executable=self.executable,
             fs_dir=str(Path(self.executable).parent),
             project_dir=str(self.work_dir),
-            slurm_nodelist=self.pool.hostnode,
             **kwargs,
         )
         return script
@@ -758,6 +950,7 @@ class FronteraSite(BaseSite):
     def _generate_provision_script(
         self, nhost: int, nproc: int, duration: Optional[str] = None, **kwargs
     ) -> str:
+        """Generate a script for provisioning a Frontera cluster."""
         env = Environment(
             loader=FileSystemLoader(
                 self._FS_dir / "src/frequensolve/orchestrator/templates"
@@ -780,32 +973,36 @@ class FronteraSite(BaseSite):
         )
 
     def _connect_to_job_host(self, job_id: int):
-        """Connect to the job host."""
+        """Connect to the job host.
 
+        Args:
+            job_id (int): The SLURM job ID.
+
+        Returns:
+            SSHClient: An SSH client connected to the job host with the captured environment.
+        """
         job_host = self._get_job_host(job_id)
         transport = self.login_client.get_transport()
 
-        # Create tunnel to job host
+        # Create a tunnel to the compute node.
         channel = transport.open_channel("direct-tcpip", (job_host, 22), ("", 0))
 
-        # Create new SSH client for job host
+        # Now create a direct connection to the compute node.
         job_client = SSHClient()
         job_client.set_missing_host_key_policy(AutoAddPolicy())
-
         try:
-            # Connect to job host
             job_client.connect(
                 job_host, username=self.credentials.username, sock=channel
             )
             logger.info("Connected to job host: %s", job_host)
             return job_client
-
         except Exception as e:
             logger.error("Failed to connect to job host: %s", str(e))
             channel.close()
             raise
 
     def _get_job_host(self, job_id: int) -> int:
+        """Get the job host."""
         status = self.run_login(f"squeue -j {job_id} -h -o %t")
         if status != "R":
             raise RuntimeError(f"Job {job_id} is not running")
@@ -833,98 +1030,58 @@ class FronteraSite(BaseSite):
             s.bind(("localhost", 0))
             return s.getsockname()[1]
 
-    def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
-        """Transfer files from local path to remote path on Frontera.
+    def _put_dir(self, sftp, local_dir: Path, remote_dir: Path):
+        """Transfer directory via SFTP.
 
         Args:
-            local_path: Local path to transfer from
-            remote_path: Remote path to transfer to
+            sftp: The SFTP client.
+            local_dir: The local directory to transfer.
+            remote_dir: The remote directory to transfer to.
         """
-        logger.info("Attempting to transfer from %s to %s", local_path, remote_path)
-
-        if not _wait_for_path(local_path):
-            logger.error("Local path %s does not exist", local_path)
-            raise FileNotFoundError(f"Local path {local_path} does not exist")
-
-        local_path = Path(local_path)
-        remote_path = Path(remote_path)
-
-        try:
-            # Create parent directory on remote
-            parent_path = str(remote_path.parent)
-            self.run_login(f"mkdir -p {parent_path}")
-
-            if self.transfer_method == "sftp":
-                # Use SFTP through existing connection
-                logger.debug("Using SFTP for file transfer")
-                sftp = self.login_client.open_sftp()
-                try:
-                    if local_path.is_dir():
-                        logger.info(
-                            "Transferring directory %s to %s", local_path, remote_path
-                        )
-                        self._put_dir(sftp, local_path, remote_path)
-                    else:
-                        logger.info(
-                            "Transferring file %s to %s", local_path, remote_path
-                        )
-                        sftp.put(str(local_path), str(remote_path))
-                finally:
-                    sftp.close()
-            else:
-                # Use rsync
-                logger.debug("Using rsync for file transfer")
-                remote_str = f"{self.credentials.username}@frontera.tacc.utexas.edu:{remote_path}"
-                rsync_cmd = ["rsync", "-azP"]
-
-                if local_path.is_dir():
-                    local_str = f"{local_path}/"
-                    logger.info(
-                        "Transferring directory %s to %s", local_path, remote_path
-                    )
-                else:
-                    local_str = str(local_path)
-                    logger.info("Transferring file %s to %s", local_path, remote_path)
-
-                result = subprocess.run(
-                    [*rsync_cmd, local_str, remote_str], capture_output=True, text=True
-                )
-
-                if result.returncode != 0:
-                    logger.error("rsync failed with output: %s", result.stderr)
-                    raise RuntimeError(f"rsync failed: {result.stderr}")
-
-            logger.info("Transfer completed successfully")
-
-        except Exception as e:
-            logger.exception("Error during file transfer: %s", str(e))
-            raise
-
-    def _put_dir(self, sftp, local_dir: Path, remote_dir: Path):
-        """Transfer directory by compressing, sending single file, then extracting."""
-        import tarfile
-        import tempfile
 
         # Create temporary tar file
         with tempfile.NamedTemporaryFile(suffix=".tar.gz") as tmp:
-            # Compress directory
             with tarfile.open(tmp.name, "w:gz") as tar:
                 tar.add(local_dir, arcname=local_dir.name)
 
-            # Upload compressed file
             remote_tar = str(remote_dir.parent / f"{remote_dir.name}.tar.gz")
             sftp.put(tmp.name, remote_tar)
 
-            # Extract on remote side
-            _, stdout, stderr = self.run_login_cmd(
+            _, _, stderr = self.run_login_cmd(
                 f"cd {remote_dir.parent} && tar xzf {remote_dir.name}.tar.gz && rm {remote_dir.name}.tar.gz"
             )
 
-            # Check for errors
             err = stderr.read().decode().strip()
             if err:
                 logger.error("Error extracting directory on remote: %s", err)
                 raise RuntimeError(f"Failed to extract directory on remote: {err}")
+
+    def _get_dir(self, sftp, remote_dir: Path, local_dir: Path):
+        """Transfer directory via SFTP.
+
+        Args:
+            sftp: The SFTP client.
+            remote_dir: The remote directory to transfer.
+            local_dir: The local directory to transfer to.
+        """
+        remote_tar = str(remote_dir.parent / f"{remote_dir.name}.tar.gz")
+        _, _, stderr = self.run_login_cmd(
+            f"cd {remote_dir.parent} && tar czf {remote_dir.name}.tar.gz {remote_dir.name}"
+        )
+
+        err = stderr.read().decode().strip()
+        if err:
+            logger.error("Error creating tar archive on remote: %s", err)
+            raise RuntimeError(f"Failed to create tar archive on remote: {err}")
+
+        local_tar = str(local_dir.parent / f"{local_dir.name}.tar.gz")
+        sftp.get(remote_tar, local_tar)
+
+        with tarfile.open(local_tar, "r:gz") as tar:
+            tar.extractall(path=local_dir.parent)
+
+        os.remove(local_tar)
+        self.run_login(f"rm {remote_tar}")
 
     # def _decode_hosts(self, hosts: str) -> List[str]:
     #     """Decode the hosts string into a list of hostnames."""
