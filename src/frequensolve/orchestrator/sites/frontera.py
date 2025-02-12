@@ -421,7 +421,9 @@ class FronteraSite(BaseSite):
 
         # Run via interactive (stateful) shell to inherit SLURM environment
         interactive = self.login_client.invoke_shell()
-        interactive.send(f"ssh {self.compute_host} && cd {self.work_dir}\n")
+        interactive.send(f"ssh {self.compute_host}\n")
+        time.sleep(1)
+        interactive.send(f"cd {self.work_dir}\n")
         time.sleep(1)
 
         cmd = f"{remote_script} {remote_job} {ntasks_per_item}\n"
@@ -446,7 +448,7 @@ class FronteraSite(BaseSite):
                         while "\n" in output_buffer:
                             line, output_buffer = output_buffer.split("\n", 1)
                             line = line.strip()
-                            logger.info("Sweep output: %s", line)
+                            logger.debug("Sweep output: %s", line)
 
                             if "Sweep Complete" in line:
                                 future.set_result(job.records)
@@ -477,8 +479,9 @@ class FronteraSite(BaseSite):
                 future.set_exception(e)
                 interactive.close()
 
-        # Create and start the monitor task
-        create_task(monitor_output())
+        # Create and start the monitor task using the current event loop.
+        loop = asyncio.get_event_loop()
+        loop.create_task(monitor_output())
         return future
 
     def provision_dask(
@@ -532,9 +535,7 @@ class FronteraSite(BaseSite):
     def run_cmd(self, client, cmd: str):
         """Run a command using exec_command, passing the captured environment if available."""
         env = getattr(client, "environ", None)
-        logger.info(
-            "Executing command on %s: %s with environment %s", client.hostname, cmd, env
-        )
+        logger.info("Executing on %s: %s", client.hostname, cmd, env)
         return (
             client.client.exec_command(cmd, environment=env)
             if env
@@ -594,7 +595,7 @@ class FronteraSite(BaseSite):
             local_path: Local path to transfer from
             remote_path: Remote path to transfer to
         """
-        logger.info("Attempting to transfer from %s to %s", local_path, remote_path)
+        logger.debug("Attempting to transfer from %s to %s", local_path, remote_path)
 
         if not _wait_for_path(local_path):
             logger.error("Local path %s does not exist", local_path)
@@ -614,12 +615,12 @@ class FronteraSite(BaseSite):
                 sftp = self.login_client.open_sftp()
                 try:
                     if local_path.is_dir():
-                        logger.info(
+                        logger.debug(
                             "Transferring directory %s to %s", local_path, remote_path
                         )
                         self._put_dir(sftp, local_path, remote_path)
                     else:
-                        logger.info(
+                        logger.debug(
                             "Transferring file %s to %s", local_path, remote_path
                         )
                         sftp.put(str(local_path), str(remote_path))
@@ -633,12 +634,12 @@ class FronteraSite(BaseSite):
 
                 if local_path.is_dir():
                     local_str = f"{local_path}/"
-                    logger.info(
+                    logger.debug(
                         "Transferring directory %s to %s", local_path, remote_path
                     )
                 else:
                     local_str = str(local_path)
-                    logger.info("Transferring file %s to %s", local_path, remote_path)
+                    logger.debug("Transferring file %s to %s", local_path, remote_path)
 
                 result = subprocess.run(
                     [*rsync_cmd, local_str, remote_str], capture_output=True, text=True
@@ -681,10 +682,13 @@ class FronteraSite(BaseSite):
             # Download, extract, and cleanup
             self.get(remote_archive, local_archive)
             with tarfile.open(local_archive, "r:gz") as tar:
+                logger.debug("Extracting files from archive:")
+                for member in tar.getmembers():
+                    logger.info("  - %s", member.name)
                 tar.extractall()
+
             local_archive.unlink()
             self.run_login(f"rm {remote_archive}")
-
             return records
 
         except Exception as e:
@@ -704,11 +708,7 @@ class FronteraSite(BaseSite):
             local_path: Local path to transfer from
             overwrite: Overwrite existing files
         """
-        logger.info("Attempting to transfer from %s to %s", remote_path, local_path)
-
-        if not _wait_for_path(remote_path):
-            logger.error("Remote path %s does not exist", remote_path)
-            raise FileNotFoundError(f"Remote path {remote_path} does not exist")
+        logger.debug("Attempting to transfer from %s to %s", remote_path, local_path)
 
         local_path = Path(local_path)
         remote_path = Path(remote_path)
@@ -723,12 +723,12 @@ class FronteraSite(BaseSite):
                 sftp = self.login_client.open_sftp()
                 try:
                     if remote_path.is_dir():
-                        logger.info(
+                        logger.debug(
                             "Transferring directory %s to %s", remote_path, local_path
                         )
                         self._get_dir(sftp, remote_path, local_path)
                     else:
-                        logger.info(
+                        logger.debug(
                             "Transferring file %s to %s", remote_path, local_path
                         )
                         sftp.get(str(remote_path), str(local_path))
@@ -742,12 +742,12 @@ class FronteraSite(BaseSite):
 
                 if remote_path.is_dir():
                     remote_str = f"{remote_path}/"
-                    logger.info(
+                    logger.debug(
                         "Transferring directory %s to %s", remote_path, local_path
                     )
                 else:
                     local_str = str(local_path)
-                    logger.info("Transferring file %s to %s", remote_path, local_path)
+                    logger.debug("Transferring file %s to %s", remote_path, local_path)
 
                 result = subprocess.run(
                     [*rsync_cmd, remote_str, local_str], capture_output=True, text=True
@@ -1065,9 +1065,11 @@ class FronteraSite(BaseSite):
             local_dir: The local directory to transfer to.
         """
         remote_tar = str(remote_dir.parent / f"{remote_dir.name}.tar.gz")
+        time.sleep(1)
         _, _, stderr = self.run_login_cmd(
             f"cd {remote_dir.parent} && tar czf {remote_dir.name}.tar.gz {remote_dir.name}"
         )
+        time.sleep(1)
 
         err = stderr.read().decode().strip()
         if err:

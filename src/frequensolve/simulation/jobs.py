@@ -102,7 +102,7 @@ class SimulationJob(ABC):
         records = {
             "datasets": {},
             "frequencies": {},
-            "simulation": self.simulation.name,
+            "simulation": self.simulation._file,
         }
         for components in output["components"]:
             group, comp = components.split(":")

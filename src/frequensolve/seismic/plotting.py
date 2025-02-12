@@ -59,28 +59,29 @@ def plot_gather(shot: ShotRecord, **kwargs):
     A = kwargs.get("A", 1)
     units = kwargs.get("units", "km")
     cmap = kwargs.get("cmap", "grey")
-    figsize = kwargs.get("figsize", (8, 8))
+    figsize = kwargs.get("figsize", (4, 4))
     fontsize = kwargs.get("fontsize", 14)
 
     plt.rcParams.update({"font.size": fontsize})
 
     Tf = kwargs.get("Tf", None)
-    nTf, Tf = shot.samples.cutoff(Tf)
+    nTf, Tf = shot.sampling.cutoff(Tf)
 
-    source = shot.source
     group = shot.receiver_group
 
-    x0 = np.min(group.coords[:, 0])
-    x1 = np.max(group.coords[:, 0])
+    x_min, x_max = group.coordinates.bounds
+    x0 = x_min[0]
+    x1 = x_max[0]
     xlabel = f"X ({units})"
     if x0 == x1:
-        x0 = np.min(group.coords[:, 1])
-        x1 = np.max(group.coords[:, 1])
+        x0 = x_min[1]
+        x1 = x_max[1]
         xlabel = f"Depth ({units})"
 
     fig = plt.figure(1, figsize=figsize)
     plt.clf()
 
+    plt.title(f"Shot {shot.number}: {shot.field}")
     plt.xlabel(xlabel)
     plt.ylabel("Time (s)")
 
@@ -143,7 +144,7 @@ def animate_gather(shot: ShotRecord, **kwargs):
         )
 
     Tf = kwargs.get("Tf", None)
-    nTf, Tf = shot.samples.cutoff(Tf)
+    nTf, Tf = shot.sampling.cutoff(Tf)
 
     A = kwargs.get("A", 1)
     units = kwargs.get("units", "km")
@@ -475,9 +476,9 @@ def plot_xf(shot: ShotRecord, **kwargs):
 
     plt.rcParams.update({"font.size": fontsize})
 
-    f_min = shot.samples.f_min
-    f_max = shot.samples.f_max
-    nf = shot.samples.nfreq
+    f_min = shot.sampling.f_min
+    f_max = shot.sampling.f_max
+    nf = shot.sampling.nfreq
 
     source = shot.source
     group = shot.receiver_group
@@ -562,9 +563,9 @@ def plot_cf(shot: ShotRecord, **kwargs):
         n1 = group.size
         xl = group.coords[:, 0] - source.coords[0]
 
-    f_min = shot.samples.f_min
-    f_max = shot.samples.f_max
-    nf = shot.samples.nfreq
+    f_min = shot.sampling.f_min
+    f_max = shot.sampling.f_max
+    nf = shot.sampling.nfreq
 
     fl = np.linspace(0, f_max, nf)
     cl = np.linspace(c_min, c_max, n_c)

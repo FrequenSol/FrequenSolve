@@ -6,79 +6,59 @@ Right now this is just a hodge-podge of code that was displaced in
 the refactoring process.
 """
 
-import os
-import re
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Set, Union
 
 import h5py
 import numpy as np
-import segyio
 
-from frequensolve.seismic.shot_record import ShotRecord
-from frequensolve.simulation.sampling import UniformSweepSampling
-from frequensolve.simulation.simulation import SeismicSimulation
-
-
-@dataclass
-class Record:
-    file: str
-    simulation: str
-    df: float
-    f_max: float
-    f_map: Dict[str, float]
-
-    def __init__(self, record: str, meta: Dict[str, Any]):
-        self.file = record
-        self.simulation = meta["simulation"]
-        self.df = meta["df"]
-        self.f_max = meta["f_max"]
-        self.f_map = meta["f_map"]
+from .shot_record import Record
 
 
 @dataclass
 class RecordDatabase:
     metadata: Dict[str, Any]
-    records: List[str]
+    records: Set[str]
 
     def __init__(self, metadata: Dict[str, Any], records: List[str]):
         self.metadata = metadata
         self.records = records
 
     @classmethod
-    def from_results(cls, results: dict):
+    def from_results(cls, results: dict, proj_path: Union[str, Path]):
         """Create a RecordDatabase from a dictionary of results.
 
         Args:
             results: A dictionary of results from a Frontera job.
+            proj_path: The path to the project directory.
 
         Returns:
             A RecordDatabase object.
         """
+        proj_path = Path(proj_path).resolve()
 
         f_map = results["frequencies"]
         for key, value in f_map.items():
             f_map[key] = float(value)
         meta = {
-            "simulation": results["simulation"],
+            "project": proj_path,
+            "simulation": proj_path / results["simulation"],
             "df": float(f_map[2] - f_map[1]),
             "f_max": float(np.max(list(f_map.values()))),
             "f_map": f_map,
         }
 
-        records = []
+        records = set()
         for file, comps in results["datasets"].items():
             file = Path(file)
             parts = file.name.split("_")
 
-            fbase = file.parent / "_".join(parts[:-1]) / "_[ifreq]"
-            fbase = str(fbase.with_suffix(".h5"))
+            fbase = str(proj_path / file.parent / "_".join(parts[:-1])) + "_[ifreq].h5"
 
             for comp in comps:
                 record = fbase + f":{comp}"
-                records.append(record)
+                records.add(record)
 
         return cls(metadata=meta, records=records)
 
@@ -104,105 +84,6 @@ class RecordDatabase:
             records_str += f"  {i}: {record}\n"
 
         return meta_str + records_str
-
-    def read_shot_TD(self, receiver_group: str, shot_number: int) -> ShotRecord:
-        """Read a time-domain shot record.
-
-        Args:
-           receiver_group (str): Name of the receiver group.
-           shot_number (int): Shot number.
-
-        Returns:
-           ShotRecord: The time-domain shot record.
-        """
-        if not isinstance(self.sampling, UniformSweepSampling):
-            raise ValueError("Time-domain data requires UniformSweepSampling")
-
-        group = self.acquisition.receiver_group(receiver_group)
-        source = self.acquisition.source(shot_number)
-
-        # Try to read frequency domain data first
-        try:
-            fd_record = self.read_shot_FD(receiver_group, shot_number)
-        except:
-            raise ValueError(
-                f"Could not read FD data for receiver group '{receiver_group}' and shot {shot_number}"
-            )
-
-        # Convert to time domain using FFT
-        try:
-            import pyfftw.interfaces.numpy_fft as fft
-        except:
-            warnings.warn("pyfftw not found, using numpy for FFT (slow)")
-            import numpy.fft as fft
-
-        nf = self.sampling.nfreq
-        nF = self.sampling.nFreq
-
-        # If upscaled, create a bigger array for inverse transform
-        if nF > nf:
-            FD = np.zeros((nF, group.size), dtype=np.csingle)
-            FD[:nf, :] = fd_record.data[:nf, :]
-            td = fft.irfft(FD, axis=0)
-        else:
-            td = fft.irfft(fd_record.data, axis=0)
-
-        return ShotRecord(
-            type="TD",
-            number=shot_number,
-            sampling=self.sampling,
-            source=source,
-            receiver_group=group,
-            field=fd_record.field,
-            data=td,
-        )
-
-    def read_shot_FD(self, receiver_group: str, shot_number: int) -> ShotRecord:
-        """Read a frequency-domain shot record.
-
-        Args:
-           receiver_group (str): Name of the receiver group.
-           shot_number (int): Shot number.
-
-        Returns:
-           ShotRecord: The frequency-domain shot record.
-        """
-        group = self.acquisition.receiver_group(receiver_group)
-        source = self.acquisition.source(shot_number)
-        nrecv = group.size
-        nf = self.sampling.nfreq
-
-        # Initialize complex data array
-        u = np.zeros((nf, nrecv), dtype=np.csingle)
-
-        # Loop over frequencies and load data
-        for ifreq, freq in enumerate(self.sampling.freqs):
-            file = Path(self.directory) / group.name / f"{group.name}_{ifreq}.h5"
-
-            if not os.path.exists(file):
-                warnings.warn(f"File {file} does not exist.", UserWarning)
-                continue
-
-            with h5py.File(file, "r") as f:
-                # Real + imaginary parts
-                field = group.field  # Assuming field is stored in receiver group
-                u[ifreq, :] += np.csingle(1j) * f[f"{field}_{shot_number}_im"][()]
-                u[ifreq, :] += f[f"{field}_{shot_number}_re"][()]
-
-                # For fiber-type receivers, multiply by iω for strain *rate*
-                if group.device._type == "ReceiverFiber":
-                    i_omega = np.csingle(1j * 2 * np.pi * freq)
-                    u[ifreq, :] *= i_omega
-
-        return ShotRecord(
-            type="FD",
-            number=shot_number,
-            sampling=self.sampling,
-            source=source,
-            receiver_group=group,
-            field=group.field,
-            data=u,
-        )
 
     # def write_hdf5(self, filename: str, **kwargs):
     #    """Write shot records to an HDF5 file.

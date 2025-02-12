@@ -303,6 +303,7 @@ class CoordsFromFile(ReceiverCoords):
                 dset = "coords"
         return cls(path=Path(path), format=format, dset=dset)
 
+    @property
     def size(self) -> int:
         """Get the total number of receivers.
 
@@ -315,6 +316,7 @@ class CoordsFromFile(ReceiverCoords):
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
+    @property
     def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
         """Get coordinate bounds without loading full dataset.
 
@@ -368,14 +370,13 @@ class CoordsGrid(ReceiverCoords):
 
     grid: CartesianGrid
 
+    @property
     def size(self) -> int:
         return self.grid.nx * self.grid.ny * self.grid.nz
 
+    @property
     def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
-        return (
-            np.array([self.grid.x0, self.grid.y0, self.grid.z0]),
-            np.array([self.grid.x1, self.grid.y1, self.grid.z1]),
-        )
+        return self.grid.x0, self.grid.x1
 
     def get(
         self, indices: Optional[Union[int, slice, List[int], List[slice]]] = None
@@ -474,9 +475,11 @@ class CoordsArray(ReceiverCoords):
             else:
                 raise ValueError("Coordinates array must have 2 or 3 columns")
 
+    @property
     def size(self) -> int:
         return len(self.coordinates)
 
+    @property
     def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
         return (
             self.coordinates.min(dim="receiver").values,
@@ -558,7 +561,7 @@ class ReceiverGroup:
 
     @property
     def size(self):
-        return self.coordinates.size()
+        return self.coordinates.size
 
     # TODO: option to correct signature for device response
     # TODO: method to define receviers
@@ -601,7 +604,7 @@ class ReceiverGroup:
     def __dict__(self) -> Dict:
         coords = self.coordinates
         if isinstance(coords, CoordsArray):
-            if coords.size() > 10:
+            if coords.size > 10:
                 dump = coords.to_file(file_name="coords.h5", format="HDF5")
                 dump._set_path(
                     proj_path=self._proj_path, rel_path=self._rel_path / self.name

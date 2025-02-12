@@ -1,12 +1,19 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from functools import cached_property
+from typing import List, Literal, Optional
 
 import numpy as np
 from pylops.utils.wavelets import klauder, ormsby, ricker
 from scipy.signal import hilbert
 from scipy.stats import norm
 
-__all__ = ["TaperFunction", "Wavelet"]
+__all__ = [
+    "TaperFunction",
+    "Wavelet",
+    "RickerWavelet",
+    "OrmsbyWavelet",
+    "KlauderWavelet",
+]
 
 
 # ----------------------------------------------------------------------
@@ -37,9 +44,6 @@ class TaperFunction:
         return vals
 
 
-# TODO: Cleanup causal wavelet
-# TODO: Add option for zero-phase wavelet
-#
 # ----------------------------------------------------------------------
 # Wavelet
 # ----------------------------------------------------------------------
@@ -51,6 +55,9 @@ class Wavelet:
        times (np.ndarray): The time samples.
        signal (np.ndarray): The wavelet signal.
     """
+
+    times: np.ndarray
+    signal: np.ndarray
 
     @classmethod
     def generate(
@@ -120,7 +127,7 @@ class Wavelet:
         # Build the wavelet object
         return cls(times=times, signal=signal)
 
-    @property
+    @cached_property
     def spectrum(self):
         """Compute the frequency-domain representation of the wavelet.
 
@@ -130,7 +137,7 @@ class Wavelet:
         spec = np.fft.rfft(self.signal)
         return spec.astype(np.complex64)
 
-    @property
+    @cached_property
     def frequencies(self):
         """Compute the frequencies for the wavelet.
 
@@ -140,6 +147,17 @@ class Wavelet:
         n = len(self.signal)
         dt = self.times[1] - self.times[0]
         return np.fft.rfftfreq(n, d=dt).astype(np.float32)
+
+    @staticmethod
+    def make_causal(signal: np.ndarray, times: np.ndarray) -> np.ndarray:
+        n = len(signal)
+        A = np.abs(np.fft.rfft(signal))
+        lnA = np.log(A)
+        phi = np.imag(hilbert(lnA))
+        spectrum = A * np.exp(-1j * phi)
+        signal = np.fft.irfft(spectrum, n=n)
+
+        return signal
 
     def plot(self) -> None:
         """Plot the time-domain and spectrum of the wavelet."""
@@ -158,3 +176,90 @@ class Wavelet:
         plt.plot(self.frequencies, np.abs(self.spectrum))
         plt.xlabel("Frequency (Hz)")
         plt.show()
+
+
+@dataclass
+class RickerWavelet(Wavelet):
+    """Ricker wavelet"""
+
+    def __init__(
+        self,
+        f0: float,
+        times: np.ndarray,
+        offset: int = 0,
+        sigma: Optional[float] = None,
+        causal: bool = True,
+    ):
+        taper = None
+        if sigma is not None:
+            taper_func = TaperFunction(sigma=sigma / times[-1])
+            taper = lambda n: taper_func.get(n)
+
+        signal, _, center = ricker(times / 2.0, f0=f0, taper=taper)
+        signal = np.roll(signal[::2], shift=(-center // 2 + offset))
+        if causal:
+            signal = Wavelet.make_causal(signal, times)
+        signal = signal.astype(np.float32)
+
+        super().__init__(times=times, signal=signal)
+
+
+@dataclass
+class OrmsbyWavelet(Wavelet):
+    """Ormsby wavelet"""
+
+    def __init__(
+        self,
+        f: List[float],
+        times: np.ndarray,
+        offset: int = 0,
+        sigma: Optional[float] = None,
+        causal: bool = True,
+    ):
+        if len(f) < 4:
+            raise ValueError(
+                "Ormsby wavelet requires four frequencies [f0, f1, f2, f3]."
+            )
+
+        taper = None
+        if sigma is not None:
+            taper_func = TaperFunction(sigma=sigma / times[-1])
+            taper = lambda n: taper_func.get(n)
+
+        signal, _, center = ormsby(times / 2.0, f=f, taper=taper)
+        signal = np.roll(signal[::2], shift=(-center // 2 + offset))
+        if causal:
+            signal = Wavelet.make_causal(signal, times)
+        signal = signal.astype(np.float32)
+
+        super().__init__(times=times, signal=signal)
+
+
+@dataclass
+class KlauderWavelet(Wavelet):
+    """Klauder wavelet"""
+
+    def __init__(
+        self,
+        f: List[float],
+        times: np.ndarray,
+        offset: int = 0,
+        sigma: Optional[float] = None,
+        causal: bool = True,
+    ):
+        if len(f) != 2:
+            raise ValueError("Klauder wavelet requires two frequencies [f0, f1].")
+
+        taper = None
+        if sigma is not None:
+            taper_func = TaperFunction(sigma=sigma / times[-1])
+            taper = lambda n: taper_func.get(n)
+
+        signal, _, center = klauder(times / 2.0, f=f, taper=taper)
+        signal = np.roll(signal[::2], shift=(-center // 2 + offset))
+
+        if causal:
+            signal = Wavelet.make_causal(signal, times)
+        signal = signal.astype(np.float32)
+
+        super().__init__(times=times, signal=signal)

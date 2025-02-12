@@ -15,12 +15,9 @@ from frequensolve.orchestrator.sites.frontera import FronteraSite
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project.migrate_version import Version
 from frequensolve.project.workflows import BaseWorkflow
-from frequensolve.simulation.simulation import (
-    BaseSimulation,
-    CustomJSONEncoder,
-    CustomTOMLEncoder,
-    SeismicSimulation,
-)
+from frequensolve.seismic.record_database import RecordDatabase
+from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
+from frequensolve.util.encoders import CustomJSONEncoder, CustomTOMLEncoder
 from frequensolve.util.named_list import NamedList
 from frequensolve.util.setup_logger import disable_jupyter_logging, set_log_level
 
@@ -200,8 +197,7 @@ class Project:
             raise NotImplementedError(
                 f"Site type {type(self.site)} not supported (yet)"
             )
-
-        return recs
+        return RecordDatabase.from_results(results, self.path.resolve())
 
     @classmethod
     def load(cls, file: Union[str, Path], auto_migrate: bool = False) -> "Project":
