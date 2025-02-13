@@ -59,74 +59,6 @@ class Wavelet:
     times: np.ndarray
     signal: np.ndarray
 
-    @classmethod
-    def generate(
-        cls,
-        kind: str,
-        f_pts: List[float],
-        times: np.ndarray,
-        offset: int = 0,
-        sigma: Optional[float] = None,
-        causal: bool = True,
-    ) -> "Wavelet":
-        """Generate a wavelet using built-in wavelet functions (Ricker, Ormsby, Klauder).
-
-        Args:
-           kind (str): Wavelet type ('Ricker', 'Ormsby', 'Klauder').
-           f_pts (List[float]): Frequencies for the wavelet (depends on the wavelet kind).
-           times (np.ndarray): Time array for final wavelet.
-           offset (int): Sample shift (in index units) to apply after generation.
-           sigma (Optional[float]): Gaussian taper parameter (optional).
-
-        Returns:
-           Wavelet: The created Wavelet object.
-        """
-
-        # Create a taper function if requested
-        taper = None
-        if sigma is not None:
-            taper_func = TaperFunction(sigma=sigma / times[-1])
-            taper = lambda n: taper_func.get(n)
-
-        # Generate the wavelet via pylops functions
-        if kind == "Ricker":
-            if len(f_pts) < 1:
-                raise ValueError(
-                    "Ricker wavelet requires at least one frequency (f_central)."
-                )
-            signal, tvals, center = ricker(times / 2.0, f0=f_pts[0], taper=taper)
-
-        elif kind == "Ormsby":
-            if len(f_pts) < 4:
-                raise ValueError(
-                    "Ormsby wavelet requires four frequencies [f1, f2, f3, f4]."
-                )
-            signal, tvals, center = ormsby(times / 2.0, f=f_pts, taper=taper)
-
-        elif kind == "Klauder":
-            if len(f_pts) < 2:
-                raise ValueError("Klauder wavelet requires two frequencies [f1, f2].")
-            signal, tvals, center = klauder(times / 2.0, f=f_pts, taper=taper)
-
-        else:
-            raise ValueError(
-                f"Unknown wavelet kind: '{kind}'. "
-                "Expected one of 'Ricker', 'Ormsby', or 'Klauder'."
-            )
-
-        signal = np.roll(signal[::2], shift=(-center // 2 + offset))
-        signal = signal.astype(np.float32)
-        if causal:
-            n = len(signal)
-            A = np.abs(np.fft.rfft(signal))
-            lnA = np.log(A)
-            phi = np.imag(hilbert(lnA))
-            spectrum = A * np.exp(-1j * phi)
-            signal = np.fft.irfft(spectrum, n=n)
-
-        # Build the wavelet object
-        return cls(times=times, signal=signal)
-
     @cached_property
     def spectrum(self):
         """Compute the frequency-domain representation of the wavelet.
@@ -150,6 +82,7 @@ class Wavelet:
 
     @staticmethod
     def make_causal(signal: np.ndarray, times: np.ndarray) -> np.ndarray:
+        return signal
         n = len(signal)
         A = np.abs(np.fft.rfft(signal))
         lnA = np.log(A)
@@ -188,7 +121,7 @@ class RickerWavelet(Wavelet):
         times: np.ndarray,
         offset: int = 0,
         sigma: Optional[float] = None,
-        causal: bool = True,
+        causal: bool = False,
     ):
         taper = None
         if sigma is not None:
@@ -214,7 +147,7 @@ class OrmsbyWavelet(Wavelet):
         times: np.ndarray,
         offset: int = 0,
         sigma: Optional[float] = None,
-        causal: bool = True,
+        causal: bool = False,
     ):
         if len(f) < 4:
             raise ValueError(
@@ -245,7 +178,7 @@ class KlauderWavelet(Wavelet):
         times: np.ndarray,
         offset: int = 0,
         sigma: Optional[float] = None,
-        causal: bool = True,
+        causal: bool = False,
     ):
         if len(f) != 2:
             raise ValueError("Klauder wavelet requires two frequencies [f0, f1].")
