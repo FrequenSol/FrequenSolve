@@ -535,7 +535,7 @@ class FronteraSite(BaseSite):
     def run_cmd(self, client, cmd: str):
         """Run a command using exec_command, passing the captured environment if available."""
         env = getattr(client, "environ", None)
-        logger.info("Executing on %s: %s", client.hostname, cmd, env)
+        logger.info("Executing on %s: %s", client.hostname, cmd)
         return (
             client.client.exec_command(cmd, environment=env)
             if env
@@ -992,7 +992,11 @@ class FronteraSite(BaseSite):
         job_client.set_missing_host_key_policy(AutoAddPolicy())
         try:
             job_client.connect(
-                job_host, username=self.credentials.username, sock=channel
+                job_host,
+                username=self.credentials.username,
+                sock=channel,
+                allow_agent=True,
+                look_for_keys=True,
             )
             logger.info("Connected to job host: %s", job_host)
             return job_client
