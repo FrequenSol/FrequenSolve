@@ -681,11 +681,15 @@ class FronteraSite(BaseSite):
 
             # Download, extract, and cleanup
             self.get(remote_archive, local_archive)
+
+            cwd = os.getcwd()
+            os.chdir(local_archive.parent)
             with tarfile.open(local_archive, "r:gz") as tar:
                 logger.debug("Extracting files from archive:")
                 for member in tar.getmembers():
                     logger.info("  - %s", member.name)
                 tar.extractall()
+            os.chdir(cwd)
 
             local_archive.unlink()
             self.run_login(f"rm {remote_archive}")
@@ -738,16 +742,10 @@ class FronteraSite(BaseSite):
                 # Use rsync
                 logger.debug("Using rsync for file transfer")
                 remote_str = f"{self.credentials.username}@frontera.tacc.utexas.edu:{remote_path}"
+                local_str = f"{local_path}/" if local_path.is_dir() else str(local_path)
                 rsync_cmd = ["rsync", "-azP"]
 
-                if remote_path.is_dir():
-                    remote_str = f"{remote_path}/"
-                    logger.debug(
-                        "Transferring directory %s to %s", remote_path, local_path
-                    )
-                else:
-                    local_str = str(local_path)
-                    logger.debug("Transferring file %s to %s", remote_path, local_path)
+                logger.debug("rsync command: %s", [*rsync_cmd, remote_str, local_str])
 
                 result = subprocess.run(
                     [*rsync_cmd, remote_str, local_str], capture_output=True, text=True
