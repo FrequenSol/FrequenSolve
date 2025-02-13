@@ -18,7 +18,9 @@
 input_file=$1
 ranks_per_job=$2
 
+{% if njob > 1 %}
 export FREQUENSOL_SWEEP=1
+{% endif %}
 export FREQUENSOLVE_DIR={{fs_dir}}
 export FS_PROJECT_DIR={{project_dir}}
 
