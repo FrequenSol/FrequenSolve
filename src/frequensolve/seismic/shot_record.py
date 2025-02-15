@@ -214,7 +214,7 @@ def read_shot_TD(record: Record, wavelet: Wavelet, upscale: int = 1) -> ShotReco
 
     # Try to read frequency domain data first
     try:
-        fd_record = read_shot_FD(record, wavelet, sampling)
+        fd_record = read_shot_FD(record, wavelet)
     except Exception as e:
         raise ValueError(f"failed reading record: {e}")
 
@@ -250,7 +250,7 @@ def read_shot_TD(record: Record, wavelet: Wavelet, upscale: int = 1) -> ShotReco
     )
 
 
-def read_shot_FD(record: Record, wavelet: Wavelet, sampling: Sampling) -> ShotRecord:
+def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
     """Read a frequency-domain shot record.
 
     Args:
@@ -261,6 +261,10 @@ def read_shot_FD(record: Record, wavelet: Wavelet, sampling: Sampling) -> ShotRe
     Returns:
         ShotRecord: The frequency-domain shot record.
     """
+    # TODO: This is a hack, fix it.
+    cwd = os.getcwd()
+    os.chdir(record.project_path)
+
     with open(record.simulation, "r") as f:
         sim = json.load(f)
 
@@ -279,6 +283,8 @@ def read_shot_FD(record: Record, wavelet: Wavelet, sampling: Sampling) -> ShotRe
 
     group = ReceiverGroup.from_dict(rgroup)
     source = Source.from_dict(source)
+
+    sampling = record.sampling(upscale=1)
 
     nrecv = group.size
     nf = sampling.nfreq
@@ -299,10 +305,15 @@ def read_shot_FD(record: Record, wavelet: Wavelet, sampling: Sampling) -> ShotRe
             u[ifreq, :] += np.csingle(1j) * f[f"{field}_{isrc}_im"][()]
             u[ifreq, :] += f[f"{field}_{isrc}_re"][()]
 
+            u[ifreq, :] *= wavelet.spectrum[ifreq]
+
             # For fiber-type receivers, multiply by iω for strain *rate*
             if isinstance(group.device, ReceiverFiber):
                 i_omega = np.csingle(1j * 2 * np.pi * freq)
                 u[ifreq, :] *= i_omega
+
+    # TODO: This is a hack.
+    os.chdir(cwd)
 
     return ShotRecord(
         type="FD",

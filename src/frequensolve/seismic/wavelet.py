@@ -59,7 +59,7 @@ class Wavelet:
     times: np.ndarray
     signal: np.ndarray
 
-    @cached_property
+    @property
     def spectrum(self):
         """Compute the frequency-domain representation of the wavelet.
 
@@ -69,7 +69,7 @@ class Wavelet:
         spec = np.fft.rfft(self.signal)
         return spec.astype(np.complex64)
 
-    @cached_property
+    @property
     def frequencies(self):
         """Compute the frequencies for the wavelet.
 
@@ -81,16 +81,33 @@ class Wavelet:
         return np.fft.rfftfreq(n, d=dt).astype(np.float32)
 
     @staticmethod
-    def make_causal(signal: np.ndarray, times: np.ndarray) -> np.ndarray:
-        return signal
-        n = len(signal)
-        A = np.abs(np.fft.rfft(signal))
-        lnA = np.log(A)
-        phi = np.imag(hilbert(lnA))
-        spectrum = A * np.exp(-1j * phi)
-        signal = np.fft.irfft(spectrum, n=n)
+    def make_causal(signal: np.ndarray) -> np.ndarray:
+        """Convert a wavelet to minimum phase (causal) form using Kolmogorov factorization.
 
-        return signal
+        Args:
+            signal: Input time-domain signal to make causal
+            times: Time samples corresponding to signal
+
+        Returns:
+            Causal (minimum phase) version of input signal
+        """
+        n = len(signal)
+
+        # Get spectrum and add small constant for stability
+        spectrum = np.fft.rfft(signal)
+        A = np.abs(spectrum)
+        eps = np.max(A) * 1e-2
+        Atmp = np.clip(A, eps, np.inf)
+
+        # Compute minimum phase using Kolmogorov method
+        lnA = np.log(Atmp)
+        phi = np.imag(hilbert(lnA))
+        phase_min = np.exp(-1j * phi)
+
+        # Transform back to time domain
+        signal_min = np.fft.irfft(phase_min * A, n=n)
+
+        return signal_min
 
     def plot(self) -> None:
         """Plot the time-domain and spectrum of the wavelet."""
@@ -129,10 +146,11 @@ class RickerWavelet(Wavelet):
             taper = lambda n: taper_func.get(n)
 
         signal, _, center = ricker(times / 2.0, f0=f0, taper=taper)
-        signal = np.roll(signal[::2], shift=(-center // 2 + offset))
         if causal:
-            signal = Wavelet.make_causal(signal, times)
-        signal = signal.astype(np.float32)
+            signal = Wavelet.make_causal(signal[::2])
+            signal = np.roll(signal, shift=offset)
+        else:
+            signal = np.roll(signal[::2], shift=(-center // 2 + offset))
 
         super().__init__(times=times, signal=signal)
 
@@ -160,10 +178,11 @@ class OrmsbyWavelet(Wavelet):
             taper = lambda n: taper_func.get(n)
 
         signal, _, center = ormsby(times / 2.0, f=f, taper=taper)
-        signal = np.roll(signal[::2], shift=(-center // 2 + offset))
         if causal:
-            signal = Wavelet.make_causal(signal, times)
-        signal = signal.astype(np.float32)
+            signal = Wavelet.make_causal(signal[::2])
+            signal = np.roll(signal, shift=offset)
+        else:
+            signal = np.roll(signal[::2], shift=(-center // 2 + offset))
 
         super().__init__(times=times, signal=signal)
 
@@ -189,10 +208,10 @@ class KlauderWavelet(Wavelet):
             taper = lambda n: taper_func.get(n)
 
         signal, _, center = klauder(times / 2.0, f=f, taper=taper)
-        signal = np.roll(signal[::2], shift=(-center // 2 + offset))
-
         if causal:
-            signal = Wavelet.make_causal(signal, times)
-        signal = signal.astype(np.float32)
+            signal = Wavelet.make_causal(signal[::2])
+            signal = np.roll(signal, shift=offset)
+        else:
+            signal = np.roll(signal[::2], shift=(-center // 2 + offset))
 
         super().__init__(times=times, signal=signal)

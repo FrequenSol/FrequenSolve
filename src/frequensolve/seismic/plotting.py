@@ -483,12 +483,13 @@ def plot_xf(shot: ShotRecord, **kwargs):
     source = shot.source
     group = shot.receiver_group
 
-    x0 = np.min(group.coords[:, 0])
-    x1 = np.max(group.coords[:, 0])
+    x_min, x_max = group.coordinates.bounds
+    x0 = x_min[0]
+    x1 = x_max[0]
     xlabel = f"X ({units})"
     if x0 == x1:
-        x0 = np.min(group.coords[:, 1])
-        x1 = np.max(group.coords[:, 1])
+        x0 = x_min[1]
+        x1 = x_max[1]
         xlabel = f"Depth ({units})"
 
     # Plot
