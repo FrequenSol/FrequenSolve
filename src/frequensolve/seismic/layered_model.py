@@ -130,7 +130,7 @@ class SimpleSurface:
         self,
         std: float,
         xarr: Optional[xr.DataArray] = None,
-        L0: float = 1.0,
+        L0: Union[float, List[float]] = 1.0,
         nu: float = 1.0,
         seed: Optional[int] = None,
     ) -> None:
@@ -148,8 +148,13 @@ class SimpleSurface:
         seed (int):
            Random seed (for reproducibility)
         """
+        if isinstance(L0, float):
+            L0 = [L0]
+        k0 = []
+        for l0 in L0:
+            k0.append(1 / l0)
         self.z_phys.stochastic_perturbation(
-            std=std, method="von_karman", xarr=xarr, k0=1 / L0, nu=nu, seed=seed
+            std=std, method="von_karman", xarr=xarr, k0=k0, nu=nu, seed=seed
         )
 
     def plot(self, limits: Dict[str, ArrayLike], **kwargs):
@@ -203,7 +208,7 @@ class Layer(ModelSubdomain):
         property: Union[str, List[str]],
         std: float,
         xarr: Optional[xr.DataArray] = None,
-        L0: float = 1.0,
+        L0: Union[float, List[float]] = 1.0,
         nu: float = 0.5,
         anisotropy: Optional[List[float]] = None,
         seed: Optional[int] = None,
@@ -235,6 +240,12 @@ class Layer(ModelSubdomain):
         else:
             properties = property
 
+        if isinstance(L0, float):
+            L0 = [L0]
+        k0 = []
+        for l0 in L0:
+            k0.append(1 / l0)
+
         for property in properties:
             if property not in self.properties:
                 raise ValueError(f"Property '{property}' not found in layer")
@@ -245,7 +256,7 @@ class Layer(ModelSubdomain):
                 std=std,
                 method="von_karman",
                 xarr=xarr,
-                k0=1 / L0,
+                k0=k0,
                 nu=nu,
                 anisotropy=anisotropy,
                 seed=seed,
@@ -637,6 +648,8 @@ class LayeredModel(ModelBase):
         else:
             self._layer_to_surfs[-1].upper = self.upper_surface()
 
+        save = kwargs.pop("save", None)
+        show_surfs = kwargs.pop("surfaces", True)
         figsize = kwargs.pop("figsize", None)
         fontsize = kwargs.pop("fontsize", 12)
         units = kwargs.pop("units", "km/s")
@@ -688,10 +701,6 @@ class LayeredModel(ModelBase):
             prop = layer.properties[property]
 
             if layer.frame == "reference":
-                data = prop.get().transpose()
-                dims = sorted(data.dims)
-                data = data.transpose(*dims)
-
                 limits = {}
                 if self.ordering == "top_down":
                     limits["z_min"] = upper.z_ref
@@ -703,7 +712,7 @@ class LayeredModel(ModelBase):
                 if prop.is_constant:
                     xgrid = samples.coords["x"]
                 else:
-                    xgrid = data.coords["x"]
+                    xgrid = prop.get().coords["x"]
 
                 mask = (samples.coords["z"].values > limits["z_min"]) & (
                     samples.coords["z"].values < limits["z_max"]
@@ -722,7 +731,9 @@ class LayeredModel(ModelBase):
                 z1p = limits["z_max"]
 
                 tmp = xr.DataArray(
-                    dims=["z", "x"], coords={"x": xgrid, "z": [z0p, z1p]}, data=[z0, z1]
+                    dims=["z", "x"],
+                    coords={"x": xgrid, "z": [z0p, z1p]},
+                    data=[z0, z1],
                 )
                 zvals = tmp.interp(coords={"x": xgrid, "z": zgrid})
 
@@ -737,34 +748,15 @@ class LayeredModel(ModelBase):
                 plt.pcolormesh(
                     samp.coords["Xcoord"].values,
                     samp.coords["Zcoord"].values,
-                    samp[property].values,
+                    samp[property].values.T,
                     shading="gouraud",
                     vmin=vmin,
                     vmax=vmax,
                     **kwargs,
                 )
-
-                # from scipy.interpolate import griddata
-
-                # # Interpolate the curvilinear grid to a uniform grid defined by 'samples'
-                # Xcurv = samp.coords["Xcoord"].values.ravel()
-                # Zcurv = samp.coords["Zcoord"].values.ravel()
-                # data_curv = samp[property].values.ravel()
-
-                # # Create a uniform grid using the 'samples' DataArray coordinates
-                # x_uniform = samples.coords["x"].values
-                # z_uniform = samples.coords["z"].values
-                # Xuniform, Zuniform = np.meshgrid(x_uniform, z_uniform, indexing="ij")
-
-                # interp_data = griddata((Xcurv, Zcurv), data_curv, (Xuniform, Zuniform), method='linear')
-
-                # # Plot the interpolated data on a uniform grid
-                # plt.pcolormesh(Xuniform, Zuniform, interp_data, shading='gouraud', **kwargs)
-
             else:
-                data = prop.get()
-                if prop.is_constant:
-                    data = xr.full_like(samples, data)
+                data = prop.get(samples)
+                xgrid = samples.coords["x"]
 
                 limits = {}
                 limits["x_min"] = self.x_limits[0]
@@ -772,12 +764,6 @@ class LayeredModel(ModelBase):
                 if self.y_limits is not None:
                     limits["y_min"] = self.y_limits[0]
                     limits["y_max"] = self.y_limits[1]
-
-                if prop.is_constant:
-                    xgrid = samples.coords["x"]
-                else:
-                    xgrid = data.coords["x"]
-
                 if self.ordering == "top_down":
                     limits["z_min"] = upper.z_phys.get(xgrid)
                     limits["z_max"] = lower.z_phys.get(xgrid)
@@ -785,30 +771,14 @@ class LayeredModel(ModelBase):
                     limits["z_max"] = upper.z_phys.get(xgrid)
                     limits["z_min"] = lower.z_phys.get(xgrid)
 
-                if prop.is_constant:
-                    mask = (
-                        (data.z < limits["z_max"])
-                        & (data.z > limits["z_min"])
-                        & (data.x < limits["x_max"])
-                        & (data.x > limits["x_min"])
-                    )
-
-                    da = data.where(mask)
-                    samples.data = np.where(~np.isnan(da), da, samples.data)
-                else:
-                    # Create mask for the samples grid
-                    mask = (
-                        (data.z < limits["z_max"])
-                        & (data.z > limits["z_min"])
-                        & (data.x < limits["x_max"])
-                        & (data.x > limits["x_min"])
-                    )
-
-                    da = data.where(mask)
-                    ds = da.interp(coords=samples.coords)
-                    samples.data = np.where(~np.isnan(ds), ds, samples.data)
-        # except Exception as e:
-        #    print(f"Error plotting {property} for layer {layer.name}: {e}")
+                mask = (
+                    (data.z < limits["z_max"])
+                    & (data.z > limits["z_min"])
+                    & (data.x < limits["x_max"])
+                    & (data.x > limits["x_min"])
+                )
+                da = data.where(mask)
+                samples.data = np.where(~np.isnan(da), da, samples.data)
 
         samples.plot.imshow(ax=ax, x="x", vmin=vmin, vmax=vmax, **kwargs)
 
@@ -817,20 +787,21 @@ class LayeredModel(ModelBase):
         line_style = kwargs.pop("line_style", "-")
         line_width = kwargs.pop("line_width", 1.5)
 
-        for surf in self.surfaces:
-            limits = {}
-            limits["x"] = self.x_limits
-            if self.y_limits is not None:
-                limits["y"] = self.y_limits
+        if show_surfs:
+            for surf in self.surfaces:
+                limits = {}
+                limits["x"] = self.x_limits
+                if self.y_limits is not None:
+                    limits["y"] = self.y_limits
 
-            surf.plot(
-                limits=limits,
-                ax=ax,
-                color=line_color,
-                linestyle=line_style,
-                linewidth=line_width,
-                **kwargs,
-            )
+                surf.plot(
+                    limits=limits,
+                    ax=ax,
+                    color=line_color,
+                    linestyle=line_style,
+                    linewidth=line_width,
+                    **kwargs,
+                )
 
             # Set limits
         ax.set_xlim(self.x_limits)
@@ -849,7 +820,11 @@ class LayeredModel(ModelBase):
         if aspect == "equal":
             ax.set_aspect("equal")
 
-        plt.show()
+        if save is not None:
+            plt.savefig(save, bbox_inches="tight")
+            plt.close()
+        else:
+            plt.show()
 
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path

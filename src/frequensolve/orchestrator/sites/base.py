@@ -1,8 +1,22 @@
+import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, Union
 
-__all__ = ["BaseSiteConfig", "BaseSite", "SiteStatus"]
+__all__ = ["BaseSite", "SiteStatus"]
+
+
+def _wait_for_path(
+    path: Union[str, Path], timeout: float = 5.0, poll_interval: float = 0.2
+) -> bool:
+    """Wait for the given path to exist."""
+    waited = 0.0
+    path = Path(path)
+    while not path.exists() and waited < timeout:
+        time.sleep(poll_interval)
+        waited += poll_interval
+    return path.exists()
 
 
 @dataclass
@@ -41,6 +55,14 @@ class SiteStatus:
     start_time: Optional[float] = None
 
     @property
+    def is_queued(self) -> bool:
+        return self.status == "pending"
+
+    @property
+    def is_running(self) -> bool:
+        return self.status == "running"
+
+    @property
     def is_complete(self) -> bool:
         return self.status in ["completed", "failed"]
 
@@ -49,47 +71,39 @@ class SiteStatus:
         return self.status == "completed" and self.return_code == 0
 
 
-class BaseSiteConfig(ABC):
-    """Site configuration for job execution."""
-
-    @abstractmethod
-    def load(self, name: str) -> "BaseSiteConfig":
-        pass
-
-    @abstractmethod
-    def save(self, name: str) -> None:
-        pass
-
-
+@dataclass
 class BaseSite(ABC):
     """Base class for site configuration."""
 
-    @abstractmethod
-    def __init__(self, config: BaseSiteConfig):
-        pass
-
-    # @abstractmethod
-    # def __enter__(self):
-    #    pass
-
-    # @abstractmethod
-    # def __exit__(self, exc_type, exc_value, traceback):
-    #    pass
+    _is_notebook: bool = field(init=False)
 
     @abstractmethod
-    def provision(self):
+    def cancel_job(self, job_id: str) -> None:
+        """Cancel a running job.
+
+        Args:
+            job_id: The ID of the job to cancel
+        """
         pass
 
     @abstractmethod
-    def deprovision(self):
+    def submit(self, **kwargs) -> str:
+        """Submit a job and return its ID.
+
+        Returns:
+            str: The job ID
+        """
         pass
 
-    @abstractmethod
-    def check_status(self):
-        """Check the status of the site."""
-        pass
-
-    @abstractmethod
-    def wait_provisioned(self):
-        """Wait for the site to be provisioned."""
-        pass
+    def _check_if_notebook(self):
+        """Check if we're running in a Jupyter notebook."""
+        try:
+            shell = get_ipython().__class__.__name__
+            if shell == "ZMQInteractiveShell":
+                return True  # Jupyter notebook or qtconsole
+            elif shell == "TerminalInteractiveShell":
+                return False  # Terminal running IPython
+            else:
+                return False  # Other type
+        except NameError:
+            return False  # Probably standard Python interpreter

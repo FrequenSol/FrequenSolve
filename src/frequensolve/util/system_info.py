@@ -32,12 +32,14 @@ __all__ = ["SystemInfo"]
 
 # Configure logging
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 # You can configure logging handlers/formatters as needed:
 ch = logging.StreamHandler(sys.stdout)
 ch.setLevel(logging.INFO)
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+formatter = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s"
+)
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
@@ -78,10 +80,10 @@ class SystemInfo:
     def get_cpu_info(self) -> Dict[str, Union[str, int]]:
         """
         Retrieve information about the CPU, such as the architecture,
-        number of physical and logical cores, etc.
+        number of physical and logical cores, and memory details.
 
         Returns:
-            A dictionary with CPU-related details.
+            A dictionary with CPU and memory related details.
         """
         cpu_info = {}
         cpu_info["machine"] = platform.machine()  # e.g., 'x86_64'
@@ -94,14 +96,25 @@ class SystemInfo:
             cpu_info["cpu_freq"] = (
                 psutil.cpu_freq()._asdict() if psutil.cpu_freq() else {}
             )
+            cpu_info["memory"] = psutil.virtual_memory().total / 1024**2
         else:
             # Fallback if psutil is not installed
-            logger.warning("psutil not found. CPU details might be limited.")
+            logger.warning("psutil not found. CPU and memory details might be limited.")
             cpu_info["physical_cores"] = None
             cpu_info["logical_cores"] = None
             cpu_info["cpu_freq"] = {}
+            cpu_info["memory"] = {}
 
         return cpu_info
+
+    def get_memory_info(self) -> Dict[str, str]:
+        """
+        Retrieve information about the memory, such as the total, available, used, and percent of memory used.
+        """
+        memory_info = {}
+        memory_info["total"] = psutil.virtual_memory().total
+        memory_info["available"] = psutil.virtual_memory().available
+        return memory_info
 
     def get_gpu_info(self) -> Dict[str, str]:
         """
@@ -118,19 +131,17 @@ class SystemInfo:
             cmd = ["nvidia-smi", "-L"]
             result = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if result.returncode == 0:
-                # Sample output might be:
-                # "GPU 0: GeForce GTX 1080 Ti (UUID: GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
                 lines = result.stdout.strip().split("\n")
                 for idx, line in enumerate(lines):
                     gpu_info[f"GPU_{idx}"] = line
             else:
-                logger.warning("nvidia-smi returned non-zero exit code.")
+                logger.debug("nvidia-smi returned non-zero exit code.")
         except FileNotFoundError:
-            logger.warning(
+            logger.debug(
                 "nvidia-smi not found. No NVIDIA GPU detected or driver not installed."
             )
         except Exception as e:
-            logger.warning(f"Failed to run nvidia-smi: {e}")
+            logger.debug(f"Failed to run nvidia-smi: {e}")
 
         return gpu_info
 
@@ -196,10 +207,10 @@ class SystemInfo:
             some default software versions.
         """
         info = {
-            "os_info": self.get_os_info(),
-            "cpu_info": self.get_cpu_info(),
-            "gpu_info": self.get_gpu_info(),
-            "software_versions": self.get_software_versions(),
+            "os": self.get_os_info(),
+            "cpu": self.get_cpu_info(),
+            "gpu": self.get_gpu_info(),
+            "software": self.get_software_versions(),
         }
         return info
 

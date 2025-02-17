@@ -3,6 +3,9 @@ from frequensolve._version import get_versions
 
 __version__ = get_versions()["version"]
 
+# Load environment
+from dotenv import load_dotenv
+
 from frequensolve.geometry import *
 from frequensolve.mesh import *
 
@@ -15,3 +18,5 @@ from frequensolve.simulation import *
 
 # Core imports that don't depend on others
 from frequensolve.util import *
+
+load_dotenv()
