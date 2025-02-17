@@ -59,8 +59,8 @@ def plot_gather(shot: ShotRecord, **kwargs):
     A = kwargs.get("A", 1)
     units = kwargs.get("units", "km")
     cmap = kwargs.get("cmap", "grey")
-    figsize = kwargs.get("figsize", (4, 4))
-    fontsize = kwargs.get("fontsize", 14)
+    figsize = kwargs.get("figsize", (5, 5))
+    fontsize = kwargs.get("fontsize", 12)
 
     plt.rcParams.update({"font.size": fontsize})
 

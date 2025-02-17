@@ -29,7 +29,7 @@ class Credentials:
     @cached_property
     def username(self):
         user = os.getenv(self.user_env)
-        if user is None:
+        if user is None or user == "":
             print(
                 f"Avoid providing this each time by adding the {self.user_env} to FrequenSolve/.env"
             )
@@ -39,7 +39,7 @@ class Credentials:
     @cached_property
     def password(self):
         pw = os.getenv(self.pw_env)
-        if pw is None:
+        if pw is None or pw == "":
             print(
                 f"Avoid providing this each time by adding the {self.pw_env} to FrequenSolve/.env"
             )
@@ -58,7 +58,7 @@ class Credentials:
     @cached_property
     def _ssh_passphrase(self):
         passphrase = os.getenv(self.ssh_key_env)
-        if passphrase is None:
+        if passphrase is None or passphrase == "":
             print(
                 f"Avoid providing this each time by adding the {self.ssh_key_env} to FrequenSolve/.env"
             )

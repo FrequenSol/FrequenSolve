@@ -40,5 +40,6 @@ for i in $(seq 1 $nfreq); do
       echo "Group done"
    fi
 done
+wait
 
 echo "Sweep Complete"

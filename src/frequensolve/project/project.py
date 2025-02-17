@@ -5,11 +5,7 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-
-import toml
-import yaml
-from numpy import max as npmax
+from typing import Any, Dict, Optional, Union
 
 from frequensolve.orchestrator.sites.frontera import FronteraSite
 from frequensolve.orchestrator.sites.local import LocalSite
@@ -299,6 +295,8 @@ class Project:
 
     def as_toml(self, **kwargs) -> str:
         """Convert project to TOML string."""
+        import toml
+
         indent = kwargs.get("indent", 3)
         try:
             return toml.dumps(self.__dict__(), encoder=CustomTOMLEncoder(), **kwargs)
@@ -307,6 +305,8 @@ class Project:
             return self.__repr__()
 
     def as_yaml(self, **kwargs) -> str:
+        import yaml
+
         def numpy_representer(dumper, data):
             """Convert numpy values to native Python types."""
             return dumper.represent_float(float(data))

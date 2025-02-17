@@ -154,6 +154,8 @@ class Property:
 
     def write(self, file: Path):
         """Write the property to a file."""
+        if not file.parent.exists():
+            file.parent.mkdir(parents=True)
         self.darr.values.astype(np.single).tofile(file)
         return file
 

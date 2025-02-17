@@ -1,7 +1,11 @@
 import json
-from pathlib import Path
 
-import toml
+try:
+    import toml
+except ImportError:
+    toml = None
+
+from pathlib import Path
 
 from frequensolve.util.class_registry import class_registry
 
