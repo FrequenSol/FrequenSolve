@@ -37,7 +37,9 @@ jobs:
 
     - name: Install dependencies
       if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      run: poetry install --no-interaction
+      run: |
+        poetry lock --no-update
+        poetry install --no-interaction
 
     - name: Run pre-commit
       uses: pre-commit/action@v3.0.0
@@ -81,7 +83,9 @@ jobs:
 
     - name: Install dependencies
       # if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      run: poetry install --no-interaction --with=dev
+      run: |
+        poetry lock --no-update
+        poetry install --no-interaction --with=dev
 
     - name: Build documentation
       run: |
@@ -110,17 +114,17 @@ jobs:
           name: documentation
           path: docs-build
 
-      # - name: Setup Pages
-      #   uses: actions/configure-pages@v4
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
 
-      # - name: Upload Pages artifact
-      #   uses: actions/upload-pages-artifact@v3
-      #   with:
-      #     path: docs-build
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-build
 
-      # - name: Deploy to GitHub Pages
-      #   id: deployment
-      #   uses: actions/deploy-pages@v4
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
 
   build:
     needs: test
@@ -139,6 +143,11 @@ jobs:
         version: latest
         virtualenvs-create: true
         virtualenvs-in-project: true
+
+    - name: Install dependencies
+      run: |
+        poetry lock --no-update
+        poetry install --no-interaction
 
     - name: Build package
       run: poetry build
