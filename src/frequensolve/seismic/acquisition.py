@@ -143,6 +143,17 @@ class Acquisition:
             group._set_path(proj_path, rel_path)
         self.source_group._set_path(proj_path, rel_path)
 
+    def receiver_locations(self) -> Dict:
+        """Get receiver locations in physical and reference frames.
+
+        Returns:
+           Dict: Dictionary containing physical and reference locations.
+        """
+        group_locations = {}
+        for group in self.receiver_groups:
+            group_locations[group.name] = group.coordinates.get()
+        return group_locations
+
     @property
     def _path(self) -> Path:
         return self._proj_path / self._rel_path

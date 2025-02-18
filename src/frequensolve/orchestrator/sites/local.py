@@ -60,47 +60,34 @@ class LocalSite(BaseSite):
 
             nest_asyncio.apply()
 
-        # Use existing loop if available, otherwise create new one
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        # Create and use a new loop for consistency
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
         try:
-            future = self.submit_async(job)
-            return loop.run_until_complete(future)
+            return loop.run_until_complete(self._run_job(job))
         finally:
-            # Don't close the loop if we didn't create it
-            if not loop.is_running():
-                loop.close()
+            loop.close()
+
+    async def _run_job(self, job: SimulationJob) -> list:
+        """Run all tasks for a job and return results."""
+        results = []
+        for i in range(job.n_tasks):
+            print(f"Running task {i+1}")
+            result = await self._run_single_task(job, i)
+            if result is not None:
+                results.append(result)
+        return job.records
 
     def submit_async(self, job: SimulationJob) -> asyncio.Future:
         """Submit job asynchronously and return a future."""
-        # Use the current event loop
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
-
-        async def run_tasks():
-            try:
-                results = []
-                for i in range(job.n_tasks):
-                    print(f"Running task {i+1}")
-                    result = await self._run_single_task(job, i)
-
-                    # TODO: once HPC side matches, update this
-                    if result is not None:
-                        results.append(result)
-                future.set_result(job.records)
-            except Exception as e:
-                future.set_exception(e)
-
         if self._is_notebook:
             import nest_asyncio
 
             nest_asyncio.apply()
 
-        loop.create_task(run_tasks())
+        loop = asyncio.get_event_loop()
+        future = loop.create_task(self._run_job(job))
         self._futures.append(future)
         return future
 
