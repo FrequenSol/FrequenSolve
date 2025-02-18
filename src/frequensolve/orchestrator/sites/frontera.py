@@ -8,6 +8,7 @@ import asyncio
 import glob
 import os
 import re
+import signal
 import socket
 import subprocess
 import tarfile
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from logging import DEBUG
 from pathlib import Path
+from select import select
 from threading import Event, Thread
 from typing import Literal, Optional, TextIO, Union
 
@@ -90,29 +92,121 @@ class BytesIO:
 
 
 class SSHProxy:
-    def __init__(self, control_path, username, host):
+    def __init__(self, control_path, username, host, compute_host=None):
         self.control_path = control_path
         self.username = username
         self.host = host
+        self.compute_host = compute_host
 
-    def exec_command(self, command):
-        result = subprocess.run(
-            [
-                "ssh",
-                "-q",
-                "-o",
-                f"ControlPath={self.control_path}",
-                f"{self.username}@{self.host}",
-                command,
-            ],
-            capture_output=True,
+    def invoke_shell(self):
+        """Create an interactive shell using subprocess.Popen."""
+        import os
+        import pty
+
+        master, slave = pty.openpty()
+
+        cmd = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-q",  # Add quiet flag
+            f"{self.username}@{self.host}",
+        ]
+
+        process = subprocess.Popen(
+            cmd,
+            stdin=slave,
+            stdout=slave,
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid,
+            universal_newlines=True,
         )
 
+        os.close(slave)
+        master_file = os.fdopen(master, "rb+", buffering=0)
+
+        if self.compute_host is not None:
+            master_file.write(f"ssh {self.compute_host}\n".encode())
+            master_file.flush()
+            time.sleep(1)
+
+        master_file.flush()
+        process.stdin = process.stdout = master_file
+
+        return process
+
+    def _filter_output(self, result):
+        """Filter unwanted messages from command output."""
+        stdout = result.stdout
+        stderr = result.stderr
+
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode()
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode()
+
+        # Filter out mount messages and empty lines
+        stdout_lines = []
+        stderr_lines = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if len(line) > 0 and not line.endswith('is mounted not "FULL" nor "IDLE"!'):
+                stdout_lines.append(line)
+        for line in stderr.splitlines():
+            line = line.strip()
+            if len(line) > 0 and not line.endswith('is mounted not "FULL" nor "IDLE"!'):
+                stderr_lines.append(line)
+
+        return ("\n".join(stdout_lines).encode(), "\n".join(stderr_lines).encode())
+
+    def exec_command(self, command):
+        if self.compute_host is not None:
+            result = self._exec_on_compute(command)
+        else:
+            result = self._exec_on_login(command)
+
+        stdout, stderr = self._filter_output(result)
+
         stdin = BytesIO(b"")
-        stdout = BytesIO(result.stdout)
-        stderr = BytesIO(result.stderr)
+        stdout = BytesIO(stdout)
+        stderr = BytesIO(stderr)
 
         return (stdin, stdout, stderr)
+
+    def exec_command_term(self, command):
+        result = self._exec_on_login(command, term=True)
+        stdout, stderr = self._filter_output(result)
+
+        stdin = BytesIO(b"")
+        stdout = BytesIO(stdout)
+        stderr = BytesIO(stderr)
+
+        return (stdin, stdout, stderr)
+
+    def _exec_on_login(self, command, term=False):
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=no"]
+        if term:
+            cmd.append("-t")
+        cmd.extend(
+            [
+                f"{self.username}@{self.host}",
+                command,
+            ]
+        )
+        return subprocess.run(cmd, capture_output=True)
+
+    def _exec_on_compute(self, command):
+        """Execute a command on a compute node via the login node."""
+        cmd = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-J",
+            f"{self.username}@{self.host}",
+            f"{self.username}@{self.compute_host}",
+            command,
+        ]
+        return subprocess.run(cmd, capture_output=True)
 
     def close(self):
         pass  # Nothing to close - using existing socket
@@ -288,6 +382,8 @@ class FronteraSite(BaseSite):
                             "ssh",
                             "-q",  # Quiet mode
                             "-o",
+                            "StrictHostKeyChecking=no",
+                            "-o",
                             f"ControlPath={control_path}",
                             f"{self.credentials.username}@{host}",
                             "echo 'Connection test'",
@@ -295,6 +391,7 @@ class FronteraSite(BaseSite):
                         capture_output=True,
                         text=True,
                     )
+                    print(result.stdout.strip())
 
                     if result.returncode == 0:
                         logger.debug(f"Found working control socket at {control_path}")
@@ -470,14 +567,14 @@ class FronteraSite(BaseSite):
                 self.update_status()
                 if self.pool.is_running:
                     break
-                if (
-                    self.pool.is_complete
-                    or self.pool.is_failed
-                    or self.pool.is_cancelled
-                ):
+                if self.pool.is_complete:
                     raise RuntimeError(
                         f"Job {job_id} ended with status: {self.pool.status}"
                     )
+                print(
+                    f"\033[38;5;244mJob {job_id} status: \033[38;5;27m{self.pool.status.capitalize()}\033[0m",
+                    end="\r",
+                )
                 time.sleep(self.config.poll_interval)
 
             if self.pool.is_running:
@@ -507,20 +604,24 @@ class FronteraSite(BaseSite):
         """Submit job asynchronously and return a future."""
         remote_script, remote_job = self._transfer_job(job)
         ntasks_per_item = max(2, self.pool.nproc // job.n_tasks)
-        cmd = f"cd {self.work_dir} && {remote_script} {remote_job} {ntasks_per_item}"
+
         future = Future()
-        logger.info("Submitting job: %s", cmd)
         if self._compute_client.is_proxy():
-            _, stdout, stderr = self.compute_client.exec_command(cmd)
-            monitor = self._monitor_command_output(stdout, stderr, future, job)
+            interactive = self.compute_client.invoke_shell()
+            cmd = f"cd {self.work_dir} && {remote_script} {remote_job} {ntasks_per_item}\n"
+            interactive.stdin.write(cmd.encode())
+            interactive.stdin.flush()
+            monitor = self._monitor_command_output(future, job, interactive)
         else:
+            # Keep existing non-proxy approach
+            cmd = (
+                f"cd {self.work_dir} && {remote_script} {remote_job} {ntasks_per_item}"
+            )
             interactive = self.login_client.invoke_shell()
             interactive.send(f"ssh {self.compute_host}\n")
             time.sleep(1)
             interactive.send(cmd)
-            monitor = self._monitor_command_output(
-                interactive, interactive, future, job, interactive
-            )
+            monitor = self._monitor_command_output(future, job, interactive)
 
         loop = asyncio.get_event_loop()
         loop.create_task(monitor)
@@ -1008,32 +1109,32 @@ class FronteraSite(BaseSite):
             control_path, username = self._login_client.get_proxy_details()
             if not control_path or not username:
                 raise RuntimeError("Missing proxy details")
-            return SSHProxy(control_path, username, job_host)
+            return SSHProxy(control_path, username, self.login_client.host, job_host)
+        else:
+            # Otherwise use paramiko SSH tunneling
+            logger.debug("Using SSH tunneling to connect to compute node")
+            transport = self._login_client.get_transport()
+            if not transport:
+                raise RuntimeError("No transport available for SSH tunneling")
 
-        # Otherwise use normal SSH tunneling
-        logger.debug("Using SSH tunneling to connect to compute node")
-        transport = self._login_client.get_transport()
-        if not transport:
-            raise RuntimeError("No transport available for SSH tunneling")
+            channel = transport.open_channel("direct-tcpip", (job_host, 22), ("", 0))
+            job_client = SSHClient()
+            job_client.set_missing_host_key_policy(AutoAddPolicy())
 
-        channel = transport.open_channel("direct-tcpip", (job_host, 22), ("", 0))
-        job_client = SSHClient()
-        job_client.set_missing_host_key_policy(AutoAddPolicy())
-
-        try:
-            job_client.connect(
-                job_host,
-                username=self.credentials.username,
-                sock=channel,
-                allow_agent=True,
-                look_for_keys=False,
-            )
-            logger.info("Connected to job host: %s", job_host)
-            return job_client
-        except Exception as e:
-            logger.error(f"Failed to connect to job host: {str(e)}")
-            channel.close()
-            raise
+            try:
+                job_client.connect(
+                    job_host,
+                    username=self.credentials.username,
+                    sock=channel,
+                    allow_agent=True,
+                    look_for_keys=False,
+                )
+                logger.info("Connected to job host: %s", job_host)
+                return job_client
+            except Exception as e:
+                logger.error(f"Failed to connect to job host: {str(e)}")
+                channel.close()
+                raise
 
     def _get_work_dir(self, rel_proj_path: Union[str, Path]) -> Path:
         """Gets the $WORK directory path on Frontera."""
@@ -1108,107 +1209,96 @@ class FronteraSite(BaseSite):
         os.remove(local_tar)
         self.run_login(f"rm {remote_tar}")
 
-    async def _monitor_command_output(
-        self, stdout, stderr, future, job, interactive=None
-    ):
-        """Monitor command output and update future accordingly.
-
-        Args:
-            stdout: Stream to read stdout from
-            stderr: Stream to read stderr from
-            future: Future to update with results
-            job: SimulationJob being monitored
-            interactive: Optional interactive shell to close when done
-        """
+    async def _monitor_command_output(self, future, job, interactive=None):
+        """Monitor command output and update future accordingly."""
         try:
             output_buffer = ""
             error_buffer = ""
 
             while True:
-                # Check stdout
-                if isinstance(stdout, BytesIO):
-                    data = stdout.read()
-                else:
-                    data = (
-                        stdout.channel.recv(4096)
-                        if hasattr(stdout, "channel")
-                        else (
-                            stdout.recv(4096)
-                            if hasattr(stdout, "recv_ready") and stdout.recv_ready()
-                            else None
-                        )
-                    )
-
-                if data:
-                    output_buffer += (
-                        data.decode("utf-8") if isinstance(data, bytes) else data
-                    )
-                    while "\n" in output_buffer:
-                        line, output_buffer = output_buffer.split("\n", 1)
-                        logger.debug("Sweep output: %s", line.strip())
-                        if "Sweep Complete" in line:
-                            future.set_result(job.records)
-                            logger.info("Sweep job completed successfully")
-                            if interactive:
-                                interactive.close()
-                            return
-
-                # Check stderr
-                if isinstance(stderr, BytesIO):
-                    error = stderr.read()
-                else:
-                    error = (
-                        stderr.channel.recv(4096)
-                        if hasattr(stderr, "channel")
-                        else (
-                            stderr.recv_stderr(4096)
-                            if hasattr(stderr, "recv_stderr_ready")
-                            and stderr.recv_stderr_ready()
-                            else None
-                        )
-                    )
-
-                if error:
-                    error_buffer += (
-                        error.decode("utf-8") if isinstance(error, bytes) else error
-                    )
-                    while "\n" in error_buffer:
-                        line, error_buffer = error_buffer.split("\n", 1)
-                        logger.error("Sweep error: %s", line.strip())
-                        future.set_exception(
-                            RuntimeError(f"Sweep job failed: {line.strip()}")
-                        )
-                        if interactive:
-                            interactive.close()
+                # Handle subprocess case
+                if isinstance(interactive, subprocess.Popen):
+                    # Check if process has ended
+                    if interactive.poll() is not None:
+                        if not future.done():
+                            future.set_exception(
+                                RuntimeError("Process ended unexpectedly")
+                            )
                         return
 
-                # Check if channels closed (proxy mode only)
-                if (
-                    hasattr(stdout, "channel")
-                    and stdout.channel.closed
-                    and stderr.channel.closed
-                ):
-                    if not future.done():
-                        future.set_exception(
-                            RuntimeError("Connection closed unexpectedly")
-                        )
-                    return
+                    # Read from stdout/stderr
+                    reads, _, _ = select(
+                        [interactive.stdout, interactive.stderr], [], [], 0.1
+                    )
+                    for fd in reads:
 
-                # For BytesIO, check if we've reached the end
-                if isinstance(stdout, BytesIO) and stdout._pos >= len(stdout._bytes):
-                    if not future.done():
-                        future.set_exception(
-                            RuntimeError("Connection closed without completion message")
-                        )
-                    return
+                        data = fd.read(4096).decode("utf-8", errors="replace")
+                        if fd == interactive.stdout:
+                            output_buffer += data
+                        else:
+                            error_buffer += data
 
-                await asyncio.sleep(0.5)
+                # Process output buffer
+                while "\n" in output_buffer:
+                    line, output_buffer = output_buffer.split("\n", 1)
+                    line = line.strip()
+                    if line:
+                        print(line, flush=True)
+                    if "Sweep Complete" in line:
+                        future.set_result(job.records)
+                        logger.info("Sweep job completed successfully")
+                        if interactive:
+                            if isinstance(interactive, subprocess.Popen):
+                                try:
+                                    pgid = os.getpgid(interactive.pid)
+                                    os.killpg(pgid, signal.SIGKILL)
+                                except:
+                                    try:
+                                        interactive.kill()
+                                    except:
+                                        pass
+                            else:
+                                interactive.close()
+                        return
+
+                # Process error buffer
+                while "\n" in error_buffer:
+                    line, error_buffer = error_buffer.split("\n", 1)
+                    line = line.strip()
+                    if line:
+                        print(f"\033[91m{line}\033[0m", flush=True)
+                        future.set_exception(RuntimeError(f"Sweep job failed: {line}"))
+                        if interactive:
+                            if isinstance(interactive, subprocess.Popen):
+                                try:
+                                    pgid = os.getpgid(interactive.pid)
+                                    os.killpg(pgid, signal.SIGKILL)
+                                except:
+                                    try:
+                                        interactive.kill()
+                                    except:
+                                        pass
+                            else:
+                                interactive.close()
+                        return
+
+                await asyncio.sleep(0.2)
 
         except Exception as e:
             logger.exception("Error in monitor task")
             future.set_exception(e)
             if interactive:
-                interactive.close()
+                if isinstance(interactive, subprocess.Popen):
+                    try:
+                        pgid = os.getpgid(interactive.pid)
+                        os.killpg(pgid, signal.SIGKILL)
+                    except:
+                        try:
+                            interactive.kill()
+                        except:
+                            pass
+                else:
+                    interactive.close()
 
     # def _decode_hosts(self, hosts: str) -> List[str]:
     #     """Decode the hosts string into a list of hostnames."""

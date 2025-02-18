@@ -42,6 +42,7 @@ class MeshAdaptor:
        adapt_sources (Optional[int]): Number of additional refinements near sources
        adapt_receivers (Optional[int]): Number of additional refinements near receivers
        jump_tolerance (Optional[float]): Maximum relative change in wavespeed that consitutes
+                                         a "jump" in material properties
        jump_factor (Optional[float]): Multiplicative factor for min_epw on "jump" elements
        smooth_refs (Optional[bool]): Do additional refinements to unconstrain element DOFs
     """

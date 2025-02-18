@@ -248,7 +248,12 @@ class Property:
         return self.darr.interp(coords=coords).broadcast_like(da)
 
     def stochastic_perturbation(
-        self, std: float, method: str, xarr: Optional[xr.DataArray] = None, **kwargs
+        self,
+        std: float,
+        method: str,
+        type: str,
+        xarr: Optional[xr.DataArray] = None,
+        **kwargs,
     ) -> None:
         """Perturb the dataset by a given factor.
 
@@ -284,8 +289,14 @@ class Property:
             da = von_karman_stochastic_field(xarr, mean, std, k0, nu, anisotropy, seed)
 
             if _coords_compatible(self.darr.coords, xarr.coords):
-                self.darr = self.darr + da
+                if type == "additive":
+                    self.darr = self.darr + da
+                elif type == "multiplicative":
+                    self.darr = self.darr * (1 + da)
             else:
-                self.darr = self._like(xarr) + da
+                if type == "additive":
+                    self.darr = self._like(xarr) + da
+                elif type == "multiplicative":
+                    self.darr = self._like(xarr) * (1 + da)
         else:
             raise ValueError(f"Unknown perturbation method: {method}")

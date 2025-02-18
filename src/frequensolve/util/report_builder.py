@@ -3,20 +3,29 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Union
 
 from jinja2 import Environment, FileSystemLoader
 
 __all__ = ["Report", "Figure", "Section"]
 
 
-@dataclass
+@dataclass(init=False)
 class Figure:
     """A figure in a report."""
 
     title: str = ""
     caption: str = ""
-    image: str = ""
+    image: Path = field(default_factory=Path)
+
+    def __init__(
+        self, title: str = "", caption: str = "", image: Union[str, Path] = ""
+    ):
+        if isinstance(image, str):
+            image = Path(image)
+        self.image = image.resolve()
+        self.title = title
+        self.caption = caption
 
 
 @dataclass
@@ -54,7 +63,7 @@ class Report:
         self.sections.append(section)
         return self.sections[-1]
 
-    def new_section(self, title="") -> Section:
+    def new_section(self, title: str = "") -> Section:
         """Adds an empty section to report
 
         Attributes:
@@ -64,7 +73,7 @@ class Report:
         self.sections.append(sec)
         return sec
 
-    def generate(self, path, timeout=15):
+    def generate(self, path: Union[str, Path], timeout: int = 30):
         """Compiles PDF from LaTeX
 
         Attributes:
@@ -72,9 +81,9 @@ class Report:
            timeout (int): Timeout for compilation command (stalls on error)
         """
         current_dir = os.getcwd()
-
+        path = Path(path)
         # Set up temporary directory
-        work_dir = "/tmp/fstmpdisk/report"
+        work_dir = Path("/tmp/fstmpdisk/report")
         setup_work_directory(work_dir)
 
         # Load the LaTeX template
@@ -83,18 +92,18 @@ class Report:
 
         # Render the LaTeX document
         latex = template.render(report=self)
-        with open(os.path.join(work_dir, "report.tex"), "w") as f:
+        with open(work_dir / "report.tex", "w") as f:
             f.write(latex)
 
         # Compile the LaTeX document to PDF
         try:
-            logfile = os.path.join(work_dir, "tex.log")
+            logfile = work_dir / "tex.log"
             with open(logfile, "w") as f:
                 # First pass to generate intermediate files
                 print("Running first pass of pdflatex...")
                 output = subprocess.check_output(
                     ["pdflatex", "report.tex"],
-                    cwd=work_dir,
+                    cwd=str(work_dir),
                     stderr=subprocess.STDOUT,
                     timeout=timeout,
                     text=True,
@@ -106,7 +115,7 @@ class Report:
                 print("Running second pass of pdflatex...")
                 output = subprocess.check_output(
                     ["pdflatex", "report.tex"],
-                    cwd=work_dir,
+                    cwd=str(work_dir),
                     stderr=subprocess.STDOUT,
                     timeout=timeout,
                     text=True,
@@ -114,13 +123,11 @@ class Report:
                 f.write("\n\n\nSecond Pass:\n\n\n")
                 f.write(output)
 
-            file = (
-                os.path.join(path, "report.pdf") if not os.path.isfile(path) else path
-            )
-            file_work = os.path.join(work_dir, "report.pdf")
+            file = (path / "report").with_suffix(".pdf") if not path.is_file() else path
+            file_work = work_dir / "report.pdf"
             if not file_work == file:
-                if os.path.exists(file):
-                    os.remove(file)
+                if file.exists():
+                    file.unlink()
                 shutil.move(file_work, file)
             print(f"Report generated successfully: {file}")
             print(f"    Compilation log: {logfile}")
@@ -140,15 +147,18 @@ class Report:
 
 
 # Utility functions
-def setup_work_directory(work_dir):
+def setup_work_directory(work_dir: Path):
     """Sets up the work directory for the report."""
-    fs_dir = os.environ["FREQUENSOL_DIR"]
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    fs_dir = os.getenv("FREQUENSOLVE_DIR")
 
     # Get template directory
-    template_dir = os.path.join(fs_dir, "trunk/files/templates/report/")
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
+    template_dir = Path(fs_dir) / "trunk/files/templates/report/"
+    work_dir.mkdir(parents=True, exist_ok=True)
 
-    if os.path.exists(work_dir):
+    if work_dir.exists():
         shutil.rmtree(work_dir)
     shutil.copytree(template_dir, work_dir)
 

@@ -10,6 +10,7 @@ from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import Property
+from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.util.class_registry import register_class
 from frequensolve.util.named_list import NamedList
 
@@ -154,7 +155,13 @@ class SimpleSurface:
         for l0 in L0:
             k0.append(1 / l0)
         self.z_phys.stochastic_perturbation(
-            std=std, method="von_karman", xarr=xarr, k0=k0, nu=nu, seed=seed
+            std=std,
+            method="von_karman",
+            xarr=xarr,
+            k0=k0,
+            nu=nu,
+            seed=seed,
+            type="additive",
         )
 
     def plot(self, limits: Dict[str, ArrayLike], **kwargs):
@@ -260,6 +267,7 @@ class Layer(ModelSubdomain):
                 nu=nu,
                 anisotropy=anisotropy,
                 seed=seed,
+                type="additive",
             )
 
 
@@ -410,9 +418,9 @@ class LayeredModel(ModelBase):
 
     @property
     def z_limits(self):
-        z0, _ = self.surfaces[0].extrema
+        z0, _ = self.surfaces[0].extrema  # extrema returns values already
         _, z1 = self.surfaces[-1].extrema
-        return [z0, z1]
+        return float(z0), float(z1)
 
     def extreme_values(self, property: str) -> Tuple[float, float]:
         vmin = 1.0e8
@@ -658,6 +666,8 @@ class LayeredModel(ModelBase):
         aspect = kwargs.pop("aspect", None)
         axes_names = kwargs.pop("axes_names", {"x": "X", "z": "Depth"})
         axes_units = kwargs.pop("axes_units", {"x": "km", "z": "km"})
+        acq = kwargs.pop("acquisition", None)
+        scatter_kwargs = kwargs.pop("scatter_kwargs", {})
 
         plt.rcParams.update({"font.size": fontsize})
 
@@ -745,10 +755,11 @@ class LayeredModel(ModelBase):
                     }
                 )
 
+                dims = sorted(samp.dims)
                 plt.pcolormesh(
                     samp.coords["Xcoord"].values,
                     samp.coords["Zcoord"].values,
-                    samp[property].values.T,
+                    samp[property].transpose(*dims).values,
                     shading="gouraud",
                     vmin=vmin,
                     vmax=vmax,
@@ -803,22 +814,27 @@ class LayeredModel(ModelBase):
                     **kwargs,
                 )
 
-            # Set limits
-        ax.set_xlim(self.x_limits)
+        # Plot acquisition if provided
+        if acq is not None:
+            self._plot_acquisition(acq, ax, **scatter_kwargs)
+
+        if aspect == "equal":
+            ax.set_aspect("equal")
+
+        # Set limits with padding after everything is plotted
+        xL = self.x_limits[1] - self.x_limits[0]
+        zL = self.z_limits[1] - self.z_limits[0]
+        L = max(xL, zL)
+
+        ax.set_xlim([self.x_limits[0] - 0.02 * L, self.x_limits[1] + 0.02 * L])
+
         if self.y_limits is None:
-            zlim = self.z_limits
-            zL = zlim[1] - zlim[0]
-            zlim[0] = zlim[0] - 0.01 * zL
-            zlim[1] = zlim[1] + 0.01 * zL
-            ax.set_ylim(zlim)
+            ax.set_ylim([self.z_limits[0] - 0.02 * L, self.z_limits[1] + 0.02 * L])
         else:
             raise NotImplementedError("2D plotting not implemented")
 
         if origin == "upper":
             ax.invert_yaxis()
-
-        if aspect == "equal":
-            ax.set_aspect("equal")
 
         if save is not None:
             plt.savefig(save, bbox_inches="tight")
@@ -833,6 +849,110 @@ class LayeredModel(ModelBase):
             subdomain._set_path(proj_path, self._rel_path)
         for surface in self.surfaces:
             surface._set_path(proj_path, self._rel_path)
+
+    def _plot_acquisition(self, acquisition: Acquisition, ax, **kwargs):
+        from matplotlib.pyplot import cm
+
+        colors = ["r", "b", "g", "o", "y", "c", "m"]
+
+        # Plot receivers
+        for igrp, group in enumerate(acquisition.receiver_groups):
+            coords = group.coordinates.get()
+            if group.frame == "reference":
+                coords = self._map_to_physical(coords)
+
+            # Plot receiver coordinates as scatter points with higher saturation
+            ax.scatter(
+                coords[:, 0],
+                coords[:, -1],
+                marker=".",
+                s=30,
+                label=f"Receivers ({group.name})",
+                zorder=6,
+                color=colors[igrp],
+                **kwargs,
+            )
+            ax.legend(bbox_to_anchor=(0, 1.02), loc="lower left")
+
+        # Plot sources
+        group = acquisition.source_group
+
+        coords = group.get_coordinates()
+        color = colors[len(acquisition.receiver_groups)]
+
+        # Map reference coordinates to physical coordinates
+        ilist = []
+        xlist = []
+        for i, source in enumerate(group.sources):
+            if source.frame == "reference":
+                ilist.append(i)
+                xlist.append(coords[i, :])
+
+        xlist = np.array(xlist)
+        xlist = self._map_to_physical(xlist)
+        for i in ilist:
+            coords[i, :] = xlist[i, :]
+
+        # Plot source coordinates as scatter points
+        ax.scatter(
+            coords[:, 0],
+            coords[:, -1],
+            marker="x",
+            s=80,
+            label=f"Sources",
+            zorder=7,
+            color=color,
+            **kwargs,
+        )
+        ax.legend(bbox_to_anchor=(0, 1.02), loc="lower left")
+
+    def _map_to_physical(self, coords: np.ndarray) -> np.ndarray:
+        """Map coordinates from reference to physical coordinates.
+
+        Args:
+            coords (np.ndarray): Coordinates to map.
+
+        Returns:
+            np.ndarray: Mapped coordinates.
+        """
+
+        for layer in self.layers:
+            upper = self.upper_surface(layer)
+            lower = self.lower_surface(layer)
+
+            if self.ordering == "top_down":
+                z_min = upper.z_ref
+                z_max = lower.z_ref
+            else:
+                z_max = upper.z_ref
+                z_min = lower.z_ref
+
+            # TODO: for now I'm assuming all are in same layer
+            if any(coords[:, -1] < z_min) or any(coords[:, -1] > z_max):
+                continue
+
+            # Convert coordinates to xarray
+            xcoords = xr.DataArray(dims=["x"], coords={"x": coords[:, 0]})
+
+            # Get surface z values
+            if self.ordering == "top_down":
+                zl = upper.z_phys.get(xcoords).values
+                zu = lower.z_phys.get(xcoords).values
+            else:
+                zl = lower.z_phys.get(xcoords).values
+                zu = upper.z_phys.get(xcoords).values
+
+            # Linear interpolation from reference to physical coordinates
+            alpha = (coords[:, -1] - z_min) / (z_max - z_min)
+            z_phys = zl + alpha * (zu - zl)
+
+            # Ensure z_phys has same shape as coords[:,-1]
+            if len(coords.shape) == 1:
+                z_phys = z_phys[0]  # Take single value for single coordinate
+
+            coords[:, -1] = z_phys
+            return coords
+        raise ValueError(f"No layer found")
 
     @property
     def _path(self) -> Path:
