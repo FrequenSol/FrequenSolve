@@ -84,10 +84,10 @@ This library provides a Python API for setting up and running the FrequenSolve s
 > ```
 
 > [!TIP]
-> You can deactivate the virtual environment with:
+> Exit the virtual environment with:
 >
 > ```console
-> $ deactivate
+> $ exit
 > ```
 
 ### Installing ParaView (optional)

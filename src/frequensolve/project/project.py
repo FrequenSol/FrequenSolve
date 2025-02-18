@@ -1,22 +1,21 @@
+import asyncio
 import json
+import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 
-import toml
-import yaml
-
+from frequensolve.orchestrator.sites.frontera import FronteraSite
+from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project.migrate_version import Version
 from frequensolve.project.workflows import BaseWorkflow
-from frequensolve.simulation.simulation import (
-    BaseSimulation,
-    CustomJSONEncoder,
-    CustomTOMLEncoder,
-    SeismicSimulation,
-)
+from frequensolve.seismic.record_database import RecordDatabase
+from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
+from frequensolve.util.encoders import CustomJSONEncoder, CustomTOMLEncoder
 from frequensolve.util.named_list import NamedList
+from frequensolve.util.setup_logger import disable_jupyter_logging, set_log_level
 
 __all__ = ["Project", "BaseProjectComponent"]
 
@@ -50,19 +49,29 @@ class Project:
     pretty_name: Optional[str] = None
     path: Union[str, Path]
     version: Version = field(default_factory=Version)
+    log_level: int = logging.DEBUG
+    jupyter_logging: bool = True
     load_if_exists: bool = False
     auto_migrate: bool = False
     site: Optional[str] = None
     simulations: NamedList[BaseSimulation] = field(default_factory=NamedList)
     workflows: Dict[str, BaseWorkflow] = field(default_factory=dict)
     extras: Dict[str, BaseProjectComponent] = field(default_factory=dict)
+    _active_jobs: Dict[str, Any] = field(
+        default_factory=dict
+    )  # job_name -> future/job_id
 
     def __post_init__(self):
         """Load project from file and check version."""
-        self.path = Path(self.path)
+        self.path = Path(self.path).resolve()
         if self.load_if_exists:
             if self.path.exists() and self.path.suffix == ".json":
                 self = Project.load(self.path)
+
+        set_log_level(self.log_level)
+
+        if not self.jupyter_logging:
+            disable_jupyter_logging()
 
         if not self.path.exists():
             self.path.mkdir(parents=True, exist_ok=True)
@@ -125,6 +134,66 @@ class Project:
         del new, old
 
         return Project.load(dest / f"{name}.json")
+
+    def transfer(self):
+        """Transfer project files to remote site with path substitution."""
+
+        if isinstance(self.site, LocalSite):
+            return
+
+        remote = self.site.work_dir
+
+        proj_file = (Path(self.path) / f"{self.name}").with_suffix(".json")
+        sim_dir = Path(self.path) / "simulations"
+
+        if proj_file.exists():
+            self.site.put(proj_file, (remote / f"{self.name}").with_suffix(".json"))
+
+        if sim_dir.exists():
+            # Create temporary modified simulation files
+            temp_files = []
+            for sim in self.simulations:
+                if hasattr(sim, "_file") and sim._file:
+                    # Load simulation file
+                    with open(sim._file, "r") as f:
+                        sim_data = json.load(f)
+
+                    # Create temporary file with modified project_path
+                    if "project_path" in sim_data:
+                        temp_file = Path(sim._file).with_suffix(".temp.json")
+                        sim_data["project_path"] = str(remote)
+                        with open(temp_file, "w") as f:
+                            json.dump(sim_data, f, cls=CustomJSONEncoder, indent=3)
+                        temp_files.append(
+                            (temp_file, Path(sim._file).relative_to(self.path))
+                        )
+
+            # Transfer simulation directory
+            self.site.put(sim_dir, remote / "simulations")
+
+            # Transfer modified simulation files
+            for temp_file, rel_path in temp_files:
+                self.site.put(temp_file, remote / rel_path)
+                temp_file.unlink()  # Clean up temporary file
+
+    def get_records(self, results: dict) -> RecordDatabase:
+        """Get records from Frontera.
+
+        Args:
+            results: A dictionary of results from a Frontera job.
+        """
+
+        if self.site is None:
+            raise ValueError("No site specified for project")
+        elif isinstance(self.site, LocalSite):
+            pass
+        elif isinstance(self.site, FronteraSite):
+            self.site.download_records(results, self.path.resolve())
+        else:
+            raise NotImplementedError(
+                f"Site type {type(self.site)} not supported (yet)"
+            )
+        return RecordDatabase.from_results(results, self.path.resolve())
 
     @classmethod
     def load(cls, file: Union[str, Path], auto_migrate: bool = False) -> "Project":
@@ -226,6 +295,8 @@ class Project:
 
     def as_toml(self, **kwargs) -> str:
         """Convert project to TOML string."""
+        import toml
+
         indent = kwargs.get("indent", 3)
         try:
             return toml.dumps(self.__dict__(), encoder=CustomTOMLEncoder(), **kwargs)
@@ -234,6 +305,8 @@ class Project:
             return self.__repr__()
 
     def as_yaml(self, **kwargs) -> str:
+        import yaml
+
         def numpy_representer(dumper, data):
             """Convert numpy values to native Python types."""
             return dumper.represent_float(float(data))
@@ -294,67 +367,33 @@ class Project:
     def __repr__(self) -> str:
         return f"Project(name='{self.name}', path='{self.path}')"
 
-    # def new_TD_simulation(self,
-    #                       name:      str,
-    #                       physics:   Literal["coupled","acoustic","elastic"],
-    #                       dimension: Literal[2, 3],
-    #                       **kwargs) -> BaseSimulation:
-    #    """Create a new time-domain simulation and add it to the project.
+    def terminate_jobs(self):
+        """Terminate all running jobs associated with this project."""
+        if not self.site:
+            return
 
-    #    Args:
-    #       name (str):      Simulation name.
-    #       mode (str):      Simulation mode (forward, adjoint, gradient)
-    #       physics (str):   Simulation physics (coupled, acoustic, elastic)
-    #       dimension (int): Simulation dimension (2, 3)
-    #       f_min (float):   Minimum frequency (Hz).
-    #       f_max (float):   Maximum frequency (Hz).
-    #       df (float):      Frequency step (Hz).
-    #       **kwargs: Additional keyword arguments to pass to the Simulation constructor.
+        for job_name, future in list(self._active_jobs.items()):
+            try:
+                if hasattr(future, "cancel"):  # Dask future
+                    future.cancel()
+                else:  # Job ID
+                    self.site.cancel_job(future)
+                logging.info(f"Terminated job {job_name}")
+            except Exception as e:
+                logging.error(f"Failed to terminate job {job_name}: {e}")
 
-    #    Returns:
-    #       Simulation: The newly created simulation.
-    #    """
-    #    tf_domain = "time"
-    #    sampling = UniformSweepSampling(f_min = f_min, f_max = f_max, df = df)
+            self._active_jobs.pop(job_name)
 
-    #    sim = SeismicSimulation(name      = name,
-    #                            physics   = physics,
-    #                            dimension = dimension,
-    #                            directory = os.path.join(self.path,name),
-    #                            tf_domain = tf_domain,
-    #                            sampling  = sampling)
-    #    self.simulations.append(sim)
-    #    return sim
+    def __del__(self):
+        """Cleanup method called when project object is destroyed."""
+        self.terminate_jobs()
 
-    # def new_FD_simulation(self,
-    #                       name:      str,
-    #                       mode:      Literal["forward","adjoint","combined","gradient"],
-    #                       physics:   Literal["coupled","acoustic","elastic"],
-    #                       dimension: Literal[2, 3],
-    #                       f_list:    List[float],
-    #                       **kwargs) -> Simulation:
-    #    """Create a new frequency-domain simulation and add it to the project.
+    def submit_job(self, job, **kwargs) -> list:
+        """Submit job and block until completion."""
+        return self.site.submit(job, **kwargs)
 
-    #    Args:
-    #       name (str):      Simulation name.
-    #       mode (str):      Simulation mode (forward, adjoint, gradient)
-    #       physics (str):   Simulation physics (coupled, acoustic, elastic)
-    #       dimension (int): Simulation dimension (2, 3)
-    #       f_list (List[float]): List of frequencies (Hz).
-    #       **kwargs: Additional keyword arguments to pass to the Simulation constructor.
-
-    #    Returns:
-    #       Simulation: The newly created simulation.
-    #    """
-    #    tf_domain = "frequency"
-    #    sampling = DiscreteSampling(freq = f_list)
-
-    #    sim = Simulation(name      = name,
-    #                     physics   = physics,
-    #                     dimension = dimension,
-    #                     directory = os.path.join(self.path,name),
-    #                     mode      = mode,
-    #                     tf_domain = tf_domain,
-    #                     sampling  = sampling)
-    #    self.simulations.append(sim)
-    #    return sim
+    def submit_job_async(self, job, **kwargs) -> asyncio.Future:
+        """Submit job asynchronously and return a future."""
+        future = self.site.submit_async(job, **kwargs)
+        self._active_jobs[job.name] = future
+        return future

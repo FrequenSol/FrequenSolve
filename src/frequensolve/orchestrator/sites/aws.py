@@ -2,8 +2,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 
-from ..jobs.base_job import BaseJob
-from .base_site import BaseSite, BaseSiteConfig
+from frequensolve.orchestrator.config.base import BaseSiteConfig
+from frequensolve.orchestrator.sites.base import BaseSite
+from frequensolve.orchestrator.tasks.base import BaseTask
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
 
@@ -110,5 +111,5 @@ class AWSSite(BaseSite):
     def wait_provisioned(self):
         pass
 
-    def submit(job: BaseJob):
+    def submit(job: BaseTask):
         pass

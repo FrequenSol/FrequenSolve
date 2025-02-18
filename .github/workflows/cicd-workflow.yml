@@ -37,7 +37,9 @@ jobs:
 
     - name: Install dependencies
       if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      run: poetry install --no-interaction
+      run: |
+        poetry lock
+        poetry install --no-interaction
 
     - name: Run pre-commit
       uses: pre-commit/action@v3.0.0
@@ -81,7 +83,9 @@ jobs:
 
     - name: Install dependencies
       # if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      run: poetry install --no-interaction --with=dev
+      run: |
+        poetry lock
+        poetry install --no-interaction --with=dev
 
     - name: Build documentation
       run: |
