@@ -1,5 +1,5 @@
-Simulation
-==========
+Simulations
+===========
 
 Output Manager
 --------------
@@ -13,14 +13,6 @@ Simulation
 ----------
 
 .. automodule:: frequensolve.simulation.simulation
-   :members:
-   :show-inheritance:
-   :noindex:
-
-Solver
-------
-
-.. automodule:: frequensolve.simulation.solver
    :members:
    :show-inheritance:
    :noindex:

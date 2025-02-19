@@ -3,3 +3,75 @@ dl.py.property > dt > .sig-name {
    color: #123951 !important;  /* Nice blue */
    font-style: italic;
 }
+
+/* Main content width */
+.wy-nav-content {
+    max-width: 1000px;
+}
+
+/* Code block styling */
+div[class^="highlight"] {
+    border-radius: 5px;
+    border: 1px solid #e1e4e5;
+}
+
+/* Method signature styling */
+dl.py.method > dt,
+dl.py.function > dt {
+    background: #f0f6fc !important;
+    border-left: 3px solid #2980b9 !important;
+    padding: 6px 8px !important;
+}
+
+/* Class signature styling */
+dl.py.class > dt {
+    background: #f0f6fc !important;
+    border-left: 3px solid #2980b9 !important;
+    padding: 6px 8px !important;
+}
+
+/* Property styling */
+dl.py.property > dt {
+    background: #f6f9fb !important;
+    border-left: 3px solid #7fb1d8 !important;
+}
+
+/* Improve table styling */
+table.docutils {
+    border-radius: 3px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* Improve heading styles */
+h1, h2, h3, h4, h5, h6 {
+    font-weight: 600 !important;
+    margin: 1.5em 0 0.5em !important;
+}
+
+/* Add a subtle line under headings */
+h1, h2 {
+    padding-bottom: 0.3em;
+    border-bottom: 1px solid #eaecef;
+}
+
+/* Improve note/warning boxes */
+.note, .warning, .tip, .important {
+    border-radius: 4px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+
+/* Version number in sidebar */
+.version {
+    color: #2980b9 !important;
+    font-weight: bold;
+}
+
+/* Improve code block copy button */
+.copybutton {
+    opacity: 0.3;
+    transition: opacity 0.3s;
+}
+
+.copybutton:hover {
+    opacity: 1;
+}
