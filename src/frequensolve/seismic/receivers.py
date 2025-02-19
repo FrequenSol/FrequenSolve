@@ -331,7 +331,7 @@ class CoordsFromFile(ReceiverCoords):
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
-    def get(self, indices) -> np.ndarray:
+    def get(self, indices: Optional[Union[int, slice]] = None) -> np.ndarray:
         """Get coordinates for specified indices.
 
         Args:
@@ -342,7 +342,10 @@ class CoordsFromFile(ReceiverCoords):
         """
         if self.format == "HDF5":
             with h5py.File(self.path, "r") as f:
-                return f[self.dset][indices]
+                if indices is None:
+                    return f[self.dset][:]
+                else:
+                    return f[self.dset][indices]
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
@@ -487,11 +490,11 @@ class CoordsArray(ReceiverCoords):
             self.coordinates.max(dim="receiver").values,
         )
 
-    def slice(self, indices) -> np.ndarray:
-        return self.coordinates[indices].values
-
-    def get(self, indices: int) -> np.ndarray:
-        return self.coordinates[indices].values
+    def get(self, indices: Optional[Union[int, slice]] = None) -> np.ndarray:
+        if indices is None:
+            return self.coordinates.values
+        else:
+            return self.coordinates[indices].values
 
     def to_file(
         self, file_name: Union[str, Path], format: Optional[Literal["HDF5"]] = None
@@ -641,11 +644,6 @@ class ReceiverGroup:
     @property
     def _path(self) -> Path:
         return self._proj_path / self._rel_path
-
-    # def plot(**kwargs):
-    #     # if "a"
-    #     fig = plt.figure()
-    #     ax = plt.gca()
 
 
 # class ReceiverPlotter:

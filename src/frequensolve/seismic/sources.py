@@ -3,6 +3,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
 
+from numpy import array as NPArray
+
 from frequensolve.util.class_registry import class_registry, register_class
 
 __all__ = ["SourceGroup", "Source", "RuptureSource", "PointSource"]
@@ -98,6 +100,9 @@ class SourceGroup:
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path
         self._rel_path = rel_path
+
+    def get_coordinates(self) -> NPArray:
+        return NPArray([source.coordinates for source in self.sources])
 
     @property
     def _path(self) -> Path:
