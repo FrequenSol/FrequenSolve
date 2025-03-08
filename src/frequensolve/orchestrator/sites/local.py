@@ -154,9 +154,8 @@ class LocalSite(BaseSite):
             raise
 
         finally:
-            if self._is_notebook:
-                sys.stdout.flush()
-                sys.stderr.flush()
+            sys.stdout.flush()
+            sys.stderr.flush()
 
     def transfer():
         pass

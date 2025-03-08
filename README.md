@@ -87,6 +87,16 @@ This library provides a Python API for setting up and running the FrequenSolve s
 
 ParaView is recommended for visualizing simulation results. Download and install (ParaView 5.13 recommended) from the official ParaView website: https://www.paraview.org/download/
 
+### Setting up SSH access to Frontera
+
+Add SSH keys to authorized_keys file:
+
+```console
+$ cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+```
+
+
+
 ## Building Documentation
 
 > [!Note]

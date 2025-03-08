@@ -226,6 +226,10 @@ class ModelBase:
         """
         self.subdomains.append(subdomain)
 
+    def __iadd__(self, other):
+        self.add_subdomain(other)
+        return self
+
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path
         self._rel_path = rel_path / self.name

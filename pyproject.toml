@@ -21,6 +21,8 @@ dependencies = [
    "toml (>=0.10.2,<0.11.0)",
    "python-dotenv (>=1.0.1,<2.0.0)",
    "click (>=8.1.8,<9.0.0)",
+   "nptyping (>=2.5.0,<3.0.0)",
+   "classy-blocks (>=1.6.4,<2.0.0)",
 ]
 
 [project.optional-dependencies]
@@ -132,6 +134,12 @@ version = {attr = "frequensolve.__version__"}
 [build-system]
 requires = ["poetry-core", "setuptools>=45", "wheel", "versioneer[toml]>=0.29"]
 build-backend = "poetry.core.masonry.api"
+
+
+
+
+
+
 
 
 [tool.poetry.group.all]

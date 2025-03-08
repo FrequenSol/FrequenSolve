@@ -64,7 +64,7 @@ def von_karman_stochastic_field(
 
     amplitude = _von_karman_spectral_density(n, L, k0, nu, a).astype(np.single)
     phase = np.exp(2j * np.pi * np.random.random((n))).astype(np.complex64)
-    fft_field = amplitude.transpose() * phase
+    fft_field = amplitude * phase
     field = fft.ifftn(fft_field).real
 
     field = field - np.average(field)
@@ -81,7 +81,7 @@ def _von_karman_spectral_density(n, L, k0, nu, a):
     for i in range(ndim):
         ax = a[i] * 2 * np.pi * np.fft.fftfreq(n[i], d=L[i] / n[i])
         kaxes.append(ax.astype(np.single))
-    kgrid = np.meshgrid(*kaxes)
+    kgrid = np.meshgrid(*kaxes, indexing="ij")
 
     k = np.zeros(kgrid[0].shape, dtype=np.single)
     for kc in kgrid:

@@ -95,8 +95,8 @@ class MeshManager:
     """
 
     mesh: Optional[Union[Mesh, BaseMeshGenerator]] = None
-    mesh_file: Optional[str] = None
-    mesh_format: Optional[str] = None
+    file: Optional[str] = None
+    format: Optional[str] = None
     parallel: Optional[MeshParallelism] = None
     adapt: Optional[MeshAdaptor] = None
     _proj_path: Optional[Path] = None
@@ -155,12 +155,12 @@ class MeshManager:
         manager = cls()
 
         # From file
-        mesh_file = data.get("mesh_file")
-        mesh_format = data.get("mesh_format")
-        if mesh_file is not None and mesh_format is not None:
-            manager.mesh_file = mesh_file
-            manager.mesh_format = mesh_format
-            manager.mesh = Mesh.read_mesh(mesh_file, mesh_format)
+        file = data.get("file")
+        format = data.get("format")
+        if file is not None and format is not None:
+            manager.file = file
+            manager.format = format
+            manager.mesh = Mesh.read_mesh(file, format)
 
         # From generator
         if "generator" in data:
@@ -198,12 +198,12 @@ class MeshManager:
 
         # Mesh determined by file
         if self.mesh is None:
-            assert self.mesh_file is not None and self.mesh_format is not None, (
+            assert self.file is not None and self.format is not None, (
                 "if a mesh or mesh generator has not been provided, "
-                "'mesh_file' and 'mesh_format' must be provided"
+                "'file' and 'format' must be provided"
             )
-            mesh_dict["mesh_file"] = self.mesh.file
-            mesh_dict["mesh_format"] = self.mesh.format
+            mesh_dict["file"] = self.file
+            mesh_dict["format"] = self.format
 
         # Mesh determined by generator (defined in backend)
         elif isinstance(self.mesh, BaseMeshGenerator):
@@ -213,8 +213,8 @@ class MeshManager:
         elif isinstance(self.mesh, Mesh):
             path = self._path / "mesh"
             self.mesh.write_mesh(path, "hp3d")
-            mesh_dict["mesh_file"] = path.relative_to(self._proj_path)
-            mesh_dict["mesh_format"] = "hp3d"
+            mesh_dict["file"] = path.relative_to(self._proj_path)
+            mesh_dict["format"] = "hp3d"
 
         if self.parallel:
             mesh_dict["parallel"] = self.parallel.__dict__()

@@ -818,10 +818,10 @@ class FronteraSite(BaseSite):
             # Create archive on remote
             tar_cmd = f"cd {self.work_dir} && tar czf {remote_archive.name} "
             tar_cmd += " ".join(files)
-            _, _, stderr = self.run_compute_cmd(tar_cmd)
+            _, _, stderr = self.run_login_cmd(tar_cmd)
             err = stderr.read().decode().strip()
-            if err:
-                raise RuntimeError(f"Failed to create archive on remote: {err}")
+            # if err:
+            #     raise RuntimeError(f"Failed to create archive on remote: {err}")
 
             # Download, extract, and cleanup
             self.get(remote_archive, local_archive)
@@ -1024,7 +1024,7 @@ class FronteraSite(BaseSite):
 
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(file), Path(remote_job))
-        self.run_compute(f"chmod 700 {remote_script}")
+        self.run_login(f"chmod 700 {remote_script}")
 
         return remote_script, remote_job
 
@@ -1138,16 +1138,19 @@ class FronteraSite(BaseSite):
 
     def _get_work_dir(self, rel_proj_path: Union[str, Path]) -> Path:
         """Gets the $WORK directory path on Frontera."""
-        _, stdout, stderr = self._login_client.client.exec_command("echo $WORK")
-        work_dir = stdout.read().decode().strip()
-        if not work_dir:
-            raise RuntimeError("Failed to get $WORK directory path from Frontera")
-        error = stderr.read().decode().strip()
-        if error or ('is mounted not "FULL" nor "IDLE"' in work_dir):
-            logger.info("Error getting $WORK directory path from Frontera: %s", error)
-            self._work_dir = Path("$WORK") / rel_proj_path
-        else:
-            self._work_dir = Path(work_dir) / rel_proj_path
+        work_dir = os.getenv("FRONTERA_WORK_DIR")
+
+        # If $WORK is not set, try getting it from the login node
+        if not work_dir or work_dir == "":
+            _, stdout, stderr = self._login_client.client.exec_command("echo $WORK")
+            work_dir = stdout.read().decode().strip()
+            if not work_dir:
+                raise RuntimeError(
+                    "Failed to get $WORK directory path from Frontera; you can work around "
+                    "this by setting FRONTERA_WORK_DIR in your environment or .env file"
+                )
+
+        self._work_dir = Path(work_dir) / rel_proj_path
         logger.info("Work directory: %s", self._work_dir)
         return self._work_dir
 

@@ -32,7 +32,7 @@ def _dims_in(dims1: List[str], dims2: List[str]) -> bool:
 def _coords_compatible(
     coords1: Dict[str, ArrayLike],
     coords2: Dict[str, ArrayLike],
-    rtol: float = 1e-05,
+    rtol: float = 1e-06,
     atol: float = 1e-08,
 ) -> bool:
     """Helper function to check if two xarrays have compatible grids."""
@@ -46,7 +46,7 @@ def _coords_compatible(
             return False
         if len(coords1[dim]) != len(coords2[dim]):
             return False
-        if not np.allclose(coords1[dim], coords2[dim], rtol=rtol, atol=atol):
+        if not np.allclose(coords1[dim].values, coords2[dim].values, rtol=rtol):
             return False
     return True
 
@@ -245,7 +245,9 @@ class Property:
         dims2 = set(da.dims)
         dims = dims1.intersection(dims2)
         coords = {dim: da.coords[dim] for dim in dims}
-        return self.darr.interp(coords=coords).broadcast_like(da)
+        return self.darr.interp(
+            coords=coords, method="nearest", kwargs={"fill_value": "extrapolate"}
+        ).broadcast_like(da)
 
     def stochastic_perturbation(
         self,
@@ -290,9 +292,9 @@ class Property:
 
             if _coords_compatible(self.darr.coords, xarr.coords):
                 if type == "additive":
-                    self.darr = self.darr + da
+                    self.darr += da
                 elif type == "multiplicative":
-                    self.darr = self.darr * (1 + da)
+                    self.darr *= 1 + da
             else:
                 if type == "additive":
                     self.darr = self._like(xarr) + da

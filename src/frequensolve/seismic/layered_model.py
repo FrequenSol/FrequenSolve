@@ -267,7 +267,7 @@ class Layer(ModelSubdomain):
                 nu=nu,
                 anisotropy=anisotropy,
                 seed=seed,
-                type="additive",
+                type="multiplicative",
             )
 
 
@@ -401,7 +401,7 @@ class LayeredModel(ModelBase):
             if surface.z_phys.is_constant:
                 surface.z_ref = surface.z_phys.get()
             else:
-                surface.z_ref = surface.z_phys.mean().values
+                surface.z_ref = float(surface.z_phys.darr.mean().compute().values)
         self += surface
 
     @property
@@ -497,7 +497,6 @@ class LayeredModel(ModelBase):
         return model
 
     def __dict__(self) -> Dict:
-
         # Mark bottom surface as interface
         self.surfaces[-1].interface = True
 
@@ -568,6 +567,8 @@ class LayeredModel(ModelBase):
                     )
                 )
             self._last_added = "layer"
+        elif isinstance(other, ModelSubdomain):
+            self.add_subdomain(other)
         else:
             raise ValueError(f"Cannot add {type(other)} to LayeredModel")
         return self
@@ -626,6 +627,12 @@ class LayeredModel(ModelBase):
                 return self.surfaces[-1]
             else:
                 return self.surfaces[0]
+
+        # TODO: add flag and method to "complete" model like this
+        if self.ordering == "top_down":
+            self._layer_to_surfs[-1].lower = self.lower_surface()
+        else:
+            self._layer_to_surfs[-1].upper = self.upper_surface()
 
         for layer_bounds in self._layer_to_surfs:
             if isinstance(layer, int):
@@ -842,14 +849,6 @@ class LayeredModel(ModelBase):
         else:
             plt.show()
 
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        self._proj_path = proj_path
-        self._rel_path = rel_path / self.name
-        for subdomain in self.subdomains:
-            subdomain._set_path(proj_path, self._rel_path)
-        for surface in self.surfaces:
-            surface._set_path(proj_path, self._rel_path)
-
     def _plot_acquisition(self, acquisition: Acquisition, ax, **kwargs):
         from matplotlib.pyplot import cm
 
@@ -953,6 +952,14 @@ class LayeredModel(ModelBase):
             coords[:, -1] = z_phys
             return coords
         raise ValueError(f"No layer found")
+
+    def _set_path(self, proj_path: Path, rel_path: Path):
+        self._proj_path = proj_path
+        self._rel_path = rel_path / self.name
+        for subdomain in self.subdomains:
+            subdomain._set_path(proj_path, self._rel_path)
+        for surface in self.surfaces:
+            surface._set_path(proj_path, self._rel_path)
 
     @property
     def _path(self) -> Path:
