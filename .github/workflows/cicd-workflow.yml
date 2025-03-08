@@ -100,34 +100,44 @@ jobs:
 
   deploy-docs:
     needs: docs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
-      pages: write
       id-token: write
+      contents: read
     environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      name: production
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download documentation artifact
         uses: actions/download-artifact@v4
         with:
           name: documentation
-          path: docs-build
+          path: docs/build/html
 
-      # - name: Setup Pages
-      #   uses: actions/configure-pages@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      # - name: Upload Pages artifact
-      #   uses: actions/upload-pages-artifact@v3
-      #   with:
-      #     path: docs-build
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
 
-      # - name: Deploy to GitHub Pages
-      #   id: deployment
-      #   uses: actions/deploy-pages@v4
+      - name: Initialize Terraform
+        working-directory: docs/host
+        run: terraform init
+
+      - name: Deploy documentation
+        working-directory: docs/host
+        run: make deploy-all
 
   build:
     needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4

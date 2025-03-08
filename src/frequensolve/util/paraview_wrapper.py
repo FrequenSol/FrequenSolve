@@ -2,13 +2,21 @@
 
 import os
 import sys
+
+import numpy as np
+
+try:
+    from paraview.simple import *  # noqa
+
+    HAS_PARAVIEW = True
+except ImportError:
+    HAS_PARAVIEW = False
+
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-import numpy as np
-from paraview.simple import *  # noqa
-
-paraview.simple._DisableFirstRenderCameraReset()
+if HAS_PARAVIEW:
+    paraview.simple._DisableFirstRenderCameraReset()
 
 __all__ = ["ParaviewManager"]
 

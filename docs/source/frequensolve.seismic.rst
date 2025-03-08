@@ -33,13 +33,6 @@ Receivers
    :show-inheritance:
    :noindex:
 
-Waveform
----------
-
-.. automodule:: frequensolve.seismic.waveform
-   :members:
-   :show-inheritance:
-   :noindex:
 
 Sources
 -------

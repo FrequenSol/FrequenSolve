@@ -149,11 +149,12 @@ class ReceiverNodeArray(ReceiverDevice):
 
     Attributes:
        offsets (List[List[float]]): List of offsets from the 'location' of the array.
-             The fast dimension is over coordinates, the slow dimension is over nodes:
-             e.g., for a 9-node channel in 3D
-                dx = 0.005 (5-m spacing)
-                dy = 0.010 (10-m spacing)
-                offsets = [[-dx, -dy, 0], [0, -dy, 0], [dx,-dy,0], ...
+            The fast dimension is over coordinates, the slow dimension is over nodes:
+            e.g., for a 9-node channel in 3D
+
+            - dx = 0.005 (5-m spacing)
+            - dy = 0.010 (10-m spacing)
+            - offsets = [[-dx, -dy, 0], [0, -dy, 0], [dx,-dy,0], ...
     """
 
     offsets: List[List[float]] = field(default_factory=list)

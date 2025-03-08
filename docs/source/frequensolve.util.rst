@@ -17,13 +17,6 @@ Paraview Wrapper
    :show-inheritance:
    :noindex:
 
-Perturb
--------
-
-.. automodule:: frequensolve.util.perturb
-   :members:
-   :show-inheritance:
-   :noindex:
 
 Registry
 --------
