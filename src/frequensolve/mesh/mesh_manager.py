@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from shutil import copy2
 from typing import Dict, List, Optional, Tuple, Union
 
 from .mesh import *  # noqa
@@ -202,7 +203,16 @@ class MeshManager:
                 "if a mesh or mesh generator has not been provided, "
                 "'file' and 'format' must be provided"
             )
-            mesh_dict["file"] = self.file
+            # Copy mesh file to project directory if not already there
+            mesh_file = Path(self.file)
+            if not mesh_file.is_relative_to(self._proj_path):
+                dest = (self._path / mesh_file.name).resolve()
+                copy2(mesh_file, dest)
+                self.file = dest
+                mesh_dict["file"] = self.file.relative_to(self._proj_path)
+            else:
+                mesh_dict["file"] = self.file
+
             mesh_dict["format"] = self.format
 
         # Mesh determined by generator (defined in backend)
@@ -212,9 +222,9 @@ class MeshManager:
         # Write mesh to file (if mesh is a Mesh object)
         elif isinstance(self.mesh, Mesh):
             path = self._path / "mesh"
-            self.mesh.write_mesh(path, "hp3d")
+            self.mesh.write_mesh(path, "gmp")
             mesh_dict["file"] = path.relative_to(self._proj_path)
-            mesh_dict["format"] = "hp3d"
+            mesh_dict["format"] = "gmp"
 
         if self.parallel:
             mesh_dict["parallel"] = self.parallel.__dict__()

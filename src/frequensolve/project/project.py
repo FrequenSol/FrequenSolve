@@ -168,6 +168,12 @@ class Project:
                             (temp_file, Path(sim._file).relative_to(self.path))
                         )
 
+            # Transfer mesh files
+            for sim in self.simulations:
+                if sim.mesh.file is not None:
+                    mesh_file = self.path / sim.mesh.file
+                    self.site.put(mesh_file, remote / mesh_file.relative_to(self.path))
+
             # Transfer simulation directory
             self.site.put(sim_dir, remote / "simulations")
 

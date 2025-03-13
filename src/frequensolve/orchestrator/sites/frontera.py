@@ -24,8 +24,6 @@ from select import select
 from threading import Event, Thread
 from typing import Literal, Optional, TextIO, Union
 
-from dask.distributed import Client
-from dask_jobqueue import SLURMCluster
 from dotenv import load_dotenv
 from jinja2 import Environment, FileSystemLoader
 from paramiko import (
@@ -588,7 +586,7 @@ class FronteraSite(BaseSite):
                 f"Unable to attach to {self.pool.id}, status: {self.pool.status}"
             )
 
-    def submit(self, job: SimulationJob):
+    def submit(self, job: SimulationJob, procs_per_job: int = 2):
         """Submit job and block until completion."""
 
         if self._is_notebook:
@@ -597,13 +595,13 @@ class FronteraSite(BaseSite):
             nest_asyncio.apply()
 
         loop = asyncio.get_event_loop()
-        future = self.submit_async(job)
+        future = self.submit_async(job, procs_per_job)
         return loop.run_until_complete(future)
 
-    def submit_async(self, job: SimulationJob) -> Future:
+    def submit_async(self, job: SimulationJob, procs_per_job: int = 2) -> Future:
         """Submit job asynchronously and return a future."""
         remote_script, remote_job = self._transfer_job(job)
-        ntasks_per_item = max(2, self.pool.nproc // job.n_tasks)
+        ntasks_per_item = max(procs_per_job, self.pool.nproc // job.n_tasks)
 
         future = Future()
         if self._compute_client.is_proxy():
@@ -627,38 +625,41 @@ class FronteraSite(BaseSite):
         loop.create_task(monitor)
         return future
 
-    def provision_dask(
-        self, nhost: int, nproc: int, duration: Optional[str] = None, **kwargs
-    ) -> Client:
-        logger.info(
-            "Provisioning Dask cluster with nhost=%d, nproc=%d, duration=%s",
-            nhost,
-            nproc,
-            duration,
-        )
-        duration = self.config.validate_request(nhost, nproc, duration)
-        cores_per_node = self.config.cores_per_socket * self.config.sockets_per_node
-        cores_per_proc = cores_per_node * nhost // nproc
-        logger.debug(
-            "Calculated cores_per_node=%d, cores_per_proc=%d",
-            cores_per_node,
-            cores_per_proc,
-        )
-        cluster = SLURMCluster(
-            queue=self.config.queue,
-            account=self.config.account,
-            processes=nproc,
-            cores=cores_per_proc,
-            walltime=duration,
-            job_extra=[
-                f"--nodes={nhost}",
-                f"--ntasks-per-node={nproc // nhost}",
-            ],
-            **kwargs,
-        )
-        logger.info("SLURMCluster created; scaling cluster with 1 job.")
-        cluster.scale(jobs=1)
-        return Client(cluster)
+    # def provision_dask(
+    #     self, nhost: int, nproc: int, duration: Optional[str] = None, **kwargs
+    # ) -> "Client":
+    #     from dask.distributed import Client
+    #     from dask_jobqueue import SLURMCluster
+
+    #     logger.info(
+    #         "Provisioning Dask cluster with nhost=%d, nproc=%d, duration=%s",
+    #         nhost,
+    #         nproc,
+    #         duration,
+    #     )
+    #     duration = self.config.validate_request(nhost, nproc, duration)
+    #     cores_per_node = self.config.cores_per_socket * self.config.sockets_per_node
+    #     cores_per_proc = cores_per_node * nhost // nproc
+    #     logger.debug(
+    #         "Calculated cores_per_node=%d, cores_per_proc=%d",
+    #         cores_per_node,
+    #         cores_per_proc,
+    #     )
+    #     cluster = SLURMCluster(
+    #         queue=self.config.queue,
+    #         account=self.config.account,
+    #         processes=nproc,
+    #         cores=cores_per_proc,
+    #         walltime=duration,
+    #         job_extra=[
+    #             f"--nodes={nhost}",
+    #             f"--ntasks-per-node={nproc // nhost}",
+    #         ],
+    #         **kwargs,
+    #     )
+    #     logger.info("SLURMCluster created; scaling cluster with 1 job.")
+    #     cluster.scale(jobs=1)
+    #     return Client(cluster)
 
     @property
     def mpi_cmd(self) -> str:
@@ -991,7 +992,7 @@ class FronteraSite(BaseSite):
         if len(jobs) == 0:
             raise RuntimeError("No jobs found")
         if len(jobs.split("\n")) == 1:
-            print("\nAttatched to job:")
+            print("\nAttached to job:")
             print(jobs)
             return jobs.split()[0]
         else:
@@ -1049,7 +1050,6 @@ class FronteraSite(BaseSite):
             mpi=self.mpi_cmd,
             executable=self.executable,
             fs_dir=str(Path(self.executable).parent),
-            project_dir=str(self.work_dir),
             **kwargs,
         )
         return script

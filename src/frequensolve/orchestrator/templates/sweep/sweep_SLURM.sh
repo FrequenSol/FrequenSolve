@@ -22,7 +22,6 @@ ranks_per_job=$2
 export FREQUENSOL_SWEEP=1
 {% endif %}
 export FREQUENSOLVE_DIR={{fs_dir}}
-export FS_PROJECT_DIR={{project_dir}}
 
 nranks={{nrank}}
 nfreq={{njob}}

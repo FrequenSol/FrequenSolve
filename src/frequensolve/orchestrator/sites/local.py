@@ -53,7 +53,7 @@ class LocalSite(BaseSite):
             raise FileNotFoundError(f"Solver executable not found at {executable}")
         return executable
 
-    def submit(self, job: SimulationJob) -> list:
+    def submit(self, job: SimulationJob, **kwargs) -> list:
         """Submit job and block until completion."""
         if self._is_notebook:
             import nest_asyncio
@@ -65,21 +65,20 @@ class LocalSite(BaseSite):
         asyncio.set_event_loop(loop)
 
         try:
-            return loop.run_until_complete(self._run_job(job))
+            return loop.run_until_complete(self._run_job(job, **kwargs))
         finally:
             loop.close()
 
-    async def _run_job(self, job: SimulationJob) -> list:
+    async def _run_job(self, job: SimulationJob, **kwargs) -> list:
         """Run all tasks for a job and return results."""
         results = []
         for i in range(job.n_tasks):
-            print(f"Running task {i+1}")
-            result = await self._run_single_task(job, i)
+            result = await self._run_single_task(job, i, **kwargs)
             if result is not None:
                 results.append(result)
         return job.records
 
-    def submit_async(self, job: SimulationJob) -> asyncio.Future:
+    def submit_async(self, job: SimulationJob, **kwargs) -> asyncio.Future:
         """Submit job asynchronously and return a future."""
         if self._is_notebook:
             import nest_asyncio
@@ -87,26 +86,40 @@ class LocalSite(BaseSite):
             nest_asyncio.apply()
 
         loop = asyncio.get_event_loop()
-        future = loop.create_task(self._run_job(job))
+        future = loop.create_task(self._run_job(job, **kwargs))
         self._futures.append(future)
         return future
 
-    async def _run_single_task(self, job: SimulationJob, task_id: int) -> dict:
+    async def _run_single_task(
+        self, job: SimulationJob, task_id: int, **kwargs
+    ) -> dict:
         """Run a single task and return its results."""
         job_file = job.save()
         _wait_for_path(job_file)
 
-        args = [
-            "mpirun",
-            "-np",
-            "2",
+        nranks = kwargs.get("nranks", 1)
+        assert (
+            nranks <= self.config.cores
+        ), "Number of ranks must be less than or equal to the number of cores"
+        nthreads = kwargs.get("nthreads", self.config.cores // nranks)
+
+        if nranks > 1:
+            args = [
+                "mpirun",
+                "-np",
+                f"{nranks}",
+            ]
+        else:
+            args = []
+
+        args += [
             self.executable,
             "-nthreads",
-            str(self.config.cores // 2 - 1),
+            f"{nthreads}",
             "-j",
-            str(job_file),
+            f"{job_file}",
             "-i",
-            str(task_id + 1),
+            f"{task_id + 1}",
         ]
 
         try:

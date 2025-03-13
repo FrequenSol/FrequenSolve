@@ -297,6 +297,7 @@ def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
     for i, freq in record.f_map.items():
         file = f"{fbase}_{i}.h5"
         ifreq = round(freq / sampling.df)
+        i_omega = np.csingle(1j * 2 * np.pi * freq)
 
         if not os.path.exists(file):
             raise FileNotFoundError(f"File {file} does not exist.")
@@ -305,11 +306,15 @@ def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
             u[ifreq, :] += np.csingle(1j) * f[f"{field}_{isrc}_im"][()]
             u[ifreq, :] += f[f"{field}_{isrc}_re"][()]
 
+            if np.any(np.isnan(u[ifreq, :])):
+                u[ifreq, :] = 0
+                print(f"NaN values for frequency {freq} Hz")
+                continue
+
             u[ifreq, :] *= wavelet.spectrum[ifreq]
 
             # For fiber-type receivers, multiply by iω for strain *rate*
             if isinstance(group.device, ReceiverFiber):
-                i_omega = np.csingle(1j * 2 * np.pi * freq)
                 u[ifreq, :] *= i_omega
 
     # TODO: This is a hack.
