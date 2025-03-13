@@ -87,14 +87,14 @@ class ParaviewOutput(Output):
        upscale (int): The upscale factor for the Paraview output.
     """
 
-    name: str = "paraview"
+    name: str = "ParaView"
     path: Optional[Path] = None
     fields: Optional[List[str]] = None
     upscale: int = 1
 
     def __init__(
         self,
-        name: str = "paraview",
+        name: str = "ParaView",
         path: Optional[Union[str, Path]] = None,
         fields: Optional[List[str]] = None,
         upscale: int = 1,
