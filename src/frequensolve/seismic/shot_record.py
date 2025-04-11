@@ -352,31 +352,30 @@ def read_shot_TD(record: Record, wavelet: Wavelet, upscale: int = 1) -> ShotReco
     field = "_".join(comp.split("_")[:-1])
     isrc = int(comp.split("_")[-1])
 
-    for rgroup in sim["Acquisition"]["receiver_groups"]:
-        if rgroup["name"] == group_name:
-            break
-    else:
-        raise ValueError(f"Receiver group {group_name} not found in simulation.")
-
-    sgroup = sim["Acquisition"]["source_groups"][isrc - 1]
-
     # TODO: This is a hack, fix it.
     cwd = os.getcwd()
     os.chdir(record.project_path)
 
-    recv_group = ReceiverGroup.from_dict(rgroup)
+    found = False
+    for rgroup in sim["Acquisition"]["receiver_groups"]:
+        if rgroup["name"] == group_name:
+            found = True
+            recv_group = ReceiverGroup.from_dict(rgroup)
+            break
+    if not found:
+        raise ValueError(f"Receiver group {group_name} not found in simulation.")
+
+    sgroup = sim["Acquisition"]["source_groups"][isrc - 1]
     src_group = SourceGroup.from_dict(sgroup)
 
     # Get sampling from metadata
     sampling = record.sampling(upscale)
-
-    # Try to read frequency domain data first
     try:
         fd_record = read_shot_FD(record, wavelet)
     except Exception as e:
-        raise ValueError(f"failed reading record: {e}")
+        raise ValueError(f"Failed reading record: {e}")
 
-    # TODO: This is a hack.
+    # TODO: end hack
     os.chdir(cwd)
 
     # Convert to time domain using FFT
@@ -391,7 +390,7 @@ def read_shot_TD(record: Record, wavelet: Wavelet, upscale: int = 1) -> ShotReco
 
     # If upscaled, create a bigger array for inverse transform
     if nF > nf:
-        FD = np.zeros((nF, group.size), dtype=np.csingle)
+        FD = np.zeros((nF, recv_group.size), dtype=np.csingle)
         FD[:nf, :] = fd_record.data[:nf, :]
         td = fft.irfft(FD, axis=0)
     else:
