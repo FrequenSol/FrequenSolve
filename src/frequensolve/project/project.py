@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -168,19 +169,29 @@ class Project:
                             (temp_file, Path(sim._file).relative_to(self.path))
                         )
 
-            # Transfer mesh files
+            # Create temporary directory for all files to transfer
+            temp_dir = Path(self.path) / ".temp_transfer"
+            temp_dir.mkdir(exist_ok=True)
+
+            # Copy mesh files to temp directory
             for sim in self.simulations:
                 if sim.mesh.file is not None:
                     mesh_file = self.path / sim.mesh.file
-                    self.site.put(mesh_file, remote / mesh_file.relative_to(self.path))
+                    dest = temp_dir / mesh_file.relative_to(self.path)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(mesh_file, dest)
 
-            # Transfer simulation directory
-            self.site.put(sim_dir, remote / "simulations")
+            # Copy simulation directory to temp
+            shutil.copytree(sim_dir, temp_dir / "simulations", dirs_exist_ok=True)
 
-            # Transfer modified simulation files
             for temp_file, rel_path in temp_files:
-                self.site.put(temp_file, remote / rel_path)
+                dest = temp_dir / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(temp_file, dest)
                 temp_file.unlink()  # Clean up temporary file
+
+            self.site.put(temp_dir, remote)
+            shutil.rmtree(temp_dir)
 
     def get_records(self, results: dict) -> RecordDatabase:
         """Get records from Frontera.

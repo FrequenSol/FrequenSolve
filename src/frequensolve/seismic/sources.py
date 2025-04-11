@@ -85,24 +85,24 @@ class SourceGroup:
        sources (List[PointSource]):     List of source objects
     """
 
-    sources: List[Source] = field(default_factory=list)
+    source: Source = field(default_factory=Source)
     _proj_path: Path = None
     _rel_path: Path = None
 
     @classmethod
     def from_dict(cls, data: Dict):
-        sources = [Source.from_dict(source) for source in data.get("sources", [])]
-        return cls(sources=sources)
+        source = Source.from_dict(data.get("source", {}))
+        return cls(source=source)
 
     def __dict__(self) -> Dict:
-        return {"sources": [source.__dict__() for source in self.sources]}
+        return {"source": self.source.__dict__()}
 
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path
         self._rel_path = rel_path
 
     def get_coordinates(self) -> NPArray:
-        return NPArray([source.coordinates for source in self.sources])
+        return NPArray(self.source.coordinates)
 
     @property
     def _path(self) -> Path:

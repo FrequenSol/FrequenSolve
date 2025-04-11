@@ -331,7 +331,10 @@ class CoordsFromFile(ReceiverCoords):
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
-    def get(self, indices: Optional[Union[int, slice]] = None) -> np.ndarray:
+    def __getitem__(self, key: Union[tuple, slice]):
+        return self.get(key)
+
+    def get(self, indices: Optional[Union[Tuple, slice]] = None) -> np.ndarray:
         """Get coordinates for specified indices.
 
         Args:
@@ -559,6 +562,7 @@ class ReceiverGroup:
     name: str = "group"
     device: ReceiverDevice = field(default_factory=ReceiverDevice)
     frame: Literal["physical", "reference"] = "physical"
+    domain: Optional[int] = None
     coordinates: ReceiverCoords = field(default_factory=ReceiverCoords)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
@@ -576,12 +580,14 @@ class ReceiverGroup:
         device: ReceiverDevice,
         coordinates: Union[np.ndarray, xr.DataArray, str, Path, Grid, ReceiverCoords],
         frame: str = "physical",
+        domain: Optional[int] = None,
     ) -> None:
         coords = self._clean_coordinates(coordinates)
         self.name = name
         self.device = device
         self.frame = frame
         self.coordinates = coords
+        self.domain = domain
 
     @staticmethod
     def _clean_coordinates(coords):
@@ -619,6 +625,7 @@ class ReceiverGroup:
             "name": self.name,
             "device": self.device.__dict__(),
             "frame": self.frame,
+            **({"domain": self.domain} if self.domain is not None else {}),
             "coordinates": self.coordinates.__dict__(),
         }
 
@@ -631,6 +638,7 @@ class ReceiverGroup:
             device=ReceiverDevice.from_dict(data["device"]),
             frame=data["frame"],
             coordinates=coords,
+            domain=data.get("domain"),
         )
 
     def _set_path(self, proj_path: Path, rel_path: Path):

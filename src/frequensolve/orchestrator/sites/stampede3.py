@@ -1,7 +1,7 @@
 """
-Frontera HPC site.
+Stampede3 HPC site.
 
-Manages authentication, transfer, and resource provisioning on Frontera.
+Manages authentication, transfer, and resource provisioning on Stampede3.
 """
 
 import asyncio
@@ -33,8 +33,8 @@ from paramiko import (
     Transport,
 )
 
-from frequensolve.orchestrator.config.frontera import (
-    FronteraConfig,
+from frequensolve.orchestrator.config.stampede3 import (
+    Stampede3Config,
     _hms_to_seconds,
     _seconds_to_hms,
 )
@@ -45,17 +45,17 @@ from frequensolve.orchestrator.ssh import SSHClientClass, SSHProxy
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
 
-__all__ = ["FronteraSite"]
+__all__ = ["Stampede3Site"]
 
 # Initialize the logger
-logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/frontera.log")
+logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/stampede3.log")
 
 
 # ----------------------------------
 # TACC Login Credentials
 # ----------------------------------
 class TACCLoginCredentials(Credentials):
-    """Credentials for Frontera HPC."""
+    """Credentials for Stampede3 HPC."""
 
     user_env: str = "TACC_USERNAME"
     pw_env: str = "TACC_PASSWORD"
@@ -63,18 +63,18 @@ class TACCLoginCredentials(Credentials):
 
 
 # ----------------------------------
-# Frontera Site
+# Stampede3 Site
 # ----------------------------------
 @dataclass(kw_only=True, init=False)
-class FronteraSite(BaseSite):
+class Stampede3Site(BaseSite):
     """
-    Frontera HPC site.
+    Stampede3 HPC site.
 
-    Manages authentication, transfer to and from, and running jobs on Frontera.
+    Manages authentication, transfer to and from, and running jobs on Stampede3.
     """
 
     credentials: TACCLoginCredentials
-    config: FronteraConfig
+    config: Stampede3Config
     pool: PoolInfo
     executable: str
     remote_env: dict
@@ -89,18 +89,18 @@ class FronteraSite(BaseSite):
         self,
         rel_path: Union[str, Path],
         transfer_method: Literal["rsync", "sftp"] = "rsync",
-        queue: str = "development",
+        queue: str = "skx-dev",
     ):
         logger.debug(
-            "Initializing FronteraSite with rel_path: %s, queue: %s", rel_path, queue
+            "Initializing Stampede3Site with rel_path: %s, queue: %s", rel_path, queue
         )
 
-        # Get Frontera credentials and configuration
+        # Get TACC credentials and node configuration
         self.credentials = TACCLoginCredentials()
-        self.config = FronteraConfig(queue=queue)
+        self.config = Stampede3Config(queue=queue)
         self.transfer_method = transfer_method
 
-        # SSH into Frontera
+        # SSH into Stampede3
         self._login_client = SSHClientClass(self.authenticate())
         logger.info("SSH client authenticated successfully")
 
@@ -112,7 +112,7 @@ class FronteraSite(BaseSite):
         self.pool = PoolInfo()
         self._is_notebook = self._check_if_notebook()
 
-        logger.info("FronteraSite initialized with work_dir: %s", self._work_dir)
+        logger.info("Stampede3Site initialized with work_dir: %s", self._work_dir)
 
     @property
     def compute_client(self) -> SSHClient:
@@ -135,7 +135,7 @@ class FronteraSite(BaseSite):
         return self._login_client.hostname
 
     def __enter__(self):
-        logger.info("Entering FronteraSite context manager.")
+        logger.info("Entering Stampede3Site context manager.")
         self.credentials = TACCLoginCredentials()
         self._login_client = SSHClientClass(self.authenticate())
         logger.info("SSH Client re-established in context manager.")
@@ -144,7 +144,7 @@ class FronteraSite(BaseSite):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        logger.info("Exiting FronteraSite context manager.")
+        logger.info("Exiting Stampede3Site context manager.")
         if self._compute_client:
             self.compute_client.close()
             logger.debug("Compute client closed.")
@@ -153,7 +153,7 @@ class FronteraSite(BaseSite):
             logger.debug("SSH client closed.")
 
     def __del__(self):
-        logger.info("Deleting FronteraSite instance and cleaning up resources.")
+        logger.info("Deleting Stampede3Site instance and cleaning up resources.")
         if self._compute_client:
             self.compute_client.close()
             logger.debug("Compute client closed in __del__.")
@@ -161,8 +161,8 @@ class FronteraSite(BaseSite):
             self.login_client.close()
             logger.debug("SSH client closed in __del__.")
 
-    def authenticate(self, host: str = "frontera.tacc.utexas.edu"):
-        """Connects to Frontera Login Node using Paramiko's built-in authentication mechanisms."""
+    def authenticate(self, host: str = "stampede3.tacc.utexas.edu"):
+        """Connects to Stampede3 Login Node using Paramiko's built-in authentication mechanisms."""
 
         if threading.current_thread() != threading.main_thread():
             raise RuntimeError("Authentication must be called from the main thread")
@@ -175,7 +175,6 @@ class FronteraSite(BaseSite):
             # Look for control sockets
             for control_path in glob.glob(f"{control_dir}/*"):
                 try:
-                    # Test if this socket works with Frontera
                     result = subprocess.run(
                         [
                             "ssh",
@@ -401,70 +400,49 @@ class FronteraSite(BaseSite):
 
     def submit_async(self, job: SimulationJob, procs_per_job: int = 2) -> Future:
         """Submit job asynchronously and return a future."""
-        remote_script, remote_job = self._transfer_job(job)
-        ntasks_per_item = max(procs_per_job, self.pool.nproc // job.n_tasks)
 
         future = Future()
-        if self._compute_client.is_proxy():
-            interactive = self.compute_client.invoke_shell()
-            cmd = f"cd {self.work_dir} && {remote_script} {remote_job} {ntasks_per_item}\n"
-            interactive.stdin.write(cmd.encode())
-            interactive.stdin.flush()
-            monitor = self._monitor_command_output(future, job, interactive)
+        if self._compute_client:  # Run on already provisioned compute node
+            remote_script, remote_job = self._transfer_job(job)
+            ntasks_per_item = max(procs_per_job, self.pool.nproc // job.n_tasks)
+
+            if self._compute_client.is_proxy():
+                interactive = self.compute_client.invoke_shell()
+                cmd = f"cd {self.work_dir} && {remote_script} {remote_job} {ntasks_per_item}\n"
+                interactive.stdin.write(cmd.encode())
+                interactive.stdin.flush()
+                monitor = self._monitor_command_output(future, job, interactive)
+            else:
+                cmd = f"cd {self.work_dir} && {remote_script} {remote_job} {ntasks_per_item}"
+                interactive = self.login_client.invoke_shell()
+                interactive.send(f"ssh {self.compute_host}\n")
+                time.sleep(1)
+                interactive.send(cmd)
+                monitor = self._monitor_command_output(future, job, interactive)
+
+        # Submit job to SLURM queue
         else:
-            # Keep existing non-proxy approach
-            cmd = (
-                f"cd {self.work_dir} && {remote_script} {remote_job} {ntasks_per_item}"
+            remote_script, remote_job = self._transfer_job(job)
+            ntasks_per_item = max(procs_per_job, self.pool.nproc // job.n_tasks)
+            run_login_cmd = self.run_login_cmd(
+                f"sbatch {remote_script} {remote_job} {ntasks_per_item}"
             )
-            interactive = self.login_client.invoke_shell()
-            interactive.send(f"ssh {self.compute_host}\n")
-            time.sleep(1)
-            interactive.send(cmd)
-            monitor = self._monitor_command_output(future, job, interactive)
+            logger.debug("sbatch output: %s", run_login_cmd)
+            job_id = re.search(r"Submitted batch job (\d+)", run_login_cmd)
+            if not job_id:
+                logger.error(
+                    "Failed to retrieve job ID from sbatch output: %s", run_login_cmd
+                )
+                raise ValueError("failed to get job ID from sbatch output")
+            job_id = job_id.group(1)
 
         loop = asyncio.get_event_loop()
         loop.create_task(monitor)
         return future
 
-    # def provision_dask(
-    #     self, nhost: int, nproc: int, duration: Optional[str] = None, **kwargs
-    # ) -> "Client":
-    #     from dask.distributed import Client
-    #     from dask_jobqueue import SLURMCluster
-
-    #     logger.info(
-    #         "Provisioning Dask cluster with nhost=%d, nproc=%d, duration=%s",
-    #         nhost,
-    #         nproc,
-    #         duration,
-    #     )
-    #     duration = self.config.validate_request(nhost, nproc, duration)
-    #     cores_per_node = self.config.cores_per_socket * self.config.sockets_per_node
-    #     cores_per_proc = cores_per_node * nhost // nproc
-    #     logger.debug(
-    #         "Calculated cores_per_node=%d, cores_per_proc=%d",
-    #         cores_per_node,
-    #         cores_per_proc,
-    #     )
-    #     cluster = SLURMCluster(
-    #         queue=self.config.queue,
-    #         account=self.config.account,
-    #         processes=nproc,
-    #         cores=cores_per_proc,
-    #         walltime=duration,
-    #         job_extra=[
-    #             f"--nodes={nhost}",
-    #             f"--ntasks-per-node={nproc // nhost}",
-    #         ],
-    #         **kwargs,
-    #     )
-    #     logger.info("SLURMCluster created; scaling cluster with 1 job.")
-    #     cluster.scale(jobs=1)
-    #     return Client(cluster)
-
     @property
     def mpi_cmd(self) -> str:
-        """Get the MPI command for Frontera."""
+        """Get the MPI command for Stampede3."""
         return f"{self.config.mpi_wrapper}"
 
     @cached_property
@@ -474,7 +452,7 @@ class FronteraSite(BaseSite):
 
     @property
     def work_dir(self) -> Path:
-        """Gets the $WORK directory path on Frontera."""
+        """Gets the $WORK directory path on Stampede3."""
         return self._work_dir
 
     def run_cmd(self, client, cmd: str):
@@ -496,7 +474,7 @@ class FronteraSite(BaseSite):
         return self.run_cmd(self._login_client, cmd)
 
     def run_compute(self, cmd: str) -> str:
-        """Run a command on compute nodeand return its stdout as a stripped string."""
+        """Run a command on compute node and return its stdout as a stripped string."""
         _, stdout, _ = self.run_compute_cmd(cmd)
         return stdout.read().decode().strip()
 
@@ -552,7 +530,7 @@ class FronteraSite(BaseSite):
         self.pool._status.status = status_map.get(status, "unknown")
 
     def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
-        """Transfer files from local path to remote path on Frontera.
+        """Transfer files from local path to remote path on Stampede3.
 
         Args:
             local_path: Local path to transfer from
@@ -581,13 +559,15 @@ class FronteraSite(BaseSite):
                 finally:
                     sftp.close()
             else:
-                remote_str = f"{self.credentials.username}@frontera.tacc.utexas.edu:{remote_path}"
+                remote_str = f"{self.credentials.username}@stampede3.tacc.utexas.edu:{remote_path}"
                 rsync_cmd = ["rsync", "-azP"]
 
                 if local_path.is_dir():
                     local_str = f"{local_path}/"
                 else:
                     local_str = str(local_path)
+
+                print(" ".join([*rsync_cmd, local_str, remote_str]))
 
                 result = subprocess.run(
                     [*rsync_cmd, local_str, remote_str], capture_output=True, text=True
@@ -603,7 +583,7 @@ class FronteraSite(BaseSite):
             raise
 
     def download_records(self, records: dict, project_dir: Union[str, Path]):
-        """Download records from Frontera.
+        """Download records from Stampede3.
 
         Args:
             records: A dictionary of records to get.
@@ -649,7 +629,7 @@ class FronteraSite(BaseSite):
         local_path: Union[str, Path],
         overwrite: bool = False,
     ):
-        """Transfer files from remote path to local path on Frontera.
+        """Transfer files from remote path to local path on Stampede3.
 
         Args:
             remote_path: Remote path to transfer to
@@ -678,7 +658,7 @@ class FronteraSite(BaseSite):
                     sftp.close()
             else:
                 # Use rsync
-                remote_str = f"{self.credentials.username}@frontera.tacc.utexas.edu:{remote_path}"
+                remote_str = f"{self.credentials.username}@stampede3.tacc.utexas.edu:{remote_path}"
                 local_str = f"{local_path}/" if local_path.is_dir() else str(local_path)
                 rsync_cmd = ["rsync", "-azP"]
                 logger.debug("rsync: %s", [*rsync_cmd, remote_str, local_str])
@@ -719,7 +699,7 @@ class FronteraSite(BaseSite):
     def _get_solver_path(self) -> str:
         """Get the solver path."""
         load_dotenv()
-        return os.getenv("FRONTERA_SOLVER_EXECUTABLE")
+        return os.getenv("STAMPEDE3_SOLVER_EXECUTABLE")
 
     def _get_FS_path(self) -> str:
         """Get the Frequensolve path."""
@@ -801,7 +781,7 @@ class FronteraSite(BaseSite):
             return int(job_id)
 
     def _transfer_job(self, job: SimulationJob):
-        """Submit a simulation job to Frontera.
+        """Submit a simulation job to Stampede3.
 
         Args:
             job (SimulationJob): The simulation job to submit
@@ -858,7 +838,7 @@ class FronteraSite(BaseSite):
     def _generate_provision_script(
         self, nhost: int, nproc: int, duration: Optional[str] = None, **kwargs
     ) -> str:
-        """Generate a script for provisioning a Frontera cluster."""
+        """Generate a script for provisioning a Stampede3 cluster."""
         env_dir = self._FS_dir / "src/frequensolve/orchestrator/templates"
         env = Environment(
             loader=FileSystemLoader(env_dir),
@@ -938,8 +918,8 @@ class FronteraSite(BaseSite):
                 raise
 
     def _get_work_dir(self, rel_proj_path: Union[str, Path]) -> Path:
-        """Gets the $WORK directory path on Frontera."""
-        work_dir = os.getenv("FRONTERA_WORK_DIR")
+        """Gets the $WORK directory path on Stampede3."""
+        work_dir = os.getenv("STAMPEDE3_WORK_DIR")
 
         # If $WORK is not set, try getting it from the login node
         if not work_dir or work_dir == "":
@@ -947,8 +927,8 @@ class FronteraSite(BaseSite):
             work_dir = stdout.read().decode().strip()
             if not work_dir:
                 raise RuntimeError(
-                    "Failed to get $WORK directory path from Frontera; you can work around "
-                    "this by setting FRONTERA_WORK_DIR in your environment or .env file"
+                    "Failed to get $WORK directory path from Stampede3; you can work around "
+                    "this by setting STAMPEDE3_WORK_DIR in your environment or .env file"
                 )
 
         self._work_dir = Path(work_dir) / rel_proj_path
@@ -1103,28 +1083,3 @@ class FronteraSite(BaseSite):
                             pass
                 else:
                     interactive.close()
-
-    # def _decode_hosts(self, hosts: str) -> List[str]:
-    #     """Decode the hosts string into a list of hostnames."""
-    #     i = 0
-    #     while i > -1:
-    #         i = hosts.find("[")
-    #         j = hosts.find("]", i)
-    #         prefix = hosts[i - 5 : i]
-    #         old_str = prefix + hosts[i : j + 1]
-    #         suffixes = []
-
-    #         group = hosts[i + 1 : j - 1]
-    #         for entries in group.split(","):
-    #             if "-" in entries:
-    #                 start, end = entries.split("-")
-    #                 for i in range(int(start), int(end) + 1):
-    #                     suffixes.append(f"{str(i).zfill(len(start))}")
-    #             else:
-    #                 suffixes.append(entries)
-
-    #         for suffix in suffixes:
-    #             new_str += f"{prefix}{suffix},"
-
-    #         new_hosts = hosts.replace(old_str, new_str[:-1])
-    #     return new_hosts.split(",")

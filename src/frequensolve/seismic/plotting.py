@@ -70,13 +70,18 @@ def plot_gather(shot: ShotRecord, **kwargs):
     group = shot.receiver_group
 
     x_min, x_max = group.coordinates.bounds
-    x0 = x_min[0]
-    x1 = x_max[0]
-    xlabel = f"X ({units})"
-    if x0 == x1:
-        x0 = x_min[1]
-        x1 = x_max[1]
-        xlabel = f"Depth ({units})"
+    idir = -1
+    x0 = 0
+    x1 = 0
+    while x0 == x1:
+        idir += 1
+        x0 = x_min[idir]
+        x1 = x_max[idir]
+        xlabel = f"{['X', 'Y', 'Z'][idir]} ({units})"
+        if idir == len(x_min):
+            x0 = 0
+            x1 = np.shape(group.coordinates)[-1]
+            break
 
     fig = plt.figure(1, figsize=figsize)
     plt.clf()
@@ -94,6 +99,7 @@ def plot_gather(shot: ShotRecord, **kwargs):
         vmin=-A,
         vmax=A,
         aspect="auto",
+        interpolation="nearest",
     )
     plt.tight_layout()
 
@@ -138,7 +144,7 @@ def animate_gather(shot: ShotRecord, **kwargs):
                     cmap=cmap,
                     vmin=-A,
                     vmax=A,
-                    extent=[x0[0], x1[0], x1[1], x0[1]],
+                    # extent=[x0[0], x1[0], x1[1], x0[1]],
                 )
             ]
         )
@@ -148,12 +154,15 @@ def animate_gather(shot: ShotRecord, **kwargs):
 
     A = kwargs.get("A", 1)
     units = kwargs.get("units", "km")
-    cmap = kwargs.get("cmap", "RdGy")
     interval = kwargs.get("interval", 50)
-    figsize = kwargs.get("figsize", (8, 8))
-    fontsize = kwargs.get("fontsize", 10)
+    cmap = kwargs.get("cmap", "grey")
+    figsize = kwargs.get("figsize", (5, 5))
+    fontsize = kwargs.get("fontsize", 12)
 
     plt.rcParams.update({"font.size": fontsize})
+
+    Tf = kwargs.get("Tf", None)
+    nTf, Tf = shot.sampling.cutoff(Tf)
 
     group = shot.receiver_group
 
@@ -226,15 +235,15 @@ def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
     Tf = kwargs.get("Tf", None)
     nTf, Tf = shot1.samples.cutoff(Tf)
 
-    source = shot1.source
-    group = shot1.receiver_group
+    sgroup = shot1.source_group
+    rgroup = shot1.receiver_group
 
-    x0 = np.min(group.coords[:, 0])
-    x1 = np.max(group.coords[:, 0])
+    x0 = np.min(rgroup.coords[:, 0])
+    x1 = np.max(rgroup.coords[:, 0])
     xlabel = f"X ({units})"
     if x0 == x1:
-        x0 = np.min(group.coords[:, 1])
-        x1 = np.max(group.coords[:, 1])
+        x0 = np.min(rgroup.coords[:, 1])
+        x1 = np.max(rgroup.coords[:, 1])
         xlabel = f"Depth ({units})"
 
     fig = plt.figure(1, figsize=figsize)
@@ -396,19 +405,19 @@ def plot_timelag(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
     Tf = kwargs.get("Tf", None)
     nTf, Tf = shot1.samples.cutoff(Tf)
 
-    source = shot1.source
-    group = shot1.receiver_group
+    sgroup = shot1.source_group
+    rgroup = shot1.receiver_group
 
-    x0 = np.min(group.coords[:, 0])
-    x1 = np.max(group.coords[:, 0])
+    x0 = np.min(rgroup.coords[:, 0])
+    x1 = np.max(rgroup.coords[:, 0])
     xlabel = f"X ({units})"
     if x0 == x1:
-        x0 = np.min(group.coords[:, 1])
-        x1 = np.max(group.coords[:, 1])
+        x0 = np.min(rgroup.coords[:, 1])
+        x1 = np.max(rgroup.coords[:, 1])
         xlabel = f"Depth ({units})"
 
     nT = shot1.samples.nTime
-    n_recv = group.size
+    n_recv = rgroup.size
     rate = (nT - 1) / shot1.samples.T  # samples/second
 
     # Compute lag time per receiver
@@ -480,10 +489,10 @@ def plot_xf(shot: ShotRecord, **kwargs):
     f_max = shot.sampling.f_max
     nf = shot.sampling.nfreq
 
-    source = shot.source
-    group = shot.receiver_group
+    sgroup = shot.source_group
+    rgroup = shot.receiver_group
 
-    x_min, x_max = group.coordinates.bounds
+    x_min, x_max = rgroup.coordinates.bounds
     x0 = x_min[0]
     x1 = x_max[0]
     xlabel = f"X ({units})"
@@ -525,7 +534,6 @@ def plot_cf(shot: ShotRecord, **kwargs):
        cmap (str):       Matplotlib colormap (default "RdYlBu_r").
        figsize (tuple):  Figure size (width, height) (default (8,8)).
        fontsize (int):   Font size for labels/ticks (default 14).
-       symm (bool):      If True, uses symmetrical approach for half of the array.
        c_min (float):    Minimum wave speed for transform (default 0.5).
        c_max (float):    Maximum wave speed for transform (default 6.0).
        n_c (int):        Number of wave speed samples (default 500).
@@ -549,22 +557,26 @@ def plot_cf(shot: ShotRecord, **kwargs):
     c_max = kwargs.get("c_max", 6.0)
     n_c = kwargs.get("n_c", 500)
 
-    source = shot.source
-    group = shot.receiver_group
+    sgroup = shot.source_group
+    rgroup = shot.receiver_group
 
-    x0 = np.min(group.coords[:, 0])
-    x1 = np.max(group.coords[:, 0])
+    x_min, x_max = rgroup.coordinates.bounds
+    idir = -1
+    x0 = 0
+    x1 = 0
+    while x0 == x1:
+        idir += 1
+        x0 = x_min[idir]
+        x1 = x_max[idir]
+        xlabel = f"{['X', 'Y', 'Z'][idir]} ({units})"
+        if idir == len(x_min):
+            x0 = 0
+            x1 = np.shape(rgroup.coordinates)[-1]
+            break
 
-    # If symmetrical, consider half the domain
-    if symm:
-        n1 = group.size // 2
-        xl = group.coords[:n1:-1, 0] - source.coords[0]
-        shot.data = shot.data[:, :n1:-1]
-    else:
-        n1 = group.size
-        xl = group.coords[:, 0] - source.coords[0]
+    n1 = rgroup.size
+    xl = abs(rgroup.coordinates[:, idir] - sgroup.source.coordinates[idir])
 
-    f_min = shot.sampling.f_min
     f_max = shot.sampling.f_max
     nf = shot.sampling.nfreq
 

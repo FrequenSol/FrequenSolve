@@ -44,6 +44,7 @@ class BaseSimulation(SimulationConfig):
     solver: SolverConfig = field(default_factory=SolverConfig)
     discretization: Discretization = field(default_factory=Discretization)
     outputs: OutputManager = field(default_factory=OutputManager)
+    user_parameters: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         from frequensolve.util.printing import print_note
@@ -97,6 +98,7 @@ class BaseSimulation(SimulationConfig):
                 else {}
             ),
             **({"Outputs": self.outputs.__dict__()} if self.outputs else {}),
+            **({"UserParameters": self.user_parameters}),
         }
 
 
@@ -126,6 +128,7 @@ class SeismicSimulation(BaseSimulation):
     discretization: Discretization = field(default_factory=Discretization)
     outputs: OutputManager = field(default_factory=OutputManager)
     acquisition: Acquisition = field(default_factory=Acquisition)
+    user_parameters: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         if self.model.dimension == 0:
@@ -165,6 +168,8 @@ class SeismicSimulation(BaseSimulation):
                 sim.outputs = OutputManager.from_dict(data["Outputs"])
             if "Acquisition" in data:
                 sim.acquisition = Acquisition.from_dict(data["Acquisition"])
+            if "UserParameters" in data:
+                sim.user_parameters = data["UserParameters"]
 
             os.chdir(cwd)
 

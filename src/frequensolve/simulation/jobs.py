@@ -165,7 +165,7 @@ class SimulationJob(ABC):
             for component in group.device.components:
                 recv_out["components"].append(f"{group.name}:{component.name}")
 
-        for isrc, source in enumerate(sim.acquisition.source_group.sources):
+        for isrc, sgroup in enumerate(sim.acquisition.source_groups):
             recv_out["sources"].append(f"{isrc+1}")
 
         return recv_out

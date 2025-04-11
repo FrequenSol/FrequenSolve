@@ -209,7 +209,9 @@ class KlauderWavelet(Wavelet):
 
         signal, _, center = klauder(times / 2.0, f=f, taper=taper)
         if causal:
-            signal = Wavelet.make_causal(signal[::2])
+            signal, _, center = klauder(times, f=f, taper=taper)
+            n = len(signal)
+            signal = Wavelet.make_causal(signal)[: n // 2 + 1]
             signal = np.roll(signal, shift=offset)
         else:
             signal = np.roll(signal[::2], shift=(-center // 2 + offset))

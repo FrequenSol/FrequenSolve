@@ -36,7 +36,7 @@ dev = [
    "versioneer",
 ]
 parallel = [
-   "pyfftw>=0.14,<0.16",
+   "pyfftw (>=0.14,<0.16)",
    "paramiko (>=3.5.0,<4.0.0)",
    "bokeh (>=3.4.2,<4.0.0)"
 ]
@@ -46,11 +46,15 @@ dask = [
    "distributed (>=2024.12.0)",
 ]
 seismic = [
-   "cython>=3.0.12,<4.0.0",
+   "cython (>=3.0.12,<4.0.0)",
    "segyio (>=1.9.12,<2.0.0)",
    "pyasdf (>=0.8.1,<0.9.0)",
    "multidimio (>=0.8.0,<0.9.0)",
    "zfpy (>=1.0.1,<2.0.0)"
+]
+em = [
+   "emg3d (>=1.8,<2.0)",
+   "empymod (>=2.0,<3.0)"
 ]
 all = [
    # Dev optional dependencies
@@ -128,6 +132,12 @@ segyio = ">=1.9.12,<2.0.0"
 pyasdf = ">=0.8.1,<0.9.0"
 multidimio = ">=0.8.0,<0.9.0"
 
+[tool.poetry.group.em]
+optional = true
+
+[tool.poetry.group.em.dependencies]
+emg3d = ">=1.8,<2.0"
+empymod = ">=2.0,<3.0"
 
 [tool.versioneer]
 VCS = "git"

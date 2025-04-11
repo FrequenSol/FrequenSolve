@@ -54,7 +54,7 @@ This library provides a Python API for setting up and running the FrequenSolve s
 
    ```console
    $ git clone git@github.com:FrequenSol/FrequenSolve.git
-   $ cd frequensolve
+   $ cd FrequenSolve
    ```
 
 3. Install the package and its dependencies using Poetry:

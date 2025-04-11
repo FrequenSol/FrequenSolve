@@ -91,6 +91,7 @@ class ParaviewOutput(Output):
     path: Optional[Path] = None
     fields: Optional[List[str]] = None
     upscale: int = 1
+    show_pml: bool = True
 
     def __init__(
         self,
@@ -98,12 +99,14 @@ class ParaviewOutput(Output):
         path: Optional[Union[str, Path]] = None,
         fields: Optional[List[str]] = None,
         upscale: int = 1,
+        show_pml: bool = True,
         **kwargs,
     ):
         self.name = name
         self.path = Path(path).resolve() if path else None
         self.fields = fields
         self.upscale = upscale
+        self.show_pml = show_pml
 
     def __dict__(self) -> Dict:
         if self.path is None:
@@ -120,6 +123,7 @@ class ParaviewOutput(Output):
             "path": self.path.relative_to(self._proj_path),
             "fields": self.fields,
             "upscale": self.upscale,
+            "show_pml": self.show_pml,
         }
 
     @classmethod

@@ -44,9 +44,11 @@ class RecordDatabase:
         meta = {
             "project": proj_path,
             "simulation": proj_path / results["simulation"],
-            "df": float(f_map[2] - f_map[1]),
-            "f_max": float(np.max(list(f_map.values()))),
-            "f_map": f_map,
+            "df": float(f_map[2] - f_map[1]) if len(f_map) > 1 else 0.0,
+            "f_max": (
+                float(np.max(list(f_map.values()))) if len(f_map) > 1 else f_map[1]
+            ),
+            "f_map": f_map if len(f_map) > 1 else {},
         }
 
         records = set()

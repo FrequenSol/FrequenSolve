@@ -79,7 +79,7 @@ def _von_karman_spectral_density(n, L, k0, nu, a):
     ndim = len(n)
     kaxes = []
     for i in range(ndim):
-        ax = a[i] * 2 * np.pi * np.fft.fftfreq(n[i], d=L[i] / n[i])
+        ax = a[i] * np.fft.fftfreq(n[i], d=L[i] / n[i])
         kaxes.append(ax.astype(np.single))
     kgrid = np.meshgrid(*kaxes, indexing="ij")
 

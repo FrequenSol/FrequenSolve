@@ -976,6 +976,58 @@ files = [
 ]
 
 [[package]]
+name = "emg3d"
+version = "1.8.7"
+description = "A multigrid solver for 3D electromagnetic diffusion"
+optional = false
+python-versions = ">=3.10"
+groups = ["main", "em"]
+markers = "python_version <= \"3.11\" or python_version >= \"3.12\""
+files = [
+    {file = "emg3d-1.8.7-py3-none-any.whl", hash = "sha256:0269379251731296d631c01ff9249f915c595da558bced6faa592f414e02be50"},
+    {file = "emg3d-1.8.7.tar.gz", hash = "sha256:9ab0adc4a372f699aada1cbb3f5dc73964077114cd432220009f9eb41623a120"},
+]
+
+[package.dependencies]
+empymod = ">=2.3.2"
+numba = "*"
+numpy = "*"
+scipy = ">=1.10"
+
+[package.extras]
+all = ["emg3d[docs]", "emg3d[tests]"]
+build = ["setuptools (>=64)", "setuptools_scm (>=8)"]
+docs = ["emg3d[full]", "ipykernel", "numpydoc", "pickleshare", "pydata_sphinx_theme", "sphinx", "sphinx_automodapi", "sphinx_design", "sphinx_numfig"]
+full = ["discretize", "h5py", "ipympl", "matplotlib", "tqdm", "xarray"]
+tests = ["coveralls", "flake8", "flake8-pyproject", "pytest", "pytest-console-scripts", "pytest_cov"]
+
+[[package]]
+name = "empymod"
+version = "2.5.1"
+description = "Open-source full 3D electromagnetic modeller for 1D VTI media"
+optional = false
+python-versions = ">=3.10"
+groups = ["main", "em"]
+markers = "python_version <= \"3.11\" or python_version >= \"3.12\""
+files = [
+    {file = "empymod-2.5.1-py3-none-any.whl", hash = "sha256:4cc4d2b6c800bf198e14a082888a75ccd7ebc98055ca862d174000990729ab49"},
+    {file = "empymod-2.5.1.tar.gz", hash = "sha256:8ae81074425a12f702cd5671aacee4b7746af7681453171a51cb0362eed25fb6"},
+]
+
+[package.dependencies]
+libdlf = "*"
+numba = "*"
+numpy = "*"
+scipy = ">=1.10"
+scooby = "*"
+
+[package.extras]
+all = ["empymod[docs]", "empymod[tests]"]
+build = ["setuptools (>=64)", "setuptools_scm (>=8)"]
+docs = ["ipykernel", "ipympl", "matplotlib", "memory_profiler", "numpydoc", "pickleshare", "pydata_sphinx_theme", "sphinx (>=7.3)", "sphinx_automodapi", "sphinx_design", "sphinx_gallery (>=0.16)", "sphinx_numfig"]
+tests = ["coveralls", "flake8", "flake8-pyproject", "pytest", "pytest-console-scripts", "pytest_cov", "pytest_mpl"]
+
+[[package]]
 name = "fasteners"
 version = "0.19"
 description = "A python package that provides useful locks"
@@ -1569,12 +1621,28 @@ files = [
 ]
 
 [[package]]
+name = "libdlf"
+version = "0.3.0"
+description = "Library for Digital Linear Filters (DLF)"
+optional = false
+python-versions = "*"
+groups = ["main", "em"]
+markers = "python_version <= \"3.11\" or python_version >= \"3.12\""
+files = [
+    {file = "libdlf-0.3.0-py3-none-any.whl", hash = "sha256:bb7b29e46b837f88289089358673513a204cc21d0d783b175a10bbdaff093367"},
+    {file = "libdlf-0.3.0.tar.gz", hash = "sha256:7a3352b01d4f8ab9ac929b1567d09c57b95415e67d9da02d54f5b4d00a3226d9"},
+]
+
+[package.dependencies]
+numpy = "*"
+
+[[package]]
 name = "llvmlite"
 version = "0.44.0"
 description = "lightweight wrapper around basic LLVM functionality"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "all", "seismic"]
+groups = ["main", "all", "em", "seismic"]
 markers = "python_version <= \"3.11\" or python_version >= \"3.12\""
 files = [
     {file = "llvmlite-0.44.0-cp310-cp310-macosx_10_14_x86_64.whl", hash = "sha256:9fbadbfba8422123bab5535b293da1cf72f9f478a65645ecd73e781f962ca614"},
@@ -2143,7 +2211,7 @@ version = "0.61.0"
 description = "compiling Python code using LLVM"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "all", "seismic"]
+groups = ["main", "all", "em", "seismic"]
 markers = "python_version <= \"3.11\" or python_version >= \"3.12\""
 files = [
     {file = "numba-0.61.0-cp310-cp310-macosx_10_14_x86_64.whl", hash = "sha256:9cab9783a700fa428b1a54d65295122bc03b3de1d01fb819a6b9dbbddfdb8c43"},
@@ -2218,7 +2286,7 @@ version = "1.26.4"
 description = "Fundamental package for array computing in Python"
 optional = false
 python-versions = ">=3.9"
-groups = ["main", "all", "parallel", "seismic"]
+groups = ["main", "all", "em", "parallel", "seismic"]
 markers = "python_version <= \"3.11\" or python_version >= \"3.12\""
 files = [
     {file = "numpy-1.26.4-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:9ff0f4f29c51e2803569d7a51c2304de5554655a60c5d776e35b4a41413830d0"},
@@ -3320,7 +3388,7 @@ version = "1.15.1"
 description = "Fundamental algorithms for scientific computing in Python"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "all", "seismic"]
+groups = ["main", "all", "em", "seismic"]
 markers = "python_version <= \"3.11\" or python_version >= \"3.12\""
 files = [
     {file = "scipy-1.15.1-cp310-cp310-macosx_10_13_x86_64.whl", hash = "sha256:c64ded12dcab08afff9e805a67ff4480f5e69993310e093434b10e85dc9d43e1"},
@@ -3372,6 +3440,22 @@ numpy = ">=1.23.5,<2.5"
 dev = ["cython-lint (>=0.12.2)", "doit (>=0.36.0)", "mypy (==1.10.0)", "pycodestyle", "pydevtool", "rich-click", "ruff (>=0.0.292)", "types-psutil", "typing_extensions"]
 doc = ["intersphinx_registry", "jupyterlite-pyodide-kernel", "jupyterlite-sphinx (>=0.16.5)", "jupytext", "matplotlib (>=3.5)", "myst-nb", "numpydoc", "pooch", "pydata-sphinx-theme (>=0.15.2)", "sphinx (>=5.0.0,<8.0.0)", "sphinx-copybutton", "sphinx-design (>=0.4.0)"]
 test = ["Cython", "array-api-strict (>=2.0,<2.1.1)", "asv", "gmpy2", "hypothesis (>=6.30)", "meson", "mpmath", "ninja", "pooch", "pytest", "pytest-cov", "pytest-timeout", "pytest-xdist", "scikit-umfpack", "threadpoolctl"]
+
+[[package]]
+name = "scooby"
+version = "0.10.0"
+description = "A Great Dane turned Python environment detective"
+optional = false
+python-versions = ">=3.8"
+groups = ["main", "em"]
+markers = "python_version <= \"3.11\" or python_version >= \"3.12\""
+files = [
+    {file = "scooby-0.10.0-py3-none-any.whl", hash = "sha256:0a3d7e304f8ebb16f69ff7f6360c345d7f50b45f2ddbf7c3d18a6a0dc2cb03a6"},
+    {file = "scooby-0.10.0.tar.gz", hash = "sha256:7ea33c262c0cc6a33c6eeeb5648df787be4f22660e53c114e5fff1b811a8854f"},
+]
+
+[package.extras]
+cpu = ["mkl", "psutil"]
 
 [[package]]
 name = "segy"
@@ -4348,10 +4432,11 @@ type = ["pytest-mypy"]
 all = ["bokeh", "cython", "dask", "dask-jobqueue", "distributed", "furo", "multidimio", "myst-parser", "paramiko", "pyasdf", "pyfftw", "segyio", "sphinx", "sphinx-rtd-theme", "versioneer", "zfpy"]
 dask = ["dask", "dask-jobqueue", "distributed"]
 dev = ["furo", "myst-parser", "sphinx", "sphinx-rtd-theme", "versioneer"]
+em = ["emg3d", "empymod"]
 parallel = ["bokeh", "paramiko", "pyfftw"]
 seismic = ["cython", "multidimio", "pyasdf", "segyio", "zfpy"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "3680664d661cff9bb3e18bf31cf936c345cdf4a2e042bd32c82e8c2f8a2bfbe6"
+content-hash = "1ac9859570f7e555a5e0b0d920eb27e8a8c80ec63596aae9013b6f1331d90231"

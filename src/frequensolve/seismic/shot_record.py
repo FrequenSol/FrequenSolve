@@ -9,11 +9,18 @@ import h5py
 import numpy as np
 
 from frequensolve.seismic.receivers import ReceiverFiber, ReceiverGroup
-from frequensolve.seismic.sources import Source
+from frequensolve.seismic.sources import SourceGroup
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.sampling import Sampling, UniformSweepSampling
 
-__all__ = ["ShotRecord", "read_shot_TD", "read_shot_FD", "Record"]
+__all__ = [
+    "ShotRecord",
+    "read_shot_TD",
+    "read_shot_FD",
+    "Record",
+    "read_frequency",
+    "array_to_segy",
+]
 
 
 @dataclass
@@ -36,7 +43,7 @@ class ShotRecord:
     type: str
     number: int
     sampling: Sampling
-    source: Source
+    source_group: SourceGroup
     receiver_group: ReceiverGroup
     field: str
     data: np.ndarray
@@ -44,10 +51,141 @@ class ShotRecord:
     def write_segy(
         self, fname: str, units_in: str = "km", units_out: str = "m", **kwargs
     ):
+        """
+        Writes time-domain field as SEGY file
+
+        Args:
+            fname: Output filename
+            units_in: Input coordinate units (default: "km")
+            units_out: Output coordinate units (default: "m")
+            **kwargs: Additional keyword arguments
+        """
+        import datetime
+
+        import pint
+        import segyio
+
+        recv_code = {
+            "generic": 1,
+            "signal": 9,
+            "pressure": 11,
+            "u_z": 12,
+            "u_y": 13,
+            "u_x": 14,
+        }
+
+        coordinates = {"length": 1, "arcseconds": 2, "degrees": 3, "DMS": 4}
+
+        # TODO: check these and make conversion
+        src_code = {
+            "u_z": 1,
+            "u_y": 2,
+            "u_x": 3,
+            "impulsive_z": 11,
+            "impulsive_y": 12,
+            "impulsive_x": 13,
+        }
+
+        rgroup = self.receiver_group
+        source = self.source_group.source
+
+        # Initialize the pint unit registry
+        ureg = pint.UnitRegistry()
+        assert units_out == "m" or units_out == "ft"
+        iunit = ureg(units_in)
+
+        # specify coordinates
+        if units_out.lower() == "m":
+            coordinate_units = 1
+            ounit = ureg.meter
+        elif units_out.lower() == "ft":
+            coordinate_units = 2
+            ounit = ureg.foot
+        else:
+            raise ValueError("units_out must be 'meters' or 'feet'")
+        scale = iunit.to(ounit).magnitude
+
+        # Get sampling parameters
+        n_samples = self.sampling.nTime
+        n_traces = rgroup.size
+        dt = self.sampling.dT  # Time step in seconds
+        sample_interval = int(dt * 1e6)  # Convert to microseconds
+
+        # Create time samples array (in seconds)
+        time_samples = np.arange(n_samples) * dt
+
+        # SEGY file settings
+        spec = segyio.spec()
+        spec.format = 5
+        spec.samples = time_samples  # Time samples in seconds
+        spec.sample_rate = sample_interval  # Sample interval in microseconds
+        spec.tracecount = n_traces
+
+        # Create a SEGY file and write data
+        with segyio.create(fname, spec) as f:
+            f.bin[segyio.BinField.MeasurementSystem] = (
+                coordinate_units  # 1 for meters, 2 for feet
+            )
+
+            for itrace in range(n_traces):
+                f.header[itrace].update(
+                    {
+                        # Trace number
+                        segyio.TraceField.TRACE_SEQUENCE_LINE: itrace + 1,
+                        segyio.TraceField.TRACE_SEQUENCE_FILE: itrace + 1,
+                        segyio.TraceField.FieldRecord: 1,
+                        segyio.TraceField.TraceNumber: itrace + 1,
+                        segyio.TraceField.TRACE_SAMPLE_COUNT: n_samples,
+                        segyio.TraceField.TRACE_SAMPLE_INTERVAL: sample_interval,
+                        segyio.TraceField.CoordinateUnits: coordinates["length"],
+                        # Source
+                        segyio.TraceField.SourceX: round(
+                            (source.coordinates[0] * scale)
+                        ),
+                        segyio.TraceField.SourceY: 0,
+                        segyio.TraceField.SourceDepth: round(
+                            (source.coordinates[-1] * scale)
+                        ),
+                        # Receiver location
+                        segyio.TraceField.GroupX: round(
+                            (rgroup.coordinates[itrace, 0] * scale) * 1000
+                        ),
+                        segyio.TraceField.GroupY: 0,
+                        segyio.TraceField.ReceiverGroupElevation: -int(
+                            (rgroup.coordinates[itrace, -1] * scale)
+                        ),
+                        # Set time
+                        segyio.TraceField.YearDataRecorded: datetime.datetime.now().year,
+                        segyio.TraceField.DayOfYear: datetime.datetime.now()
+                        .timetuple()
+                        .tm_yday,
+                        segyio.TraceField.HourOfDay: datetime.datetime.now().hour,
+                        segyio.TraceField.MinuteOfHour: datetime.datetime.now().minute,
+                        segyio.TraceField.SecondOfMinute: datetime.datetime.now().second,
+                    }
+                )
+                f.trace[itrace] = self.data[:n_samples, itrace].copy()
+
+        # # Print SEGY file contents - but open in strict=False mode for 2D data
+        # with segyio.open(fname, mode="r", strict=False) as sgy:
+        #     print(f"\nSEGY File Contents:")
+        #     print(f"File size: {os.path.getsize(fname) / 1024:.1f} KB")
+        #     print(f"Number of traces: {sgy.tracecount}")
+        #     print(f"Samples per trace: {sgy.samples}")
+        #     print(f"Sample interval: {sgy.bin[segyio.BinField.Interval]} μs")
+        #     print(f"Measurement system: {'meters' if sgy.bin[segyio.BinField.MeasurementSystem] == 1 else 'feet'}")
+        #     print(f"\nFirst trace:")
+        #     print(f"Source coordinates (x,y,z): ({sgy.header[0][segyio.TraceField.SourceX]}, {sgy.header[0][segyio.TraceField.SourceY]}, {sgy.header[0][segyio.TraceField.SourceDepth]})")
+        #     print(f"Receiver coordinates (x,y,z): ({sgy.header[0][segyio.TraceField.GroupX]}, {sgy.header[0][segyio.TraceField.GroupY]}, {sgy.header[0][segyio.TraceField.ReceiverGroupElevation]})")
+        #     print(f"Data min/max: {sgy.trace[0].min():.2e} / {sgy.trace[0].max():.2e}")
+
+    def write_segy_TGS(
+        self, fname: str, units_in: str = "km", units_out: str = "m", **kwargs
+    ):
         """Write a time-domain shot to a SEGY file.
 
-        Uses SEGY to create a valid SEG-Y file with
-        correct geometry headers. This method is only valid if the shot type is "TD".
+        This version uses TGS's SEGY library that may be convenient for the cloud
+        but is lacking documentation and is still under development.
 
         Args:
            fname (str): Output SEGY file name.
@@ -63,6 +201,7 @@ class ShotRecord:
         from pathlib import Path
 
         import pint
+        from segy import SegyFile
         from segy.factory import SegyFactory
         from segy.standards import get_segy_standard
 
@@ -80,7 +219,7 @@ class ShotRecord:
         # Basic geometry and dimension info
         group = self.receiver_group
         source = self.source
-        dim = len(source.coord)
+        dim = len(source.coordinates)
 
         # Optional cutoff time
         Tf = kwargs.get("Tf", None)
@@ -91,18 +230,26 @@ class ShotRecord:
         interval = int(self.sampling.dT * 1e6)  # sample interval in microseconds
         trace_datetime = datetime.datetime.now()
 
+        print(interval, n_samples, n_traces)
+
         # Build SEG-Y config
         config = {
             "spec": get_segy_standard(1.0),
             "samples_per_trace": n_samples,
             "sample_interval": interval,
-            "trace_sorting_code": 5,  # Common source point
-            "measurement_system_code": "meters" if units_out.lower() == "m" else "feet",
         }
 
         factory = SegyFactory(**config)
         txt = factory.create_textual_header()
         bin_ = factory.create_binary_header()
+
+        # # Update binary header schema
+        # factory.binary_header_schema.trace_sorting_code = 5  # Common source point
+        # factory.binary_header_schema.measurement_system = 1 if units_out.lower() == "m" else 2  # 1 = meters, 2 = feet
+
+        # Recreate binary header with updated schema
+        bin_ = factory.create_binary_header()
+
         headers = factory.create_trace_header_template(size=n_traces)
         samples = factory.create_trace_sample_template(size=n_traces)
 
@@ -113,21 +260,23 @@ class ShotRecord:
             headers[itr]["crossline"] = 1
 
             # Source position
-            headers[itr]["source_coord_x"] = int(source.coord[0] * scale)
+            headers[itr]["source_coord_x"] = int(source.coordinates[0] * scale)
             if dim == 2:
                 headers[itr]["source_coord_y"] = 0
             else:
-                headers[itr]["source_coord_y"] = int(source.coord[1] * scale)
-            headers[itr]["source_surface_elevation"] = int(-source.coord[-1] * scale)
+                headers[itr]["source_coord_y"] = int(source.coordinates[1] * scale)
+            headers[itr]["source_surface_elevation"] = int(
+                -source.coordinates[-1] * scale
+            )
 
             # Receiver position
-            headers[itr]["group_coord_x"] = int(group.coord[itr, 0] * scale)
+            headers[itr]["group_coord_x"] = int(group.coordinates[itr, 0] * scale)
             if dim == 2:
                 headers[itr]["group_coord_y"] = 0
             else:
-                headers[itr]["group_coord_y"] = int(group.coord[itr, 1] * scale)
+                headers[itr]["group_coord_y"] = int(group.coordinates[itr, 1] * scale)
             headers[itr]["receiver_group_elevation"] = int(
-                -group.coord[itr, -1] * scale
+                -group.coordinates[itr, -1] * scale
             )
 
             # Trace data (slice out the first n_samples from each trace)
@@ -140,6 +289,15 @@ class ShotRecord:
             f.write(txt)
             f.write(bin_)
             f.write(traces)
+
+        # sgy = SegyFile(fname)
+        # sgy.binary_header.to_dataframe()
+
+        # # print(f"file size: {sgy.file_size / 1024**3:0.2f} GiB")
+        # # print(f"num traces: {sgy.num_traces:,}")
+        # # print(f"sample rate: {sgy.sample_interval}")
+        # # print(f"num samples: {sgy.samples_per_trace}")
+        # # print(f"sample labels: {sgy.sample_labels // 1000}")
 
 
 @dataclass
@@ -200,14 +358,14 @@ def read_shot_TD(record: Record, wavelet: Wavelet, upscale: int = 1) -> ShotReco
     else:
         raise ValueError(f"Receiver group {group_name} not found in simulation.")
 
-    source = sim["Acquisition"]["source_group"]["sources"][isrc - 1]
+    sgroup = sim["Acquisition"]["source_groups"][isrc - 1]
 
     # TODO: This is a hack, fix it.
     cwd = os.getcwd()
     os.chdir(record.project_path)
 
-    group = ReceiverGroup.from_dict(rgroup)
-    source = Source.from_dict(source)
+    recv_group = ReceiverGroup.from_dict(rgroup)
+    src_group = SourceGroup.from_dict(sgroup)
 
     # Get sampling from metadata
     sampling = record.sampling(upscale)
@@ -243,8 +401,8 @@ def read_shot_TD(record: Record, wavelet: Wavelet, upscale: int = 1) -> ShotReco
         type="TD",
         number=isrc,
         sampling=sampling,
-        source=source,
-        receiver_group=group,
+        source_group=src_group,
+        receiver_group=recv_group,
         field=field,
         data=td,
     )
@@ -279,14 +437,14 @@ def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
             break
     else:
         raise ValueError(f"Receiver group {group_name} not found in simulation.")
-    source = sim["Acquisition"]["source_group"]["sources"][isrc - 1]
+    sgroup = sim["Acquisition"]["source_groups"][isrc - 1]
 
-    group = ReceiverGroup.from_dict(rgroup)
-    source = Source.from_dict(source)
+    recv_group = ReceiverGroup.from_dict(rgroup)
+    src_group = SourceGroup.from_dict(sgroup)
 
     sampling = record.sampling(upscale=1)
 
-    nrecv = group.size
+    nrecv = recv_group.size
     nf = sampling.nfreq
 
     # Initialize complex data array
@@ -300,13 +458,14 @@ def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
         i_omega = np.csingle(1j * 2 * np.pi * freq)
 
         if not os.path.exists(file):
-            raise FileNotFoundError(f"File {file} does not exist.")
+            continue
+            # raise FileNotFoundError(f"File {file} does not exist.")
 
         with h5py.File(file, "r") as f:
             u[ifreq, :] += np.csingle(1j) * f[f"{field}_{isrc}_im"][()]
             u[ifreq, :] += f[f"{field}_{isrc}_re"][()]
 
-            if np.any(np.isnan(u[ifreq, :])):
+            if np.any(np.isnan(u[ifreq, :])) or np.any(u[ifreq, :] > 1e5):
                 u[ifreq, :] = 0
                 print(f"NaN values for frequency {freq} Hz")
                 continue
@@ -314,7 +473,7 @@ def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
             u[ifreq, :] *= wavelet.spectrum[ifreq]
 
             # For fiber-type receivers, multiply by iω for strain *rate*
-            if isinstance(group.device, ReceiverFiber):
+            if isinstance(recv_group.device, ReceiverFiber):
                 u[ifreq, :] *= i_omega
 
     # TODO: This is a hack.
@@ -324,8 +483,158 @@ def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
         type="FD",
         number=isrc,
         sampling=sampling,
-        source=source,
-        receiver_group=group,
+        source_group=src_group,
+        receiver_group=recv_group,
         field=field,
         data=u,
     )
+
+
+def read_frequency(record: Record, ifreq: int) -> ShotRecord:
+    """Read a frequency-domain shot record.
+
+    Args:
+        record (Record): Record to read.
+        wavelet (Wavelet): Wavelet to use for the shot record.
+        sampling (Sampling): Sampling to use for the shot record.
+
+    Returns:
+        ShotRecord: The frequency-domain shot record.
+    """
+    # TODO: This is a hack, fix it.
+    cwd = os.getcwd()
+    os.chdir(record.project_path)
+
+    with open(record.simulation, "r") as f:
+        sim = json.load(f)
+
+    fbase, comp = record.file.split(":")
+    fbase = "_".join(fbase.split("_")[:-1])
+    group_name = Path(fbase).name
+    field = "_".join(comp.split("_")[:-1])
+    isrc = int(comp.split("_")[-1])
+
+    for rgroup in sim["Acquisition"]["receiver_groups"]:
+        if rgroup["name"] == group_name:
+            break
+    else:
+        raise ValueError(f"Receiver group {group_name} not found in simulation.")
+    sgroup = sim["Acquisition"]["source_groups"][isrc - 1]
+
+    recv_group = ReceiverGroup.from_dict(rgroup)
+    src_group = SourceGroup.from_dict(sgroup)
+    nrecv = recv_group.size
+
+    fmap = record.f_map
+
+    file = f"{fbase}_{ifreq}.h5"
+
+    if not os.path.exists(file):
+        raise FileNotFoundError(f"File {file} does not exist.")
+
+    with h5py.File(file, "r") as f:
+        u = np.csingle(1j) * f[f"{field}_{isrc}_im"][()]
+        u += f[f"{field}_{isrc}_re"][()]
+
+    # TODO: This is a hack.
+    os.chdir(cwd)
+
+    return u
+
+
+# --------------------------------------------
+# Output to SEGY
+# --------------------------------------------
+def array_to_segy(
+    samples: np.ndarray,
+    data: np.ndarray,
+    fname: str,
+    units_in: str = "km",
+    units_out: str = "m",
+    **kwargs,
+):
+    """
+    Writes time-domain field as segy file
+
+    Parameters
+    ----------
+    key : {group.name}:{field.name}
+    shot: Source number
+    """
+    import datetime
+
+    import pint
+    import segyio
+
+    # Initialize the pint unit registry
+    ureg = pint.UnitRegistry()
+    assert units_out == "m" or units_out == "ft"
+    iunit = ureg(units_in)
+
+    # specify coordinates
+    if units_out.lower() == "m":
+        coordinate_units = 1
+        ounit = ureg.meter
+    elif units_out.lower() == "ft":
+        coordinate_units = 2
+        ounit = ureg.foot
+    else:
+        raise ValueError("units_out must be 'meters' or 'feet'")
+    scale = iunit.to(ounit).magnitude
+
+    n_samples = samples.shape[0]
+    n_traces = 1
+    sample_interval = int((samples[1] - samples[0]) * 1e3)
+
+    trace_datetime = datetime.datetime.now()
+
+    ilines = [0]
+    xlines = [0]
+
+    # SEGY file settings
+    spec = segyio.spec()
+    spec.sorting = 1
+    spec.format = 5
+    spec.samples = samples
+    spec.ilines = ilines  # Inline indices
+    spec.xlines = xlines  # Crossline indices
+    spec.sample_rate = sample_interval  # Sample interval (microseconds)
+    spec.tracecount = n_traces  # Number of traces
+
+    # Create a SEGY file and write data
+    with segyio.create(fname, spec) as f:
+        f.bin[segyio.BinField.Interval] = sample_interval  # Set sample interval in µs
+        f.bin[segyio.BinField.Samples] = n_samples  # Set number of samples per trace
+        f.bin[segyio.BinField.MeasurementSystem] = (
+            coordinate_units  # 1 for meters, 2 for feet
+        )
+
+        itrace = -1
+        for i_recv in ilines:
+            for x_recv in xlines:
+                itrace += 1
+                f.header[i_recv].update(
+                    {
+                        # Trace number
+                        segyio.TraceField.TRACE_SEQUENCE_LINE: 1,
+                        segyio.TraceField.TRACE_SEQUENCE_FILE: 1,
+                        segyio.TraceField.FieldRecord: itrace,
+                        segyio.TraceField.TraceNumber: itrace,
+                        segyio.TraceField.CoordinateUnits: 1,
+                        # Source
+                        segyio.TraceField.SourceX: 0,
+                        segyio.TraceField.SourceY: 0,
+                        segyio.TraceField.SourceDepth: 0,
+                        # Receiver location
+                        segyio.TraceField.GroupX: 0,
+                        segyio.TraceField.GroupY: 0,
+                        segyio.TraceField.ReceiverGroupElevation: 0,
+                        # Set time
+                        segyio.TraceField.YearDataRecorded: trace_datetime.year,
+                        segyio.TraceField.DayOfYear: trace_datetime.timetuple().tm_yday,
+                        segyio.TraceField.HourOfDay: trace_datetime.hour,
+                        segyio.TraceField.MinuteOfHour: trace_datetime.minute,
+                        segyio.TraceField.SecondOfMinute: trace_datetime.second,
+                    }
+                )
+                f.trace[itrace] = np.single(data.copy())
