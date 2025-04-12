@@ -134,6 +134,12 @@ class FronteraSite(BaseSite):
         """Get the login host."""
         return self._login_client.hostname
 
+    @property
+    def provisioned(self):
+        """Check if the site is provisioned."""
+        self.update_status()
+        return self.pool.is_running
+
     def __enter__(self):
         logger.info("Entering FronteraSite context manager.")
         self.credentials = TACCLoginCredentials()

@@ -134,6 +134,28 @@ class Stampede3Site(BaseSite):
         """Get the login host."""
         return self._login_client.hostname
 
+    @property
+    def mpi_cmd(self) -> str:
+        """Get the MPI command for Stampede3."""
+        return f"{self.config.mpi_wrapper}"
+
+    # TODO: fix this, shouldn't be cached or it won't handle state changes.
+    @cached_property
+    def pool_host(self) -> str:
+        """Get the resource pool host node."""
+        return self._get_job_host(self.pool.id)
+
+    @property
+    def work_dir(self) -> Path:
+        """Gets the $WORK directory path on Stampede3."""
+        return self._work_dir
+
+    @property
+    def provisioned(self):
+        """Check if the site is provisioned."""
+        self.update_status()
+        return self.pool.is_running
+
     def __enter__(self):
         logger.info("Entering Stampede3Site context manager.")
         self.credentials = TACCLoginCredentials()
@@ -386,6 +408,114 @@ class Stampede3Site(BaseSite):
                 f"Unable to attach to {self.pool.id}, status: {self.pool.status}"
             )
 
+    def sync(self, project):
+        """Sync the project to the site."""
+        self._sync_project(project)
+
+    def _sync_project(self, project):
+        """Sync the project to the site."""
+        project.transfer(self)
+
+    def _sync_result(self, result):
+        """Sync a result with the site."""
+        raise NotImplementedError("Syncing results is not implemented for Stampede3")
+
+    def _sync_simulation(self, simulation):
+        """Sync the simulation to the site."""
+        raise NotImplementedError(
+            "Syncing simulations is not implemented for Stampede3"
+        )
+
+    def submit_SLURM(
+        self,
+        job: SimulationJob,
+        nodes: int,
+        procs_per_node: int = 2,
+        procs_per_task: Optional[int] = None,
+        wait: bool = False,
+        duration: str = "00-02:00:00",
+        queue: Optional[str] = None,
+        account: Optional[str] = None,
+        notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
+        notify_email: Optional[str] = None,
+        run_path: Optional[str] = None,
+        **kwargs,
+    ):
+        """Submit job to SLURM queue.
+
+        Args:
+            n_tasks:        Number of tasks to run
+            n_nodes:        Number of nodes to run on
+            procs_per_node: Number of processes per node
+            procs_per_task: Number of processes per task
+            wait:           Wait for job to complete
+            duration:       Duration of the job
+            queue:          Queue to run on
+            account:        TACC account to run on
+            notify_on:      Notify on event
+            notify_email:   Email address to notify
+            run_path:           Path where the slurm job will be run
+        """
+
+        if procs_per_task is None:
+            procs_per_task = max(1, (nodes * procs_per_node) // job.n_tasks)
+
+        script = self._sweep_SLURM_script(
+            n_tasks=job.n_tasks,
+            n_nodes=nodes,
+            procs_per_node=procs_per_node,
+            procs_per_task=procs_per_task,
+            duration=duration,
+            **({"queue": queue} if queue is not None else {}),
+            **({"account": account} if account is not None else {}),
+            **({"notify_on": notify_on} if notify_on is not None else {}),
+            **({"notify_email": notify_email} if notify_email is not None else {}),
+            **({"run_path": run_path} if run_path is not None else {}),
+            **kwargs,
+        )
+
+        if procs_per_node * nodes > procs_per_task * job.n_tasks:
+            raise ValueError(
+                f"Number of workers ({procs_per_node * nodes}) "
+                f"is greater than number of tasks ({procs_per_task * job.n_tasks}), "
+                "reduce the number of workers (by decreasing the "
+                "n_nodes or processes_per_node) or increase the number of "
+                "tasks."
+            )
+
+        if run_path is None:
+            run_path = self.work_dir
+
+        # Transfer job and script to Stampede3
+        remote_script, remote_job = self._transfer_SLURM_job(script, job)
+
+        cmd = f"mkdir -p {run_path}/jobs/batch && "
+        cmd += "sbatch "
+        if "slurm_args" in kwargs:
+            for arg in kwargs["slurm_args"]:
+                cmd += f"{arg} "
+        cmd += f"{remote_script} {remote_job}"
+
+        # Submit job to SLURM queue
+        _, stdout, stderr = self.run_login_cmd(cmd)
+        output = stdout.read().decode().strip()
+        err = stderr.read().decode().strip()
+        if err:
+            logger.error("sbatch error: %s", err)
+            print(f"sbatch error: \033[91m{err}\033[0m")
+
+        logger.debug("sbatch output: %s", output)
+        job_id = re.search(r"Submitted batch job (\d+)", output)
+        if not job_id:
+            logger.error("Failed to retrieve job ID from sbatch output: %s", output)
+            raise ValueError("failed to get job ID from sbatch output")
+        job_id = job_id.group(1)
+
+        print(
+            f"Job {job_id} submitted successfully to Stampede3:{queue or self.config.queue}"
+        )
+        return job_id
+
     def submit(self, job: SimulationJob, procs_per_job: int = 2):
         """Submit job and block until completion."""
 
@@ -402,7 +532,7 @@ class Stampede3Site(BaseSite):
         """Submit job asynchronously and return a future."""
 
         future = Future()
-        if self._compute_client:  # Run on already provisioned compute node
+        if self.provisioned:  # Run on already provisioned compute node
             remote_script, remote_job = self._transfer_job(job)
             ntasks_per_item = max(procs_per_job, self.pool.nproc // job.n_tasks)
 
@@ -422,38 +552,17 @@ class Stampede3Site(BaseSite):
 
         # Submit job to SLURM queue
         else:
-            remote_script, remote_job = self._transfer_job(job)
-            ntasks_per_item = max(procs_per_job, self.pool.nproc // job.n_tasks)
-            run_login_cmd = self.run_login_cmd(
-                f"sbatch {remote_script} {remote_job} {ntasks_per_item}"
+            raise ValueError(
+                "This submit method requires the site to"
+                "be provisioned (attached to a running job)."
+                "Use submit_SLURM to queue a job."
             )
-            logger.debug("sbatch output: %s", run_login_cmd)
-            job_id = re.search(r"Submitted batch job (\d+)", run_login_cmd)
-            if not job_id:
-                logger.error(
-                    "Failed to retrieve job ID from sbatch output: %s", run_login_cmd
-                )
-                raise ValueError("failed to get job ID from sbatch output")
-            job_id = job_id.group(1)
+
+            # TODO: automatically compute job sizing and submit to queue
 
         loop = asyncio.get_event_loop()
         loop.create_task(monitor)
         return future
-
-    @property
-    def mpi_cmd(self) -> str:
-        """Get the MPI command for Stampede3."""
-        return f"{self.config.mpi_wrapper}"
-
-    @cached_property
-    def pool_host(self) -> str:
-        """Get the resource pool host node."""
-        return self._get_job_host(self.pool.id)
-
-    @property
-    def work_dir(self) -> Path:
-        """Gets the $WORK directory path on Stampede3."""
-        return self._work_dir
 
     def run_cmd(self, client, cmd: str):
         """Run a command using exec_command, passing the captured environment if available."""
@@ -780,6 +889,27 @@ class Stampede3Site(BaseSite):
             job_id = input("Enter job ID: ")
             return int(job_id)
 
+    def _transfer_SLURM_job(self, script: str, job: SimulationJob):
+        """Transfer a SLURM job to Stampede3."""
+        fd, script_path = tempfile.mkstemp(suffix=".slurm", prefix="sweep", dir="./")
+        logger.debug("Temporary sweep script created at %s", script_path)
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
+        os.chmod(script_path, 0o700)
+
+        remote_script = (self.work_dir / "sweep").with_suffix(".slurm")
+        self.put(Path(script_path), Path(remote_script))
+        os.unlink(script_path)
+
+        file = job.save_for_remote(self.work_dir)
+        remote_job = ((self.work_dir / "jobs") / job.name).with_suffix(".json")
+
+        logger.debug("Transferring job file to remote path: %s", remote_job)
+        self.put(Path(file), Path(remote_job))
+        self.run_login(f"chmod 700 {remote_script}")
+
+        return remote_script, remote_job
+
     def _transfer_job(self, job: SimulationJob):
         """Submit a simulation job to Stampede3.
 
@@ -816,7 +946,7 @@ class Stampede3Site(BaseSite):
         return status == "R"
 
     def _sweep_script(self, n_tasks: int, **kwargs) -> str:
-        """Generate a sweep script."""
+        """Generate a scripte for sweeping through frequencies (tasks) on pre-provisioned resources."""
         env_dir = self._FS_dir / "src/frequensolve/orchestrator/templates"
         env = Environment(
             loader=FileSystemLoader(env_dir),
@@ -825,9 +955,9 @@ class Stampede3Site(BaseSite):
         template = env.get_template("sweep/sweep_SLURM.sh")
         script = template.render(
             batch_job=False,
-            nrank=self.pool.nproc,
-            nthread=self.pool.ncore // self.pool.nproc,
-            njob=n_tasks,
+            n_tasks=n_tasks,
+            n_procs=self.pool.nproc,
+            n_threads=self.pool.ncore // self.pool.nproc,
             mpi=self.mpi_cmd,
             executable=self.executable,
             fs_dir=str(Path(self.executable).parent),
@@ -835,10 +965,97 @@ class Stampede3Site(BaseSite):
         )
         return script
 
-    def _generate_provision_script(
-        self, nhost: int, nproc: int, duration: Optional[str] = None, **kwargs
+    def _sweep_SLURM_script(
+        self,
+        n_tasks: int,
+        n_nodes: int,
+        name: str = "FrequenSolve",
+        procs_per_node: int = 2,
+        procs_per_task: int = 2,
+        duration: str = "00-02:00:00",
+        queue: Optional[str] = None,
+        account: Optional[str] = None,
+        notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
+        notify_email: Optional[str] = None,
+        run_path: Optional[str] = None,
+        **kwargs,
     ) -> str:
-        """Generate a script for provisioning a Stampede3 cluster."""
+        """Generate a SLURM sweep script.
+
+        Args:
+            n_tasks:        Number of tasks (frequencies) to run
+            duration:       Duration of the job (DD-HH:MM:SS)
+            n_nodes:        Number of nodes to run on
+            procs_per_node: Number of processes per node
+            procs_per_task: Number of processes per task
+            queue:          Queue to run on (optional, defaults to site queue)
+            account:        TACC account to run on (defaults to TACC_ACCOUNT env var if set)
+            notify_on:      Notify on event (optional)
+            notify_email:   Email address to notify (optional)
+            **kwargs:       Additional keyword arguments
+        """
+
+        if account is None:
+            account = self.config.account
+        if queue is None:
+            queue = self.config.queue
+        config = Stampede3Config(queue)
+
+        # Check that job fits in queue limits
+        duration = config.validate_request(n_nodes, n_nodes * procs_per_node, duration)
+
+        if run_path is None:
+            run_path = self.work_dir
+        print(f"run_path: {run_path}")
+
+        # Load and populate Jinja2 template
+        env_dir = self._FS_dir / "src/frequensolve/orchestrator/templates"
+        env = Environment(
+            loader=FileSystemLoader(env_dir),
+            keep_trailing_newline=True,
+        )
+        template = env.get_template("sweep/sweep_SLURM.sh")
+        script = template.render(
+            batch_job=True,
+            name=name,
+            n_nodes=n_nodes,
+            n_procs=n_nodes * procs_per_node,
+            n_threads=config.cores_per_node // procs_per_node,
+            n_tasks=n_tasks,
+            procs_per_task=procs_per_task,
+            duration=duration,
+            queue=queue,
+            account=account,
+            mpi=self.mpi_cmd,
+            executable=self.executable,
+            fs_dir=str(Path(self.executable).parent),
+            **({"run_path": run_path} if run_path is not None else {}),
+            **({"notify_on": notify_on.upper()} if notify_on is not None else {}),
+            **({"notify_email": notify_email} if notify_email is not None else {}),
+            **kwargs,
+        )
+        return script
+
+    def _generate_provision_script(
+        self,
+        n_nodes: int,
+        procs_per_node: int,
+        duration: str = "00-02:00:00",
+        queue: Optional[str] = None,
+        account: Optional[str] = None,
+        notify_email: Optional[str] = None,
+        **kwargs,
+    ) -> str:
+        """Generate a script for provisioning a Stampede3 cluster.
+
+        Args:
+            n_nodes:        Number of nodes to provision
+            procs_per_node: Number of processes per node
+            duration:       Duration of the job (DD-HH:MM:SS)
+            queue:          Queue to run on (optional, defaults to site queue)
+            account:        TACC account to run on (defaults to TACC_ACCOUNT env var if set)
+            notify_email:   Email address to notify (optional)
+        """
         env_dir = self._FS_dir / "src/frequensolve/orchestrator/templates"
         env = Environment(
             loader=FileSystemLoader(env_dir),
@@ -849,13 +1066,14 @@ class Stampede3Site(BaseSite):
 
         return template.render(
             name=name,
-            nhost=nhost,
-            nproc=nproc,
-            queue=self.config.queue,
-            account=self.config.account,
+            n_nodes=n_nodes,
+            procs_per_node=procs_per_node,
+            queue=queue,
+            account=account,
             duration=duration,
             work_dir=self.work_dir,
             mpi=self.config.mpi_wrapper,
+            **({"notify_email": notify_email} if notify_email is not None else {}),
         )
 
     def _get_job_host(self, job_id: int) -> str:
@@ -992,6 +1210,47 @@ class Stampede3Site(BaseSite):
 
         os.remove(local_tar)
         self.run_login(f"rm {remote_tar}")
+
+    def _print_interactive_output(self, interactive, timeout=5):
+        """Monitor command output and update future accordingly."""
+        try:
+            output_buffer = ""
+            error_buffer = ""
+
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if isinstance(interactive, subprocess.Popen):
+                    if interactive.poll() is not None:
+                        return
+
+                    reads, _, _ = select(
+                        [interactive.stdout, interactive.stderr], [], [], 0.1
+                    )
+                    for fd in reads:
+                        data = fd.read(4096).decode("utf-8", errors="replace")
+                        if fd == interactive.stdout:
+                            output_buffer += data
+                        else:
+                            error_buffer += data
+
+                # Process output buffer
+                while "\n" in output_buffer:
+                    line, output_buffer = output_buffer.split("\n", 1)
+                    line = line.strip()
+                    if line:
+                        print(line, flush=True)
+
+                # Process error buffer
+                while "\n" in error_buffer:
+                    line, error_buffer = error_buffer.split("\n", 1)
+                    line = line.strip()
+                    if line:
+                        print(f"\033[91m{line}\033[0m", flush=True)
+
+                time.sleep(0.2)
+
+        except Exception as e:
+            logger.exception(f"Monitor exception: {e}")
 
     async def _monitor_command_output(self, future, job, interactive=None):
         """Monitor command output and update future accordingly."""

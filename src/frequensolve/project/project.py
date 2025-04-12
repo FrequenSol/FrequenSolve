@@ -7,8 +7,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
+from warnings import warn
 
-from frequensolve.orchestrator.sites.frontera import FronteraSite
+from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project.migrate_version import Version
 from frequensolve.project.workflows import BaseWorkflow
@@ -54,7 +55,7 @@ class Project:
     jupyter_logging: bool = True
     load_if_exists: bool = False
     auto_migrate: bool = False
-    site: Optional[str] = None
+    site: Optional[BaseSite] = None
     simulations: NamedList[BaseSimulation] = field(default_factory=NamedList)
     workflows: Dict[str, BaseWorkflow] = field(default_factory=dict)
     extras: Dict[str, BaseProjectComponent] = field(default_factory=dict)
@@ -136,19 +137,26 @@ class Project:
 
         return Project.load(dest / f"{name}.json")
 
-    def transfer(self):
+    def transfer(self, site: Optional[BaseSite] = None):
         """Transfer project files to remote site with path substitution."""
 
-        if isinstance(self.site, LocalSite):
+        if site is None:
+            if self.site is None:
+                raise ValueError(
+                    "site must either be provided as an argument (preferred) or set for the project."
+                )
+            site = self.site
+
+        if isinstance(site, LocalSite):
             return
 
-        remote = self.site.work_dir
+        remote = site.work_dir
 
         proj_file = (Path(self.path) / f"{self.name}").with_suffix(".json")
         sim_dir = Path(self.path) / "simulations"
 
         if proj_file.exists():
-            self.site.put(proj_file, (remote / f"{self.name}").with_suffix(".json"))
+            site.put(proj_file, (remote / f"{self.name}").with_suffix(".json"))
 
         if sim_dir.exists():
             # Create temporary modified simulation files
@@ -190,7 +198,7 @@ class Project:
                 shutil.copy2(temp_file, dest)
                 temp_file.unlink()  # Clean up temporary file
 
-            self.site.put(temp_dir, remote)
+            site.put(temp_dir, remote)
             shutil.rmtree(temp_dir)
 
     def get_records(self, results: dict) -> RecordDatabase:
@@ -200,16 +208,18 @@ class Project:
             results: A dictionary of results from a Frontera job.
         """
 
-        if self.site is None:
-            raise ValueError("No site specified for project")
-        elif isinstance(self.site, LocalSite):
-            pass
-        elif isinstance(self.site, FronteraSite):
-            self.site.download_records(results, self.path.resolve())
+        # Make results specify site
+        # directory where results will be
+        if site not in results:
+            site = self.site
         else:
-            raise NotImplementedError(
-                f"Site type {type(self.site)} not supported (yet)"
-            )
+            site = results["site"]
+
+        if isinstance(site, LocalSite):
+            # TOOD: copy from file if output directory set on submission
+            pass
+        else:
+            site.download_records(results, self.path.resolve())
         return RecordDatabase.from_results(results, self.path.resolve())
 
     @classmethod
@@ -386,20 +396,21 @@ class Project:
 
     def terminate_jobs(self):
         """Terminate all running jobs associated with this project."""
-        if not self.site:
-            return
+        # TODO: on job submission, point to site
 
-        for job_name, future in list(self._active_jobs.items()):
+        # TODO: keep list of active sites;
+        # TODO: get_site should check if the site is active otherwise it should connect and try to cancel the job
+        for job, future in list(self._active_jobs.items()):
             try:
                 if hasattr(future, "cancel"):  # Dask future
                     future.cancel()
                 else:  # Job ID
-                    self.site.cancel_job(future)
-                logging.info(f"Terminated job {job_name}")
+                    NotImplementedError("Job cancelation needs work")
+                    # job.get_site().cancel_job(future)
+                logging.info(f"Terminated job {job}")
             except Exception as e:
-                logging.error(f"Failed to terminate job {job_name}: {e}")
-
-            self._active_jobs.pop(job_name)
+                logging.error(f"Failed to terminate job {job}: {e}")
+            self._active_jobs.pop(job)
 
     def __del__(self):
         """Cleanup method called when project object is destroyed."""
@@ -407,10 +418,19 @@ class Project:
 
     def submit_job(self, job, **kwargs) -> list:
         """Submit job and block until completion."""
+        warn(
+            "Note: you can submit jobs to sites directly with `site.submit(job, **kwargs)`; "
+            "submitting via project will be deprecated in the future.",
+            DeprecationWarning,
+        )
         return self.site.submit(job, **kwargs)
 
     def submit_job_async(self, job, **kwargs) -> asyncio.Future:
-        """Submit job asynchronously and return a future."""
+        warn(
+            "Note: you can submit jobs to sites directly with `site.submit(job, **kwargs)`; "
+            "submitting via project will be deprecated in the future.",
+            DeprecationWarning,
+        )
         future = self.site.submit_async(job, **kwargs)
         self._active_jobs[job.name] = future
         return future

@@ -181,6 +181,10 @@ class Stampede3Config:
         return self._base_config._cores_per_socket
 
     @property
+    def cores_per_node(self):
+        return self.cores_per_socket * self.sockets_per_node
+
+    @property
     def memory_per_node(self):
         return self._base_config._memory_per_node
 

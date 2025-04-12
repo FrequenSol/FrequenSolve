@@ -78,6 +78,18 @@ class LocalSite(BaseSite):
                 results.append(result)
         return job.records
 
+    def sync(self, project):
+        """Dummy method for consistency."""
+        pass
+
+    def _sync_project(self, project):
+        """Dummy method for consistency."""
+        pass
+
+    def connect_to_existing_job(self):
+        """Dummy method for consistency."""
+        pass
+
     def submit_async(self, job: SimulationJob, **kwargs) -> asyncio.Future:
         """Submit job asynchronously and return a future."""
         if self._is_notebook:
