@@ -18,7 +18,6 @@ import time
 from asyncio import Future
 from dataclasses import dataclass
 from functools import cached_property
-from logging import DEBUG
 from pathlib import Path
 from select import select
 from threading import Event, Thread
@@ -42,6 +41,7 @@ from frequensolve.orchestrator.credentials import Credentials
 from frequensolve.orchestrator.pool import PoolInfo, PoolStatus
 from frequensolve.orchestrator.sites.base import BaseSite, _wait_for_path
 from frequensolve.orchestrator.ssh import SSHClientClass, SSHProxy
+from frequensolve.seismic.record_database import RecordDatabase
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
 
@@ -89,15 +89,17 @@ class Stampede3Site(BaseSite):
         self,
         rel_path: Union[str, Path],
         transfer_method: Literal["rsync", "sftp"] = "rsync",
-        queue: str = "skx-dev",
+        default_queue: str = "skx-dev",
     ):
         logger.debug(
-            "Initializing Stampede3Site with rel_path: %s, queue: %s", rel_path, queue
+            "Initializing Stampede3Site with rel_path: %s, default_queue: %s",
+            rel_path,
+            default_queue,
         )
 
         # Get TACC credentials and node configuration
         self.credentials = TACCLoginCredentials()
-        self.config = Stampede3Config(queue=queue)
+        self.config = Stampede3Config(queue=default_queue)
         self.transfer_method = transfer_method
 
         # SSH into Stampede3
@@ -514,7 +516,36 @@ class Stampede3Site(BaseSite):
         print(
             f"Job {job_id} submitted successfully to Stampede3:{queue or self.config.queue}"
         )
+
+        # Set job ID in job object
+        job._job_id = job_id
+
         return job_id
+
+    def wait_completion(self, job: SimulationJob):
+        """Wait for job to complete and download results."""
+        job_id = job._job_id
+        if job_id is None:
+            print(f"\nJob is not queued; returning.")
+            return
+
+        status = "pending"
+        while status in ["pending", "running"]:
+            status = self.update_status(job_id)
+            print(
+                f"\033[38;5;244mJob {job_id} status: \033[38;5;27m{status.capitalize()}\033[0m",
+                end="\r",
+            )
+            time.sleep(self.config.poll_interval)
+
+        if status in ["complete", "failed", "timeout"]:
+            print(f"\nJob {job_id} completed with status: {status.capitalize()}\n")
+        elif status in ["cancelled"]:
+            print(f"\nJob {job_id} was cancelled.")
+            return
+        else:
+            print(f"\nJob {job_id} returned with unknown status: {status}.")
+            return
 
     def submit(self, job: SimulationJob, procs_per_job: int = 2):
         """Submit job and block until completion."""
@@ -595,12 +626,28 @@ class Stampede3Site(BaseSite):
             return output.decode().strip()
         return output.strip()
 
-    def update_status(self):
+    def update_status(self, job_id: Optional[str] = None):
         """Check the status of the resource request."""
-        job_id = self.pool.id
+
+        # Map SLURM status codes to our status codes
+        status_map = {
+            "PD": "pending",
+            "R": "running",
+            "CG": "running",
+            "CD": "complete",
+            "F": "failed",
+            "TO": "timeout",
+            "CA": "cancelled",
+        }
+
+        if job_id is None:
+            job_id = self.pool.id
+            job_specified = False  # Checking status of pool
+        else:
+            job_specified = True  # Checking status of a specific job
+
         if job_id is None:
             self.pool._status.status = "unknown"
-            return
 
         # Get job status
         status = self.run_login(f"squeue -j {job_id} -h -o %t").strip()
@@ -615,31 +662,25 @@ class Stampede3Site(BaseSite):
             )
 
             if "COMPLETED" in completion_status:
-                self.pool._status.status = "complete"
+                status = "complete"
             elif "FAILED" in completion_status:
-                self.pool._status.status = "failed"
+                status = "failed"
             elif "CANCELLED" in completion_status:
-                self.pool._status.status = "cancelled"
+                status = "cancelled"
             elif "TIMEOUT" in completion_status:
-                self.pool._status.status = "timeout"
+                status = "timeout"
             else:
-                self.pool._status.status = "unknown"
-            return
+                status = "unknown"
+        else:
+            status = status_map.get(status, "unknown")
 
-        # Map SLURM status codes to our status codes
-        status_map = {
-            "PD": "pending",
-            "R": "running",
-            "CG": "running",
-            "CD": "complete",
-            "F": "failed",
-            "TO": "timeout",
-            "CA": "cancelled",
-        }
-        self.pool._status.status = status_map.get(status, "unknown")
+        if not job_specified:
+            self.pool._status.status = status
+        return status
 
     def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
-        """Transfer files from local path to remote path on Stampede3.
+        """
+        Transfer files from local path to remote path on Stampede3.
 
         Args:
             local_path: Local path to transfer from
@@ -691,7 +732,100 @@ class Stampede3Site(BaseSite):
             logger.exception("Error during file transfer: %s", str(e))
             raise
 
-    def download_records(self, records: dict, project_dir: Union[str, Path]):
+    def fetch_traces(
+        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
+    ) -> RecordDatabase:
+        """Get results from Stampede3.
+
+        Args:
+            job: A SimulationJob object.
+            path: The path to save the results to.
+        """
+
+        if path is None:
+            path = job.project_path
+        else:
+            path = Path(path)
+
+        files = job.records["datasets"].keys()
+        try:
+            # Create temporary directory name for the archive
+            archive_name = f"records_{int(time.time())}"
+            remote_archive = self.work_dir / f"{archive_name}.tar.gz"
+            local_archive = path / f"{archive_name}.tar.gz"
+
+            # Create archive on remote
+            tar_cmd = f"cd {self.work_dir} && tar czf {remote_archive.name} "
+            tar_cmd += " ".join(files)
+            _, _, stderr = self.run_login_cmd(tar_cmd)
+            # err = stderr.read().decode().strip()
+            # if err:
+            #     raise RuntimeError(f"Failed to create archive on remote: {err}")
+
+            # Download, extract, and cleanup
+            self.get(remote_archive, local_archive)
+
+            cwd = os.getcwd()
+            os.chdir(local_archive.parent)
+            with tarfile.open(local_archive, "r:gz") as tar:
+                logger.debug("Extracting files from archive:")
+                tar.extractall()
+            os.chdir(cwd)
+
+            local_archive.unlink()
+            self.run_login(f"rm {remote_archive}")
+
+            # TODO: Copy job, simulation file to database so that it can be read independently.
+
+            return RecordDatabase.from_results(job.records, path.resolve())
+
+        except Exception as e:
+            logger.exception("Error downloading records: %s", str(e))
+            raise
+
+    def fetch_paraview(
+        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
+    ):
+        """Get results from Stampede3.
+
+        Args:
+            job: A SimulationJob object.
+            path: The path to save the results to.
+        """
+
+        if path is None:
+            path = job.project_path
+        else:
+            path = Path(path)
+
+        for pv_name, pv_path in job.paraview_outputs.items():
+            print(f"Fetching ParaView output: {pv_name} at {pv_path}")
+            try:
+                archive_name = f"{pv_name}.tar.gz"
+                remote_archive = self.work_dir / pv_path / archive_name
+                local_archive = path / pv_path / archive_name
+                tar_cmd = (
+                    f"cd {self.work_dir / pv_path} && tar czf {archive_name} {pv_name}"
+                )
+                _, _, stderr = self.run_login_cmd(tar_cmd)
+
+                self.get(remote_archive, local_archive)
+
+                cwd = os.getcwd()
+                os.chdir(local_archive.parent)
+                with tarfile.open(local_archive, "r:gz") as tar:
+                    logger.debug("Extracting files from archive:")
+                    tar.extractall()
+                os.chdir(cwd)
+
+                local_archive.unlink()
+                self.run_login(f"rm {remote_archive}")
+
+            except Exception as e:
+                logger.exception("Error downloading ParaView outputs: %s", str(e))
+                raise
+
+    def download_record_files(self, records: dict, project_dir: Union[str, Path]):
         """Download records from Stampede3.
 
         Args:

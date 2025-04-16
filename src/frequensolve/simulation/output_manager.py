@@ -10,7 +10,6 @@ __all__ = [
     "Output",
     "OutputManager",
     "ParaviewOutput",
-    "ReflectivityOutput",
     "WavefieldOutput",
 ]
 
@@ -60,7 +59,7 @@ class ReceiverOutput(Output):
     path: Optional[Path] = None
 
     def __init__(self, path: Optional[Union[str, Path]] = None, **kwargs):
-        self.path = Path(path).resolve() if path else None
+        self.path = Path(path).resolve() if path is not None else None
 
     def __dict__(self) -> Dict:
         if self.path is None:
@@ -187,53 +186,6 @@ class WavefieldOutput(Output):
         )
 
 
-@register_class
-@dataclass(kw_only=True)
-class ReflectivityOutput(Output):
-    """
-    Represents the ReflectivityImage subsection in the Output section.
-    """
-
-    name: str = "reflectivity"
-    path: Optional[Path] = None
-    grid: Optional[CartesianGrid] = None
-
-    def __init__(
-        self,
-        name: str = "reflectivity",
-        path: Optional[Union[str, Path]] = None,
-        grid: Optional[CartesianGrid] = None,
-        **kwargs,
-    ):
-        self.name = name
-        self.path = Path(path) if path else None
-        self.grid = grid
-
-    def __dict__(self) -> Dict:
-        if self.path is None:
-            self.path = self._path / "reflectivity"
-        if not self.path.exists():
-            self.path.mkdir(parents=True)
-
-        if self.grid is None:
-            self.grid = CartesianGrid()
-
-        return {
-            "_type": self.__class__.__name__,
-            "name": self.name,
-            "path": self.path.relative_to(self._proj_path),
-            "grid": self.grid.__dict__(),
-        }
-
-    @classmethod
-    def from_dict(cls, dict: Dict) -> "ReflectivityOutput":
-        return cls(
-            name=dict.get("name", "reflectivity"),
-            path=dict.get("path"),
-            grid=CartesianGrid.from_dict(dict["grid"]),
-        )
-
-
 @dataclass
 class OutputManager:
     """
@@ -245,14 +197,12 @@ class OutputManager:
        receivers (List[ReceiverOutput]):         Receiver output path
        paraview (List[ParaviewOutput]):          List of paraview outputs
        wavefields (List[WavefieldOutput]):       List of wavefield outputs
-       reflectivity (List[ReflectivityOutput]):  List of reflectivity outputs
     """
 
     write_receivers: bool = True
     receivers: ReceiverOutput = field(default_factory=ReceiverOutput)
     paraview: List[ParaviewOutput] = field(default_factory=list)
     wavefields: List[WavefieldOutput] = field(default_factory=list)
-    reflectivity: List[ReflectivityOutput] = field(default_factory=list)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
 
@@ -262,8 +212,6 @@ class OutputManager:
             self.paraview.append(output)
         elif isinstance(output, WavefieldOutput):
             self.wavefields.append(output)
-        elif isinstance(output, ReflectivityOutput):
-            self.reflectivity.append(output)
         return self
 
     def __dict__(self) -> Dict:
@@ -273,7 +221,6 @@ class OutputManager:
             ),
             "ParaView": [pv_out.__dict__() for pv_out in self.paraview],
             "wavefields": [wf_out.__dict__() for wf_out in self.wavefields],
-            "reflectivity": [ri_out.__dict__() for ri_out in self.reflectivity],
         }
         return {k: v for k, v in dict.items() if v}
 
@@ -286,15 +233,10 @@ class OutputManager:
         wavefields = [
             WavefieldOutput.from_dict(wf_out) for wf_out in dict.get("wavefields", [])
         ]
-        reflectivity = [
-            ReflectivityOutput.from_dict(ri_out)
-            for ri_out in dict.get("reflectivity", [])
-        ]
         return cls(
             write_receivers=receivers is not None,
             paraview=paraview,
             wavefields=wavefields,
-            reflectivity=reflectivity,
         )
 
     def _set_path(self, proj_path: Path, rel_path: Path):
@@ -307,8 +249,6 @@ class OutputManager:
             out._set_path(proj_path, self._rel_path / "ParaView")
         for out in self.wavefields:
             out._set_path(proj_path, self._rel_path / "wavefields")
-        for out in self.reflectivity:
-            out._set_path(proj_path, self._rel_path / "reflectivity")
 
     @property
     def _path(self) -> Path:

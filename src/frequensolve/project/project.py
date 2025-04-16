@@ -208,18 +208,20 @@ class Project:
             results: A dictionary of results from a Frontera job.
         """
 
-        # Make results specify site
-        # directory where results will be
-        if site not in results:
-            site = self.site
-        else:
-            site = results["site"]
+        warn(
+            "`Project.get_records` will be deprecated; use `site.fetch_results` instead.",
+            DeprecationWarning,
+        )
 
-        if isinstance(site, LocalSite):
-            # TOOD: copy from file if output directory set on submission
+        if self.site is None:
+            raise ValueError(
+                "Getting records through projects requires Project.site to be set; use site.fetch_results instead."
+            )
+
+        if isinstance(self.site, LocalSite):
             pass
         else:
-            site.download_records(results, self.path.resolve())
+            self.site.download_record_files(results, self.path.resolve())
         return RecordDatabase.from_results(results, self.path.resolve())
 
     @classmethod

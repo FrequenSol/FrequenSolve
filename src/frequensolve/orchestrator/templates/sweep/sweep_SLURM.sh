@@ -3,11 +3,11 @@
 {% if batch_job %}
 #SBATCH -J {{ name }}
 {% if run_path %}
-#SBATCH -o {{run_path}}/jobs/batch/job.o%j
-#SBATCH -e {{run_path}}/jobs/batch/job.e%j
+#SBATCH -o {{run_path}}/jobs/batch/job_%j.o
+#SBATCH -e {{run_path}}/jobs/batch/job_%j.e
 {% else %}
-#SBATCH -o ./job.o%j
-#SBATCH -e ./job.e%j
+#SBATCH -o ./job_%j.o
+#SBATCH -e ./job_%j.e
 {% endif %}
 #SBATCH -N {{ n_nodes }}
 #SBATCH -n {{ n_procs }}
@@ -49,10 +49,14 @@ rm -rf $dir_out
 mkdir -p $dir_out
 {% endif %}
 
+ml phdf5
+
 {% if n_tasks > 1 %}
 export FREQUENSOL_SWEEP=1              # Disable ParaView output
 {% endif %}
 export FREQUENSOLVE_DIR={{fs_dir}}
+
+export KMP_STACKSIZE=16M
 
 mpi_exec={{mpi}}
 executable={{executable}}
@@ -61,6 +65,8 @@ n_procs={{n_procs}}
 n_tasks={{n_tasks}}
 
 n_workers=$((n_procs / procs_per_task))
+
+start_time=$(date +%s)
 
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
@@ -73,4 +79,13 @@ for i in $(seq 1 $n_tasks); do
 done
 wait
 
+# Calculate and print total time taken
+end_time=$(date +%s)
+if [ -n "$start_time" ]; then
+    total_seconds=$((end_time - start_time))
+    hours=$((total_seconds / 3600))
+    minutes=$(( (total_seconds % 3600) / 60 ))
+    seconds=$((total_seconds % 60))
+    echo "Total time: ${hours}h ${minutes}m ${seconds}s"
+fi
 echo "Sweep Complete"

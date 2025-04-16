@@ -1,5 +1,6 @@
 import json
 import os
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Literal, Optional, Union
@@ -119,8 +120,9 @@ class SeismicSimulation(BaseSimulation):
     """
 
     name: str
-    physics: Literal["acoustic", "elastic", "plasma"]
+    physics: Literal["acoustic", "elastic", "coupled", "em"]
     dimension: Literal[2, 3]
+    workflow: Optional[Literal["forward", "adjoint", "RTM"]] = None
     model: ModelBase = field(default_factory=ModelBase)
     mesh: MeshManager = field(default_factory=MeshManager)
     BCs: BoundaryConditionManager = field(default_factory=BoundaryConditionManager)
@@ -174,6 +176,12 @@ class SeismicSimulation(BaseSimulation):
             os.chdir(cwd)
 
         sim._set_path(project_dir, Path("simulations"))
+        return sim
+
+    def copy(self, **kwargs) -> "SeismicSimulation":
+        sim = deepcopy(self)
+        for key, value in kwargs.items():
+            setattr(sim, key, value)
         return sim
 
     @classmethod

@@ -5,6 +5,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional, Union
 
 from dotenv import load_dotenv
 
@@ -78,6 +79,11 @@ class LocalSite(BaseSite):
                 results.append(result)
         return job.records
 
+    @property
+    def provisioned(self) -> bool:
+        """Dummy method for consistency."""
+        return True
+
     def sync(self, project):
         """Dummy method for consistency."""
         pass
@@ -87,6 +93,18 @@ class LocalSite(BaseSite):
         pass
 
     def connect_to_existing_job(self):
+        """Dummy method for consistency."""
+        pass
+
+    def fetch_paraview(
+        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
+    ):
+        """Dummy method for consistency."""
+        for name, pv_path in job.paraview_outputs.items():
+            print(f"Fetching ParaView output {name} from {pv_path}")
+        pass
+
+    def fetch_traces(self, job: SimulationJob, path: Optional[Union[str, Path]] = None):
         """Dummy method for consistency."""
         pass
 

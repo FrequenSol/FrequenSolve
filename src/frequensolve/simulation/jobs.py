@@ -20,6 +20,7 @@ class SimulationJob(ABC):
     simulation: BaseSimulation
     f_list: List[float]
     _file: Optional[Path] = None
+    _job_id: Optional[str] = None
 
     @classmethod
     def from_dict(cls, d: dict, project_dir: Optional[Path] = None) -> "SimulationJob":
@@ -36,6 +37,10 @@ class SimulationJob(ABC):
         job = cls.from_dict(json.loads(path.read_text()), project_dir=project_dir)
         job._file = path
         return job
+
+    @property
+    def project_path(self):
+        return Path(self.simulation._file).parent.parent
 
     def __dict__(self):
         if self.simulation._file is None:
@@ -203,36 +208,6 @@ class SimulationJob(ABC):
                 wave_out["sources"].append(f"{isrc+1}")
 
         return wave_out
-
-    @property
-    def reflectivity_outputs(self) -> dict:
-        """Lists reflectivity outputs.
-
-        Returns:
-            - reflectivity: Reflectivity outputs
-        """
-        sim = self.simulation
-        receivers = sim.acquisition.receiver_groups
-
-        sim_file = sim._file
-        with open(sim_file, "r") as f:
-            sim_data = json.load(f)
-
-        outputs = sim_data["Outputs"]["reflectivity"]
-
-        refl_out = {}
-        for out in outputs:
-            refl_out["domain"] = (self.__class__.__name__,)
-            refl_out["summed"] = out.get("summed", True)
-            refl_out["path"] = out["path"]
-            refl_out["frequencies"] = self.f_list
-            refl_out["sources"] = []
-
-            if not refl_out["summed"]:
-                for isrc, source in enumerate(sim.acquisition.source_group.sources):
-                    refl_out["sources"].append(f"{isrc+1}")
-
-        return refl_out
 
 
 @register_class
