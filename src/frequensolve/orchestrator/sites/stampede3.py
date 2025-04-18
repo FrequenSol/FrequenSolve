@@ -76,9 +76,9 @@ class Stampede3Site(BaseSite):
     credentials: TACCLoginCredentials
     config: Stampede3Config
     pool: PoolInfo
-    executable: str
     remote_env: dict
     transfer_method: Literal["rsync", "sftp"] = "rsync"
+    _executable: str
     _login_client: SSHClientClass
     _compute_client: Optional[SSHClientClass] = None
     _work_dir: Path
@@ -108,13 +108,23 @@ class Stampede3Site(BaseSite):
 
         # Get work directory and solver path
         self._work_dir = self._get_work_dir(rel_path)
-        self.executable = self._get_solver_path()
+        self._executable = self._get_solver_path()
         self._FS_dir = self._get_FS_path()
 
         self.pool = PoolInfo()
         self._is_notebook = self._check_if_notebook()
 
         logger.info("Stampede3Site initialized with work_dir: %s", self._work_dir)
+
+    @property
+    def executable(self) -> str:
+        """Get the solver executable."""
+
+        if self._executable is None:
+            raise ValueError(
+                "Solver executable not specified; set STAMPADE3_SOLVER_EXECUTABLE environment variable."
+            )
+        return self._executable
 
     @property
     def compute_client(self) -> SSHClient:

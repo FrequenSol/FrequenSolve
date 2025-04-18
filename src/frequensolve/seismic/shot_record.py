@@ -464,7 +464,7 @@ def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
             u[ifreq, :] += np.csingle(1j) * f[f"{field}_{isrc}_im"][()]
             u[ifreq, :] += f[f"{field}_{isrc}_re"][()]
 
-            if np.any(np.isnan(u[ifreq, :])) or np.any(u[ifreq, :] > 1e5):
+            if np.any(np.isnan(u[ifreq, :])) or np.any(u[ifreq, :] > 1e8):
                 u[ifreq, :] = 0
                 print(f"NaN values for frequency {freq} Hz")
                 continue

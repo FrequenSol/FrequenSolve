@@ -581,6 +581,7 @@ class ReceiverGroup:
         coordinates: Union[np.ndarray, xr.DataArray, str, Path, Grid, ReceiverCoords],
         frame: str = "physical",
         domain: Optional[int] = None,
+        **kwargs,
     ) -> None:
         coords = self._clean_coordinates(coordinates)
         self.name = name
@@ -588,6 +589,7 @@ class ReceiverGroup:
         self.frame = frame
         self.coordinates = coords
         self.domain = domain
+        self.kwargs = kwargs
 
     @staticmethod
     def _clean_coordinates(coords):
@@ -627,18 +629,20 @@ class ReceiverGroup:
             "frame": self.frame,
             **({"domain": self.domain} if self.domain is not None else {}),
             "coordinates": self.coordinates.__dict__(),
+            **self.kwargs,
         }
 
     @classmethod
     def from_dict(cls, data: Dict) -> "ReceiverGroup":
-        coords = ReceiverCoords.from_dict(data["coordinates"])
+        coords = ReceiverCoords.from_dict(data.pop("coordinates", None))
 
         return cls(
-            name=data["name"],
-            device=ReceiverDevice.from_dict(data["device"]),
-            frame=data["frame"],
+            name=data.pop("name", None),
+            device=ReceiverDevice.from_dict(data.pop("device", None)),
+            frame=data.pop("frame", None),
             coordinates=coords,
-            domain=data.get("domain"),
+            domain=data.pop("domain", None),
+            **data,
         )
 
     def _set_path(self, proj_path: Path, rel_path: Path):

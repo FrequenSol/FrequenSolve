@@ -100,6 +100,7 @@ class Acquisition:
         coords: np.ndarray,
         frame: str = "physical",
         domain: Optional[int] = None,
+        **kwargs,
     ):
         """Add a group of recievers with common kind, frame, and direction.
 
@@ -116,7 +117,12 @@ class Acquisition:
 
         self.receiver_groups.append(
             ReceiverGroup(
-                name=name, device=device, frame=frame, coordinates=coords, domain=domain
+                name=name,
+                device=device,
+                frame=frame,
+                coordinates=coords,
+                domain=domain,
+                **kwargs,
             )
         )
 

@@ -38,10 +38,6 @@ class SimulationJob(ABC):
         job._file = path
         return job
 
-    @property
-    def project_path(self):
-        return Path(self.simulation._file).parent.parent
-
     def __dict__(self):
         if self.simulation._file is None:
             raise ValueError("Simulation has not been saved.")
@@ -87,6 +83,10 @@ class SimulationJob(ABC):
         # Save the file name
         self._file = file
         return file
+
+    @property
+    def project_path(self):
+        return Path(self.simulation._file).parent.parent
 
     @property
     def n_tasks(self):

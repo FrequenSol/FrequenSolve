@@ -15,6 +15,7 @@ from frequensolve.orchestrator.sites.base import (
     SiteStatus,
     _wait_for_path,
 )
+from frequensolve.seismic.record_database import RecordDatabase
 from frequensolve.simulation.jobs import SimulationJob
 
 __all__ = ["LocalSite"]
@@ -105,8 +106,8 @@ class LocalSite(BaseSite):
         pass
 
     def fetch_traces(self, job: SimulationJob, path: Optional[Union[str, Path]] = None):
-        """Dummy method for consistency."""
-        pass
+        """Gets traces."""
+        return RecordDatabase.from_results(job.records, job.project_path.resolve())
 
     def submit_async(self, job: SimulationJob, **kwargs) -> asyncio.Future:
         """Submit job asynchronously and return a future."""

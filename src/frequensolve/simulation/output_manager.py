@@ -106,6 +106,7 @@ class ParaviewOutput(Output):
         self.fields = fields
         self.upscale = upscale
         self.show_pml = show_pml
+        self.kwargs = kwargs
 
     def __dict__(self) -> Dict:
         if self.path is None:
@@ -123,6 +124,7 @@ class ParaviewOutput(Output):
             "fields": self.fields,
             "upscale": self.upscale,
             "show_pml": self.show_pml,
+            **self.kwargs,
         }
 
     @classmethod

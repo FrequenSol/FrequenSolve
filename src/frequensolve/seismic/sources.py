@@ -56,7 +56,7 @@ class RuptureSource(Source):
 @register_class
 @dataclass
 class PointSource(Source):
-    kind: Literal["scalar", "vector", "moment"]
+    kind: Literal["scalar", "vector", "moment", "monopole", "dipole"]
     frame: Literal["physical", "reference"] = "physical"
     coordinates: List[float] = field(default_factory=list)
     direction: Optional[List[float]] = None
