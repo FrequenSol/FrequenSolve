@@ -68,15 +68,20 @@ class Acquisition:
         kind: str,
         coords: np.ndarray,
         direction: Optional[np.ndarray] = None,
+        domain: Optional[int] = None,
         frame: str = "physical",
     ):
         """Add a group of recievers with common kind, frame, and direction.
 
         Args:
-           kind (str): Kind of the receiver group (e.g., "station", "geophone", "fiber").
-           coords (np.ndarray): Coordinates of the receiver group.
-           direction (np.ndarray): Direction of the receiver group.
-           frame (str): Frame of the receiver group (e.g., "physical", "global").
+           kind (str):              Kind of the receiver group (e.g., "station", "geophone", "fiber").
+           coords (np.ndarray):     Coordinates of the receiver group.
+           direction (np.ndarray):  Direction of the receiver group.
+           frame (str):             Frame of the receiver group (e.g., "physical", "global").
+           domain (int):            Domain in which the source group should be evaluated
+                                    (if a source is defined between multiple domains, responses
+                                     will be evaluated in all and averaged by default, setting this
+                                     specifies a specific domain to evaluate, neglecting others).
         """
 
         for row in coords:
@@ -88,6 +93,7 @@ class Acquisition:
                         frame=frame,
                         coordinates=row,
                         direction=direction,
+                        domain=domain,
                         name=f"source_{isrc}",
                     )
                 )

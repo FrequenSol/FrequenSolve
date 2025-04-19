@@ -575,7 +575,9 @@ def plot_cf(shot: ShotRecord, **kwargs):
             break
 
     n1 = rgroup.size
-    xl = abs(rgroup.coordinates[:, idir] - sgroup.source.coordinates[idir])
+    xl = rgroup.coordinates[:, idir] - sgroup.source.coordinates[idir]
+
+    shot.data[:, xl < 0] = 0
 
     f_max = shot.sampling.f_max
     nf = shot.sampling.nfreq
@@ -586,10 +588,10 @@ def plot_cf(shot: ShotRecord, **kwargs):
 
     # Define window function for spatial damping
     w = np.zeros((n1), dtype=np.single)
-    i1 = n1 // 16
+    i1 = n1 // 8
     i2 = n1 - i1
     w[i1:i2] = 1
-    w = gaussian_filter1d(w, n1 // 32)
+    w = gaussian_filter1d(w, n1 // 16)
 
     # Evaluate radon-like transform
     for ifreq, f in enumerate(fl):

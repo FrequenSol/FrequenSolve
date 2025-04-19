@@ -52,7 +52,7 @@ mkdir -p $dir_out
 ml phdf5
 
 {% if n_tasks > 1 %}
-export FREQUENSOL_SWEEP=1              # Disable ParaView output
+export FS_DISABLE_PARAVIEW=1
 {% endif %}
 export FREQUENSOLVE_DIR={{fs_dir}}
 

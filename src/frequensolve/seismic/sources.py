@@ -60,6 +60,7 @@ class PointSource(Source):
     frame: Literal["physical", "reference"] = "physical"
     coordinates: List[float] = field(default_factory=list)
     direction: Optional[List[float]] = None
+    domain: Optional[int] = None
     name: str = "point"
 
     @classmethod
@@ -74,6 +75,7 @@ class PointSource(Source):
             "frame": self.frame,
             "coordinates": self.coordinates,
             **({"direction": self.direction} if self.direction is not None else {}),
+            **({"domain": self.domain} if self.domain is not None else {}),
         }
 
 
