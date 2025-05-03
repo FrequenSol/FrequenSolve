@@ -3,7 +3,7 @@ import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import h5py
 import numpy as np
@@ -86,6 +86,9 @@ class ShotRecord:
             "impulsive_x": 13,
         }
 
+        Tf = kwargs.get("Tf", None)
+        nTf, Tf = self.sampling.cutoff(Tf)
+
         rgroup = self.receiver_group
         source = self.source_group.source
 
@@ -106,19 +109,19 @@ class ShotRecord:
         scale = iunit.to(ounit).magnitude
 
         # Get sampling parameters
-        n_samples = self.sampling.nTime
+        n_samples = nTf
         n_traces = rgroup.size
         dt = self.sampling.dT  # Time step in seconds
         sample_interval = int(dt * 1e6)  # Convert to microseconds
 
-        # Create time samples array (in seconds)
-        time_samples = np.arange(n_samples) * dt
+        # Create time samples array (milliseconds)
+        time_samples = np.arange(n_samples) * dt * 1000
 
         # SEGY file settings
         spec = segyio.spec()
         spec.format = 5
-        spec.samples = time_samples  # Time samples in seconds
-        spec.sample_rate = sample_interval  # Sample interval in microseconds
+        spec.samples = time_samples  # Time samples (milliseconds)
+        spec.sample_rate = sample_interval  # Sample interval in microseconds (segyio ignores this and computes from samples)
         spec.tracecount = n_traces
 
         # Create a SEGY file and write data
@@ -139,16 +142,14 @@ class ShotRecord:
                         segyio.TraceField.TRACE_SAMPLE_INTERVAL: sample_interval,
                         segyio.TraceField.CoordinateUnits: coordinates["length"],
                         # Source
-                        segyio.TraceField.SourceX: round(
-                            (source.coordinates[0] * scale)
-                        ),
+                        segyio.TraceField.SourceX: int((source.coordinates[0] * scale)),
                         segyio.TraceField.SourceY: 0,
-                        segyio.TraceField.SourceDepth: round(
+                        segyio.TraceField.SourceDepth: -int(
                             (source.coordinates[-1] * scale)
                         ),
                         # Receiver location
-                        segyio.TraceField.GroupX: round(
-                            (rgroup.coordinates[itrace, 0] * scale) * 1000
+                        segyio.TraceField.GroupX: int(
+                            (rgroup.coordinates[itrace, 0] * scale)
                         ),
                         segyio.TraceField.GroupY: 0,
                         segyio.TraceField.ReceiverGroupElevation: -int(
@@ -308,32 +309,110 @@ class Record:
     df: float
     f_max: float
     f_map: Dict[str, float]
+    _upscale: int
 
-    def sampling(self, upscale: int = 1) -> Sampling:
-        return UniformSweepSampling(
-            f_min=0.0, f_max=self.f_max, df=self.df, upscale=upscale
-        )
-
-    def times(self, upscale: int = 1) -> np.ndarray:
-        return self.sampling(upscale).t_list
-
-    def __init__(self, record: str, meta: Dict[str, Any]):
+    def __init__(self, record: str, meta: Dict[str, Any], upscale: int = 1):
         self.file = record
         self.project_path = meta["project"]
         self.simulation = Path(meta["simulation"]).with_suffix(".json")
         self.df = meta["df"]
         self.f_max = meta["f_max"]
         self.f_map = meta["f_map"]
+        self.set_upscaling(upscale)
 
-    def read_TD(self, wavelet: Wavelet, upscale: int = 1) -> ShotRecord:
-        return read_shot_TD(self, wavelet, upscale)
+    @property
+    def is_consolidated(self) -> bool:
+        """Check if records have been consolidated into single h5 files."""
+        fbase = "_".join(self.file.split(":")[0].split("_")[:-1])
+        consolidated_file = f"{fbase}_consolidated.h5"
+        if not os.path.exists(consolidated_file):
+            return False
+        return True
+
+    @property
+    def group(self) -> str:
+        fbase, _ = self.file.split(":")
+        fbase = "_".join(fbase.split("_")[:-1])
+        return Path(fbase).name
+
+    @property
+    def field(self) -> str:
+        _, comp = self.file.split(":")
+        return "_".join(comp.split("_")[:-1])
+
+    @property
+    def source(self) -> int:
+        _, comp = self.file.split(":")
+        return int(comp.split("_")[-1])
+
+    @property
+    def file_base(self) -> str:
+        fbase, _ = self.file.split(":")
+        return "_".join(fbase.split("_")[:-1])
+
+    @property
+    def upscaling(self) -> int:
+        return self._upscale
+
+    def read_TD(self, wavelet: Wavelet) -> ShotRecord:
+        return read_shot_TD(self, wavelet, self.upscaling)
 
     def read_FD(self, wavelet: Wavelet) -> ShotRecord:
         return read_shot_FD(self, wavelet)
 
+    def set_upscaling(self, upscale: int) -> None:
+        self._upscale = upscale
 
-# TODO: Upscale needs to be consistent in different places, make it so it's only specified once.
-def read_shot_TD(record: Record, wavelet: Wavelet, upscale: int = 1) -> ShotRecord:
+    def sampling(self, upscale: Optional[int] = None) -> Sampling:
+        upscale = self.upscaling if upscale is None else upscale
+        return UniformSweepSampling(
+            f_min=0.0, f_max=self.f_max, df=self.df, upscale=upscale
+        )
+
+    def times(self, upscale: Optional[int] = None) -> np.ndarray:
+        return self.sampling(upscale).T_list
+
+    def read_consolidated(self) -> np.ndarray:
+        """Read data from a consolidated HDF5 file.
+
+        Args:
+            group (str): Name of the receiver group
+            field (str): Field component to read (e.g. 'u_x', 'u_z')
+            source (int): Source number
+
+        Returns:
+            np.ndarray: Complex array containing the frequency domain data
+                       with shape (n_frequencies, n_receivers)
+
+        Raises:
+            FileNotFoundError: If consolidated file does not exist
+            KeyError: If requested data not found in file
+        """
+        fbase = self.file_base
+        field = self.field
+        src = self.source
+
+        consolidated_file = f"{fbase}_consolidated.h5"
+        if not os.path.exists(consolidated_file):
+            raise FileNotFoundError(f"Consolidated file {consolidated_file} not found")
+
+        with h5py.File(consolidated_file, "r") as f:
+            # List all available fields in the file
+            available_fields = list(f.keys())
+            if field not in available_fields:
+                raise KeyError(
+                    f"Field {field} not found in {consolidated_file}. Available fields: {available_fields}"
+                )
+
+            source_group = f[field][f"source_{src}"]
+            real_data = source_group["real"][:]
+            imag_data = source_group["imag"][:]
+            return real_data.astype(np.complex64) + 1j * imag_data.astype(np.complex64)
+
+
+def read_shot_TD(
+    record: Record, wavelet: Wavelet, upscale: Optional[int] = None
+) -> ShotRecord:
     """Read a time-domain shot record.
 
     Args:
@@ -351,6 +430,8 @@ def read_shot_TD(record: Record, wavelet: Wavelet, upscale: int = 1) -> ShotReco
     group_name = "_".join(Path(fbase).name.split("_")[:-1])
     field = "_".join(comp.split("_")[:-1])
     isrc = int(comp.split("_")[-1])
+
+    upscale = record.upscaling if upscale is None else upscale
 
     # TODO: This is a hack, fix it.
     cwd = os.getcwd()
@@ -380,7 +461,11 @@ def read_shot_TD(record: Record, wavelet: Wavelet, upscale: int = 1) -> ShotReco
 
     # Convert to time domain using FFT
     try:
-        import pyfftw.interfaces.numpy_fft as fft
+        import pyfftw
+
+        pyfftw.interfaces.cache.enable()
+        fft = pyfftw.interfaces.numpy_fft
+        pyfftw.config.NUM_THREADS = 6  # Or however many threads you want to use
     except:
         warnings.warn("pyfftw not found, using numpy for FFT (slow)")
         import numpy.fft as fft
@@ -418,6 +503,10 @@ def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
     Returns:
         ShotRecord: The frequency-domain shot record.
     """
+
+    if record.is_consolidated:
+        return read_shot_FD_consolidated(record, wavelet)
+
     # TODO: This is a hack, fix it.
     cwd = os.getcwd()
     os.chdir(record.project_path)
@@ -450,30 +539,101 @@ def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
     u = np.zeros((nf, nrecv), dtype=np.csingle)
 
     fmap = record.f_map
+    spectrum = wavelet.spectrum
 
     for i, freq in record.f_map.items():
         file = f"{fbase}_{i}.h5"
         ifreq = round(freq / sampling.df)
-        i_omega = np.csingle(1j * 2 * np.pi * freq)
+        omega = np.csingle(2 * np.pi * freq)
+        i_omega = np.csingle(1j * omega)
 
         if not os.path.exists(file):
             continue
             # raise FileNotFoundError(f"File {file} does not exist.")
-
         with h5py.File(file, "r") as f:
-            u[ifreq, :] += np.csingle(1j) * f[f"{field}_{isrc}_im"][()]
-            u[ifreq, :] += f[f"{field}_{isrc}_re"][()]
+            # Read real and imaginary parts in one operation
+            im_data = f[f"{field}_{isrc}_im"][()]
+            re_data = f[f"{field}_{isrc}_re"][()]
+            u[ifreq, :] = re_data + np.csingle(1j) * im_data
 
-            if np.any(np.isnan(u[ifreq, :])) or np.any(u[ifreq, :] > 1e8):
+            # Check for invalid values
+            if np.any(~np.isfinite(u[ifreq, :])) or np.any(np.abs(u[ifreq, :]) > 1e8):
                 u[ifreq, :] = 0
-                print(f"NaN values for frequency {freq} Hz")
+                print(f"Invalid values for frequency {freq} Hz")
                 continue
 
-            u[ifreq, :] *= wavelet.spectrum[ifreq]
+            scale = spectrum[ifreq]
+            # if isinstance(recv_group.device, ReceiverFiber):
+            scale *= omega
+            u[ifreq, :] *= scale
 
-            # For fiber-type receivers, multiply by iω for strain *rate*
-            if isinstance(recv_group.device, ReceiverFiber):
-                u[ifreq, :] *= i_omega
+    # TODO: This is a hack.
+    os.chdir(cwd)
+
+    return ShotRecord(
+        type="FD",
+        number=isrc,
+        sampling=sampling,
+        source_group=src_group,
+        receiver_group=recv_group,
+        field=field,
+        data=u,
+    )
+
+
+def read_shot_FD_consolidated(record: Record, wavelet: Wavelet) -> ShotRecord:
+    """Read a frequency-domain shot record.
+
+    Args:
+        record (Record): Record to read.
+        wavelet (Wavelet): Wavelet to use for the shot record.
+        sampling (Sampling): Sampling to use for the shot record.
+
+    Returns:
+        ShotRecord: The frequency-domain shot record.
+    """
+    # TODO: This is a hack, fix it.
+    cwd = os.getcwd()
+    os.chdir(record.project_path)
+
+    with open(record.simulation, "r") as f:
+        sim = json.load(f)
+
+    fbase, comp = record.file.split(":")
+    fbase = "_".join(fbase.split("_")[:-1])
+    group_name = Path(fbase).name
+    field = "_".join(comp.split("_")[:-1])
+    isrc = int(comp.split("_")[-1])
+
+    for rgroup in sim["Acquisition"]["receiver_groups"]:
+        if rgroup["name"] == group_name:
+            break
+    else:
+        raise ValueError(f"Receiver group {group_name} not found in simulation.")
+    sgroup = sim["Acquisition"]["source_groups"][isrc - 1]
+
+    recv_group = ReceiverGroup.from_dict(rgroup)
+    src_group = SourceGroup.from_dict(sgroup)
+    sampling = record.sampling(upscale=1)
+
+    nrecv = recv_group.size
+    nf = sampling.nfreq
+
+    # Initialize complex data array
+    u = np.zeros((nf, nrecv), dtype=np.csingle)
+    data = record.read_consolidated()
+
+    fmap = record.f_map
+    spectrum = wavelet.spectrum
+
+    for i, freq in record.f_map.items():
+        ifreq = round(freq / sampling.df)
+        i_omega = np.csingle(1j * 2 * np.pi * freq)
+
+        scale = spectrum[ifreq]
+        # if isinstance(recv_group.device, ReceiverFiber):
+        scale *= i_omega
+        u[ifreq, :] = scale * data[i - 1, :]
 
     # TODO: This is a hack.
     os.chdir(cwd)
@@ -597,13 +757,10 @@ def array_to_segy(
     spec.samples = samples
     spec.ilines = ilines  # Inline indices
     spec.xlines = xlines  # Crossline indices
-    spec.sample_rate = sample_interval  # Sample interval (microseconds)
-    spec.tracecount = n_traces  # Number of traces
 
-    # Create a SEGY file and write data
     with segyio.create(fname, spec) as f:
-        f.bin[segyio.BinField.Interval] = sample_interval  # Set sample interval in µs
-        f.bin[segyio.BinField.Samples] = n_samples  # Set number of samples per trace
+        f.bin[segyio.BinField.Interval] = sample_interval
+        f.bin[segyio.BinField.Samples] = n_samples
         f.bin[segyio.BinField.MeasurementSystem] = (
             coordinate_units  # 1 for meters, 2 for feet
         )

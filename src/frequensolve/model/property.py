@@ -123,7 +123,10 @@ class Property:
             return self.darr
         else:
             if _dims_compatible(self.darr.dims, coords):
-                return self.darr.interp(coords)
+                return self.darr.interp(
+                    coords=coords, method="linear", kwargs={"fill_value": "extrapolate"}
+                )
+
             elif self.is_constant:
                 dims = xarr.dims
                 shape = tuple(len(coords[dim]) for dim in dims)
@@ -131,7 +134,7 @@ class Property:
                     data=np.full(shape, self.darr.values), dims=dims, coords=coords
                 )
             else:
-                return self.darr.interp(coords)
+                raise ValueError("Incompatible dimensions")
 
     def __iadd__(self, other: Union[float, xr.DataArray]) -> None:
         """Add a scalar or DataArray to the property."""

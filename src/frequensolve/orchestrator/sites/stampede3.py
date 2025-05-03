@@ -21,7 +21,7 @@ from functools import cached_property
 from pathlib import Path
 from select import select
 from threading import Event, Thread
-from typing import Literal, Optional, TextIO, Union
+from typing import Dict, List, Literal, Optional, TextIO, Union
 
 from dotenv import load_dotenv
 from jinja2 import Environment, FileSystemLoader
@@ -38,7 +38,7 @@ from frequensolve.orchestrator.config.stampede3 import (
     _seconds_to_hms,
 )
 from frequensolve.orchestrator.credentials import Credentials
-from frequensolve.orchestrator.pool import PoolInfo, PoolStatus
+from frequensolve.orchestrator.pool import PoolInfo
 from frequensolve.orchestrator.sites.base import BaseSite, _wait_for_path
 from frequensolve.orchestrator.ssh import SSHClientClass, SSHProxy
 from frequensolve.seismic.record_database import RecordDatabase
@@ -466,7 +466,7 @@ class Stampede3Site(BaseSite):
             account:        TACC account to run on
             notify_on:      Notify on event
             notify_email:   Email address to notify
-            run_path:           Path where the slurm job will be run
+            run_path:       Path where the slurm job will be run
         """
 
         if procs_per_task is None:
@@ -532,30 +532,100 @@ class Stampede3Site(BaseSite):
 
         return job_id
 
-    def wait_completion(self, job: SimulationJob):
+    def wait_completion(self, job: Union[SimulationJob, List[SimulationJob]]):
         """Wait for job to complete and download results."""
-        job_id = job._job_id
-        if job_id is None:
-            print(f"\nJob is not queued; returning.")
-            return
 
-        status = "pending"
-        while status in ["pending", "running"]:
-            status = self.update_status(job_id)
+        status_colors = {
+            "pending": "\033[38;5;27m",
+            "running": "\033[38;5;28m",
+            "complete": "\033[38;5;40m",
+            "timeout": "\033[38;5;202m",
+            "failed": "\033[38;5;160m",
+            "cancelled": "\033[38;5;160m",
+        }
+
+        if isinstance(job, SimulationJob):
+            jobs = [job]
+            job_ids = [job._job_id]
+        else:
+            jobs = job
+            job_ids = [j._job_id for j in job]
+
+        statuses = {j_id: "pending" for j_id in job_ids}
+        active_jobs = set(job_ids)
+        # Calculate max job name length for alignment
+        name_width = max(len(job.name) for job in jobs)
+
+        # Print initial status lines for each job
+        for job in jobs:
+            j_id = job._job_id
             print(
-                f"\033[38;5;244mJob {job_id} status: \033[38;5;27m{status.capitalize()}\033[0m",
-                end="\r",
+                f"\033[38;5;244mJob {j_id} ({job.name:<{name_width}}): \033[38;5;27m{statuses[j_id].capitalize()}\033[0m"
             )
+
+        while active_jobs:
+            # Move cursor up to first status line
+            print(f"\033[{len(job_ids)}A", end="")
+            # Get status for all active jobs in one sacct call
+            active_ids = ",".join(active_jobs)
+            cmd = f"sacct -j {active_ids} --format=JobID,State --noheader --parsable2"
+            _, stdout, stderr = self.run_login_cmd(cmd)
+            output = stdout.read().decode().strip()
+
+            # Parse sacct output and update statuses
+            for line in output.split("\n"):
+                if not line:
+                    continue
+                job_id, state = line.split("|")
+                job_id = job_id.split(".")[0]  # Remove any array task IDs
+                state = state.split(" ")[0]  # Remove info about cancelling user
+                if job_id in active_jobs:
+                    # Map SLURM states to our status values
+                    if state in ["PENDING", "CONFIGURING"]:
+                        status = "pending"
+                    elif state in ["RUNNING", "COMPLETING"]:
+                        status = "running"
+                    elif state in ["COMPLETED"]:
+                        status = "complete"
+                    elif state in ["FAILED", "NODE_FAIL", "PREEMPTED"]:
+                        status = "failed"
+                    elif state in ["TIMEOUT"]:
+                        status = "timeout"
+                    elif state in ["CANCELLED"]:
+                        status = "cancelled"
+                    else:
+                        status = "unknown"
+                    statuses[job_id] = status
+
+            for job in jobs:
+                j_id = job._job_id
+                status = statuses[j_id]
+
+                if j_id in active_jobs:
+                    if status not in ["pending", "running"]:
+                        active_jobs.remove(j_id)
+
+                print(
+                    f"\033[38;5;244mJob {j_id} ({job.name:<{name_width}}): {status_colors[status]}{status.capitalize()}\033[0m\033[K"
+                )
+
             time.sleep(self.config.poll_interval)
 
-        if status in ["complete", "failed", "timeout"]:
-            print(f"\nJob {job_id} completed with status: {status.capitalize()}\n")
-        elif status in ["cancelled"]:
-            print(f"\nJob {job_id} was cancelled.")
-            return
-        else:
-            print(f"\nJob {job_id} returned with unknown status: {status}.")
-            return
+        print()  # Final newline
+
+        for job in jobs:
+            j_id = job._job_id
+            status = statuses[j_id]
+            if status in ["complete", "failed", "timeout"]:
+                print(
+                    f"Job {j_id} ({job.name}) completed with status: {status.capitalize()}"
+                )
+            elif status == "cancelled":
+                print(f"Job {j_id} ({job.name}) was cancelled.")
+            else:
+                print(
+                    f"Job {j_id} ({job.name}) returned with unknown status: {status}."
+                )
 
     def submit(self, job: SimulationJob, procs_per_job: int = 2):
         """Submit job and block until completion."""
@@ -727,7 +797,8 @@ class Stampede3Site(BaseSite):
                 else:
                     local_str = str(local_path)
 
-                print(" ".join([*rsync_cmd, local_str, remote_str]))
+                cmd_str = " ".join([*rsync_cmd, local_str, remote_str])
+                logger.debug("Transferring via rsync: %s", cmd_str)
 
                 result = subprocess.run(
                     [*rsync_cmd, local_str, remote_str], capture_output=True, text=True
@@ -743,8 +814,11 @@ class Stampede3Site(BaseSite):
             raise
 
     def fetch_traces(
-        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
-    ) -> RecordDatabase:
+        self,
+        job: Union[SimulationJob, List[SimulationJob]],
+        path: Optional[Union[str, Path]] = None,
+        upscale: int = 1,
+    ) -> Union[RecordDatabase, Dict[str, RecordDatabase]]:
         """Get results from Stampede3.
 
         Args:
@@ -752,46 +826,62 @@ class Stampede3Site(BaseSite):
             path: The path to save the results to.
         """
 
+        if isinstance(job, SimulationJob):
+            jobs = [job]
+        else:
+            jobs = job
+
         if path is None:
-            path = job.project_path
+            path = jobs[0].project_path
         else:
             path = Path(path)
 
-        files = job.records["datasets"].keys()
-        try:
-            # Create temporary directory name for the archive
-            archive_name = f"records_{int(time.time())}"
-            remote_archive = self.work_dir / f"{archive_name}.tar.gz"
-            local_archive = path / f"{archive_name}.tar.gz"
+        db_map = {}
 
-            # Create archive on remote
-            tar_cmd = f"cd {self.work_dir} && tar czf {remote_archive.name} "
-            tar_cmd += " ".join(files)
-            _, _, stderr = self.run_login_cmd(tar_cmd)
-            # err = stderr.read().decode().strip()
-            # if err:
-            #     raise RuntimeError(f"Failed to create archive on remote: {err}")
+        for job in jobs:
+            try:
+                files = job.records["datasets"].keys()
 
-            # Download, extract, and cleanup
-            self.get(remote_archive, local_archive)
+                # Create temporary directory name for the archive
+                archive_name = f"records_{int(time.time())}"
+                remote_archive = self.work_dir / f"{archive_name}.tar.gz"
+                local_archive = path / f"{archive_name}.tar.gz"
 
-            cwd = os.getcwd()
-            os.chdir(local_archive.parent)
-            with tarfile.open(local_archive, "r:gz") as tar:
-                logger.debug("Extracting files from archive:")
-                tar.extractall()
-            os.chdir(cwd)
+                # Create archive on remote
+                tar_cmd = f"cd {self.work_dir} && tar czf {remote_archive.name} "
+                tar_cmd += " ".join(files)
+                _, _, stderr = self.run_login_cmd(tar_cmd)
+                # err = stderr.read().decode().strip()
+                # if err:
+                #     raise RuntimeError(f"Failed to create archive on remote: {err}")
 
-            local_archive.unlink()
-            self.run_login(f"rm {remote_archive}")
+                # Download, extract, and cleanup
+                self.get(remote_archive, local_archive)
 
-            # TODO: Copy job, simulation file to database so that it can be read independently.
+                cwd = os.getcwd()
+                os.chdir(local_archive.parent)
+                with tarfile.open(local_archive, "r:gz") as tar:
+                    logger.debug("Extracting files from archive:")
+                    tar.extractall()
+                os.chdir(cwd)
 
-            return RecordDatabase.from_results(job.records, path.resolve())
+                local_archive.unlink()
+                self.run_login(f"rm {remote_archive}")
 
-        except Exception as e:
-            logger.exception("Error downloading records: %s", str(e))
-            raise
+                # TODO: Copy job, simulation file to database so that it can be read independently.
+
+                db = RecordDatabase.from_results(job.records, path.resolve(), upscale)
+                db.consolidate_h5()
+                db_map[job.name] = db
+
+            except Exception as e:
+                logger.exception("Error downloading records: %s", str(e))
+                raise
+
+        if len(db_map) == 1:
+            return db_map[jobs[0].name]
+        else:
+            return db_map
 
     def fetch_paraview(
         self, job: SimulationJob, path: Optional[Union[str, Path]] = None
@@ -1150,7 +1240,6 @@ class Stampede3Site(BaseSite):
 
         if run_path is None:
             run_path = self.work_dir
-        print(f"run_path: {run_path}")
 
         # Load and populate Jinja2 template
         env_dir = self._FS_dir / "src/frequensolve/orchestrator/templates"

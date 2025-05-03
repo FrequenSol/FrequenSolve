@@ -4,6 +4,7 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import xarray as xr
+from matplotlib.axes import Axes
 from numpy.typing import ArrayLike
 
 from frequensolve.geometry.grids import CartesianGrid
@@ -647,6 +648,143 @@ class LayeredModel(ModelBase):
             else:
                 raise ValueError(f"Layer '{layer}' not found")
 
+    def get_1D_log(
+        self,
+        property: str,
+        x: float,
+        dz: float,
+        z_min: Optional[float] = None,
+        z_max: Optional[float] = None,
+    ) -> xr.DataArray:
+        """Get a 1D well-log of a property."""
+
+        if self.dimension == 3:
+            raise NotImplementedError("3D sampling not implemented")
+
+        if z_min is None:
+            z_min = self.z_limits[0]
+        if z_max is None:
+            z_max = self.z_limits[1]
+        depths = np.arange(z_min, z_max, dz)
+        samples = xr.DataArray(dims=["x", "z"], coords={"z": depths, "x": [x]})
+        samples = self._physical_to_reference(samples.coords)
+
+        for layer in self.layers:
+            if property not in layer.properties:
+                continue
+            prop = layer.properties[property].get(samples)
+            dims = sorted(prop.dims)
+            prop = prop.transpose(*dims[::-1])
+            mask = self._get_layer_mask(layer, samples)
+            data = prop.where(mask)
+            samples.data = np.where(~np.isnan(data), data, samples.data)
+
+        return depths, samples.data
+
+    def plot_1d_log(
+        self,
+        ax: Axes,
+        property: str,
+        x: float,
+        dz: float,
+        z_min: Optional[float] = None,
+        z_max: Optional[float] = None,
+        **kwargs,
+    ):
+        """Plot a 1D well-log of a property."""
+        import matplotlib.pyplot as plt
+
+        if self.dimension == 3:
+            raise NotImplementedError("3D plotting not implemented")
+        if isinstance(property, str):
+            property = [property]
+
+        property_units = kwargs.pop("property_units", "km/s")
+        property_label = kwargs.pop("property_label", f"{property} [{property_units}]")
+        aspect = kwargs.pop("aspect", None)
+        show_legend = kwargs.pop("show_legend", True)
+        legend_coords = kwargs.pop("legend_coords", (1.8, 1))
+
+        depths, data = self.get_1D_log(property, x, dz, z_min, z_max)
+        ax.plot(data, depths, label=property_label, **kwargs)
+
+        # Set aspect ratio
+        x_range = np.nanmax(data) - np.nanmin(data)
+        y_range = depths[-1] - depths[0]
+        if aspect:
+            aspect *= x_range / y_range
+            ax.set_aspect(aspect)
+        ax.grid(True, alpha=0.5)
+
+        if show_legend:
+            ax.legend(bbox_to_anchor=legend_coords, loc="upper right")
+
+    @property
+    def properties(self) -> List[str]:
+        """List of properties in the model."""
+        props = set()
+        for layer in self.layers:
+            props.update(layer.properties.keys())
+        return list(props)
+
+    def sample_uniform(self, n: Union[np.ndarray, List[int]]) -> xr.Dataset:
+        """Export model on a uniform grid."""
+
+        xl = np.linspace(self.x_limits[0], self.x_limits[1], n[0])
+        zl = np.linspace(self.z_limits[0], self.z_limits[1], n[-1])
+        if self.dimension == 2:
+            samples = xr.DataArray(dims=["x", "z"], coords={"z": zl, "x": xl})
+        elif self.dimension == 3:
+            yl = np.linspace(self.y_limits[0], self.y_limits[1], n[1])
+            samples = xr.DataArray(
+                dims=["x", "y", "z"], coords={"z": zl, "y": yl, "x": xl}
+            )
+        else:
+            raise ValueError("Invalid dimension")
+
+        gridded = xr.Dataset(coords=samples.coords)
+        for property in self.properties:
+            gridded[property] = xr.DataArray(
+                dims=samples.dims,
+                coords=samples.coords,
+                data=np.nan * np.ones(samples.shape),
+            )
+        samples = self._physical_to_reference_2d(samples)
+
+        for layer in self.layers:
+            mask = self._get_layer_mask_2d(layer, samples)
+
+            for property in self.properties:
+                if property not in layer.properties:
+                    continue
+                prop = layer.properties[property]
+                if prop.is_constant:
+                    gridded[property].data[mask] = prop.get()
+                elif layer.frame == "physical":
+                    gridded[property].data[mask] = prop.get(samples).data[mask]
+                else:
+                    for ix, x in enumerate(samples.coords["x"].values):
+                        z = samples.data[ix, mask[ix, :]]
+                        samp = xr.DataArray(dims=["x", "z"], coords={"z": z, "x": x})
+                        gridded[property].data[ix, mask[ix, :]] = prop.get(samp).data
+
+        return gridded
+
+    def smooth(self, n: ArrayLike, sigma, **kwargs) -> xr.Dataset:
+        """Smooth the model."""
+        from scipy.ndimage import gaussian_filter
+
+        gridded = self.sample_uniform(n)
+        for property in self.properties:
+            gridded[property].data = gaussian_filter(
+                gridded[property].data, sigma=sigma, **kwargs
+            )
+
+        for layer in self.layers:
+            for property in layer.properties:
+                layer.set_property(property, gridded[property])
+        return self
+
     def plot(self, property: str, resolution: List[int] = [500, 500], **kwargs):
         """Plot the model."""
         import matplotlib.pyplot as plt
@@ -663,29 +801,39 @@ class LayeredModel(ModelBase):
         else:
             self._layer_to_surfs[-1].upper = self.upper_surface()
 
-        save = kwargs.pop("save", None)
-        show_surfs = kwargs.pop("surfaces", True)
-        figsize = kwargs.pop("figsize", None)
-        fontsize = kwargs.pop("fontsize", 12)
+        # Process kwargs
         units = kwargs.pop("units", "km/s")
         label = kwargs.pop("label", property)
         origin = kwargs.pop("origin", "upper")
         aspect = kwargs.pop("aspect", None)
         axes_names = kwargs.pop("axes_names", {"x": "X", "z": "Depth"})
         axes_units = kwargs.pop("axes_units", {"x": "km", "z": "km"})
+
+        # Get surface plotting kwargs
+        show_surfs = kwargs.pop("surfaces", True)
+        surf_kwargs = {}
+        surf_kwargs["line_color"] = kwargs.pop("line_color", "k")
+        surf_kwargs["line_style"] = kwargs.pop("line_style", "-")
+        surf_kwargs["line_width"] = kwargs.pop("line_width", 1)
+
+        # Get acquisition plotting kwargs
         acq = kwargs.pop("acquisition", None)
         scatter_kwargs = kwargs.pop("scatter_kwargs", {})
 
+        # General kwargs
+        figsize = kwargs.pop("figsize", None)
+        fontsize = kwargs.pop("fontsize", 12)
+        save = kwargs.pop("save", None)
+        dpi = kwargs.pop("dpi", None)
+
         plt.rcParams.update({"font.size": fontsize})
 
+        show = True
         if "ax" in kwargs:
             ax = kwargs.pop("ax")
             show = False
         else:
-            if figsize is not None:
-                fig = plt.figure(figsize=figsize)
-            else:
-                fig = plt.figure()
+            fig = plt.figure(*({figsize} if figsize is not None else {}))
             ax = fig.gca()
 
         if units is not None:
@@ -703,65 +851,13 @@ class LayeredModel(ModelBase):
         vmin = kwargs.pop("vmin", vmin)
         vmax = kwargs.pop("vmax", vmax)
 
-        vrange = vmax - vmin
-        vmin -= 0.1 * vrange
-        vmax += 0.1 * vrange
-
         for layer in self.layers:
-
             if property not in layer.properties:
                 continue
 
-            upper = self.upper_surface(layer)
-            lower = self.lower_surface(layer)
-
-            prop = layer.properties[property]
-
+            # Plot layer in reference frame
             if layer.frame == "reference":
-                limits = {}
-                if self.ordering == "top_down":
-                    limits["z_min"] = upper.z_ref
-                    limits["z_max"] = lower.z_ref
-                else:
-                    limits["z_max"] = upper.z_ref
-                    limits["z_min"] = lower.z_ref
-
-                if prop.is_constant:
-                    xgrid = samples.coords["x"]
-                else:
-                    xgrid = prop.get().coords["x"]
-
-                mask = (samples.coords["z"].values > limits["z_min"]) & (
-                    samples.coords["z"].values < limits["z_max"]
-                )
-                zgrid = samples.coords["z"].values[mask]
-
-                # Get surface values at xgrid
-                if self.ordering == "top_down":
-                    z0 = upper.z_phys.get(xgrid)
-                    z1 = lower.z_phys.get(xgrid)
-                else:
-                    z1 = lower.z_phys.get(xgrid)
-                    z0 = upper.z_phys.get(xgrid)
-
-                z0p = limits["z_min"]
-                z1p = limits["z_max"]
-
-                tmp = xr.DataArray(
-                    dims=["z", "x"],
-                    coords={"x": xgrid, "z": [z0p, z1p]},
-                    data=[z0, z1],
-                )
-                zvals = tmp.interp(coords={"x": xgrid, "z": zgrid})
-
-                samp = xr.Dataset({property: prop.get(zvals)})
-                samp = samp.assign_coords(
-                    {
-                        "Xcoord": (("x", "z"), xgrid.broadcast_like(zvals).values.T),
-                        "Zcoord": (("x", "z"), zvals.values.T),
-                    }
-                )
-
+                samp = self._get_layer_samples_ref(layer, samples, property)
                 dims = sorted(samp.dims)
                 plt.pcolormesh(
                     samp.coords["Xcoord"].values,
@@ -772,39 +868,19 @@ class LayeredModel(ModelBase):
                     vmax=vmax,
                     **kwargs,
                 )
+            # Plot layer in physical frame
             else:
-                data = prop.get(samples)
-                xgrid = samples.coords["x"]
+                prop = layer.properties[property].get(samples)
+                mask = self._get_layer_mask(layer, samples)
+                data = prop.where(mask)
+                samples.data = np.where(~np.isnan(data), data, samples.data)
 
-                limits = {}
-                limits["x_min"] = self.x_limits[0]
-                limits["x_max"] = self.x_limits[1]
-                if self.y_limits is not None:
-                    limits["y_min"] = self.y_limits[0]
-                    limits["y_max"] = self.y_limits[1]
-                if self.ordering == "top_down":
-                    limits["z_min"] = upper.z_phys.get(xgrid)
-                    limits["z_max"] = lower.z_phys.get(xgrid)
-                else:
-                    limits["z_max"] = upper.z_phys.get(xgrid)
-                    limits["z_min"] = lower.z_phys.get(xgrid)
+        samples = samples.clip(min=vmin, max=vmax)
+        im = samples.plot.imshow(
+            ax=ax, x="x", vmin=vmin, vmax=vmax, extend="neither", **kwargs
+        )
 
-                mask = (
-                    (data.z < limits["z_max"])
-                    & (data.z > limits["z_min"])
-                    & (data.x < limits["x_max"])
-                    & (data.x > limits["x_min"])
-                )
-                da = data.where(mask)
-                samples.data = np.where(~np.isnan(da), da, samples.data)
-
-        samples.plot.imshow(ax=ax, x="x", vmin=vmin, vmax=vmax, **kwargs)
-
-        # Get surface plotting kwargs
-        line_color = kwargs.pop("line_color", "k")
-        line_style = kwargs.pop("line_style", "-")
-        line_width = kwargs.pop("line_width", 1.5)
-
+        # Plot surfaces
         if show_surfs:
             for surf in self.surfaces:
                 limits = {}
@@ -815,16 +891,12 @@ class LayeredModel(ModelBase):
                 surf.plot(
                     limits=limits,
                     ax=ax,
-                    color=line_color,
-                    linestyle=line_style,
-                    linewidth=line_width,
-                    **kwargs,
+                    **surf_kwargs,
                 )
 
         # Plot acquisition if provided
         if acq is not None:
             self._plot_acquisition(acq, ax, **scatter_kwargs)
-
         if aspect == "equal":
             ax.set_aspect("equal")
 
@@ -834,78 +906,160 @@ class LayeredModel(ModelBase):
         L = max(xL, zL)
 
         ax.set_xlim([self.x_limits[0] - 0.02 * L, self.x_limits[1] + 0.02 * L])
-
         if self.y_limits is None:
             ax.set_ylim([self.z_limits[0] - 0.02 * L, self.z_limits[1] + 0.02 * L])
         else:
             raise NotImplementedError("2D plotting not implemented")
-
         if origin == "upper":
             ax.invert_yaxis()
 
         if save is not None:
-            plt.savefig(save, bbox_inches="tight")
+            plt.savefig(
+                save, bbox_inches="tight", **({"dpi": dpi} if dpi is not None else {})
+            )
             plt.close()
         else:
-            plt.show()
+            if show:
+                plt.show()
 
     def _plot_acquisition(self, acquisition: Acquisition, ax, **kwargs):
         from matplotlib.pyplot import cm
 
-        colors = ["r", "b", "g", "o", "y", "c", "m"]
+        colors = ["b", "g", "orange", "y", "c", "m"]
+
+        plot_sources = kwargs.pop("plot_sources", True)
+        groups = kwargs.pop("groups", None)
+        if groups is None:
+            groups = acquisition.receiver_groups
 
         # Plot receivers
-        for igrp, group in enumerate(acquisition.receiver_groups):
+        for igrp, group in enumerate(groups):
             coords = group.coordinates.get()
             if group.frame == "reference":
-                coords = self._map_to_physical(coords)
+                coords = self._reference_to_physical(coords)
 
             # Plot receiver coordinates as scatter points with higher saturation
             ax.scatter(
                 coords[:, 0],
                 coords[:, -1],
                 marker=".",
-                s=30,
+                s=20,
                 label=f"Receivers ({group.name})",
                 zorder=6,
                 color=colors[igrp],
                 **kwargs,
             )
-            ax.legend(bbox_to_anchor=(0, 1.02), loc="lower left")
+            # ax.legend(bbox_to_anchor=(0, 1.02), loc="lower left")
+
+        if not plot_sources:
+            return
 
         # Plot sources
-        group = acquisition.source_group
+        for igrp, group in enumerate(acquisition.source_groups):
 
-        coords = group.get_coordinates()
-        color = colors[len(acquisition.receiver_groups)]
+            coords = group.get_coordinates()
+            color = colors[len(acquisition.receiver_groups)]
 
-        # Map reference coordinates to physical coordinates
-        ilist = []
-        xlist = []
-        for i, source in enumerate(group.sources):
-            if source.frame == "reference":
+            # Map reference coordinates to physical coordinates
+            ilist = []
+            xlist = []
+            if group.source.frame == "reference":
                 ilist.append(i)
                 xlist.append(coords[i, :])
 
-        xlist = np.array(xlist)
-        xlist = self._map_to_physical(xlist)
-        for i in ilist:
-            coords[i, :] = xlist[i, :]
+            if len(xlist) > 0:
+                xlist = np.array(xlist)
+                xlist = self._reference_to_physical(xlist)
+                for i in ilist:
+                    coords[i, :] = xlist[i, :]
 
-        # Plot source coordinates as scatter points
-        ax.scatter(
-            coords[:, 0],
-            coords[:, -1],
-            marker="x",
-            s=80,
-            label=f"Sources",
-            zorder=7,
-            color=color,
-            **kwargs,
+            # Plot source coordinates as scatter points
+            ax.scatter(
+                coords[:, 0],
+                coords[:, -1],
+                marker=".",
+                s=20,
+                label=f"Sources",
+                zorder=7,
+                color="r",
+                **kwargs,
+            )
+            # ax.legend(bbox_to_anchor=(0, 1.02), loc="lower left")
+
+    def _get_layer_samples_ref(self, layer, samples, property):
+        prop = layer.properties[property]
+        xgrid = samples.coords["x"]
+        upper = (
+            self.upper_surface(layer)
+            if self.ordering == "top_down"
+            else self.lower_surface(layer)
         )
-        ax.legend(bbox_to_anchor=(0, 1.02), loc="lower left")
+        lower = (
+            self.lower_surface(layer)
+            if self.ordering == "top_down"
+            else self.upper_surface(layer)
+        )
 
-    def _map_to_physical(self, coords: np.ndarray) -> np.ndarray:
+        z_min = upper.z_ref
+        z_max = lower.z_ref
+        z0 = upper.z_phys.get(xgrid)
+        z1 = lower.z_phys.get(xgrid)
+
+        mask = samples.coords["z"].values > z_min
+        mask &= samples.coords["z"].values < z_max
+        zgrid = samples.coords["z"].values[mask]
+
+        tmp = xr.DataArray(
+            dims=["z", "x"],
+            coords={"x": xgrid, "z": [z_min, z_max]},
+            data=[z0, z1],
+        )
+        zvals = tmp.interp(coords={"x": xgrid, "z": zgrid})
+
+        samp = xr.Dataset({property: prop.get(zvals)})
+        samp = samp.assign_coords(
+            {
+                "Xcoord": (("x", "z"), xgrid.broadcast_like(zvals).values.T),
+                "Zcoord": (("x", "z"), zvals.values.T),
+            }
+        )
+        return samp
+
+    def _get_layer_mask(self, layer, samples):
+        xgrid = samples.coords["x"]
+        upper = (
+            self.upper_surface(layer)
+            if self.ordering == "top_down"
+            else self.lower_surface(layer)
+        )
+        lower = (
+            self.lower_surface(layer)
+            if self.ordering == "top_down"
+            else self.upper_surface(layer)
+        )
+
+        limits = {}
+        limits["x_min"] = self.x_limits[0]
+        limits["x_max"] = self.x_limits[1]
+        if self.y_limits is not None:
+            limits["y_min"] = self.y_limits[0]
+            limits["y_max"] = self.y_limits[1]
+        if layer.frame == "reference":
+            limits["z_min"] = upper.z_ref
+            limits["z_max"] = lower.z_ref
+        else:
+            limits["z_min"] = upper.z_phys.get(xgrid)
+            limits["z_max"] = lower.z_phys.get(xgrid)
+
+        mask = (
+            (samples.coords["z"] <= limits["z_max"])
+            & (samples.coords["z"] >= limits["z_min"])
+            & (samples.coords["x"] <= limits["x_max"])
+            & (samples.coords["x"] >= limits["x_min"])
+        )
+        return mask
+
+    def _reference_to_physical(self, coords: np.ndarray) -> np.ndarray:
         """Map coordinates from reference to physical coordinates.
 
         Args:
@@ -914,44 +1068,187 @@ class LayeredModel(ModelBase):
         Returns:
             np.ndarray: Mapped coordinates.
         """
+        x_coords = xr.DataArray(dims=["x"], coords={"x": coords[:, 0]})
+        z_coords = coords[:, -1]
+        z_phys = np.zeros_like(z_coords)
+        found = np.zeros_like(z_coords, dtype=bool)
 
         for layer in self.layers:
-            upper = self.upper_surface(layer)
-            lower = self.lower_surface(layer)
+            upper = (
+                self.upper_surface(layer)
+                if self.ordering == "top_down"
+                else self.lower_surface(layer)
+            )
+            lower = (
+                self.lower_surface(layer)
+                if self.ordering == "top_down"
+                else self.upper_surface(layer)
+            )
 
-            if self.ordering == "top_down":
-                z_min = upper.z_ref
-                z_max = lower.z_ref
-            else:
-                z_max = upper.z_ref
-                z_min = lower.z_ref
+            z_min = upper.z_ref
+            z_max = lower.z_ref
+            zl = upper.z_phys.get(x_coords).values
+            zu = lower.z_phys.get(x_coords).values
 
-            # TODO: for now I'm assuming all are in same layer
-            if any(coords[:, -1] < z_min) or any(coords[:, -1] > z_max):
-                continue
+            layer_mask = (z_coords >= z_min) & (z_coords <= z_max) & ~found
 
-            # Convert coordinates to xarray
-            xcoords = xr.DataArray(dims=["x"], coords={"x": coords[:, 0]})
+            if np.any(layer_mask):
+                if layer.frame == "reference":
+                    alpha = (z_coords[layer_mask] - z_min) / (z_max - z_min)
+                    z_phys[layer_mask] = zl[layer_mask] + alpha * (
+                        zu[layer_mask] - zl[layer_mask]
+                    )
+                else:
+                    z_phys[layer_mask] = z_coords[layer_mask]
+                found[layer_mask] = True
 
-            # Get surface z values
-            if self.ordering == "top_down":
-                zl = upper.z_phys.get(xcoords).values
-                zu = lower.z_phys.get(xcoords).values
-            else:
-                zl = lower.z_phys.get(xcoords).values
-                zu = upper.z_phys.get(xcoords).values
+        if not np.all(found):
+            raise ValueError("Some points were not found in any layer")
 
-            # Linear interpolation from reference to physical coordinates
-            alpha = (coords[:, -1] - z_min) / (z_max - z_min)
-            z_phys = zl + alpha * (zu - zl)
+        coords = coords.copy()
+        coords[:, -1] = z_phys
+        return coords
 
-            # Ensure z_phys has same shape as coords[:,-1]
-            if len(coords.shape) == 1:
-                z_phys = z_phys[0]  # Take single value for single coordinate
+    def _get_layer_mask_2d(self, layer, samples):
+        xgrid = samples.coords["x"]
+        upper = (
+            self.upper_surface(layer)
+            if self.ordering == "top_down"
+            else self.lower_surface(layer)
+        )
+        lower = (
+            self.lower_surface(layer)
+            if self.ordering == "top_down"
+            else self.upper_surface(layer)
+        )
 
-            coords[:, -1] = z_phys
-            return coords
-        raise ValueError(f"No layer found")
+        limits = {}
+        limits["x_min"] = self.x_limits[0]
+        limits["x_max"] = self.x_limits[1]
+        if self.y_limits is not None:
+            limits["y_min"] = self.y_limits[0]
+            limits["y_max"] = self.y_limits[1]
+        if layer.frame == "reference":
+            limits["z_min"] = upper.z_ref
+            limits["z_max"] = lower.z_ref
+        else:
+            z_min = upper.z_phys.get(xgrid).values  # shape (nx,)
+            z_max = lower.z_phys.get(xgrid).values  # shape (nx,)
+            limits["z_min"] = np.broadcast_to(
+                z_min[:, np.newaxis], samples.shape
+            )  # shape (nx, nz)
+            limits["z_max"] = np.broadcast_to(
+                z_max[:, np.newaxis], samples.shape
+            )  # shape (nx, nz)
+
+        x_mask = (
+            (samples.coords["x"] <= limits["x_max"])
+            & (samples.coords["x"] >= limits["x_min"])
+        ).values
+        x_mask = np.broadcast_to(x_mask[:, np.newaxis], samples.shape)
+        mask = (
+            x_mask
+            & (samples.data <= limits["z_max"])
+            & (samples.data >= limits["z_min"])
+        )
+        return mask
+
+    def _physical_to_reference_2d(self, samples: xr.DataArray) -> xr.DataArray:
+        """Map coordinates from physical to reference coordinates for a uniform grid.
+
+        Args:
+            samples (xr.DataArray): DataArray with x and z coordinates defining a uniform grid.
+
+        Returns:
+            xr.DataArray: DataArray with same coords and dims, but z values mapped to reference frame.
+        """
+        x_coords = samples.coords["x"]
+        z_coords = samples.coords["z"]
+        Z_coords = np.broadcast_to(z_coords, (len(x_coords), len(z_coords)))  # (nx, nz)
+        z_ref = np.zeros((len(x_coords), len(z_coords)))
+        found = np.zeros((len(x_coords), len(z_coords)), dtype=bool)
+
+        for layer in self.layers:
+            upper = (
+                self.upper_surface(layer)
+                if self.ordering == "top_down"
+                else self.lower_surface(layer)
+            )
+            lower = (
+                self.lower_surface(layer)
+                if self.ordering == "top_down"
+                else self.upper_surface(layer)
+            )
+
+            zl = upper.z_ref
+            zu = lower.z_ref
+            z_min = upper.z_phys.get(x_coords).values
+            z_max = lower.z_phys.get(x_coords).values
+
+            Z_min = z_min[:, np.newaxis]  # (nx, 1)
+            Z_max = z_max[:, np.newaxis]  # (nx, 1)
+            layer_mask = (Z_coords >= Z_min) & (Z_coords <= Z_max) & ~found  # (nx, nz)
+
+            if np.any(layer_mask):
+                if layer.frame == "reference":
+                    alpha = (Z_coords - Z_min) / (Z_max - Z_min)  # (nx, nz)
+                    z_ref[layer_mask] = zl + alpha[layer_mask] * (zu - zl)
+                else:
+                    z_ref[layer_mask] = Z_coords[layer_mask]
+                found[layer_mask] = True
+
+        if not np.all(found):
+            raise ValueError("Some points were not found in any layer")
+
+        return xr.DataArray(
+            dims=["x", "z"], coords={"x": x_coords, "z": z_coords}, data=z_ref
+        )
+
+    def _physical_to_reference(self, coords: Dict[str, np.ndarray]) -> np.ndarray:
+        """Map coordinates from physical to reference coordinates.
+
+        Args:
+            coords (np.ndarray): Coordinates to map.
+
+        Returns:
+            np.ndarray: Mapped coordinates.
+        """
+        x_coords = xr.DataArray(dims=["x"], coords={"x": coords["x"]})
+        z_coords = coords["z"]
+        z_ref = np.zeros_like(z_coords)
+        found = np.zeros_like(z_coords, dtype=bool)
+
+        for layer in self.layers:
+            upper = (
+                self.upper_surface(layer)
+                if self.ordering == "top_down"
+                else self.lower_surface(layer)
+            )
+            lower = (
+                self.lower_surface(layer)
+                if self.ordering == "top_down"
+                else self.upper_surface(layer)
+            )
+
+            zl = upper.z_ref
+            zu = lower.z_ref
+            z_min = upper.z_phys.get(x_coords).values
+            z_max = lower.z_phys.get(x_coords).values
+
+            layer_mask = (z_coords >= z_min) & (z_coords <= z_max) & ~found
+
+            if np.any(layer_mask):
+                if layer.frame == "reference":
+                    alpha = (z_coords[layer_mask] - z_min) / (z_max - z_min)
+                    z_ref[layer_mask] = zl + alpha * (zu - zl)
+                else:
+                    z_ref[layer_mask] = z_coords[layer_mask]
+                found[layer_mask] = True
+
+        if not np.all(found):
+            raise ValueError("Some points were not found in any layer")
+
+        return xr.DataArray(dims=["z", "x"], coords={"z": z_ref, "x": coords["x"]})
 
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path

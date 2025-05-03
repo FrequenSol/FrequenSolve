@@ -94,10 +94,13 @@ class SimulationJob(ABC):
 
     @property
     def records(self):
-        """Get records from Frontera.
+        """Lists records that should be produced by a job.
 
-        Args:
-            outputs: A dictionary of outputs to get.
+        Returns:
+            dict: Dictionary containing:
+                - datasets: Dictionary of datasets
+                - frequencies: List of frequencies
+                - simulation: Path to simulation file
         """
 
         output = self.trace_outputs

@@ -379,7 +379,7 @@ class CoordsGrid(ReceiverCoords):
 
     @property
     def size(self) -> int:
-        return self.grid.nx * self.grid.ny * self.grid.nz
+        return np.prod(self.grid.n)
 
     @property
     def bounds(self) -> Tuple[np.ndarray, np.ndarray]:

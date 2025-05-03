@@ -5,7 +5,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, List, Optional, Union
 
 from dotenv import load_dotenv
 
@@ -105,9 +105,33 @@ class LocalSite(BaseSite):
             print(f"Fetching ParaView output {name} from {pv_path}")
         pass
 
-    def fetch_traces(self, job: SimulationJob, path: Optional[Union[str, Path]] = None):
-        """Gets traces."""
-        return RecordDatabase.from_results(job.records, job.project_path.resolve())
+    def wait_completion(self, jobs: List[SimulationJob]):
+        """Wait for all jobs to complete."""
+        pass
+
+    # TODO: use path (will need changes elsewhere to support)
+    def fetch_traces(
+        self,
+        job: Union[SimulationJob, List[SimulationJob]],
+        upscale: int = 1,
+        path: Optional[Union[str, Path]] = None,
+    ) -> Union[RecordDatabase, Dict[str, RecordDatabase]]:
+        """Gets traces and consolidates them into a single HDF5 file."""
+        if isinstance(job, SimulationJob):
+            db = RecordDatabase.from_results(
+                job.records, job.project_path.resolve(), upscale
+            )
+            db.consolidate_h5()
+            return db
+        else:
+            db_map = {}
+            for j in job:
+                db = RecordDatabase.from_results(
+                    j.records, j.project_path.resolve(), upscale
+                )
+                db.consolidate_h5()
+                db_map[j.name] = db
+            return db_map
 
     def submit_async(self, job: SimulationJob, **kwargs) -> asyncio.Future:
         """Submit job asynchronously and return a future."""

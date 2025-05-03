@@ -6,27 +6,32 @@ Right now this is just a hodge-podge of code that was displaced in
 the refactoring process.
 """
 
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Set, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 import h5py
 import numpy as np
 
-from .shot_record import Record
+from frequensolve.seismic.shot_record import Record
+from frequensolve.simulation.sampling import UniformSweepSampling
 
 
 @dataclass
 class RecordDatabase:
     metadata: Dict[str, Any]
-    records: Set[str]
+    records: List[str]
+    _upscale: int
 
-    def __init__(self, metadata: Dict[str, Any], records: List[str]):
+    def __init__(self, metadata: Dict[str, Any], records: List[str], upscale: int = 1):
         self.metadata = metadata
         self.records = records
+        self.set_upscaling(upscale)
 
     @classmethod
-    def from_results(cls, results: dict, proj_path: Union[str, Path]):
+    def from_results(cls, results: dict, proj_path: Union[str, Path], upscale: int = 1):
         """Create a RecordDatabase from a dictionary of results.
 
         Args:
@@ -51,7 +56,7 @@ class RecordDatabase:
             "f_map": f_map if len(f_map) > 1 else {},
         }
 
-        records = set()
+        records = []
         for file, comps in results["datasets"].items():
             file = Path(file)
             parts = file.name.split("_")
@@ -60,16 +65,41 @@ class RecordDatabase:
 
             for comp in comps:
                 record = fbase + f":{comp}"
-                records.add(record)
+                if record not in records:
+                    records.append(record)
 
-        return cls(metadata=meta, records=records)
+        return cls(metadata=meta, records=records, upscale=upscale)
+
+    @property
+    def upscaling(self) -> int:
+        return self._upscale
+
+    def set_upscaling(self, upscale):
+        """Set the upscaling factor for the records."""
+        self._upscale = upscale
+
+    def times(self, upscale: Optional[int] = None) -> np.ndarray:
+        """Returns the times of the records."""
+
+        upscale = self._upscale if upscale is None else upscale
+        sampling = UniformSweepSampling(
+            f_min=0.0,
+            f_max=self.metadata["f_max"],
+            df=self.metadata["df"],
+            upscale=upscale,
+        )
+        return sampling.T_list
+
+    def __len__(self) -> int:
+        """Returns the number of records in the database."""
+        return len(self.records)
 
     def __iter__(self):
         for record in self.records:
-            yield Record(record, self.metadata)
+            yield Record(record, self.metadata, self._upscale)
 
     def __getitem__(self, key: int):
-        return Record(self.records[key], self.metadata)
+        return Record(self.records[key], self.metadata, self._upscale)
 
     def __str__(self) -> str:
         meta_str = "Metadata:\n"
@@ -86,6 +116,131 @@ class RecordDatabase:
             records_str += f"  {i}: {record}\n"
 
         return meta_str + records_str
+
+    def consolidate_h5(self):
+        """Consolidate records into single h5 files to improve efficiency and convenience."""
+        if self.is_consolidated:
+            return
+
+        n_freq = len(self.metadata["f_map"])
+
+        # Get unique receiver group bases
+        bases = set()
+        for file in self.records:
+            fbase = "_".join(file.split(":")[0].split("_")[:-1])
+            bases.add(fbase)
+
+        for base in bases:
+            base_files = [f for f in self.records if f.startswith(base)]
+
+            fields = set()
+            for file in base_files:
+                _, comp = file.split(":")
+                fields.add("_".join(comp.split("_")[:-1]))
+
+            print(f"Consolidating {base}")
+
+            # Create new consolidated HDF5 file
+            new_file = f"{base}_consolidated.h5"
+            with h5py.File(new_file, "w") as f:
+                sample_file = base_files[0]
+                _, comp = sample_file.split(":")
+
+                # For each field component
+                for field in fields:
+                    field_group = f.create_group(field)
+
+                    # Create source subgroups
+                    source_files = [f for f in base_files if field in f]
+                    for src_file in source_files:
+                        # Get source number
+                        _, comp = src_file.split(":")
+                        isrc = int(comp.split("_")[-1])
+
+                        # Create source group
+                        src_group = field_group.create_group(f"source_{isrc}")
+
+                        # Get dimensions from first frequency file
+                        fbase = "_".join(src_file.split(":")[0].split("_")[:-1])
+
+                        with h5py.File(f"{fbase}_1.h5", "r") as freq_file:
+                            shape = freq_file[f"{field}_{isrc}_re"].shape
+                            n_recv = shape[0]
+
+                        # Create datasets for real and imaginary components
+                        src_group.create_dataset(
+                            "real", (n_freq,) + (n_recv,), dtype=np.float32
+                        )
+                        src_group.create_dataset(
+                            "imag", (n_freq,) + (n_recv,), dtype=np.float32
+                        )
+
+                        # Read and store data from individual frequency files
+                        for i in range(n_freq):
+                            freq_file = f"{fbase}_{i+1}.h5"
+                            with h5py.File(freq_file, "r") as ff:
+                                src_group["real"][i, :] = ff[f"{field}_{isrc}_re"][:]
+                                src_group["imag"][i, :] = ff[f"{field}_{isrc}_im"][:]
+
+            # Delete individual frequency files after consolidation
+            for i in range(n_freq):
+                freq_file = f"{fbase}_{i+1}.h5"
+                if os.path.exists(freq_file):
+                    os.remove(freq_file)
+
+    @property
+    def is_consolidated(self) -> bool:
+        """Check if records have been consolidated into single h5 files.
+
+        Returns:
+            bool: True if all records have been consolidated, False otherwise.
+        """
+
+        n_freq = len(self.metadata["f_map"])
+
+        # Get unique receiver group bases
+        bases = set()
+        for file in self.records:
+            fbase = "_".join(file.split(":")[0].split("_")[:-1])
+            bases.add(fbase)
+
+        for base in bases:
+            base_files = [f for f in self.records if f.startswith(base)]
+            for ifreq in range(1, n_freq + 1):
+                file = f"{base}_{ifreq}.h5"
+                if os.path.exists(file):
+                    return False
+        return True
+
+    def read_consolidated(self, group: str, field: str, source: int) -> np.ndarray:
+        """Read data from a consolidated HDF5 file.
+
+        Args:
+            group (str): Name of the receiver group
+            field (str): Field component to read (e.g. 'u_x', 'u_z')
+            source (int): Source number
+
+        Returns:
+            np.ndarray: Complex array containing the frequency domain data
+                       with shape (n_frequencies, n_receivers)
+
+        Raises:
+            FileNotFoundError: If consolidated file does not exist
+            KeyError: If requested data not found in file
+        """
+        consolidated_file = f"{group}_consolidated.h5"
+        if not os.path.exists(consolidated_file):
+            raise FileNotFoundError(f"Consolidated file {consolidated_file} not found")
+
+        with h5py.File(consolidated_file, "r") as f:
+            if field not in f:
+                raise KeyError(f"Field {field} not found in {consolidated_file}")
+
+            source_group = f[field][f"source_{source}"]
+            real_data = source_group["real"][:]
+            imag_data = source_group["imag"][:]
+
+            return real_data + 1j * imag_data
 
     # def write_hdf5(self, filename: str, **kwargs):
     #    """Write shot records to an HDF5 file.

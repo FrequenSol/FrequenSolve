@@ -64,6 +64,9 @@ class ModelSubdomain:
                 key: Property(data=val) for key, val in properties.items()
             }
 
+    def set_property(self, key: str, value: Union[float, xr.DataArray]):
+        self._properties[key] = Property(data=value)
+
     @property
     def properties(self) -> Dict[str, Property]:
         if self._properties is None:
