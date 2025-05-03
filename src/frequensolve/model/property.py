@@ -123,8 +123,24 @@ class Property:
             return self.darr
         else:
             if _dims_compatible(self.darr.dims, coords):
+                # Linear interpolation for valid values
+                out = self.darr.interp(coords=coords, method="linear")
+                # Use nearest neighbor interpolation to fill NaNs
+                if np.isnan(out.values).any():
+                    nan_mask = np.isnan(out.values)
+                    out = out.fillna(
+                        out.interp(
+                            coords=coords,
+                            method="nearest",
+                            kwargs={"fill_value": "extrapolate"},
+                        )
+                    )
+                return out
+
                 return self.darr.interp(
-                    coords=coords, method="linear", kwargs={"fill_value": "extrapolate"}
+                    coords=coords,
+                    method="nearest",
+                    kwargs={"fill_value": "extrapolate"},
                 )
 
             elif self.is_constant:

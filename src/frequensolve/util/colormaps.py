@@ -136,15 +136,19 @@ BuGrOr_data = """[
 ]"""
 
 
-def get_colormap(data):
+def get_colormap(data, reverse=False):
     colormap_data = json.loads(data)
     rgb_points = colormap_data[0]["RGBPoints"]
 
-    positions = rgb_points[::4]  # Every 4th element starting from index 0
+    positions = np.array(rgb_points[::4])  # Every 4th element starting from index 0
     n = len(positions)
     rgb_values = np.zeros((n, 3))
     for i in range(n):
         rgb_values[i] = rgb_points[1 + 4 * i : 4 + 4 * i]
+
+    if reverse:
+        positions = 1 - positions[::-1]
+        rgb_values = rgb_values[::-1]
 
     # Normalize the positions
     positions = np.array(positions)
@@ -156,4 +160,6 @@ def get_colormap(data):
 
 
 RdYlBu = get_colormap(RdYlBu_data)
+RdYlBu_r = get_colormap(RdYlBu_data, reverse=True)
 BuGrOr = get_colormap(BuGrOr_data)
+BuGrOr_r = get_colormap(BuGrOr_data, reverse=True)

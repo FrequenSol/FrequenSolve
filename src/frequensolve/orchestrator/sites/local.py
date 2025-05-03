@@ -102,7 +102,7 @@ class LocalSite(BaseSite):
     ):
         """Dummy method for consistency."""
         for name, pv_path in job.paraview_outputs.items():
-            print(f"Fetching ParaView output {name} from {pv_path}")
+            print(f"Fetching ParaView output '{name}' from {pv_path}")
         pass
 
     def wait_completion(self, jobs: List[SimulationJob]):

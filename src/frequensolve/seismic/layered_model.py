@@ -812,9 +812,9 @@ class LayeredModel(ModelBase):
         # Get surface plotting kwargs
         show_surfs = kwargs.pop("surfaces", True)
         surf_kwargs = {}
-        surf_kwargs["line_color"] = kwargs.pop("line_color", "k")
-        surf_kwargs["line_style"] = kwargs.pop("line_style", "-")
-        surf_kwargs["line_width"] = kwargs.pop("line_width", 1)
+        surf_kwargs["color"] = kwargs.pop("linecolor", "k")
+        surf_kwargs["linestyle"] = kwargs.pop("linestyle", "-")
+        surf_kwargs["linewidth"] = kwargs.pop("linewidth", 1)
 
         # Get acquisition plotting kwargs
         acq = kwargs.pop("acquisition", None)
@@ -833,7 +833,7 @@ class LayeredModel(ModelBase):
             ax = kwargs.pop("ax")
             show = False
         else:
-            fig = plt.figure(*({figsize} if figsize is not None else {}))
+            fig = plt.figure(**({"figsize": figsize} if figsize is not None else {}))
             ax = fig.gca()
 
         if units is not None:

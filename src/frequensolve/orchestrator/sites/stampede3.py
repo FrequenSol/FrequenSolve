@@ -899,7 +899,7 @@ class Stampede3Site(BaseSite):
             path = Path(path)
 
         for pv_name, pv_path in job.paraview_outputs.items():
-            print(f"Fetching ParaView output: {pv_name} at {pv_path}")
+            print(f"Fetching ParaView output '{pv_name}' from {pv_path}")
             try:
                 archive_name = f"{pv_name}.tar.gz"
                 remote_archive = self.work_dir / pv_path / archive_name
