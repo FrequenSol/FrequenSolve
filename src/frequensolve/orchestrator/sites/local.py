@@ -185,10 +185,8 @@ class LocalSite(BaseSite):
                 env=self.env,
             )
 
-            # Collect output for result
             output_lines = []
 
-            # Read stdout and stderr concurrently
             async def read_stream(stream):
                 while True:
                     line = await stream.readline()
@@ -215,7 +213,6 @@ class LocalSite(BaseSite):
                 )
 
             return
-            # return job.records
 
         except Exception as e:
             print(f"Task {task_id+1} failed: {str(e)}", file=sys.stderr)

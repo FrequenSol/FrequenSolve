@@ -7,7 +7,7 @@ from numpy import array as NPArray
 
 from frequensolve.util.class_registry import class_registry, register_class
 
-__all__ = ["SourceGroup", "Source", "RuptureSource", "PointSource"]
+__all__ = ["SourceGroup", "Source", "RuptureSource", "PointSource", "CompoundSource"]
 
 
 @register_class
@@ -73,6 +73,34 @@ class PointSource(Source):
             "name": self.name,
             "kind": self.kind,
             "frame": self.frame,
+            "coordinates": self.coordinates,
+            **({"direction": self.direction} if self.direction is not None else {}),
+            **({"domain": self.domain} if self.domain is not None else {}),
+        }
+
+
+@register_class
+@dataclass
+class CompoundSource(Source):
+    kind: Literal["scalar", "vector"]
+    frame: Literal["physical", "reference"] = "physical"
+    coordinates: List[float] = field(default_factory=list)
+    direction: List[float] = field(default_factory=list)
+    domain: Optional[int] = None
+    name: str = "compound"
+
+    @classmethod
+    def from_dict(cls, data: Dict):
+        data.pop("n_points")
+        return cls(**data)
+
+    def __dict__(self) -> Dict:
+        return {
+            "_type": self.__class__.__name__,
+            "name": self.name,
+            "kind": self.kind,
+            "frame": self.frame,
+            "n_points": len(self.coordinates),
             "coordinates": self.coordinates,
             **({"direction": self.direction} if self.direction is not None else {}),
             **({"domain": self.domain} if self.domain is not None else {}),

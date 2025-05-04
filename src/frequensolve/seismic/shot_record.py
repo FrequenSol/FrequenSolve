@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 import h5py
 import numpy as np
 
-from frequensolve.seismic.receivers import ReceiverFiber, ReceiverGroup
+from frequensolve.seismic.receivers import ReceiverGroup
 from frequensolve.seismic.sources import SourceGroup
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.sampling import Sampling, UniformSweepSampling
@@ -563,8 +563,6 @@ def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
                 continue
 
             scale = spectrum[ifreq]
-            # if isinstance(recv_group.device, ReceiverFiber):
-            scale *= omega
             u[ifreq, :] *= scale
 
     # TODO: This is a hack.

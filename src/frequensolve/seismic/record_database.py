@@ -142,45 +142,62 @@ class RecordDatabase:
 
             # Create new consolidated HDF5 file
             new_file = f"{base}_consolidated.h5"
-            with h5py.File(new_file, "w") as f:
+
+            if os.path.exists(new_file):
+                access = "r+"
+            else:
+                access = "w"
+
+            with h5py.File(new_file, access) as f:
                 sample_file = base_files[0]
                 _, comp = sample_file.split(":")
 
                 # For each field component
                 for field in fields:
-                    field_group = f.create_group(field)
+                    if field in f:
+                        field_group = f[field]
+                    else:
+                        field_group = f.create_group(field)
 
                     # Create source subgroups
-                    source_files = [f for f in base_files if field in f]
+                    source_files = [f for f in base_files if f":{field}" in f]
                     for src_file in source_files:
                         # Get source number
                         _, comp = src_file.split(":")
                         isrc = int(comp.split("_")[-1])
 
                         # Create source group
-                        src_group = field_group.create_group(f"source_{isrc}")
+                        if f"source_{isrc}" in field_group:
+                            src_group = field_group[f"source_{isrc}"]
+                        else:
+                            src_group = field_group.create_group(f"source_{isrc}")
 
-                        # Get dimensions from first frequency file
                         fbase = "_".join(src_file.split(":")[0].split("_")[:-1])
 
                         with h5py.File(f"{fbase}_1.h5", "r") as freq_file:
                             shape = freq_file[f"{field}_{isrc}_re"].shape
                             n_recv = shape[0]
 
-                        # Create datasets for real and imaginary components
-                        src_group.create_dataset(
-                            "real", (n_freq,) + (n_recv,), dtype=np.float32
-                        )
-                        src_group.create_dataset(
-                            "imag", (n_freq,) + (n_recv,), dtype=np.float32
-                        )
+                        # Create or open existing datasets
+                        if not "real" in src_group:
+                            src_group.create_dataset(
+                                "real", (n_freq,) + (n_recv,), dtype=np.float32
+                            )
+                            src_group.create_dataset(
+                                "imag", (n_freq,) + (n_recv,), dtype=np.float32
+                            )
 
                         # Read and store data from individual frequency files
                         for i in range(n_freq):
                             freq_file = f"{fbase}_{i+1}.h5"
-                            with h5py.File(freq_file, "r") as ff:
-                                src_group["real"][i, :] = ff[f"{field}_{isrc}_re"][:]
-                                src_group["imag"][i, :] = ff[f"{field}_{isrc}_im"][:]
+                            if os.path.exists(freq_file):
+                                with h5py.File(freq_file, "r") as ff:
+                                    src_group["real"][i, :] = ff[f"{field}_{isrc}_re"][
+                                        :
+                                    ]
+                                    src_group["imag"][i, :] = ff[f"{field}_{isrc}_im"][
+                                        :
+                                    ]
 
             # Delete individual frequency files after consolidation
             for i in range(n_freq):

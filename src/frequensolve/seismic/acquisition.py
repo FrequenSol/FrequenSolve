@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from frequensolve.seismic.receivers import ReceiverDevice, ReceiverGroup
-from frequensolve.seismic.sources import PointSource, SourceGroup
+from frequensolve.seismic.sources import CompoundSource, PointSource, SourceGroup
 from frequensolve.util.named_list import NamedList
 
 __all__ = ["Acquisition"]
@@ -86,18 +86,38 @@ class Acquisition:
 
         for row in coords:
             isrc = len(self.source_groups)
-            self.source_groups.append(
-                SourceGroup(
-                    source=PointSource(
-                        kind=kind,
-                        frame=frame,
-                        coordinates=row,
-                        direction=direction,
-                        domain=domain,
-                        name=f"source_{isrc}",
-                    )
-                )
+            source = PointSource(
+                kind=kind,
+                frame=frame,
+                coordinates=row,
+                direction=direction,
+                domain=domain,
+                name=f"source_{isrc}",
             )
+            self.source_groups.append(SourceGroup(source=source))
+
+    def add_compound_source(
+        self,
+        kind: str,
+        coords: np.ndarray,
+        weights: np.ndarray,
+        direction: Optional[np.ndarray] = None,
+        domain: Optional[int] = None,
+    ):
+        isrc = len(self.source_groups)
+        if direction is None:
+            direction = np.ones((len(coords), 1))
+        for i, row in enumerate(direction):
+            direction[i, :] *= weights[i]
+        source = CompoundSource(
+            kind=kind,
+            frame="physical",
+            coordinates=coords,
+            direction=direction,
+            domain=domain,
+            name=f"source_{isrc}",
+        )
+        self.source_groups.append(SourceGroup(source=source))
 
     def add_receiver_group(
         self,

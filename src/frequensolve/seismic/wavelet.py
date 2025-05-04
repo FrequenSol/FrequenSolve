@@ -143,8 +143,8 @@ class Wavelet:
         dpi = kwargs.pop("dpi", None)
 
         # Formatting kwargs
-        figsize = kwargs.pop("figsize", (6, 4))
-        fontsize = kwargs.pop("fontsize", 12)
+        figsize = kwargs.pop("figsize", (4, 3))
+        fontsize = kwargs.pop("fontsize", 10)
         plt.rcParams.update({"font.size": fontsize})
 
         # Plot time-domain
@@ -201,7 +201,9 @@ class RickerWavelet(Wavelet):
 
         signal, _, center = ricker(times / 2.0, f0=f0, taper=taper)
         if causal:
-            signal = Wavelet.make_causal(signal[::2])
+            signal, _, center = ricker(times, f0=f0, taper=taper)
+            n = len(signal)
+            signal = Wavelet.make_causal(signal)[: n // 2 + 1]
             signal = np.roll(signal, shift=offset)
         else:
             signal = np.roll(signal[::2], shift=(-center // 2 + offset))
@@ -233,7 +235,9 @@ class OrmsbyWavelet(Wavelet):
 
         signal, _, center = ormsby(times / 2.0, f=f, taper=taper)
         if causal:
-            signal = Wavelet.make_causal(signal[::2])
+            signal, _, center = ormsby(times, f=f, taper=taper)
+            n = len(signal)
+            signal = Wavelet.make_causal(signal)[: n // 2 + 1]
             signal = np.roll(signal, shift=offset)
         else:
             signal = np.roll(signal[::2], shift=(-center // 2 + offset))
