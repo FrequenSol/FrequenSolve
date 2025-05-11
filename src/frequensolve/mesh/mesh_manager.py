@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from shutil import copy2
 from typing import Dict, List, Optional, Tuple, Union
 
 from .mesh import *  # noqa
@@ -53,9 +54,9 @@ class MeshAdaptor:
     jump_tolerance: Optional[float] = None  # 0.2
     jump_factor: Optional[float] = None  # 1.0
     smooth_refs: Optional[bool] = None  # False
-    #   adapt_order:      bool  = False
-    #   f_low:            float = 4.0
-    #   f_med:            float = 8.0
+    f_low: Optional[float] = None
+    f_med: Optional[float] = None
+    # adapt_order:      bool  = False
 
     def __dict__(self) -> Dict:
         return {
@@ -69,6 +70,8 @@ class MeshAdaptor:
             **({"jump_tolerance": self.jump_tolerance} if self.jump_tolerance else {}),
             **({"jump_factor": self.jump_factor} if self.jump_factor else {}),
             **({"smooth_refs": self.smooth_refs} if self.smooth_refs else {}),
+            **({"f_low": self.f_low} if self.f_low else {}),
+            **({"f_med": self.f_med} if self.f_med else {}),
         }
 
     @classmethod
@@ -80,6 +83,8 @@ class MeshAdaptor:
             jump_tolerance=data.get("jump_tolerance"),
             jump_factor=data.get("jump_factor"),
             smooth_refs=data.get("smooth_refs"),
+            f_low=data.get("f_low"),
+            f_med=data.get("f_med"),
         )
 
 
@@ -95,8 +100,8 @@ class MeshManager:
     """
 
     mesh: Optional[Union[Mesh, BaseMeshGenerator]] = None
-    mesh_file: Optional[str] = None
-    mesh_format: Optional[str] = None
+    file: Optional[str] = None
+    format: Optional[str] = None
     parallel: Optional[MeshParallelism] = None
     adapt: Optional[MeshAdaptor] = None
     _proj_path: Optional[Path] = None
@@ -110,6 +115,8 @@ class MeshManager:
         jump_tolerance: Optional[float] = None,
         jump_factor: Optional[float] = None,
         smooth_refs: Optional[bool] = None,
+        f_low: Optional[float] = None,
+        f_med: Optional[float] = None,
     ) -> None:
         """Sets mesh adaptivity options
 
@@ -129,6 +136,8 @@ class MeshManager:
             jump_tolerance=jump_tolerance,
             jump_factor=jump_factor,
             smooth_refs=smooth_refs,
+            f_low=f_low,
+            f_med=f_med,
         )
 
     def set_parallel(
@@ -155,12 +164,12 @@ class MeshManager:
         manager = cls()
 
         # From file
-        mesh_file = data.get("mesh_file")
-        mesh_format = data.get("mesh_format")
-        if mesh_file is not None and mesh_format is not None:
-            manager.mesh_file = mesh_file
-            manager.mesh_format = mesh_format
-            manager.mesh = Mesh.read_mesh(mesh_file, mesh_format)
+        file = data.get("file")
+        format = data.get("format")
+        if file is not None and format is not None:
+            manager.file = file
+            manager.format = format
+            manager.mesh = Mesh.read_mesh(file, format)
 
         # From generator
         if "generator" in data:
@@ -196,14 +205,27 @@ class MeshManager:
             "adapt": self.adapt.__dict__(),
         }
 
+        if self.parallel:
+            mesh_dict["parallel"] = self.parallel.__dict__()
+
         # Mesh determined by file
         if self.mesh is None:
-            assert self.mesh_file is not None and self.mesh_format is not None, (
+            assert self.file is not None and self.format is not None, (
                 "if a mesh or mesh generator has not been provided, "
-                "'mesh_file' and 'mesh_format' must be provided"
+                "'file' and 'format' must be provided"
             )
-            mesh_dict["mesh_file"] = self.mesh.file
-            mesh_dict["mesh_format"] = self.mesh.format
+            # Copy mesh file to project directory if not already there
+            mesh_file = Path(self.file)
+            if not mesh_file.is_relative_to(self._proj_path):
+                dest = (self._path / mesh_file.name).resolve()
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                copy2(mesh_file, dest)
+                self.file = dest
+                mesh_dict["file"] = self.file.relative_to(self._proj_path)
+            else:
+                mesh_dict["file"] = self.file
+
+            mesh_dict["format"] = self.format
 
         # Mesh determined by generator (defined in backend)
         elif isinstance(self.mesh, BaseMeshGenerator):
@@ -212,12 +234,9 @@ class MeshManager:
         # Write mesh to file (if mesh is a Mesh object)
         elif isinstance(self.mesh, Mesh):
             path = self._path / "mesh"
-            self.mesh.write_mesh(path, "hp3d")
-            mesh_dict["mesh_file"] = path.relative_to(self._proj_path)
-            mesh_dict["mesh_format"] = "hp3d"
-
-        if self.parallel:
-            mesh_dict["parallel"] = self.parallel.__dict__()
+            self.mesh.write_mesh(path, "gmp")
+            mesh_dict["file"] = path.relative_to(self._proj_path)
+            mesh_dict["format"] = "gmp"
 
         return mesh_dict
 

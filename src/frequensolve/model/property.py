@@ -32,7 +32,7 @@ def _dims_in(dims1: List[str], dims2: List[str]) -> bool:
 def _coords_compatible(
     coords1: Dict[str, ArrayLike],
     coords2: Dict[str, ArrayLike],
-    rtol: float = 1e-05,
+    rtol: float = 1e-06,
     atol: float = 1e-08,
 ) -> bool:
     """Helper function to check if two xarrays have compatible grids."""
@@ -46,7 +46,7 @@ def _coords_compatible(
             return False
         if len(coords1[dim]) != len(coords2[dim]):
             return False
-        if not np.allclose(coords1[dim], coords2[dim], rtol=rtol, atol=atol):
+        if not np.allclose(coords1[dim].values, coords2[dim].values, rtol=rtol):
             return False
     return True
 
@@ -123,7 +123,26 @@ class Property:
             return self.darr
         else:
             if _dims_compatible(self.darr.dims, coords):
-                return self.darr.interp(coords)
+                # Linear interpolation for valid values
+                out = self.darr.interp(coords=coords, method="linear")
+                # Use nearest neighbor interpolation to fill NaNs
+                if np.isnan(out.values).any():
+                    nan_mask = np.isnan(out.values)
+                    out = out.fillna(
+                        out.interp(
+                            coords=coords,
+                            method="nearest",
+                            kwargs={"fill_value": "extrapolate"},
+                        )
+                    )
+                return out
+
+                return self.darr.interp(
+                    coords=coords,
+                    method="nearest",
+                    kwargs={"fill_value": "extrapolate"},
+                )
+
             elif self.is_constant:
                 dims = xarr.dims
                 shape = tuple(len(coords[dim]) for dim in dims)
@@ -131,7 +150,7 @@ class Property:
                     data=np.full(shape, self.darr.values), dims=dims, coords=coords
                 )
             else:
-                return self.darr.interp(coords)
+                raise ValueError("Incompatible dimensions")
 
     def __iadd__(self, other: Union[float, xr.DataArray]) -> None:
         """Add a scalar or DataArray to the property."""
@@ -245,7 +264,9 @@ class Property:
         dims2 = set(da.dims)
         dims = dims1.intersection(dims2)
         coords = {dim: da.coords[dim] for dim in dims}
-        return self.darr.interp(coords=coords).broadcast_like(da)
+        return self.darr.interp(
+            coords=coords, method="nearest", kwargs={"fill_value": "extrapolate"}
+        ).broadcast_like(da)
 
     def stochastic_perturbation(
         self,
@@ -290,9 +311,9 @@ class Property:
 
             if _coords_compatible(self.darr.coords, xarr.coords):
                 if type == "additive":
-                    self.darr = self.darr + da
+                    self.darr += da
                 elif type == "multiplicative":
-                    self.darr = self.darr * (1 + da)
+                    self.darr *= 1 + da
             else:
                 if type == "additive":
                     self.darr = self._like(xarr) + da

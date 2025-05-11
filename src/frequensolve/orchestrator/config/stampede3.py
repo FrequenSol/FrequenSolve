@@ -5,11 +5,12 @@ from frequensolve.orchestrator.config.base import BaseSiteConfig
 from frequensolve.util.printing import print_warn
 
 __all__ = [
-    "FronteraConfig",
+    "Stampede3Config",
     "_BaseQueue",
-    "_DevelopmentQueue",
-    "_NormalQueue",
-    "_LargeQueue",
+    "_DebugQueue",
+    "_ICXQueue",
+    "_SKXQueue",
+    "_SPRQueue",
 ]
 
 
@@ -50,62 +51,104 @@ class _BaseQueue:
 
 
 @dataclass(frozen=True)
-class _LargeQueue(_BaseQueue):
+class _SPRQueue(_BaseQueue):
     """Frontera Large queue."""
 
-    _name: str = "large"
+    _name: str = "spr"
     _max_duration: str = "2-00:00:00"
-    _max_nodes: int = 2048
-    _min_nodes: int = 513
-
-
-@dataclass(frozen=True)
-class _NormalQueue(_BaseQueue):
-    """Frontera Normal queue."""
-
-    _name: str = "normal"
-    _max_duration: str = "2-00:00:00"
-    _max_nodes: int = 512
-    _min_nodes: int = 4
-
-
-@dataclass(frozen=True)
-class _DevelopmentQueue(_BaseQueue):
-    """Frontera Development queue."""
-
-    _name: str = "development"
-    _max_duration: str = "02:00:00"
-    _max_nodes: int = 40
+    _max_nodes: int = 32
     _min_nodes: int = 1
 
 
 @dataclass(frozen=True)
-class _FronteraBaseConfig(BaseSiteConfig):
-    _hostname: str = "frontera.tacc.utexas.edu"
+class _SKXQueue(_BaseQueue):
+    """Frontera Normal queue."""
+
+    _name: str = "skx"
+    _max_duration: str = "2-00:00:00"
+    _max_nodes: int = 256
+    _min_nodes: int = 1
+
+
+@dataclass(frozen=True)
+class _ICXQueue(_BaseQueue):
+    """Frontera Normal queue."""
+
+    _name: str = "icx"
+    _max_duration: str = "2-00:00:00"
+    _max_nodes: int = 32
+    _min_nodes: int = 1
+
+
+@dataclass(frozen=True)
+class _DebugQueue(_BaseQueue):
+    """Frontera Debug queue."""
+
+    _name: str = "skx-dev"
+    _max_duration: str = "02:00:00"
+    _max_nodes: int = 16
+    _min_nodes: int = 1
+
+
+@dataclass(frozen=True)
+class _Stampede3SPRConfig(BaseSiteConfig):
+    _hostname: str = "stampede3.tacc.utexas.edu"
     _scheduler: str = "SLURM"
     _mpi_wrapper: str = "ibrun"
     _poll_interval: int = 5
     _sockets_per_node: int = 2
     _gpus_per_node: int = 0
-    _cores_per_socket: int = 28
+    _cores_per_socket: int = 56
+    _memory_per_node: int = 198000
+    _account: str = field(default_factory=lambda: os.getenv("TACC_ACCOUNT", ""))
+
+
+@dataclass(frozen=True)
+class _Stampede3SKXConfig(BaseSiteConfig):
+    _hostname: str = "stampede3.tacc.utexas.edu"
+    _scheduler: str = "SLURM"
+    _mpi_wrapper: str = "ibrun"
+    _poll_interval: int = 5
+    _sockets_per_node: int = 2
+    _gpus_per_node: int = 0
+    _cores_per_socket: int = 24
+    _memory_per_node: int = 198000
+    _account: str = field(default_factory=lambda: os.getenv("TACC_ACCOUNT", ""))
+
+
+@dataclass(frozen=True)
+class _Stampede3ICXConfig(BaseSiteConfig):
+    _hostname: str = "stampede3.tacc.utexas.edu"
+    _scheduler: str = "SLURM"
+    _mpi_wrapper: str = "ibrun"
+    _poll_interval: int = 5
+    _sockets_per_node: int = 2
+    _gpus_per_node: int = 0
+    _cores_per_socket: int = 40
     _memory_per_node: int = 198000
     _account: str = field(default_factory=lambda: os.getenv("TACC_ACCOUNT", ""))
 
 
 @dataclass
-class FronteraConfig:
+class Stampede3Config:
     """Combines immutable base configuration with queue info for Frontera."""
 
     _queue: _BaseQueue
-    _base_config: _FronteraBaseConfig = _FronteraBaseConfig()
+    _base_config: BaseSiteConfig
 
-    def __init__(self, queue: str = "development"):
-        if queue == "development":
-            self._queue = _DevelopmentQueue()
-        elif queue == "normal":
-            self._queue = _NormalQueue()
-        elif queue == "large":
-            self._queue = _LargeQueue()
+    def __init__(self, queue: str = "skx-dev"):
+        if queue == "spr":
+            self._queue = _SPRQueue()
+            self._base_config = _Stampede3SPRConfig()
+        elif queue == "icx":
+            self._queue = _ICXQueue()
+            self._base_config = _Stampede3ICXConfig()
+        elif queue == "skx":
+            self._queue = _SKXQueue()
+            self._base_config = _Stampede3SKXConfig()
+        elif queue == "skx-dev":
+            self._queue = _DebugQueue()
+            self._base_config = _Stampede3SKXConfig()
         else:
             raise ValueError(f"Invalid queue: {queue}")
 
@@ -136,6 +179,10 @@ class FronteraConfig:
     @property
     def cores_per_socket(self):
         return self._base_config._cores_per_socket
+
+    @property
+    def cores_per_node(self):
+        return self.cores_per_socket * self.sockets_per_node
 
     @property
     def memory_per_node(self):

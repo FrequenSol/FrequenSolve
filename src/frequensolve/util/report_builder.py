@@ -17,15 +17,21 @@ class Figure:
     title: str = ""
     caption: str = ""
     image: Path = field(default_factory=Path)
+    width: float = 1.0
 
     def __init__(
-        self, title: str = "", caption: str = "", image: Union[str, Path] = ""
+        self,
+        title: str = "",
+        caption: str = "",
+        image: Union[str, Path] = "",
+        width: float = 1.0,
     ):
         if isinstance(image, str):
             image = Path(image)
         self.image = image.resolve()
         self.title = title
         self.caption = caption
+        self.width = width
 
 
 @dataclass
@@ -35,14 +41,17 @@ class Section:
     title: str = ""
     figures: List[Figure] = field(default_factory=list)
 
-    def add_figure(self, figure: Figure) -> Figure:
+    def add_figure(
+        self,
+        figure: Figure,
+    ) -> Figure:
         """Adds a Figure object to the section."""
         self.figures.append(figure)
         return self.figures[-1]
 
-    def new_figure(self, title="", caption="", image="") -> Figure:
+    def new_figure(self, title="", caption="", image="", width=1.0) -> Figure:
         """Adds an empty figure to the section or initializes with given values."""
-        fig = Figure(title=title, caption=caption, image=image)
+        fig = Figure(title=title, caption=caption, image=image, width=width)
         self.figures.append(fig)
         return fig
 
@@ -73,17 +82,18 @@ class Report:
         self.sections.append(sec)
         return sec
 
-    def generate(self, path: Union[str, Path], timeout: int = 30):
+    def generate(self, path: Union[str, Path], name="report", timeout: int = 30):
         """Compiles PDF from LaTeX
 
         Attributes:
            path (str): Where PDF will be saved
+           name (str): Name of the report
            timeout (int): Timeout for compilation command (stalls on error)
         """
         current_dir = os.getcwd()
         path = Path(path)
         # Set up temporary directory
-        work_dir = Path("/tmp/fstmpdisk/report")
+        work_dir = Path(f"/tmp/fstmpdisk/{name}")
         setup_work_directory(work_dir)
 
         # Load the LaTeX template
@@ -92,7 +102,7 @@ class Report:
 
         # Render the LaTeX document
         latex = template.render(report=self)
-        with open(work_dir / "report.tex", "w") as f:
+        with open(work_dir / f"{name}.tex", "w") as f:
             f.write(latex)
 
         # Compile the LaTeX document to PDF
@@ -102,7 +112,7 @@ class Report:
                 # First pass to generate intermediate files
                 print("Running first pass of pdflatex...")
                 output = subprocess.check_output(
-                    ["pdflatex", "report.tex"],
+                    ["pdflatex", f"{name}.tex"],
                     cwd=str(work_dir),
                     stderr=subprocess.STDOUT,
                     timeout=timeout,
@@ -123,8 +133,10 @@ class Report:
                 f.write("\n\n\nSecond Pass:\n\n\n")
                 f.write(output)
 
-            file = (path / "report").with_suffix(".pdf") if not path.is_file() else path
-            file_work = work_dir / "report.pdf"
+            file = (
+                (path / f"{name}").with_suffix(".pdf") if not path.is_file() else path
+            )
+            file_work = work_dir / f"{name}.pdf"
             if not file_work == file:
                 if file.exists():
                     file.unlink()
@@ -152,7 +164,7 @@ def setup_work_directory(work_dir: Path):
     from dotenv import load_dotenv
 
     load_dotenv()
-    fs_dir = os.getenv("FREQUENSOLVE_DIR")
+    fs_dir = os.getenv("FS_SOLVER_PATH")
 
     # Get template directory
     template_dir = Path(fs_dir) / "trunk/files/templates/report/"

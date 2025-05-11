@@ -56,11 +56,11 @@ class UniformSweepSampling(Sampling):
 
     @property
     def ofreq(self):
-        return int(self.f_min / self.df)
+        return round(self.f_min / self.df)
 
     @property
     def nfreq(self):
-        return int(self.f_max / self.df) + 1
+        return round(self.f_max / self.df) + 1
 
     @property
     def ntime(self):

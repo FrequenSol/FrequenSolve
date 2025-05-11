@@ -1,5 +1,6 @@
 import json
 import os
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Literal, Optional, Union
@@ -44,6 +45,7 @@ class BaseSimulation(SimulationConfig):
     solver: SolverConfig = field(default_factory=SolverConfig)
     discretization: Discretization = field(default_factory=Discretization)
     outputs: OutputManager = field(default_factory=OutputManager)
+    user_parameters: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         from frequensolve.util.printing import print_note
@@ -97,6 +99,7 @@ class BaseSimulation(SimulationConfig):
                 else {}
             ),
             **({"Outputs": self.outputs.__dict__()} if self.outputs else {}),
+            **({"UserParameters": self.user_parameters}),
         }
 
 
@@ -117,8 +120,9 @@ class SeismicSimulation(BaseSimulation):
     """
 
     name: str
-    physics: Literal["acoustic", "elastic", "plasma"]
+    physics: Literal["acoustic", "elastic", "coupled", "em"]
     dimension: Literal[2, 3]
+    workflow: Optional[Literal["forward", "adjoint", "RTM"]] = None
     model: ModelBase = field(default_factory=ModelBase)
     mesh: MeshManager = field(default_factory=MeshManager)
     BCs: BoundaryConditionManager = field(default_factory=BoundaryConditionManager)
@@ -126,6 +130,7 @@ class SeismicSimulation(BaseSimulation):
     discretization: Discretization = field(default_factory=Discretization)
     outputs: OutputManager = field(default_factory=OutputManager)
     acquisition: Acquisition = field(default_factory=Acquisition)
+    user_parameters: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         if self.model.dimension == 0:
@@ -165,10 +170,18 @@ class SeismicSimulation(BaseSimulation):
                 sim.outputs = OutputManager.from_dict(data["Outputs"])
             if "Acquisition" in data:
                 sim.acquisition = Acquisition.from_dict(data["Acquisition"])
+            if "UserParameters" in data:
+                sim.user_parameters = data["UserParameters"]
 
             os.chdir(cwd)
 
         sim._set_path(project_dir, Path("simulations"))
+        return sim
+
+    def copy(self, **kwargs) -> "SeismicSimulation":
+        sim = deepcopy(self)
+        for key, value in kwargs.items():
+            setattr(sim, key, value)
         return sim
 
     @classmethod

@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from frequensolve.seismic.receivers import ReceiverDevice, ReceiverGroup
-from frequensolve.seismic.sources import PointSource, Source, SourceGroup
+from frequensolve.seismic.sources import CompoundSource, PointSource, SourceGroup
 from frequensolve.util.named_list import NamedList
 
 __all__ = ["Acquisition"]
@@ -21,11 +21,11 @@ class Acquisition:
     wavelet signatures. It then aggregates them into a single cohesive acquisition definition.
 
     Attributes:
-       source_group (SourceGroup): A group of source objects describing all shot points.
-       receiver_groups (List[ReceiverGroup]): A list of ReceiverGroup objects (stations, geophones, or fibers).
+       source_groups   (NamedList[SourceGroup]): A list of SourceGroup objects describing all shot points.
+       receiver_groups (NamedList[ReceiverGroup]): A list of ReceiverGroup objects (stations, geophones, or fibers).
     """
 
-    source_group: SourceGroup = field(default_factory=SourceGroup)
+    source_groups: NamedList = field(default_factory=NamedList)
     receiver_groups: NamedList = field(default_factory=NamedList)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
@@ -33,7 +33,9 @@ class Acquisition:
     @classmethod
     def from_dict(cls, dict: Dict) -> "Acquisition":
         return cls(
-            source_group=SourceGroup.from_dict(dict["source_group"]),
+            source_groups=NamedList(
+                [SourceGroup.from_dict(group) for group in dict["source_groups"]]
+            ),
             receiver_groups=NamedList(
                 [ReceiverGroup.from_dict(group) for group in dict["receiver_groups"]]
             ),
@@ -57,7 +59,7 @@ class Acquisition:
             names[group.name] = group.name
 
         return {
-            "source_group": self.source_group.__dict__(),
+            "source_groups": [group.__dict__() for group in self.source_groups],
             "receiver_groups": [group.__dict__() for group in self.receiver_groups],
         }
 
@@ -66,28 +68,56 @@ class Acquisition:
         kind: str,
         coords: np.ndarray,
         direction: Optional[np.ndarray] = None,
+        domain: Optional[int] = None,
         frame: str = "physical",
     ):
         """Add a group of recievers with common kind, frame, and direction.
 
         Args:
-           kind (str): Kind of the receiver group (e.g., "station", "geophone", "fiber").
-           coords (np.ndarray): Coordinates of the receiver group.
-           direction (np.ndarray): Direction of the receiver group.
-           frame (str): Frame of the receiver group (e.g., "physical", "global").
+           kind (str):              Kind of the receiver group (e.g., "station", "geophone", "fiber").
+           coords (np.ndarray):     Coordinates of the receiver group.
+           direction (np.ndarray):  Direction of the receiver group.
+           frame (str):             Frame of the receiver group (e.g., "physical", "global").
+           domain (int):            Domain in which the source group should be evaluated
+                                    (if a source is defined between multiple domains, responses
+                                     will be evaluated in all and averaged by default, setting this
+                                     specifies a specific domain to evaluate, neglecting others).
         """
 
         for row in coords:
-            isrc = len(self.source_group.sources)
-            self.source_group.sources.append(
-                PointSource(
-                    kind=kind,
-                    frame=frame,
-                    coordinates=row,
-                    direction=direction,
-                    name=f"source_{isrc}",
-                )
+            isrc = len(self.source_groups)
+            source = PointSource(
+                kind=kind,
+                frame=frame,
+                coordinates=row,
+                direction=direction,
+                domain=domain,
+                name=f"source_{isrc}",
             )
+            self.source_groups.append(SourceGroup(source=source))
+
+    def add_compound_source(
+        self,
+        kind: str,
+        coords: np.ndarray,
+        weights: np.ndarray,
+        direction: Optional[np.ndarray] = None,
+        domain: Optional[int] = None,
+    ):
+        isrc = len(self.source_groups)
+        if direction is None:
+            direction = np.ones((len(coords), 1))
+        for i, row in enumerate(direction):
+            direction[i, :] *= weights[i]
+        source = CompoundSource(
+            kind=kind,
+            frame="physical",
+            coordinates=coords,
+            direction=direction,
+            domain=domain,
+            name=f"source_{isrc}",
+        )
+        self.source_groups.append(SourceGroup(source=source))
 
     def add_receiver_group(
         self,
@@ -95,6 +125,8 @@ class Acquisition:
         device: ReceiverDevice,
         coords: np.ndarray,
         frame: str = "physical",
+        domain: Optional[int] = None,
+        **kwargs,
     ):
         """Add a group of recievers with common kind, frame, and direction.
 
@@ -102,11 +134,22 @@ class Acquisition:
            name (str):                Name of the receiver group.
            device (ReceiverDevice):   Device defining receiver type and components.
            coordinates (np.ndarray):  Coordinates of the receiver group.
-           frame (str): Frame of the receiver group (e.g., "physical", "global").
+           frame (str):               Frame of the receiver group (e.g., "physical", "global").
+           domain (int):              Domain in which the receiver group should be evaluated
+                                      (if a receiver is defined between multiple domains, responses
+                                       will be evaluated in all and averaged by default, setting this
+                                       specifies a specific domain to evaluate, neglecting others).
         """
 
         self.receiver_groups.append(
-            ReceiverGroup(name=name, device=device, frame=frame, coordinates=coords)
+            ReceiverGroup(
+                name=name,
+                device=device,
+                frame=frame,
+                coordinates=coords,
+                domain=domain,
+                **kwargs,
+            )
         )
 
     def list_fields(self, recv_name: str = "") -> List[str]:
@@ -127,12 +170,12 @@ class Acquisition:
 
     def list_sources(self) -> List[int]:
         """List valid source numbers."""
-        return list(range(1, len(self.source_group.sources) + 1))
+        return list(range(1, len(self.source_groups) + 1))
 
-    def source(self, isrc: int) -> Source:
+    def source(self, isrc: int) -> SourceGroup:
         """Retrieve a source by index."""
         try:
-            return self.source_group.sources[isrc - 1]
+            return self.source_groups[isrc - 1]
         except IndexError:
             raise IndexError(f"Source index {isrc} is out of range.")
 
@@ -141,7 +184,8 @@ class Acquisition:
         self._rel_path = rel_path
         for group in self.receiver_groups:
             group._set_path(proj_path, rel_path)
-        self.source_group._set_path(proj_path, rel_path)
+        for group in self.source_groups:
+            group._set_path(proj_path, rel_path)
 
     def receiver_locations(self) -> Dict:
         """Get receiver locations in physical and reference frames.

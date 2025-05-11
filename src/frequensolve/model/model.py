@@ -64,6 +64,9 @@ class ModelSubdomain:
                 key: Property(data=val) for key, val in properties.items()
             }
 
+    def set_property(self, key: str, value: Union[float, xr.DataArray]):
+        self._properties[key] = Property(data=value)
+
     @property
     def properties(self) -> Dict[str, Property]:
         if self._properties is None:
@@ -225,6 +228,10 @@ class ModelBase:
            **kwargs: Additional subdomain parameters.
         """
         self.subdomains.append(subdomain)
+
+    def __iadd__(self, other):
+        self.add_subdomain(other)
+        return self
 
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path

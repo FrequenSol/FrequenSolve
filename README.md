@@ -54,7 +54,7 @@ This library provides a Python API for setting up and running the FrequenSolve s
 
    ```console
    $ git clone git@github.com:FrequenSol/FrequenSolve.git
-   $ cd frequensolve
+   $ cd FrequenSolve
    ```
 
 3. Install the package and its dependencies using Poetry:
@@ -101,7 +101,6 @@ You can add this to your Python path by setting the PYTHONPATH environment varia
 # Linux/macOS
 export PYTHONPATH="/path/to/paraview/python:$PYTHONPATH"
 ```
-
 
 ## Building Documentation
 

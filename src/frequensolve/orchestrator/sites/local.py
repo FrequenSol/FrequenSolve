@@ -5,6 +5,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Dict, List, Optional, Union
 
 from dotenv import load_dotenv
 
@@ -14,6 +15,7 @@ from frequensolve.orchestrator.sites.base import (
     SiteStatus,
     _wait_for_path,
 )
+from frequensolve.seismic.record_database import RecordDatabase
 from frequensolve.simulation.jobs import SimulationJob
 
 __all__ = ["LocalSite"]
@@ -53,7 +55,7 @@ class LocalSite(BaseSite):
             raise FileNotFoundError(f"Solver executable not found at {executable}")
         return executable
 
-    def submit(self, job: SimulationJob) -> list:
+    def submit(self, job: SimulationJob, **kwargs) -> list:
         """Submit job and block until completion."""
         if self._is_notebook:
             import nest_asyncio
@@ -65,21 +67,73 @@ class LocalSite(BaseSite):
         asyncio.set_event_loop(loop)
 
         try:
-            return loop.run_until_complete(self._run_job(job))
+            return loop.run_until_complete(self._run_job(job, **kwargs))
         finally:
             loop.close()
 
-    async def _run_job(self, job: SimulationJob) -> list:
+    async def _run_job(self, job: SimulationJob, **kwargs) -> list:
         """Run all tasks for a job and return results."""
         results = []
         for i in range(job.n_tasks):
-            print(f"Running task {i+1}")
-            result = await self._run_single_task(job, i)
+            result = await self._run_single_task(job, i, **kwargs)
             if result is not None:
                 results.append(result)
         return job.records
 
-    def submit_async(self, job: SimulationJob) -> asyncio.Future:
+    @property
+    def provisioned(self) -> bool:
+        """Dummy method for consistency."""
+        return True
+
+    def sync(self, project):
+        """Dummy method for consistency."""
+        pass
+
+    def _sync_project(self, project):
+        """Dummy method for consistency."""
+        pass
+
+    def connect_to_existing_job(self):
+        """Dummy method for consistency."""
+        pass
+
+    def fetch_paraview(
+        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
+    ):
+        """Dummy method for consistency."""
+        for name, pv_path in job.paraview_outputs.items():
+            print(f"Fetching ParaView output '{name}' from {pv_path}")
+        pass
+
+    def wait_completion(self, jobs: List[SimulationJob]):
+        """Wait for all jobs to complete."""
+        pass
+
+    # TODO: use path (will need changes elsewhere to support)
+    def fetch_traces(
+        self,
+        job: Union[SimulationJob, List[SimulationJob]],
+        upscale: int = 1,
+        path: Optional[Union[str, Path]] = None,
+    ) -> Union[RecordDatabase, Dict[str, RecordDatabase]]:
+        """Gets traces and consolidates them into a single HDF5 file."""
+        if isinstance(job, SimulationJob):
+            db = RecordDatabase.from_results(
+                job.records, job.project_path.resolve(), upscale
+            )
+            db.consolidate_h5()
+            return db
+        else:
+            db_map = {}
+            for j in job:
+                db = RecordDatabase.from_results(
+                    j.records, j.project_path.resolve(), upscale
+                )
+                db.consolidate_h5()
+                db_map[j.name] = db
+            return db_map
+
+    def submit_async(self, job: SimulationJob, **kwargs) -> asyncio.Future:
         """Submit job asynchronously and return a future."""
         if self._is_notebook:
             import nest_asyncio
@@ -87,26 +141,40 @@ class LocalSite(BaseSite):
             nest_asyncio.apply()
 
         loop = asyncio.get_event_loop()
-        future = loop.create_task(self._run_job(job))
+        future = loop.create_task(self._run_job(job, **kwargs))
         self._futures.append(future)
         return future
 
-    async def _run_single_task(self, job: SimulationJob, task_id: int) -> dict:
+    async def _run_single_task(
+        self, job: SimulationJob, task_id: int, **kwargs
+    ) -> dict:
         """Run a single task and return its results."""
         job_file = job.save()
         _wait_for_path(job_file)
 
-        args = [
-            "mpirun",
-            "-np",
-            "2",
+        nranks = kwargs.get("nranks", 1)
+        assert (
+            nranks <= self.config.cores
+        ), "Number of ranks must be less than or equal to the number of cores"
+        nthreads = kwargs.get("nthreads", self.config.cores // nranks)
+
+        if nranks > 1:
+            args = [
+                "mpirun",
+                "-np",
+                f"{nranks}",
+            ]
+        else:
+            args = []
+
+        args += [
             self.executable,
             "-nthreads",
-            str(self.config.cores // 2 - 1),
+            f"{nthreads}",
             "-j",
-            str(job_file),
+            f"{job_file}",
             "-i",
-            str(task_id + 1),
+            f"{task_id + 1}",
         ]
 
         try:
@@ -117,10 +185,8 @@ class LocalSite(BaseSite):
                 env=self.env,
             )
 
-            # Collect output for result
             output_lines = []
 
-            # Read stdout and stderr concurrently
             async def read_stream(stream):
                 while True:
                     line = await stream.readline()
@@ -147,16 +213,14 @@ class LocalSite(BaseSite):
                 )
 
             return
-            # return job.records
 
         except Exception as e:
             print(f"Task {task_id+1} failed: {str(e)}", file=sys.stderr)
             raise
 
         finally:
-            if self._is_notebook:
-                sys.stdout.flush()
-                sys.stderr.flush()
+            sys.stdout.flush()
+            sys.stderr.flush()
 
     def transfer():
         pass

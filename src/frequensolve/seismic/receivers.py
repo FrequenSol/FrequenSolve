@@ -331,7 +331,10 @@ class CoordsFromFile(ReceiverCoords):
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
-    def get(self, indices: Optional[Union[int, slice]] = None) -> np.ndarray:
+    def __getitem__(self, key: Union[tuple, slice]):
+        return self.get(key)
+
+    def get(self, indices: Optional[Union[Tuple, slice]] = None) -> np.ndarray:
         """Get coordinates for specified indices.
 
         Args:
@@ -376,7 +379,7 @@ class CoordsGrid(ReceiverCoords):
 
     @property
     def size(self) -> int:
-        return self.grid.nx * self.grid.ny * self.grid.nz
+        return np.prod(self.grid.n)
 
     @property
     def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -559,6 +562,7 @@ class ReceiverGroup:
     name: str = "group"
     device: ReceiverDevice = field(default_factory=ReceiverDevice)
     frame: Literal["physical", "reference"] = "physical"
+    domain: Optional[int] = None
     coordinates: ReceiverCoords = field(default_factory=ReceiverCoords)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
@@ -576,12 +580,16 @@ class ReceiverGroup:
         device: ReceiverDevice,
         coordinates: Union[np.ndarray, xr.DataArray, str, Path, Grid, ReceiverCoords],
         frame: str = "physical",
+        domain: Optional[int] = None,
+        **kwargs,
     ) -> None:
         coords = self._clean_coordinates(coordinates)
         self.name = name
         self.device = device
         self.frame = frame
         self.coordinates = coords
+        self.domain = domain
+        self.kwargs = kwargs
 
     @staticmethod
     def _clean_coordinates(coords):
@@ -619,18 +627,22 @@ class ReceiverGroup:
             "name": self.name,
             "device": self.device.__dict__(),
             "frame": self.frame,
+            **({"domain": self.domain} if self.domain is not None else {}),
             "coordinates": self.coordinates.__dict__(),
+            **self.kwargs,
         }
 
     @classmethod
     def from_dict(cls, data: Dict) -> "ReceiverGroup":
-        coords = ReceiverCoords.from_dict(data["coordinates"])
+        coords = ReceiverCoords.from_dict(data.pop("coordinates", None))
 
         return cls(
-            name=data["name"],
-            device=ReceiverDevice.from_dict(data["device"]),
-            frame=data["frame"],
+            name=data.pop("name", None),
+            device=ReceiverDevice.from_dict(data.pop("device", None)),
+            frame=data.pop("frame", None),
             coordinates=coords,
+            domain=data.pop("domain", None),
+            **data,
         )
 
     def _set_path(self, proj_path: Path, rel_path: Path):

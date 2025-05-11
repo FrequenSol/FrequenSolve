@@ -20,6 +20,7 @@ class SimulationJob(ABC):
     simulation: BaseSimulation
     f_list: List[float]
     _file: Optional[Path] = None
+    _job_id: Optional[str] = None
 
     @classmethod
     def from_dict(cls, d: dict, project_dir: Optional[Path] = None) -> "SimulationJob":
@@ -84,15 +85,22 @@ class SimulationJob(ABC):
         return file
 
     @property
+    def project_path(self):
+        return Path(self.simulation._file).parent.parent
+
+    @property
     def n_tasks(self):
         return len(self.f_list)
 
     @property
     def records(self):
-        """Get records from Frontera.
+        """Lists records that should be produced by a job.
 
-        Args:
-            outputs: A dictionary of outputs to get.
+        Returns:
+            dict: Dictionary containing:
+                - datasets: Dictionary of datasets
+                - frequencies: List of frequencies
+                - simulation: Path to simulation file
         """
 
         output = self.trace_outputs
@@ -165,7 +173,7 @@ class SimulationJob(ABC):
             for component in group.device.components:
                 recv_out["components"].append(f"{group.name}:{component.name}")
 
-        for isrc, source in enumerate(sim.acquisition.source_group.sources):
+        for isrc, sgroup in enumerate(sim.acquisition.source_groups):
             recv_out["sources"].append(f"{isrc+1}")
 
         return recv_out
@@ -203,36 +211,6 @@ class SimulationJob(ABC):
                 wave_out["sources"].append(f"{isrc+1}")
 
         return wave_out
-
-    @property
-    def reflectivity_outputs(self) -> dict:
-        """Lists reflectivity outputs.
-
-        Returns:
-            - reflectivity: Reflectivity outputs
-        """
-        sim = self.simulation
-        receivers = sim.acquisition.receiver_groups
-
-        sim_file = sim._file
-        with open(sim_file, "r") as f:
-            sim_data = json.load(f)
-
-        outputs = sim_data["Outputs"]["reflectivity"]
-
-        refl_out = {}
-        for out in outputs:
-            refl_out["domain"] = (self.__class__.__name__,)
-            refl_out["summed"] = out.get("summed", True)
-            refl_out["path"] = out["path"]
-            refl_out["frequencies"] = self.f_list
-            refl_out["sources"] = []
-
-            if not refl_out["summed"]:
-                for isrc, source in enumerate(sim.acquisition.source_group.sources):
-                    refl_out["sources"].append(f"{isrc+1}")
-
-        return refl_out
 
 
 @register_class

@@ -7,7 +7,7 @@ from numpy import array as NPArray
 
 from frequensolve.util.class_registry import class_registry, register_class
 
-__all__ = ["SourceGroup", "Source", "RuptureSource", "PointSource"]
+__all__ = ["SourceGroup", "Source", "RuptureSource", "PointSource", "CompoundSource"]
 
 
 @register_class
@@ -56,10 +56,11 @@ class RuptureSource(Source):
 @register_class
 @dataclass
 class PointSource(Source):
-    kind: Literal["scalar", "vector", "moment"]
+    kind: Literal["scalar", "vector", "moment", "monopole", "dipole"]
     frame: Literal["physical", "reference"] = "physical"
     coordinates: List[float] = field(default_factory=list)
     direction: Optional[List[float]] = None
+    domain: Optional[int] = None
     name: str = "point"
 
     @classmethod
@@ -74,6 +75,35 @@ class PointSource(Source):
             "frame": self.frame,
             "coordinates": self.coordinates,
             **({"direction": self.direction} if self.direction is not None else {}),
+            **({"domain": self.domain} if self.domain is not None else {}),
+        }
+
+
+@register_class
+@dataclass
+class CompoundSource(Source):
+    kind: Literal["scalar", "vector"]
+    frame: Literal["physical", "reference"] = "physical"
+    coordinates: List[float] = field(default_factory=list)
+    direction: List[float] = field(default_factory=list)
+    domain: Optional[int] = None
+    name: str = "compound"
+
+    @classmethod
+    def from_dict(cls, data: Dict):
+        data.pop("n_points")
+        return cls(**data)
+
+    def __dict__(self) -> Dict:
+        return {
+            "_type": self.__class__.__name__,
+            "name": self.name,
+            "kind": self.kind,
+            "frame": self.frame,
+            "n_points": len(self.coordinates),
+            "coordinates": self.coordinates,
+            **({"direction": self.direction} if self.direction is not None else {}),
+            **({"domain": self.domain} if self.domain is not None else {}),
         }
 
 
@@ -85,24 +115,25 @@ class SourceGroup:
        sources (List[PointSource]):     List of source objects
     """
 
-    sources: List[Source] = field(default_factory=list)
+    source: Source = field(default_factory=Source)
     _proj_path: Path = None
     _rel_path: Path = None
 
     @classmethod
     def from_dict(cls, data: Dict):
-        sources = [Source.from_dict(source) for source in data.get("sources", [])]
-        return cls(sources=sources)
+        source = Source.from_dict(data.get("source", {}))
+        return cls(source=source)
 
     def __dict__(self) -> Dict:
-        return {"sources": [source.__dict__() for source in self.sources]}
+        return {"source": self.source.__dict__()}
 
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path
         self._rel_path = rel_path
 
+    # TODO: fix this, point source will need to make 2D array
     def get_coordinates(self) -> NPArray:
-        return NPArray([source.coordinates for source in self.sources])
+        return NPArray([self.source.coordinates])
 
     @property
     def _path(self) -> Path:

@@ -1,11 +1,23 @@
 from dataclasses import dataclass
 from functools import cached_property
 from typing import List, Literal, Optional
+from warnings import warn
 
 import numpy as np
 from pylops.utils.wavelets import klauder, ormsby, ricker
 from scipy.signal import hilbert
 from scipy.stats import norm
+
+# Convert to time domain using FFT
+try:
+    import pyfftw
+
+    pyfftw.interfaces.cache.enable()
+    fft = pyfftw.interfaces.numpy_fft
+    pyfftw.config.NUM_THREADS = 6  # Or however many threads you want to use
+except:
+    warn("pyfftw not found, using numpy for FFT (slow)")
+    import numpy.fft as fft
 
 __all__ = [
     "TaperFunction",
@@ -58,18 +70,19 @@ class Wavelet:
 
     times: np.ndarray
     signal: np.ndarray
+    f_max: float
 
-    @property
+    @cached_property
     def spectrum(self):
         """Compute the frequency-domain representation of the wavelet.
 
         Returns:
            np.ndarray: The frequency-domain representation of the wavelet.
         """
-        spec = np.fft.rfft(self.signal)
+        spec = fft.rfft(self.signal)
         return spec.astype(np.complex64)
 
-    @property
+    @cached_property
     def frequencies(self):
         """Compute the frequencies for the wavelet.
 
@@ -78,7 +91,7 @@ class Wavelet:
         """
         n = len(self.signal)
         dt = self.times[1] - self.times[0]
-        return np.fft.rfftfreq(n, d=dt).astype(np.float32)
+        return fft.rfftfreq(n, d=dt).astype(np.float32)
 
     @staticmethod
     def make_causal(signal: np.ndarray) -> np.ndarray:
@@ -94,9 +107,9 @@ class Wavelet:
         n = len(signal)
 
         # Get spectrum and add small constant for stability
-        spectrum = np.fft.rfft(signal)
+        spectrum = fft.rfft(signal)
         A = np.abs(spectrum)
-        eps = np.max(A) * 1e-2
+        eps = np.max(A) * 1e-3
         Atmp = np.clip(A, eps, np.inf)
 
         # Compute minimum phase using Kolmogorov method
@@ -105,27 +118,68 @@ class Wavelet:
         phase_min = np.exp(-1j * phi)
 
         # Transform back to time domain
-        signal_min = np.fft.irfft(phase_min * A, n=n)
+        signal_min = fft.irfft(phase_min * A, n=n)
 
         return signal_min
 
-    def plot(self) -> None:
+    def plot(self, **kwargs) -> None:
         """Plot the time-domain and spectrum of the wavelet."""
         import matplotlib.pyplot as plt
 
+        # Axis limit kwargs
+        Tf = kwargs.pop("T_max", None)
+        if Tf:
+            nTf = np.searchsorted(self.times, Tf, side="left")
+            nTf = np.minimum(nTf, len(self.times))
+        else:
+            nTf = len(self.times)
+        f_max = kwargs.pop("f_max", self.f_max)
+        nF = np.searchsorted(self.frequencies, f_max, side="left")
+        nF = np.minimum(nF, len(self.frequencies))
+
+        # Save kwargs
+        save_time = kwargs.pop("save_time", None)
+        save_freq = kwargs.pop("save_freq", None)
+        dpi = kwargs.pop("dpi", None)
+
+        # Formatting kwargs
+        figsize = kwargs.pop("figsize", (4, 3))
+        fontsize = kwargs.pop("fontsize", 10)
+        plt.rcParams.update({"font.size": fontsize})
+
         # Plot time-domain
-        plt.figure()
-        plt.title("Wavelet")
-        plt.plot(self.times, self.signal)
+        plt.figure(figsize=figsize)
+        # plt.title("Signal")
+        plt.plot(self.times[:nTf], self.signal[:nTf], **kwargs)
         plt.xlabel("Time (s)")
-        plt.show()
+        plt.ylabel("Amplitude")
+        plt.grid(True, alpha=0.2)
+        if save_time:
+            plt.savefig(
+                save_time,
+                bbox_inches="tight",
+                **({"dpi": dpi} if dpi is not None else {}),
+            )
+            plt.close()
+        else:
+            plt.show()
 
         # Plot frequency-domain
-        plt.figure()
-        plt.title("Wavelet Spectrum")
-        plt.plot(self.frequencies, np.abs(self.spectrum))
+        plt.figure(figsize=figsize)
+        # plt.title("Spectrum")
+        plt.plot(self.frequencies[:nF], np.abs(self.spectrum[:nF]), **kwargs)
         plt.xlabel("Frequency (Hz)")
-        plt.show()
+        plt.ylabel("Amplitude")
+        plt.grid(True, alpha=0.2)
+        if save_freq:
+            plt.savefig(
+                save_freq,
+                bbox_inches="tight",
+                **({"dpi": dpi} if dpi is not None else {}),
+            )
+            plt.close()
+        else:
+            plt.show()
 
 
 @dataclass
@@ -147,12 +201,14 @@ class RickerWavelet(Wavelet):
 
         signal, _, center = ricker(times / 2.0, f0=f0, taper=taper)
         if causal:
-            signal = Wavelet.make_causal(signal[::2])
+            signal, _, center = ricker(times, f0=f0, taper=taper)
+            n = len(signal)
+            signal = Wavelet.make_causal(signal)[: n // 2 + 1]
             signal = np.roll(signal, shift=offset)
         else:
             signal = np.roll(signal[::2], shift=(-center // 2 + offset))
 
-        super().__init__(times=times, signal=signal)
+        super().__init__(times=times, signal=signal, f_max=3 * f0)
 
 
 @dataclass
@@ -179,12 +235,14 @@ class OrmsbyWavelet(Wavelet):
 
         signal, _, center = ormsby(times / 2.0, f=f, taper=taper)
         if causal:
-            signal = Wavelet.make_causal(signal[::2])
+            signal, _, center = ormsby(times, f=f, taper=taper)
+            n = len(signal)
+            signal = Wavelet.make_causal(signal)[: n // 2 + 1]
             signal = np.roll(signal, shift=offset)
         else:
             signal = np.roll(signal[::2], shift=(-center // 2 + offset))
 
-        super().__init__(times=times, signal=signal)
+        super().__init__(times=times, signal=signal, f_max=1.1 * f[-1])
 
 
 @dataclass
@@ -209,9 +267,11 @@ class KlauderWavelet(Wavelet):
 
         signal, _, center = klauder(times / 2.0, f=f, taper=taper)
         if causal:
-            signal = Wavelet.make_causal(signal[::2])
+            signal, _, center = klauder(times, f=f, taper=taper)
+            n = len(signal)
+            signal = Wavelet.make_causal(signal)[: n // 2 + 1]
             signal = np.roll(signal, shift=offset)
         else:
             signal = np.roll(signal[::2], shift=(-center // 2 + offset))
 
-        super().__init__(times=times, signal=signal)
+        super().__init__(times=times, signal=signal, f_max=1.1 * f[-1])

@@ -1,3 +1,4 @@
+from .colormaps import *  # noqa
 from .input_parser import *  # noqa
 from .report_builder import *  # noqa
 
