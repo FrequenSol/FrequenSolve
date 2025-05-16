@@ -104,6 +104,12 @@ sphinx-copybutton = "^0.5.1"
 myst-parser = "^4.0.0"
 versioneer = "^0.29"
 furo = "^2024.8.6"
+pytest = "^8.0.0"
+pytest-cov = "^4.1.0"
+pytest-xdist = "^3.5.0"
+pytest-mock = "^3.12.0"
+pytest-timeout = "^2.2.0"
+pytest-mpl = "^0.16.1"
 ipykernel = "^6.29.5"
 
 
@@ -183,3 +189,37 @@ multidimio = ">=0.8.0,<0.9.0"
 distributed = ">=2024.12.0"
 bokeh = ">=3.4.2,<4.0.0"
 zfpy = ">=1.0.1,<2.0.0"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q --cov=frequensolve --cov-report=term-missing"
+testpaths = [
+    "tests",
+]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+timeout = 300  # 5 minutes timeout for tests
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.coverage.run]
+source = ["src/frequensolve"]
+omit = [
+    "tests/*",
+    "setup.py",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "pass",
+    "@abstractmethod",
+]
