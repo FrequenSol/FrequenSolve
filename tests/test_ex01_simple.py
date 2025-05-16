@@ -254,7 +254,7 @@ def test_acquisition_setup(simulation):
     simulation += acq
 
     # Test acquisition setup
-    assert len(acq.source_group.sources) == 1
+    assert len(acq.source_groups) == 1
     assert len(acq.receiver_groups) == 1
     assert acq.receiver_groups[0].name == "surface_hydrophones"
     assert len(acq.receiver_groups[0].device.components) == 1
@@ -262,7 +262,7 @@ def test_acquisition_setup(simulation):
     assert acq.receiver_groups[0].device.components[0].direction is None
 
     # Test source and receiver locations
-    source_coords = acq.source_group.get_coordinates()
+    source_coords = acq.source_groups[0].get_coordinates()
     receiver_coords = acq.receiver_groups[0].coordinates.get()
     assert source_coords.shape == (1, 2)
     assert receiver_coords.shape == (1001, 2)
@@ -376,7 +376,7 @@ def test_project_save_load(project, simulation):
     assert float(loaded_sim.model.layers[1].properties["Vp"].get()) == 2.0
 
     # Verify acquisition setup
-    assert len(loaded_sim.acquisition.source_group.sources) == 1
+    assert len(loaded_sim.acquisition.source_groups) == 1
     assert len(loaded_sim.acquisition.receiver_groups) == 1
     assert loaded_sim.acquisition.receiver_groups[0].name == "surface_hydrophones"
 
