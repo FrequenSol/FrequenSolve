@@ -1,4 +1,11 @@
-.PHONY: test
+.PHONY: generate-reference-images
+generate-reference-images:
+	poetry run pytest -ra -k "not integration" --mpl-generate-path=tests/reference_images/ tests/
 
+.PHONY: test
 test:
-	pytest -k "not integration" --cov=src/ --cov-report=xml tests/
+	poetry run pytest \
+	-ra -k "not integration" \
+	--cov=src/ --cov-report=xml \
+	--mpl --mpl-baseline-path=tests/reference_images/ --mpl-generate-summary=html \
+	tests/

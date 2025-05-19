@@ -204,6 +204,7 @@ filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::UserWarning",
 ]
+mpl_baseline_path = "tests/reference_images"  # Path to store reference images
 
 [tool.coverage.run]
 source = ["src/frequensolve"]

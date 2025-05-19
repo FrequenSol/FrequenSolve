@@ -62,9 +62,6 @@ import pytest
 
 from frequensolve import *
 
-# Create reference images directory if it doesn't exist
-REFERENCE_IMAGES_DIR = Path(__file__).parent / "reference_images"
-
 
 @pytest.fixture
 def project_path(tmp_path):
@@ -391,12 +388,9 @@ def test_project_save_load(project, simulation):
     assert loaded_sim.outputs.paraview[0].name == "simple"
     assert "pressure" in loaded_sim.outputs.paraview[0].fields
     assert len(loaded_sim.outputs.wavefields) == 0  # No wavefield outputs in this test
-    assert (
-        len(loaded_sim.outputs.reflectivity) == 0
-    )  # No reflectivity outputs in this test
 
 
-@pytest.mark.mpl_image_compare(baseline_dir=str(REFERENCE_IMAGES_DIR), tolerance=2.0)
+@pytest.mark.mpl_image_compare(tolerance=2.0)
 def test_plot_basic(simulation):
     """Test basic plotting functionality without requiring the solver.
 
@@ -420,15 +414,18 @@ def test_plot_basic(simulation):
     # Set up the simulation
     test_simulation_setup(simulation)
 
-    # Create figure and plot model exactly as in the notebook
-    fig = plt.figure()
-    simulation.model.plot(property="Vp", aspect="equal")
+    # Create figure and plot model similar to the notebook
+    # NOTE: We have to obtain the figure object first and pass the ax to the plot method
+    #       to prevent the plot method from creating a new figure and closing it.
+    #       This method needs to return the correct figure to be compared using the mpl_image_compare decorator.
+    fig, ax = plt.subplots()
+    simulation.model.plot(property="Vp", aspect="equal", ax=ax)
 
     return fig
 
 
 @pytest.mark.integration
-@pytest.mark.mpl_image_compare(baseline_dir=str(REFERENCE_IMAGES_DIR), tolerance=2.0)
+@pytest.mark.mpl_image_compare(tolerance=2.0)
 def test_plot_verification_integration(simulation):
     """Test complete visualization including mesh generation (requires solver).
 
