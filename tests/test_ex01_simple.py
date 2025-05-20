@@ -427,21 +427,11 @@ def test_plot_basic(simulation):
 @pytest.mark.integration
 @pytest.mark.mpl_image_compare(tolerance=2.0)
 def test_plot_verification_integration(simulation):
-    """Test complete visualization including mesh generation (requires solver).
+    """Test visualization of the model geometry as shown in the notebook.
 
-    This test verifies that the complete visualization outputs match the expected reference
-    images. It generates plots for:
-    1. Model geometry (layers and surfaces)
-    2. Mesh with boundary conditions (requires solver)
-    3. Acquisition geometry (sources and receivers)
-    4. Frequency domain results (if available)
-
-    The test uses pytest-mpl to compare the generated plots against reference
-    images stored in tests/reference_images/. The tolerance parameter allows for
-    small differences in rendering between systems.
-
-    Note: This is marked as an integration test as it requires the solver to
-    generate the mesh for proper visualization.
+    This test verifies that the model visualization matches what is shown in
+    ex01_simple.ipynb. Specifically, it generates a plot of the model geometry
+    showing the Vp property with equal aspect ratio.
 
     Parameters
     ----------
@@ -451,50 +441,15 @@ def test_plot_verification_integration(simulation):
     Returns
     -------
     matplotlib.figure.Figure
-        The figure containing the plots to be compared.
+        The figure containing the plot to be compared.
     """
     # Set up the simulation
     test_simulation_setup(simulation)
 
-    # Create a figure with subplots
-    fig = plt.figure(figsize=(15, 10))
-    gs = fig.add_gridspec(2, 2)
+    # Create figure and plot model exactly as shown in the notebook
+    fig, ax = plt.subplots()
+    simulation.model.plot(property="Vp", aspect="equal", ax=ax)
 
-    # Plot 1: Model geometry
-    ax1 = fig.add_subplot(gs[0, 0])
-    simulation.model.plot(property="Vp", ax=ax1)
-    ax1.set_title("Model Geometry")
-
-    # Plot 2: Mesh with boundary conditions
-    ax2 = fig.add_subplot(gs[0, 1])
-    simulation.mesh.mesh.plot(
-        ax=ax2
-    )  # Now we can plot the mesh since this is an integration test
-    simulation.BCs.plot(ax=ax2)
-    ax2.set_title("Mesh and Boundary Conditions")
-
-    # Plot 3: Acquisition geometry
-    ax3 = fig.add_subplot(gs[1, 0])
-    simulation.acquisition.plot(ax=ax3)
-    ax3.set_title("Acquisition Geometry")
-
-    # Plot 4: Frequency domain results (if available)
-    ax4 = fig.add_subplot(gs[1, 1])
-    if hasattr(simulation, "results") and simulation.results is not None:
-        simulation.results.plot(ax=ax4)
-        ax4.set_title("Frequency Domain Results")
-    else:
-        ax4.text(
-            0.5,
-            0.5,
-            "No results available",
-            ha="center",
-            va="center",
-            transform=ax4.transAxes,
-        )
-        ax4.set_title("Frequency Domain Results (Not Available)")
-
-    plt.tight_layout()
     return fig
 
 

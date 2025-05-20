@@ -1,5 +1,5 @@
-.PHONY: generate-reference-images
-generate-reference-images:
+.PHONY: generate_reference_images
+generate_reference_images:
 	poetry run pytest -ra -k "not integration" --mpl-generate-path=tests/reference_images/ tests/
 
 .PHONY: test
