@@ -3,7 +3,7 @@ import os
 from abc import ABC
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Literal, Optional, Union
 
 from numpy import arange
 
@@ -18,6 +18,7 @@ __all__ = ["SimulationJob", "FrequencyDomainJob", "TimeDomainJob"]
 class SimulationJob(ABC):
     name: str
     simulation: BaseSimulation
+    workflow: str
     f_list: List[float]
     _file: Optional[Path] = None
     _job_id: Optional[str] = None
@@ -46,6 +47,7 @@ class SimulationJob(ABC):
             "_type": self.__class__.__name__,
             "name": self.name,
             "simulation": str(self.simulation._file),
+            "workflow": self.workflow,
             "f_list": self.f_list,
         }
 
@@ -74,9 +76,27 @@ class SimulationJob(ABC):
             parent.mkdir(parents=True, exist_ok=True)
 
         data = self.__dict__()
-        proj_dir = str(self.simulation._file.parent.parent)
-        data["simulation"] = data["simulation"].replace(proj_dir, str(remote_proj))
 
+        proj_dir = str(self.simulation._file.parent.parent)
+
+        # Recursively process the data dictionary
+        def replace_path(d):
+            for key, value in d.items():
+                if isinstance(value, dict):
+                    replace_path(value)
+                if isinstance(value, list):
+                    for i, item in enumerate(value):
+                        if isinstance(item, dict):
+                            replace_path(item)
+                if isinstance(value, Path):
+                    if proj_dir in str(value):
+                        d[key] = str(value).replace(proj_dir, str(remote_proj))
+                if isinstance(value, str):
+                    if proj_dir in value:
+                        d[key] = value.replace(proj_dir, str(remote_proj))
+            return d
+
+        data = replace_path(data)
         file = (parent / self.name).with_suffix(".json")
         file.write_text(json.dumps(data, cls=CustomJSONEncoder, indent=3))
 
@@ -147,6 +167,15 @@ class SimulationJob(ABC):
         return pv_out
 
     @property
+    def trace_path(self) -> dict:
+        """Lists receiver trace groups.
+
+        Returns:
+            - traces: Receiver traces
+        """
+        return self.trace_outputs["path"]
+
+    @property
     def trace_outputs(self) -> dict:
         """Lists receiver trace groups.
 
@@ -163,8 +192,7 @@ class SimulationJob(ABC):
         out = sim_data["Outputs"]["receivers"]
 
         recv_out = {}
-        recv_out["domain"] = (self.__class__.__name__,)
-        recv_out["path"] = out["path"]
+        recv_out["path"] = self.project_path / out["path"]
         recv_out["frequencies"] = self.f_list
         recv_out["components"] = []
         recv_out["sources"] = []
@@ -218,13 +246,14 @@ class FrequencyDomainJob(SimulationJob):
     def __init__(self, name: str, simulation: BaseSimulation, f_list: List[float]):
         self.name = name
         self.simulation = simulation
+        self.workflow = "forward"
         self.f_list = f_list
 
     @classmethod
     def from_dict(cls, d: dict, project_dir: Optional[Path] = None):
         return cls(
             name=d["name"],
-            simulation=BaseSimulation.load(d["simulation"], project_dir=project_dir),
+            simulation=BaseSimulation.load(d["simulation"]),
             f_list=d["f_list"],
         )
 
@@ -250,6 +279,7 @@ class TimeDomainJob(SimulationJob):
         f_list = arange(f_min, f_max + df / 2, df)
 
         self.name = name
+        self.workflow = "forward"
         self.simulation = simulation
         self.f_list = f_list
 
@@ -257,6 +287,6 @@ class TimeDomainJob(SimulationJob):
     def from_dict(cls, d: dict, project_dir: Optional[Path] = None):
         return cls(
             name=d["name"],
-            simulation=BaseSimulation.load(d["simulation"], project_dir=project_dir),
+            simulation=BaseSimulation.load(d["simulation"]),
             f_list=d["f_list"],
         )

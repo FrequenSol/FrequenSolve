@@ -39,7 +39,7 @@ class MeshAdaptor:
     """Sets mesh adaptivity options
 
     Attributes:
-       min_epw (float): Minimum # of elements per wavelength.
+       min_epw (float | Dict[str, float]): Minimum # of elements per wavelength.
        adapt_sources (Optional[int]): Number of additional refinements near sources
        adapt_receivers (Optional[int]): Number of additional refinements near receivers
        jump_tolerance (Optional[float]): Maximum relative change in wavespeed that consitutes
@@ -48,7 +48,7 @@ class MeshAdaptor:
        smooth_refs (Optional[bool]): Do additional refinements to unconstrain element DOFs
     """
 
-    min_epw: float
+    min_epw: Union[float, Dict[str, float]]
     adapt_sources: Optional[int] = None  # 2
     adapt_receivers: Optional[int] = None  # 0
     jump_tolerance: Optional[float] = None  # 0.2
@@ -56,6 +56,7 @@ class MeshAdaptor:
     smooth_refs: Optional[bool] = None  # False
     f_low: Optional[float] = None
     f_med: Optional[float] = None
+    f_adapt: Optional[float] = None
     # adapt_order:      bool  = False
 
     def __dict__(self) -> Dict:
@@ -72,6 +73,7 @@ class MeshAdaptor:
             **({"smooth_refs": self.smooth_refs} if self.smooth_refs else {}),
             **({"f_low": self.f_low} if self.f_low else {}),
             **({"f_med": self.f_med} if self.f_med else {}),
+            **({"f_adapt": self.f_adapt} if self.f_adapt else {}),
         }
 
     @classmethod
@@ -85,6 +87,7 @@ class MeshAdaptor:
             smooth_refs=data.get("smooth_refs"),
             f_low=data.get("f_low"),
             f_med=data.get("f_med"),
+            f_adapt=data.get("f_adapt"),
         )
 
 
@@ -109,7 +112,7 @@ class MeshManager:
 
     def set_adapt(
         self,
-        min_epw: float,
+        min_epw: Union[float, Dict[str, float]],
         adapt_sources: Optional[int] = None,
         adapt_receivers: Optional[int] = None,
         jump_tolerance: Optional[float] = None,
@@ -117,6 +120,7 @@ class MeshManager:
         smooth_refs: Optional[bool] = None,
         f_low: Optional[float] = None,
         f_med: Optional[float] = None,
+        f_adapt: Optional[float] = None,
     ) -> None:
         """Sets mesh adaptivity options
 
@@ -138,6 +142,7 @@ class MeshManager:
             smooth_refs=smooth_refs,
             f_low=f_low,
             f_med=f_med,
+            f_adapt=f_adapt,
         )
 
     def set_parallel(
@@ -187,12 +192,15 @@ class MeshManager:
         if "adapt" in data:
             a = data["adapt"]
             manager.set_adapt(
-                min_epw=a["min_epw"],
-                adapt_sources=a.get("adapt_sources", 0),
-                adapt_receivers=a.get("adapt_receivers", 0),
-                jump_tolerance=a.get("jump_tolerance"),
-                jump_factor=a.get("jump_factor"),
-                smooth_refs=a.get("smooth_refs", False),
+                min_epw=a.pop("min_epw"),
+                adapt_sources=a.pop("adapt_sources", 0),
+                adapt_receivers=a.pop("adapt_receivers", 0),
+                jump_tolerance=a.pop("jump_tolerance", None),
+                jump_factor=a.pop("jump_factor", None),
+                smooth_refs=a.pop("smooth_refs", False),
+                f_low=a.pop("f_low", None),
+                f_med=a.pop("f_med", None),
+                f_adapt=a.pop("f_adapt", None),
             )
 
         return manager

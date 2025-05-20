@@ -1,4 +1,5 @@
 import os
+from abc import ABC
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -8,7 +9,7 @@ __all__ = ["Sampling", "DiscreteSampling", "UniformSweepSampling"]
 
 
 @dataclass
-class Sampling:
+class Sampling(ABC):
     """Base class for sampling parameters."""
 
     pass
@@ -48,7 +49,12 @@ class UniformSweepSampling(Sampling):
     f_min: float
     f_max: float
     df: float
+    t_shift: float = 0.0
     upscale: int = 1
+
+    @property
+    def t0(self):
+        return -self.t_shift
 
     @property
     def T(self):
@@ -106,9 +112,9 @@ class UniformSweepSampling(Sampling):
         """
         if Tf:
             Tl = self.T_list
-            nTf = np.searchsorted(Tl, Tf, side="left")
+            nTf = np.searchsorted(Tl, Tf + self.t_shift, side="left")
             nTf = np.minimum(nTf, self.nTime)
-            return nTf, Tl[nTf]
+            return nTf, Tl[nTf] - self.t_shift
         else:
             return self.nTime, self.T
 

@@ -15,7 +15,7 @@ from frequensolve.project.migrate_version import Version
 from frequensolve.project.workflows import BaseWorkflow
 from frequensolve.seismic.record_database import RecordDatabase
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
-from frequensolve.util.encoders import CustomJSONEncoder, CustomTOMLEncoder
+from frequensolve.util.encoders import CustomJSONEncoder
 from frequensolve.util.named_list import NamedList
 from frequensolve.util.setup_logger import disable_jupyter_logging, set_log_level
 
@@ -55,7 +55,6 @@ class Project:
     jupyter_logging: bool = True
     load_if_exists: bool = False
     auto_migrate: bool = False
-    site: Optional[BaseSite] = None
     simulations: NamedList[BaseSimulation] = field(default_factory=NamedList)
     workflows: Dict[str, BaseWorkflow] = field(default_factory=dict)
     extras: Dict[str, BaseProjectComponent] = field(default_factory=dict)
@@ -137,28 +136,26 @@ class Project:
 
         return Project.load(dest / f"{name}.json")
 
-    def transfer(self, site: Optional[BaseSite] = None):
+    def _transfer(self, site: BaseSite):
         """Transfer project files to remote site with path substitution."""
-
-        if site is None:
-            if self.site is None:
-                raise ValueError(
-                    "site must either be provided as an argument (preferred) or set for the project."
-                )
-            site = self.site
 
         if isinstance(site, LocalSite):
             return
 
         remote = site.work_dir
-
         proj_file = (Path(self.path) / f"{self.name}").with_suffix(".json")
         sim_dir = Path(self.path) / "simulations"
+
+        # Create temporary directory for all files to transfer
+        temp_dir = Path(self.path) / ".temp_transfer"
+        temp_dir.mkdir(exist_ok=True)
 
         if proj_file.exists():
             site.put(proj_file, (remote / f"{self.name}").with_suffix(".json"))
 
         if sim_dir.exists():
+            shutil.copytree(sim_dir, temp_dir / "simulations", dirs_exist_ok=True)
+
             # Create temporary modified simulation files
             temp_files = []
             for sim in self.simulations:
@@ -169,17 +166,11 @@ class Project:
 
                     # Create temporary file with modified project_path
                     if "project_path" in sim_data:
-                        temp_file = Path(sim._file).with_suffix(".temp.json")
+                        rel_path = Path(sim._file).relative_to(self.path)
+                        temp_file = temp_dir / rel_path
                         sim_data["project_path"] = str(remote)
                         with open(temp_file, "w") as f:
                             json.dump(sim_data, f, cls=CustomJSONEncoder, indent=3)
-                        temp_files.append(
-                            (temp_file, Path(sim._file).relative_to(self.path))
-                        )
-
-            # Create temporary directory for all files to transfer
-            temp_dir = Path(self.path) / ".temp_transfer"
-            temp_dir.mkdir(exist_ok=True)
 
             # Copy mesh files to temp directory
             for sim in self.simulations:
@@ -189,14 +180,15 @@ class Project:
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(mesh_file, dest)
 
-            # Copy simulation directory to temp
-            shutil.copytree(sim_dir, temp_dir / "simulations", dirs_exist_ok=True)
-
-            for temp_file, rel_path in temp_files:
-                dest = temp_dir / rel_path
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(temp_file, dest)
-                temp_file.unlink()  # Clean up temporary file
+            # # Recursively list all files in temp_dir for debugging
+            # print(f"Files to be transferred to {remote}:")
+            # for root, dirs, files in os.walk(temp_dir):
+            #     for file in files:
+            #         rel_path = Path(root).relative_to(temp_dir)
+            #         if rel_path == Path("."):
+            #             print(f"  {file}")
+            #         else:
+            #             print(f"  {rel_path / file}")
 
             site.put(temp_dir, remote)
             shutil.rmtree(temp_dir)
@@ -265,9 +257,9 @@ class Project:
                 os.chdir(path)
 
                 # Load simulations
-                for f in sim_files:
-                    f = Path(path) / f
-                    sim = SeismicSimulation.load(f)
+                for sim_file in sim_files:
+                    sim_file = Path(path) / sim_file
+                    sim = SeismicSimulation.load(sim_file)
                     project.simulations.append(sim)
 
                 # TODO: Load workflows
@@ -288,12 +280,11 @@ class Project:
         except Exception as e:
             raise ValueError(f"Failed to load project: {e}")
 
-    def save(self, file: Optional[Union[str, Path]] = None, **kwargs) -> str:
+    def save(self, file: Optional[Union[str, Path]] = None, **json_kwargs) -> str:
         """Save project to JSON file."""
 
         self._set_path_deep()
 
-        # TODO: file does nothing right now
         if file is None:
             file = Path(self.path) / f"{self.name}.json"
         else:
@@ -307,62 +298,17 @@ class Project:
         }
         sims = []
         for sim in self.simulations:
-            path = Path(self.path) / "simulations"
-            sim_file = sim.save(path, **kwargs)
+            sim_file = sim.save(**json_kwargs)
             sims.append(sim_file)
         dict["simulations"] = sims
 
-        indent = kwargs.get("indent", 3)
+        indent = json_kwargs.pop("indent", 3)
         with open(file, "w") as f:
-            json.dump(dict, f, cls=CustomJSONEncoder, indent=indent, **kwargs)
-
-        return str(file)
+            json.dump(dict, f, cls=CustomJSONEncoder, indent=indent, **json_kwargs)
+        return file
 
     def as_json(self, **kwargs) -> str:
-        indent = kwargs.get("indent", 3)
         return json.dumps(self.__dict__(), cls=CustomJSONEncoder, **kwargs)
-
-    def as_toml(self, **kwargs) -> str:
-        """Convert project to TOML string."""
-        import toml
-
-        indent = kwargs.get("indent", 3)
-        try:
-            return toml.dumps(self.__dict__(), encoder=CustomTOMLEncoder(), **kwargs)
-        except Exception as e:
-            print(f"Failed to convert to TOML: {e}")
-            return self.__repr__()
-
-    def as_yaml(self, **kwargs) -> str:
-        import yaml
-
-        def numpy_representer(dumper, data):
-            """Convert numpy values to native Python types."""
-            return dumper.represent_float(float(data))
-
-        indent = kwargs.get("indent", 3)
-        try:
-            import numpy as np
-
-            yaml.add_representer(np.float64, numpy_representer)
-            yaml.add_representer(np.float32, numpy_representer)
-            yaml.add_representer(
-                np.int64, lambda dumper, data: dumper.represent_int(int(data))
-            )
-            yaml.add_representer(
-                np.int32, lambda dumper, data: dumper.represent_int(int(data))
-            )
-
-            return yaml.dump(
-                self.__dict__(),
-                indent=indent,
-                default_flow_style=False,
-                sort_keys=False,
-                **kwargs,
-            )
-        except Exception as e:
-            print(f"Failed to convert to YAML: {e}")
-            return self.__repr__()
 
     def __dict__(self) -> Dict:
         return {
@@ -374,15 +320,31 @@ class Project:
             "extras": [extra.__dict__() for extra in self.extras.values()],
         }
 
+    def new_simulation(
+        self, name: str, physics: str, dimension: int, **kwargs
+    ) -> BaseSimulation:
+        sim = SeismicSimulation(
+            name=name,
+            physics=physics,
+            dimension=dimension,
+            project_path=self.path,
+        )
+        sim.misc = kwargs
+        self.simulations.append(sim)
+        return sim
+
     def __iadd__(
         self, base: Union[BaseSimulation, BaseWorkflow, BaseProjectComponent]
     ) -> "Project":
         """Overrides += operator"""
         if isinstance(base, BaseSimulation):
+            base.project_path = self.path
             self.simulations.append(base)
         elif isinstance(base, BaseWorkflow):
+            base.project_path = self.path
             self.workflows[base.name] = base
         elif isinstance(base, BaseProjectComponent):
+            base.project_path = self.path
             self.extras[base.name] = base
         self._set_path_deep()
         return self
@@ -417,22 +379,3 @@ class Project:
     def __del__(self):
         """Cleanup method called when project object is destroyed."""
         self.terminate_jobs()
-
-    def submit_job(self, job, **kwargs) -> list:
-        """Submit job and block until completion."""
-        warn(
-            "Note: you can submit jobs to sites directly with `site.submit(job, **kwargs)`; "
-            "submitting via project will be deprecated in the future.",
-            DeprecationWarning,
-        )
-        return self.site.submit(job, **kwargs)
-
-    def submit_job_async(self, job, **kwargs) -> asyncio.Future:
-        warn(
-            "Note: you can submit jobs to sites directly with `site.submit(job, **kwargs)`; "
-            "submitting via project will be deprecated in the future.",
-            DeprecationWarning,
-        )
-        future = self.site.submit_async(job, **kwargs)
-        self._active_jobs[job.name] = future
-        return future

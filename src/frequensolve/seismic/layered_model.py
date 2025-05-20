@@ -758,6 +758,7 @@ class LayeredModel(ModelBase):
                 if property not in layer.properties:
                     continue
                 prop = layer.properties[property]
+
                 if prop.is_constant:
                     gridded[property].data[mask] = prop.get()
                 elif layer.frame == "physical":
@@ -767,7 +768,6 @@ class LayeredModel(ModelBase):
                         z = samples.data[ix, mask[ix, :]]
                         samp = xr.DataArray(dims=["x", "z"], coords={"z": z, "x": x})
                         gridded[property].data[ix, mask[ix, :]] = prop.get(samp).data
-
         return gridded
 
     def smooth(self, n: ArrayLike, sigma, **kwargs) -> xr.Dataset:
@@ -1197,8 +1197,8 @@ class LayeredModel(ModelBase):
                     z_ref[layer_mask] = Z_coords[layer_mask]
                 found[layer_mask] = True
 
-        if not np.all(found):
-            raise ValueError("Some points were not found in any layer")
+        # if not np.all(found):
+        #     raise ValueError("Some points were not found in any layer")
 
         return xr.DataArray(
             dims=["x", "z"], coords={"x": x_coords, "z": z_coords}, data=z_ref

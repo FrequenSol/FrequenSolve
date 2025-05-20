@@ -127,21 +127,14 @@ class Property:
                 out = self.darr.interp(coords=coords, method="linear")
                 # Use nearest neighbor interpolation to fill NaNs
                 if np.isnan(out.values).any():
-                    nan_mask = np.isnan(out.values)
-                    out = out.fillna(
-                        out.interp(
-                            coords=coords,
-                            method="nearest",
-                            kwargs={"fill_value": "extrapolate"},
-                        )
+                    nearest_interp = self.darr.interp(
+                        coords=coords,
+                        method="nearest",
+                        kwargs={"fill_value": "extrapolate"},
                     )
+                    nan_mask = np.isnan(out.values)
+                    out.values[nan_mask] = nearest_interp.values[nan_mask]
                 return out
-
-                return self.darr.interp(
-                    coords=coords,
-                    method="nearest",
-                    kwargs={"fill_value": "extrapolate"},
-                )
 
             elif self.is_constant:
                 dims = xarr.dims
@@ -205,6 +198,8 @@ class Property:
     @staticmethod
     def _bin_reader(file: Path, xarr: xr.DataArray) -> xr.DataArray:
         """Read a binary file."""
+        dims = sorted(xarr.dims)
+        xarr = xarr.transpose(*dims[::-1])
         data = np.fromfile(file, dtype=np.float32).reshape(xarr.shape)
         da = xr.DataArray(data, coords=xarr.coords, dims=xarr.dims)
         dims = sorted(xarr.dims)

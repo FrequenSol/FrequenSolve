@@ -98,13 +98,17 @@ class ModelSubdomain:
                 if prop.is_constant:
                     props[key] = {"value": self._properties[key].get()}
                 else:
-                    dims = sorted(self.properties[key].darr.dims)
+                    orig_dims = self.properties[key].darr.dims
+                    dims = sorted(orig_dims)
                     file = self._path / (f"layer_{self.mesh_block_id}_{key}.bin")
                     file.parent.mkdir(parents=True, exist_ok=True)
                     self.properties[key].darr = self.properties[key].darr.transpose(
                         *dims[::-1]
                     )
                     self.properties[key].write(file)
+                    self.properties[key].darr = self.properties[key].darr.transpose(
+                        *orig_dims
+                    )
                     props[key] = {"file": file.relative_to(self._proj_path)}
 
                     # TODO: Update Fortran code to accept different grids for different properties

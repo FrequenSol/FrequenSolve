@@ -1,12 +1,8 @@
 import json
 import os
-from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Literal, Optional, Union
-
-import toml
-import yaml
 
 from frequensolve.mesh.boundary_conditions import BoundaryConditionManager
 from frequensolve.mesh.mesh import Mesh
@@ -120,9 +116,9 @@ class SeismicSimulation(BaseSimulation):
     """
 
     name: str
-    physics: Literal["acoustic", "elastic", "coupled", "em"]
+    physics: Literal["acoustic", "elastic", "coupled", "EM"]
     dimension: Literal[2, 3]
-    workflow: Optional[Literal["forward", "adjoint", "RTM"]] = None
+    project_path: Union[str, Path] = None
     model: ModelBase = field(default_factory=ModelBase)
     mesh: MeshManager = field(default_factory=MeshManager)
     BCs: BoundaryConditionManager = field(default_factory=BoundaryConditionManager)
@@ -131,58 +127,82 @@ class SeismicSimulation(BaseSimulation):
     outputs: OutputManager = field(default_factory=OutputManager)
     acquisition: Acquisition = field(default_factory=Acquisition)
     user_parameters: Dict = field(default_factory=dict)
+    misc: Dict = field(default_factory=dict)
 
     def __post_init__(self):
+        if self.project_path is None:
+            raise ValueError(
+                "When initializing a simulation, you now must either call project.new_simulation() "
+                "(recommended), or specify the project_path as an argument to the constructor."
+            )
+        else:
+            self.project_path = Path(self.project_path)
+
         if self.model.dimension == 0:
             self.model.dimension = self.dimension
 
     @classmethod
-    def from_dict(
-        cls, data: Dict, project_dir: Optional[Path] = None
-    ) -> "SeismicSimulation":
-        name = data["name"]
-        physics = data["physics"]
-        dimension = data["dimension"]
-        sim = cls(name=name, physics=physics, dimension=dimension)
-
-        # TODO: this path stuff is sloppy; need to make better way to manage all of this.
-        if project_dir is None:
-            project_dir = Path(data["project_path"])
-        else:
-            project_dir = project_dir
+    def from_dict(cls, data: Dict) -> "SeismicSimulation":
+        name = data.pop("name")
+        physics = data.pop("physics")
+        dimension = data.pop("dimension")
+        project_path = Path(data.pop("project_path"))
+        sim = cls(
+            name=name,
+            physics=physics,
+            dimension=dimension,
+            project_path=project_path,
+        )
 
         # Load simulation from project directory
-        if os.getcwd() != project_dir:
+        if os.getcwd() != project_path:
             cwd = os.getcwd()
-            os.chdir(project_dir)
+            os.chdir(project_path)
 
             if "Model" in data:
-                sim.model = ModelBase.from_dict(data["Model"])
+                sim.model = ModelBase.from_dict(data.pop("Model"))
             if "Mesh" in data:
-                sim.mesh = MeshManager.from_dict(data["Mesh"])
+                sim.mesh = MeshManager.from_dict(data.pop("Mesh"))
             if "BCs" in data:
-                sim.BCs = BoundaryConditionManager.from_dict(data["BCs"])
+                sim.BCs = BoundaryConditionManager.from_dict(data.pop("BCs"))
             if "Solver" in data:
-                sim.solver = SolverConfig.from_dict(data["Solver"])
+                sim.solver = SolverConfig.from_dict(data.pop("Solver"))
             if "Discretization" in data:
-                sim.discretization = Discretization.from_dict(data["Discretization"])
+                sim.discretization = Discretization.from_dict(
+                    data.pop("Discretization")
+                )
             if "Outputs" in data:
-                sim.outputs = OutputManager.from_dict(data["Outputs"])
+                sim.outputs = OutputManager.from_dict(data.pop("Outputs"))
             if "Acquisition" in data:
-                sim.acquisition = Acquisition.from_dict(data["Acquisition"])
+                sim.acquisition = Acquisition.from_dict(data.pop("Acquisition"))
             if "UserParameters" in data:
-                sim.user_parameters = data["UserParameters"]
+                sim.user_parameters = data.pop("UserParameters")
 
             os.chdir(cwd)
 
-        sim._set_path(project_dir, Path("simulations"))
+        # Any remaining items are added to misc parameters
+        sim.misc = data
+
+        sim._set_path(project_path, Path("simulations"))
         return sim
 
-    def copy(self, **kwargs) -> "SeismicSimulation":
-        sim = deepcopy(self)
+    def copy(self, name, **kwargs) -> "SeismicSimulation":
+        file = self.save()
+        sim_copy = self.__class__.load(file)
+        sim_copy.name = name
+
         for key, value in kwargs.items():
-            setattr(sim, key, value)
-        return sim
+            setattr(sim_copy, key, value)
+
+        for i, out in enumerate(self.outputs.paraview):
+            path = out.path.parent.parent / name / out.path.name
+            sim_copy.outputs.paraview[i].path = path
+
+        for i, out in enumerate(self.outputs.wavefields):
+            path = out.path.parent.parent / name / out.path.name
+            sim_copy.outputs.wavefields[i].path = path
+
+        return sim_copy
 
     @classmethod
     def load(cls, path: Union[str, Path], **kwargs) -> "SeismicSimulation":
@@ -190,23 +210,15 @@ class SeismicSimulation(BaseSimulation):
 
         with open(path, "r") as f:
             data = json.load(f)
-        project_dir = Path(path).parent.parent
-        sim = cls.from_dict(data, project_dir=project_dir)
+        sim = cls.from_dict(data)
         sim._file = path
         return sim
 
     def __dict__(self) -> Dict:
         dict = super().__dict__()
-        dict.update(
-            {
-                "_type": self.__class__.__name__,
-                **(
-                    {"Acquisition": self.acquisition.__dict__()}
-                    if self.acquisition
-                    else {}
-                ),
-            }
-        )
+        dict["_type"] = self.__class__.__name__
+        dict["Acquisition"] = self.acquisition.__dict__()
+        dict.update(self.misc)
         return dict
 
     def __iadd__(self, other):
@@ -237,58 +249,22 @@ class SeismicSimulation(BaseSimulation):
             self.__dict__(), cls=CustomJSONEncoder, indent=indent, **kwargs
         )
 
-    def as_toml(self, **kwargs) -> str:
-        """Convert simulation to TOML string."""
-        indent = kwargs.get("indent", 3)
-        return toml.dumps(
-            self.__dict__(), encoder=CustomTOMLEncoder(), indent=indent, **kwargs
-        )
-
-    def as_yaml(self, **kwargs) -> str:
-        """Convert simulation to YAML string."""
-
-        def numpy_representer(dumper, data):
-            """Convert numpy values to native Python types."""
-            return dumper.represent_float(float(data))
-
-        indent = kwargs.get("indent", 3)
-        try:
-            import numpy.typing as npt
-
-            yaml.add_representer(npt.Float64, numpy_representer)
-            yaml.add_representer(npt.Float32, numpy_representer)
-            yaml.add_representer(
-                npt.Int64, lambda dumper, data: dumper.represent_int(int(data))
-            )
-            yaml.add_representer(
-                npt.Int32, lambda dumper, data: dumper.represent_int(int(data))
-            )
-
-            return yaml.dump(
-                self.__dict__(),
-                indent=indent,
-                default_flow_style=False,
-                sort_keys=False,
-                **kwargs,
-            )
-        except Exception as e:
-            print(f"Failed to convert to YAML: {e}")
-            return self.__repr__()
-
-    def save(self, path: Union[str, Path], **kwargs) -> str:
+    def save(self, **json_kwargs) -> Path:
         """Save seismic simulation to JSON file."""
-        file = (Path(path) / f"{self.name}").with_suffix(".json").resolve()
+        self._set_path(self.project_path, Path("simulations"))
 
+        file = self.project_path / "simulations" / f"{self.name}"
+        file = file.with_suffix(".json").resolve()
         if not file.parent.exists():
             file.parent.mkdir(parents=True, exist_ok=True)
 
         self._file = file
-        indent = kwargs.get("indent", 3)
+        indent = json_kwargs.pop("indent", 3)
         with open(file, "w") as f:
             json.dump(
-                self.__dict__(), f, cls=CustomJSONEncoder, indent=indent, **kwargs
+                self.__dict__(), f, cls=CustomJSONEncoder, indent=indent, **json_kwargs
             )
-        return file.relative_to(self._proj_path)
+        return file
 
     def check(self) -> bool:
         """Check the simulation is defined correctly."""

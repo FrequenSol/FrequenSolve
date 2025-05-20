@@ -69,6 +69,7 @@ def plot_gather(shot: ShotRecord, **kwargs):
 
     Tf = kwargs.get("Tf", None)
     nTf, Tf = shot.sampling.cutoff(Tf)
+    t0 = shot.sampling.t0
 
     group = shot.receiver_group
 
@@ -94,13 +95,13 @@ def plot_gather(shot: ShotRecord, **kwargs):
     plt.ylabel("Time (s)")
 
     if isinstance(aspect, (int, float)):
-        aspect *= (x1 - x0) / Tf
+        aspect *= (x1 - x0) / (Tf - t0)
     # Plot gather as an image
     plt.imshow(
         shot.data[:nTf, :],
         origin="upper",
         cmap=cmap,
-        extent=[x0, x1, Tf, 0],
+        extent=[x0, x1, Tf, t0],
         vmin=-A,
         vmax=A,
         aspect=aspect,
@@ -254,6 +255,7 @@ def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
 
     Tf = kwargs.get("Tf", None)
     nTf, Tf = shot1.sampling.cutoff(Tf)
+    t0 = shot1.sampling.t0
 
     sgroup = shot1.source_group
     rgroup = shot1.receiver_group
@@ -274,7 +276,7 @@ def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
     tlabel = "Time (s)"
 
     if isinstance(aspect, (int, float)):
-        aspect *= (x1 - x0) / Tf
+        aspect *= (x1 - x0) / (Tf - t0)
 
     if stack == "horizontal":
         fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=figsize, sharey=True)
@@ -308,7 +310,7 @@ def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
         kwargs_imshow = dict(
             origin="upper",
             cmap=cmap,
-            extent=[Tf, 0, x1, x0],
+            extent=[Tf, t0, x1, x0],
             vmin=-A,
             vmax=A,
             aspect=aspect,
@@ -330,7 +332,7 @@ def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
         kwargs_imshow = dict(
             origin="upper",
             cmap=cmap,
-            extent=[x0, x1, Tf, 0],
+            extent=[x0, x1, Tf, t0],
             vmin=-A,
             vmax=A,
             aspect=aspect,
@@ -631,7 +633,7 @@ def compute_timelag(shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, **kwarg
         shot2.data[:nTmax, :],
         rate,
         threshold_ratio=threshold,
-        window_length=0.005,
+        window_length=0.01,
     )
 
     nW = np.shape(win1)[0]
@@ -713,6 +715,7 @@ def plot_timelag(shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, **kwargs):
 
     plt.rcParams.update({"font.size": fontsize})
 
+    t0 = shot1.sampling.t0
     Tf = kwargs.get("Tf", None)
     nTf, Tf = shot1.sampling.cutoff(Tf)
 
@@ -755,7 +758,7 @@ def plot_timelag(shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, **kwargs):
         win1[:nTf, :],
         origin="upper",
         cmap=cmap,
-        extent=[x0, x1, Tf, 0],
+        extent=[x0, x1, Tf, t0],
         vmin=-A,
         vmax=A,
         aspect="auto",

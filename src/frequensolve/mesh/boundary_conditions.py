@@ -1,7 +1,7 @@
 """Python structures defining boundary conditions"""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Union
+from typing import Dict, List, Literal, Optional, Union
 
 from ..util.printing import print_warn
 from .mesh import Mesh
@@ -33,6 +33,7 @@ class BoundaryCondition:
     pml_wavelengths: float = 2.0
     pml_exponent: float = 3.0
     pml_constant: float = 20.0
+    stretch_limit: float = 1.0
 
     @classmethod
     def from_dict(cls, data: Dict) -> "BoundaryCondition":
@@ -43,6 +44,7 @@ class BoundaryCondition:
             pml_wavelengths=data.get("pml_wavelengths", 2.0),
             pml_exponent=data.get("pml_exponent", 3.0),
             pml_constant=data.get("pml_constant", 20.0),
+            stretch_limit=data.get("stretch_limit", 1.0),
         )
 
     def __dict__(self) -> Dict:
@@ -55,6 +57,7 @@ class BoundaryCondition:
                     "pml_wavelengths": self.pml_wavelengths,
                     "pml_exponent": self.pml_exponent,
                     "pml_constant": self.pml_constant,
+                    "stretch_limit": self.stretch_limit,
                 }
                 if self.kind == "pml"
                 else {}

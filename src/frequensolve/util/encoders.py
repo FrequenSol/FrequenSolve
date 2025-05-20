@@ -1,13 +1,10 @@
 import json
+from pathlib import Path
 
 try:
     import toml
 except ImportError:
     toml = None
-
-from pathlib import Path
-
-from frequensolve.util.class_registry import class_registry
 
 
 class CustomJSONEncoder(json.JSONEncoder):
@@ -20,6 +17,8 @@ class CustomJSONEncoder(json.JSONEncoder):
 
         if isinstance(obj, (np.integer, np.floating, np.bool_)):
             return obj.item()
+        if isinstance(obj, (np.complex64, np.complex128)):
+            return [obj.real.item(), obj.imag.item()]
         if isinstance(obj, ndarray):
             return obj.tolist()
         if isinstance(obj, DataArray):
@@ -29,15 +28,6 @@ class CustomJSONEncoder(json.JSONEncoder):
         if hasattr(obj, "__dict__"):
             return obj.__dict__()
         return super().default(obj)
-
-
-def custom_json_decoder(obj):
-    if "_type" in obj:
-        class_name = obj["_type"]
-        if class_name in class_registry:
-            model_class = class_registry[class_name]
-            return model_class.from_dict(obj)
-    return obj
 
 
 class CustomTOMLEncoder(toml.TomlEncoder):
@@ -65,3 +55,34 @@ class CustomTOMLEncoder(toml.TomlEncoder):
         except:
             print(f"Cannot encode object of type {type(obj)}")
             return None
+
+
+# import yaml
+# class CustomYAMLEncoder(yaml.Dumper):
+#     def numpy_representer(dumper, data):
+#         """Convert numpy values to native Python types."""
+#         return dumper.represent_float(float(data))
+
+#     indent = kwargs.get("indent", 3)
+#     try:
+#         import numpy as np
+
+#         yaml.add_representer(np.float64, numpy_representer)
+#         yaml.add_representer(np.float32, numpy_representer)
+#         yaml.add_representer(
+#             np.int64, lambda dumper, data: dumper.represent_int(int(data))
+#         )
+#         yaml.add_representer(
+#             np.int32, lambda dumper, data: dumper.represent_int(int(data))
+#         )
+
+#         return yaml.dump(
+#             self.__dict__(),
+#             indent=indent,
+#             default_flow_style=False,
+#             sort_keys=False,
+#             **kwargs,
+#         )
+#     except Exception as e:
+#         print(f"Failed to convert to YAML: {e}")
+#         return self.__repr__()

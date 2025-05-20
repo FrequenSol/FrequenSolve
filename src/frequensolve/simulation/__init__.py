@@ -1,5 +1,14 @@
-from . import config, jobs, numerics_manager, output_manager, sampling, simulation
+from . import (
+    config,
+    imaging,
+    jobs,
+    numerics_manager,
+    output_manager,
+    sampling,
+    simulation,
+)
 from .config import *  # noqa
+from .imaging import *  # noqa
 from .jobs import *  # noqa
 from .numerics_manager import *  # noqa
 from .output_manager import *  # noqa

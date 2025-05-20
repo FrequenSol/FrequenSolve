@@ -28,7 +28,7 @@ class RecordDatabase:
     def __init__(self, metadata: Dict[str, Any], records: List[str], upscale: int = 1):
         self.metadata = metadata
         self.records = records
-        self.set_upscaling(upscale)
+        self.upscale = upscale
 
     @classmethod
     def from_results(cls, results: dict, proj_path: Union[str, Path], upscale: int = 1):
@@ -71,17 +71,17 @@ class RecordDatabase:
         return cls(metadata=meta, records=records, upscale=upscale)
 
     @property
-    def upscaling(self) -> int:
+    def upscale(self) -> int:
         return self._upscale
 
-    def set_upscaling(self, upscale):
-        """Set the upscaling factor for the records."""
+    @upscale.setter
+    def upscale(self, upscale: int) -> None:
         self._upscale = upscale
 
     def times(self, upscale: Optional[int] = None) -> np.ndarray:
         """Returns the times of the records."""
 
-        upscale = self._upscale if upscale is None else upscale
+        upscale = self.upscale if upscale is None else upscale
         sampling = UniformSweepSampling(
             f_min=0.0,
             f_max=self.metadata["f_max"],
@@ -168,9 +168,9 @@ class RecordDatabase:
 
                         # Create source group
                         if f"source_{isrc}" in field_group:
-                            src_group = field_group[f"source_{isrc}"]
+                            src = field_group[f"source_{isrc}"]
                         else:
-                            src_group = field_group.create_group(f"source_{isrc}")
+                            src = field_group.create_group(f"source_{isrc}")
 
                         fbase = "_".join(src_file.split(":")[0].split("_")[:-1])
 
@@ -178,12 +178,20 @@ class RecordDatabase:
                             shape = freq_file[f"{field}_{isrc}_re"].shape
                             n_recv = shape[0]
 
-                        # Create or open existing datasets
-                        if not "real" in src_group:
-                            src_group.create_dataset(
+                        # If dataset exists, make sure it has the correct shape
+                        if "real" in src:
+                            nf, nr = src["real"].shape
+
+                            if nf < n_freq or nr != n_recv:
+                                del src["real"]
+                                del src["imag"]
+
+                        # If dataset does not exist, create it
+                        if "real" not in src:
+                            src.create_dataset(
                                 "real", (n_freq,) + (n_recv,), dtype=np.float32
                             )
-                            src_group.create_dataset(
+                            src.create_dataset(
                                 "imag", (n_freq,) + (n_recv,), dtype=np.float32
                             )
 
@@ -192,12 +200,8 @@ class RecordDatabase:
                             freq_file = f"{fbase}_{i+1}.h5"
                             if os.path.exists(freq_file):
                                 with h5py.File(freq_file, "r") as ff:
-                                    src_group["real"][i, :] = ff[f"{field}_{isrc}_re"][
-                                        :
-                                    ]
-                                    src_group["imag"][i, :] = ff[f"{field}_{isrc}_im"][
-                                        :
-                                    ]
+                                    src["real"][i, :] = ff[f"{field}_{isrc}_re"][:]
+                                    src["imag"][i, :] = ff[f"{field}_{isrc}_im"][:]
 
             # Delete individual frequency files after consolidation
             for i in range(n_freq):
