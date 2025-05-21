@@ -35,7 +35,7 @@ jobs:
           client-payload: '{"FREQUENSOLVE_BRANCH": "${{ github.ref_name }}"}'
 
       - name: Wait for workflow
-        uses: tibdex/wait-for-workflow@v1
+        uses: tibdex/wait-for-workflow-run@v1
         with:
           token: ${{ steps.generate-token.outputs.token }}
           repository: FrequenSol/FrequenSolveDockerImage
