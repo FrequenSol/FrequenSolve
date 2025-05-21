@@ -78,6 +78,26 @@ The project includes several Makefile targets for running tests:
   - Creates baseline images in `tests/reference_images/`
   - Skips all integration tests (doesn't generate images for integration tests either)
 
+### Using Cursor for Test Analysis
+
+When working with tests in Cursor, you can leverage AI assistance to analyze test failures and prioritize fixes:
+
+1. **Running Tests in Docker**:
+   - Run the full test suite in FrequenSolveDockerImage
+   - Copy the terminal output into Cursor chat
+   - Ask Cursor to analyze the failures
+
+2. **Failure Analysis**:
+   - Ask Cursor to rate each failure by probability of being caused by source code issues
+   - Example prompt: "Rate each of these failures by probability that the failure is caused by an underlying source code issue. List in descending order so I can address issues that are most urgent."
+   - Cursor will help prioritize which failures to investigate first
+
+3. **Using Analysis Results**:
+   - Focus on high-probability source code issues first
+   - Use Cursor to help investigate specific failures
+   - Get suggestions for potential fixes
+   - Verify fixes by running tests again
+
 ## Continuous Integration
 
 The project uses GitHub Actions for continuous integration. The workflow (`cicd-workflow.yml`) includes:
@@ -104,3 +124,4 @@ The project uses GitHub Actions for continuous integration. The workflow (`cicd-
 - While you can run tests directly in this repository for quick checks, it's recommended to run the full test suite (including integration tests) from the FrequenSolveDockerImage repository before releasing.
 - The CI pipeline only runs non-integration tests since integration tests are run in the FrequenSolveDockerImage repo.
 - Integration tests are crucial for ensuring the solver works correctly in a production environment and should be run before any release.
+- Use Cursor's AI capabilities to help analyze and debug test failures, especially for complex integration tests.

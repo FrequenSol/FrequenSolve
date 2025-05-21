@@ -50,6 +50,41 @@ to balance test isolation, performance, and maintainability. Here's how it works
       - Clear separation between setup and fixture behavior
       - Easy to add new fixtures with different scopes
 
+Parameter Organization
+--------------------
+The test parameters are organized into module-level constants that match the values
+used in ex01_simple.ipynb. This organization serves several purposes:
+
+1. Single Source of Truth
+   - All test parameters are defined in one place at the module level
+   - Parameters are grouped logically (MODEL_PARAMS, MESH_PARAMS, etc.)
+   - Makes it easy to see what values match the notebook
+   - Reduces the risk of inconsistent parameter usage across tests
+
+2. Improved Maintainability
+   - Changes to parameters only need to be made in one place
+   - Parameter groups make it clear which values belong together
+   - Documentation of parameters is centralized
+   - Easier to track changes to parameters over time
+
+3. Better Test Readability
+   - Tests use descriptive parameter names instead of magic numbers
+   - Parameter groups provide context for what each value represents
+   - Assertions reference parameters directly, making their purpose clear
+   - Error messages can reference the parameter source
+
+4. Enhanced Documentation
+   - Parameter groups serve as implicit documentation
+   - Values are clearly associated with their purpose
+   - Relationship to notebook values is explicit
+   - Makes it easier for new developers to understand the test setup
+
+5. Flexible Parameter Usage
+   - Parameters can be used with dictionary unpacking
+   - Easy to modify subsets of parameters for specific tests
+   - Simple to add new parameter groups as needed
+   - Parameters can be referenced in docstrings and error messages
+
 Test Categories
 --------------
 The tests are organized into several categories:
@@ -115,6 +150,80 @@ import numpy as np
 import pytest
 
 from frequensolve import *
+
+# Constants for test parameters
+# These match the values used in ex01_simple.ipynb
+MODEL_PARAMS = {
+    "x_limits": [0.0, 2.0],
+    "layers": [
+        {
+            "name": "layer_1",
+            "z": 0.25,
+            "properties": {"Vp": 1.0, "Qp": 300.0, "Rho": 1.0},
+        },
+        {
+            "name": "layer_2",
+            "z": 0.5,
+            "properties": {"Vp": 2.0, "Qp": 50.0, "Rho": 1.0},
+        },
+    ],
+}
+
+MESH_PARAMS = {
+    "n": [4, 4],
+    "min_epw": 1.0,
+    "adapt_sources": 1,
+}
+
+BOUNDARY_PARAMS = {
+    "free_surface": {
+        "name": "free_surface",
+        "kind": "neumann",
+        "boundaries": ["z_min"],
+    },
+    "pml": {
+        "name": "pml",
+        "kind": "pml",
+        "boundaries": ["x_min", "x_max", "z_max"],
+        "pml_wavelengths": 1.2,
+        "pml_exponent": 3.0,
+        "pml_constant": 20.0,
+    },
+}
+
+ACQUISITION_PARAMS = {
+    "source": {
+        "kind": "scalar",
+        "coords": [[0.5, 0.0]],
+    },
+    "receivers": {
+        "name": "surface_hydrophones",
+        "device": "hydrophone",
+        "component": {"name": "p", "field": "pressure"},
+        "coords": {"x_range": [0.0, 1.0], "n": 1001},
+    },
+}
+
+SIMULATION_PARAMS = {
+    "discretization": {"order": 6},
+    "solver": {
+        "solve_on": "final",
+        "max_iter": 300,
+        "tolerance": 1.0e-4,
+    },
+    "output": {
+        "name": "simple",
+        "fields": ["pressure"],
+        "upscale": 1,
+    },
+}
+
+TIME_DOMAIN_PARAMS = {
+    "f_min": 1.0,
+    "f_max": 18.0,
+    "T_max": 4.0,
+    "wavelet": {"f0": 6.0, "offset": 5},
+}
 
 
 # Utility functions for test setup
@@ -185,6 +294,7 @@ def setup_complete_simulation(simulation):
 
     This function sets up the model, mesh, boundary conditions,
     acquisition, discretization, solver, and output components.
+    All parameters match those used in ex01_simple.ipynb.
 
     Parameters
     ----------
@@ -192,54 +302,66 @@ def setup_complete_simulation(simulation):
         The simulation to set up
     """
     # Create model
-    model = LayeredModel(dimension=2, x_limits=[0.0, 2.0])
+    model = LayeredModel(dimension=2, x_limits=MODEL_PARAMS["x_limits"])
     model.add_surface(name="top", z=0.0)
-    model.add_layer(name="layer_1", properties={"Vp": 1.0, "Rho": 1.0})
-    model.add_surface(name="interface", z=0.25)
-    model.add_layer(name="layer_2", properties={"Vp": 2.0, "Rho": 1.0})
-    model.add_surface(name="bottom", z=0.5)
+
+    for layer in MODEL_PARAMS["layers"]:
+        model.add_layer(name=layer["name"], properties=layer["properties"])
+        if layer != MODEL_PARAMS["layers"][-1]:  # Don't add surface after last layer
+            model.add_surface(name=f"{layer['name']}_interface", z=layer["z"])
+
     simulation += model
 
     # Create mesh
-    mesh = model.hex_mesh_generator(n=[4, 4])
+    mesh = model.hex_mesh_generator(n=MESH_PARAMS["n"])
     simulation += mesh
-    simulation.mesh.set_adapt(min_epw=1.0, adapt_sources=1)
+    simulation.mesh.set_adapt(
+        min_epw=MESH_PARAMS["min_epw"], adapt_sources=MESH_PARAMS["adapt_sources"]
+    )
 
     # Add boundary conditions
     BCs = BoundaryConditionManager(label_type="geometric")
-    BCs += BoundaryCondition(name="free_surface", kind="neumann", boundaries=["z_min"])
-    BCs += BoundaryCondition(
-        name="pml",
-        kind="pml",
-        boundaries=["x_min", "x_max", "z_max"],
-        pml_wavelengths=1.2,
-        pml_exponent=3.0,
-        pml_constant=20.0,
-    )
+    for bc_params in BOUNDARY_PARAMS.values():
+        BCs += BoundaryCondition(**bc_params)
     simulation += BCs
 
     # Add acquisition
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
-    hydrophone = ReceiverNode(name="hydrophone")
-    hydrophone.add_component(name="p", field="pressure")
-    coords = [[x, 0.0] for x in np.linspace(0.0, 1.0, 1001)]
+    acq.add_source_group(**ACQUISITION_PARAMS["source"])
+
+    # Set up receiver
+    hydrophone = ReceiverNode(name=ACQUISITION_PARAMS["receivers"]["device"])
+    hydrophone.add_component(**ACQUISITION_PARAMS["receivers"]["component"])
+
+    # Create receiver coordinates
+    coords = [
+        [x, 0.0]
+        for x in np.linspace(
+            ACQUISITION_PARAMS["receivers"]["coords"]["x_range"][0],
+            ACQUISITION_PARAMS["receivers"]["coords"]["x_range"][1],
+            ACQUISITION_PARAMS["receivers"]["coords"]["n"],
+        )
+    ]
+
     acq.add_receiver_group(
-        name="surface_hydrophones", device=hydrophone, coords=coords, frame="reference"
+        name=ACQUISITION_PARAMS["receivers"]["name"],
+        device=hydrophone,
+        coords=coords,
+        frame="reference",
     )
     simulation += acq
 
     # Add discretization
-    method = Discretization(order=4)
+    method = Discretization(**SIMULATION_PARAMS["discretization"])
     simulation += method
 
     # Add solver config
-    solver = SolverConfig(solve_on="final", max_iter=300, tolerance=1.0e-4)
+    solver = SolverConfig(**SIMULATION_PARAMS["solver"])
     simulation += solver
 
     # Add output
     out = OutputManager()
-    out += ParaviewOutput(name="simple", fields=["pressure"], upscale=2)
+    out += ParaviewOutput(**SIMULATION_PARAMS["output"])
     simulation += out
 
 
@@ -540,40 +662,37 @@ def test_output_configuration(simulation):
 def test_time_domain_parameters(time_domain_results):
     """Test the time domain simulation parameters.
 
-    This test verifies that:
-    1. The time domain simulation uses the correct frequency range
-    2. The wavelet parameters match the notebook
-    3. The simulation duration is correct
-
-    This corresponds to the time domain simulation setup in ex01_simple.ipynb where:
-    - f_min=1.0 Hz
-    - f_max=18.0 Hz
-    - T_max=4.0 s
-    - Ricker wavelet with f0=6.0 Hz
+    This test verifies that the time domain simulation parameters match
+    those specified in ex01_simple.ipynb:
+    - Frequency range: {TIME_DOMAIN_PARAMS['f_min']} to {TIME_DOMAIN_PARAMS['f_max']} Hz
+    - Simulation duration: {TIME_DOMAIN_PARAMS['T_max']} s
+    - Ricker wavelet: f0={TIME_DOMAIN_PARAMS['wavelet']['f0']} Hz, offset={TIME_DOMAIN_PARAMS['wavelet']['offset']} samples
     """
     trace_db, wavelet = time_domain_results
 
     # Verify frequency range from metadata
-    assert trace_db.metadata["f_max"] == 18.0, "Maximum frequency should be 18.0 Hz"
+    assert (
+        trace_db.metadata["f_max"] == TIME_DOMAIN_PARAMS["f_max"]
+    ), "Maximum frequency should match notebook"
     assert trace_db.metadata["df"] > 0, "Frequency step should be positive"
 
     # Verify wavelet parameters through signal properties
-    # For a Ricker wavelet with f0=6.0 Hz, the peak frequency should be around 6.0 Hz
     peak_freq_idx = np.argmax(np.abs(wavelet.spectrum))
     peak_freq = wavelet.frequencies[peak_freq_idx]
-    assert abs(peak_freq - 6.0) < 0.5, "Wavelet peak frequency should be around 6.0 Hz"
-
-    # Verify time offset (wavelet should be centered at offset=5 samples)
-    peak_time_idx = np.argmax(np.abs(wavelet.signal))
-    expected_offset = 5  # From notebook
     assert (
-        abs(peak_time_idx - expected_offset) <= 1
-    ), "Wavelet should be centered at offset=5 samples"
+        abs(peak_freq - TIME_DOMAIN_PARAMS["wavelet"]["f0"]) < 0.5
+    ), "Wavelet peak frequency should match notebook"
+
+    # Verify time offset
+    peak_time_idx = np.argmax(np.abs(wavelet.signal))
+    assert (
+        abs(peak_time_idx - TIME_DOMAIN_PARAMS["wavelet"]["offset"]) <= 1
+    ), "Wavelet offset should match notebook"
 
     # Verify time sampling
     times = trace_db.times()
     assert times[0] >= 0.0, "Time should start at or after 0"
-    assert times[-1] <= 4.0, "Time should not exceed T_max"
+    assert times[-1] <= TIME_DOMAIN_PARAMS["T_max"], "Time should not exceed T_max"
     assert len(times) > 0, "Should have time samples"
 
 
