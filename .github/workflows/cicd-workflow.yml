@@ -41,7 +41,7 @@ jobs:
       - name: Download test results from Docker workflow
         uses: dawidd6/action-download-artifact@v2
         with:
-          token: ${{ steps.generate-token.outputs.token }}
+          github_token: ${{ steps.generate-token.outputs.token }}
           workflow: cicd-workflow.yml
           run_id: ${{ steps.docker-workflow.outputs.workflow-id }}
           repo: FrequenSol/FrequenSolveDockerImage
