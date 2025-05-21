@@ -13,7 +13,7 @@ on:
 
 jobs:
   test:
-    uses: FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@main
+    uses: FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@run_tests
     with:
       FREQUENSOLVE_BRANCH: ${{ github.ref_name }}
     secrets:
