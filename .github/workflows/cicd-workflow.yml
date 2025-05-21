@@ -8,50 +8,14 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10"] #, "3.11", "3.12", "3.13"]
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-
-    - name: Install Poetry
-      uses: snok/install-poetry@v1
-      with:
-        version: latest
-        virtualenvs-create: true
-        virtualenvs-in-project: true
-
-    - name: Load cached venv
-      id: cached-poetry-dependencies
-      uses: actions/cache@v3
-      with:
-        path: .venv
-        key: venv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/poetry.lock') }}
-
-    - name: Install dependencies
-      if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      run: |
-        poetry lock
-        poetry install --no-interaction --with=dev,parallel
-
-    - name: Run pre-commit
-      uses: pre-commit/action@v3.0.0
-
-    - name: Run tests with pytest
-      run: |
-        pytest -k "not integration" --cov=src/ --cov-report=xml tests/
-
-    - name: Upload coverage reports to Codecov
-      uses: codecov/codecov-action@v3
-      env:
-        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+    uses: FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@main
+    with:
+      FREQUENSOLVE_BRANCH: ${{ github.ref_name }}
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      FREQUENSOLVER_BUILDER_APP_ID: ${{ secrets.FREQUENSOLVER_BUILDER_APP_ID }}
+      FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
 
   docs:
     needs: test
@@ -96,7 +60,7 @@ jobs:
         path: docs/build/html/
 
   deploy-docs:
-    needs: docs
+    needs: [test, docs]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
