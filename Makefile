@@ -7,5 +7,5 @@ test:
 	poetry run pytest \
 	-ra -k "not integration" \
 	--cov=src/ --cov-report=xml \
-	--mpl --mpl-baseline-path=tests/reference_images/ --mpl-generate-summary=html \
+	--mpl --mpl-baseline-path=tests/reference_images/ --mpl-generate-summary=html --mpl-results-path=tests/output/ \
 	tests/
