@@ -38,14 +38,22 @@ jobs:
           wait-for-completion-timeout: 30m
           display-workflow-run-url: true
 
-      - name: Check workflow conclusion
-        if: always()
-        run: |
-          if [ "${{ steps.docker-workflow.outputs.workflow-conclusion }}" != "success" ]; then
-            echo "Docker Image workflow failed with conclusion: ${{ steps.docker-workflow.outputs.workflow-conclusion }}"
-            echo "See workflow run at: ${{ steps.docker-workflow.outputs.workflow-url }}"
-            exit 1
-          fi
+      - name: Download test results from Docker workflow
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+          workflow: cicd-workflow.yml
+          run_id: ${{ steps.docker-workflow.outputs.workflow-id }}
+          repo: FrequenSol/FrequenSolveDockerImage
+          name: test-results
+          path: tests/output
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: tests/output/
+          retention-days: 7
 
   docs:
     needs: test
