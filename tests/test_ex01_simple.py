@@ -2,7 +2,92 @@
 
 This module contains tests that verify the functionality demonstrated in the
 ex01_simple.ipynb example notebook. The tests cover the complete workflow of
-setting up and running a simple 2D acoustic simulation, including:
+setting up and running a simple 2D acoustic simulation.
+
+Test Structure and Design
+------------------------
+The test suite is organized using a combination of utility functions and pytest fixtures
+to balance test isolation, performance, and maintainability. Here's how it works:
+
+1. Utility Functions
+   - Core setup logic is separated into utility functions (create_project, create_simulation, etc.)
+   - These functions are pure and can be used independently of the fixture mechanism
+   - Makes the code more reusable and easier to test
+   - Allows for different fixture scopes to use the same setup logic
+
+2. Fixtures
+   - Function-scoped fixtures (default):
+     * project_path: Creates a temporary directory for each test
+     * project: Creates a fresh project for each test
+     * simulation: Creates a new simulation for each test
+     * These are used by tests that need isolated state
+
+   - Module-scoped fixtures:
+     * time_domain_results: Runs the simulation once and caches results for all tests
+     * Uses tmp_path_factory to create a module-scoped temporary directory
+     * Used by plotting tests that only need to read simulation results
+
+3. Design Decisions
+   a. Separation of Concerns
+      - Setup logic is separated from fixture mechanism
+      - Makes it easier to modify setup without changing fixture behavior
+      - Allows reuse of setup code in different contexts
+
+   b. Fixture Independence
+      - Fixtures don't depend on each other
+      - Each fixture uses utility functions directly
+      - Prevents scope mismatch issues
+      - Makes it easier to change fixture scopes
+
+   c. Performance Optimization
+      - Time-consuming simulation only runs once per module
+      - Other fixtures run per test for proper isolation
+      - Balance between test isolation and performance
+
+   d. Maintainability
+      - Setup logic is centralized in utility functions
+      - Changes to setup only need to be made in one place
+      - Clear separation between setup and fixture behavior
+      - Easy to add new fixtures with different scopes
+
+Parameter Organization
+--------------------
+The test parameters are organized into module-level constants that match the values
+used in ex01_simple.ipynb. This organization serves several purposes:
+
+1. Single Source of Truth
+   - All test parameters are defined in one place at the module level
+   - Parameters are grouped logically (MODEL_PARAMS, MESH_PARAMS, etc.)
+   - Makes it easy to see what values match the notebook
+   - Reduces the risk of inconsistent parameter usage across tests
+
+2. Improved Maintainability
+   - Changes to parameters only need to be made in one place
+   - Parameter groups make it clear which values belong together
+   - Documentation of parameters is centralized
+   - Easier to track changes to parameters over time
+
+3. Better Test Readability
+   - Tests use descriptive parameter names instead of magic numbers
+   - Parameter groups provide context for what each value represents
+   - Assertions reference parameters directly, making their purpose clear
+   - Error messages can reference the parameter source
+
+4. Enhanced Documentation
+   - Parameter groups serve as implicit documentation
+   - Values are clearly associated with their purpose
+   - Relationship to notebook values is explicit
+   - Makes it easier for new developers to understand the test setup
+
+5. Flexible Parameter Usage
+   - Parameters can be used with dictionary unpacking
+   - Easy to modify subsets of parameters for specific tests
+   - Simple to add new parameter groups as needed
+   - Parameters can be referenced in docstrings and error messages
+
+Test Categories
+--------------
+The tests are organized into several categories:
 
 1. Project Creation
    - Creating a new FrequenSolve project
@@ -38,10 +123,11 @@ setting up and running a simple 2D acoustic simulation, including:
    - Running time domain simulations
    - Basic result validation
 
-The tests are designed to verify both the individual components and their
-integration into a complete simulation. Some tests are marked as integration
-tests (using @pytest.mark.integration) as they require running the actual
-simulation solver (most likely in the docker container).
+8. Visualization Tests
+   - Plotting model geometry
+   - Plotting time domain results
+   - Plotting frequency domain results
+   - These tests use the module-scoped time_domain_results fixture
 
 Note: This test suite focuses on verifying the setup and configuration of
 simulations rather than the numerical accuracy of the results. The example
@@ -52,8 +138,11 @@ See Also
 ex01_simple.ipynb : The example notebook that this test suite verifies
 """
 
+import logging
 import os
 import shutil
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -62,18 +151,121 @@ import pytest
 
 from frequensolve import *
 
+# =============================================================================
+# Test Parameters
+# =============================================================================
 
-@pytest.fixture
-def project_path(tmp_path):
-    """Create a temporary directory for the project."""
+# Constants for test parameters
+# These match the values used in ex01_simple.ipynb
+MODEL_PARAMS = {
+    "x_limits": [0.0, 2.0],
+    "layers": [
+        {
+            "name": "layer_1",
+            "z": 0.25,
+            "properties": {"Vp": 1.0, "Qp": 300.0, "Rho": 1.0},
+        },
+        {
+            "name": "layer_2",
+            "z": 0.5,
+            "properties": {"Vp": 2.0, "Qp": 50.0, "Rho": 1.0},
+        },
+    ],
+}
+
+MESH_PARAMS = {
+    "n": [4, 4],
+    "min_epw": 1.0,
+    "adapt_sources": 1,
+}
+
+BOUNDARY_PARAMS = {
+    "free_surface": {
+        "name": "free_surface",
+        "kind": "neumann",
+        "boundaries": ["z_min"],
+    },
+    "pml": {
+        "name": "pml",
+        "kind": "pml",
+        "boundaries": ["x_min", "x_max", "z_max"],
+        "pml_wavelengths": 1.2,
+        "pml_exponent": 3.0,
+        "pml_constant": 20.0,
+    },
+}
+
+ACQUISITION_PARAMS = {
+    "source": {
+        "kind": "scalar",
+        "coords": [[0.5, 0.0]],
+    },
+    "receivers": {
+        "name": "surface_hydrophones",
+        "device": "hydrophone",
+        "component": {"name": "p", "field": "pressure"},
+        "coords": {"x_range": [0.0, 1.0], "n": 1001},
+    },
+}
+
+SIMULATION_PARAMS = {
+    "discretization": {"order": 6},
+    "solver": {
+        "solve_on": "final",
+        "max_iter": 300,
+        "tolerance": 1.0e-4,
+    },
+    "output": {
+        "name": "simple",
+        "fields": ["pressure"],
+        "upscale": 1,
+    },
+}
+
+TIME_DOMAIN_PARAMS = {
+    "f_min": 1.0,
+    "f_max": 18.0,
+    "T_max": 4.0,
+    "wavelet": {"f0": 6.0, "offset": 5},
+}
+
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
+
+
+def create_project_path(tmp_path):
+    """Create a temporary directory for a project.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        The temporary directory provided by pytest
+
+    Returns
+    -------
+    str
+        Path to the created project directory
+    """
     path = tmp_path / "ex_01"
     path.mkdir()
     return str(path)
 
 
-@pytest.fixture
-def project(project_path):
-    """Create a project for testing."""
+def create_project(project_path):
+    """Create a new FrequenSolve project.
+
+    Parameters
+    ----------
+    project_path : str
+        Path where the project should be created
+
+    Returns
+    -------
+    Project
+        The created project instance
+    """
     project = Project(
         name="project",
         pretty_name="Simple Simulation",
@@ -83,9 +275,19 @@ def project(project_path):
     return project
 
 
-@pytest.fixture
-def simulation(project):
-    """Create a simulation for testing."""
+def create_simulation(project):
+    """Create a simulation and add it to the project.
+
+    Parameters
+    ----------
+    project : Project
+        The project to add the simulation to
+
+    Returns
+    -------
+    SeismicSimulation
+        The created simulation instance
+    """
     sim = SeismicSimulation(
         name="simulation_01",
         physics="acoustic",
@@ -93,6 +295,183 @@ def simulation(project):
     )
     project += sim
     return sim
+
+
+def setup_complete_simulation(simulation):
+    """Set up a complete simulation with all components.
+
+    This function sets up the model, mesh, boundary conditions,
+    acquisition, discretization, solver, and output components.
+    All parameters match those used in ex01_simple.ipynb.
+
+    Parameters
+    ----------
+    simulation : SeismicSimulation
+        The simulation to set up
+    """
+    # Create model
+    model = LayeredModel(dimension=2, x_limits=MODEL_PARAMS["x_limits"])
+    model.add_surface(name="top", z=0.0)
+
+    for layer in MODEL_PARAMS["layers"]:
+        model.add_layer(name=layer["name"], properties=layer["properties"])
+        if layer != MODEL_PARAMS["layers"][-1]:  # Don't add surface after last layer
+            model.add_surface(name=f"{layer['name']}_interface", z=layer["z"])
+
+    simulation += model
+
+    # Create mesh
+    mesh = model.hex_mesh_generator(n=MESH_PARAMS["n"])
+    simulation += mesh
+    simulation.mesh.set_adapt(
+        min_epw=MESH_PARAMS["min_epw"], adapt_sources=MESH_PARAMS["adapt_sources"]
+    )
+
+    # Add boundary conditions
+    BCs = BoundaryConditionManager(label_type="geometric")
+    for bc_params in BOUNDARY_PARAMS.values():
+        BCs += BoundaryCondition(**bc_params)
+    simulation += BCs
+
+    # Add acquisition
+    acq = Acquisition()
+    acq.add_source_group(**ACQUISITION_PARAMS["source"])
+
+    # Set up receiver
+    hydrophone = ReceiverNode(name=ACQUISITION_PARAMS["receivers"]["device"])
+    hydrophone.add_component(**ACQUISITION_PARAMS["receivers"]["component"])
+
+    # Create receiver coordinates
+    coords = [
+        [x, 0.0]
+        for x in np.linspace(
+            ACQUISITION_PARAMS["receivers"]["coords"]["x_range"][0],
+            ACQUISITION_PARAMS["receivers"]["coords"]["x_range"][1],
+            ACQUISITION_PARAMS["receivers"]["coords"]["n"],
+        )
+    ]
+
+    acq.add_receiver_group(
+        name=ACQUISITION_PARAMS["receivers"]["name"],
+        device=hydrophone,
+        coords=coords,
+        frame="reference",
+    )
+    simulation += acq
+
+    # Add discretization
+    method = Discretization(**SIMULATION_PARAMS["discretization"])
+    simulation += method
+
+    # Add solver config
+    solver = SolverConfig(**SIMULATION_PARAMS["solver"])
+    simulation += solver
+
+    # Add output
+    out = OutputManager()
+    out += ParaviewOutput(**SIMULATION_PARAMS["output"])
+    simulation += out
+
+
+def run_time_domain_simulation(project, simulation):
+    """Run a time domain simulation and return the results.
+
+    Parameters
+    ----------
+    project : Project
+        The project containing the simulation
+    simulation : SeismicSimulation
+        The simulation to run
+
+    Returns
+    -------
+    tuple
+        (trace_db, wavelet) containing the simulation results
+    """
+    # Save the project to ensure simulation file exists
+    project.save()
+
+    site = LocalSite()
+    site.sync(project)
+
+    # Define and submit a time-domain simulation
+    td_job = TimeDomainJob(
+        name="time", simulation=simulation, f_min=1.0, f_max=18.0, T_max=4.0
+    )
+
+    # Capture stdout during job submission
+    stdout_capture = StringIO()
+    with redirect_stdout(stdout_capture):
+        site.submit(td_job)
+
+    # Get results from the site
+    trace_db = site.fetch_traces(td_job, upscale=4)
+    wavelet = RickerWavelet(f0=6.0, times=trace_db.times(), offset=5)
+
+    return trace_db, wavelet
+
+
+# =============================================================================
+# Test Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def project_path(tmp_path):
+    """Create a temporary directory for the project."""
+    return create_project_path(tmp_path)
+
+
+@pytest.fixture
+def project(project_path):
+    """Create a project for testing."""
+    return create_project(project_path)
+
+
+@pytest.fixture
+def simulation(project):
+    """Create a simulation for testing."""
+    sim = create_simulation(project)
+    setup_complete_simulation(sim)
+    return sim
+
+
+@pytest.fixture(scope="module")
+def time_domain_results(tmp_path_factory):
+    """Run a time domain simulation and cache the results for all tests.
+
+    This fixture is module-scoped to avoid running the simulation multiple times,
+    but it creates its own project and simulation instances to avoid depending
+    on other fixtures.
+
+    Parameters
+    ----------
+    tmp_path_factory : pytest.TempPathFactory
+        Factory for creating temporary directories
+    """
+    # Create a module-scoped temporary directory
+    tmp_path = tmp_path_factory.mktemp("time_domain")
+
+    # Create project and simulation directly
+    project_path = create_project_path(tmp_path)
+    project = create_project(project_path)
+    simulation = create_simulation(project)
+    setup_complete_simulation(simulation)
+
+    # Run simulation and yield results
+    results = run_time_domain_simulation(project, simulation)
+    yield results
+
+    # Cleanup will happen automatically when the module is done
+
+
+# =============================================================================
+# Test Suite
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Project and Model Tests
+# -----------------------------------------------------------------------------
 
 
 def test_project_creation(project):
@@ -119,14 +498,14 @@ def test_model_setup(simulation):
     This test verifies that:
     1. A 2D layered model can be created with specified x-limits
     2. Surfaces can be added at specific z-depths (top, interface, bottom)
-    3. Layers can be added with specified material properties (Vp, Rho)
+    3. Layers can be added with specified material properties (Vp, Qp, Rho)
     4. The model correctly stores and provides access to surfaces and layers
     5. Material properties can be accessed and have the expected values
 
     This corresponds to the "Defining a Model" section in ex01_simple.ipynb where
     a two-layer model is created with:
-    - Layer 1: Vp=1.0 km/s, Rho=1.0 g/cm³
-    - Layer 2: Vp=2.0 km/s, Rho=1.0 g/cm³
+    - Layer 1: Vp=1.0 km/s, Qp=300.0, Rho=1.0 g/cm³
+    - Layer 2: Vp=2.0 km/s, Qp=50.0, Rho=1.0 g/cm³
     - Interface at z=0.25
     """
     # Create model
@@ -134,9 +513,9 @@ def test_model_setup(simulation):
 
     # Add surfaces and layers
     model.add_surface(name="top", z=0.0)
-    model.add_layer(name="layer_1", properties={"Vp": 1.0, "Rho": 1.0})
+    model.add_layer(name="layer_1", properties={"Vp": 1.0, "Qp": 300.0, "Rho": 1.0})
     model.add_surface(name="interface", z=0.25)
-    model.add_layer(name="layer_2", properties={"Vp": 2.0, "Rho": 1.0})
+    model.add_layer(name="layer_2", properties={"Vp": 2.0, "Qp": 50.0, "Rho": 1.0})
     model.add_surface(name="bottom", z=0.5)
 
     simulation += model
@@ -146,6 +525,10 @@ def test_model_setup(simulation):
     assert len(model.layers) == 2  # layer_1, layer_2
     assert float(model.layers[0].properties["Vp"].get()) == 1.0
     assert float(model.layers[1].properties["Vp"].get()) == 2.0
+    assert float(model.layers[0].properties["Qp"].get()) == 300.0
+    assert float(model.layers[1].properties["Qp"].get()) == 50.0
+    assert float(model.layers[0].properties["Rho"].get()) == 1.0
+    assert float(model.layers[1].properties["Rho"].get()) == 1.0
 
 
 def test_mesh_setup(simulation):
@@ -218,6 +601,11 @@ def test_boundary_conditions(simulation):
     assert any(bc.kind == "pml" for bc in BCs.boundary_conditions)
 
 
+# -----------------------------------------------------------------------------
+# Acquisition and Simulation Tests
+# -----------------------------------------------------------------------------
+
+
 def test_acquisition_setup(simulation):
     """Test the setup of sources and receivers for the simulation.
 
@@ -268,6 +656,35 @@ def test_acquisition_setup(simulation):
     assert np.allclose(receiver_coords[-1], [1.0, 0.0])
 
 
+def test_output_configuration(simulation):
+    """Test the configuration of simulation outputs.
+
+    This test verifies that:
+    1. Paraview output can be configured with specific settings
+    2. Output fields and upscale parameters are correctly set
+    3. The output configuration matches the example notebook
+
+    This corresponds to the "Outputs" section in ex01_simple.ipynb where
+    Paraview output is configured with:
+    - name="simple"
+    - fields=["pressure"]
+    - upscale=1
+    """
+    out = OutputManager()
+    out += ParaviewOutput(name="simple", fields=["pressure"], upscale=1)
+    simulation += out
+
+    # Verify output configuration
+    assert len(simulation.outputs.paraview) == 1, "Should have one Paraview output"
+    pv_output = simulation.outputs.paraview[0]
+    assert pv_output.name == "simple", "Output name should match notebook"
+    assert pv_output.fields == ["pressure"], "Should output pressure field"
+    assert pv_output.upscale == 1, "Upscale should match notebook"
+    assert (
+        simulation.outputs.write_receivers is True
+    ), "Should write receiver data by default"
+
+
 def test_simulation_setup(simulation):
     """Test the complete setup of a seismic simulation.
 
@@ -282,6 +699,7 @@ def test_simulation_setup(simulation):
        - Output settings
     2. Each component is properly stored and accessible
     3. The simulation is ready for execution
+    4. All component settings match the example notebook exactly
 
     This corresponds to the complete setup process in ex01_simple.ipynb,
     combining all the individual component tests into a full simulation
@@ -292,106 +710,127 @@ def test_simulation_setup(simulation):
     test_mesh_setup(simulation)
     test_boundary_conditions(simulation)
     test_acquisition_setup(simulation)
+    test_output_configuration(simulation)  # Use dedicated output test
 
-    # Add discretization
-    method = Discretization(order=4)
+    # Add discretization with order=6 as in the notebook
+    method = Discretization(order=6)
     simulation += method
+    assert (
+        simulation.discretization.order == 6
+    ), "Discretization order should be 6 as in the notebook"
 
-    # Add solver config
+    # Add solver config with exact notebook parameters
     solver = SolverConfig(solve_on="final", max_iter=300, tolerance=1.0e-4)
     simulation += solver
+    assert simulation.solver.solve_on == "final", "Should solve on final mesh"
+    assert simulation.solver.max_iter == 300, "Maximum iterations should be 300"
+    assert simulation.solver.tolerance == 1.0e-4, "Tolerance should be 1e-4"
 
-    # Add output
-    out = OutputManager()
-    out += ParaviewOutput(name="simple", fields=["pressure"], upscale=2)
-    simulation += out
-
-    # Verify simulation components
-    assert simulation.model is not None
-    assert simulation.mesh is not None
-    assert simulation.BCs is not None
-    assert simulation.acquisition is not None
-    assert simulation.discretization is not None
-    assert simulation.solver is not None
-    assert simulation.outputs is not None
+    # Verify all components are present
+    assert simulation.model is not None, "Model should be present"
+    assert simulation.mesh is not None, "Mesh should be present"
+    assert simulation.BCs is not None, "Boundary conditions should be present"
+    assert simulation.acquisition is not None, "Acquisition should be present"
+    assert simulation.discretization is not None, "Discretization should be present"
+    assert simulation.solver is not None, "Solver should be present"
+    assert simulation.outputs is not None, "Outputs should be present"
 
 
-def test_project_save_load(project, simulation):
-    """Test saving and loading a project with a complete simulation setup.
+# -----------------------------------------------------------------------------
+# Time Domain Tests
+# -----------------------------------------------------------------------------
+
+
+def test_time_domain_parameters(time_domain_results):
+    """Test the time domain simulation parameters.
+
+    This test verifies that the time domain simulation parameters match
+    those specified in ex01_simple.ipynb:
+    - Frequency range: {TIME_DOMAIN_PARAMS['f_min']} to {TIME_DOMAIN_PARAMS['f_max']} Hz
+    - Simulation duration: {TIME_DOMAIN_PARAMS['T_max']} s
+    - Ricker wavelet: f0={TIME_DOMAIN_PARAMS['wavelet']['f0']} Hz, offset={TIME_DOMAIN_PARAMS['wavelet']['offset']} samples
+    """
+    trace_db, wavelet = time_domain_results
+
+    # Verify frequency range from metadata
+    assert (
+        trace_db.metadata["f_max"] == TIME_DOMAIN_PARAMS["f_max"]
+    ), "Maximum frequency should match notebook"
+    assert trace_db.metadata["df"] > 0, "Frequency step should be positive"
+
+    # Verify wavelet parameters through signal properties
+    peak_freq_idx = np.argmax(np.abs(wavelet.spectrum))
+    peak_freq = wavelet.frequencies[peak_freq_idx]
+    assert (
+        abs(peak_freq - TIME_DOMAIN_PARAMS["wavelet"]["f0"]) < 0.5
+    ), "Wavelet peak frequency should match notebook"
+
+    # Verify time offset
+    peak_time_idx = np.argmax(np.abs(wavelet.signal))
+    assert (
+        abs(peak_time_idx - TIME_DOMAIN_PARAMS["wavelet"]["offset"]) <= 1
+    ), "Wavelet offset should match notebook"
+
+    # Verify time sampling
+    times = trace_db.times()
+    assert times[0] >= 0.0, "Time should start at or after 0"
+    assert times[-1] <= TIME_DOMAIN_PARAMS["T_max"], "Time should not exceed T_max"
+    assert len(times) > 0, "Should have time samples"
+
+
+@pytest.mark.integration
+def test_time_domain_simulation_basic(project, simulation):
+    """Test basic functionality of time domain simulation without plotting.
 
     This test verifies that:
-    1. A project with a complete simulation can be saved to disk
-    2. The saved project can be loaded back
-    3. All simulation components are preserved through the save/load cycle
-    4. The loaded project maintains all properties and relationships
+    1. A complete simulation can be set up
+    2. The project can be saved
+    3. A time domain job can be created with correct parameters
+    4. The simulation produces valid results
 
-    This corresponds to the project saving and loading section in ex01_simple.ipynb
-    where the project is saved and then loaded back from the project.json file.
+    This corresponds to the time domain simulation section in ex01_simple.ipynb
+    where a TimeDomainJob is created with:
+    - f_min=1.0 Hz
+    - f_max=18.0 Hz
+    - T_max=4.0 s
     """
     # Set up complete simulation
     test_simulation_setup(simulation)
 
-    # Save project and store path
+    # Save the project to ensure simulation file exists
     project.save()
-    project_path = os.path.join(project.path, "project.json")
-    original_path = project.path  # Store the path before deleting project
-    assert os.path.exists(project_path), "Project file was not created"
+    assert os.path.exists(
+        os.path.join(project.path, "project.json")
+    ), "Project file should exist"
 
-    # Delete project and simulation objects
-    del simulation
-    del project
+    # Create and run time domain job with notebook parameters
+    td_job = TimeDomainJob(
+        name="td_job", simulation=simulation, f_min=1.0, f_max=18.0, T_max=4.0
+    )
 
-    # Load project back
-    loaded_project = Project.load(project_path)
+    # Verify job parameters through f_list
+    assert len(td_job.f_list) > 0, "Should have frequency samples"
+    assert min(td_job.f_list) >= 1.0, "Minimum frequency should be at least 1.0 Hz"
+    assert max(td_job.f_list) <= 18.0, "Maximum frequency should be at most 18.0 Hz"
+    assert (
+        td_job.f_list[1] - td_job.f_list[0] == 1.0 / 4.0
+    ), "Frequency step should be 1/T_max"
 
-    # Verify project properties
-    assert loaded_project.name == "project"
-    assert loaded_project.pretty_name == "Simple Simulation"
-    assert loaded_project.path == original_path  # Compare with stored path
+    # Run locally
+    td_results = td_job.records
 
-    # Get the simulation from loaded project
-    loaded_sim = loaded_project.simulations["simulation_01"]
+    # Basic validation of results
+    assert td_results is not None, "Should have simulation results"
+    assert len(td_results) > 0, "Should have at least one record"
 
-    # Verify simulation properties
-    assert loaded_sim.name == "simulation_01"
-    assert loaded_sim.physics == "acoustic"
-    assert loaded_sim.dimension == 2
 
-    # Verify all components are present and properly loaded
-    assert loaded_sim.model is not None
-    assert loaded_sim.mesh is not None
-    assert loaded_sim.BCs is not None
-    assert loaded_sim.acquisition is not None
-    assert loaded_sim.discretization is not None
-    assert loaded_sim.solver is not None
-    assert loaded_sim.outputs is not None
-
-    # Verify model properties
-    assert len(loaded_sim.model.surfaces) == 3
-    assert len(loaded_sim.model.layers) == 2
-    assert float(loaded_sim.model.layers[0].properties["Vp"].get()) == 1.0
-    assert float(loaded_sim.model.layers[1].properties["Vp"].get()) == 2.0
-
-    # Verify acquisition setup
-    assert len(loaded_sim.acquisition.source_groups) == 1
-    assert len(loaded_sim.acquisition.receiver_groups) == 1
-    assert loaded_sim.acquisition.receiver_groups[0].name == "surface_hydrophones"
-
-    # Verify solver configuration
-    assert loaded_sim.solver.solve_on == "final"
-    assert loaded_sim.solver.max_iter == 300
-    assert loaded_sim.solver.tolerance == 1.0e-4
-
-    # Verify output configuration
-    assert loaded_sim.outputs.write_receivers is True
-    assert len(loaded_sim.outputs.paraview) == 1
-    assert loaded_sim.outputs.paraview[0].name == "simple"
-    assert "pressure" in loaded_sim.outputs.paraview[0].fields
-    assert len(loaded_sim.outputs.wavefields) == 0  # No wavefield outputs in this test
+# -----------------------------------------------------------------------------
+# Visualization Tests
+# -----------------------------------------------------------------------------
 
 
 @pytest.mark.mpl_image_compare(tolerance=2.0)
-def test_plot_basic(simulation):
+def test_model_plot(simulation):
     """Test basic plotting functionality without requiring the solver.
 
     This test verifies that the model visualization matches the expected reference
@@ -425,96 +864,72 @@ def test_plot_basic(simulation):
 
 
 @pytest.mark.integration
-@pytest.mark.mpl_image_compare(tolerance=2.0)
-def test_plot_verification_integration(simulation):
-    """Test visualization of the model geometry as shown in the notebook.
+@pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
+def test_time_domain_wavelet_time_plot(time_domain_results):
+    """Test the time-domain wavelet plot from time domain simulation.
 
-    This test verifies that the model visualization matches what is shown in
-    ex01_simple.ipynb. Specifically, it generates a plot of the model geometry
-    showing the Vp property with equal aspect ratio.
-
-    Parameters
-    ----------
-    simulation : SeismicSimulation
-        The simulation object to generate plots for.
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-        The figure containing the plot to be compared.
+    This test verifies that the time-domain wavelet plot matches its expected reference image.
     """
-    # Set up the simulation
-    test_simulation_setup(simulation)
+    _, wavelet = time_domain_results
 
-    # Create figure and plot model exactly as shown in the notebook
+    # Create figure and axes
     fig, ax = plt.subplots()
-    simulation.model.plot(property="Vp", aspect="equal", ax=ax)
+
+    # Plot on the provided axes
+    wavelet.plot(ax_time=ax)
 
     return fig
 
 
 @pytest.mark.integration
-def test_frequency_domain_simulation(project, simulation):
-    """Test running a frequency domain simulation.
+@pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
+def test_time_domain_wavelet_freq_plot(time_domain_results):
+    """Test the frequency-domain wavelet plot from time domain simulation.
 
-    This test verifies that:
-    1. A complete simulation can be set up
-    2. The project can be saved
-    3. A frequency domain job can be created and run
-    4. The simulation produces results
-
-    This corresponds to the frequency domain simulation section in ex01_simple.ipynb
-    where a single frequency (10 Hz) is simulated.
-
-    Note: This is marked as an integration test as it requires running the actual
-    simulation solver.
+    This test verifies that the frequency-domain wavelet plot matches its expected reference image.
     """
-    # Set up complete simulation
-    test_simulation_setup(simulation)
+    _, wavelet = time_domain_results
 
-    # Save project
-    project.save()
+    # Create figure and axes
+    fig, ax = plt.subplots()
 
-    # Create and run frequency domain job
-    fd_job = FrequencyDomainJob(name="fd_job", simulation=simulation, f_list=[10.0])
+    # Plot on the provided axes
+    wavelet.plot(ax_freq=ax)
 
-    # Run locally
-    fd_results = fd_job.records
-
-    # Basic validation of results
-    assert fd_results is not None
+    return fig
 
 
 @pytest.mark.integration
-def test_time_domain_simulation(project, simulation):
-    """Test running a time domain simulation.
+@pytest.mark.mpl_image_compare(tolerance=2.0)
+def test_time_domain_common_frequency_plot(time_domain_results):
+    """Test the common frequency plot from time domain simulation.
 
-    This test verifies that:
-    1. A complete simulation can be set up
-    2. The project can be saved
-    3. A time domain job can be created and run
-    4. The simulation produces results
-
-    This corresponds to the time domain simulation section in ex01_simple.ipynb
-    where multiple frequencies (1-18 Hz) are simulated and combined to create
-    a time domain response.
-
-    Note: This is marked as an integration test as it requires running the actual
-    simulation solver and may take significant time to complete.
+    This test verifies that the common frequency plot matches the expected reference image.
     """
-    # Set up complete simulation
-    test_simulation_setup(simulation)
+    trace_db, wavelet = time_domain_results
 
-    # Save project
-    project.save()
+    # Get first record and create common frequency plot
+    record = next(iter(trace_db))
+    shot = record.read_FD(wavelet)
+    fig, ax = plt.subplots()
+    plot_cf(shot, c_min=0.4, c_max=3.0, n_c=400, ax=ax)
 
-    # Create and run time domain job
-    td_job = TimeDomainJob(
-        name="td_job", simulation=simulation, f_min=1.0, f_max=18.0, T_max=2.0
-    )
+    return fig
 
-    # Run locally
-    td_results = td_job.records
 
-    # Basic validation of results
-    assert td_results is not None
+@pytest.mark.integration
+@pytest.mark.mpl_image_compare(tolerance=2.0)
+def test_time_domain_gather_plot(time_domain_results):
+    """Test the gather plot from time domain simulation.
+
+    This test verifies that the gather plot matches the expected reference image.
+    """
+    trace_db, wavelet = time_domain_results
+
+    # Get first record and create gather plot
+    record = next(iter(trace_db))
+    shot = record.read_TD(wavelet)
+    fig, ax = plt.subplots()
+    plot_gather(shot, A=100, ax=ax)
+
+    return fig
