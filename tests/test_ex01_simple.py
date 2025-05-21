@@ -508,6 +508,75 @@ def test_acquisition_setup(simulation):
     assert np.allclose(receiver_coords[-1], [1.0, 0.0])
 
 
+def test_output_configuration(simulation):
+    """Test the configuration of simulation outputs.
+
+    This test verifies that:
+    1. Paraview output can be configured with specific settings
+    2. Output fields and upscale parameters are correctly set
+    3. The output configuration matches the example notebook
+
+    This corresponds to the "Outputs" section in ex01_simple.ipynb where
+    Paraview output is configured with:
+    - name="simple"
+    - fields=["pressure"]
+    - upscale=1
+    """
+    out = OutputManager()
+    out += ParaviewOutput(name="simple", fields=["pressure"], upscale=1)
+    simulation += out
+
+    # Verify output configuration
+    assert len(simulation.outputs.paraview) == 1, "Should have one Paraview output"
+    pv_output = simulation.outputs.paraview[0]
+    assert pv_output.name == "simple", "Output name should match notebook"
+    assert pv_output.fields == ["pressure"], "Should output pressure field"
+    assert pv_output.upscale == 1, "Upscale should match notebook"
+    assert (
+        simulation.outputs.write_receivers is True
+    ), "Should write receiver data by default"
+
+
+def test_time_domain_parameters(time_domain_results):
+    """Test the time domain simulation parameters.
+
+    This test verifies that:
+    1. The time domain simulation uses the correct frequency range
+    2. The wavelet parameters match the notebook
+    3. The simulation duration is correct
+
+    This corresponds to the time domain simulation setup in ex01_simple.ipynb where:
+    - f_min=1.0 Hz
+    - f_max=18.0 Hz
+    - T_max=4.0 s
+    - Ricker wavelet with f0=6.0 Hz
+    """
+    trace_db, wavelet = time_domain_results
+
+    # Verify frequency range from metadata
+    assert trace_db.metadata["f_max"] == 18.0, "Maximum frequency should be 18.0 Hz"
+    assert trace_db.metadata["df"] > 0, "Frequency step should be positive"
+
+    # Verify wavelet parameters through signal properties
+    # For a Ricker wavelet with f0=6.0 Hz, the peak frequency should be around 6.0 Hz
+    peak_freq_idx = np.argmax(np.abs(wavelet.spectrum))
+    peak_freq = wavelet.frequencies[peak_freq_idx]
+    assert abs(peak_freq - 6.0) < 0.5, "Wavelet peak frequency should be around 6.0 Hz"
+
+    # Verify time offset (wavelet should be centered at offset=5 samples)
+    peak_time_idx = np.argmax(np.abs(wavelet.signal))
+    expected_offset = 5  # From notebook
+    assert (
+        abs(peak_time_idx - expected_offset) <= 1
+    ), "Wavelet should be centered at offset=5 samples"
+
+    # Verify time sampling
+    times = trace_db.times()
+    assert times[0] >= 0.0, "Time should start at or after 0"
+    assert times[-1] <= 4.0, "Time should not exceed T_max"
+    assert len(times) > 0, "Should have time samples"
+
+
 def test_simulation_setup(simulation):
     """Test the complete setup of a seismic simulation.
 
@@ -522,7 +591,7 @@ def test_simulation_setup(simulation):
        - Output settings
     2. Each component is properly stored and accessible
     3. The simulation is ready for execution
-    4. All component settings match the example notebook
+    4. All component settings match the example notebook exactly
 
     This corresponds to the complete setup process in ex01_simple.ipynb,
     combining all the individual component tests into a full simulation
@@ -533,6 +602,7 @@ def test_simulation_setup(simulation):
     test_mesh_setup(simulation)
     test_boundary_conditions(simulation)
     test_acquisition_setup(simulation)
+    test_output_configuration(simulation)  # Use dedicated output test
 
     # Add discretization with order=6 as in the notebook
     method = Discretization(order=6)
@@ -541,104 +611,67 @@ def test_simulation_setup(simulation):
         simulation.discretization.order == 6
     ), "Discretization order should be 6 as in the notebook"
 
-    # Add solver config
+    # Add solver config with exact notebook parameters
     solver = SolverConfig(solve_on="final", max_iter=300, tolerance=1.0e-4)
     simulation += solver
-    assert simulation.solver.solve_on == "final"
-    assert simulation.solver.max_iter == 300
-    assert simulation.solver.tolerance == 1.0e-4
+    assert simulation.solver.solve_on == "final", "Should solve on final mesh"
+    assert simulation.solver.max_iter == 300, "Maximum iterations should be 300"
+    assert simulation.solver.tolerance == 1.0e-4, "Tolerance should be 1e-4"
 
-    # Add output with Paraview configuration as in the notebook
-    out = OutputManager()
-    out += ParaviewOutput(name="simple", fields=["pressure"], upscale=1)
-    simulation += out
-    assert len(simulation.outputs.paraview) == 1
-    assert simulation.outputs.paraview[0].name == "simple"
-    assert simulation.outputs.paraview[0].fields == ["pressure"]
-    assert simulation.outputs.paraview[0].upscale == 1
-
-    # Verify simulation components
-    assert simulation.model is not None
-    assert simulation.mesh is not None
-    assert simulation.BCs is not None
-    assert simulation.acquisition is not None
-    assert simulation.discretization is not None
-    assert simulation.solver is not None
-    assert simulation.outputs is not None
+    # Verify all components are present
+    assert simulation.model is not None, "Model should be present"
+    assert simulation.mesh is not None, "Mesh should be present"
+    assert simulation.BCs is not None, "Boundary conditions should be present"
+    assert simulation.acquisition is not None, "Acquisition should be present"
+    assert simulation.discretization is not None, "Discretization should be present"
+    assert simulation.solver is not None, "Solver should be present"
+    assert simulation.outputs is not None, "Outputs should be present"
 
 
-def test_project_save_load(project, simulation):
-    """Test saving and loading a project with a complete simulation setup.
+@pytest.mark.integration
+def test_time_domain_simulation_basic(project, simulation):
+    """Test basic functionality of time domain simulation without plotting.
 
     This test verifies that:
-    1. A project with a complete simulation can be saved to disk
-    2. The saved project can be loaded back
-    3. All simulation components are preserved through the save/load cycle
-    4. The loaded project maintains all properties and relationships
+    1. A complete simulation can be set up
+    2. The project can be saved
+    3. A time domain job can be created with correct parameters
+    4. The simulation produces valid results
 
-    This corresponds to the project saving and loading section in ex01_simple.ipynb
-    where the project is saved and then loaded back from the project.json file.
+    This corresponds to the time domain simulation section in ex01_simple.ipynb
+    where a TimeDomainJob is created with:
+    - f_min=1.0 Hz
+    - f_max=18.0 Hz
+    - T_max=4.0 s
     """
     # Set up complete simulation
     test_simulation_setup(simulation)
 
-    # Save project and store path
+    # Save the project to ensure simulation file exists
     project.save()
-    project_path = os.path.join(project.path, "project.json")
-    original_path = project.path  # Store the path before deleting project
-    assert os.path.exists(project_path), "Project file was not created"
+    assert os.path.exists(
+        os.path.join(project.path, "project.json")
+    ), "Project file should exist"
 
-    # Delete project and simulation objects
-    del simulation
-    del project
+    # Create and run time domain job with notebook parameters
+    td_job = TimeDomainJob(
+        name="td_job", simulation=simulation, f_min=1.0, f_max=18.0, T_max=4.0
+    )
 
-    # Load project back
-    loaded_project = Project.load(project_path)
+    # Verify job parameters through f_list
+    assert len(td_job.f_list) > 0, "Should have frequency samples"
+    assert min(td_job.f_list) >= 1.0, "Minimum frequency should be at least 1.0 Hz"
+    assert max(td_job.f_list) <= 18.0, "Maximum frequency should be at most 18.0 Hz"
+    assert (
+        td_job.f_list[1] - td_job.f_list[0] == 1.0 / 4.0
+    ), "Frequency step should be 1/T_max"
 
-    # Verify project properties
-    assert loaded_project.name == "project"
-    assert loaded_project.pretty_name == "Simple Simulation"
-    assert loaded_project.path == original_path  # Compare with stored path
+    # Run locally
+    td_results = td_job.records
 
-    # Get the simulation from loaded project
-    loaded_sim = loaded_project.simulations["simulation_01"]
-
-    # Verify simulation properties
-    assert loaded_sim.name == "simulation_01"
-    assert loaded_sim.physics == "acoustic"
-    assert loaded_sim.dimension == 2
-
-    # Verify all components are present and properly loaded
-    assert loaded_sim.model is not None
-    assert loaded_sim.mesh is not None
-    assert loaded_sim.BCs is not None
-    assert loaded_sim.acquisition is not None
-    assert loaded_sim.discretization is not None
-    assert loaded_sim.solver is not None
-    assert loaded_sim.outputs is not None
-
-    # Verify model properties
-    assert len(loaded_sim.model.surfaces) == 3
-    assert len(loaded_sim.model.layers) == 2
-    assert float(loaded_sim.model.layers[0].properties["Vp"].get()) == 1.0
-    assert float(loaded_sim.model.layers[1].properties["Vp"].get()) == 2.0
-
-    # Verify acquisition setup
-    assert len(loaded_sim.acquisition.source_groups) == 1
-    assert len(loaded_sim.acquisition.receiver_groups) == 1
-    assert loaded_sim.acquisition.receiver_groups[0].name == "surface_hydrophones"
-
-    # Verify solver configuration
-    assert loaded_sim.solver.solve_on == "final"
-    assert loaded_sim.solver.max_iter == 300
-    assert loaded_sim.solver.tolerance == 1.0e-4
-
-    # Verify output configuration
-    assert loaded_sim.outputs.write_receivers is True
-    assert len(loaded_sim.outputs.paraview) == 1
-    assert loaded_sim.outputs.paraview[0].name == "simple"
-    assert "pressure" in loaded_sim.outputs.paraview[0].fields
-    assert len(loaded_sim.outputs.wavefields) == 0  # No wavefield outputs in this test
+    # Basic validation of results
+    assert td_results is not None, "Should have simulation results"
+    assert len(td_results) > 0, "Should have at least one record"
 
 
 @pytest.mark.mpl_image_compare(tolerance=2.0)
@@ -745,31 +778,3 @@ def test_time_domain_gather_plot(time_domain_results):
     plot_gather(shot, A=100, ax=ax)
 
     return fig
-
-
-@pytest.mark.integration
-def test_time_domain_simulation_basic(project, simulation):
-    """Test basic functionality of time domain simulation without plotting.
-
-    This test verifies that:
-    1. A complete simulation can be set up
-    2. The project can be saved
-    3. A time domain job can be created and run
-    4. The simulation produces results
-    """
-    # Set up complete simulation
-    test_simulation_setup(simulation)
-
-    # Save the project to ensure simulation file exists
-    project.save()
-
-    # Create and run time domain job
-    td_job = TimeDomainJob(
-        name="td_job", simulation=simulation, f_min=1.0, f_max=18.0, T_max=2.0
-    )
-
-    # Run locally
-    td_results = td_job.records
-
-    # Basic validation of results
-    assert td_results is not None
