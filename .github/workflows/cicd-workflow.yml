@@ -26,6 +26,7 @@ jobs:
           private_key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
 
       - name: Trigger and wait for Docker Image workflow
+        id: docker-workflow
         uses: the-actions-org/workflow-dispatch@v4
         with:
           token: ${{ steps.generate-token.outputs.token }}
@@ -36,6 +37,15 @@ jobs:
           wait-for-completion: true
           wait-for-completion-timeout: 30m
           display-workflow-run-url: true
+
+      - name: Check workflow conclusion
+        if: always()
+        run: |
+          if [ "${{ steps.docker-workflow.outputs.workflow-conclusion }}" != "success" ]; then
+            echo "Docker Image workflow failed with conclusion: ${{ steps.docker-workflow.outputs.workflow-conclusion }}"
+            echo "See workflow run at: ${{ steps.docker-workflow.outputs.workflow-url }}"
+            exit 1
+          fi
 
   docs:
     needs: test
