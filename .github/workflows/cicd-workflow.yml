@@ -15,14 +15,15 @@ on:
 
 jobs:
   test:
-    uses: FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@run_tests
-    with:
-      FREQUENSOLVE_BRANCH: ${{ github.ref_name }}
-    secrets:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-      FREQUENSOLVER_BUILDER_APP_ID: ${{ secrets.FREQUENSOLVER_BUILDER_APP_ID }}
-      FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Docker Image workflow
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          repository: FrequenSol/FrequenSolveDockerImage
+          event-type: test_frequensolve
+          client-payload: '{"FREQUENSOLVE_BRANCH": "${{ github.ref_name }}"}'
 
   docs:
     needs: test
