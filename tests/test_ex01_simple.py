@@ -151,6 +151,10 @@ import pytest
 
 from frequensolve import *
 
+# =============================================================================
+# Test Parameters
+# =============================================================================
+
 # Constants for test parameters
 # These match the values used in ex01_simple.ipynb
 MODEL_PARAMS = {
@@ -226,7 +230,11 @@ TIME_DOMAIN_PARAMS = {
 }
 
 
-# Utility functions for test setup
+# =============================================================================
+# Utility Functions
+# =============================================================================
+
+
 def create_project_path(tmp_path):
     """Create a temporary directory for a project.
 
@@ -403,7 +411,11 @@ def run_time_domain_simulation(project, simulation):
     return trace_db, wavelet
 
 
-# Fixtures that use the utility functions
+# =============================================================================
+# Test Fixtures
+# =============================================================================
+
+
 @pytest.fixture
 def project_path(tmp_path):
     """Create a temporary directory for the project."""
@@ -451,6 +463,15 @@ def time_domain_results(tmp_path_factory):
     yield results
 
     # Cleanup will happen automatically when the module is done
+
+
+# =============================================================================
+# Test Suite
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Project and Model Tests
+# -----------------------------------------------------------------------------
 
 
 def test_project_creation(project):
@@ -580,6 +601,11 @@ def test_boundary_conditions(simulation):
     assert any(bc.kind == "pml" for bc in BCs.boundary_conditions)
 
 
+# -----------------------------------------------------------------------------
+# Acquisition and Simulation Tests
+# -----------------------------------------------------------------------------
+
+
 def test_acquisition_setup(simulation):
     """Test the setup of sources and receivers for the simulation.
 
@@ -659,43 +685,6 @@ def test_output_configuration(simulation):
     ), "Should write receiver data by default"
 
 
-def test_time_domain_parameters(time_domain_results):
-    """Test the time domain simulation parameters.
-
-    This test verifies that the time domain simulation parameters match
-    those specified in ex01_simple.ipynb:
-    - Frequency range: {TIME_DOMAIN_PARAMS['f_min']} to {TIME_DOMAIN_PARAMS['f_max']} Hz
-    - Simulation duration: {TIME_DOMAIN_PARAMS['T_max']} s
-    - Ricker wavelet: f0={TIME_DOMAIN_PARAMS['wavelet']['f0']} Hz, offset={TIME_DOMAIN_PARAMS['wavelet']['offset']} samples
-    """
-    trace_db, wavelet = time_domain_results
-
-    # Verify frequency range from metadata
-    assert (
-        trace_db.metadata["f_max"] == TIME_DOMAIN_PARAMS["f_max"]
-    ), "Maximum frequency should match notebook"
-    assert trace_db.metadata["df"] > 0, "Frequency step should be positive"
-
-    # Verify wavelet parameters through signal properties
-    peak_freq_idx = np.argmax(np.abs(wavelet.spectrum))
-    peak_freq = wavelet.frequencies[peak_freq_idx]
-    assert (
-        abs(peak_freq - TIME_DOMAIN_PARAMS["wavelet"]["f0"]) < 0.5
-    ), "Wavelet peak frequency should match notebook"
-
-    # Verify time offset
-    peak_time_idx = np.argmax(np.abs(wavelet.signal))
-    assert (
-        abs(peak_time_idx - TIME_DOMAIN_PARAMS["wavelet"]["offset"]) <= 1
-    ), "Wavelet offset should match notebook"
-
-    # Verify time sampling
-    times = trace_db.times()
-    assert times[0] >= 0.0, "Time should start at or after 0"
-    assert times[-1] <= TIME_DOMAIN_PARAMS["T_max"], "Time should not exceed T_max"
-    assert len(times) > 0, "Should have time samples"
-
-
 def test_simulation_setup(simulation):
     """Test the complete setup of a seismic simulation.
 
@@ -747,6 +736,48 @@ def test_simulation_setup(simulation):
     assert simulation.outputs is not None, "Outputs should be present"
 
 
+# -----------------------------------------------------------------------------
+# Time Domain Tests
+# -----------------------------------------------------------------------------
+
+
+def test_time_domain_parameters(time_domain_results):
+    """Test the time domain simulation parameters.
+
+    This test verifies that the time domain simulation parameters match
+    those specified in ex01_simple.ipynb:
+    - Frequency range: {TIME_DOMAIN_PARAMS['f_min']} to {TIME_DOMAIN_PARAMS['f_max']} Hz
+    - Simulation duration: {TIME_DOMAIN_PARAMS['T_max']} s
+    - Ricker wavelet: f0={TIME_DOMAIN_PARAMS['wavelet']['f0']} Hz, offset={TIME_DOMAIN_PARAMS['wavelet']['offset']} samples
+    """
+    trace_db, wavelet = time_domain_results
+
+    # Verify frequency range from metadata
+    assert (
+        trace_db.metadata["f_max"] == TIME_DOMAIN_PARAMS["f_max"]
+    ), "Maximum frequency should match notebook"
+    assert trace_db.metadata["df"] > 0, "Frequency step should be positive"
+
+    # Verify wavelet parameters through signal properties
+    peak_freq_idx = np.argmax(np.abs(wavelet.spectrum))
+    peak_freq = wavelet.frequencies[peak_freq_idx]
+    assert (
+        abs(peak_freq - TIME_DOMAIN_PARAMS["wavelet"]["f0"]) < 0.5
+    ), "Wavelet peak frequency should match notebook"
+
+    # Verify time offset
+    peak_time_idx = np.argmax(np.abs(wavelet.signal))
+    assert (
+        abs(peak_time_idx - TIME_DOMAIN_PARAMS["wavelet"]["offset"]) <= 1
+    ), "Wavelet offset should match notebook"
+
+    # Verify time sampling
+    times = trace_db.times()
+    assert times[0] >= 0.0, "Time should start at or after 0"
+    assert times[-1] <= TIME_DOMAIN_PARAMS["T_max"], "Time should not exceed T_max"
+    assert len(times) > 0, "Should have time samples"
+
+
 @pytest.mark.integration
 def test_time_domain_simulation_basic(project, simulation):
     """Test basic functionality of time domain simulation without plotting.
@@ -791,6 +822,11 @@ def test_time_domain_simulation_basic(project, simulation):
     # Basic validation of results
     assert td_results is not None, "Should have simulation results"
     assert len(td_results) > 0, "Should have at least one record"
+
+
+# -----------------------------------------------------------------------------
+# Visualization Tests
+# -----------------------------------------------------------------------------
 
 
 @pytest.mark.mpl_image_compare(tolerance=2.0)
