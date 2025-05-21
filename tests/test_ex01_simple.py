@@ -52,8 +52,11 @@ See Also
 ex01_simple.ipynb : The example notebook that this test suite verifies
 """
 
+import logging
 import os
 import shutil
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -391,7 +394,7 @@ def test_project_save_load(project, simulation):
 
 
 @pytest.mark.mpl_image_compare(tolerance=2.0)
-def test_plot_basic(simulation):
+def test_model_plot(simulation):
     """Test basic plotting functionality without requiring the solver.
 
     This test verifies that the model visualization matches the expected reference
@@ -425,87 +428,127 @@ def test_plot_basic(simulation):
 
 
 @pytest.mark.integration
-@pytest.mark.mpl_image_compare(tolerance=2.0)
-def test_plot_verification_integration(simulation):
-    """Test visualization of the model geometry as shown in the notebook.
+@pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
+def test_time_domain_wavelet_time_plot(time_domain_results):
+    """Test the time-domain wavelet plot from time domain simulation.
 
-    This test verifies that the model visualization matches what is shown in
-    ex01_simple.ipynb. Specifically, it generates a plot of the model geometry
-    showing the Vp property with equal aspect ratio.
-
-    Parameters
-    ----------
-    simulation : SeismicSimulation
-        The simulation object to generate plots for.
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-        The figure containing the plot to be compared.
+    This test verifies that the time-domain wavelet plot matches its expected reference image.
     """
-    # Set up the simulation
-    test_simulation_setup(simulation)
+    _, wavelet = time_domain_results
 
-    # Create figure and plot model exactly as shown in the notebook
+    # Create figure and axes
     fig, ax = plt.subplots()
-    simulation.model.plot(property="Vp", aspect="equal", ax=ax)
+
+    # Plot on the provided axes
+    wavelet.plot(ax_time=ax)
 
     return fig
 
 
 @pytest.mark.integration
-def test_frequency_domain_simulation(project, simulation):
-    """Test running a frequency domain simulation.
+@pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
+def test_time_domain_wavelet_freq_plot(time_domain_results):
+    """Test the frequency-domain wavelet plot from time domain simulation.
 
-    This test verifies that:
-    1. A complete simulation can be set up
-    2. The project can be saved
-    3. A frequency domain job can be created and run
-    4. The simulation produces results
+    This test verifies that the frequency-domain wavelet plot matches its expected reference image.
+    """
+    _, wavelet = time_domain_results
 
-    This corresponds to the frequency domain simulation section in ex01_simple.ipynb
-    where a single frequency (10 Hz) is simulated.
+    # Create figure and axes
+    fig, ax = plt.subplots()
 
-    Note: This is marked as an integration test as it requires running the actual
-    simulation solver.
+    # Plot on the provided axes
+    wavelet.plot(ax_freq=ax)
+
+    return fig
+
+
+@pytest.fixture
+def time_domain_results(project, simulation):
+    """Fixture to set up and run the time domain simulation.
+
+    This fixture:
+    1. Sets up the complete simulation
+    2. Runs the time domain job
+    3. Returns the trace database and wavelet for plotting tests
     """
     # Set up complete simulation
     test_simulation_setup(simulation)
 
-    # Save project
+    # Save the project to ensure simulation file exists
     project.save()
 
-    # Create and run frequency domain job
-    fd_job = FrequencyDomainJob(name="fd_job", simulation=simulation, f_list=[10.0])
+    site = LocalSite()
+    site.sync(project)
 
-    # Run locally
-    fd_results = fd_job.records
+    # Define and submit a time-domain simulation
+    td_job = TimeDomainJob(
+        name="time", simulation=simulation, f_min=1.0, f_max=18.0, T_max=4.0
+    )
 
-    # Basic validation of results
-    assert fd_results is not None
+    # Capture stdout during job submission
+    stdout_capture = StringIO()
+    with redirect_stdout(stdout_capture):
+        site.submit(td_job)
+    # stdout_capture.getvalue() contains the captured output if needed
+
+    # Get results from the site
+    trace_db = site.fetch_traces(td_job, upscale=4)
+    wavelet = RickerWavelet(f0=6.0, times=trace_db.times(), offset=5)
+
+    return trace_db, wavelet
 
 
 @pytest.mark.integration
-def test_time_domain_simulation(project, simulation):
-    """Test running a time domain simulation.
+@pytest.mark.mpl_image_compare(tolerance=2.0)
+def test_time_domain_common_frequency_plot(time_domain_results):
+    """Test the common frequency plot from time domain simulation.
+
+    This test verifies that the common frequency plot matches the expected reference image.
+    """
+    trace_db, wavelet = time_domain_results
+
+    # Get first record and create common frequency plot
+    record = next(iter(trace_db))
+    shot = record.read_FD(wavelet)
+    fig, ax = plt.subplots()
+    plot_cf(shot, c_min=0.4, c_max=3.0, n_c=400, ax=ax)
+
+    return fig
+
+
+@pytest.mark.integration
+@pytest.mark.mpl_image_compare(tolerance=2.0)
+def test_time_domain_gather_plot(time_domain_results):
+    """Test the gather plot from time domain simulation.
+
+    This test verifies that the gather plot matches the expected reference image.
+    """
+    trace_db, wavelet = time_domain_results
+
+    # Get first record and create gather plot
+    record = next(iter(trace_db))
+    shot = record.read_TD(wavelet)
+    fig, ax = plt.subplots()
+    plot_gather(shot, A=100, ax=ax)
+
+    return fig
+
+
+@pytest.mark.integration
+def test_time_domain_simulation_basic(project, simulation):
+    """Test basic functionality of time domain simulation without plotting.
 
     This test verifies that:
     1. A complete simulation can be set up
     2. The project can be saved
     3. A time domain job can be created and run
     4. The simulation produces results
-
-    This corresponds to the time domain simulation section in ex01_simple.ipynb
-    where multiple frequencies (1-18 Hz) are simulated and combined to create
-    a time domain response.
-
-    Note: This is marked as an integration test as it requires running the actual
-    simulation solver and may take significant time to complete.
     """
     # Set up complete simulation
     test_simulation_setup(simulation)
 
-    # Save project
+    # Save the project to ensure simulation file exists
     project.save()
 
     # Create and run time domain job
