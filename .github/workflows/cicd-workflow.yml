@@ -17,10 +17,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # Generate GitHub App Token
+      - name: Generate GitHub App Token
+        id: generate-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.FREQUENSOLVER_BUILDER_APP_ID }}
+          private_key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+
       - name: Trigger Docker Image workflow
         uses: peter-evans/repository-dispatch@v2
         with:
-          token: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          token: ${{ steps.generate-token.outputs.token }}
           repository: FrequenSol/FrequenSolveDockerImage
           event-type: test_frequensolve
           client-payload: '{"FREQUENSOLVE_BRANCH": "${{ github.ref_name }}"}'
