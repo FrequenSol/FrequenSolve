@@ -26,12 +26,23 @@ jobs:
           private_key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
 
       - name: Trigger Docker Image workflow
+        id: dispatch
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ steps.generate-token.outputs.token }}
           repository: FrequenSol/FrequenSolveDockerImage
           event-type: test_frequensolve
           client-payload: '{"FREQUENSOLVE_BRANCH": "${{ github.ref_name }}"}'
+
+      - name: Wait for workflow
+        uses: tibdex/wait-for-workflow@v1
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+          repository: FrequenSol/FrequenSolveDockerImage
+          workflow_id: cicd-workflow.yml
+          ref: run_tests
+          timeout_minutes: 30
+          check_interval_seconds: 10
 
   docs:
     needs: test
