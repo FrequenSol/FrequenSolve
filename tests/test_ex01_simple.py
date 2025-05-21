@@ -2,7 +2,57 @@
 
 This module contains tests that verify the functionality demonstrated in the
 ex01_simple.ipynb example notebook. The tests cover the complete workflow of
-setting up and running a simple 2D acoustic simulation, including:
+setting up and running a simple 2D acoustic simulation.
+
+Test Structure and Design
+------------------------
+The test suite is organized using a combination of utility functions and pytest fixtures
+to balance test isolation, performance, and maintainability. Here's how it works:
+
+1. Utility Functions
+   - Core setup logic is separated into utility functions (create_project, create_simulation, etc.)
+   - These functions are pure and can be used independently of the fixture mechanism
+   - Makes the code more reusable and easier to test
+   - Allows for different fixture scopes to use the same setup logic
+
+2. Fixtures
+   - Function-scoped fixtures (default):
+     * project_path: Creates a temporary directory for each test
+     * project: Creates a fresh project for each test
+     * simulation: Creates a new simulation for each test
+     * These are used by tests that need isolated state
+
+   - Module-scoped fixtures:
+     * time_domain_results: Runs the simulation once and caches results for all tests
+     * Uses tmp_path_factory to create a module-scoped temporary directory
+     * Used by plotting tests that only need to read simulation results
+
+3. Design Decisions
+   a. Separation of Concerns
+      - Setup logic is separated from fixture mechanism
+      - Makes it easier to modify setup without changing fixture behavior
+      - Allows reuse of setup code in different contexts
+
+   b. Fixture Independence
+      - Fixtures don't depend on each other
+      - Each fixture uses utility functions directly
+      - Prevents scope mismatch issues
+      - Makes it easier to change fixture scopes
+
+   c. Performance Optimization
+      - Time-consuming simulation only runs once per module
+      - Other fixtures run per test for proper isolation
+      - Balance between test isolation and performance
+
+   d. Maintainability
+      - Setup logic is centralized in utility functions
+      - Changes to setup only need to be made in one place
+      - Clear separation between setup and fixture behavior
+      - Easy to add new fixtures with different scopes
+
+Test Categories
+--------------
+The tests are organized into several categories:
 
 1. Project Creation
    - Creating a new FrequenSolve project
@@ -38,10 +88,11 @@ setting up and running a simple 2D acoustic simulation, including:
    - Running time domain simulations
    - Basic result validation
 
-The tests are designed to verify both the individual components and their
-integration into a complete simulation. Some tests are marked as integration
-tests (using @pytest.mark.integration) as they require running the actual
-simulation solver (most likely in the docker container).
+8. Visualization Tests
+   - Plotting model geometry
+   - Plotting time domain results
+   - Plotting frequency domain results
+   - These tests use the module-scoped time_domain_results fixture
 
 Note: This test suite focuses on verifying the setup and configuration of
 simulations rather than the numerical accuracy of the results. The example
@@ -66,17 +117,38 @@ import pytest
 from frequensolve import *
 
 
-@pytest.fixture
-def project_path(tmp_path):
-    """Create a temporary directory for the project."""
+# Utility functions for test setup
+def create_project_path(tmp_path):
+    """Create a temporary directory for a project.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        The temporary directory provided by pytest
+
+    Returns
+    -------
+    str
+        Path to the created project directory
+    """
     path = tmp_path / "ex_01"
     path.mkdir()
     return str(path)
 
 
-@pytest.fixture
-def project(project_path):
-    """Create a project for testing."""
+def create_project(project_path):
+    """Create a new FrequenSolve project.
+
+    Parameters
+    ----------
+    project_path : str
+        Path where the project should be created
+
+    Returns
+    -------
+    Project
+        The created project instance
+    """
     project = Project(
         name="project",
         pretty_name="Simple Simulation",
@@ -86,9 +158,19 @@ def project(project_path):
     return project
 
 
-@pytest.fixture
-def simulation(project):
-    """Create a simulation for testing."""
+def create_simulation(project):
+    """Create a simulation and add it to the project.
+
+    Parameters
+    ----------
+    project : Project
+        The project to add the simulation to
+
+    Returns
+    -------
+    SeismicSimulation
+        The created simulation instance
+    """
     sim = SeismicSimulation(
         name="simulation_01",
         physics="acoustic",
@@ -96,6 +178,157 @@ def simulation(project):
     )
     project += sim
     return sim
+
+
+def setup_complete_simulation(simulation):
+    """Set up a complete simulation with all components.
+
+    This function sets up the model, mesh, boundary conditions,
+    acquisition, discretization, solver, and output components.
+
+    Parameters
+    ----------
+    simulation : SeismicSimulation
+        The simulation to set up
+    """
+    # Create model
+    model = LayeredModel(dimension=2, x_limits=[0.0, 2.0])
+    model.add_surface(name="top", z=0.0)
+    model.add_layer(name="layer_1", properties={"Vp": 1.0, "Rho": 1.0})
+    model.add_surface(name="interface", z=0.25)
+    model.add_layer(name="layer_2", properties={"Vp": 2.0, "Rho": 1.0})
+    model.add_surface(name="bottom", z=0.5)
+    simulation += model
+
+    # Create mesh
+    mesh = model.hex_mesh_generator(n=[4, 4])
+    simulation += mesh
+    simulation.mesh.set_adapt(min_epw=1.0, adapt_sources=1)
+
+    # Add boundary conditions
+    BCs = BoundaryConditionManager(label_type="geometric")
+    BCs += BoundaryCondition(name="free_surface", kind="neumann", boundaries=["z_min"])
+    BCs += BoundaryCondition(
+        name="pml",
+        kind="pml",
+        boundaries=["x_min", "x_max", "z_max"],
+        pml_wavelengths=1.2,
+        pml_exponent=3.0,
+        pml_constant=20.0,
+    )
+    simulation += BCs
+
+    # Add acquisition
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    coords = [[x, 0.0] for x in np.linspace(0.0, 1.0, 1001)]
+    acq.add_receiver_group(
+        name="surface_hydrophones", device=hydrophone, coords=coords, frame="reference"
+    )
+    simulation += acq
+
+    # Add discretization
+    method = Discretization(order=4)
+    simulation += method
+
+    # Add solver config
+    solver = SolverConfig(solve_on="final", max_iter=300, tolerance=1.0e-4)
+    simulation += solver
+
+    # Add output
+    out = OutputManager()
+    out += ParaviewOutput(name="simple", fields=["pressure"], upscale=2)
+    simulation += out
+
+
+def run_time_domain_simulation(project, simulation):
+    """Run a time domain simulation and return the results.
+
+    Parameters
+    ----------
+    project : Project
+        The project containing the simulation
+    simulation : SeismicSimulation
+        The simulation to run
+
+    Returns
+    -------
+    tuple
+        (trace_db, wavelet) containing the simulation results
+    """
+    # Save the project to ensure simulation file exists
+    project.save()
+
+    site = LocalSite()
+    site.sync(project)
+
+    # Define and submit a time-domain simulation
+    td_job = TimeDomainJob(
+        name="time", simulation=simulation, f_min=1.0, f_max=18.0, T_max=4.0
+    )
+
+    # Capture stdout during job submission
+    stdout_capture = StringIO()
+    with redirect_stdout(stdout_capture):
+        site.submit(td_job)
+
+    # Get results from the site
+    trace_db = site.fetch_traces(td_job, upscale=4)
+    wavelet = RickerWavelet(f0=6.0, times=trace_db.times(), offset=5)
+
+    return trace_db, wavelet
+
+
+# Fixtures that use the utility functions
+@pytest.fixture
+def project_path(tmp_path):
+    """Create a temporary directory for the project."""
+    return create_project_path(tmp_path)
+
+
+@pytest.fixture
+def project(project_path):
+    """Create a project for testing."""
+    return create_project(project_path)
+
+
+@pytest.fixture
+def simulation(project):
+    """Create a simulation for testing."""
+    sim = create_simulation(project)
+    setup_complete_simulation(sim)
+    return sim
+
+
+@pytest.fixture(scope="module")
+def time_domain_results(tmp_path_factory):
+    """Run a time domain simulation and cache the results for all tests.
+
+    This fixture is module-scoped to avoid running the simulation multiple times,
+    but it creates its own project and simulation instances to avoid depending
+    on other fixtures.
+
+    Parameters
+    ----------
+    tmp_path_factory : pytest.TempPathFactory
+        Factory for creating temporary directories
+    """
+    # Create a module-scoped temporary directory
+    tmp_path = tmp_path_factory.mktemp("time_domain")
+
+    # Create project and simulation directly
+    project_path = create_project_path(tmp_path)
+    project = create_project(project_path)
+    simulation = create_simulation(project)
+    setup_complete_simulation(simulation)
+
+    # Run simulation and yield results
+    results = run_time_domain_simulation(project, simulation)
+    yield results
+
+    # Cleanup will happen automatically when the module is done
 
 
 def test_project_creation(project):
@@ -122,14 +355,14 @@ def test_model_setup(simulation):
     This test verifies that:
     1. A 2D layered model can be created with specified x-limits
     2. Surfaces can be added at specific z-depths (top, interface, bottom)
-    3. Layers can be added with specified material properties (Vp, Rho)
+    3. Layers can be added with specified material properties (Vp, Qp, Rho)
     4. The model correctly stores and provides access to surfaces and layers
     5. Material properties can be accessed and have the expected values
 
     This corresponds to the "Defining a Model" section in ex01_simple.ipynb where
     a two-layer model is created with:
-    - Layer 1: Vp=1.0 km/s, Rho=1.0 g/cm³
-    - Layer 2: Vp=2.0 km/s, Rho=1.0 g/cm³
+    - Layer 1: Vp=1.0 km/s, Qp=300.0, Rho=1.0 g/cm³
+    - Layer 2: Vp=2.0 km/s, Qp=50.0, Rho=1.0 g/cm³
     - Interface at z=0.25
     """
     # Create model
@@ -137,9 +370,9 @@ def test_model_setup(simulation):
 
     # Add surfaces and layers
     model.add_surface(name="top", z=0.0)
-    model.add_layer(name="layer_1", properties={"Vp": 1.0, "Rho": 1.0})
+    model.add_layer(name="layer_1", properties={"Vp": 1.0, "Qp": 300.0, "Rho": 1.0})
     model.add_surface(name="interface", z=0.25)
-    model.add_layer(name="layer_2", properties={"Vp": 2.0, "Rho": 1.0})
+    model.add_layer(name="layer_2", properties={"Vp": 2.0, "Qp": 50.0, "Rho": 1.0})
     model.add_surface(name="bottom", z=0.5)
 
     simulation += model
@@ -149,6 +382,10 @@ def test_model_setup(simulation):
     assert len(model.layers) == 2  # layer_1, layer_2
     assert float(model.layers[0].properties["Vp"].get()) == 1.0
     assert float(model.layers[1].properties["Vp"].get()) == 2.0
+    assert float(model.layers[0].properties["Qp"].get()) == 300.0
+    assert float(model.layers[1].properties["Qp"].get()) == 50.0
+    assert float(model.layers[0].properties["Rho"].get()) == 1.0
+    assert float(model.layers[1].properties["Rho"].get()) == 1.0
 
 
 def test_mesh_setup(simulation):
@@ -285,6 +522,7 @@ def test_simulation_setup(simulation):
        - Output settings
     2. Each component is properly stored and accessible
     3. The simulation is ready for execution
+    4. All component settings match the example notebook
 
     This corresponds to the complete setup process in ex01_simple.ipynb,
     combining all the individual component tests into a full simulation
@@ -296,18 +534,28 @@ def test_simulation_setup(simulation):
     test_boundary_conditions(simulation)
     test_acquisition_setup(simulation)
 
-    # Add discretization
-    method = Discretization(order=4)
+    # Add discretization with order=6 as in the notebook
+    method = Discretization(order=6)
     simulation += method
+    assert (
+        simulation.discretization.order == 6
+    ), "Discretization order should be 6 as in the notebook"
 
     # Add solver config
     solver = SolverConfig(solve_on="final", max_iter=300, tolerance=1.0e-4)
     simulation += solver
+    assert simulation.solver.solve_on == "final"
+    assert simulation.solver.max_iter == 300
+    assert simulation.solver.tolerance == 1.0e-4
 
-    # Add output
+    # Add output with Paraview configuration as in the notebook
     out = OutputManager()
-    out += ParaviewOutput(name="simple", fields=["pressure"], upscale=2)
+    out += ParaviewOutput(name="simple", fields=["pressure"], upscale=1)
     simulation += out
+    assert len(simulation.outputs.paraview) == 1
+    assert simulation.outputs.paraview[0].name == "simple"
+    assert simulation.outputs.paraview[0].fields == ["pressure"]
+    assert simulation.outputs.paraview[0].upscale == 1
 
     # Verify simulation components
     assert simulation.model is not None
@@ -461,42 +709,6 @@ def test_time_domain_wavelet_freq_plot(time_domain_results):
     wavelet.plot(ax_freq=ax)
 
     return fig
-
-
-@pytest.fixture
-def time_domain_results(project, simulation):
-    """Fixture to set up and run the time domain simulation.
-
-    This fixture:
-    1. Sets up the complete simulation
-    2. Runs the time domain job
-    3. Returns the trace database and wavelet for plotting tests
-    """
-    # Set up complete simulation
-    test_simulation_setup(simulation)
-
-    # Save the project to ensure simulation file exists
-    project.save()
-
-    site = LocalSite()
-    site.sync(project)
-
-    # Define and submit a time-domain simulation
-    td_job = TimeDomainJob(
-        name="time", simulation=simulation, f_min=1.0, f_max=18.0, T_max=4.0
-    )
-
-    # Capture stdout during job submission
-    stdout_capture = StringIO()
-    with redirect_stdout(stdout_capture):
-        site.submit(td_job)
-    # stdout_capture.getvalue() contains the captured output if needed
-
-    # Get results from the site
-    trace_db = site.fetch_traces(td_job, upscale=4)
-    wavelet = RickerWavelet(f0=6.0, times=trace_db.times(), offset=5)
-
-    return trace_db, wavelet
 
 
 @pytest.mark.integration
