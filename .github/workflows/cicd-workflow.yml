@@ -39,7 +39,7 @@ jobs:
           repo: FrequenSol/FrequenSolveDockerImage
           workflow: cicd-workflow.yml
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH || 'main' }}
-          inputs: '{"FREQUENSOLVE_BRANCH": "${{ github.ref_name }}"}'
+          inputs: '{"FREQUENSOLVE_BRANCH": "${{ github.event_name == ''pull_request'' && github.head_ref || github.ref_name }}"}'
           wait-for-completion: true
           wait-for-completion-timeout: 30m
           display-workflow-run-url: true
