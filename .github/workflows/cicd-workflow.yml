@@ -12,6 +12,12 @@ on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH:
+        description: 'Branch of FrequenSolveDockerImage repository to use'
+        required: false
+        default: 'main'
+        type: string
 
 jobs:
   test:
@@ -32,7 +38,7 @@ jobs:
           token: ${{ steps.generate-token.outputs.token }}
           repo: FrequenSol/FrequenSolveDockerImage
           workflow: cicd-workflow.yml
-          ref: main
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH || 'main' }}
           inputs: '{"FREQUENSOLVE_BRANCH": "${{ github.ref_name }}"}'
           wait-for-completion: true
           wait-for-completion-timeout: 30m
