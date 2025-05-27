@@ -20,7 +20,54 @@ on:
         type: string
 
 jobs:
-  test:
+  unit-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10"] #, "3.11", "3.12", "3.13"]
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: latest
+        virtualenvs-create: true
+        virtualenvs-in-project: true
+
+    - name: Load cached venv
+      id: cached-poetry-dependencies
+      uses: actions/cache@v3
+      with:
+        path: .venv
+        key: venv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/poetry.lock') }}
+
+    - name: Install dependencies
+      if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
+      run: poetry install --no-interaction
+
+    - name: Run pre-commit
+      uses: pre-commit/action@v3.0.0
+
+    - name: Install pytest
+      run: pip install pytest pytest-cov
+
+    - name: Run tests with pytest
+      run: |
+        pytest --cov=src/ --cov-report=xml tests/
+
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v3
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  integration-test:
+    needs: unit-test
     runs-on: ubuntu-latest
     steps:
       # Generate GitHub App Token
@@ -62,7 +109,7 @@ jobs:
           retention-days: 7
 
   docs:
-    needs: test
+    needs: unit-test
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -103,8 +150,36 @@ jobs:
         name: documentation
         path: docs/build/html/
 
+  build-package:
+    needs: unit-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: latest
+        virtualenvs-create: true
+        virtualenvs-in-project: true
+
+    - name: Build package
+      run: poetry build
+
+    - name: Store build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
   deploy-docs:
-    needs: [test, docs]
+    needs: [docs, build-package]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -139,31 +214,3 @@ jobs:
       - name: Deploy documentation
         working-directory: docs/host
         run: make deploy-all
-
-  build:
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.10"
-
-    - name: Install Poetry
-      uses: snok/install-poetry@v1
-      with:
-        version: latest
-        virtualenvs-create: true
-        virtualenvs-in-project: true
-
-    - name: Build package
-      run: poetry build
-
-    - name: Store build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: dist
-        path: dist/
