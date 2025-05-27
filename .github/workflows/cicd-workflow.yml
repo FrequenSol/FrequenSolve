@@ -32,7 +32,7 @@ jobs:
           token: ${{ steps.generate-token.outputs.token }}
           repo: FrequenSol/FrequenSolveDockerImage
           workflow: cicd-workflow.yml
-          ref: run_tests
+          ref: main
           inputs: '{"FREQUENSOLVE_BRANCH": "${{ github.ref_name }}"}'
           wait-for-completion: true
           wait-for-completion-timeout: 30m
