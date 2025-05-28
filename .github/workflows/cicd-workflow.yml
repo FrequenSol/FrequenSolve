@@ -20,6 +20,8 @@ on:
         type: string
 
 jobs:
+  # This job runs basic Python unit tests only - it does not test Docker functionality
+  # or integration with other services. For full integration testing, see the integration-test job.
   unit-test:
     runs-on: ubuntu-latest
     strategy:
@@ -67,6 +69,7 @@ jobs:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   integration-test:
+    # This job runs all tests (including integration) in the docker image with the solver software.
     needs: unit-test
     runs-on: ubuntu-latest
     steps:
