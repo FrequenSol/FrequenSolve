@@ -59,8 +59,7 @@ jobs:
       run: pip install pytest pytest-cov
 
     - name: Run tests with pytest
-      run: |
-        poetry run pytest --cov=src/ --cov-report=xml tests/
+      run: make test
 
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v3
