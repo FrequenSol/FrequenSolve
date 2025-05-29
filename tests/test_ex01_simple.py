@@ -741,6 +741,7 @@ def test_simulation_setup(simulation):
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.integration
 def test_time_domain_parameters(time_domain_results):
     """Test the time domain simulation parameters.
 
