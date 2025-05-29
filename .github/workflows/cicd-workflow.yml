@@ -88,6 +88,7 @@ jobs:
           inputs: '{"FREQUENSOLVE_BRANCH": "${{ github.event_name == ''pull_request'' && github.head_ref || github.ref_name }}"}'
           wait-for-completion: true
           wait-for-completion-timeout: 30m
+          wait-for-completion-interval: 10s
           display-workflow-run-url: true
 
       - name: Download test results from Docker workflow
