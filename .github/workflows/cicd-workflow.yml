@@ -51,13 +51,10 @@ jobs:
 
     - name: Install dependencies
       if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      run: poetry install --no-interaction --with=parallel
+      run: poetry install --no-interaction --with=parallel,dev
 
     - name: Run pre-commit
       uses: pre-commit/action@v3.0.0
-
-    - name: Install pytest
-      run: pip install pytest pytest-cov
 
     - name: Run tests with pytest
       run: make test
