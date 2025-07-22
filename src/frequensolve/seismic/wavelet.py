@@ -144,8 +144,11 @@ class Wavelet:
     window: Optional[Tuple[Literal["gaussian", "blackman"], float]] = None
     causal: bool = False
     f_max: float = field(init=False)
+    scale: float = 1.0
     _times: np.ndarray = field(default=None, init=False)
     _signal: np.ndarray = field(default=None, init=False)
+    _frequencies: np.ndarray = field(default=None, init=False)
+    _spectrum: np.ndarray = field(default=None, init=False)
 
     @property
     def times(self) -> np.ndarray:
@@ -158,23 +161,16 @@ class Wavelet:
         Args:
             times: The new time samples.
         """
-        if len(times) % 2 == 0:
-            dt = times[-1] - times[-2]
-            times = np.append(times, times[-1] + dt)
 
         if self._times is None:
             self._times = times
         else:
-            # Don't change or re-evaluate if all times are the same
             if np.array_equal(times, self._times):
                 return
             else:
                 self._times = times
-                # Force re-evaluation of cached properties
-                if hasattr(self, "spectrum"):
-                    del self.spectrum
-                if hasattr(self, "frequencies"):
-                    del self.frequencies
+                self._spectrum = None
+                self._frequencies = None
 
         taper = Wavelet._get_window_callable(self._times, self.window)
         offset = (
@@ -182,10 +178,9 @@ class Wavelet:
         )
         self._generate(self._times, taper)
 
-        if self.causal:
-            self.signal = Wavelet._make_causal(self.signal)
-
-        self.signal = np.roll(self.signal, shift=offset)
+        # if self.causal:
+        #     self._signal = Wavelet._make_causal(self.signal)
+        self._signal = np.roll(self._signal, shift=offset)
 
     @property
     def signal(self) -> np.ndarray:
@@ -195,26 +190,31 @@ class Wavelet:
     def signal(self, signal: np.ndarray) -> None:
         self._signal = signal
 
-    @cached_property
+    @property
     def spectrum(self):
         """Compute the frequency-domain representation of the wavelet.
 
         Returns:
            np.ndarray: The frequency-domain representation of the wavelet.
         """
-        spec = fft.rfft(self.signal)
-        return spec.astype(np.complex64)
+        if self._spectrum is None:
+            self._evaluate_initial()
+            self._spectrum = fft.rfft(self.signal).astype(np.complex64)
+        return self._spectrum
 
-    @cached_property
+    @property
     def frequencies(self):
         """Compute the frequencies for the wavelet.
 
         Returns:
            np.ndarray: The frequencies for the wavelet.
         """
-        n = len(self.signal)
-        dt = self.times[1] - self.times[0]
-        return fft.rfftfreq(n, d=dt).astype(np.float32)
+        if self._frequencies is None:
+            self._evaluate_initial()
+            n = len(self._times) - 1
+            dt = self.times[1] - self.times[0]
+            self._frequencies = fft.rfftfreq(n, d=dt).astype(np.float32)
+        return self._frequencies
 
     def evaluate(self, times: np.ndarray) -> np.ndarray:
         """Evaluate the wavelet at given times."""
@@ -222,6 +222,11 @@ class Wavelet:
         # Setting times will trigger re-evaluation if needed
         self.times = times
         return self.signal
+
+    def _evaluate_initial(self):
+        if self.times is None:
+            dt = 1.0 / (20 * self.f_max)
+            self.times = np.arange(0.0, 1.0 + dt, dt)
 
     @staticmethod
     def _get_window_callable(
@@ -280,9 +285,7 @@ class Wavelet:
         """Plot the time-domain and spectrum of the wavelet."""
         import matplotlib.pyplot as plt
 
-        if self.times is None:
-            dt = 1.0 / (20 * self.f_max)
-            self.times = np.arange(0.0, 1.0 + dt, dt)
+        self._evaluate_initial()
 
         # Axis limit kwargs
         Tf = kwargs.pop("T_max", None)
@@ -294,11 +297,13 @@ class Wavelet:
         f_max = kwargs.pop("f_max", self.f_max)
         nF = np.searchsorted(self.frequencies, f_max, side="left")
         nF = np.minimum(nF, len(self.frequencies))
+        print(nF, self.frequencies[nF])
 
         # Save kwargs
         save_time = kwargs.pop("save_time", None)
         save_freq = kwargs.pop("save_freq", None)
         dpi = kwargs.pop("dpi", None)
+        y_scale = kwargs.pop("y_scale", None)
 
         # Formatting kwargs
         figsize = kwargs.pop("figsize", (6, 3))
@@ -324,17 +329,23 @@ class Wavelet:
 
         # Plot frequency-domain
         plt.figure(figsize=figsize)
-        normalized_spectrum = np.abs(self.spectrum) / np.max(np.abs(self.spectrum))
-        # plt.title("Spectrum")
-        plt.plot(
-            self.frequencies[:nF], 20 * np.log10(normalized_spectrum[:nF]), **kwargs
-        )
-        plt.xlabel("Frequency [Hz]")
-        plt.ylabel("Amplitude [dB]")
-        plt.grid(True, alpha=0.3)
-        plt.yticks(np.arange(-60, 1, 20))
-        plt.yticks(np.arange(-60, 1, 10), minor=True)
-        plt.ylim(-60, 1)
+        if y_scale == "dB":
+            normalized_spectrum = np.abs(self.spectrum) / np.max(np.abs(self.spectrum))
+            # plt.title("Spectrum")
+            plt.plot(
+                self.frequencies[:nF], 20 * np.log10(normalized_spectrum[:nF]), **kwargs
+            )
+            plt.xlabel("Frequency [Hz]")
+            plt.ylabel("Amplitude [dB]")
+            plt.grid(True, alpha=0.3)
+            plt.yticks(np.arange(-60, 1, 20))
+            plt.yticks(np.arange(-60, 1, 10), minor=True)
+            plt.ylim(-60, 1)
+        else:
+            plt.plot(self.frequencies[:nF], np.abs(self.spectrum[:nF]))
+            plt.xlabel("Frequency [Hz]")
+            plt.ylabel("Amplitude")
+            plt.grid(True, alpha=0.3)
 
         # # Set major x ticks
         # major_xticks = plt.xticks()[0]
@@ -380,12 +391,12 @@ class RickerWavelet(Wavelet):
     def _generate(self, times: np.ndarray, taper: Callable[[int], np.ndarray]) -> None:
         """Generate the wavelet signal."""
 
-        if self.causal:
-            signal, _, _ = ricker(times, f0=self.f, taper=taper)
-        else:
-            signal, _, i_c = ricker(times / 2.0, f0=self.f, taper=taper)
-            signal = np.roll(signal[::2], shift=(-i_c // 2))
-        self.signal = signal
+        # if self.causal:
+        #     signal, _, _ = ricker(times, f0=self.f, taper=taper)
+        # else:
+        signal, _, i_c = ricker(times / 2.0, f0=self.f, taper=taper)
+        signal = np.roll(signal[::2], shift=(-i_c // 2))
+        self.signal = signal * self.scale
 
 
 @dataclass
@@ -408,7 +419,7 @@ class OrmsbyWavelet(Wavelet):
         else:
             signal, _, i_c = ormsby(times / 2.0, f=self.f, taper=taper)
             signal = np.roll(signal[::2], shift=(-i_c // 2))
-        self.signal = signal
+        self.signal = signal * self.scale
 
 
 @dataclass
@@ -425,9 +436,9 @@ class KlauderWavelet(Wavelet):
     def _generate(self, times: np.ndarray, taper: Callable[[int], np.ndarray]) -> None:
         """Generate the wavelet signal."""
 
-        if self.causal:
-            signal, _, _ = klauder(times, f=self.f, taper=taper)
-        else:
-            signal, _, i_c = klauder(times / 2.0, f=self.f, taper=taper)
-            signal = np.roll(signal[::2], shift=(-i_c // 2))
-        self.signal = signal
+        # if self.causal:
+        #     signal, _, _ = klauder(times, f=self.f, taper=taper)
+        # else:
+        signal, _, i_c = klauder(times / 2.0, f=self.f, taper=taper)
+        signal = np.roll(signal[::2], shift=(-i_c // 2))
+        self.signal = signal * self.scale

@@ -80,11 +80,16 @@ class SimpleSurface:
             type = "ConstantSurface"
             z_phys = self.z_phys.get()
         else:
+
             type = "GridSurface"
             file = self._path / (self.name + ".bin")
-            self.z_phys.write(file)
-            z_phys = file.relative_to(self._proj_path)
 
+            orig_dims = self.z_phys.darr.dims
+            dims = sorted(orig_dims)
+            self.z_phys.darr = self.z_phys.darr.transpose(*dims[::-1])
+            self.z_phys.write(file)
+            self.z_phys.darr = self.z_phys.darr.transpose(*orig_dims)
+            z_phys = file.relative_to(self._proj_path)
             grid = self.z_phys.grid
 
             # TODO: This is again a nasty hack to get around not specifying dims in Grid
@@ -808,6 +813,7 @@ class LayeredModel(ModelBase):
         aspect = kwargs.pop("aspect", None)
         axes_names = kwargs.pop("axes_names", {"x": "X", "z": "Depth"})
         axes_units = kwargs.pop("axes_units", {"x": "km", "z": "km"})
+        add_colorbar = kwargs.pop("add_colorbar", True)
 
         # Get surface plotting kwargs
         show_surfs = kwargs.pop("surfaces", True)
@@ -877,7 +883,13 @@ class LayeredModel(ModelBase):
 
         samples = samples.clip(min=vmin, max=vmax)
         im = samples.plot.imshow(
-            ax=ax, x="x", vmin=vmin, vmax=vmax, extend="neither", **kwargs
+            ax=ax,
+            x="x",
+            vmin=vmin,
+            vmax=vmax,
+            extend="neither",
+            add_colorbar=add_colorbar,
+            **kwargs,
         )
 
         # Plot surfaces

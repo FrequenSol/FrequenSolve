@@ -6,6 +6,7 @@ import xarray as xr
 from numpy.typing import ArrayLike
 
 from frequensolve.geometry.grids import CartesianGrid
+from frequensolve.model.dispersion import DispersionScaling
 from frequensolve.util.stochastic_fields import von_karman_stochastic_field
 
 __all__ = ["Property"]
@@ -27,6 +28,64 @@ def _dims_in(dims1: List[str], dims2: List[str]) -> bool:
     dims1 = set(dims1)
     dims2 = set(dims2)
     return dims1.issubset(dims2)
+
+
+def _extend_single_coords(da: xr.DataArray) -> xr.DataArray:
+    """Ensure each dimension has at least 2 coordinate points.
+
+    If any dimension has only 1 coordinate point, add another coordinate
+    at distance 1 from the existing one and copy the data to the new dimension.
+
+    Args:
+        da: Input DataArray
+
+    Returns:
+        DataArray with at least 2 coordinate points in each dimension
+    """
+    if da.ndim == 0:
+        return da
+
+    new_coords = {}
+    new_data = da.values.copy()
+    new_dims = list(da.dims)
+
+    for dim in da.dims:
+        coords = da.coords[dim].values
+        if len(coords) == 1:
+            # Add a second coordinate at distance 1 from the existing one
+            new_coord_value = coords[0] + 1.0
+            new_coords[dim] = np.array([coords[0], new_coord_value])
+
+            dim_idx = da.dims.index(dim)
+            new_shape = list(new_data.shape)
+            new_shape[dim_idx] = 2
+
+            expanded_data = np.zeros(new_shape, dtype=new_data.dtype)
+            if dim_idx == 0:
+                expanded_data[0, ...] = new_data[0, ...]
+                expanded_data[1, ...] = new_data[0, ...]
+            elif dim_idx == 1:
+                expanded_data[:, 0, ...] = new_data[:, 0, ...]
+                expanded_data[:, 1, ...] = new_data[:, 0, ...]
+            elif dim_idx == 2:
+                expanded_data[:, :, 0, ...] = new_data[:, :, 0, ...]
+                expanded_data[:, :, 1, ...] = new_data[:, :, 0, ...]
+            else:
+                slices = [slice(None)] * len(new_data.shape)
+                slices[dim_idx] = 0
+                slices0 = slices.copy()
+                expanded_data[tuple(slices)] = new_data[tuple(slices0)]
+                slices[dim_idx] = 1
+                expanded_data[tuple(slices)] = new_data[tuple(slices0)]
+
+            new_data = expanded_data
+        else:
+            new_coords[dim] = coords
+
+    result = xr.DataArray(
+        data=new_data, coords=new_coords, dims=new_dims, attrs=da.attrs
+    )
+    return result
 
 
 def _coords_compatible(
@@ -51,9 +110,9 @@ def _coords_compatible(
     return True
 
 
-# --------------------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Property class
-# --------------------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 class Property:
     """Class defining properties.
 
@@ -63,17 +122,23 @@ class Property:
 
     def __init__(
         self,
-        data: Union[int, float, str, Path, xr.DataArray] = 0.0,
+        data: Union[int, float, str, Path, xr.DataArray, DispersionScaling] = 0.0,
         xarr: Optional[xr.DataArray] = None,
         scale: float = 1.0,
     ):
 
+        if isinstance(data, DispersionScaling):
+            self.dispersion = data.dispersion
+            data = data.property
+        else:
+            self.dispersion = None
+
         if isinstance(data, str):
             data = Path(data)
-        if isinstance(data, int):
+        if isinstance(data, (int, np.integer)):
             data = float(data)
 
-        if isinstance(data, float):
+        if isinstance(data, (float, np.floating)):
             self.darr = xr.DataArray(data=data)
         elif isinstance(data, Path):
             self.darr = Property.read(data.resolve(), xarr=xarr)
@@ -81,6 +146,10 @@ class Property:
             self.darr = data
         else:
             raise ValueError(f"Unknown property type: {type(data)}")
+
+        # Ensure each dimension has at least 2 coordinate points
+        if not self.is_constant:
+            self.darr = _extend_single_coords(self.darr)
 
         if scale != 1.0:
             self.darr.values = self.darr.values / scale
@@ -120,7 +189,7 @@ class Property:
 
         # Otherwise, interpolate the property onto coords
         if _coords_compatible(coords, self.darr.coords):
-            return self.darr
+            result = self.darr
         else:
             if _dims_compatible(self.darr.dims, coords):
                 # Linear interpolation for valid values
@@ -134,16 +203,22 @@ class Property:
                     )
                     nan_mask = np.isnan(out.values)
                     out.values[nan_mask] = nearest_interp.values[nan_mask]
-                return out
+                result = out
 
             elif self.is_constant:
                 dims = xarr.dims
                 shape = tuple(len(coords[dim]) for dim in dims)
-                return xr.DataArray(
+                result = xr.DataArray(
                     data=np.full(shape, self.darr.values), dims=dims, coords=coords
                 )
             else:
                 raise ValueError("Incompatible dimensions")
+
+        # Ensure the result has at least 2 coordinate points in each dimension
+        if not self.is_constant and result.ndim > 0:
+            result = _extend_single_coords(result)
+
+        return result
 
     def __iadd__(self, other: Union[float, xr.DataArray]) -> None:
         """Add a scalar or DataArray to the property."""
@@ -192,6 +267,8 @@ class Property:
             return Property._zarr_reader
         elif file.suffix == ".nc":
             return Property._netcdf_reader
+        elif file.suffix == "":
+            return Property._bin_reader
         else:
             raise ValueError(f"Unknown file format for {file}")
 
@@ -202,6 +279,9 @@ class Property:
         xarr = xarr.transpose(*dims[::-1])
         data = np.fromfile(file, dtype=np.float32).reshape(xarr.shape)
         da = xr.DataArray(data, coords=xarr.coords, dims=xarr.dims)
+
+        da = _extend_single_coords(da)
+
         dims = sorted(xarr.dims)
         da = da.transpose(*dims)
         return da

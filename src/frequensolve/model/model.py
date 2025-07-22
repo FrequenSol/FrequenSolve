@@ -110,9 +110,6 @@ class ModelSubdomain:
                         *orig_dims
                     )
                     props[key] = {"file": file.relative_to(self._proj_path)}
-
-                    # TODO: Update Fortran code to accept different grids for different properties
-                    #       (and update format so Grid doesn't need to be passed separately)
                     if grid is not None:
                         if grid != self.properties[key].grid:
                             raise ValueError(

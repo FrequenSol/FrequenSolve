@@ -87,7 +87,11 @@ class UniformSweepSampling(Sampling):
     # Upscaled
     @property
     def nFreq(self):
-        return self.upscale * self.nfreq
+        return self.upscale * (self.nfreq - 1) + 1
+
+    @property
+    def F_list(self):
+        return np.linspace(0, self.upscale * self.f_max, self.nFreq)
 
     @property
     def nTime(self):
@@ -113,7 +117,7 @@ class UniformSweepSampling(Sampling):
         if Tf:
             Tl = self.T_list
             nTf = np.searchsorted(Tl, Tf + self.t_shift, side="left")
-            nTf = np.minimum(nTf, self.nTime)
+            nTf = np.minimum(nTf + 1, self.nTime)
             return nTf, Tl[nTf] - self.t_shift
         else:
             return self.nTime, self.T

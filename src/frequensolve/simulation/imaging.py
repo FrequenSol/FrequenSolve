@@ -24,6 +24,10 @@ class MisfitGroup:
     observed: Union[str, Path] = ""
     simulated: Union[str, Path] = ""
 
+    def __post_init__(self):
+        self.observed = Path(self.observed) / f"receivers"
+        self.simulated = Path(self.simulated) / f"receivers"
+
     def __dict__(self) -> Dict:
         return {
             "name": self.name,
@@ -76,6 +80,7 @@ class RTMImagingJob(SimulationJob):
     grid: CartesianGrid = field(default_factory=CartesianGrid)
     keep_forward: bool = False
     keep_adjoint: bool = False
+    imaging_condition: Literal["energy", "up_down"] = "energy"
     weights: List[float] = field(default_factory=list)
     reassemble_adjoint: bool = False
 
@@ -86,6 +91,7 @@ class RTMImagingJob(SimulationJob):
         data_path: Union[str, Path],
         f_list: List[float],
         resolution: List[int],
+        imaging_condition: Literal["energy", "up_down"] = "energy",
         weights: Optional[List[float]] = None,
         wavelet: Optional[Wavelet] = None,
         misfit_type: Literal["L2"] = "L2",
@@ -93,7 +99,8 @@ class RTMImagingJob(SimulationJob):
         keep_adjoint: bool = False,
         save_path: Optional[Union[str, Path]] = None,
         reassemble_adjoint: bool = False,
-    ):
+        **kwargs,
+    ) -> None:
         simulation.save()
         super().__init__(
             name=name,
@@ -115,7 +122,9 @@ class RTMImagingJob(SimulationJob):
         if save_path is not None:
             self.save_path = Path(save_path).resolve()
         else:
-            self.save_path = simulation.project_path / "outputs" / "rtm"
+            self.save_path = (
+                simulation.project_path / "outputs" / simulation.name / "imaging"
+            )
         if not self.save_path.exists():
             self.save_path.mkdir(parents=True, exist_ok=True)
 
@@ -131,6 +140,8 @@ class RTMImagingJob(SimulationJob):
             assert weights is not None, "Either wavelet or weights must be provided"
             self.weights = weights
 
+        self.kwargs = kwargs
+        self.imaging_condition = imaging_condition
         self.keep_forward = keep_forward
         self.keep_adjoint = keep_adjoint
 
@@ -139,8 +150,8 @@ class RTMImagingJob(SimulationJob):
             self.misfit.receiver_groups.append(
                 MisfitGroup(
                     name=receiver_group.name,
-                    observed=Path(data_path) / f"{receiver_group.name}",
-                    simulated=f_sim / f"{receiver_group.name}",
+                    observed=Path(data_path),
+                    simulated=f_sim,
                 )
             )
 
@@ -168,36 +179,45 @@ class RTMImagingJob(SimulationJob):
         self.grid = CartesianGrid(x0=x0, x1=x1, n=resolution)
         self.reassemble_adjoint = reassemble_adjoint
 
+    def image_file(self, task_id: int) -> str:
+        return str(self.save_path / f"image_{task_id}.h5")
+
     def __dict__(self) -> Dict:
-        image = {
+        imaging = {
             "data_path": self.data_path,
             "save_path": self.save_path,
             "misfit": self.misfit.__dict__(),
             "grid": self.grid.__dict__(),
             "keep_forward": self.keep_forward,
             "keep_adjoint": self.keep_adjoint,
+            "imaging_condition": self.imaging_condition,
             "weights": self.weights,
             "reassemble_adjoint": self.reassemble_adjoint,
+            **self.kwargs,
         }
         return {
             **super().__dict__(),
-            "Image": image,
+            "Imaging": imaging,
         }
 
     @classmethod
     def from_dict(cls, data: Dict) -> "RTMImagingJob":
         image_data = data.pop("Image")
+        grid = image_data.pop("grid", None)
+        resolution = grid.pop("n", None)
         job = cls(
-            name=data["name"],
-            simulation=SeismicSimulation.load(data["simulation"]),
-            f_list=data["f_list"],
-            data_path=image_data["data_path"],
-            resolution=image_data["grid"]["n"],
-            keep_forward=image_data["keep_forward"],
-            keep_adjoint=image_data["keep_adjoint"],
-            save_path=image_data["save_path"],
-            weights=image_data["weights"],
-            reassemble_adjoint=image_data["reassemble_adjoint"],
+            name=data.pop("name", None),
+            simulation=SeismicSimulation.load(data.pop("simulation")),
+            f_list=data.pop("f_list", None),
+            data_path=image_data.pop("data_path", None),
+            resolution=resolution,
+            imaging_condition=image_data.pop("imaging_condition", None),
+            keep_forward=image_data.pop("keep_forward", None),
+            keep_adjoint=image_data.pop("keep_adjoint", None),
+            save_path=image_data.pop("save_path", None),
+            weights=image_data.pop("weights", None),
+            reassemble_adjoint=image_data.pop("reassemble_adjoint", None),
+            **image_data,
         )
         job.misfit = Misfit.from_dict(image_data["misfit"])
         return job

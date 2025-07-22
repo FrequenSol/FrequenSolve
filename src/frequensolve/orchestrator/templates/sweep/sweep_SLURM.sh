@@ -54,7 +54,7 @@ ml phdf5
 {% if n_tasks > 1 %}
 export FS_DISABLE_PARAVIEW=1
 {% endif %}
-export FREQUENSOLVE_DIR={{fs_dir}}
+export FS_SOLVER_PATH={{fs_dir}}
 
 export KMP_STACKSIZE=16M
 

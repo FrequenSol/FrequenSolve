@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, Generator, List, Optional
+from typing import Dict, Generator, List, Optional, Tuple
 
 import numpy as np
 
@@ -155,17 +155,17 @@ class CartesianGrid(Grid):
         # TODO: This is a gnarly hack since the Fortran code assumes all indices present.
         dims = sorted(xarr.coords.dims)
         coords = xarr.coords
-        if "y" in dims:
-            intended = ["x", "y", "z"]
-        elif "z" in dims:
-            intended = ["x", "z"]
-        else:
-            intended = ["x"]
+        # if "y" in dims:
+        #     intended = ["x", "y", "z"]
+        # elif "z" in dims:
+        #     intended = ["x", "z"]
+        # else:
+        #     intended = ["x"]
 
-        for dim in intended:
-            if dim not in dims:
-                coords[dim] = [0]
-        dims = intended
+        # for dim in intended:
+        #     if dim not in dims:
+        #         coords[dim] = [0]
+        # dims = intended
 
         n = [coords[dim].size for dim in dims]
         x0 = [float(coords[dim].values.min()) for dim in dims]
@@ -186,6 +186,10 @@ class CartesianGrid(Grid):
     @property
     def dimension(self) -> int:
         return len(self.n)
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        return tuple(self.n[::-1])
 
     # TODO: indexing below is confusing to align with fortran definition, should be changed
     def generate_coords(self, slices: Optional[List[slice]] = None):

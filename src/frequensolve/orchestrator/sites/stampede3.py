@@ -871,7 +871,6 @@ class Stampede3Site(BaseSite):
                 # TODO: Copy job, simulation file to database so that it can be read independently.
 
                 db = RecordDatabase.from_results(job.records, path.resolve(), upscale)
-                db.consolidate_h5()
                 db_map[job.name] = db
 
             except Exception as e:

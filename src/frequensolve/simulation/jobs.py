@@ -112,6 +112,40 @@ class SimulationJob(ABC):
     def n_tasks(self):
         return len(self.f_list)
 
+    # @property
+    # def records(self):
+    #     """Lists records that should be produced by a job.
+
+    #     Returns:
+    #         dict: Dictionary containing:
+    #             - datasets: Dictionary of datasets
+    #             - frequencies: List of frequencies
+    #             - simulation: Path to simulation file
+    #     """
+
+    #     output = self.trace_outputs
+
+    #     # For now we have to get entire files (with all sources, etc.)
+    #     path = output["path"]
+    #     records = {
+    #         "datasets": {},
+    #         "frequencies": {},
+    #         "simulation": self.simulation._file,
+    #     }
+    #     for components in output["components"]:
+    #         group, comp = components.split(":")
+    #         for i, freq in enumerate(output["frequencies"]):
+    #             ifreq = i + 1
+    #             for src in output["sources"]:
+    #                 record = group + "_" + str(ifreq) + ".h5"
+    #                 dset = comp + "_" + str(src)
+    #                 file = os.path.join(path, record)
+    #                 if file not in records["datasets"]:
+    #                     records["datasets"][file] = []
+    #                 records["datasets"][file].append(dset)
+    #                 records["frequencies"][ifreq] = freq
+    #     return records
+
     @property
     def records(self):
         """Lists records that should be produced by a job.
@@ -128,22 +162,18 @@ class SimulationJob(ABC):
         # For now we have to get entire files (with all sources, etc.)
         path = output["path"]
         records = {
-            "datasets": {},
+            "groups": output["groups"],
             "frequencies": {},
             "simulation": self.simulation._file,
         }
-        for components in output["components"]:
-            group, comp = components.split(":")
-            for i, freq in enumerate(output["frequencies"]):
-                ifreq = i + 1
-                for src in output["sources"]:
-                    record = group + "_" + str(ifreq) + ".h5"
-                    dset = comp + "_" + str(src)
-                    file = os.path.join(path, record)
-                    if file not in records["datasets"]:
-                        records["datasets"][file] = []
-                    records["datasets"][file].append(dset)
-                    records["frequencies"][ifreq] = freq
+        records["groups"] = output["groups"]
+        records["files"] = []
+        for i, freq in enumerate(output["frequencies"]):
+            ifreq = i + 1
+            file = os.path.join(path, f"receivers_{ifreq}.h5")
+            records["files"].append(file)
+            records["frequencies"][ifreq] = freq
+
         return records
 
     @property
@@ -194,10 +224,12 @@ class SimulationJob(ABC):
         recv_out = {}
         recv_out["path"] = self.project_path / out["path"]
         recv_out["frequencies"] = self.f_list
+        recv_out["groups"] = []
         recv_out["components"] = []
         recv_out["sources"] = []
 
         for group in receivers:
+            recv_out["groups"].append(group.name)
             for component in group.device.components:
                 recv_out["components"].append(f"{group.name}:{component.name}")
 

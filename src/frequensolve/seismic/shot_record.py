@@ -122,11 +122,10 @@ class ShotRecord:
         # Get sampling parameters
         n_samples = nTf
         n_traces = rgroup.size
-        dt = self.sampling.dT  # Time step in seconds
-        sample_interval = int(dt * 1e6)  # Convert to microseconds
-
-        # Create time samples array (milliseconds)
-        time_samples = np.arange(n_samples) * dt * 1000
+        t0 = self.sampling.t0
+        dt = self.sampling.dT  # Seconds
+        sample_interval = int(dt * 1e6)  # Microseconds
+        time_samples = (t0 + np.arange(n_samples) * dt) * 1000  # Milliseconds
 
         now = datetime.datetime.now()
         year = now.year
@@ -135,9 +134,6 @@ class ShotRecord:
         minute = now.minute
         second = now.second
 
-        recv_x = int((rgroup.coordinates[itrace, 0] * scale))
-        recv_elev = -int((rgroup.coordinates[itrace, -1] * scale))
-
         source_x = int((source.coordinates[0] * scale))
         source_elev = -int((source.coordinates[-1] * scale))
 
@@ -145,6 +141,8 @@ class ShotRecord:
         spec = segyio.spec()
         spec.format = 5
         spec.samples = time_samples  # Time samples (milliseconds)
+        spec.sample_rate = sample_interval
+        spec.tracecount = n_traces
 
         # Create a SEGY file and write data
         with segyio.create(fname, spec) as f:
@@ -153,6 +151,9 @@ class ShotRecord:
             )
 
             for itrace in range(n_traces):
+                recv_x = int((rgroup.coordinates[itrace, 0] * scale))
+                recv_elev = -int((rgroup.coordinates[itrace, -1] * scale))
+
                 f.header[itrace].update(
                     {
                         # Trace number
@@ -415,7 +416,7 @@ class Record:
 
     def read_FD(self, wavelet: Wavelet) -> ShotRecord:
         sampling = self.sampling(1)
-        wavelet.times = sampling.T_list
+        wavelet.times = sampling.t_list
         return read_shot_FD(self, wavelet)
 
     def sampling(self, upscale: Optional[int] = None, t_shift: float = 0.0) -> Sampling:
@@ -554,28 +555,28 @@ def read_shot_FD(record: Record, wavelet: Wavelet) -> ShotRecord:
     u = np.zeros((nf, nrecv), dtype=np.csingle)
     for i, freq in record.f_map.items():
         file = f"{fbase}_{i}.h5"
-        ifreq = round(freq / sampling.df)
+        ifreq = int(freq / sampling.df)
         omega = np.csingle(2 * np.pi * freq)
 
         if not os.path.exists(file):
             continue
             # raise FileNotFoundError(f"File {file} does not exist.")
+
         with h5py.File(file, "r") as f:
-            # Read real and imaginary parts in one operation
             im_data = f[f"{field}_{isrc}_im"][()]
             re_data = f[f"{field}_{isrc}_re"][()]
-            u[ifreq, :] = re_data + np.csingle(1j) * im_data
+        u[ifreq, :] = re_data + np.csingle(1j) * im_data
 
-            # Check for invalid values
-            if np.any(~np.isfinite(u[ifreq, :])) or np.any(np.abs(u[ifreq, :]) > 1e8):
-                u[ifreq, :] = 0
-                print(f"Invalid values for frequency {freq} Hz")
-                continue
+        # Check for invalid values
+        if np.any(~np.isfinite(u[ifreq, :])) or np.any(np.abs(u[ifreq, :]) > 1e8):
+            u[ifreq, :] = 0
+            print(f"Invalid values for frequency {freq} Hz")
+            continue
 
-            scale = spectrum[ifreq]
-            if isinstance(recv_group.device, ReceiverFiber):
-                scale *= np.csingle(1j * omega)
-            u[ifreq, :] *= scale
+        scale = spectrum[ifreq]
+        if isinstance(recv_group.device, ReceiverFiber):
+            scale *= np.csingle(1j * omega)
+        u[ifreq, :] *= scale
     os.chdir(cwd)
 
     return ShotRecord(
@@ -619,13 +620,19 @@ def read_shot_FD_consolidated(record: Record, wavelet: Wavelet) -> ShotRecord:
     fmap = record.f_map
     spectrum = wavelet.spectrum
 
+    from scipy.special import hankel1
+
+    x = recv_group.coordinates[:] - src_group.source.coordinates
+    r = np.linalg.norm(x, axis=1)
+
     for i, freq in record.f_map.items():
         ifreq = round(freq / sampling.df)
-        omega = np.csingle(2 * np.pi * freq)
+        omega = 2 * np.pi * freq
 
         scale = spectrum[ifreq]
-        if isinstance(recv_group.device, ReceiverFiber):
-            scale *= np.csingle(1j * omega)
+        # if isinstance(recv_group.device, ReceiverFiber):
+        #     scale *= np.csingle(1j * omega)
+        # u[ifreq, :] = scale * np.conj(0.25j * hankel1(0, omega*r)) * 1j * omega
         u[ifreq, :] = scale * data[i - 1, :]
 
     return ShotRecord(

@@ -19,7 +19,7 @@ class Discretization:
     method: str = "DPG"
     order: Union[int, Dict[str, int]] = 3
     DPG_alpha: float = 1.0
-    DPG_enrich: int = 1
+    DPG_enrich: int = 0
     DPG_penalty: float = 100.0
     misc: Dict[str, Any] = field(default_factory=dict)
 
@@ -28,7 +28,7 @@ class Discretization:
         method: str = "DPG",
         order: Union[int, Dict[str, int]] = 3,
         DPG_alpha: float = 1.0,
-        DPG_enrich: int = 1,
+        DPG_enrich: int = 0,
         DPG_penalty: float = 100.0,
         **kwargs,
     ):
@@ -45,7 +45,7 @@ class Discretization:
             method=d.pop("method", "DPG"),
             order=d.pop("order", 3),
             DPG_alpha=d.pop("DPG_alpha", 1.0),
-            DPG_enrich=d.pop("DPG_enrich", 1),
+            DPG_enrich=d.pop("DPG_enrich", 0),
             DPG_penalty=d.pop("DPG_penalty", 100),
             misc=d,
         )

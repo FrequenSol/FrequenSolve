@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Union
 from dask import config
 from dask.distributed import Client, Future, LocalCluster, get_task_stream, wait
 from dotenv import load_dotenv
+from numpy.typing import ArrayLike
 
 from frequensolve.orchestrator.config.local import LocalSiteConfig
 from frequensolve.orchestrator.sites.base import (
@@ -26,7 +27,7 @@ from frequensolve.util.setup_logger import init_logger
 logging.basicConfig(level=ERROR)
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/local.log")
-logger.setLevel(INFO)
+logger.setLevel(ERROR)
 
 for logger_name in ["distributed", "bokeh", "tornado"]:
     log = getLogger(logger_name)
@@ -94,19 +95,15 @@ def run_task(
 
     if active_dir:
         stdout_file = os.path.join(active_dir, f"task_{task_id+1}.out")
-        stderr_file = os.path.join(active_dir, f"task_{task_id+1}.err")
     else:
         stdout_file = None
-        stderr_file = None
 
     try:
         with (
             open(stdout_file, "w") if stdout_file else open(os.devnull, "w") as stdout,
-            open(stderr_file, "w") if stderr_file else open(os.devnull, "w") as stderr,
         ):
-
             proc = subprocess.Popen(
-                args, stdout=stdout, stderr=stderr, env=env, text=True
+                args, stdout=stdout, stderr=stdout, env=env, text=True
             )
             return_code = proc.wait()
 
@@ -116,7 +113,7 @@ def run_task(
             # Move files from active to output directory if successful
             if output_dir and active_dir:
                 os.makedirs(output_dir, exist_ok=True)
-                for file in [stdout_file, stderr_file]:
+                for file in [stdout_file]:
                     if os.path.exists(file):
                         dest_file = os.path.join(output_dir, os.path.basename(file))
                         os.rename(file, dest_file)
@@ -125,13 +122,8 @@ def run_task(
         return {
             "task_id": task_id,
             "status": "success",
-            "output_file": (
+            "stdout": (
                 os.path.join(output_dir, f"task_{task_id+1}.out")
-                if output_dir
-                else None
-            ),
-            "error_file": (
-                os.path.join(output_dir, f"task_{task_id+1}.err")
                 if output_dir
                 else None
             ),
@@ -140,7 +132,7 @@ def run_task(
         # Move files from active to output directory even if failed
         if output_dir and active_dir:
             os.makedirs(output_dir, exist_ok=True)
-            for file in [stdout_file, stderr_file]:
+            for file in [stdout_file]:
                 if os.path.exists(file):
                     dest_file = os.path.join(output_dir, os.path.basename(file))
                     os.rename(file, dest_file)
@@ -150,13 +142,8 @@ def run_task(
             "task_id": task_id,
             "status": "error",
             "error": str(e),
-            "output_file": (
+            "stdout": (
                 os.path.join(output_dir, f"task_{task_id+1}.out")
-                if output_dir
-                else None
-            ),
-            "error_file": (
-                os.path.join(output_dir, f"task_{task_id+1}.err")
                 if output_dir
                 else None
             ),
@@ -185,7 +172,7 @@ class LocalSite(BaseSite):
     config: LocalSiteConfig = field(init=False)
     executable: str = field(init=False)
     env: dict = field(default_factory=dict)
-    n_workers: Optional[int] = 1
+    n_workers: Optional[int] = 0
     threads_per_worker: Optional[int] = None
     memory_per_worker: Optional[int] = None
     _dask_client: Optional[Client] = field(default=None)
@@ -198,12 +185,16 @@ class LocalSite(BaseSite):
     def __post_init__(self):
         self.status = SiteStatus(status="running")
         self.config = LocalSiteConfig()
+        self.n_workers = self.config.cores // 2
         self.executable = self._get_solver_path()
         self.env = os.environ.copy()
-        self.env["FREQUENSOLVE_DIR"] = os.getenv("FS_SOLVER_PATH")
+        self.env["FS_SOLVER_PATH"] = os.getenv("FS_SOLVER_PATH")
 
-    def _initialize_dask(self):
+    def _initialize_dask(self, n_workers: Optional[int] = None):
         """Initialize Dask client and cluster."""
+
+        if self.n_workers == 0:
+            self.n_workers = self.config.cores // 2
 
         if self.threads_per_worker is None:
             self.threads_per_worker = self.config.cores // self.n_workers
@@ -227,16 +218,19 @@ class LocalSite(BaseSite):
                     f"Total memory ({total_memory}MB) exceed available memory ({self.config.memory}MB)"
                 )
 
-        logger.info(
-            f"Initializing Dask with {self.n_workers} workers, "
+        print(
+            f"Dask initialized with {self.n_workers} workers, "
             f"{self.threads_per_worker} threads per worker, "
             f"and {self.memory_per_worker}MB memory per worker"
         )
+        # logger.info(
+        #     f"Dask initialized with {self.n_workers} workers, "
+        #     f"{self.threads_per_worker} threads per worker, "
+        #     f"and {self.memory_per_worker}MB memory per worker"
+        # )
 
         if self._dask_client is None:
             try:
-                dashboard_port = 8787
-
                 config.set(
                     {
                         "distributed.worker.memory.target": 0.6,
@@ -252,7 +246,7 @@ class LocalSite(BaseSite):
                     n_workers=self.n_workers,
                     threads_per_worker=self.threads_per_worker,
                     memory_limit=f"{self.memory_per_worker}MB",
-                    dashboard_address=f"localhost:{dashboard_port}",
+                    dashboard_address=":0",  # Let Dask choose an available port
                     local_directory="/tmp/dask-worker-space",
                     scheduler_port=0,
                     silence_logs=ERROR,
@@ -260,7 +254,7 @@ class LocalSite(BaseSite):
                     resources={"CPU": self.threads_per_worker},
                 )
                 self._dask_client = Client(self._dask_cluster)
-                self._dashboard_port = dashboard_port
+                self._dashboard_port = self._dask_cluster.dashboard_link.split(":")[-1]
                 print(
                     f"Dask Dashboard available at: http://localhost:{self._dashboard_port}"
                 )
@@ -313,6 +307,7 @@ class LocalSite(BaseSite):
         Returns:
             List of results from completed tasks
         """
+        job.n_tasks
         if self._dask_client is None:
             self._initialize_dask()
 
@@ -359,14 +354,37 @@ class LocalSite(BaseSite):
 
         output_dir = os.path.join(job.project_path, "jobs", "out", job.name)
         active_dir = os.path.join(job.project_path, "jobs", "active")
+
+        if os.path.exists(output_dir):
+            for file in os.listdir(output_dir):
+                os.remove(os.path.join(output_dir, file))
+        if os.path.exists(active_dir):
+            for file in os.listdir(active_dir):
+                os.remove(os.path.join(active_dir, file))
+
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(active_dir, exist_ok=True)
 
-        if not self._is_notebook:
-            print("\n" * (self.n_workers + 2))
+        # if not self._is_notebook:
+        #     print("\n" * (self.n_workers + 2))
         # self._print_worker_status()
 
         futures = []
+
+        # Mesh first
+        future = self._dask_client.submit(
+            run_task,
+            job_file,
+            -1,
+            self.executable,
+            self.env,
+            n_ranks=1,
+            n_threads=1,
+            resources={"CPU": 1},
+        )
+        future.result()
+
+        # TODO: Verify success of mesh task before submitting other tasks
 
         # Loop tasks in reverse order for improved load balancing
         for i in range(job.n_tasks - 1, -1, -1):
@@ -410,12 +428,10 @@ class LocalSite(BaseSite):
         upscale: int = 1,
         path: Optional[Union[str, Path]] = None,
     ) -> Union[RecordDatabase, Dict[str, RecordDatabase]]:
-        """Gets traces and consolidates them into a single HDF5 file."""
         if isinstance(job, SimulationJob):
             db = RecordDatabase.from_results(
                 job.records, job.project_path.resolve(), upscale
             )
-            db.consolidate_h5()
             return db
         else:
             db_map = {}
@@ -423,16 +439,35 @@ class LocalSite(BaseSite):
                 db = RecordDatabase.from_results(
                     j.records, j.project_path.resolve(), upscale
                 )
-                db.consolidate_h5()
                 db_map[j.name] = db
             return db_map
 
     def fetch_image(
         self,
-        job: Union[RTMImagingJob, List[RTMImagingJob]],
-        path: Optional[Union[str, Path]] = None,
-    ) -> Union[RecordDatabase, Dict[str, RecordDatabase]]:
-        """Gets traces and consolidates them into a single HDF5 file."""
+        job: RTMImagingJob,
+    ) -> ArrayLike:
+        """Gets and accumulates images."""
+
+        import h5py
+        import numpy as np
+
+        n_freq = job.n_tasks
+        shape = job.grid.shape
+        img = np.zeros(shape)
+        for i in range(job.n_tasks):
+            file = job.image_file(i + 1)
+            w = job.weights[i] ** 2
+            with h5py.File(file, "r") as f:
+                im = np.reshape(f["image"][:], shape)
+                img += im * w / n_freq
+        return img
+
+    def fetch_paraview(
+        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
+    ):
+        """Dummy method for consistency."""
+        for name, pv_path in job.paraview_outputs.items():
+            print(f"Fetching ParaView output '{name}' from {pv_path}")
         pass
 
     @property
@@ -450,14 +485,6 @@ class LocalSite(BaseSite):
 
     def connect_to_existing_job(self):
         """Dummy method for consistency."""
-        pass
-
-    def fetch_paraview(
-        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
-    ):
-        """Dummy method for consistency."""
-        for name, pv_path in job.paraview_outputs.items():
-            print(f"Fetching ParaView output '{name}' from {pv_path}")
         pass
 
     def wait_completion(self, jobs: List[SimulationJob]):
