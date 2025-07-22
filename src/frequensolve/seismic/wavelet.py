@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import List, Literal, Optional, Tuple
+from typing import Callable, List, Literal, Optional, Tuple, Union
 from warnings import warn
 
 import matplotlib.pyplot as plt
