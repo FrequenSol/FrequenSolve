@@ -1,18 +1,32 @@
 name: CI
 
+permissions:
+  contents: read
+  actions: read
+  packages: read
+  id-token: write
+
 on:
   pull_request:
     branches: [ "main" ]
   push:
     branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH:
+        description: 'Branch of FrequenSolveDockerImage repository to use'
+        required: false
+        default: 'main'
+        type: string
 
 jobs:
-  test:
+  # This job runs basic Python unit tests only - it does not test Docker functionality
+  # or integration with other services. For full integration testing, see the integration-test job.
+  unit-test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.10"] #, "3.11", "3.12", "3.13"]
-
     steps:
     - uses: actions/checkout@v4
 
@@ -37,27 +51,65 @@ jobs:
 
     - name: Install dependencies
       if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      run: |
-        poetry lock
-        poetry install --no-interaction
+      run: poetry install --no-interaction --with=dev,parallel
 
     - name: Run pre-commit
       uses: pre-commit/action@v3.0.0
 
-    - name: Install pytest
-      run: pip install pytest pytest-cov
-
     - name: Run tests with pytest
-      run: |
-        pytest --cov=src/ --cov-report=xml tests/
+      run: make test
 
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v3
       env:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  integration-test:
+    # This job runs all tests (including integration) in the docker image with the solver software.
+    needs: unit-test
+    runs-on: ubuntu-latest
+    steps:
+      # Generate GitHub App Token
+      - name: Generate GitHub App Token
+        id: generate-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.FREQUENSOLVER_BUILDER_APP_ID }}
+          private_key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+
+      - name: Trigger and wait for Docker Image workflow
+        id: docker-workflow
+        uses: the-actions-org/workflow-dispatch@v4
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+          repo: FrequenSol/FrequenSolveDockerImage
+          workflow: cicd-workflow.yml
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH || 'main' }}
+          inputs: '{"FREQUENSOLVE_BRANCH": "${{ github.event_name == ''pull_request'' && github.head_ref || github.ref_name }}", "DISABLE_PUSH": true}'
+          wait-for-completion: true
+          wait-for-completion-timeout: 30m
+          wait-for-completion-interval: 10s
+          display-workflow-run-url: true
+
+      - name: Download test results from Docker workflow
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          github_token: ${{ steps.generate-token.outputs.token }}
+          workflow: cicd-workflow.yml
+          run_id: ${{ steps.docker-workflow.outputs.workflow-id }}
+          repo: FrequenSol/FrequenSolveDockerImage
+          name: test-results
+          path: tests/output
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: tests/output/
+          retention-days: 7
+
   docs:
-    needs: test
+    needs: unit-test
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -98,8 +150,35 @@ jobs:
         name: documentation
         path: docs/build/html/
 
+  build-package:
+    needs: unit-test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: latest
+        virtualenvs-create: true
+        virtualenvs-in-project: true
+
+    - name: Build package
+      run: poetry build
+
+    - name: Store build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
   deploy-docs:
-    needs: docs
+    needs: [docs, build-package]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -134,31 +213,3 @@ jobs:
       - name: Deploy documentation
         working-directory: docs/host
         run: make deploy-all
-
-  build:
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.10"
-
-    - name: Install Poetry
-      uses: snok/install-poetry@v1
-      with:
-        version: latest
-        virtualenvs-create: true
-        virtualenvs-in-project: true
-
-    - name: Build package
-      run: poetry build
-
-    - name: Store build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: dist
-        path: dist/
