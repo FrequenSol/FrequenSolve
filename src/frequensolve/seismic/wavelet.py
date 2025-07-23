@@ -4,7 +4,6 @@ from functools import cached_property
 from typing import Callable, List, Literal, Optional, Tuple, Union
 from warnings import warn
 
-import matplotlib.pyplot as plt
 import numpy as np
 from pylops.utils.wavelets import klauder, ormsby, ricker
 from scipy.signal import hilbert
@@ -282,28 +281,12 @@ class Wavelet:
         signal_min = signal_min[: len(signal_min) // 2 + 1]
         return signal_min
 
-    def plot(
-        self, ax_time=None, ax_freq=None, **kwargs
-    ) -> Tuple[Optional[plt.Figure], Optional[plt.Figure]]:
-        """Plot the time-domain and spectrum of the wavelet.
+    def plot(self, **kwargs) -> None:
+        """Plot the time-domain and spectrum of the wavelet."""
+        import matplotlib.pyplot as plt
 
-        Args:
-            ax_time: matplotlib axes to plot time domain signal on. If None, creates a new figure.
-            ax_freq: matplotlib axes to plot frequency domain signal on. If None, creates a new figure.
+        self._evaluate_initial()
 
-        Keyword Args:
-            T_max: Maximum time to plot (default: None, plots all times)
-            f_max: Maximum frequency to plot (default: self.f_max)
-            figsize: Figure size (default: (4, 3))
-            fontsize: Font size (default: 10)
-            save_time: Path to save time domain plot (default: None)
-            save_freq: Path to save frequency domain plot (default: None)
-            dpi: DPI for saved figures (default: None)
-
-        Returns:
-            A tuple of (time_domain_figure, frequency_domain_figure).
-            Each figure will be None if the corresponding axis was provided.
-        """
         # Axis limit kwargs
         Tf = kwargs.pop("T_max", None)
         if Tf:
@@ -327,24 +310,13 @@ class Wavelet:
         fontsize = kwargs.pop("fontsize", 10)
         plt.rcParams.update({"font.size": fontsize})
 
-        # Initialize return values
-        fig_time = None
-        fig_freq = None
-
-        # Handle time domain plot
-        if ax_time is None:
-            fig_time = plt.figure(figsize=figsize)
-            ax_time = fig_time.gca()
-            show_time = True
-        else:
-            show_time = False
-
         # Plot time-domain
-        ax_time.plot(self.times[:nTf], self.signal[:nTf], **kwargs)
-        ax_time.set_xlabel("Time (s)")
-        ax_time.set_ylabel("Amplitude")
-        ax_time.grid(True, alpha=0.2)
-
+        plt.figure(figsize=figsize)
+        # plt.title("Signal")
+        plt.plot(self.times[:nTf] - self.center, self.signal[:nTf], **kwargs)
+        plt.xlabel("Time [s]")
+        plt.ylabel("Amplitude")
+        plt.grid(True, alpha=0.3)
         if save_time:
             plt.savefig(
                 save_time,
@@ -352,23 +324,40 @@ class Wavelet:
                 **({"dpi": dpi} if dpi is not None else {}),
             )
             plt.close()
-        elif show_time:
+        else:
             plt.show()
 
-        # Handle frequency domain plot
-        if ax_freq is None:
-            fig_freq = plt.figure(figsize=figsize)
-            ax_freq = fig_freq.gca()
-            show_freq = True
-        else:
-            show_freq = False
-
         # Plot frequency-domain
-        ax_freq.plot(self.frequencies[:nF], np.abs(self.spectrum[:nF]), **kwargs)
-        ax_freq.set_xlabel("Frequency (Hz)")
-        ax_freq.set_ylabel("Amplitude")
-        ax_freq.grid(True, alpha=0.2)
+        plt.figure(figsize=figsize)
+        if y_scale == "dB":
+            normalized_spectrum = np.abs(self.spectrum) / np.max(np.abs(self.spectrum))
+            # plt.title("Spectrum")
+            plt.plot(
+                self.frequencies[:nF], 20 * np.log10(normalized_spectrum[:nF]), **kwargs
+            )
+            plt.xlabel("Frequency [Hz]")
+            plt.ylabel("Amplitude [dB]")
+            plt.grid(True, alpha=0.3)
+            plt.yticks(np.arange(-60, 1, 20))
+            plt.yticks(np.arange(-60, 1, 10), minor=True)
+            plt.ylim(-60, 1)
+        else:
+            plt.plot(self.frequencies[:nF], np.abs(self.spectrum[:nF]))
+            plt.xlabel("Frequency [Hz]")
+            plt.ylabel("Amplitude")
+            plt.grid(True, alpha=0.3)
 
+        # # Set major x ticks
+        # major_xticks = plt.xticks()[0]
+        # if len(major_xticks) > 1:
+        #     tick_spacing = major_xticks[1] - major_xticks[0]
+        #     minor_xticks = np.arange(major_xticks[0], major_xticks[-1] + tick_spacing/2, tick_spacing/2)
+        #     plt.xticks(minor_xticks[::2])
+        #     plt.xticks(minor_xticks, minor=True)
+        # else:
+        #     plt.xticks(minor=True)
+
+        plt.grid(True, which="minor", linestyle=":", alpha=0.3)
         if save_freq:
             plt.savefig(
                 save_freq,
@@ -376,10 +365,8 @@ class Wavelet:
                 **({"dpi": dpi} if dpi is not None else {}),
             )
             plt.close()
-        elif show_freq:
+        else:
             plt.show()
-
-        return fig_time, fig_freq
 
 
 @dataclass

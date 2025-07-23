@@ -19,6 +19,20 @@ def _wait_for_path(
     return path.exists()
 
 
+def _check_if_notebook() -> bool:
+    """Check if we're running in a Jupyter notebook."""
+    try:
+        shell = get_ipython().__class__.__name__
+        if shell == "ZMQInteractiveShell":
+            return True  # Jupyter notebook or qtconsole
+        elif shell == "TerminalInteractiveShell":
+            return False  # Terminal running IPython
+        else:
+            return False  # Other type
+    except NameError:
+        return False  # Probably standard Python interpreter
+
+
 @dataclass
 class SiteStatus:
     """Status and result information for a command execution.
@@ -71,11 +85,11 @@ class SiteStatus:
         return self.status == "completed" and self.return_code == 0
 
 
-@dataclass
+@dataclass(kw_only=True)
 class BaseSite(ABC):
     """Base class for site configuration."""
 
-    _is_notebook: bool = field(init=False)
+    _is_notebook: bool = field(default_factory=_check_if_notebook)
 
     @abstractmethod
     def cancel_job(self, job_id: str) -> None:
@@ -94,16 +108,3 @@ class BaseSite(ABC):
             str: The job ID
         """
         pass
-
-    def _check_if_notebook(self):
-        """Check if we're running in a Jupyter notebook."""
-        try:
-            shell = get_ipython().__class__.__name__
-            if shell == "ZMQInteractiveShell":
-                return True  # Jupyter notebook or qtconsole
-            elif shell == "TerminalInteractiveShell":
-                return False  # Terminal running IPython
-            else:
-                return False  # Other type
-        except NameError:
-            return False  # Probably standard Python interpreter

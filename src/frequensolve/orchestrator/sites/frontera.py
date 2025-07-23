@@ -110,7 +110,6 @@ class FronteraSite(BaseSite):
         self._FS_dir = self._get_FS_path()
 
         self.pool = PoolInfo()
-        self._is_notebook = self._check_if_notebook()
 
         logger.info("FronteraSite initialized with work_dir: %s", self._work_dir)
 

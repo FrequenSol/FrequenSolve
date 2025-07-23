@@ -193,29 +193,6 @@ class Project:
             site.put(temp_dir, remote)
             shutil.rmtree(temp_dir)
 
-    def get_records(self, results: dict) -> RecordDatabase:
-        """Get records from Frontera.
-
-        Args:
-            results: A dictionary of results from a Frontera job.
-        """
-
-        warn(
-            "`Project.get_records` will be deprecated; use `site.fetch_results` instead.",
-            DeprecationWarning,
-        )
-
-        if self.site is None:
-            raise ValueError(
-                "Getting records through projects requires Project.site to be set; use site.fetch_results instead."
-            )
-
-        if isinstance(self.site, LocalSite):
-            pass
-        else:
-            self.site.download_record_files(results, self.path.resolve())
-        return RecordDatabase.from_results(results, self.path.resolve())
-
     @classmethod
     def load(cls, file: Union[str, Path], auto_migrate: bool = False) -> "Project":
         """Load project from JSON file."""

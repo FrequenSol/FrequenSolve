@@ -150,21 +150,7 @@ def run_task(
         }
 
 
-def is_notebook() -> bool:
-    """Check if running in a Jupyter notebook."""
-    try:
-        shell = get_ipython().__class__.__name__
-        if shell == "ZMQInteractiveShell":
-            return True
-        elif shell == "TerminalInteractiveShell":
-            return False
-        else:
-            return False
-    except NameError:
-        return False
-
-
-@dataclass
+@dataclass(kw_only=True)
 class LocalSite(BaseSite):
     """Site for local execution."""
 
@@ -172,7 +158,7 @@ class LocalSite(BaseSite):
     config: LocalSiteConfig = field(init=False)
     executable: str = field(init=False)
     env: dict = field(default_factory=dict)
-    n_workers: Optional[int] = 0
+    n_workers: Optional[int] = None
     threads_per_worker: Optional[int] = None
     memory_per_worker: Optional[int] = None
     _dask_client: Optional[Client] = field(default=None)
@@ -180,7 +166,6 @@ class LocalSite(BaseSite):
     _futures: List[Future] = field(default_factory=list)
     _worker_status: Dict[str, str] = field(default_factory=dict)
     _status_display: Optional[object] = field(default=None)
-    _is_notebook: bool = field(default_factory=is_notebook)
 
     def __post_init__(self):
         self.status = SiteStatus(status="running")
@@ -193,7 +178,7 @@ class LocalSite(BaseSite):
     def _initialize_dask(self, n_workers: Optional[int] = None):
         """Initialize Dask client and cluster."""
 
-        if self.n_workers == 0:
+        if self.n_workers is None:
             self.n_workers = self.config.cores // 2
 
         if self.threads_per_worker is None:
@@ -493,7 +478,17 @@ class LocalSite(BaseSite):
         # return wait(self._dask_client.futures())
         pass
 
-    def transfer():
+    def get(
+        self,
+        remote_path: Union[str, Path],
+        local_path: Union[str, Path],
+        overwrite: bool = False,
+    ):
+        """Download a file or directory from the site."""
+        pass
+
+    def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
+        """Send a file or directory to the site."""
         pass
 
     @property
