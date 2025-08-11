@@ -58,9 +58,7 @@ class Project:
     simulations: NamedList[BaseSimulation] = field(default_factory=NamedList)
     workflows: Dict[str, BaseWorkflow] = field(default_factory=dict)
     extras: Dict[str, BaseProjectComponent] = field(default_factory=dict)
-    _active_jobs: Dict[str, Any] = field(
-        default_factory=dict
-    )  # job_name -> future/job_id
+    _active_jobs: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Load project from file and check version."""

@@ -297,7 +297,6 @@ class Wavelet:
         f_max = kwargs.pop("f_max", self.f_max)
         nF = np.searchsorted(self.frequencies, f_max, side="left")
         nF = np.minimum(nF, len(self.frequencies))
-        print(nF, self.frequencies[nF])
 
         # Save kwargs
         save_time = kwargs.pop("save_time", None)
@@ -313,7 +312,11 @@ class Wavelet:
         # Plot time-domain
         plt.figure(figsize=figsize)
         # plt.title("Signal")
-        plt.plot(self.times[:nTf] - self.center, self.signal[:nTf], **kwargs)
+        times = self.times
+        signal = self.signal
+        if signal.shape != times.shape:
+            times = times[: signal.size]
+        plt.plot(times[:nTf] - self.center, signal[:nTf], **kwargs)
         plt.xlabel("Time [s]")
         plt.ylabel("Amplitude")
         plt.grid(True, alpha=0.3)

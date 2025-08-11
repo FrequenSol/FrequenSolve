@@ -10,6 +10,7 @@ from frequensolve.mesh.mesh_generators import BaseMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.model.model import ModelBase
 from frequensolve.seismic.acquisition import Acquisition
+from frequensolve.seismic.receivers import CoordsArray
 from frequensolve.simulation.config import SimulationConfig
 from frequensolve.simulation.numerics_manager import Discretization, SolverConfig
 from frequensolve.simulation.output_manager import OutputManager
@@ -137,7 +138,6 @@ class SeismicSimulation(BaseSimulation):
             )
         else:
             self.project_path = Path(self.project_path)
-
         if self.model.dimension == 0:
             self.model.dimension = self.dimension
 
@@ -179,10 +179,7 @@ class SeismicSimulation(BaseSimulation):
                 sim.user_parameters = data.pop("UserParameters")
 
             os.chdir(cwd)
-
-        # Any remaining items are added to misc parameters
         sim.misc = data
-
         sim._set_path(project_path, Path("simulations"))
         return sim
 
@@ -194,13 +191,11 @@ class SeismicSimulation(BaseSimulation):
         for key, value in kwargs.items():
             setattr(sim_copy, key, value)
 
-        for i, out in enumerate(self.outputs.paraview):
-            path = out.path.parent.parent / name / out.path.name
-            sim_copy.outputs.paraview[i].path = path
-
-        for i, out in enumerate(self.outputs.wavefields):
-            path = out.path.parent.parent / name / out.path.name
-            sim_copy.outputs.wavefields[i].path = path
+        # Load coords as array so they can be saved where they need to be
+        for i, grp in enumerate(sim_copy.acquisition.receiver_groups):
+            if grp.coordinates.__class__.__name__ == "CoordsFromFile":
+                coords = grp.coordinates.get()
+                grp.coordinates = CoordsArray(coordinates=coords)
 
         return sim_copy
 
@@ -253,7 +248,7 @@ class SeismicSimulation(BaseSimulation):
         """Save seismic simulation to JSON file."""
         self._set_path(self.project_path, Path("simulations"))
 
-        file = self.project_path / "simulations" / f"{self.name}"
+        file = self.project_path / "simulations" / f"{self.name}" / f"{self.name}"
         file = file.with_suffix(".json").resolve()
         if not file.parent.exists():
             file.parent.mkdir(parents=True, exist_ok=True)
@@ -285,13 +280,14 @@ class SeismicSimulation(BaseSimulation):
             self.model._set_path(self._proj_path, self._rel_path)
         if self.mesh:
             self.mesh._set_path(self._proj_path, self._rel_path)
-        if self.outputs:
-            path = self._proj_path / Path("outputs") / self.name
-            self.outputs._set_path(self._proj_path, path)
 
     @property
     def _path(self) -> Path:
         return self._proj_path / self._rel_path
+
+    @property
+    def _remote_path(self) -> Path:
+        return self._proj_path.name / self._rel_path
 
 
 # TODO: loop over source groups

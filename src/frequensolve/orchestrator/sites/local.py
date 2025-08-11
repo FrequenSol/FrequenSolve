@@ -27,7 +27,7 @@ from frequensolve.util.setup_logger import init_logger
 logging.basicConfig(level=ERROR)
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/local.log")
-logger.setLevel(ERROR)
+logger.setLevel(INFO)
 
 for logger_name in ["distributed", "bokeh", "tornado"]:
     log = getLogger(logger_name)
@@ -50,8 +50,7 @@ def run_task(
     env: dict,
     n_ranks: int = 1,
     n_threads: int = 1,
-    output_dir: str = None,
-    active_dir: str = None,
+    stdout_dir: str = None,
 ) -> dict:
     """Run a single task and return its results.
 
@@ -93,8 +92,8 @@ def run_task(
 
     logger.info(f"Executing: {' '.join(args)}")
 
-    if active_dir:
-        stdout_file = os.path.join(active_dir, f"task_{task_id+1}.out")
+    if stdout_dir:
+        stdout_file = os.path.join(stdout_dir, f"task_{task_id+1}.out")
     else:
         stdout_file = None
 
@@ -110,41 +109,23 @@ def run_task(
             if return_code != 0:
                 raise subprocess.CalledProcessError(return_code, args)
 
-            # Move files from active to output directory if successful
-            if output_dir and active_dir:
-                os.makedirs(output_dir, exist_ok=True)
-                for file in [stdout_file]:
-                    if os.path.exists(file):
-                        dest_file = os.path.join(output_dir, os.path.basename(file))
-                        os.rename(file, dest_file)
-                        file = dest_file
-
         return {
             "task_id": task_id,
             "status": "success",
             "stdout": (
-                os.path.join(output_dir, f"task_{task_id+1}.out")
-                if output_dir
+                os.path.join(stdout_dir, f"task_{task_id+1}.out")
+                if stdout_dir
                 else None
             ),
         }
     except Exception as e:
-        # Move files from active to output directory even if failed
-        if output_dir and active_dir:
-            os.makedirs(output_dir, exist_ok=True)
-            for file in [stdout_file]:
-                if os.path.exists(file):
-                    dest_file = os.path.join(output_dir, os.path.basename(file))
-                    os.rename(file, dest_file)
-                    file = dest_file
-
         return {
             "task_id": task_id,
             "status": "error",
             "error": str(e),
             "stdout": (
-                os.path.join(output_dir, f"task_{task_id+1}.out")
-                if output_dir
+                os.path.join(stdout_dir, f"task_{task_id+1}.out")
+                if stdout_dir
                 else None
             ),
         }
@@ -170,7 +151,6 @@ class LocalSite(BaseSite):
     def __post_init__(self):
         self.status = SiteStatus(status="running")
         self.config = LocalSiteConfig()
-        self.n_workers = self.config.cores // 2
         self.executable = self._get_solver_path()
         self.env = os.environ.copy()
         self.env["FS_SOLVER_PATH"] = os.getenv("FS_SOLVER_PATH")
@@ -178,8 +158,10 @@ class LocalSite(BaseSite):
     def _initialize_dask(self, n_workers: Optional[int] = None):
         """Initialize Dask client and cluster."""
 
-        if self.n_workers is None:
-            self.n_workers = self.config.cores // 2
+        if n_workers is None:
+            self.n_workers = self.config.cores
+        else:
+            self.n_workers = n_workers
 
         if self.threads_per_worker is None:
             self.threads_per_worker = self.config.cores // self.n_workers
@@ -292,9 +274,11 @@ class LocalSite(BaseSite):
         Returns:
             List of results from completed tasks
         """
-        job.n_tasks
         if self._dask_client is None:
-            self._initialize_dask()
+            if job.n_tasks < self.config.cores:
+                self._initialize_dask(n_workers=1)
+            else:
+                self._initialize_dask(self.n_workers)
 
         futures = self.submit_async(job, **kwargs)
 
@@ -331,24 +315,18 @@ class LocalSite(BaseSite):
         Returns:
             List of Dask futures for the submitted tasks
         """
+        job_file = job.save()
+
         if self._dask_client is None:
             self._initialize_dask()
 
-        job_file = job.save()
-        n_ranks = kwargs.get("n_ranks", 1)
+        n_ranks = kwargs.get("procs_per_job", 1)
 
-        output_dir = os.path.join(job.project_path, "jobs", "out", job.name)
-        active_dir = os.path.join(job.project_path, "jobs", "active")
-
-        if os.path.exists(output_dir):
-            for file in os.listdir(output_dir):
-                os.remove(os.path.join(output_dir, file))
-        if os.path.exists(active_dir):
-            for file in os.listdir(active_dir):
-                os.remove(os.path.join(active_dir, file))
-
-        os.makedirs(output_dir, exist_ok=True)
-        os.makedirs(active_dir, exist_ok=True)
+        stdout_dir = str(job._stdout_path)
+        if os.path.exists(stdout_dir):
+            for file in os.listdir(stdout_dir):
+                os.remove(os.path.join(stdout_dir, file))
+        os.makedirs(stdout_dir, exist_ok=True)
 
         # if not self._is_notebook:
         #     print("\n" * (self.n_workers + 2))
@@ -356,7 +334,7 @@ class LocalSite(BaseSite):
 
         futures = []
 
-        # Mesh first
+        # Mesh and size first
         future = self._dask_client.submit(
             run_task,
             job_file,
@@ -369,7 +347,7 @@ class LocalSite(BaseSite):
         )
         future.result()
 
-        # TODO: Verify success of mesh task before submitting other tasks
+        # TODO: Verify success of mesh and size before submitting other tasks
 
         # Loop tasks in reverse order for improved load balancing
         for i in range(job.n_tasks - 1, -1, -1):
@@ -382,8 +360,7 @@ class LocalSite(BaseSite):
                     self.env,
                     n_ranks=n_ranks,
                     n_threads=self.threads_per_worker,
-                    output_dir=output_dir,
-                    active_dir=active_dir,
+                    stdout_dir=stdout_dir,
                     retries=0,
                     priority=i,
                     actor=False,
@@ -441,7 +418,7 @@ class LocalSite(BaseSite):
         img = np.zeros(shape)
         for i in range(job.n_tasks):
             file = job.image_file(i + 1)
-            w = job.weights[i] ** 2
+            w = 1.0  # job.weights[i] ** 2
             with h5py.File(file, "r") as f:
                 im = np.reshape(f["image"][:], shape)
                 img += im * w / n_freq
@@ -514,310 +491,3 @@ class LocalSite(BaseSite):
             pass
         except ValueError:
             raise ValueError(f"Invalid process ID: {job_id}")
-
-    # def get_job_status(self, futures: Optional[List[Future]] = None) -> Dict:
-    #     """Get status of submitted jobs.
-
-    #     Args:
-    #         futures: Optional list of futures to check. If None, checks all futures.
-
-    #     Returns:
-    #         Dict containing job status information including:
-    #         - total_jobs: Total number of jobs
-    #         - completed: Number of completed jobs
-    #         - running: Number of running jobs
-    #         - failed: Number of failed jobs
-    #         - pending: Number of pending jobs
-    #     """
-    #     if futures is None:
-    #         futures = self._futures
-
-    #     if not futures:
-    #         return {"total_jobs": 0, "status": "no_jobs"}
-
-    #     status = {
-    #         "total_jobs": len(futures),
-    #         "completed": 0,
-    #         "running": 0,
-    #         "failed": 0,
-    #         "pending": 0
-    #     }
-
-    #     for future in futures:
-    #         if future.done():
-    #             if future.status == "finished":
-    #                 status["completed"] += 1
-    #             else:
-    #                 status["failed"] += 1
-    #         elif future.status == "pending":
-    #             status["pending"] += 1
-    #         else:
-    #             status["running"] += 1
-
-    #     return status
-
-    # def _print_worker_status(self):
-    #     """Update worker status display based on environment."""
-    #     if self._is_notebook:
-    #         self._print_worker_status_notebook()
-    #     else:
-    #         self._print_worker_status_terminal()
-
-    # def _get_theme_colors(self) -> dict:
-    #     """Detect the current theme and return appropriate colors.
-
-    #     Returns:
-    #         Dict containing color scheme for the current theme
-    #     """
-    #     if self._is_notebook:
-    #         try:
-    #             from IPython.display import display
-    #             import ipywidgets as widgets
-    #             from IPython.core.display import HTML
-
-    #             # Try to detect theme from Jupyter
-    #             try:
-    #                 from jupyterthemes import jtplot
-    #                 theme = jtplot.style().get('theme', 'default')
-    #             except:
-    #                 # Default to dark theme if we can't detect
-    #                 theme = 'dark'
-
-    #             if theme == 'dark':
-    #                 return {
-    #                     'bg': '#1e1e1e',
-    #                     'text': '#d4d4d4',
-    #                     'border': '#3c3c3c',
-    #                     'idle': '#6b6b6b',
-    #                     'active': '#4ec9b0',
-    #                     'header': '#9cdcfe'
-    #                 }
-    #             else:
-    #                 return {
-    #                     'bg': '#ffffff',
-    #                     'text': '#000000',
-    #                     'border': '#e0e0e0',
-    #                     'idle': '#666666',
-    #                     'active': '#007acc',
-    #                     'header': '#0000ff'
-    #                 }
-    #         except ImportError:
-    #             pass
-
-    #     return {
-    #         'bg': '#1e1e1e',
-    #         'text': '#d4d4d4',
-    #         'border': '#3c3c3c',
-    #         'idle': '#6b6b6b',
-    #         'active': '#4ec9b0',
-    #         'header': '#9cdcfe'
-    #     }
-
-    # def _print_worker_status_notebook(self):
-    #     """Update worker status display in Jupyter notebook."""
-    #     try:
-    #         from IPython.display import display
-    #         import ipywidgets as widgets
-
-    #         if self._status_display is None:
-    #             self._status_display = widgets.HTML()
-    #             display(self._status_display)
-
-    #         colors = self._get_theme_colors()
-
-    #         # Create a container for both worker and task status
-    #         status_html = f"""
-    #         <div style='
-    #             font-family: "JetBrains Mono", "Fira Code", monospace;
-    #             background-color: {colors['bg']};
-    #             color: {colors['text']};
-    #             padding: 10px;
-    #             border: 1px solid {colors['border']};
-    #             border-radius: 4px;
-    #             margin: 5px 0;
-    #             display: flex;
-    #             flex-direction: column;
-    #             gap: 10px;
-    #         '>
-    #             <div style='
-    #                 color: {colors['header']};
-    #                 font-weight: bold;
-    #                 border-bottom: 1px solid {colors['border']};
-    #                 padding-bottom: 5px;
-    #                 margin-bottom: 5px;
-    #             '>
-    #                 Dask Dashboard: <a href="http://localhost:{self._dashboard_port}" target="_blank" style="color: {colors['active']};">http://localhost:{self._dashboard_port}</a>
-    #             </div>
-    #             <div style='display: flex; gap: 20px;'>
-    #                 <div style='width: 300px;'>
-    #                     <div style='
-    #                         color: {colors['header']};
-    #                         font-weight: bold;
-    #                         margin-bottom: 3px;
-    #                         border-bottom: 1px solid {colors['border']};
-    #                         padding-bottom: 3px;
-    #                     '>Workers:</div>
-    #         """
-
-    #         worker_states = self._get_worker_states()
-
-    #         for i in range(self.n_workers):
-    #             worker_key = f"worker_{i}"
-    #             worker_info = worker_states.get(worker_key, {'status': 'idle', 'cores': None, 'memory': 0})
-    #             status_color = colors['active'] if 'running' in worker_info['status'] else colors['idle']
-    #             status_html += f"""
-    #             <div style='
-    #                 margin: 1px 0;
-    #                 padding: 1px 5px;
-    #                 line-height: 1.2;
-    #             '>
-    #                 <span style='color: {colors['text']};'>Worker {i} ({worker_info['cores']} cores):</span>
-    #                 <span style='color: {status_color};'>{worker_info['status']}</span>
-    #             </div>
-    #             """
-
-    #         status_html += "</div>"
-
-    #         # Add task status section
-    #         status_html += f"""
-    #                 <div style='width: 300px;'>
-    #                     <div style='
-    #                         color: {colors['header']};
-    #                         font-weight: bold;
-    #                         margin-bottom: 3px;
-    #                         border-bottom: 1px solid {colors['border']};
-    #                         padding-bottom: 3px;
-    #                     '>Tasks:</div>
-    #         """
-
-    #         # Get task states
-    #         task_states = self._get_task_states()
-
-    #         # Display task status
-    #         for task_id, task_info in task_states.items():
-    #             status_color = colors['active'] if 'Running' in task_info['status'] else colors['idle']
-    #             status_html += f"""
-    #             <div style='
-    #                 margin: 1px 0;
-    #                 padding: 1px 5px;
-    #                 line-height: 1.2;
-    #             '>
-    #                 <span style='color: {colors['text']};'>Task {task_id} ({task_info['frequency']} Hz):</span>
-    #                 <span style='color: {status_color};'>{task_info['status']}</span>
-    #             </div>
-    #             """
-
-    #         status_html += "</div></div></div>"
-    #         self._status_display.value = status_html
-    #     except ImportError:
-    #         # Fall back to terminal display if IPython widgets not available
-    #         self._is_notebook = False
-    #         self._print_worker_status_terminal()
-
-    # def _print_worker_status_terminal(self):
-    #     """Print current worker status in terminal-friendly format."""
-    #     colors = self._get_theme_colors()
-    #     # Move cursor up to overwrite previous status
-    #     print("\033[F" * (self.n_workers + 2), end="")
-    #     print(f"\033[38;2;156;220;254mWorkers:\033[0m", end="")  # Header in light blue
-
-    #     # Get current worker states from Dask
-    #     worker_states = self._get_worker_states()
-
-    #     for i in range(self.n_workers):
-    #         worker_key = f"worker_{i}"
-    #         status = worker_states.get(worker_key, "idle")
-    #         status_color = "\033[38;2;78;201;176m" if status != "idle" else "\033[38;2;107;107;107m"  # Active in teal, idle in gray
-    #         print(f"\n\r  {i}: {status_color}{status}\033[0m", end="")
-    #     print("\n", end="", flush=True)
-
-    # def _get_worker_states(self) -> Dict[str, str]:
-    #     """Get current state of all workers by polling Dask scheduler.
-
-    #     Returns:
-    #         Dict mapping worker keys to their current task status
-    #     """
-    #     if not self._dask_client:
-    #         return {f"worker_{i}": "idle" for i in range(self.n_workers)}
-
-    #     try:
-    #         scheduler_info = self._dask_client.scheduler_info()
-    #         workers = scheduler_info.get('workers', {})
-
-    #         # Initialize all workers as idle
-    #         worker_states = {}
-
-    #         for worker_addr, worker_info in workers.items():
-    #             try:
-    #                 worker_num = worker_info["name"]
-    #                 worker_key = f"worker_{worker_num}"
-    #                 task_counts = worker_info.get('metrics', {}).get('task_counts', {})
-    #                 executing = task_counts.get('executing', 0)
-    #                 memory = task_counts.get('memory', 0)
-    #                 constrained = task_counts.get('constrained', 0)
-    #                 nthreads = worker_info.get('nthreads', 8)
-    #                 if executing > 0:
-    #                     status = f"running - Task {executing}"
-    #                 else:
-    #                     status = "idle"
-
-    #                 worker_states[worker_key] = {
-    #                     'status': status,
-    #                     'cores': nthreads,
-    #                     'memory': worker_info.get('metrics', {}).get('memory', 0) / (1024*1024)  # Convert to MB
-    #                 }
-    #             except (ValueError, IndexError, KeyError):
-    #                 continue
-
-    #         return worker_states
-    #     except Exception as e:
-    #         logger.error(f"Error getting worker states: {str(e)}")
-    #         return {f"worker_{i}": "idle" for i in range(self.n_workers)}
-
-    # def _get_task_states(self) -> Dict[int, Dict]:
-    #     """Get current state of all tasks using task stream data.
-
-    #     Returns:
-    #         Dict mapping task IDs to their current status and info
-    #     """
-    #     if not self._dask_client or not hasattr(self, '_task_stream'):
-    #         return {}
-
-    #     try:
-    #         task_data = self._task_stream.data
-    #         print(task_data)
-    #         if task_data is None or len(task_data) == 0:
-    #             logger.debug("No task data available yet")
-    #             return {i: {'status': 'Pending', 'frequency': None, 'worker': '', 'key': future.key}
-    #                    for i, future in enumerate(self._futures)}
-
-    #         tasks = {}
-    #         for i, future in enumerate(self._futures):
-    #             task_key = future.key
-    #             task_info = [t for t in task_data if t['key'] == task_key]
-
-    #             if not task_info:
-    #                 status = "Pending"
-    #             else:
-    #                 latest = task_info[-1]
-    #                 if latest['action'] == 'compute':
-    #                     if 'stop' not in latest or latest['stop'] is None:
-    #                         worker = latest['worker']
-    #                         status = f"Running on Worker {worker}"
-    #                     else:
-    #                         duration = (latest['stop'] - latest['start']).total_seconds()
-    #                         status = f"Completed in {duration:.1f}s"
-    #                 else:
-    #                     status = f"Pending ({latest['action']})"
-
-    #             tasks[i] = {
-    #                 'status': status,
-    #                 'frequency': '5',  # TODO: Get actual frequency from job info
-    #                 'worker': task_info[-1]['worker'] if task_info else '',
-    #                 'key': task_key
-    #             }
-
-    #         return tasks
-    #     except Exception as e:
-    #         logger.error(f"Error getting task states: {str(e)}")
-    #         return {}

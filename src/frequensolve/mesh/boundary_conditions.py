@@ -33,7 +33,7 @@ class BoundaryCondition:
     pml_wavelengths: float = 2.0
     pml_exponent: float = 3.0
     pml_constant: float = 20.0
-    stretch_limit: float = 1.0
+    stretch_limit: float = 0.25
 
     @classmethod
     def from_dict(cls, data: Dict) -> "BoundaryCondition":

@@ -39,7 +39,11 @@ from frequensolve.orchestrator.config.stampede3 import (
 )
 from frequensolve.orchestrator.credentials import Credentials
 from frequensolve.orchestrator.pool import PoolInfo
-from frequensolve.orchestrator.sites.base import BaseSite, _wait_for_path
+from frequensolve.orchestrator.sites.base import (
+    BaseSite,
+    _check_if_notebook,
+    _wait_for_path,
+)
 from frequensolve.orchestrator.ssh import SSHClientClass, SSHProxy
 from frequensolve.seismic.record_database import RecordDatabase
 from frequensolve.simulation.imaging import RTMImagingJob
@@ -113,6 +117,7 @@ class Stampede3Site(BaseSite):
         self._FS_dir = self._get_FS_path()
 
         self.pool = PoolInfo()
+        self._is_notebook = _check_if_notebook()
 
         logger.info("Stampede3Site initialized with work_dir: %s", self._work_dir)
 
@@ -1189,11 +1194,12 @@ class Stampede3Site(BaseSite):
         self.put(Path(script_path), Path(remote_script))
         os.unlink(script_path)
 
-        file = job.save_for_remote(self.work_dir)
-        remote_job = ((self.work_dir / "jobs") / job.name).with_suffix(".json")
+        local_job, remote_job = job.save_for_remote(
+            self.__class__.__name__, self.work_dir
+        )
 
         logger.debug("Transferring job file to remote path: %s", remote_job)
-        self.put(Path(file), Path(remote_job))
+        self.put(Path(local_job), Path(remote_job))
         self.run_login(f"chmod 700 {remote_script}")
 
         return remote_script, remote_job
@@ -1219,11 +1225,12 @@ class Stampede3Site(BaseSite):
         self.put(Path(script_path), Path(remote_script))
         os.unlink(script_path)
 
-        file = job.save_for_remote(self.work_dir)
-        remote_job = ((self.work_dir / "jobs") / job.name).with_suffix(".json")
+        local_job, remote_job = job.save_for_remote(
+            self.__class__.__name__, self.work_dir
+        )
 
         logger.debug("Transferring job file to remote path: %s", remote_job)
-        self.put(Path(file), Path(remote_job))
+        self.put(Path(local_job), Path(remote_job))
         self.run_login(f"chmod 700 {remote_script}")
 
         return remote_script, remote_job

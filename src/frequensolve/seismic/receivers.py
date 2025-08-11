@@ -63,10 +63,8 @@ class ReceiverComponent:
 # ----------------------------------------------------------------------
 @register_class
 @dataclass(kw_only=True)
-class ReceiverDevice:
-    """Defines a single receiver.
-
-    This class represents a single receiver, which is a point in space where measurements are taken.
+class ReceiverDevice(ABC):
+    """Defines an abstract base class for a receiver device with multiple measurements (components).
 
     Attributes:
        name (str): String identifier for this receiver.
@@ -109,7 +107,18 @@ class ReceiverDevice:
 @register_class
 @dataclass(kw_only=True)
 class ReceiverFiber(ReceiverDevice):
-    """Defines a fiber receiver."""
+    """Defines a fiber receiver device (e.g. a DAS fiber) that integrates
+    response over a length.
+
+    The response is integrated over the gauge length by averaging over the
+    number of points per gauge (n_gauge).
+
+    Attributes:
+       L_gauge (float): Length of the gauge.
+       n_gauge (int): Number of points per guage
+       radius (Optional[float]): Radius of the fiber.
+       pitch (Optional[float]): Pitch of the fiber.
+    """
 
     L_gauge: float
     n_gauge: int
@@ -276,7 +285,7 @@ class CoordsFromFile(ReceiverCoords):
        dset (str):                Dataset name in file.
     """
 
-    path: Path
+    file: Path
     format: Literal["HDF5"]
     dset: Optional[str] = None
     _proj_path: Optional[Path] = None
@@ -284,25 +293,25 @@ class CoordsFromFile(ReceiverCoords):
 
     def __init__(
         self,
-        path: Union[str, Path],
+        file: Union[str, Path],
         format: Literal["HDF5"],
         dset: Optional[str] = None,
         **kwargs,
     ):
-        self.path = Path(path).resolve()
+        self.file = Path(file).resolve()
         self.format = format
         self.dset = dset
 
     @classmethod
     def from_dict(cls, data: Dict) -> "CoordsFromFile":
-        path = data["path"]
+        file = data["file"]
         format = data["format"]
         if format == "HDF5":
-            if ":" in path:
-                path, dset = path.split(":")
+            if ":" in file:
+                file, dset = file.split(":")
             else:
                 dset = "coords"
-        return cls(path=Path(path), format=format, dset=dset)
+        return cls(file=Path(file), format=format, dset=dset)
 
     @property
     def size(self) -> int:
@@ -312,7 +321,7 @@ class CoordsFromFile(ReceiverCoords):
            int: Number of receivers.
         """
         if self.format == "HDF5":
-            with h5py.File(self.path, "r") as f:
+            with h5py.File(self.file, "r") as f:
                 return f[self.dset].shape[0]
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
@@ -325,7 +334,7 @@ class CoordsFromFile(ReceiverCoords):
            Tuple[np.ndarray, np.ndarray]: Min and max coordinates.
         """
         if self.format == "HDF5":
-            with h5py.File(self.path, "r") as f:
+            with h5py.File(self.file, "r") as f:
                 coords = f[self.dset]
                 return np.min(coords, axis=0), np.max(coords, axis=0)
         else:
@@ -344,7 +353,7 @@ class CoordsFromFile(ReceiverCoords):
            np.ndarray: Coordinate array for requested receivers.
         """
         if self.format == "HDF5":
-            with h5py.File(self.path, "r") as f:
+            with h5py.File(self.file, "r") as f:
                 if indices is None:
                     return f[self.dset][:]
                 else:
@@ -353,17 +362,17 @@ class CoordsFromFile(ReceiverCoords):
             raise NotImplementedError(f"Format {self.format} not implemented")
 
     def __dict__(self) -> Dict:
-        rel_path = self.path.relative_to(self._proj_path)
+        rel_path = self.file.relative_to(self._proj_path)
 
         if self.format == "HDF5":
             if self.dset is None:
-                path = str(rel_path.with_suffix(".h5")) + ":coords"
+                file = str(rel_path.with_suffix(".h5")) + ":coords"
             else:
-                path = str(rel_path.with_suffix(".h5")) + ":" + self.dset
+                file = str(rel_path.with_suffix(".h5")) + ":" + self.dset
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
-        return {"_type": self.__class__.__name__, "path": path, "format": self.format}
+        return {"_type": self.__class__.__name__, "file": file, "format": self.format}
 
 
 @register_class
@@ -456,7 +465,6 @@ class CoordsArray(ReceiverCoords):
 
     Attributes:
        coords (Union[xr.DataArray, np.ndarray]): Coordinate array.
-       output_path (Optional[Union[str, Path]]): Path to save coordinates.
     """
 
     coordinates: Union[xr.DataArray, np.ndarray]
@@ -465,7 +473,7 @@ class CoordsArray(ReceiverCoords):
         if isinstance(self.coordinates, np.ndarray):
             if self.coordinates.ndim != 2:
                 raise ValueError(
-                    "Coordinates array must be 2D with shape (n_receivers, n_coordinates)"
+                    "Coordinates array must be 2D with shape (n_receivers, <simulation dimension>)"
                 )
             if self.coordinates.shape[1] == 2:
                 self.coordinates = xr.DataArray(
@@ -513,19 +521,19 @@ class CoordsArray(ReceiverCoords):
             else:
                 raise ValueError(f"Unknown coordinates file extension: {file_name}")
 
-        path = self._path / file_name
-        if not path.parent.exists():
-            path.parent.mkdir(parents=True)
+        file = self._path / file_name
+        if not file.parent.exists():
+            file.parent.mkdir(parents=True)
 
         if format == "HDF5":
-            with h5py.File(path, "w") as f:
+            with h5py.File(file, "w") as f:
                 dset = f.create_dataset(
                     "coords", data=(self.coordinates.values).astype(np.float64)
                 )
         else:
             raise NotImplementedError(f"Format {format} not implemented")
 
-        return CoordsFromFile(path=path, dset="coords", format=format)
+        return CoordsFromFile(file=file, dset="coords", format=format)
 
     def __dict__(self) -> Dict:
         return {
@@ -536,9 +544,7 @@ class CoordsArray(ReceiverCoords):
     @classmethod
     def from_dict(cls, data: Dict) -> "CoordsArray":
         coords = np.array(data["coords"])
-        return cls(
-            name=data["name"], coords=coords, output_path=data.get("output_path")
-        )
+        return cls(name=data["name"], coords=coords)
 
 
 # ----------------------------------------------------------------------
@@ -656,129 +662,3 @@ class ReceiverGroup:
     @property
     def _path(self) -> Path:
         return self._proj_path / self._rel_path
-
-
-# class ReceiverPlotter:
-#    """Class for plotting receiver groups and devices."""
-
-#    def plot_group(self,
-#                   group: ReceiverGroup,
-#                   ax: Optional[plt.Axes] = None,
-#                   projection: Optional[Literal['2d', '3d']] = None,
-#                   **kwargs) -> plt.Axes:
-#       """Plot receiver locations for a single group.
-
-#       Args:
-#          group: ReceiverGroup to plot.
-#          ax: Matplotlib axes to plot on. If None, a new figure will be created.
-#          projection: '2d' or '3d'. If None, will be inferred from coordinates.
-#          **kwargs: Additional keyword arguments to pass to the scatter function.
-
-#       Returns:
-#          Matplotlib axes containing the plot.
-#       """
-#       if ax is None:
-#          fig = plt.figure()
-#          if projection is None:
-#             projection = '3d' if group.coordinates.coordinates.shape[1] == 3 else '2d'
-#          if projection == '2d':
-#             ax = fig.add_subplot()
-#          else:
-#             ax = fig.add_subplot(projection='3d')
-
-#       coords = group.coordinates.coordinates
-#       if isinstance(coords, xr.DataArray):
-#          coords = coords.values
-
-#       if coords.shape[1] == 2:
-#          ax.scatter(coords[:,0], coords[:,1], **kwargs)
-#          ax.set_xlabel('X')
-#          ax.set_ylabel('Z')
-#       else:
-#          ax.scatter(coords[:,0], coords[:,1], coords[:,2], **kwargs)
-#          ax.set_xlabel('X')
-#          ax.set_ylabel('Y')
-#          ax.set_zlabel('Z')
-
-#       ax.set_title(f"Receiver Group: {group.name}")
-
-#       return ax
-
-#    def plot_groups(self,
-#                    groups: List[ReceiverGroup],
-#                    ax: Optional[plt.Axes] = None,
-#                    projection: Optional[Literal['2d', '3d']] = None,
-#                    **kwargs) -> plt.Axes:
-#       """Plot receiver locations for multiple groups.
-
-#       Args:
-#          groups: List of ReceiverGroups to plot.
-#          ax: Matplotlib axes to plot on. If None, a new figure will be created.
-#          projection: '2d' or '3d'. If None, will be inferred from coordinates.
-#          **kwargs: Additional keyword arguments to pass to the scatter function.
-
-#       Returns:
-#          Matplotlib axes containing the plot.
-#       """
-#       if ax is None:
-#          fig = plt.figure()
-#          if projection is None:
-#             projection = '3d' if groups[0].coordinates.coordinates.shape[1] == 3 else '2d'
-#          if projection == '2d':
-#             ax = fig.add_subplot()
-#          else:
-#             ax = fig.add_subplot(projection='3d')
-
-#       for group in groups:
-#          self.plot_group(group, ax=ax, **kwargs)
-
-#       ax.set_title("Receiver Groups")
-
-#       return ax
-
-#    def plot_device(self,
-#                    device: ReceiverDevice,
-#                    ax: Optional[plt.Axes] = None,
-#                    **kwargs) -> plt.Axes:
-#       """Plot a schematic of a receiver device.
-
-#       Args:
-#          device: ReceiverDevice to plot.
-#          ax: Matplotlib axes to plot on. If None, a new figure will be created.
-#          **kwargs: Additional keyword arguments to pass to the plotting functions.
-
-#       Returns:
-#          Matplotlib axes containing the plot.
-#       """
-#       if ax is None:
-#          fig, ax = plt.subplots()
-
-#       if isinstance(device, ReceiverNode):
-#          # Plot a point for a node receiver
-#          ax.scatter(0, 0, **kwargs)
-#       elif isinstance(device, ReceiverNodeArray):
-#          # Plot points for each node in the array
-#          for offset in device.offsets:
-#             ax.scatter(offset[0], offset[1], **kwargs)
-#       elif isinstance(device, ReceiverFiber):
-#          # Plot a line for a fiber
-#          x = [0, device.L_gauge]
-#          y = [0, 0]
-#          ax.plot(x, y, **kwargs)
-
-#          # Add points for each gauge
-#          dx = device.L_gauge / (device.n_gauge - 1)
-#          for i in range(device.n_gauge):
-#             ax.scatter(i*dx, 0, color='red', **kwargs)
-#       else:
-#          raise ValueError(f"Unknown receiver device type: {type(device)}")
-
-#       # Set title and labels
-#       ax.set_title(f"Receiver Device: {device.name}")
-#       ax.set_xlabel('X')
-#       ax.set_ylabel('Y')
-
-#       # Set equal aspect ratio
-#       ax.set_aspect('equal')
-
-#       return ax

@@ -15,7 +15,7 @@ import h5py
 import numpy as np
 from xarray import DataArray
 
-from frequensolve.seismic.shot_record import Record
+from frequensolve.seismic.shot_record import ShotRecord
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.sampling import UniformSweepSampling
 
@@ -76,18 +76,6 @@ class RecordDatabase:
             ),
             "f_map": f_map if len(f_map) > 1 else {},
         }
-
-        # records = []
-        # for file, comps in results["datasets"].items():
-        #     file = Path(file)
-        #     parts = file.name.split("_")
-
-        #     fbase = str(proj_path / file.parent / "_".join(parts[:-1])) + "_[ifreq].h5"
-
-        #     for comp in comps:
-        #         record = fbase + f":{comp}"
-        #         if record not in records:
-        #             records.append(record)
 
         records = results["files"]
         db = cls(metadata=meta, records=records, upscale=upscale)
@@ -209,6 +197,10 @@ class RecordDatabase:
 
                 # Get shape and dimensions
                 with h5py.File(self.records[0], "r") as f:
+                    if group not in f:
+                        raise KeyError(
+                            f"Group '{group}' not found in HDF5 {self.records[0]}"
+                        )
                     dset_shape = f[group].shape
                     dset_dtype = f[group].dtype
                     dims = f[group].attrs["dims"]
@@ -244,7 +236,7 @@ class RecordDatabase:
 
         self._consolidated = Path(new_file)
 
-    def read_h5(self, group: str) -> np.ndarray:
+    def read_h5(self, group: str) -> ShotRecord:
         import dask.array as da
 
         f = h5py.File(self._consolidated, "r")
@@ -257,11 +249,14 @@ class RecordDatabase:
         coords["complex"] = ["real", "imag"]
 
         dset = f[group]
+
         if dset.chunks is not None:
-            data = da.from_array(dset, chunks=dset.chunks)
+            chunks = dset.chunks
         else:
-            data = dset[:]
-        fd = DataArray(data, dims=dims[::-1], coords=coords)
+            # Use chunk size of 1 for shot and component dimensions
+            chunks = (dset.shape[0], 1, 1, *dset.shape[3:])
+        data = da.from_array(dset, chunks=chunks)
+        fd = ShotRecord(data, dims=dims[::-1], coords=coords)
         return fd
 
     def read_FD(self, group: str, component: str, shot: int, wavelet: Wavelet):
@@ -286,8 +281,14 @@ class RecordDatabase:
         return fd
 
     def read_TD(
-        self, group: str, component: str, shot: int, wavelet: Wavelet, upscale: int = 1
-    ) -> DataArray:
+        self,
+        group: str,
+        component: str,
+        shot: int,
+        wavelet: Wavelet,
+        upscale: int = 1,
+        T_max: Optional[float] = None,
+    ) -> ShotRecord:
         sampling = UniformSweepSampling(
             f_min=0.0,
             f_max=self.metadata["f_max"],
@@ -305,10 +306,17 @@ class RecordDatabase:
             if d in fd.coords:
                 coords[d] = fd.coords[d]
             else:
-                coords[d] = sampling.T_list[:-1]
+                coords[d] = sampling.T_list[:-1] - wavelet.center
 
-        td = DataArray(data=td, dims=dims, coords=coords)
-        # Fill out attributes for plotting
+        td = ShotRecord(data=td, dims=dims, coords=coords)
+        if T_max is not None:
+            td = td.sel(time=slice(None, T_max))
+
+        td.attrs["source_group"] = shot
+        td.attrs["receiver_group"] = group
+        # NOTE: this is a temporary hack since receivers read from project path
+        td.attrs["project_path"] = str(self.metadata["project"])
+        td.attrs["simulation"] = str(self.metadata["simulation"])
         td.attrs["long_name"] = f"{component}"
         for d in td.dims:
             td.coords[d].attrs["long_name"] = d.title()

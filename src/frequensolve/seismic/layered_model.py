@@ -216,6 +216,11 @@ class SimpleSurface:
 # ----------------------------------------------------------------------
 class Layer(ModelSubdomain):
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lower = None
+        self.upper = None
+
     def perturb(
         self,
         property: Union[str, List[str]],
@@ -276,6 +281,9 @@ class Layer(ModelSubdomain):
                 type="multiplicative",
             )
 
+    def set_property(self, key: str, value: Union[float, xr.DataArray]):
+        self._properties[key] = Property(data=value)
+
 
 # Helper class for LayeredModel
 @dataclass(kw_only=True, slots=True)
@@ -334,7 +342,6 @@ class LayeredModel(ModelBase):
     y_limits: Optional[List[float]] = None
     surfaces: NamedList = field(default_factory=NamedList)
     ordering: Literal["top_down", "bottom_up"] = "top_down"
-    _layer_to_surfs: List[LayerBounds] = field(default_factory=list)
     _last_added: str = "none"
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
@@ -529,9 +536,9 @@ class LayeredModel(ModelBase):
             # Build layer-to-surface mapping
             if len(self.surfaces) > 1:
                 if self.ordering == "top_down":
-                    self._layer_to_surfs[-1].lower = other
+                    self.layers[-1].lower = other
                 else:
-                    self._layer_to_surfs[-1].upper = other
+                    self.layers[-1].upper = other
             self._last_added = "surface"
 
         elif isinstance(other, Layer):
@@ -554,24 +561,16 @@ class LayeredModel(ModelBase):
                 else:
                     prev_lower = self.lower_surface(self.layers[-2])
 
-                self._layer_to_surfs.append(
-                    LayerBounds(
-                        upper=prev_lower,
-                        layer=other,
-                    )
-                )
+                self.layers[-1].upper = prev_lower
+                self.layers[-1].lower = other
             else:
                 if len(self.layers) == 1:
                     prev_upper = self.lower_surface()
                 else:
                     prev_upper = self.upper_surface(self.layers[-2])
 
-                self._layer_to_surfs.append(
-                    LayerBounds(
-                        lower=prev_upper,
-                        layer=other,
-                    )
-                )
+                self.layers[-1].lower = prev_upper
+                self.layers[-1].upper = other
             self._last_added = "layer"
         elif isinstance(other, ModelSubdomain):
             self.add_subdomain(other)
@@ -600,18 +599,18 @@ class LayeredModel(ModelBase):
             else:
                 return self.surfaces[-1]
 
-        for layer_bounds in self._layer_to_surfs:
-            if isinstance(layer, int):
-                if layer_bounds.layer.mesh_block_id == layer:
-                    return layer_bounds.upper
-            elif isinstance(layer, str):
-                if layer_bounds.layer.name == layer:
-                    return layer_bounds.upper
-            elif isinstance(layer, ModelSubdomain):
-                if layer_bounds.layer == layer:
-                    return layer_bounds.upper
-            else:
-                raise ValueError(f"Layer '{layer}' not found")
+        surf = None
+        if isinstance(layer, int):
+            surf = self.layers[layer].upper
+        elif isinstance(layer, str):
+            surf = self.layers[layer].upper
+        elif isinstance(layer, Layer):
+            surf = layer.upper
+        elif isinstance(layer, ModelSubdomain):
+            for layer in self.layers:
+                if layer.mesh_block_id == layer.mesh_block_id:
+                    return layer.upper
+        return surf
 
     def lower_surface(
         self, layer: Optional[Union[str, int, ModelSubdomain]] = None
@@ -636,22 +635,22 @@ class LayeredModel(ModelBase):
 
         # TODO: add flag and method to "complete" model like this
         if self.ordering == "top_down":
-            self._layer_to_surfs[-1].lower = self.lower_surface()
+            self.layers[-1].lower = self.lower_surface()
         else:
-            self._layer_to_surfs[-1].upper = self.upper_surface()
+            self.layers[-1].upper = self.upper_surface()
 
-        for layer_bounds in self._layer_to_surfs:
-            if isinstance(layer, int):
-                if layer_bounds.layer.mesh_block_id == layer:
-                    return layer_bounds.lower
-            elif isinstance(layer, str):
-                if layer_bounds.layer.name == layer:
-                    return layer_bounds.lower
-            elif isinstance(layer, ModelSubdomain):
-                if layer_bounds.layer == layer:
-                    return layer_bounds.lower
-            else:
-                raise ValueError(f"Layer '{layer}' not found")
+        surf = None
+        if isinstance(layer, int):
+            surf = self.layers[layer].lower
+        elif isinstance(layer, str):
+            surf = self.layers[layer].lower
+        elif isinstance(layer, Layer):
+            surf = layer.lower
+        elif isinstance(layer, ModelSubdomain):
+            for layer in self.layers:
+                if layer.mesh_block_id == layer.mesh_block_id:
+                    return layer.lower
+        return surf
 
     def get_1D_log(
         self,
@@ -775,7 +774,7 @@ class LayeredModel(ModelBase):
                         gridded[property].data[ix, mask[ix, :]] = prop.get(samp).data
         return gridded
 
-    def smooth(self, n: ArrayLike, sigma, **kwargs) -> xr.Dataset:
+    def smooth(self, n: ArrayLike, sigma, **kwargs):
         """Smooth the model."""
         from scipy.ndimage import gaussian_filter
 
@@ -802,9 +801,9 @@ class LayeredModel(ModelBase):
             raise NotImplementedError("3D plotting not implemented")
 
         if self.ordering == "top_down":
-            self._layer_to_surfs[-1].lower = self.lower_surface()
+            self.layers[-1].lower = self.lower_surface()
         else:
-            self._layer_to_surfs[-1].upper = self.upper_surface()
+            self.layers[-1].upper = self.upper_surface()
 
         # Process kwargs
         units = kwargs.pop("units", "km/s")

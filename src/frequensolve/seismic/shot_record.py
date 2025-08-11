@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 import h5py
 import numpy as np
+from xarray import DataArray
 
 from frequensolve.seismic.receivers import ReceiverFiber, ReceiverGroup
 from frequensolve.seismic.sources import SourceGroup
@@ -33,8 +34,7 @@ __all__ = [
 ]
 
 
-@dataclass
-class ShotRecord:
+class ShotRecord(DataArray):
     """Container for storing a shot record, including source, receiver info, and field data.
 
     A ShotRecord may represent frequency-domain (FD) or time-domain (TD) data, along with the
@@ -50,22 +50,40 @@ class ShotRecord:
        data (np.ndarray): The raw data array, shape depends on FD or TD usage.
     """
 
-    type: str
-    number: int
-    sampling: Sampling
-    source_group: SourceGroup
-    receiver_group: ReceiverGroup
-    field: str
-    data: np.ndarray
+    __slots__ = ()
 
-    def write_segy(
-        self, fname: str, units_in: str = "km", units_out: str = "m", **kwargs
-    ):
+    @property
+    def _source_group(self) -> SourceGroup:
+        with open(self.attrs["simulation"], "r") as f:
+            sim = json.load(f)
+        shot = self.attrs["source_group"]
+        sgroup = sim["Acquisition"]["source_groups"][shot - 1]
+        return SourceGroup.from_dict(sgroup)
+
+    @property
+    def _receiver_group(self) -> ReceiverGroup:
+        with open(self.attrs["simulation"], "r") as f:
+            sim = json.load(f)
+
+        # TODO: this is a hack since receivers read from project path
+        cwd = os.getcwd()
+        os.chdir(self.attrs["project_path"])
+        group = self.attrs["receiver_group"]
+        for rgroup in sim["Acquisition"]["receiver_groups"]:
+            if rgroup["name"] == group:
+                break
+        else:
+            raise ValueError(f"Receiver group {group} not found in simulation.")
+        rgrp = ReceiverGroup.from_dict(rgroup)
+        os.chdir(cwd)
+        return rgrp
+
+    def to_segy(self, file: str, units_in: str = "km", units_out: str = "m", **kwargs):
         """
-        Writes time-domain field as SEGY file
+        Writes DataArray as SEGY file
 
         Args:
-            fname: Output filename
+            file: Output filename
             units_in: Input coordinate units (default: "km")
             units_out: Output coordinate units (default: "m")
             **kwargs: Additional keyword arguments
@@ -96,12 +114,16 @@ class ShotRecord:
             "u_x": 14,
         }
 
-        Tf = kwargs.get("Tf", None)
+        T_max = kwargs.get("T_max", None)
         preview = kwargs.get("preview", False)
-        nTf, Tf = self.sampling.cutoff(Tf)
+        if T_max is not None:
+            td = self.sel(time=slice(None, T_max))
+        else:
+            td = self
+        n_samples = td.shape[0]
 
-        rgroup = self.receiver_group
-        source = self.source_group.source
+        rgroup = self._receiver_group
+        source = self._source_group.source
 
         # Initialize the pint unit registry
         ureg = pint.UnitRegistry()
@@ -120,12 +142,11 @@ class ShotRecord:
         scale = iunit.to(ounit).magnitude
 
         # Get sampling parameters
-        n_samples = nTf
         n_traces = rgroup.size
-        t0 = self.sampling.t0
-        dt = self.sampling.dT  # Seconds
+        t0 = td.coords["time"].values[0]
+        dt = td.coords["time"].values[1] - td.coords["time"].values[0]  # Seconds
         sample_interval = int(dt * 1e6)  # Microseconds
-        time_samples = (t0 + np.arange(n_samples) * dt) * 1000  # Milliseconds
+        time_samples = td.coords["time"].values * 1000
 
         now = datetime.datetime.now()
         year = now.year
@@ -145,7 +166,7 @@ class ShotRecord:
         spec.tracecount = n_traces
 
         # Create a SEGY file and write data
-        with segyio.create(fname, spec) as f:
+        with segyio.create(file, spec) as f:
             f.bin[segyio.BinField.MeasurementSystem] = (
                 coordinate_units  # 1 for meters, 2 for feet
             )
@@ -164,6 +185,7 @@ class ShotRecord:
                         segyio.TraceField.TRACE_SAMPLE_COUNT: n_samples,
                         segyio.TraceField.TRACE_SAMPLE_INTERVAL: sample_interval,
                         segyio.TraceField.CoordinateUnits: coordinates["length"],
+                        segyio.TraceField.DelayRecordingTime: int(t0 * 1000),
                         # Source
                         segyio.TraceField.SourceX: source_x,
                         segyio.TraceField.SourceY: 0,
@@ -181,13 +203,13 @@ class ShotRecord:
                     }
                 )
                 f.trace[itrace] = (
-                    self.data[:n_samples, itrace].copy().astype(np.float32)
+                    td.sel(receiver=(itrace + 1)).data.copy().astype(np.float32)
                 )
 
         if preview:
-            with segyio.open(fname, mode="r", strict=False) as sgy:
+            with segyio.open(file, mode="r", strict=False) as sgy:
                 print(f"\nSEGY File Contents:")
-                print(f"File size: {os.path.getsize(fname) / 1024:.1f} KB")
+                print(f"File size: {os.path.getsize(file) / 1024:.1f} KB")
                 print(f"Number of traces: {sgy.tracecount}")
                 print(f"Samples per trace: {sgy.samples}")
                 print(f"Sample interval: {sgy.bin[segyio.BinField.Interval]} μs")
@@ -195,141 +217,142 @@ class ShotRecord:
                     f"Measurement system: {'meters' if sgy.bin[segyio.BinField.MeasurementSystem] == 1 else 'feet'}"
                 )
                 print(f"\nFirst trace:")
+                itrace = 3
                 print(
                     f"Source coordinates (x,y,z): "
-                    f"({sgy.header[0][segyio.TraceField.SourceX]},"
-                    f" {sgy.header[0][segyio.TraceField.SourceY]},"
-                    f" {sgy.header[0][segyio.TraceField.SourceDepth]})"
+                    f"({sgy.header[itrace][segyio.TraceField.SourceX]},"
+                    f" {sgy.header[itrace][segyio.TraceField.SourceY]},"
+                    f" {sgy.header[itrace][segyio.TraceField.SourceDepth]})"
                 )
                 print(
                     f"Receiver coordinates (x,y,z): "
-                    f"({sgy.header[0][segyio.TraceField.GroupX]},"
-                    f" {sgy.header[0][segyio.TraceField.GroupY]},"
-                    f" {sgy.header[0][segyio.TraceField.ReceiverGroupElevation]})"
+                    f"({sgy.header[itrace][segyio.TraceField.GroupX]},"
+                    f" {sgy.header[itrace][segyio.TraceField.GroupY]},"
+                    f" {sgy.header[itrace][segyio.TraceField.ReceiverGroupElevation]})"
                 )
                 print(
                     f"Data min/max: {sgy.trace[0].min():.2e} / {sgy.trace[0].max():.2e}"
                 )
 
-    def write_segy_TGS(
-        self, fname: str, units_in: str = "km", units_out: str = "m", **kwargs
-    ):
-        """Write a time-domain shot to a SEGY file.
+    # def write_segy_TGS(
+    #     self, file: str, units_in: str = "km", units_out: str = "m", **kwargs
+    # ):
+    #     """Write a time-domain shot to a SEGY file.
 
-        This version uses TGS's SEGY library that may be convenient for the cloud
-        but is lacking documentation and is still under development.
+    #     This version uses TGS's SEGY library that may be convenient for the cloud
+    #     but is lacking documentation and is still under development.
 
-        Args:
-           fname (str): Output SEGY file name.
-           units_in (str): Units of the input coordinates (defaults to "km").
-           units_out (str): Units for the output coordinates (defaults to "m"). Must be 'm' or 'ft'.
-           kwargs (dict): Additional options, such as 'Tf' for cutoff time.
+    #     Args:
+    #        fname (str): Output SEGY file name.
+    #        units_in (str): Units of the input coordinates (defaults to "km").
+    #        units_out (str): Units for the output coordinates (defaults to "m"). Must be 'm' or 'ft'.
+    #        kwargs (dict): Additional options, such as 'Tf' for cutoff time.
 
-        Raises:
-           AssertionError: If shot type is not "TD".
-           ValueError: If units_out is not "m" or "ft".
-        """
-        import datetime
-        from pathlib import Path
+    #     Raises:
+    #        AssertionError: If shot type is not "TD".
+    #        ValueError: If units_out is not "m" or "ft".
+    #     """
+    #     import datetime
+    #     from pathlib import Path
 
-        import pint
-        from segy import SegyFile
-        from segy.factory import SegyFactory
-        from segy.standards import get_segy_standard
+    #     import pint
+    #     from segy import SegyFile
+    #     from segy.factory import SegyFactory
+    #     from segy.standards import get_segy_standard
 
-        # Ensure correct shot type
-        assert self.type == "TD", "SEGY output is only valid for time-domain (TD) data."
+    #     # Ensure correct shot type
+    #     assert self.type == "TD", "SEGY output is only valid for time-domain (TD) data."
 
-        # Unit conversion checks
-        ureg = pint.UnitRegistry()
-        if units_out.lower() not in ["m", "ft"]:
-            raise ValueError("units_out must be 'm' or 'ft' (meters or feet).")
-        iunit = ureg(units_in)
-        ounit = ureg.meter if units_out.lower() == "m" else ureg.foot
-        scale = iunit.to(ounit).magnitude
+    #     # Unit conversion checks
+    #     ureg = pint.UnitRegistry()
+    #     if units_out.lower() not in ["m", "ft"]:
+    #         raise ValueError("units_out must be 'm' or 'ft' (meters or feet).")
+    #     iunit = ureg(units_in)
+    #     ounit = ureg.meter if units_out.lower() == "m" else ureg.foot
+    #     scale = iunit.to(ounit).magnitude
 
-        # Basic geometry and dimension info
-        group = self.receiver_group
-        source = self.source
-        dim = len(source.coordinates)
+    #     # Basic geometry and dimension info
+    #     group = self.receiver_group
+    #     source = self.source
+    #     dim = len(source.coordinates)
 
-        # Optional cutoff time
-        Tf = kwargs.get("Tf", None)
-        nTf, Tf = self.sampling.cutoff(Tf)  # number of time samples after cutoff
+    #     # Optional cutoff time
+    #     Tf = kwargs.get("Tf", None)
+    #     nTf, Tf = self.sampling.cutoff(Tf)  # number of time samples after cutoff
 
-        n_traces = group.size
-        n_samples = nTf
-        interval = int(self.sampling.dT * 1e6)  # sample interval in microseconds
-        trace_datetime = datetime.datetime.now()
+    #     n_traces = group.size
+    #     n_samples = nTf
+    #     interval = int(self.sampling.dT * 1e6)  # sample interval in microseconds
+    #     trace_datetime = datetime.datetime.now()
 
-        print(interval, n_samples, n_traces)
+    #     print(interval, n_samples, n_traces)
 
-        # Build SEG-Y config
-        config = {
-            "spec": get_segy_standard(1.0),
-            "samples_per_trace": n_samples,
-            "sample_interval": interval,
-        }
+    #     # Build SEG-Y config
+    #     config = {
+    #         "spec": get_segy_standard(1.0),
+    #         "samples_per_trace": n_samples,
+    #         "sample_interval": interval,
+    #     }
 
-        factory = SegyFactory(**config)
-        txt = factory.create_textual_header()
-        bin_ = factory.create_binary_header()
+    #     factory = SegyFactory(**config)
+    #     txt = factory.create_textual_header()
+    #     bin_ = factory.create_binary_header()
 
-        # # Update binary header schema
-        # factory.binary_header_schema.trace_sorting_code = 5  # Common source point
-        # factory.binary_header_schema.measurement_system = 1 if units_out.lower() == "m" else 2  # 1 = meters, 2 = feet
+    #     # # Update binary header schema
+    #     # factory.binary_header_schema.trace_sorting_code = 5  # Common source point
+    #     # factory.binary_header_schema.measurement_system = 1 if units_out.lower() == "m" else 2  # 1 = meters, 2 = feet
 
-        # Recreate binary header with updated schema
-        bin_ = factory.create_binary_header()
+    #     # Recreate binary header with updated schema
+    #     bin_ = factory.create_binary_header()
 
-        headers = factory.create_trace_header_template(size=n_traces)
-        samples = factory.create_trace_sample_template(size=n_traces)
+    #     headers = factory.create_trace_header_template(size=n_traces)
+    #     samples = factory.create_trace_sample_template(size=n_traces)
 
-        # Populate headers and data
-        for itr in range(n_traces):
-            headers[itr]["trace_seq_num_reel"] = itr + 1
-            headers[itr]["inline"] = itr + 1
-            headers[itr]["crossline"] = 1
+    #     # Populate headers and data
+    #     for itr in range(n_traces):
+    #         headers[itr]["trace_seq_num_reel"] = itr + 1
+    #         headers[itr]["inline"] = itr + 1
+    #         headers[itr]["crossline"] = 1
 
-            # Source position
-            headers[itr]["source_coord_x"] = int(source.coordinates[0] * scale)
-            if dim == 2:
-                headers[itr]["source_coord_y"] = 0
-            else:
-                headers[itr]["source_coord_y"] = int(source.coordinates[1] * scale)
-            headers[itr]["source_surface_elevation"] = int(
-                -source.coordinates[-1] * scale
-            )
+    #         # Source position
+    #         headers[itr]["source_coord_x"] = int(source.coordinates[0] * scale)
+    #         if dim == 2:
+    #             headers[itr]["source_coord_y"] = 0
+    #         else:
+    #             headers[itr]["source_coord_y"] = int(source.coordinates[1] * scale)
+    #         headers[itr]["source_surface_elevation"] = int(
+    #             -source.coordinates[-1] * scale
+    #         )
 
-            # Receiver position
-            headers[itr]["group_coord_x"] = int(group.coordinates[itr, 0] * scale)
-            if dim == 2:
-                headers[itr]["group_coord_y"] = 0
-            else:
-                headers[itr]["group_coord_y"] = int(group.coordinates[itr, 1] * scale)
-            headers[itr]["receiver_group_elevation"] = int(
-                -group.coordinates[itr, -1] * scale
-            )
+    #         # Receiver position
+    #         headers[itr]["group_coord_x"] = int(group.coordinates[itr, 0] * scale)
+    #         if dim == 2:
+    #             headers[itr]["group_coord_y"] = 0
+    #         else:
+    #             headers[itr]["group_coord_y"] = int(group.coordinates[itr, 1] * scale)
+    #         headers[itr]["receiver_group_elevation"] = int(
+    #             -group.coordinates[itr, -1] * scale
+    #         )
 
-            # Trace data (slice out the first n_samples from each trace)
-            samples[itr] = self.data[:n_samples, itr].copy()
+    #         # Trace data (slice out the first n_samples from each trace)
+    #         samples[itr] = self.data[:n_samples, itr].copy()
 
-        traces = factory.create_traces(samples=samples, headers=headers)
+    #     traces = factory.create_traces(samples=samples, headers=headers)
 
-        # Write the file
-        with Path(fname).open(mode="wb") as f:
-            f.write(txt)
-            f.write(bin_)
-            f.write(traces)
+    #     # Write the file
+    #     with Path(fname).open(mode="wb") as f:
+    #         f.write(txt)
+    #         f.write(bin_)
+    #         f.write(traces)
 
-        # sgy = SegyFile(fname)
-        # sgy.binary_header.to_dataframe()
+    #     # sgy = SegyFile(fname)
+    #     # sgy.binary_header.to_dataframe()
 
-        # # print(f"file size: {sgy.file_size / 1024**3:0.2f} GiB")
-        # # print(f"num traces: {sgy.num_traces:,}")
-        # # print(f"sample rate: {sgy.sample_interval}")
-        # # print(f"num samples: {sgy.samples_per_trace}")
-        # # print(f"sample labels: {sgy.sample_labels // 1000}")
+    #     # # print(f"file size: {sgy.file_size / 1024**3:0.2f} GiB")
+    #     # # print(f"num traces: {sgy.num_traces:,}")
+    #     # # print(f"sample rate: {sgy.sample_interval}")
+    #     # # print(f"num samples: {sgy.samples_per_trace}")
+    #     # # print(f"sample labels: {sgy.sample_labels // 1000}")
 
 
 @dataclass

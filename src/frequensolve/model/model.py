@@ -10,6 +10,7 @@ from numpy.typing import ArrayLike
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.property import Property
 from frequensolve.util.class_registry import class_registry, register_class
+from frequensolve.util.data_file import save_data_if_new
 from frequensolve.util.named_list import NamedList
 
 __all__ = ["ModelSubdomain", "ModelBase"]
@@ -46,23 +47,18 @@ class ModelSubdomain:
         self.name = name
         self.frame = frame
         self._properties = {}
-        if xarr is not None:
-            for key, val in properties.items():
-                if isinstance(val, str) or isinstance(val, Path):
-                    split = str(val).split("|")
-                    if len(split) == 2:
-                        path, scale = split
-                        self._properties[key] = Property(
-                            data=path, xarr=xarr, scale=float(scale)
-                        )
-                    else:
-                        self._properties[key] = Property(data=val, xarr=xarr)
+        for key, val in properties.items():
+            if isinstance(val, str) or isinstance(val, Path):
+                split = str(val).split("|")
+                if len(split) == 2:
+                    path, scale = split
+                    self._properties[key] = Property(
+                        data=path, xarr=xarr, scale=float(scale)
+                    )
                 else:
-                    self._properties[key] = Property(data=val)
-        else:
-            self._properties = {
-                key: Property(data=val) for key, val in properties.items()
-            }
+                    self._properties[key] = Property(data=val, xarr=xarr)
+            else:
+                self._properties[key] = Property(data=val)
 
     def set_property(self, key: str, value: Union[float, xr.DataArray]):
         self._properties[key] = Property(data=value)
@@ -102,10 +98,15 @@ class ModelSubdomain:
                     dims = sorted(orig_dims)
                     file = self._path / (f"layer_{self.mesh_block_id}_{key}.bin")
                     file.parent.mkdir(parents=True, exist_ok=True)
+
+                    # Transpose to match solver convention
                     self.properties[key].darr = self.properties[key].darr.transpose(
                         *dims[::-1]
                     )
-                    self.properties[key].write(file)
+
+                    file = save_data_if_new(self.properties[key].darr, file)
+
+                    # Un-transpose
                     self.properties[key].darr = self.properties[key].darr.transpose(
                         *orig_dims
                     )

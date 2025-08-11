@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-__all__ = ["BaseSite", "SiteStatus"]
+__all__ = ["BaseSite", "SiteStatus", "_check_if_notebook"]
 
 
 def _wait_for_path(

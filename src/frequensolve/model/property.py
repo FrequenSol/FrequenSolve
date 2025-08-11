@@ -152,7 +152,7 @@ class Property:
             self.darr = _extend_single_coords(self.darr)
 
         if scale != 1.0:
-            self.darr.values = self.darr.values / scale
+            self.darr.values = self.darr.values * scale
 
     @property
     def is_constant(self) -> bool:
@@ -261,6 +261,8 @@ class Property:
 
         if file.suffix == ".bin":
             return Property._bin_reader
+        if file.suffix == ".sgy" or file.suffix == ".segy":
+            return Property._segy_reader
         elif file.suffix == ".h5":
             return Property._h5_reader
         elif file.suffix == ".zarr":
@@ -307,6 +309,7 @@ class Property:
                 coords = {dim: f["coords"][dim][()] for dim in dims}
             return xr.DataArray(f[dset], coords=coords, dims=dims)
 
+    @staticmethod
     def _netcdf_reader(file: Path, **kwargs) -> xr.DataArray:
         """Read a netcdf file."""
         xarr = kwargs.pop("xarr", None)
@@ -317,6 +320,36 @@ class Property:
             return da.interp(coords=xarr.coords)
         else:
             return da
+
+    @staticmethod
+    def _segy_reader(file: Path, **kwargs) -> xr.DataArray:
+        """Read a SEGY file."""
+        import segyio
+
+        with segyio.open(file, mode="r", strict=False) as sgy:
+
+            # TODO: Improve how L is defined (ideally it would be defined in the segy, but it's often not)
+            scale = kwargs.get("scale", 1.0)
+            L = kwargs.get("L", 4.5)
+
+            dims = ["x", "z"]
+            coords = {}
+            nx = sgy.tracecount
+            nz = len(sgy.samples)
+            coords["z"] = sgy.samples / 1000.0
+            coords["z"] -= coords["z"][0]
+            coords["x"] = np.linspace(0, L, nx)
+            # for i in range(sgy.tracecount):
+            #     coords["x"][i] = sgy.bin[segyio.BinField.SourceX]
+
+            da = xr.DataArray(dims=dims, coords=coords, data=np.zeros((nx, nz)))
+            for i in range(sgy.tracecount):
+                data = np.array(sgy.trace[i].data[:], dtype=np.float32)
+                da.values[i, :] = data * scale
+
+        dims = sorted(da.dims)
+        da = da.transpose(*dims)
+        return da
 
     @staticmethod
     def _zarr_reader(file: Path, **kwargs) -> xr.DataArray:

@@ -99,6 +99,8 @@ class RTMImagingJob(SimulationJob):
         keep_adjoint: bool = False,
         save_path: Optional[Union[str, Path]] = None,
         reassemble_adjoint: bool = False,
+        overwrite: bool = True,
+        max_versions: int = 5,
         **kwargs,
     ) -> None:
         simulation.save()
@@ -107,13 +109,15 @@ class RTMImagingJob(SimulationJob):
             simulation=simulation,
             f_list=f_list,
             workflow="RTM",
+            overwrite=overwrite,
+            max_versions=max_versions,
         )
 
         # This is a simple way to ensure that recevier paths are correct
         sim_file = simulation._file
         with open(sim_file, "r") as f:
             sim_data = json.load(f)
-        f_sim = simulation.project_path / sim_data["Outputs"]["receivers"]["path"]
+        f_sim = self._result_path / sim_data["Outputs"]["receivers"]["path"]
 
         self.data_path = Path(data_path)
         if not self.data_path.exists():
@@ -122,9 +126,7 @@ class RTMImagingJob(SimulationJob):
         if save_path is not None:
             self.save_path = Path(save_path).resolve()
         else:
-            self.save_path = (
-                simulation.project_path / "outputs" / simulation.name / "imaging"
-            )
+            self.save_path = self._result_path / "imaging"
         if not self.save_path.exists():
             self.save_path.mkdir(parents=True, exist_ok=True)
 
