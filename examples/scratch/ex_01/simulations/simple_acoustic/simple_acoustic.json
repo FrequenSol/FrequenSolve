@@ -1,0 +1,193 @@
+{
+   "_type": "SeismicSimulation",
+   "name": "simple_acoustic",
+   "physics": "acoustic",
+   "dimension": 2,
+   "project_path": "/Users/sambadger/Projects/FrequenSol/FrequenSolve/examples/scratch/ex_01",
+   "Model": {
+      "_type": "LayeredModel",
+      "name": "model",
+      "dimension": 2,
+      "subdomains": [
+         {
+            "_type": "ConstantLayer",
+            "mesh_block_id": 1,
+            "name": "layer_1",
+            "frame": "physical",
+            "properties": {
+               "Vp": 1.0,
+               "Qp": 150.0,
+               "Rho": 1.0
+            }
+         },
+         {
+            "_type": "ConstantLayer",
+            "mesh_block_id": 2,
+            "name": "layer_2",
+            "frame": "physical",
+            "properties": {
+               "Vp": 2.0,
+               "Rho": 1.0
+            }
+         }
+      ],
+      "x_limits": [
+         0.0,
+         1.0
+      ],
+      "ordering": "top_down",
+      "surfaces": [
+         {
+            "_type": "ConstantSurface",
+            "name": "top",
+            "z_phys": 0.0,
+            "z_ref": 0.0
+         },
+         {
+            "_type": "ConstantSurface",
+            "name": "interface",
+            "z_phys": 0.25,
+            "z_ref": 0.25
+         },
+         {
+            "_type": "ConstantSurface",
+            "name": "bottom",
+            "z_phys": 0.5,
+            "z_ref": 0.5
+         }
+      ]
+   },
+   "Mesh": {
+      "adapt": {
+         "min_epw": 1.0,
+         "adapt_sources": 2,
+         "f_low": 3.0,
+         "f_med": 6.0
+      },
+      "generator": {
+         "_type": "HexMeshGenerator",
+         "path": "simulations/simple_acoustic",
+         "n": [
+            4,
+            4
+         ],
+         "l_bound": [
+            0.0,
+            0.0
+         ],
+         "u_bound": [
+            1.0,
+            0.5
+         ]
+      }
+   },
+   "BCs": {
+      "label_type": "geometric",
+      "boundary_conditions": [
+         {
+            "name": "free_surface",
+            "kind": "neumann",
+            "boundaries": [
+               "z_min"
+            ]
+         },
+         {
+            "name": "pml",
+            "kind": "pml",
+            "boundaries": [
+               "x_min",
+               "x_max",
+               "z_max"
+            ],
+            "pml_wavelengths": 1.5,
+            "pml_exponent": 3.0,
+            "pml_constant": 20.0,
+            "stretch_limit": 0.25
+         }
+      ]
+   },
+   "Solver": {
+      "solve_on": "final",
+      "max_iter": 300,
+      "tolerance": 0.0001,
+      "grids": 4,
+      "hp_switch": 4,
+      "refinement_kind": "adapt_wavespeed",
+      "refinement_flags": []
+   },
+   "Discretization": {
+      "method": "DPG",
+      "order": 6,
+      "DPG_alpha": 1.0,
+      "DPG_enrich": 0,
+      "DPG_penalty": 100.0
+   },
+   "Outputs": {
+      "receivers": {
+         "_type": "ReceiverOutput",
+         "path": "receivers"
+      }
+   },
+   "UserParameters": {},
+   "Acquisition": {
+      "source_groups": [
+         {
+            "source": {
+               "_type": "PointSource",
+               "name": "source_0",
+               "kind": "scalar",
+               "frame": "reference",
+               "coordinates": [
+                  0.5,
+                  0.0
+               ]
+            }
+         }
+      ],
+      "receiver_groups": [
+         {
+            "name": "surface",
+            "device": {
+               "_type": "ReceiverNode",
+               "name": "hydrophone",
+               "components": [
+                  {
+                     "name": "p",
+                     "field": "pressure"
+                  }
+               ]
+            },
+            "frame": "reference",
+            "coordinates": {
+               "_type": "CoordsFromFile",
+               "file": "simulations/simple_acoustic/surface/coords.h5:coords",
+               "format": "HDF5"
+            }
+         },
+         {
+            "name": "well",
+            "device": {
+               "_type": "ReceiverNode",
+               "name": "geophone",
+               "components": [
+                  {
+                     "name": "v_z",
+                     "field": "velocity",
+                     "direction": [
+                        0.0,
+                        1.0
+                     ]
+                  }
+               ]
+            },
+            "frame": "reference",
+            "coordinates": {
+               "_type": "CoordsFromFile",
+               "file": "simulations/simple_acoustic/well/coords.h5:coords",
+               "format": "HDF5"
+            }
+         }
+      ]
+   },
+   "f0": 10.0
+}

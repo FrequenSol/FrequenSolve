@@ -112,7 +112,7 @@ class AWSSite(BaseSite):
         self.config = config
         self.batch_client = session.client("batch", region_name=self.config.region)
         self.s3_client = session.client("s3", region_name=self.config.region)
-        self._validate_config()
+        # self._validate_config()
 
     def _validate_config(self):
         """Validate AWS Batch configuration."""
@@ -120,8 +120,8 @@ class AWSSite(BaseSite):
             print("=== AWS Credentials and Access Test ===")
             self._check_credentials()
             self._check_profile()
-            self._test_aws_access()
-            self._list_job_definitions()
+            # self._test_aws_access()
+            # self._list_job_definitions()
 
             print("\n=== Configuration Validation ===")
 
