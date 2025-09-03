@@ -66,6 +66,8 @@ n_workers=$((n_procs / procs_per_task))
 
 start_time=$(date +%s)
 
+$executable -j $input_file -i 0
+
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
    echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file -i $i"
