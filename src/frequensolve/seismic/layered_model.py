@@ -1,6 +1,7 @@
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Set, Tuple, Union
 
 import numpy as np
 import xarray as xr
@@ -80,7 +81,6 @@ class SimpleSurface:
             type = "ConstantSurface"
             z_phys = self.z_phys.get()
         else:
-
             type = "GridSurface"
             file = self._path / (self.name + ".bin")
 
@@ -141,7 +141,7 @@ class SimpleSurface:
         nu: float = 1.0,
         seed: Optional[int] = None,
     ) -> None:
-        """Perturb the dataset by a Von Karmanstochastic field.
+        """Perturb the dataset by a von Karman stochastic field.
 
         std (float):
            Standard deviation of the perturbation
@@ -342,10 +342,12 @@ class LayeredModel(ModelBase):
     y_limits: Optional[List[float]] = None
     surfaces: NamedList = field(default_factory=NamedList)
     ordering: Literal["top_down", "bottom_up"] = "top_down"
+
     _last_added: str = "none"
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
-    _names: List[str] = field(default_factory=list)
+    _surface_names: Set[str] = field(default_factory=set)
+    _layer_names: Set[str] = field(default_factory=set)
 
     def add_layer(
         self,
@@ -370,6 +372,10 @@ class LayeredModel(ModelBase):
               Xarray with final shape of the layer (required for reading file formats
               where grid is not stored with data)
         """
+
+        name = self._get_unique_name(name, self._layer_names)
+        self._layer_names.add(name)
+
         layer = Layer(
             name=name,
             mesh_block_id=mesh_block_id,
@@ -382,7 +388,7 @@ class LayeredModel(ModelBase):
     def add_surface(
         self,
         z: Union[float, str, Path, xr.DataArray],
-        name: str = "surface",
+        name: Optional[str] = None,
         z_ref: Optional[float] = None,
         xarr: Optional[xr.DataArray] = None,
         scale: float = 1.0,
@@ -393,7 +399,7 @@ class LayeredModel(ModelBase):
            z (float, str, Path, xr.DataArray):
               Coordinates of the surface. Can be defined as a float (constant surface),
               via a file, or as an xr.DataArray (gridded surface).
-           name (str):
+           name (str, optional):
               Name of the surface.
            z_ref (float):
               Reference z-coordinate of the surface.
@@ -402,6 +408,10 @@ class LayeredModel(ModelBase):
         """
 
         interface = len(self.surfaces) == 0
+
+        name = self._get_unique_name(name, self._surface_names)
+        self._surface_names.add(name)
+
         surface = SimpleSurface(
             name=name,
             interface=interface,
@@ -916,9 +926,10 @@ class LayeredModel(ModelBase):
         zL = self.z_limits[1] - self.z_limits[0]
         L = max(xL, zL)
 
-        ax.set_xlim([self.x_limits[0] - 0.02 * L, self.x_limits[1] + 0.02 * L])
+        lgrow = 0.0
+        ax.set_xlim([self.x_limits[0] - lgrow * L, self.x_limits[1] + lgrow * L])
         if self.y_limits is None:
-            ax.set_ylim([self.z_limits[0] - 0.02 * L, self.z_limits[1] + 0.02 * L])
+            ax.set_ylim([self.z_limits[0] - lgrow * L, self.z_limits[1] + lgrow * L])
         else:
             raise NotImplementedError("2D plotting not implemented")
         if origin == "upper":
@@ -1260,6 +1271,26 @@ class LayeredModel(ModelBase):
             raise ValueError("Some points were not found in any layer")
 
         return xr.DataArray(dims=["z", "x"], coords={"z": z_ref, "x": coords["x"]})
+
+    @staticmethod
+    def _get_unique_name(name: Optional[str], names: Set[str]) -> str:
+        orig_name = name
+        warn_flag = True
+        if name is None:
+            warn_flag = False
+            name = "no_name"
+
+        if name in names:
+            i = 1
+            while f"{name}_{i}" in names and i < 1000:
+                i += 1
+            name = f"{name}_{i}"
+
+        if warn_flag and orig_name != name:
+            warnings.warn(
+                f"\nSurface name '{orig_name}' was not unique; name was changed to '{name}'\n\n"
+            )
+        return name
 
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path

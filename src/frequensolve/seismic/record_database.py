@@ -232,7 +232,8 @@ class RecordDatabase:
                 dset = nf[group]
                 dset.attrs["dims"] = dims
                 for dim, coord in coords.items():
-                    dset.attrs[dim] = coord
+                    if len(coord) < 10000:
+                        dset.attrs[dim] = coord
 
         self._consolidated = Path(new_file)
 
@@ -240,15 +241,19 @@ class RecordDatabase:
         import dask.array as da
 
         f = h5py.File(self._consolidated, "r")
-        dims = f[group].attrs["dims"]
-        coords = {dim: f[group].attrs[dim] for dim in dims}
+        dset = f[group]
+        dims = dset.attrs["dims"]
+        coords = {}
+        for dim in dims:
+            if dim in dset.attrs:
+                coords[dim] = dset.attrs[dim]
+            else:
+                coords[dim] = np.arange(1, dset.shape[dims[::-1].index(dim)] + 1)
         tmp = ["complex"]
         for dim in dims:
             tmp.append(dim)
         dims = tmp
         coords["complex"] = ["real", "imag"]
-
-        dset = f[group]
 
         if dset.chunks is not None:
             chunks = dset.chunks
@@ -277,7 +282,21 @@ class RecordDatabase:
         w = spectrum.interp(
             frequency=gather.coords["frequency"].values, kwargs={"fill_value": 0}
         )
-        fd = (gather.sel(complex="real") + 1j * gather.sel(complex="imag")) * w
+        fd = gather.sel(complex="real") + 1j * gather.sel(complex="imag")
+
+        from scipy.signal.windows import tukey
+
+        taper_alpha = 0.2
+        dim = "frequency"
+        if taper_alpha and taper_alpha > 0:
+            window = DataArray(
+                tukey(fd.sizes[dim], alpha=taper_alpha),
+                dims=[dim],
+                coords={dim: fd[dim]},
+            )
+            w = w * window
+        fd = fd * w
+
         return fd
 
     def read_TD(

@@ -4,7 +4,7 @@ from abc import ABC
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import List, Optional, Union
 
 from numpy import arange
 
@@ -120,6 +120,7 @@ class SimulationJob(ABC):
             local_path, remote_path = self._new_version(site, remote_path)
         else:
             local_path = self._local_path
+        local_path.mkdir(parents=True, exist_ok=True)
         data = self.__dict__()
 
         local_project = f"{self.simulation._proj_path}"
@@ -151,6 +152,17 @@ class SimulationJob(ABC):
         local_file.write_text(json.dumps(data, cls=CustomJSONEncoder, indent=3))
 
         return local_file, remote_file
+
+    def _remote_path(self, work_dir: Union[Path, str]):
+        """Get local path but with version number."""
+        work_dir = Path(work_dir)
+        base = work_dir / "jobs" / self.simulation.name / self.name
+        if not self.overwrite:
+            version = self._version
+            path = base / f"v{version}"
+        else:
+            path = base
+        return path
 
     @property
     def _local_path(self):

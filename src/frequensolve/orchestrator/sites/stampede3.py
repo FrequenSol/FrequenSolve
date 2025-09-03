@@ -217,7 +217,7 @@ class Stampede3Site(BaseSite):
                     result = subprocess.run(
                         [
                             "ssh",
-                            "-q",  # Quiet mode
+                            "-q",
                             "-o",
                             "StrictHostKeyChecking=no",
                             "-o",
@@ -480,6 +480,7 @@ class Stampede3Site(BaseSite):
         script = self._sweep_SLURM_script(
             n_tasks=job.n_tasks,
             n_nodes=nodes,
+            stdout=str(job._remote_path(self.work_dir) / "logs"),
             procs_per_node=procs_per_node,
             procs_per_task=procs_per_task,
             duration=duration,
@@ -625,7 +626,7 @@ class Stampede3Site(BaseSite):
                     f"Job {j_id} ({job.name}) returned with unknown status: {status}."
                 )
 
-    def submit(self, job: SimulationJob, procs_per_job: int = 2):
+    def submit(self, job: SimulationJob, procs_per_task: int = 2):
         """Submit job and block until completion."""
 
         if self._is_notebook:
@@ -634,16 +635,16 @@ class Stampede3Site(BaseSite):
             nest_asyncio.apply()
 
         loop = asyncio.get_event_loop()
-        future = self.submit_async(job, procs_per_job)
+        future = self.submit_async(job, procs_per_task)
         return loop.run_until_complete(future)
 
-    def submit_async(self, job: SimulationJob, procs_per_job: int = 2) -> Future:
+    def submit_async(self, job: SimulationJob, procs_per_task: int = 2) -> Future:
         """Submit job asynchronously and return a future."""
 
         future = Future()
         if self.provisioned:  # Run on already provisioned compute node
             remote_script, remote_job = self._transfer_job(job)
-            ntasks_per_item = max(procs_per_job, self.pool.nproc // job.n_tasks)
+            ntasks_per_item = max(procs_per_task, self.pool.nproc // job.n_tasks)
 
             if self._compute_client.is_proxy():
                 interactive = self.compute_client.invoke_shell()
@@ -838,41 +839,9 @@ class Stampede3Site(BaseSite):
 
         for job in jobs:
             try:
-                files = job.records["datasets"].keys()
-
-                # Create temporary directory name for the payload
-                payload_name = f"records_{int(time.time())}"
-                remote_payload = self.work_dir / f"{payload_name}.tar.gz"
-                local_payload = path / f"{payload_name}.tar.gz"
-
-                print(payload_name)
-                print(remote_payload)
-                print(local_payload)
-                # print(files)
-
-                # Create payload on remote
-                tar_cmd = f"cd {self.work_dir} && tar czf {remote_payload.name} "
-                tar_cmd += " ".join(files)
-                _, _, stderr = self.run_login_cmd(tar_cmd)
-                print(stderr.read().decode().strip())
-                # err = stderr.read().decode().strip()
-                # if err:
-                #     raise RuntimeError(f"Failed to create payload on remote: {err}")
-
-                # Download, extract, and cleanup
-                self.get(remote_payload, local_payload)
-
-                cwd = os.getcwd()
-                os.chdir(local_payload.parent)
-                with tarfile.open(local_payload, "r:gz") as tar:
-                    logger.debug("Extracting files from payload:")
-                    tar.extractall()
-                os.chdir(cwd)
-
-                local_payload.unlink()
-                self.run_login(f"rm {remote_payload}")
-
-                # TODO: Copy job, simulation file to database so that it can be read independently.
+                remote_dir = job._remote_path(self.work_dir) / "results" / "receivers/"
+                local_dir = job._local_path / "results" / "receivers/"
+                self.get(remote_dir, local_dir)
 
                 db = RecordDatabase.from_results(job.records, path.resolve(), upscale)
                 db_map[job.name] = db
@@ -901,32 +870,16 @@ class Stampede3Site(BaseSite):
         else:
             path = Path(path)
 
-        for pv_name, pv_path in job.paraview_outputs.items():
-            print(f"Fetching ParaView output '{pv_name}' from {pv_path}")
-            try:
-                payload_name = f"{pv_name}.tar.gz"
-                remote_payload = self.work_dir / pv_path / payload_name
-                local_payload = path / pv_path / payload_name
-                tar_cmd = (
-                    f"cd {self.work_dir / pv_path} && tar czf {payload_name} {pv_name}"
-                )
-                _, _, stderr = self.run_login_cmd(tar_cmd)
+        try:
+            remote_dir = job._remote_path(self.work_dir) / "results" / "ParaView/"
+            local_dir = job._local_path / "results" / "ParaView/"
+            print("Fetching ParaView outputs")
+            print(f"from: {remote_dir}")
+            print(f"to  : {local_dir}")
+            self.get(remote_dir, local_dir)
 
-                self.get(remote_payload, local_payload)
-
-                cwd = os.getcwd()
-                os.chdir(local_payload.parent)
-                with tarfile.open(local_payload, "r:gz") as tar:
-                    logger.debug("Extracting files from payload:")
-                    tar.extractall()
-                os.chdir(cwd)
-
-                local_payload.unlink()
-                self.run_login(f"rm {remote_payload}")
-
-            except Exception as e:
-                logger.exception("Error downloading ParaView outputs: %s", str(e))
-                raise
+        except Exception as e:
+            logger.exception("Error downloading ParaView outputs: %s", str(e))
 
     def fetch_image(
         self,
@@ -1060,14 +1013,22 @@ class Stampede3Site(BaseSite):
                     sftp.close()
             else:
                 # Use rsync
-                remote_str = f"{self.credentials.username}@stampede3.tacc.utexas.edu:{remote_path}"
+                if remote_path.suffix == "":
+                    remote_str = f"{remote_path}/"
+                else:
+                    remote_str = str(remote_path)
+                remote_str = f"{self.credentials.username}@stampede3.tacc.utexas.edu:{remote_str}"
                 local_str = f"{local_path}/" if local_path.is_dir() else str(local_path)
                 rsync_cmd = ["rsync", "-azP"]
                 logger.debug("rsync: %s", [*rsync_cmd, remote_str, local_str])
 
                 result = subprocess.run(
-                    [*rsync_cmd, remote_str, local_str], capture_output=True, text=True
+                    [*rsync_cmd, remote_str, local_str],
+                    capture_output=True,
+                    text=True,
+                    check=True,
                 )
+                print(result.stdout)
 
                 if result.returncode != 0:
                     raise RuntimeError(f"rsync failed: {result.stderr}")
@@ -1213,24 +1174,24 @@ class Stampede3Site(BaseSite):
         if self._compute_client is None:
             raise NotImplementedError("Batch sweep job not implemented yet.")
 
-        script = self._sweep_script(job.n_tasks)
+        # Note: job must be saved for remote **before** script is generated
+        local_job, remote_job = job.save_for_remote(
+            self.__class__.__name__, self.work_dir
+        )
+        script = self._sweep_script(job)
+
+        logger.debug("Transferring job file to remote path: %s", remote_job)
+        self.put(Path(local_job), Path(remote_job))
 
         fd, script_path = tempfile.mkstemp(suffix=".sh", prefix="sweep", dir="./")
         logger.debug("Temporary sweep script created at %s", script_path)
         with os.fdopen(fd, "w") as f:
             f.write(script)
-        os.chmod(script_path, 0o700)
 
         remote_script = (self.work_dir / "sweep").with_suffix(".sh")
         self.put(Path(script_path), Path(remote_script))
         os.unlink(script_path)
 
-        local_job, remote_job = job.save_for_remote(
-            self.__class__.__name__, self.work_dir
-        )
-
-        logger.debug("Transferring job file to remote path: %s", remote_job)
-        self.put(Path(local_job), Path(remote_job))
         self.run_login(f"chmod 700 {remote_script}")
 
         return remote_script, remote_job
@@ -1240,8 +1201,11 @@ class Stampede3Site(BaseSite):
         status = self.run_login(f"squeue -j {job_id} -h -o %t")
         return status == "R"
 
-    def _sweep_script(self, n_tasks: int, **kwargs) -> str:
+    def _sweep_script(self, job: SimulationJob, **kwargs) -> str:
         """Generate a scripte for sweeping through frequencies (tasks) on pre-provisioned resources."""
+
+        n_tasks = job.n_tasks
+        dir_out = str(job._remote_path(self.work_dir) / "logs")
         env_dir = self._FS_dir / "src/frequensolve/orchestrator/templates"
         env = Environment(
             loader=FileSystemLoader(env_dir),
@@ -1254,6 +1218,7 @@ class Stampede3Site(BaseSite):
             n_procs=self.pool.nproc,
             n_threads=self.pool.ncore // self.pool.nproc,
             mpi=self.mpi_cmd,
+            dir_out=dir_out,
             executable=self.executable,
             fs_dir=str(Path(self.executable).parent),
             **kwargs,
@@ -1264,6 +1229,7 @@ class Stampede3Site(BaseSite):
         self,
         n_tasks: int,
         n_nodes: int,
+        stdout: str,
         name: str = "FrequenSolve",
         procs_per_node: int = 2,
         procs_per_task: int = 2,
@@ -1312,6 +1278,7 @@ class Stampede3Site(BaseSite):
         script = template.render(
             batch_job=True,
             name=name,
+            dir_out=stdout,
             n_nodes=n_nodes,
             n_procs=n_nodes * procs_per_node,
             n_threads=config.cores_per_node // procs_per_node,
