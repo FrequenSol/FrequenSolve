@@ -6,6 +6,7 @@ Right now this is just a hodge-podge of code that was displaced in
 the refactoring process.
 """
 
+import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -185,6 +186,8 @@ class RecordDatabase:
         file = self.records[0]
         base = "_".join(file.split("_")[:-1])
         new_file = f"{base}_consolidated.h5"
+        if os.path.exists(new_file):
+            os.remove(new_file)
         freqs = []
 
         with h5py.File(new_file, "w") as nf:
