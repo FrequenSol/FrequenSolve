@@ -127,7 +127,7 @@ class Stampede3Site(BaseSite):
 
         if self._executable is None:
             raise ValueError(
-                "Solver executable not specified; set STAMPADE3_SOLVER_EXECUTABLE environment variable."
+                "Solver executable not specified; set STAMPEDE3_SOLVER_EXECUTABLE environment variable."
             )
         return self._executable
 
@@ -841,6 +841,7 @@ class Stampede3Site(BaseSite):
             try:
                 remote_dir = job._remote_path(self.work_dir) / "results" / "receivers/"
                 local_dir = job._local_path / "results" / "receivers/"
+                local_dir.mkdir(parents=True, exist_ok=True)
                 self.get(remote_dir, local_dir)
 
                 db = RecordDatabase.from_results(job.records, path.resolve(), upscale)
@@ -1062,7 +1063,10 @@ class Stampede3Site(BaseSite):
     def _get_solver_path(self) -> str:
         """Get the solver path."""
         load_dotenv()
-        return os.getenv("STAMPEDE3_SOLVER_EXECUTABLE")
+        executable = os.getenv("STAMPEDE3_SOLVER_EXECUTABLE")
+        if executable is None:
+            executable = "/work2/06472/jbadger/shared/stampede3/FS_stable/FS_seismic"
+        return executable
 
     def _get_FS_path(self) -> str:
         """Get the Frequensolve path."""

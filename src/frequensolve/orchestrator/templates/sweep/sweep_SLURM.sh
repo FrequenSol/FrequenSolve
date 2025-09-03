@@ -47,6 +47,7 @@ mkdir -p $dir_out
 mkdir -p $dir_out
 
 ml phdf5
+ml petsc/3.23
 module list
 
 {% if n_tasks > 1 %}
