@@ -837,9 +837,7 @@ class Stampede3Site(BaseSite):
                 local_dir.mkdir(parents=True, exist_ok=True)
                 self.get(remote_dir, local_dir)
 
-                db = RecordDatabase.from_results(
-                    j.records, j.project_path.resolve(), upscale
-                )
+                db = RecordDatabase.from_job(j, upscale)
                 db_map[j.name] = db
 
             except Exception as e:
