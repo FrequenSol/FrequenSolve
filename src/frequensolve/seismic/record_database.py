@@ -52,7 +52,7 @@ class RecordDatabase:
         self.upscale = upscale
 
     @classmethod
-    def from_results(cls, results: dict, proj_path: Union[str, Path], upscale: int = 1):
+    def from_job(cls, job, upscale: int = 1):
         """Create a RecordDatabase from a dictionary of results.
 
         Args:
@@ -62,24 +62,27 @@ class RecordDatabase:
         Returns:
             A RecordDatabase object.
         """
-        proj_path = Path(proj_path).resolve()
+        records = job.records
+        proj_path = Path(job.project_path).resolve()
 
-        f_map = results["frequencies"]
+        f_map = records["frequencies"]
         for key, value in f_map.items():
             f_map[key] = float(value)
+        f_list = np.sort(list(f_map.values()))
+        f_max = f_list[-1]
+        df = np.diff(f_list).min()
+
         meta = {
             "project": proj_path,
-            "simulation": proj_path / results["simulation"],
-            "groups": results["groups"],
-            "df": float(f_map[2] - f_map[1]) if len(f_map) > 1 else 0.0,
-            "f_max": (
-                float(np.max(list(f_map.values()))) if len(f_map) > 1 else f_map[1]
-            ),
-            "f_map": f_map if len(f_map) > 1 else {},
+            "simulation": proj_path / records["simulation"],
+            "groups": records["groups"],
+            "df": df,
+            "f_max": f_max,
+            "f_map": f_map,
         }
 
-        records = results["files"]
-        db = cls(metadata=meta, records=records, upscale=upscale)
+        files = records["files"]
+        db = cls(metadata=meta, records=files, upscale=upscale)
         db.consolidate_h5()
         return db
 
@@ -159,7 +162,7 @@ class RecordDatabase:
             out += f"{group}\n"
             out += f"  {_gray('Receivers')}\t: {recv[0]} - {recv[-1]}\n"
             if len(shot) > 1:
-                out += f"  {_gray('Shots')}\t\t:   {shot[0]} - {shot[-1]}\n"
+                out += f"  {_gray('Shots')}\t\t: {shot[0]} - {shot[-1]}\n"
             else:
                 out += f"  {_gray('Shot')}\t\t: {shot[0]}\n"
             out += f"  {_gray('Components')}\t: {comp}\n"

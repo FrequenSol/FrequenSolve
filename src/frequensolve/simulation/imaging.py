@@ -1,11 +1,14 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
+
+import numpy as np
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.jobs import SimulationJob
+from frequensolve.simulation.sampling import UniformSweepSampling
 from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.util.class_registry import class_registry, register_class
 
@@ -13,7 +16,85 @@ __all__ = [
     "RTMImagingJob",
     "Misfit",
     "MisfitGroup",
+    "RawImage",
 ]
+
+
+@dataclass(kw_only=True)
+class RawImage:
+    """Raw image."""
+
+    path: Path
+    parts: int
+    shape: Tuple[int, ...]
+
+    def __post_init__(self):
+        self.path = Path(self.path)
+        if not self.path.exists():
+            raise FileNotFoundError(f"Image path {self.path} does not exist")
+
+    @property
+    def f_list(self):
+        import h5py
+
+        f_list = np.zeros(self.parts)
+        for i in range(self.parts):
+            file = self.image_file(i + 1)
+            with h5py.File(file, "r") as f:
+                f_list[i] = f["frequency"][()]
+        return f_list
+
+    def image_file(self, part: int):
+        return self.path / f"image_{part}.h5"
+
+    def image(self, part: int):
+        import h5py
+
+        file = self.image_file(part + 1)
+        with h5py.File(file, "r") as f:
+            im = np.reshape(f["image"][:], self.shape)
+            return im
+
+    def stack(
+        self, omega_exp: int = 0, wavelet: Optional[Wavelet] = None
+    ) -> np.ndarray:
+        import h5py
+
+        n_freq = self.parts
+        f_list = self.f_list
+
+        weights = np.ones(self.parts, dtype=np.float64)
+        if n_freq > 1 and wavelet is not None:
+            f_max = f_list.max()
+            f_list = np.sort(f_list)
+            df = np.diff(f_list).min()
+
+            sampling = UniformSweepSampling(
+                f_min=0.0,
+                f_max=f_max,
+                df=df,
+            )
+            wavelet.times = sampling.t_list
+
+            frequencies = wavelet.frequencies
+            spectrum = abs(wavelet.spectrum)
+            for i, f in enumerate(self.f_list):
+                idx = abs(frequencies - f).argmin()
+                weights[i] = abs(spectrum[idx])
+
+        w_norm = np.sqrt(np.sum(np.abs(weights) ** 2))
+        weights /= w_norm
+
+        img = np.zeros(self.shape)
+        for i in range(n_freq):
+            file = self.image_file(i + 1)
+            f0 = f_list.max()
+            omega = 2.0 * np.pi * f_list[i]
+            w = omega ** (omega_exp - 2) * weights[i] ** 2
+            with h5py.File(file, "r") as f:
+                im = np.reshape(f["image"][:], self.shape)
+                img += im * w
+        return img
 
 
 @dataclass(kw_only=True)
@@ -181,8 +262,15 @@ class RTMImagingJob(SimulationJob):
         self.grid = CartesianGrid(x0=x0, x1=x1, n=resolution)
         self.reassemble_adjoint = reassemble_adjoint
 
-    def image_file(self, task_id: int) -> str:
-        return str(self.save_path / f"image_{task_id}.h5")
+    def _remote_image_path(self, work_dir: Union[Path, str]):
+        """Get local path but with version number."""
+        rel_path = self.save_path.relative_to(self.project_path)
+        remote = Path(work_dir) / rel_path
+        return remote
+
+    @property
+    def _local_image_path(self):
+        return self.save_path
 
     def __dict__(self) -> Dict:
         imaging = {

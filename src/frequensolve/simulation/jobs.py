@@ -154,7 +154,7 @@ class SimulationJob(ABC):
         return local_file, remote_file
 
     def _remote_path(self, work_dir: Union[Path, str]):
-        """Get local path but with version number."""
+        """Get remote job path."""
         work_dir = Path(work_dir)
         base = work_dir / "jobs" / self.simulation.name / self.name
         if not self.overwrite:
@@ -166,6 +166,7 @@ class SimulationJob(ABC):
 
     @property
     def _local_path(self):
+        """Get local job path."""
         project_path = self.project_path
         return project_path / "jobs" / self.simulation.name / self.name
 

@@ -46,7 +46,7 @@ from frequensolve.orchestrator.sites.base import (
 )
 from frequensolve.orchestrator.ssh import SSHClientClass, SSHProxy
 from frequensolve.seismic.record_database import RecordDatabase
-from frequensolve.simulation.imaging import RTMImagingJob
+from frequensolve.simulation.imaging import RawImage, RTMImagingJob
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
 
@@ -815,14 +815,12 @@ class Stampede3Site(BaseSite):
     def fetch_traces(
         self,
         job: Union[SimulationJob, List[SimulationJob]],
-        path: Optional[Union[str, Path]] = None,
         upscale: int = 1,
     ) -> Union[RecordDatabase, Dict[str, RecordDatabase]]:
         """Get results from Stampede3.
 
         Args:
             job: A SimulationJob object.
-            path: The path to save the results to.
         """
 
         if isinstance(job, SimulationJob):
@@ -830,22 +828,19 @@ class Stampede3Site(BaseSite):
         else:
             jobs = job
 
-        if path is None:
-            path = jobs[0].project_path
-        else:
-            path = Path(path)
-
         db_map = {}
 
-        for job in jobs:
+        for j in jobs:
             try:
-                remote_dir = job._remote_path(self.work_dir) / "results" / "receivers/"
-                local_dir = job._local_path / "results" / "receivers/"
+                remote_dir = j._remote_path(self.work_dir) / "results" / "receivers/"
+                local_dir = j._local_path / "results" / "receivers/"
                 local_dir.mkdir(parents=True, exist_ok=True)
                 self.get(remote_dir, local_dir)
 
-                db = RecordDatabase.from_results(job.records, path.resolve(), upscale)
-                db_map[job.name] = db
+                db = RecordDatabase.from_results(
+                    j.records, j.project_path.resolve(), upscale
+                )
+                db_map[j.name] = db
 
             except Exception as e:
                 logger.exception("Error downloading records: %s", str(e))
@@ -856,20 +851,12 @@ class Stampede3Site(BaseSite):
         else:
             return db_map
 
-    def fetch_paraview(
-        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
-    ):
-        """Get results from Stampede3.
+    def fetch_paraview(self, job: SimulationJob):
+        """Get paraview files from Stampede3.
 
         Args:
             job: A SimulationJob object.
-            path: The path to save the results to.
         """
-
-        if path is None:
-            path = job.project_path
-        else:
-            path = Path(path)
 
         try:
             remote_dir = job._remote_path(self.work_dir) / "results" / "ParaView/"
@@ -885,13 +872,11 @@ class Stampede3Site(BaseSite):
     def fetch_image(
         self,
         job: Union[RTMImagingJob, List[RTMImagingJob]],
-        path: Optional[Union[str, Path]] = None,
     ):
-        """Get results from Stampede3.
+        """Get image files from Stampede3.
 
         Args:
-            job: A SimulationJob object.
-            path: The path to save the results to.
+            job: A RTMImagingJob object.
         """
 
         if isinstance(job, RTMImagingJob):
@@ -899,44 +884,28 @@ class Stampede3Site(BaseSite):
         else:
             jobs = job
 
-        if path is None:
-            path = jobs[0].project_path
-        else:
-            path = Path(path)
+        images = {}
 
         for job in jobs:
             try:
-                files = []
-                fbase = str(job.save_path / "RTM").replace(
-                    str(job.project_path), str(self.work_dir)
+                remote = job._remote_image_path(self.work_dir)
+                local = job._local_image_path
+                self.get(remote, local)
+
+                images[job.name] = RawImage(
+                    path=local,
+                    shape=job.grid.shape,
+                    parts=job.n_tasks,
                 )
-                for i, f in enumerate(job.f_list):
-                    fpath = fbase + f"_{i}.h5"
-                    files.append(fpath)
-
-                payload_name = f"payload_{int(time.time())}"
-                remote_payload = self.work_dir / f"{payload_name}.tar.gz"
-                local_payload = path / f"{payload_name}.tar.gz"
-
-                # Tar and download the payload
-                tar_cmd = f"cd {self.work_dir} && tar czf {remote_payload.name} "
-                tar_cmd += " ".join(files)
-                _, _, stderr = self.run_login_cmd(tar_cmd)
-                self.get(remote_payload, local_payload)
-
-                cwd = os.getcwd()
-                os.chdir(local_payload.parent)
-                with tarfile.open(local_payload, "r:gz") as tar:
-                    logger.debug("Extracting files from payload:")
-                    tar.extractall()
-                os.chdir(cwd)
-
-                local_payload.unlink()
-                self.run_login(f"rm {remote_payload}")
 
             except Exception as e:
                 logger.exception("Error retrieving payload: %s", str(e))
                 raise
+
+        if len(images) == 1:
+            return images[jobs[0].name]
+        else:
+            return images
 
     def download_record_files(self, records: dict, project_dir: Union[str, Path]):
         """Download records from Stampede3.
@@ -1029,7 +998,6 @@ class Stampede3Site(BaseSite):
                     text=True,
                     check=True,
                 )
-                print(result.stdout)
 
                 if result.returncode != 0:
                     raise RuntimeError(f"rsync failed: {result.stderr}")

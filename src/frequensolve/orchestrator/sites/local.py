@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import subprocess
+import warnings
 from dataclasses import dataclass, field
 from logging import ERROR, INFO, FileHandler, Formatter, getLogger
 from pathlib import Path
@@ -20,14 +21,14 @@ from frequensolve.orchestrator.sites.base import (
     _wait_for_path,
 )
 from frequensolve.seismic.record_database import RecordDatabase
-from frequensolve.simulation.imaging import RTMImagingJob
+from frequensolve.simulation.imaging import RawImage, RTMImagingJob
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
 
 logging.basicConfig(level=ERROR)
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/local.log")
-logger.setLevel(INFO)
+logger.setLevel(ERROR)
 
 for logger_name in ["distributed", "bokeh", "tornado"]:
     log = getLogger(logger_name)
@@ -259,9 +260,11 @@ class LocalSite(BaseSite):
         load_dotenv()
         executable = os.getenv("LOCAL_SOLVER_EXECUTABLE")
         if not executable:
-            raise RuntimeError("LOCAL_SOLVER_EXECUTABLE not set in environment")
+            warnings.warn("LOCAL_SOLVER_EXECUTABLE not set in environment")
+            return None
         if not Path(executable).exists():
-            raise FileNotFoundError(f"Solver executable not found at {executable}")
+            warnings.warn(f"Solver executable not found at {executable}")
+            return None
         return executable
 
     def submit(self, job: SimulationJob, **kwargs) -> List[dict]:
@@ -274,9 +277,13 @@ class LocalSite(BaseSite):
         Returns:
             List of results from completed tasks
         """
+
         if self._dask_client is None:
             if job.n_tasks < self.config.cores:
-                self._initialize_dask(n_workers=1)
+                nw = self.config.cores
+                while nw > job.n_tasks:
+                    nw = nw // 2
+                self._initialize_dask(n_workers=nw)
             else:
                 self._initialize_dask(self.n_workers)
 
@@ -300,7 +307,6 @@ class LocalSite(BaseSite):
         for future in futures:
             future.add_done_callback(update_progress)
 
-        # Wait for all futures to complete
         results = wait(futures)
         pbar.close()
         return results
@@ -315,6 +321,9 @@ class LocalSite(BaseSite):
         Returns:
             List of Dask futures for the submitted tasks
         """
+        if not self.executable:
+            raise RuntimeError("Solver executable not found, cannot submit job")
+
         job_file = job.save()
 
         if self._dask_client is None:
@@ -327,10 +336,6 @@ class LocalSite(BaseSite):
             for file in os.listdir(stdout_dir):
                 os.remove(os.path.join(stdout_dir, file))
         os.makedirs(stdout_dir, exist_ok=True)
-
-        # if not self._is_notebook:
-        #     print("\n" * (self.n_workers + 2))
-        # self._print_worker_status()
 
         futures = []
 
@@ -391,38 +396,41 @@ class LocalSite(BaseSite):
         path: Optional[Union[str, Path]] = None,
     ) -> Union[RecordDatabase, Dict[str, RecordDatabase]]:
         if isinstance(job, SimulationJob):
-            db = RecordDatabase.from_results(
-                job.records, job.project_path.resolve(), upscale
-            )
+            db = RecordDatabase.from_job(job, upscale)
             return db
         else:
             db_map = {}
             for j in job:
-                db = RecordDatabase.from_results(
-                    j.records, j.project_path.resolve(), upscale
-                )
+                db = RecordDatabase.from_job(j, upscale)
                 db_map[j.name] = db
             return db_map
 
     def fetch_image(
         self,
-        job: RTMImagingJob,
+        job: Union[RTMImagingJob, List[RTMImagingJob]],
     ) -> ArrayLike:
         """Gets and accumulates images."""
 
-        import h5py
-        import numpy as np
+        if isinstance(job, RTMImagingJob):
+            jobs = [job]
+        else:
+            jobs = job
 
-        n_freq = job.n_tasks
-        shape = job.grid.shape
-        img = np.zeros(shape)
-        for i in range(job.n_tasks):
-            file = job.image_file(i + 1)
-            w = 1.0  # job.weights[i] ** 2
-            with h5py.File(file, "r") as f:
-                im = np.reshape(f["image"][:], shape)
-                img += im * w / n_freq
-        return img
+        images = {}
+
+        for job in jobs:
+            local = job._local_image_path
+            image = RawImage(
+                path=local,
+                shape=job.grid.shape,
+                parts=job.n_tasks,
+            )
+            images[job.name] = image
+
+        if len(images) == 1:
+            return images[jobs[0].name]
+        else:
+            return images
 
     def fetch_paraview(
         self, job: SimulationJob, path: Optional[Union[str, Path]] = None
