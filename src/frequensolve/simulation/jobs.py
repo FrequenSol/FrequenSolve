@@ -148,6 +148,10 @@ class SimulationJob(ABC):
         self._file = local_file
 
         data["result_path"] = str(self._result_path.relative_to(self.project_path))
+
+        # Ensure parent directory exists before writing
+        local_file.parent.mkdir(parents=True, exist_ok=True)
+
         local_file.write_text(json.dumps(data, cls=CustomJSONEncoder, indent=3))
 
         return local_file, remote_file

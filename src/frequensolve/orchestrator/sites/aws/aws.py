@@ -143,20 +143,22 @@ class AWSSiteConfig(BaseSiteConfig):
             try:
                 with open(cache_path, "r") as f:
                     cached_config = json.load(f)
-                    print(f"📦 Using cached configuration for {domain}")
+                    logger.info(f"Using cached configuration for {domain}")
+                    logger.debug(f"Cache path: {cache_path}")
                     return cached_config
             except (json.JSONDecodeError, IOError) as e:
-                print(f"⚠️  Failed to read cached config, fetching fresh: {e}")
+                logger.debug(f"Failed to read cached config, fetching fresh: {e}")
 
         # Try both HTTPS and HTTP (for local development)
+        logger.info(f"Fetching configuration from {domain}...")
         for protocol in ["https", "http"]:
             url = f"{protocol}://{domain}/api/config.json"
             try:
-                print(f"📡 Fetching configuration from {url}")
+                logger.debug(f"Trying {url}")
                 response = requests.get(url, timeout=10)
                 response.raise_for_status()
                 config_data = response.json()
-                print(f"✅ Successfully fetched configuration from {domain}")
+                logger.info(f"✓ Configuration loaded from {domain}")
                 return config_data
             except requests.RequestException as e:
                 if protocol == "http":  # Last attempt failed
@@ -174,9 +176,9 @@ class AWSSiteConfig(BaseSiteConfig):
         try:
             with open(cache_path, "w") as f:
                 json.dump(config_data, f, indent=2)
-            print(f"💾 Cached configuration to {cache_path}")
+            logger.debug(f"Cached configuration to {cache_path}")
         except IOError as e:
-            print(f"⚠️  Failed to cache configuration: {e}")
+            logger.debug(f"Failed to cache configuration: {e}")
 
     def __post_init__(self):
         """Initialize configuration from domain if provided."""

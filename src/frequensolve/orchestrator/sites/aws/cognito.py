@@ -8,6 +8,7 @@ This module handles:
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -15,6 +16,8 @@ from typing import Dict, Optional
 
 import boto3
 from botocore.exceptions import ClientError
+
+logger = logging.getLogger(__name__)
 
 
 class CognitoAuth:
@@ -66,6 +69,7 @@ class CognitoAuth:
         Raises:
             ClientError: If authentication fails
         """
+        logger.info(f"Authenticating with Cognito as {email}...")
         try:
             response = self.cognito_client.initiate_auth(
                 ClientId=self.client_id,
@@ -90,6 +94,8 @@ class CognitoAuth:
 
             # Save tokens to file
             self.save_tokens(tokens)
+
+            logger.info("✓ Authentication successful")
 
             return tokens
 
@@ -191,10 +197,11 @@ class CognitoAuth:
         # Construct the login provider key
         provider_name = f"cognito-idp.{self.region}.amazonaws.com/{self.user_pool_id}"
 
-        print(f"\n[DEBUG] Getting Identity ID...")
-        print(f"  Identity Pool ID: {self.identity_pool_id}")
-        print(f"  Provider: {provider_name}")
-        print(f"  ID Token (first 50 chars): {id_token[:50]}...")
+        logger.info("Fetching AWS credentials from Identity Pool...")
+        logger.debug("Getting Identity ID...")
+        logger.debug(f"  Identity Pool ID: {self.identity_pool_id}")
+        logger.debug(f"  Provider: {provider_name}")
+        logger.debug(f"  ID Token (first 50 chars): {id_token[:50]}...")
 
         try:
             # Get Identity ID
@@ -202,24 +209,24 @@ class CognitoAuth:
                 IdentityPoolId=self.identity_pool_id, Logins={provider_name: id_token}
             )
 
-            print(f"\n[DEBUG] Identity Response:")
-            print(f"  {json.dumps(identity_response, indent=2, default=str)}")
+            logger.debug("Identity Response:")
+            logger.debug(f"  {json.dumps(identity_response, indent=2, default=str)}")
 
             identity_id = identity_response["IdentityId"]
-            print(f"\n[DEBUG] Identity ID: {identity_id}")
+            logger.debug(f"Identity ID: {identity_id}")
 
             # Get AWS credentials for this identity
-            print(f"\n[DEBUG] Getting credentials for identity...")
+            logger.debug("Getting credentials for identity...")
             credentials_response = self.identity_client.get_credentials_for_identity(
                 IdentityId=identity_id, Logins={provider_name: id_token}
             )
 
-            print(f"\n[DEBUG] Credentials Response:")
-            print(f"  {json.dumps(credentials_response, indent=2, default=str)}")
+            logger.debug("Credentials Response:")
+            logger.debug(f"  {json.dumps(credentials_response, indent=2, default=str)}")
 
             credentials = credentials_response["Credentials"]
 
-            print(f"\n[DEBUG] Extracted credentials keys: {list(credentials.keys())}")
+            logger.debug(f"Extracted credentials keys: {list(credentials.keys())}")
 
             result = {
                 "AccessKeyId": credentials["AccessKeyId"],
@@ -231,15 +238,19 @@ class CognitoAuth:
                 "IdentityId": identity_id,
             }
 
-            print(f"\n[DEBUG] Final credential dict keys: {list(result.keys())}")
+            logger.debug(f"Final credential dict keys: {list(result.keys())}")
+
+            logger.info("✓ AWS credentials obtained successfully")
 
             return result
 
         except ClientError as e:
-            print(f"\n[DEBUG] ClientError occurred:")
-            print(f"  Error Code: {e.response['Error']['Code']}")
-            print(f"  Error Message: {e.response['Error']['Message']}")
-            print(f"  Full Response: {json.dumps(e.response, indent=2, default=str)}")
+            logger.debug("ClientError occurred:")
+            logger.debug(f"  Error Code: {e.response['Error']['Code']}")
+            logger.debug(f"  Error Message: {e.response['Error']['Message']}")
+            logger.debug(
+                f"  Full Response: {json.dumps(e.response, indent=2, default=str)}"
+            )
 
             error_code = e.response["Error"]["Code"]
             if error_code == "NotAuthorizedException":
@@ -247,8 +258,8 @@ class CognitoAuth:
             else:
                 raise
         except KeyError as e:
-            print(f"\n[DEBUG] KeyError - missing key: {e}")
-            print(f"  Available keys in credentials: {list(credentials.keys())}")
+            logger.debug(f"KeyError - missing key: {e}")
+            logger.debug(f"  Available keys in credentials: {list(credentials.keys())}")
             raise
 
     def get_cached_tokens(self) -> Dict[str, str]:
@@ -269,6 +280,7 @@ class CognitoAuth:
         try:
             with open(self.credentials_path, "r") as f:
                 tokens = json.load(f)
+            logger.info("Using cached credentials")
             return tokens
         except (json.JSONDecodeError, IOError) as e:
             raise ValueError(f"Failed to read credentials file: {e}") from e

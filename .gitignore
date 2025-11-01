@@ -160,4 +160,4 @@ terraform.rc
 tests/output/*
 !tests/output/.gitkeep
 
-results/
+examples/scratch/

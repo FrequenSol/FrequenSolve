@@ -6,11 +6,14 @@ the FrequenSol AppSync API using Cognito authentication.
 """
 
 import json
+import logging
 from typing import Any, Dict, Optional
 
 import requests
 
 from .cognito import CognitoAuth
+
+logger = logging.getLogger(__name__)
 
 
 class GraphQLClient:
@@ -137,24 +140,25 @@ class GraphQLClient:
             }
         """
 
-        print(f"\n[DEBUG] Executing GraphQL query: listStacks (storage)")
+        logger.info("Fetching stack information from API...")
+        logger.debug("Executing GraphQL query: listStacks (storage)")
         storage_result = self.execute(storage_query)
 
-        print(f"[DEBUG] Storage stack GraphQL result:")
-        print(f"  {json.dumps(storage_result, indent=2)}")
+        logger.debug("Storage stack GraphQL result:")
+        logger.debug(f"  {json.dumps(storage_result, indent=2)}")
 
-        print(f"\n[DEBUG] Executing GraphQL query: listStacks (compute)")
+        logger.debug("Executing GraphQL query: listStacks (compute)")
         compute_result = self.execute(compute_query)
 
-        print(f"[DEBUG] Compute stack GraphQL result:")
-        print(f"  {json.dumps(compute_result, indent=2)}")
+        logger.debug("Compute stack GraphQL result:")
+        logger.debug(f"  {json.dumps(compute_result, indent=2)}")
 
         # Check storage stack
         if (
             "listStacks" not in storage_result
             or not storage_result["listStacks"]["items"]
         ):
-            print(f"[DEBUG] No storage stacks found in result")
+            logger.debug("No storage stacks found in result")
             raise RuntimeError(
                 "No active storage stack found. Please deploy storage infrastructure first at "
                 "https://app.frequensol.com"
@@ -165,7 +169,7 @@ class GraphQLClient:
             "listStacks" not in compute_result
             or not compute_result["listStacks"]["items"]
         ):
-            print(f"[DEBUG] No compute stacks found in result")
+            logger.debug("No compute stacks found in result")
             raise RuntimeError(
                 "No active compute stack found. Please deploy compute infrastructure first at "
                 "https://app.frequensol.com"
@@ -173,40 +177,40 @@ class GraphQLClient:
 
         # Get most recent storage stack (in case there are multiple)
         storage_stacks = storage_result["listStacks"]["items"]
-        print(f"\n[DEBUG] Found {len(storage_stacks)} storage stack(s)")
+        logger.debug(f"Found {len(storage_stacks)} storage stack(s)")
 
         storage_stack = sorted(
             storage_stacks, key=lambda s: s["createdAt"], reverse=True
         )[0]
-        print(f"[DEBUG] Using most recent storage stack:")
-        print(f"  Stack ID: {storage_stack.get('stackId')}")
-        print(f"  Status: {storage_stack.get('status')}")
-        print(f"  Outputs (raw): {storage_stack.get('outputs', 'NULL')}")
+        logger.debug("Using most recent storage stack:")
+        logger.debug(f"  Stack ID: {storage_stack.get('stackId')}")
+        logger.debug(f"  Status: {storage_stack.get('status')}")
+        logger.debug(f"  Outputs (raw): {storage_stack.get('outputs', 'NULL')}")
 
         # Get most recent compute stack (in case there are multiple)
         compute_stacks = compute_result["listStacks"]["items"]
-        print(f"\n[DEBUG] Found {len(compute_stacks)} compute stack(s)")
+        logger.debug(f"Found {len(compute_stacks)} compute stack(s)")
 
         compute_stack = sorted(
             compute_stacks, key=lambda s: s["createdAt"], reverse=True
         )[0]
-        print(f"[DEBUG] Using most recent compute stack:")
-        print(f"  Stack ID: {compute_stack.get('stackId')}")
-        print(f"  Status: {compute_stack.get('status')}")
-        print(f"  Outputs (raw): {compute_stack.get('outputs', 'NULL')}")
+        logger.debug("Using most recent compute stack:")
+        logger.debug(f"  Stack ID: {compute_stack.get('stackId')}")
+        logger.debug(f"  Status: {compute_stack.get('status')}")
+        logger.debug(f"  Outputs (raw): {compute_stack.get('outputs', 'NULL')}")
 
         # Parse outputs JSON from both stacks
         storage_outputs = (
             json.loads(storage_stack["outputs"]) if storage_stack.get("outputs") else {}
         )
-        print(f"\n[DEBUG] Parsed storage outputs:")
-        print(f"  {json.dumps(storage_outputs, indent=2)}")
+        logger.debug("Parsed storage outputs:")
+        logger.debug(f"  {json.dumps(storage_outputs, indent=2)}")
 
         compute_outputs = (
             json.loads(compute_stack["outputs"]) if compute_stack.get("outputs") else {}
         )
-        print(f"\n[DEBUG] Parsed compute outputs:")
-        print(f"  {json.dumps(compute_outputs, indent=2)}")
+        logger.debug("Parsed compute outputs:")
+        logger.debug(f"  {json.dumps(compute_outputs, indent=2)}")
 
         # Merge outputs from both stacks
         bucket_name = storage_outputs.get("StorageBucketName", "")
@@ -234,8 +238,10 @@ class GraphQLClient:
             "status": f"storage:{storage_stack['status']}, compute:{compute_stack['status']}",
         }
 
-        print(f"\n[DEBUG] Final merged result:")
-        print(f"  {json.dumps(result_dict, indent=2)}")
+        logger.debug("Final merged result:")
+        logger.debug(f"  {json.dumps(result_dict, indent=2)}")
+
+        logger.info(f"✓ Stack info loaded: bucket={bucket_name}, queue={job_queue}")
 
         return result_dict
 
