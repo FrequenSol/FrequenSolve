@@ -36,3 +36,6 @@ class NamedList(list):
             return super().__setitem__(key, value)
         else:
             raise ValueError(f"Invalid key type: {type(key)}")
+
+    def __iadd__(self, other):
+        return self.append(other)

@@ -17,12 +17,12 @@ __all__ = [
 @register_class
 @dataclass(kw_only=True)
 class Output(ABC):
-    """Base class for all outputs."""
+    """Base class for all outputs.
+
+    Note path will be relative to result_path, specified in the job."""
 
     name: str = ""
     path: Union[str, Path] = None
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     @abstractmethod
     def __dict__(self) -> Dict:
@@ -37,40 +37,17 @@ class Output(ABC):
         else:
             raise ValueError(f"Unknown output class: {class_name}")
 
-    def _set_path(self, proj_path: Path, rel_path: Path):
-
-        # This is for copying/moving a project; we want path to be resolved in the new project
-        try:
-            self.path = proj_path / self.path.relative_to(self._proj_path)
-        except Exception as e:
-            pass
-
-        self._proj_path = proj_path
-        self._rel_path = rel_path
-
-    @property
-    def _path(self) -> Path:
-        return self._proj_path / self._rel_path
-
 
 @register_class
 @dataclass(kw_only=True)
 class ReceiverOutput(Output):
     path: Optional[Path] = None
 
-    def __init__(self, path: Optional[Union[str, Path]] = None, **kwargs):
-        self.path = Path(path).resolve() if path is not None else None
+    def __init__(self, **kwargs):
+        self.path = "receivers"
 
     def __dict__(self) -> Dict:
-        if self.path is None:
-            self.path = self._path
-        if not self.path.exists():
-            self.path.mkdir(parents=True)
-
-        return {
-            "_type": self.__class__.__name__,
-            "path": self.path.relative_to(self._proj_path),
-        }
+        return {"_type": self.__class__.__name__, "path": self.path}
 
 
 @register_class
@@ -87,7 +64,7 @@ class ParaviewOutput(Output):
     """
 
     name: str = "ParaView"
-    path: Optional[Path] = None
+    path: Union[str, Path] = ("ParaView",)
     fields: Optional[List[str]] = None
     upscale: int = 1
     show_pml: bool = True
@@ -95,32 +72,27 @@ class ParaviewOutput(Output):
     def __init__(
         self,
         name: str = "ParaView",
-        path: Optional[Union[str, Path]] = None,
+        path: Union[str, Path] = "ParaView",
         fields: Optional[List[str]] = None,
         upscale: int = 1,
         show_pml: bool = True,
         **kwargs,
     ):
         self.name = name
-        self.path = Path(path).resolve() if path else None
+        self.path = path
         self.fields = fields
         self.upscale = upscale
         self.show_pml = show_pml
         self.kwargs = kwargs
 
     def __dict__(self) -> Dict:
-        if self.path is None:
-            self.path = self._path
-        if not self.path.exists():
-            self.path.mkdir(parents=True)
-
         if self.fields is None:
-            self.fields = ["primary"]
+            self.fields = ["all"]
 
         return {
             "_type": self.__class__.__name__,
             "name": self.name,
-            "path": self.path.relative_to(self._proj_path),
+            "path": self.path,
             "fields": self.fields,
             "upscale": self.upscale,
             "show_pml": self.show_pml,
@@ -141,29 +113,24 @@ class WavefieldOutput(Output):
     """
 
     name: str = "wavefield"
-    path: Optional[Path] = None
+    path: Union[str, Path] = "wavefields"
     fields: Optional[List[str]] = None
     grid: Optional[CartesianGrid] = None
 
     def __init__(
         self,
         name: str = "wavefield",
-        path: Optional[Union[str, Path]] = None,
+        path: Union[str, Path] = "wavefields",
         fields: Optional[List[str]] = None,
         grid: Optional[CartesianGrid] = None,
         **kwargs,
     ):
         self.name = name
-        self.path = Path(path).resolve() if path else None
+        self.path = path
         self.fields = fields
         self.grid = grid
 
     def __dict__(self) -> Dict:
-        if self.path is None:
-            self.path = self._path
-        if not self.path.exists():
-            self.path.mkdir(parents=True)
-
         if self.fields is None:
             self.fields = ["primary"]
 
@@ -240,18 +207,3 @@ class OutputManager:
             paraview=paraview,
             wavefields=wavefields,
         )
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        self._proj_path = proj_path
-        self._rel_path = rel_path
-
-        for out in [self.receivers]:
-            out._set_path(proj_path, self._rel_path / "receivers")
-        for out in self.paraview:
-            out._set_path(proj_path, self._rel_path / "ParaView")
-        for out in self.wavefields:
-            out._set_path(proj_path, self._rel_path / "wavefields")
-
-    @property
-    def _path(self) -> Path:
-        return self._proj_path / self._rel_path

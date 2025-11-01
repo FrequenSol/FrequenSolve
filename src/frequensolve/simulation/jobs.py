@@ -2,8 +2,9 @@ import json
 import os
 from abc import ABC
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Literal, Optional, Union
 
 from numpy import arange
 
@@ -12,13 +13,19 @@ from frequensolve.util.class_registry import class_registry, register_class
 
 __all__ = ["SimulationJob", "FrequencyDomainJob", "TimeDomainJob"]
 
+# TODO: Give job a status field
+# TODO: Enable max versions (overwrite after a certain number of versions)
+
 
 @register_class
 @dataclass
 class SimulationJob(ABC):
     name: str
     simulation: BaseSimulation
+    workflow: str
     f_list: List[float]
+    overwrite: bool = True
+    max_versions: int = 5
     _file: Optional[Path] = None
     _job_id: Optional[str] = None
 
@@ -46,47 +53,166 @@ class SimulationJob(ABC):
             "_type": self.__class__.__name__,
             "name": self.name,
             "simulation": str(self.simulation._file),
+            "workflow": self.workflow,
             "f_list": self.f_list,
         }
 
-    def save(self, path: Optional[Path] = None):
-        if path is None:
-            sim_file = str(self.simulation._file)
-            parent = Path(sim_file.replace("simulations/", "jobs/")).parent
+    def _new_version(
+        self, site: Optional[str] = None, remote_path: Optional[Union[Path, str]] = None
+    ):
+        manifest = self._manifest
+        version = manifest["current_version"] + 1
+
+        # TODO: loop through directory and check whether it actually exists
+        manifest["current_version"] = version
+
+        local_path = self._local_path / f"v{version}"
+        if remote_path is not None:
+            remote_path = Path(remote_path) / f"v{version}"
         else:
-            raise ValueError(
-                "Directory hierarchy is currently somewhat rigid;"
-                "for now specifying save path not supported."
-            )
-        parent.mkdir(parents=True, exist_ok=True)
+            remote_path = None
 
-        file = (parent / self.name).with_suffix(".json")
-        file.write_text(json.dumps(self.__dict__(), cls=CustomJSONEncoder, indent=3))
+        if site is None:
+            site = "LocalSite"
+            path = local_path
+        else:
+            path = remote_path
 
-        # Save the file name
-        self._file = file
-        return file
+        manifest["versions"][version] = {
+            "created": datetime.now().isoformat(),
+            "site": site,
+            "path": f"{path}",
+        }
+        self._manifest_file.write_text(
+            json.dumps(manifest, cls=CustomJSONEncoder, indent=3)
+        )
+        return local_path, remote_path
 
-    def save_for_remote(self, remote_proj: Union[Path, str]):
-        sim_file = str(self.simulation._file)
-        parent = Path(sim_file.replace("simulations/", "jobs/")).parent
+    def save(self):
+        project_path = self.project_path
+        if not self.overwrite:
+            job_path, _ = self._new_version()
+        else:
+            job_path = self._local_path
+
+        file = job_path / f"{self.name}.json"
+        parent = file.parent
         if not parent.exists():
             parent.mkdir(parents=True, exist_ok=True)
 
-        data = self.__dict__()
-        proj_dir = str(self.simulation._file.parent.parent)
-        data["simulation"] = data["simulation"].replace(proj_dir, str(remote_proj))
-
-        file = (parent / self.name).with_suffix(".json")
-        file.write_text(json.dumps(data, cls=CustomJSONEncoder, indent=3))
-
-        # Save the file name
         self._file = file
+        data = self.__dict__()
+        data["result_path"] = str(self._result_path.relative_to(self.project_path))
+        file.write_text(json.dumps(data, cls=CustomJSONEncoder, indent=3))
         return file
+
+    def save_for_remote(self, site: str, remote_project: Union[Path, str]):
+        """Save the job for remote simulation.
+
+        Args:
+            site (str): The site to save the job for.
+            remote_project (Union[Path, str]): The remote project to save the job to.
+        """
+        remote_project = Path(remote_project)
+        remote_path = remote_project / "jobs" / self.simulation.name / self.name
+
+        if not self.overwrite:
+            local_path, remote_path = self._new_version(site, remote_path)
+        else:
+            local_path = self._local_path
+        data = self.__dict__()
+
+        local_project = f"{self.simulation._proj_path}"
+
+        # Recursively process the data dictionary
+        def replace_path(d):
+            for key, value in d.items():
+                if isinstance(value, dict):
+                    replace_path(value)
+                if isinstance(value, list):
+                    for i, item in enumerate(value):
+                        if isinstance(item, dict):
+                            replace_path(item)
+                if isinstance(value, Path):
+                    if local_project in str(value):
+                        d[key] = str(value).replace(local_project, str(remote_project))
+                if isinstance(value, str):
+                    if local_project in value:
+                        d[key] = value.replace(local_project, str(remote_project))
+            return d
+
+        local_file = local_path / f"{self.name}.json"
+        remote_file = remote_path / f"{self.name}.json"
+
+        data = replace_path(data)
+        self._file = local_file
+
+        data["result_path"] = str(self._result_path.relative_to(self.project_path))
+
+        # Ensure parent directory exists before writing
+        local_file.parent.mkdir(parents=True, exist_ok=True)
+
+        local_file.write_text(json.dumps(data, cls=CustomJSONEncoder, indent=3))
+
+        return local_file, remote_file
+
+    @property
+    def _local_path(self):
+        project_path = self.project_path
+        return project_path / "jobs" / self.simulation.name / self.name
+
+    @property
+    def _save_path(self):
+        """Get local path but with version number."""
+        if not self.overwrite:
+            version = self._version + 1
+            path = self._local_path / f"v{version}"
+        else:
+            path = self._local_path
+        return path
+
+    @property
+    def _manifest_file(self):
+        return self._local_path / "manifest.json"
+
+    @property
+    def _manifest(self):
+        if not self._manifest_file.exists():
+            self._create_manifest()
+        return json.loads(self._manifest_file.read_text())
+
+    def _create_manifest(self):
+        manifest_file = self._manifest_file
+        manifest_file.parent.mkdir(parents=True, exist_ok=True)
+        manifest_data = {
+            "current_version": 0,
+            "versions": {},
+        }
+        manifest_file.write_text(
+            json.dumps(manifest_data, cls=CustomJSONEncoder, indent=3)
+        )
+
+    @property
+    def _version(self):
+        return self._manifest["current_version"]
+
+    @property
+    def _stdout_path(self):
+        """Path where solver stdout is stored."""
+        return self._file.parent / "logs"
+
+    # TODO: note that for now these will always be local; will be troublesome for remote simulation
+    @property
+    def _result_path(self):
+        """Path where solver results will be stored."""
+        if self._file is None:
+            return self._save_path / "results"
+        else:
+            return self._file.parent / "results"
 
     @property
     def project_path(self):
-        return Path(self.simulation._file).parent.parent
+        return self.simulation._proj_path
 
     @property
     def n_tasks(self):
@@ -108,22 +234,18 @@ class SimulationJob(ABC):
         # For now we have to get entire files (with all sources, etc.)
         path = output["path"]
         records = {
-            "datasets": {},
+            "groups": output["groups"],
             "frequencies": {},
             "simulation": self.simulation._file,
         }
-        for components in output["components"]:
-            group, comp = components.split(":")
-            for i, freq in enumerate(output["frequencies"]):
-                ifreq = i + 1
-                for src in output["sources"]:
-                    record = group + "_" + str(ifreq) + ".h5"
-                    dset = comp + "_" + str(src)
-                    file = os.path.join(path, record)
-                    if file not in records["datasets"]:
-                        records["datasets"][file] = []
-                    records["datasets"][file].append(dset)
-                    records["frequencies"][ifreq] = freq
+        records["groups"] = output["groups"]
+        records["files"] = []
+        for i, freq in enumerate(output["frequencies"]):
+            ifreq = i + 1
+            file = os.path.join(path, f"receivers_{ifreq}.h5")
+            records["files"].append(file)
+            records["frequencies"][ifreq] = freq
+
         return records
 
     @property
@@ -147,6 +269,15 @@ class SimulationJob(ABC):
         return pv_out
 
     @property
+    def trace_path(self) -> dict:
+        """Lists receiver trace groups.
+
+        Returns:
+            - traces: Receiver traces
+        """
+        return self.trace_outputs["path"]
+
+    @property
     def trace_outputs(self) -> dict:
         """Lists receiver trace groups.
 
@@ -163,13 +294,14 @@ class SimulationJob(ABC):
         out = sim_data["Outputs"]["receivers"]
 
         recv_out = {}
-        recv_out["domain"] = (self.__class__.__name__,)
-        recv_out["path"] = out["path"]
+        recv_out["path"] = self._result_path / out["path"]
         recv_out["frequencies"] = self.f_list
+        recv_out["groups"] = []
         recv_out["components"] = []
         recv_out["sources"] = []
 
         for group in receivers:
+            recv_out["groups"].append(group.name)
             for component in group.device.components:
                 recv_out["components"].append(f"{group.name}:{component.name}")
 
@@ -215,16 +347,22 @@ class SimulationJob(ABC):
 
 @register_class
 class FrequencyDomainJob(SimulationJob):
-    def __init__(self, name: str, simulation: BaseSimulation, f_list: List[float]):
-        self.name = name
-        self.simulation = simulation
-        self.f_list = f_list
+    def __init__(
+        self,
+        name: str,
+        simulation: BaseSimulation,
+        f_list: List[float],
+        overwrite: bool = True,
+        max_versions: int = 5,
+    ):
+        workflow = "forward"
+        super().__init__(name, simulation, workflow, f_list, overwrite, max_versions)
 
     @classmethod
     def from_dict(cls, d: dict, project_dir: Optional[Path] = None):
         return cls(
             name=d["name"],
-            simulation=BaseSimulation.load(d["simulation"], project_dir=project_dir),
+            simulation=BaseSimulation.load(d["simulation"]),
             f_list=d["f_list"],
         )
 
@@ -239,6 +377,8 @@ class TimeDomainJob(SimulationJob):
         f_min: float = 0.0,
         df: Optional[float] = None,
         T_max: Optional[float] = None,
+        overwrite: bool = True,
+        max_versions: int = 5,
     ):
         if T_max is not None:
             if df is not None:
@@ -249,14 +389,47 @@ class TimeDomainJob(SimulationJob):
             f_min = f_min + df
         f_list = arange(f_min, f_max + df / 2, df)
 
-        self.name = name
-        self.simulation = simulation
-        self.f_list = f_list
+        workflow = "forward"
+        super().__init__(name, simulation, workflow, f_list, overwrite, max_versions)
 
     @classmethod
     def from_dict(cls, d: dict, project_dir: Optional[Path] = None):
         return cls(
             name=d["name"],
-            simulation=BaseSimulation.load(d["simulation"], project_dir=project_dir),
+            simulation=BaseSimulation.load(d["simulation"]),
             f_list=d["f_list"],
         )
+
+    # @property
+    # def records(self):
+    #     """Lists records that should be produced by a job.
+
+    #     Returns:
+    #         dict: Dictionary containing:
+    #             - datasets: Dictionary of datasets
+    #             - frequencies: List of frequencies
+    #             - simulation: Path to simulation file
+    #     """
+
+    #     output = self.trace_outputs
+
+    #     # For now we have to get entire files (with all sources, etc.)
+    #     path = output["path"]
+    #     records = {
+    #         "datasets": {},
+    #         "frequencies": {},
+    #         "simulation": self.simulation._file,
+    #     }
+    #     for components in output["components"]:
+    #         group, comp = components.split(":")
+    #         for i, freq in enumerate(output["frequencies"]):
+    #             ifreq = i + 1
+    #             for src in output["sources"]:
+    #                 record = group + "_" + str(ifreq) + ".h5"
+    #                 dset = comp + "_" + str(src)
+    #                 file = os.path.join(path, record)
+    #                 if file not in records["datasets"]:
+    #                     records["datasets"][file] = []
+    #                 records["datasets"][file].append(dset)
+    #                 records["frequencies"][ifreq] = freq
+    #     return records

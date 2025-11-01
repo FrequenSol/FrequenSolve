@@ -39,9 +39,14 @@ from frequensolve.orchestrator.config.stampede3 import (
 )
 from frequensolve.orchestrator.credentials import Credentials
 from frequensolve.orchestrator.pool import PoolInfo
-from frequensolve.orchestrator.sites.base import BaseSite, _wait_for_path
+from frequensolve.orchestrator.sites.base import (
+    BaseSite,
+    _check_if_notebook,
+    _wait_for_path,
+)
 from frequensolve.orchestrator.ssh import SSHClientClass, SSHProxy
 from frequensolve.seismic.record_database import RecordDatabase
+from frequensolve.simulation.imaging import RTMImagingJob
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
 
@@ -112,7 +117,7 @@ class Stampede3Site(BaseSite):
         self._FS_dir = self._get_FS_path()
 
         self.pool = PoolInfo()
-        self._is_notebook = self._check_if_notebook()
+        self._is_notebook = _check_if_notebook()
 
         logger.info("Stampede3Site initialized with work_dir: %s", self._work_dir)
 
@@ -426,7 +431,7 @@ class Stampede3Site(BaseSite):
 
     def _sync_project(self, project):
         """Sync the project to the site."""
-        project.transfer(self)
+        project._transfer(self)
 
     def _sync_result(self, result):
         """Sync a result with the site."""
@@ -553,10 +558,7 @@ class Stampede3Site(BaseSite):
 
         statuses = {j_id: "pending" for j_id in job_ids}
         active_jobs = set(job_ids)
-        # Calculate max job name length for alignment
         name_width = max(len(job.name) for job in jobs)
-
-        # Print initial status lines for each job
         for job in jobs:
             j_id = job._job_id
             print(
@@ -564,15 +566,12 @@ class Stampede3Site(BaseSite):
             )
 
         while active_jobs:
-            # Move cursor up to first status line
             print(f"\033[{len(job_ids)}A", end="")
-            # Get status for all active jobs in one sacct call
             active_ids = ",".join(active_jobs)
             cmd = f"sacct -j {active_ids} --format=JobID,State --noheader --parsable2"
             _, stdout, stderr = self.run_login_cmd(cmd)
             output = stdout.read().decode().strip()
 
-            # Parse sacct output and update statuses
             for line in output.split("\n"):
                 if not line:
                     continue
@@ -580,7 +579,6 @@ class Stampede3Site(BaseSite):
                 job_id = job_id.split(".")[0]  # Remove any array task IDs
                 state = state.split(" ")[0]  # Remove info about cancelling user
                 if job_id in active_jobs:
-                    # Map SLURM states to our status values
                     if state in ["PENDING", "CONFIGURING"]:
                         status = "pending"
                     elif state in ["RUNNING", "COMPLETING"]:
@@ -842,36 +840,41 @@ class Stampede3Site(BaseSite):
             try:
                 files = job.records["datasets"].keys()
 
-                # Create temporary directory name for the archive
-                archive_name = f"records_{int(time.time())}"
-                remote_archive = self.work_dir / f"{archive_name}.tar.gz"
-                local_archive = path / f"{archive_name}.tar.gz"
+                # Create temporary directory name for the payload
+                payload_name = f"records_{int(time.time())}"
+                remote_payload = self.work_dir / f"{payload_name}.tar.gz"
+                local_payload = path / f"{payload_name}.tar.gz"
 
-                # Create archive on remote
-                tar_cmd = f"cd {self.work_dir} && tar czf {remote_archive.name} "
+                print(payload_name)
+                print(remote_payload)
+                print(local_payload)
+                # print(files)
+
+                # Create payload on remote
+                tar_cmd = f"cd {self.work_dir} && tar czf {remote_payload.name} "
                 tar_cmd += " ".join(files)
                 _, _, stderr = self.run_login_cmd(tar_cmd)
+                print(stderr.read().decode().strip())
                 # err = stderr.read().decode().strip()
                 # if err:
-                #     raise RuntimeError(f"Failed to create archive on remote: {err}")
+                #     raise RuntimeError(f"Failed to create payload on remote: {err}")
 
                 # Download, extract, and cleanup
-                self.get(remote_archive, local_archive)
+                self.get(remote_payload, local_payload)
 
                 cwd = os.getcwd()
-                os.chdir(local_archive.parent)
-                with tarfile.open(local_archive, "r:gz") as tar:
-                    logger.debug("Extracting files from archive:")
+                os.chdir(local_payload.parent)
+                with tarfile.open(local_payload, "r:gz") as tar:
+                    logger.debug("Extracting files from payload:")
                     tar.extractall()
                 os.chdir(cwd)
 
-                local_archive.unlink()
-                self.run_login(f"rm {remote_archive}")
+                local_payload.unlink()
+                self.run_login(f"rm {remote_payload}")
 
                 # TODO: Copy job, simulation file to database so that it can be read independently.
 
                 db = RecordDatabase.from_results(job.records, path.resolve(), upscale)
-                db.consolidate_h5()
                 db_map[job.name] = db
 
             except Exception as e:
@@ -901,28 +904,84 @@ class Stampede3Site(BaseSite):
         for pv_name, pv_path in job.paraview_outputs.items():
             print(f"Fetching ParaView output '{pv_name}' from {pv_path}")
             try:
-                archive_name = f"{pv_name}.tar.gz"
-                remote_archive = self.work_dir / pv_path / archive_name
-                local_archive = path / pv_path / archive_name
+                payload_name = f"{pv_name}.tar.gz"
+                remote_payload = self.work_dir / pv_path / payload_name
+                local_payload = path / pv_path / payload_name
                 tar_cmd = (
-                    f"cd {self.work_dir / pv_path} && tar czf {archive_name} {pv_name}"
+                    f"cd {self.work_dir / pv_path} && tar czf {payload_name} {pv_name}"
                 )
                 _, _, stderr = self.run_login_cmd(tar_cmd)
 
-                self.get(remote_archive, local_archive)
+                self.get(remote_payload, local_payload)
 
                 cwd = os.getcwd()
-                os.chdir(local_archive.parent)
-                with tarfile.open(local_archive, "r:gz") as tar:
-                    logger.debug("Extracting files from archive:")
+                os.chdir(local_payload.parent)
+                with tarfile.open(local_payload, "r:gz") as tar:
+                    logger.debug("Extracting files from payload:")
                     tar.extractall()
                 os.chdir(cwd)
 
-                local_archive.unlink()
-                self.run_login(f"rm {remote_archive}")
+                local_payload.unlink()
+                self.run_login(f"rm {remote_payload}")
 
             except Exception as e:
                 logger.exception("Error downloading ParaView outputs: %s", str(e))
+                raise
+
+    def fetch_image(
+        self,
+        job: Union[RTMImagingJob, List[RTMImagingJob]],
+        path: Optional[Union[str, Path]] = None,
+    ):
+        """Get results from Stampede3.
+
+        Args:
+            job: A SimulationJob object.
+            path: The path to save the results to.
+        """
+
+        if isinstance(job, RTMImagingJob):
+            jobs = [job]
+        else:
+            jobs = job
+
+        if path is None:
+            path = jobs[0].project_path
+        else:
+            path = Path(path)
+
+        for job in jobs:
+            try:
+                files = []
+                fbase = str(job.save_path / "RTM").replace(
+                    str(job.project_path), str(self.work_dir)
+                )
+                for i, f in enumerate(job.f_list):
+                    fpath = fbase + f"_{i}.h5"
+                    files.append(fpath)
+
+                payload_name = f"payload_{int(time.time())}"
+                remote_payload = self.work_dir / f"{payload_name}.tar.gz"
+                local_payload = path / f"{payload_name}.tar.gz"
+
+                # Tar and download the payload
+                tar_cmd = f"cd {self.work_dir} && tar czf {remote_payload.name} "
+                tar_cmd += " ".join(files)
+                _, _, stderr = self.run_login_cmd(tar_cmd)
+                self.get(remote_payload, local_payload)
+
+                cwd = os.getcwd()
+                os.chdir(local_payload.parent)
+                with tarfile.open(local_payload, "r:gz") as tar:
+                    logger.debug("Extracting files from payload:")
+                    tar.extractall()
+                os.chdir(cwd)
+
+                local_payload.unlink()
+                self.run_login(f"rm {remote_payload}")
+
+            except Exception as e:
+                logger.exception("Error retrieving payload: %s", str(e))
                 raise
 
     def download_record_files(self, records: dict, project_dir: Union[str, Path]):
@@ -935,31 +994,31 @@ class Stampede3Site(BaseSite):
         project_dir = Path(project_dir)
         files = records["datasets"].keys()
         try:
-            # Create temporary directory name for the archive
-            archive_name = f"records_{int(time.time())}"
-            remote_archive = self.work_dir / f"{archive_name}.tar.gz"
-            local_archive = project_dir / f"{archive_name}.tar.gz"
+            # Create temporary directory name for the payload
+            payload_name = f"records_{int(time.time())}"
+            remote_payload = self.work_dir / f"{payload_name}.tar.gz"
+            local_payload = project_dir / f"{payload_name}.tar.gz"
 
-            # Create archive on remote
-            tar_cmd = f"cd {self.work_dir} && tar czf {remote_archive.name} "
+            # Create payload on remote
+            tar_cmd = f"cd {self.work_dir} && tar czf {remote_payload.name} "
             tar_cmd += " ".join(files)
             _, _, stderr = self.run_login_cmd(tar_cmd)
             err = stderr.read().decode().strip()
             # if err:
-            #     raise RuntimeError(f"Failed to create archive on remote: {err}")
+            #     raise RuntimeError(f"Failed to create payload on remote: {err}")
 
             # Download, extract, and cleanup
-            self.get(remote_archive, local_archive)
+            self.get(remote_payload, local_payload)
 
             cwd = os.getcwd()
-            os.chdir(local_archive.parent)
-            with tarfile.open(local_archive, "r:gz") as tar:
-                logger.debug("Extracting files from archive:")
+            os.chdir(local_payload.parent)
+            with tarfile.open(local_payload, "r:gz") as tar:
+                logger.debug("Extracting files from payload:")
                 tar.extractall()
             os.chdir(cwd)
 
-            local_archive.unlink()
-            self.run_login(f"rm {remote_archive}")
+            local_payload.unlink()
+            self.run_login(f"rm {remote_payload}")
             return records
 
         except Exception as e:
@@ -1135,11 +1194,12 @@ class Stampede3Site(BaseSite):
         self.put(Path(script_path), Path(remote_script))
         os.unlink(script_path)
 
-        file = job.save_for_remote(self.work_dir)
-        remote_job = ((self.work_dir / "jobs") / job.name).with_suffix(".json")
+        local_job, remote_job = job.save_for_remote(
+            self.__class__.__name__, self.work_dir
+        )
 
         logger.debug("Transferring job file to remote path: %s", remote_job)
-        self.put(Path(file), Path(remote_job))
+        self.put(Path(local_job), Path(remote_job))
         self.run_login(f"chmod 700 {remote_script}")
 
         return remote_script, remote_job
@@ -1165,11 +1225,12 @@ class Stampede3Site(BaseSite):
         self.put(Path(script_path), Path(remote_script))
         os.unlink(script_path)
 
-        file = job.save_for_remote(self.work_dir)
-        remote_job = ((self.work_dir / "jobs") / job.name).with_suffix(".json")
+        local_job, remote_job = job.save_for_remote(
+            self.__class__.__name__, self.work_dir
+        )
 
         logger.debug("Transferring job file to remote path: %s", remote_job)
-        self.put(Path(file), Path(remote_job))
+        self.put(Path(local_job), Path(remote_job))
         self.run_login(f"chmod 700 {remote_script}")
 
         return remote_script, remote_job
@@ -1433,7 +1494,7 @@ class Stampede3Site(BaseSite):
 
         err = stderr.read().decode().strip()
         if err:
-            raise RuntimeError(f"Failed to create tar archive on remote: {err}")
+            raise RuntimeError(f"Failed to create tar payload on remote: {err}")
 
         local_tar = str(local_dir.parent / f"{local_dir.name}.tar.gz")
         sftp.get(remote_tar, local_tar)

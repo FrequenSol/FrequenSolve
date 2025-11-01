@@ -3,8 +3,6 @@ SSH manager for Frontera and Stampede3 that uses a master socket to
 avoid re-authenticating each time a connection is made.
 """
 
-import os
-import pty
 import subprocess
 import time
 from io import BytesIO

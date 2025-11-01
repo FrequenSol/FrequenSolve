@@ -110,7 +110,6 @@ class FronteraSite(BaseSite):
         self._FS_dir = self._get_FS_path()
 
         self.pool = PoolInfo()
-        self._is_notebook = self._check_if_notebook()
 
         logger.info("FronteraSite initialized with work_dir: %s", self._work_dir)
 
@@ -827,7 +826,7 @@ class FronteraSite(BaseSite):
         self.put(Path(script_path), Path(remote_script))
         os.unlink(script_path)
 
-        file = job.save_for_remote(self.work_dir)
+        file = job.save_for_remote(self.__class__.__name__, self.work_dir)
         remote_job = ((self.work_dir / "jobs") / job.name).with_suffix(".json")
 
         logger.debug("Transferring job file to remote path: %s", remote_job)

@@ -80,11 +80,16 @@ class SimpleSurface:
             type = "ConstantSurface"
             z_phys = self.z_phys.get()
         else:
+
             type = "GridSurface"
             file = self._path / (self.name + ".bin")
-            self.z_phys.write(file)
-            z_phys = file.relative_to(self._proj_path)
 
+            orig_dims = self.z_phys.darr.dims
+            dims = sorted(orig_dims)
+            self.z_phys.darr = self.z_phys.darr.transpose(*dims[::-1])
+            self.z_phys.write(file)
+            self.z_phys.darr = self.z_phys.darr.transpose(*orig_dims)
+            z_phys = file.relative_to(self._proj_path)
             grid = self.z_phys.grid
 
             # TODO: This is again a nasty hack to get around not specifying dims in Grid
@@ -211,6 +216,11 @@ class SimpleSurface:
 # ----------------------------------------------------------------------
 class Layer(ModelSubdomain):
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lower = None
+        self.upper = None
+
     def perturb(
         self,
         property: Union[str, List[str]],
@@ -271,6 +281,9 @@ class Layer(ModelSubdomain):
                 type="multiplicative",
             )
 
+    def set_property(self, key: str, value: Union[float, xr.DataArray]):
+        self._properties[key] = Property(data=value)
+
 
 # Helper class for LayeredModel
 @dataclass(kw_only=True, slots=True)
@@ -329,7 +342,6 @@ class LayeredModel(ModelBase):
     y_limits: Optional[List[float]] = None
     surfaces: NamedList = field(default_factory=NamedList)
     ordering: Literal["top_down", "bottom_up"] = "top_down"
-    _layer_to_surfs: List[LayerBounds] = field(default_factory=list)
     _last_added: str = "none"
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
@@ -524,9 +536,9 @@ class LayeredModel(ModelBase):
             # Build layer-to-surface mapping
             if len(self.surfaces) > 1:
                 if self.ordering == "top_down":
-                    self._layer_to_surfs[-1].lower = other
+                    self.layers[-1].lower = other
                 else:
-                    self._layer_to_surfs[-1].upper = other
+                    self.layers[-1].upper = other
             self._last_added = "surface"
 
         elif isinstance(other, Layer):
@@ -549,24 +561,16 @@ class LayeredModel(ModelBase):
                 else:
                     prev_lower = self.lower_surface(self.layers[-2])
 
-                self._layer_to_surfs.append(
-                    LayerBounds(
-                        upper=prev_lower,
-                        layer=other,
-                    )
-                )
+                self.layers[-1].upper = prev_lower
+                self.layers[-1].lower = other
             else:
                 if len(self.layers) == 1:
                     prev_upper = self.lower_surface()
                 else:
                     prev_upper = self.upper_surface(self.layers[-2])
 
-                self._layer_to_surfs.append(
-                    LayerBounds(
-                        lower=prev_upper,
-                        layer=other,
-                    )
-                )
+                self.layers[-1].lower = prev_upper
+                self.layers[-1].upper = other
             self._last_added = "layer"
         elif isinstance(other, ModelSubdomain):
             self.add_subdomain(other)
@@ -595,18 +599,18 @@ class LayeredModel(ModelBase):
             else:
                 return self.surfaces[-1]
 
-        for layer_bounds in self._layer_to_surfs:
-            if isinstance(layer, int):
-                if layer_bounds.layer.mesh_block_id == layer:
-                    return layer_bounds.upper
-            elif isinstance(layer, str):
-                if layer_bounds.layer.name == layer:
-                    return layer_bounds.upper
-            elif isinstance(layer, ModelSubdomain):
-                if layer_bounds.layer == layer:
-                    return layer_bounds.upper
-            else:
-                raise ValueError(f"Layer '{layer}' not found")
+        surf = None
+        if isinstance(layer, int):
+            surf = self.layers[layer].upper
+        elif isinstance(layer, str):
+            surf = self.layers[layer].upper
+        elif isinstance(layer, Layer):
+            surf = layer.upper
+        elif isinstance(layer, ModelSubdomain):
+            for layer in self.layers:
+                if layer.mesh_block_id == layer.mesh_block_id:
+                    return layer.upper
+        return surf
 
     def lower_surface(
         self, layer: Optional[Union[str, int, ModelSubdomain]] = None
@@ -631,22 +635,22 @@ class LayeredModel(ModelBase):
 
         # TODO: add flag and method to "complete" model like this
         if self.ordering == "top_down":
-            self._layer_to_surfs[-1].lower = self.lower_surface()
+            self.layers[-1].lower = self.lower_surface()
         else:
-            self._layer_to_surfs[-1].upper = self.upper_surface()
+            self.layers[-1].upper = self.upper_surface()
 
-        for layer_bounds in self._layer_to_surfs:
-            if isinstance(layer, int):
-                if layer_bounds.layer.mesh_block_id == layer:
-                    return layer_bounds.lower
-            elif isinstance(layer, str):
-                if layer_bounds.layer.name == layer:
-                    return layer_bounds.lower
-            elif isinstance(layer, ModelSubdomain):
-                if layer_bounds.layer == layer:
-                    return layer_bounds.lower
-            else:
-                raise ValueError(f"Layer '{layer}' not found")
+        surf = None
+        if isinstance(layer, int):
+            surf = self.layers[layer].lower
+        elif isinstance(layer, str):
+            surf = self.layers[layer].lower
+        elif isinstance(layer, Layer):
+            surf = layer.lower
+        elif isinstance(layer, ModelSubdomain):
+            for layer in self.layers:
+                if layer.mesh_block_id == layer.mesh_block_id:
+                    return layer.lower
+        return surf
 
     def get_1D_log(
         self,
@@ -758,6 +762,7 @@ class LayeredModel(ModelBase):
                 if property not in layer.properties:
                     continue
                 prop = layer.properties[property]
+
                 if prop.is_constant:
                     gridded[property].data[mask] = prop.get()
                 elif layer.frame == "physical":
@@ -767,10 +772,9 @@ class LayeredModel(ModelBase):
                         z = samples.data[ix, mask[ix, :]]
                         samp = xr.DataArray(dims=["x", "z"], coords={"z": z, "x": x})
                         gridded[property].data[ix, mask[ix, :]] = prop.get(samp).data
-
         return gridded
 
-    def smooth(self, n: ArrayLike, sigma, **kwargs) -> xr.Dataset:
+    def smooth(self, n: ArrayLike, sigma, **kwargs):
         """Smooth the model."""
         from scipy.ndimage import gaussian_filter
 
@@ -797,9 +801,9 @@ class LayeredModel(ModelBase):
             raise NotImplementedError("3D plotting not implemented")
 
         if self.ordering == "top_down":
-            self._layer_to_surfs[-1].lower = self.lower_surface()
+            self.layers[-1].lower = self.lower_surface()
         else:
-            self._layer_to_surfs[-1].upper = self.upper_surface()
+            self.layers[-1].upper = self.upper_surface()
 
         # Process kwargs
         units = kwargs.pop("units", "km/s")
@@ -808,6 +812,7 @@ class LayeredModel(ModelBase):
         aspect = kwargs.pop("aspect", None)
         axes_names = kwargs.pop("axes_names", {"x": "X", "z": "Depth"})
         axes_units = kwargs.pop("axes_units", {"x": "km", "z": "km"})
+        add_colorbar = kwargs.pop("add_colorbar", True)
 
         # Get surface plotting kwargs
         show_surfs = kwargs.pop("surfaces", True)
@@ -877,7 +882,13 @@ class LayeredModel(ModelBase):
 
         samples = samples.clip(min=vmin, max=vmax)
         im = samples.plot.imshow(
-            ax=ax, x="x", vmin=vmin, vmax=vmax, extend="neither", **kwargs
+            ax=ax,
+            x="x",
+            vmin=vmin,
+            vmax=vmax,
+            extend="neither",
+            add_colorbar=add_colorbar,
+            **kwargs,
         )
 
         # Plot surfaces
@@ -1197,8 +1208,8 @@ class LayeredModel(ModelBase):
                     z_ref[layer_mask] = Z_coords[layer_mask]
                 found[layer_mask] = True
 
-        if not np.all(found):
-            raise ValueError("Some points were not found in any layer")
+        # if not np.all(found):
+        #     raise ValueError("Some points were not found in any layer")
 
         return xr.DataArray(
             dims=["x", "z"], coords={"x": x_coords, "z": z_coords}, data=z_ref

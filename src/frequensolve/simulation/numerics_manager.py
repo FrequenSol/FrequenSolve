@@ -1,5 +1,5 @@
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 __all__ = ["Discretization", "SolverConfig", "NumericsManager"]
 
@@ -10,29 +10,55 @@ class Discretization:
 
     Args:
        method (str): The discretization method, defaults to "DPG".
+       order (Union[int, Dict[str, int]]): The discretization order, defaults to 3.
        DPG_alpha (float): The DPG stabilization parameter, defaults to 1.0.
        DPG_enrich (int): The DPG enrichment parameter, defaults to 1.
        DPG_penalty (float): The DPG penalty parameter (for enforcing constraints like continuity), defaults to 100.
     """
 
     method: str = "DPG"
-    order: int = 3
+    order: Union[int, Dict[str, int]] = 3
     DPG_alpha: float = 1.0
-    DPG_enrich: int = 1
+    DPG_enrich: int = 0
     DPG_penalty: float = 100.0
+    misc: Dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        method: str = "DPG",
+        order: Union[int, Dict[str, int]] = 3,
+        DPG_alpha: float = 1.0,
+        DPG_enrich: int = 0,
+        DPG_penalty: float = 100.0,
+        **kwargs,
+    ):
+        self.method = method
+        self.order = order
+        self.DPG_alpha = DPG_alpha
+        self.DPG_enrich = DPG_enrich
+        self.DPG_penalty = DPG_penalty
+        self.misc = kwargs
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Discretization":
         return cls(
-            method=d.get("method", "DPG"),
-            order=d.get("order", 3),
-            DPG_alpha=d.get("DPG_alpha", 1.0),
-            DPG_enrich=d.get("DPG_enrich", 1),
-            DPG_penalty=d.get("DPG_penalty", 100),
+            method=d.pop("method", "DPG"),
+            order=d.pop("order", 3),
+            DPG_alpha=d.pop("DPG_alpha", 1.0),
+            DPG_enrich=d.pop("DPG_enrich", 0),
+            DPG_penalty=d.pop("DPG_penalty", 100),
+            misc=d,
         )
 
     def __dict__(self) -> Dict[str, Any]:
-        return asdict(self)
+        return {
+            "method": self.method,
+            "order": self.order,
+            "DPG_alpha": self.DPG_alpha,
+            "DPG_enrich": self.DPG_enrich,
+            "DPG_penalty": self.DPG_penalty,
+            **self.misc,
+        }
 
 
 @dataclass
