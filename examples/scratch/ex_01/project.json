@@ -1,9 +1,0 @@
-{
-   "name": "project",
-   "path": "/Users/sambadger/Projects/FrequenSol/FrequenSolve/examples/scratch/ex_01",
-   "pretty_name": "Simple Simulation",
-   "version": "0.0.0",
-   "simulations": [
-      "/Users/sambadger/Projects/FrequenSol/FrequenSolve/examples/scratch/ex_01/simulations/simple_acoustic/simple_acoustic.json"
-   ]
-}

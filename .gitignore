@@ -159,3 +159,5 @@ terraform.rc
 # Ignore test output
 tests/output/*
 !tests/output/.gitkeep
+
+results/
