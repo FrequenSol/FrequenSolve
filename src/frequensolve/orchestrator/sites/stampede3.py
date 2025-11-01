@@ -797,7 +797,7 @@ class Stampede3Site(BaseSite):
                     local_str = str(local_path)
 
                 cmd_str = " ".join([*rsync_cmd, local_str, remote_str])
-                logger.debug("Transferring via rsync: %s", cmd_str)
+                logger.info("Transferring via rsync: %s", cmd_str)
 
                 result = subprocess.run(
                     [*rsync_cmd, local_str, remote_str], capture_output=True, text=True

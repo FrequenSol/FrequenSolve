@@ -53,27 +53,32 @@ class SimpleSurface:
         interface: bool,
         z_ref: Optional[float],
         z_phys: Property,
-        xarr: Optional[xr.DataArray] = None,
+        grid: Optional[xr.DataArray] = None,
         scale: float = 1.0,
+        **kwargs,
     ):
+        # Legacy argument naming convention
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
+
         self.name = name
         self.interface = interface
         self.z_ref = z_ref
-        self.z_phys = Property(data=z_phys, xarr=xarr, scale=scale)
+        self.z_phys = Property(data=z_phys, grid=grid, scale=scale)
 
     @classmethod
     def from_dict(cls, dict: Dict) -> "SimpleSurface":
         data = dict["z_phys"]
         if isinstance(data, float):
-            xarr = None
+            grid = None
         else:
-            xarr = CartesianGrid.from_dict(dict["grid"]).as_xarray()
+            grid = CartesianGrid.from_dict(dict["grid"]).as_xarray()
         return cls(
             name=dict["name"],
             interface=dict.get("interface", True),
             z_ref=dict.get("z_ref"),
             z_phys=data,
-            xarr=xarr,
+            grid=grid,
         )
 
     def __dict__(self):
@@ -136,17 +141,18 @@ class SimpleSurface:
     def perturb(
         self,
         std: float,
-        xarr: Optional[xr.DataArray] = None,
+        grid: Optional[xr.DataArray] = None,
         L0: Union[float, List[float]] = 1.0,
         nu: float = 1.0,
         seed: Optional[int] = None,
+        **kwargs,
     ) -> None:
         """Perturb the dataset by a von Karman stochastic field.
 
         std (float):
            Standard deviation of the perturbation
-        xarr (xr.DataArray):
-           Xarray with final shape of the perturbation
+        grid (xr.DataArray):
+           Xarray defining the grid for the perturbation
         L0 (float):
            Characteristic length scale of the perturbation
         nu (float):
@@ -155,6 +161,11 @@ class SimpleSurface:
         seed (int):
            Random seed (for reproducibility)
         """
+
+        # Legacy argument naming convention
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
+
         if isinstance(L0, float):
             L0 = [L0]
         k0 = []
@@ -163,7 +174,7 @@ class SimpleSurface:
         self.z_phys.stochastic_perturbation(
             std=std,
             method="von_karman",
-            xarr=xarr,
+            grid=grid,
             k0=k0,
             nu=nu,
             seed=seed,
@@ -176,8 +187,8 @@ class SimpleSurface:
 
         if self.z_phys.is_constant:
             dims = sorted(limits.keys())
-            xarr = xr.DataArray(dims=dims, coords=limits)
-            surf = self.z_phys.get(xarr=xarr)
+            grid = xr.DataArray(dims=dims, coords=limits)
+            surf = self.z_phys.get(grid=grid)
         else:
             surf = self.z_phys.get()
 
@@ -225,11 +236,12 @@ class Layer(ModelSubdomain):
         self,
         property: Union[str, List[str]],
         std: float,
-        xarr: Optional[xr.DataArray] = None,
         L0: Union[float, List[float]] = 1.0,
         nu: float = 0.5,
         anisotropy: Optional[List[float]] = None,
+        grid: Optional[xr.DataArray] = None,
         seed: Optional[int] = None,
+        **kwargs,
     ) -> None:
         """Perturb the dataset by a Von Karmanstochastic field.
 
@@ -240,8 +252,8 @@ class Layer(ModelSubdomain):
               Name of the property to perturb
            std (float):
               Standard deviation of the perturbation
-           xarr (xr.DataArray):
-              Xarray with final shape of the perturbation
+           grid (xr.DataArray):
+              Xarray defining the grid for the perturbation
            L0 (float):
               Characteristic length scale of the perturbation
            nu (float):
@@ -252,6 +264,12 @@ class Layer(ModelSubdomain):
            seed (int):
               Random seed (for reproducibility)
         """
+
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
+
+        if grid is None:
+            grid = self.grid
 
         if isinstance(property, str):
             properties = [property]
@@ -273,7 +291,7 @@ class Layer(ModelSubdomain):
             self.properties[property].stochastic_perturbation(
                 std=std,
                 method="von_karman",
-                xarr=xarr,
+                grid=grid,
                 k0=k0,
                 nu=nu,
                 anisotropy=anisotropy,
@@ -342,6 +360,7 @@ class LayeredModel(ModelBase):
     y_limits: Optional[List[float]] = None
     surfaces: NamedList = field(default_factory=NamedList)
     ordering: Literal["top_down", "bottom_up"] = "top_down"
+    kwargs: Dict = field(default_factory=dict)
 
     _last_added: str = "none"
     _proj_path: Optional[Path] = None
@@ -355,7 +374,8 @@ class LayeredModel(ModelBase):
         mesh_block_id: int = -1,
         frame: str = "physical",
         properties: Optional[dict] = None,
-        xarr: Optional[xr.DataArray] = None,
+        grid: Optional[xr.DataArray] = None,
+        **kwargs,
     ) -> None:
         """Add a layer to the model.
 
@@ -368,10 +388,14 @@ class LayeredModel(ModelBase):
               Frame of the layer.
            properties (dict):
               Properties of the layer.
-           xarr (xr.DataArray, optional):
-              Xarray with final shape of the layer (required for reading file formats
+           grid (xr.DataArray, optional):
+              Xarray defining the grid for the layer (required for reading file formats
               where grid is not stored with data)
         """
+
+        # Legacy argument naming convention
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
 
         name = self._get_unique_name(name, self._layer_names)
         self._layer_names.add(name)
@@ -381,7 +405,7 @@ class LayeredModel(ModelBase):
             mesh_block_id=mesh_block_id,
             frame=frame,
             properties=properties,
-            xarr=xarr,
+            grid=grid,
         )
         self += layer
 
@@ -390,8 +414,9 @@ class LayeredModel(ModelBase):
         z: Union[float, str, Path, xr.DataArray],
         name: Optional[str] = None,
         z_ref: Optional[float] = None,
-        xarr: Optional[xr.DataArray] = None,
+        grid: Optional[xr.DataArray] = None,
         scale: float = 1.0,
+        **kwargs,
     ):
         """Add a surface to the model.
 
@@ -403,11 +428,15 @@ class LayeredModel(ModelBase):
               Name of the surface.
            z_ref (float):
               Reference z-coordinate of the surface.
-           xarr (xr.DataArray, optional):
-              Xarray with final shape of the surface.
+           grid (xr.DataArray, optional):
+              Xarray defining the grid for the surface.
         """
 
         interface = len(self.surfaces) == 0
+
+        # Legacy argument naming convention
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
 
         name = self._get_unique_name(name, self._surface_names)
         self._surface_names.add(name)
@@ -417,7 +446,7 @@ class LayeredModel(ModelBase):
             interface=interface,
             z_ref=z_ref,
             z_phys=z,
-            xarr=xarr,
+            grid=grid,
             scale=scale,
         )
         if z_ref is None:
@@ -480,15 +509,14 @@ class LayeredModel(ModelBase):
            LayeredModel: New LayeredModel instance created from dictionary data.
         """
         # Create copy and remove surfaces to pass rest to parent
-        data_copy = data.copy()
-        surfs = data_copy.pop("surfaces")
-        layers = data_copy.pop("subdomains")
+        surfs = data.pop("surfaces")
+        layers = data.pop("subdomains")
 
-        name = data["name"]
-        dimension = data["dimension"]
-        x_limits = data["x_limits"]
-        y_limits = data.get("y_limits")
-        ordering = data.get("ordering", "top_down")
+        name = data.pop("name", None)
+        dimension = data.pop("dimension", None)
+        x_limits = data.pop("x_limits", None)
+        y_limits = data.pop("y_limits", None)
+        ordering = data.pop("ordering", "top_down")
         model = LayeredModel(
             name=name,
             dimension=dimension,
@@ -496,14 +524,14 @@ class LayeredModel(ModelBase):
             y_limits=y_limits,
             ordering=ordering,
         )
+        model.kwargs = data
 
         model += SimpleSurface.from_dict(surfs[0])
 
-        nsurfs = len(surfs)
-        nlayers = len(layers)
+        n_surf = len(surfs)
         isurf = 1
         ilayer = 0
-        while isurf < nsurfs:
+        while isurf < n_surf:
             # Add layer
             model += Layer.from_dict(layers[ilayer])
             ilayer += 1
@@ -533,6 +561,7 @@ class LayeredModel(ModelBase):
                 "surfaces": [surface.__dict__() for surface in self.surfaces],
             }
         )
+        base_dict.update(self.kwargs)
         return base_dict
 
     def __iadd__(self, other):
@@ -684,6 +713,7 @@ class LayeredModel(ModelBase):
         samples = self._physical_to_reference(samples.coords)
 
         for layer in self.layers:
+            layer.properties.keys()
             if property not in layer.properties:
                 continue
             prop = layer.properties[property].get(samples)
@@ -790,10 +820,15 @@ class LayeredModel(ModelBase):
 
         gridded = self.sample_uniform(n)
         for property in self.properties:
-            gridded[property].data = gaussian_filter(
-                gridded[property].data, sigma=sigma, **kwargs
-            )
+            if np.any(np.isnan(gridded[property].data)):
+                filled = gridded[property]
+                for dim in filled.dims:
+                    filled = filled.bfill(dim=dim).ffill(dim=dim)
+                data = filled.data
+            else:
+                data = gridded[property].data
 
+            gridded[property].data = gaussian_filter(data, sigma=sigma, **kwargs)
         for layer in self.layers:
             for property in layer.properties:
                 layer.set_property(property, gridded[property])

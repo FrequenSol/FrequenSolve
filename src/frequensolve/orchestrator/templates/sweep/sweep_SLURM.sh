@@ -46,8 +46,7 @@ rm -rf $dir_out
 mkdir -p $dir_out
 mkdir -p $dir_out
 
-ml phdf5
-ml petsc/3.23
+ml phdf5 petsc/3.23 fftw3
 module list
 
 {% if n_tasks > 1 %}
@@ -115,8 +114,6 @@ wait
 #    fi
 # done
 # wait
-
-
 
 # Calculate and print total time taken
 end_time=$(date +%s)

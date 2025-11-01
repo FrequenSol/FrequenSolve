@@ -69,7 +69,14 @@ class BaseSimulation(SimulationConfig):
         """Load seismic simulation from JSON file."""
         with open(path, "r") as f:
             data = json.load(f)
-            return cls.from_dict(data)
+        class_name = data["_type"]
+        if class_name in class_registry:
+            sim_class = class_registry[class_name]
+            sim = sim_class.from_dict(data)
+            sim._file = path
+            return sim
+        else:
+            raise Exception(f"Unknown simulation class: {class_name}")
 
     def __dict__(self) -> Dict:
         from frequensolve.util.printing import print_note
@@ -125,7 +132,7 @@ class SeismicSimulation(BaseSimulation):
     discretization: Discretization = field(default_factory=Discretization)
     outputs: OutputManager = field(default_factory=OutputManager)
     acquisition: Acquisition = field(default_factory=Acquisition)
-    misc: Dict = field(default_factory=dict)
+    kwargs: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         if self.project_path is None:
@@ -174,7 +181,7 @@ class SeismicSimulation(BaseSimulation):
                 sim.acquisition = Acquisition.from_dict(data.pop("Acquisition"))
 
             os.chdir(cwd)
-        sim.misc = data
+        sim.kwargs = data
         sim._set_path(project_path, Path("simulations"))
         return sim
 
@@ -194,21 +201,11 @@ class SeismicSimulation(BaseSimulation):
 
         return sim_copy
 
-    @classmethod
-    def load(cls, path: Union[str, Path], **kwargs) -> "SeismicSimulation":
-        """Load seismic simulation from JSON file."""
-
-        with open(path, "r") as f:
-            data = json.load(f)
-        sim = cls.from_dict(data)
-        sim._file = path
-        return sim
-
     def __dict__(self) -> Dict:
         dict = super().__dict__()
         dict["_type"] = self.__class__.__name__
         dict["Acquisition"] = self.acquisition.__dict__()
-        dict.update(self.misc)
+        dict.update(self.kwargs)
         return dict
 
     def __iadd__(self, other):

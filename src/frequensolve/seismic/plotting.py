@@ -81,7 +81,7 @@ def plot_gather(shot: ShotRecord, **kwargs):
         idir += 1
         x0 = x_min[idir]
         x1 = x_max[idir]
-        xlabel = f"{['X', 'Y', 'Z'][idir]} ({units})"
+        xlabel = f"{['X', 'Y', 'Z'][idir]} [{units}]"
         if idir == len(x_min):
             x0 = 0
             x1 = np.shape(group.coordinates)[-1]
@@ -92,7 +92,7 @@ def plot_gather(shot: ShotRecord, **kwargs):
 
     plt.title(f"Shot {shot.number}: {shot.field}")
     plt.xlabel(xlabel)
-    plt.ylabel("Time (s)")
+    plt.ylabel("Time [s]")
 
     if isinstance(aspect, (int, float)):
         aspect *= (x1 - x0) / (Tf - t0)
@@ -185,8 +185,8 @@ def animate_gather(shot: ShotRecord, **kwargs):
     frames = []
     fig = plt.figure(1, figsize=figsize)
 
-    plt.xlabel(f"X ({units})")
-    plt.ylabel(f"Z ({units})")
+    plt.xlabel(f"X [{units}]")
+    plt.ylabel(f"Z [{units}]")
 
     ax = plt.gca()
     ax.set_axis_off()
@@ -234,7 +234,8 @@ def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
     )
 
     A = kwargs.get("A", 1)
-    units = kwargs.get("units", "km")
+    L_units = kwargs.get("L_units", "km")
+    T_units = kwargs.get("T_units", "s")
     cmap = kwargs.get("cmap", "Greys")
     figsize = kwargs.get("figsize", (10, 4))
     fontsize = kwargs.get("fontsize", 12)
@@ -253,10 +254,37 @@ def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
     if Cdiff != 1.0:
         title3 = f"{title3} ({Cdiff}x amplified)"
 
+    x_scale = kwargs.pop("L_scale", 1.0)
+    t_scale = kwargs.pop("T_scale", 1.0)
+
+    if "ax" in kwargs:
+        ax = kwargs.pop("ax")
+        show = False
+    else:
+        show = True
+        if stack == "horizontal":
+            fig, ax = plt.subplots(1, 3, figsize=figsize, sharey=True)
+        elif stack == "vertical":
+            fig, ax = plt.subplots(3, 1, figsize=figsize, sharex=True)
+
+    if stack == "horizontal":
+        if flip:
+            axes_y = [ax[0]]
+            axes_x = ax
+        else:
+            axes_y = [ax[0]]
+            axes_x = ax
+    elif stack == "vertical":
+        if flip:
+            axes_x = [ax[2]]
+            axes_y = ax
+        else:
+            axes_x = [ax[2]]
+            axes_y = ax
+
     Tf = kwargs.get("Tf", None)
     nTf, Tf = shot1.sampling.cutoff(Tf)
     t0 = shot1.sampling.t0
-
     sgroup = shot1.source_group
     rgroup = shot1.receiver_group
 
@@ -268,44 +296,34 @@ def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
         idir += 1
         x0 = x_min[idir]
         x1 = x_max[idir]
-        xlabel = f"{['X', 'Depth'][idir]} ({units})"
+        xlabel = f"{['X', 'Depth'][idir]} [{L_units}]"
         if idir == len(x_min):
             x0 = 0
             x1 = np.shape(rgroup.coordinates)[-1]
             break
-    tlabel = "Time (s)"
+    tlabel = f"Time [{T_units}]"
+
+    # Scale axes
+    t0 *= t_scale
+    Tf *= t_scale
+    x0 *= x_scale
+    x1 *= x_scale
 
     if isinstance(aspect, (int, float)):
         aspect *= (x1 - x0) / (Tf - t0)
 
-    if stack == "horizontal":
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=figsize, sharey=True)
-        if flip:
-            axes_y = [ax1]
-            axes_x = [ax1, ax2, ax3]
-        else:
-            axes_y = [ax1]
-            axes_x = [ax1, ax2, ax3]
-    elif stack == "vertical":
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=figsize, sharex=True)
-        if flip:
-            axes_x = [ax3]
-            axes_y = [ax1, ax2, ax3]
-        else:
-            axes_x = [ax3]
-            axes_y = [ax1, ax2, ax3]
     plt.subplots_adjust(wspace=wspace)
 
-    ax1.set_title(title1)
-    ax2.set_title(title2)
-    ax3.set_title(title3)
+    ax[0].set_title(title1)
+    ax[1].set_title(title2)
+    ax[2].set_title(title3)
 
     # Plot data
     if flip:
-        for ax in axes_y:
-            ax.set_ylabel(xlabel)
-        for ax in axes_x:
-            ax.set_xlabel(tlabel)
+        for axis in axes_y:
+            axis.set_ylabel(xlabel)
+        for axis in axes_x:
+            axis.set_xlabel(tlabel)
 
         kwargs_imshow = dict(
             origin="upper",
@@ -317,17 +335,17 @@ def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
         )
 
         # Flip the data horizontally by reversing the time axis
-        ax1.imshow(shot1.data[nTf:1:-1, :].T, **kwargs_imshow)
-        ax2.imshow(shot2.data[nTf:1:-1, :].T, **kwargs_imshow)
-        ax3.imshow(
+        ax[0].imshow(shot1.data[nTf:1:-1, :].T, **kwargs_imshow)
+        ax[1].imshow(shot2.data[nTf:1:-1, :].T, **kwargs_imshow)
+        ax[2].imshow(
             Cdiff * (shot1.data[nTf:1:-1, :].T - shot2.data[nTf:1:-1, :].T),
             **kwargs_imshow,
         )
     else:
-        for ax in axes_y:
-            ax.set_ylabel(tlabel)
-        for ax in axes_x:
-            ax.set_xlabel(xlabel)
+        for axis in axes_y:
+            axis.set_ylabel(tlabel)
+        for axis in axes_x:
+            axis.set_xlabel(xlabel)
 
         kwargs_imshow = dict(
             origin="upper",
@@ -337,9 +355,11 @@ def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
             vmax=A,
             aspect=aspect,
         )
-        ax1.imshow(shot1.data[:nTf, :], **kwargs_imshow)
-        ax2.imshow(shot2.data[:nTf, :], **kwargs_imshow)
-        ax3.imshow(Cdiff * (shot1.data[:nTf, :] - shot2.data[:nTf, :]), **kwargs_imshow)
+        ax[0].imshow(shot1.data[:nTf, :], **kwargs_imshow)
+        ax[1].imshow(shot2.data[:nTf, :], **kwargs_imshow)
+        ax[2].imshow(
+            Cdiff * (shot1.data[:nTf, :] - shot2.data[:nTf, :]), **kwargs_imshow
+        )
 
     if "save" in kwargs:
         file = kwargs["save"]
@@ -348,8 +368,9 @@ def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
         )
         plt.close()
     else:
-        plt.show()
-    del fig
+        if show:
+            plt.show()
+            plt.close()
 
 
 def hilbert_envelope(x: np.ndarray, axis: int = 0):
@@ -407,14 +428,9 @@ def pick_first_arrivals(
        ValueError: If window_type is not 'tukey' or 'gaussian'.
        ValueError: If signals have different lengths.
     """
-
-    # Step 1: Envelope
     envelope = hilbert_envelope(signal)
-
-    # Step 2: Find first arrival index for each trace
     threshold = threshold_ratio * np.max(envelope, axis=0)
     first_arrivals = np.argmax(envelope > threshold, axis=0)
-
     return first_arrivals
 
 
@@ -425,11 +441,26 @@ def window_first_arrivals(
     threshold_ratio: float,
     window_length: float,
     alpha: float = 0.5,
+    **kwargs,
 ):
-    """Pick and window first arrivals from a pair of seismic signals."""
+    """Pick and window first arrivals from a pair of seismic signals.
+
+    Args:
+        signal (np.ndarray): Primary time series to analyze for first arrival.
+        signal2 (np.ndarray): Secondary time series to window (same length as signal).
+        sampling_rate (float): Sampling rate in samples per second.
+        threshold_ratio (float): Fraction of peak envelope amplitude for first-arrival detection.
+        window_length (float): Total length of the time window in seconds.
+        alpha (float, optional): Shape parameter for Tukey window. Defaults to 0.5.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray] or tuple[np.ndarray, np.ndarray, np.ndarray]:
+            If ifirst is not requested: (smoothed1, smoothed2)
+            If ifirst is requested: (smoothed1, smoothed2, ifirst)
+    """
     from scipy.signal.windows import tukey
 
-    ifirst = pick_first_arrivals(signal, threshold_ratio)
+    ifirst = pick_first_arrivals(signal.data, threshold_ratio)
 
     def full_window(signal, ifirst, wl):
         """Apply a simple window, centered around first threshold crossing."""
@@ -475,55 +506,58 @@ def window_first_arrivals(
             out[j1:j2, i] = window[j1:j2] * signal[i1:i2, i]
         return out
 
-    def apply_window(sig, sig2, ifirst):
+    def apply_window(sig, ifirst):
         """Apply a simple window, centered around maximum amplitude of simple window."""
-        small1 = small_window(sig, ifirst, window_length)
-        small2 = small_window(sig2, ifirst, window_length)
+        small = full_window(sig, ifirst, window_length)
+        # small = small_window(sig, ifirst, window_length)
+        return small
 
-        return small1, small2
+    import xarray as xr
+
+    full1 = full_window(signal.data, ifirst, window_length)
+    ifirst = np.argmax(full1, axis=0)
+    ifirst = xr.DataArray(
+        ifirst,
+        dims=["z"],
+        coords={
+            "z": signal._receiver_group.coordinates[:, -1],
+        },
+    )
+    ifirst2 = ifirst.interp(
+        z=signal2._receiver_group.coordinates[:, -1], method="nearest"
+    )
+    ifirst2 = ifirst2.data.astype(int)
+
+    # if len(ifirst2) == 70:
+    #     np.save('ifirst_DAS.npy', ifirst2)
+    # else:
+    #     np.save('ifirst_geo.npy', ifirst2)
 
     # Step 5: Apply window
-    smoothed1, smoothed2 = apply_window(signal, signal2, ifirst)
+    smoothed = apply_window(signal2.data, ifirst2)
 
-    # fig = plt.figure(figsize=(10, 5))
-    # A = 0.1*np.max(np.abs(smoothed1))
+    import inspect
 
-    # plt.subplot(121)
-    # plt.title(f"Baseline")
-    # plt.ylabel("Time (s)")
-    # plt.imshow(
-    #     signal,
-    #     origin="upper",
-    #     cmap="Greys",
-    #     vmin=-A,
-    #     vmax=A,
-    #     aspect="auto",
-    #     interpolation="nearest",
-    # )
-    # plt.plot(ifirst, "r-")
+    frame = inspect.currentframe()
+    try:
+        caller_source = inspect.getframeinfo(frame.f_back).code_context[0]
+        if "=" in caller_source and "," in caller_source:
+            lhs = caller_source.split("=")[0].strip()
+            num_vars = len(lhs.split(","))
+            if num_vars == 3:
+                return smoothed, ifirst2
+    finally:
+        del frame
 
-    # plt.subplot(122)
-    # plt.title(f"Monitor")
-    # plt.imshow(
-    #     smoothed1,
-    #     origin="upper",
-    #     cmap="Greys",
-    #     vmin=-A,
-    #     vmax=A,
-    #     aspect="auto",
-    #     interpolation="nearest",
-    # )
-
-    # plt.show()
-    return smoothed1, smoothed2
+    return smoothed, ifirst2
 
 
 def compute_nrms(
-    base1: ShotRecord,
+    base: ShotRecord,
     shot1: ShotRecord,
-    base2: ShotRecord,
     shot2: ShotRecord,
     threshold=0.2,
+    window_length=0.01,
     **kwargs,
 ):
     """Compute time lag between two time-domain shots.
@@ -551,42 +585,65 @@ def compute_nrms(
        ValueError:       If shots have incompatible sampling.
     """
 
-    sgroup = base1.source_group
-    rgroup = base1.receiver_group
+    sgroup = base._source_group
+    rgroup = base._receiver_group
 
-    nT = base1.sampling.nTime
+    nT = len(base.coords["time"])
     n_recv = rgroup.size
-    rate = (nT - 1) / base1.sampling.T  # samples/second
+    T = base.coords["time"][-1] - base.coords["time"][0]
+    rate = (nT - 1) / T
 
-    Tmax = kwargs.get("Tmax", None)
-    nTmax, Tmax = base1.sampling.cutoff(Tmax)
+    T_max = kwargs.get("T_max", None)
+    if T_max is not None:
+        base = base.sel(time=slice(0, T_max))
+        shot1 = shot1.sel(time=slice(0, T_max))
+        shot2 = shot2.sel(time=slice(0, T_max))
 
-    b1, win1 = window_first_arrivals(
-        base1.data[:nTmax, :],
-        shot1.data[:nTmax, :],
+    win1, f1 = window_first_arrivals(
+        base,
+        shot1,
         rate,
         threshold_ratio=threshold,
-        window_length=0.005,
+        window_length=window_length,
     )
 
-    b2, win2 = window_first_arrivals(
-        base2.data[:nTmax, :],
-        shot2.data[:nTmax, :],
+    win2, f2 = window_first_arrivals(
+        base,
+        shot2,
         rate,
         threshold_ratio=threshold,
-        window_length=0.005,
+        window_length=window_length,
+        ifirst_ref=f1,
     )
     wind = win1 - win2
+
+    fig, ax = plt.subplots(1, 4, figsize=(16, 4))
+    hwl = int(window_length * rate / 2)
+    print(hwl)
+    A = 4 * np.std(np.abs(shot1.data))
+    ax[0].imshow(shot1.data, cmap="gray", aspect="auto", vmin=-A, vmax=A)
+    ax[0].set_title("Baseline")
+    ax[0].plot(f1 - hwl, linewidth=1, color="red")
+    ax[0].plot(f1 + hwl, linewidth=1, color="red")
+    ax[1].imshow(shot2.data, cmap="gray", aspect="auto", vmin=-A, vmax=A)
+    ax[1].set_title("Day 1")
+    ax[2].imshow(wind, cmap="gray", aspect="auto", vmin=-A, vmax=A)
+    ax[2].set_title("Windowed Difference")
 
     rms1 = np.sqrt(np.mean(np.square(win1), axis=0))
     rms2 = np.sqrt(np.mean(np.square(win2), axis=0))
     rmsd = np.sqrt(np.mean(np.square(wind), axis=0))
     nrms = 100 * rmsd / ((rms1 + rms2) / 2)
+    ax[3].set_title("NRMS")
+    ax[3].plot(nrms, linewidth=2)
+    plt.show()
 
     return nrms
 
 
-def compute_timelag(shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, **kwargs):
+def compute_timelag(
+    shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, window_length=0.01, **kwargs
+):
     """Compute time lag between two time-domain shots.
 
     Performs cross-correlation between corresponding traces in two shots to estimate
@@ -633,7 +690,7 @@ def compute_timelag(shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, **kwarg
         shot2.data[:nTmax, :],
         rate,
         threshold_ratio=threshold,
-        window_length=0.01,
+        window_length=window_length,
     )
 
     nW = np.shape(win1)[0]
@@ -704,7 +761,7 @@ def plot_timelag(shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, **kwargs):
         x0 = x_min[idir]
         x1 = x_max[idir]
         # TODO: different for 2D; make getting axis limits a member of shot
-        xlabel = f"{['X', 'Y', 'Z'][idir]} ({units})"
+        xlabel = f"{['X', 'Y', 'Z'][idir]} [{units}]"
         if idir == len(x_min):
             x0 = 0
             x1 = np.shape(rgroup.coordinates)[-1]
@@ -751,7 +808,7 @@ def plot_timelag(shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, **kwargs):
     plt.clf()
     plt.title(f"Shot {shot1.number}: {shot1.field}")
     plt.xlabel(xlabel)
-    plt.ylabel("Time (s)")
+    plt.ylabel("Time [s]")
 
     A = 0.5 * np.max(np.abs(win1))
     plt.imshow(
@@ -831,11 +888,11 @@ def plot_xf(shot: ShotRecord, **kwargs):
     x_min, x_max = rgroup.coordinates.bounds
     x0 = x_min[0]
     x1 = x_max[0]
-    xlabel = f"X ({units})"
+    xlabel = f"X [{units}]"
     if x0 == x1:
         x0 = x_min[1]
         x1 = x_max[1]
-        xlabel = f"Depth ({units})"
+        xlabel = f"Depth [{units}]"
 
     # Plot
     plt.ylabel("f (Hz)")
@@ -904,7 +961,7 @@ def plot_cf(shot: ShotRecord, **kwargs):
         idir += 1
         x0 = x_min[idir]
         x1 = x_max[idir]
-        xlabel = f"{['X', 'Y', 'Z'][idir]} ({units})"
+        xlabel = f"{['X', 'Y', 'Z'][idir]} [{units}]"
         if idir == len(x_min):
             x0 = 0
             x1 = np.shape(rgroup.coordinates)[-1]
@@ -935,8 +992,9 @@ def plot_cf(shot: ShotRecord, **kwargs):
             v = np.exp(1j * f * 2 * np.pi * xl / c) * w
             cf[ifreq, ic] = np.abs(np.dot(shot.data[ifreq, :], v))
 
-    plt.xlabel("f (Hz)")
-    plt.ylabel(f"c ({units}/s)")
+    plt.figure()
+    plt.xlabel("f [Hz]")
+    plt.ylabel(f"c [{units}/s]")
     plt.imshow(
         cf[:, :].transpose(),
         origin="lower",

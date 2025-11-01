@@ -18,7 +18,7 @@ class Discretization:
 
     method: str = "DPG"
     order: Union[int, Dict[str, int]] = 3
-    misc: Dict[str, Any] = field(default_factory=dict)
+    kwargs: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
         self,
@@ -28,21 +28,21 @@ class Discretization:
     ):
         self.method = method
         self.order = order
-        self.misc = kwargs
+        self.kwargs = kwargs
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Discretization":
         return cls(
             method=d.pop("method", "DPG"),
             order=d.pop("order", 3),
-            misc=d,
+            kwargs=d,
         )
 
     def __dict__(self) -> Dict[str, Any]:
         return {
             "method": self.method,
             "order": self.order,
-            **self.misc,
+            **self.kwargs,
         }
 
 
@@ -127,12 +127,12 @@ class SolverConfig:
         "adapt_wavespeed"
     )
     refinement_flags: List[Literal["h", "p"]] = field(default_factory=list)
-    misc: Dict[str, Any] = field(default_factory=dict)
+    kwargs: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Dict) -> "SolverConfig":
         ngrids = data.pop("grids", 4)
-        return cls(
+        obj = cls(
             solve_on=data.pop("solve_on", "final"),
             max_iter=data.pop("max_iter", 300),
             tolerance=data.pop("tolerance", 1.0e-4),
@@ -140,19 +140,20 @@ class SolverConfig:
             hp_switch=data.pop("hp_switch", ngrids),
             refinement_kind=data.pop("refinement_kind", "adapt_wavespeed"),
             refinement_flags=data.pop("refinement_flags", []),
-            misc=data,
         )
+        obj.kwargs = data
+        return obj
 
     def __iadd__(self, other: SuperPatch) -> "SolverConfig":
         if isinstance(other, SuperPatch):
-            if "super_patches" not in self.misc:
-                self.misc["super_patches"] = []
-            self.misc["super_patches"].append(other.__dict__())
+            if "super_patches" not in self.kwargs:
+                self.kwargs["super_patches"] = []
+            self.kwargs["super_patches"].append(other.__dict__())
         return self
 
     def __dict__(self) -> Dict:
         hp_switch = self.hp_switch if self.hp_switch is not None else self.grids
-        return {
+        dict = {
             "solve_on": self.solve_on,
             "max_iter": self.max_iter,
             "tolerance": self.tolerance,
@@ -160,8 +161,9 @@ class SolverConfig:
             "hp_switch": hp_switch,
             "refinement_kind": self.refinement_kind,
             "refinement_flags": self.refinement_flags,
-            **self.misc,
         }
+        dict.update(self.kwargs)
+        return dict
 
 
 @dataclass

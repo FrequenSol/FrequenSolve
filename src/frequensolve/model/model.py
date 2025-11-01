@@ -41,22 +41,40 @@ class ModelSubdomain:
         name: Optional[str] = None,
         frame: str = "physical",
         properties: Dict[str, Union[float, str, Path, xr.DataArray]] = {},
-        xarr: Optional[xr.DataArray] = None,
+        grid: Optional[xr.DataArray] = None,
+        **kwargs,
     ):
+        # Legacy argument naming convention
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
+
         self.mesh_block_id = mesh_block_id
         self.name = name
         self.frame = frame
         self._properties = {}
         for key, val in properties.items():
             if isinstance(val, str) or isinstance(val, Path):
+                order = None
+                scale = 1.0
                 split = str(val).split("|")
-                if len(split) == 2:
-                    path, scale = split
+                if len(split) >= 2:
+                    path = split[0]
+                    if "x" in split[1]:
+                        order = split[1]
+                        if len(split) >= 3:
+                            scale = split[2]
+                    else:
+                        scale = split[1]
+                        if len(split) >= 3:
+                            order = split[2]
                     self._properties[key] = Property(
-                        data=path, xarr=xarr, scale=float(scale)
+                        data=path,
+                        grid=grid,
+                        scale=float(scale),
+                        **({"order": order} if order else {}),
                     )
                 else:
-                    self._properties[key] = Property(data=val, xarr=xarr)
+                    self._properties[key] = Property(data=val, grid=grid)
             else:
                 self._properties[key] = Property(data=val)
 
@@ -71,6 +89,7 @@ class ModelSubdomain:
 
     @properties.setter
     def properties(self, dict: Dict[str, Union[float, str, Path, xr.DataArray]]):
+        # TODO: Will need a way to specify the grid for the properties
         self._properties = {key: Property(data=val) for key, val in dict.items()}
 
     def __getitem__(self, key: str):
@@ -80,82 +99,89 @@ class ModelSubdomain:
     #       need to implement TensorStore for zarr or HDF5 format.
     def __dict__(self) -> Dict:
         props = {}
-        grid = None
-        all_constant = True
         for key, prop in self._properties.items():
-            if not prop.is_constant:
-                all_constant = False
-        if all_constant:
-            type = "ConstantLayer"
-            props = {key: prop.get() for key, prop in self._properties.items()}
-        else:
-            type = "GridLayer"
-            for key, prop in self._properties.items():
-                if prop.is_constant:
-                    props[key] = {"value": self._properties[key].get()}
+            if prop.is_constant:
+                props[key] = {"value": self._properties[key].get()}
+            else:
+                if prop.is_remote:
+                    props[key] = {
+                        "absolute": True,
+                        "file": f"{prop.remote_path}",
+                        **(
+                            {"scale": prop.remote_scale}
+                            if prop.remote_scale != 1.0
+                            else {}
+                        ),
+                        **({"order": prop.order} if prop.order != "xyz" else {}),
+                    }
                 else:
                     orig_dims = self.properties[key].darr.dims
                     dims = sorted(orig_dims)
                     file = self._path / (f"layer_{self.mesh_block_id}_{key}.bin")
                     file.parent.mkdir(parents=True, exist_ok=True)
 
-                    # Transpose to match solver convention
+                    # Transpose to match solver, save, then transpose back
                     self.properties[key].darr = self.properties[key].darr.transpose(
                         *dims[::-1]
                     )
-
                     file = save_data_if_new(self.properties[key].darr, file)
-
-                    # Un-transpose
                     self.properties[key].darr = self.properties[key].darr.transpose(
                         *orig_dims
                     )
-                    props[key] = {"file": file.relative_to(self._proj_path)}
-                    if grid is not None:
-                        if grid != self.properties[key].grid:
-                            raise ValueError(
-                                "All properties must be defined on the same grid"
-                            )
-                    grid = self.properties[key].grid
+                    props[key] = {
+                        "file": file.relative_to(self._proj_path),
+                        **(
+                            {"order": self.properties[key].order}
+                            if self.properties[key].order != "xyz"
+                            else {}
+                        ),
+                    }
+                grid = self.properties[key].grid
+                props[key]["grid"] = grid.__dict__()
         return {
-            "_type": type,
             "mesh_block_id": self.mesh_block_id,
             "name": self.name,
             "frame": self.frame,
             "properties": props,
-            **({"grid": grid.__dict__()} if grid is not None else {}),
         }
 
     @classmethod
     def from_dict(cls, data: Dict) -> "ModelSubdomain":
-        if data["_type"] == "ConstantLayer":
-            props = data["properties"]
-            xarr = None
-        elif data["_type"] == "GridLayer":
-            xarr = CartesianGrid.from_dict(data["grid"]).as_xarray()
-            props = {}
-            for key, prop in data["properties"].items():
-                if "file" in prop:
-                    props[key] = Path(prop["file"])
-                else:
-                    props[key] = prop["value"]
-        else:
-            raise ValueError(f"Unknown subdomain type: {data['_type']}")
+        props = {}
+        grid = None
+        for prop, value in data["properties"].items():
+            if "file" in value:
+                grid = CartesianGrid.from_dict(value["grid"]).as_xarray()
+                props[prop] = value["file"]
+                if "absolute" in value:
+                    props[prop] = f"remote:{props[prop]}"
+                if "scale" in value:
+                    scale = value["scale"]
+                    props[prop] = f"{props[prop]}|{scale}"
+                if "order" in value:
+                    order = value["order"]
+                    props[prop] = f"{props[prop]}|{order}"
+            else:
+                props[prop] = value["value"]
 
         return cls(
             mesh_block_id=data["mesh_block_id"],
             name=data["name"],
             frame=data["frame"],
             properties=props,
-            xarr=xarr,
+            **({"grid": grid} if grid is not None else {}),
         )
 
-    def like(self, xarr: xr.DataArray) -> None:
+    def like(self, grid: xr.DataArray, **kwargs) -> None:
+        # Legacy argument naming convention
+        if "grid" in kwargs:
+            grid = kwargs.pop("grid")
+
         for key, prop in self._properties.items():
-            if prop.data.dims == xarr.dims:
-                self._properties[key]._like(xarr)
+            if prop.data.dims == grid.dims:
+                self._properties[key]._like(grid)
             else:
-                raise ValueError(f"Property {key} does not match dimensions of xarr")
+                raise ValueError(f"Property {key} does not match dimensions of grid")
 
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path

@@ -143,10 +143,10 @@ class ShotRecord(DataArray):
 
         # Get sampling parameters
         n_traces = rgroup.size
-        t0 = td.coords["time"].values[0]
+        t0 = td.coords["time"].values[0] / 1000
         dt = td.coords["time"].values[1] - td.coords["time"].values[0]  # Seconds
-        sample_interval = int(dt * 1e6)  # Microseconds
-        time_samples = td.coords["time"].values * 1000
+        sample_interval = int(dt * 1e3)  # Microseconds
+        time_samples = td.coords["time"].values
 
         now = datetime.datetime.now()
         year = now.year
@@ -170,6 +170,7 @@ class ShotRecord(DataArray):
             f.bin[segyio.BinField.MeasurementSystem] = (
                 coordinate_units  # 1 for meters, 2 for feet
             )
+            f.bin[segyio.BinField.Interval] = int(dt * 1e3)
 
             for itrace in range(n_traces):
                 recv_x = int((rgroup.coordinates[itrace, 0] * scale))
@@ -233,126 +234,6 @@ class ShotRecord(DataArray):
                 print(
                     f"Data min/max: {sgy.trace[0].min():.2e} / {sgy.trace[0].max():.2e}"
                 )
-
-    # def write_segy_TGS(
-    #     self, file: str, units_in: str = "km", units_out: str = "m", **kwargs
-    # ):
-    #     """Write a time-domain shot to a SEGY file.
-
-    #     This version uses TGS's SEGY library that may be convenient for the cloud
-    #     but is lacking documentation and is still under development.
-
-    #     Args:
-    #        fname (str): Output SEGY file name.
-    #        units_in (str): Units of the input coordinates (defaults to "km").
-    #        units_out (str): Units for the output coordinates (defaults to "m"). Must be 'm' or 'ft'.
-    #        kwargs (dict): Additional options, such as 'Tf' for cutoff time.
-
-    #     Raises:
-    #        AssertionError: If shot type is not "TD".
-    #        ValueError: If units_out is not "m" or "ft".
-    #     """
-    #     import datetime
-    #     from pathlib import Path
-
-    #     import pint
-    #     from segy import SegyFile
-    #     from segy.factory import SegyFactory
-    #     from segy.standards import get_segy_standard
-
-    #     # Ensure correct shot type
-    #     assert self.type == "TD", "SEGY output is only valid for time-domain (TD) data."
-
-    #     # Unit conversion checks
-    #     ureg = pint.UnitRegistry()
-    #     if units_out.lower() not in ["m", "ft"]:
-    #         raise ValueError("units_out must be 'm' or 'ft' (meters or feet).")
-    #     iunit = ureg(units_in)
-    #     ounit = ureg.meter if units_out.lower() == "m" else ureg.foot
-    #     scale = iunit.to(ounit).magnitude
-
-    #     # Basic geometry and dimension info
-    #     group = self.receiver_group
-    #     source = self.source
-    #     dim = len(source.coordinates)
-
-    #     # Optional cutoff time
-    #     Tf = kwargs.get("Tf", None)
-    #     nTf, Tf = self.sampling.cutoff(Tf)  # number of time samples after cutoff
-
-    #     n_traces = group.size
-    #     n_samples = nTf
-    #     interval = int(self.sampling.dT * 1e6)  # sample interval in microseconds
-    #     trace_datetime = datetime.datetime.now()
-
-    #     print(interval, n_samples, n_traces)
-
-    #     # Build SEG-Y config
-    #     config = {
-    #         "spec": get_segy_standard(1.0),
-    #         "samples_per_trace": n_samples,
-    #         "sample_interval": interval,
-    #     }
-
-    #     factory = SegyFactory(**config)
-    #     txt = factory.create_textual_header()
-    #     bin_ = factory.create_binary_header()
-
-    #     # # Update binary header schema
-    #     # factory.binary_header_schema.trace_sorting_code = 5  # Common source point
-    #     # factory.binary_header_schema.measurement_system = 1 if units_out.lower() == "m" else 2  # 1 = meters, 2 = feet
-
-    #     # Recreate binary header with updated schema
-    #     bin_ = factory.create_binary_header()
-
-    #     headers = factory.create_trace_header_template(size=n_traces)
-    #     samples = factory.create_trace_sample_template(size=n_traces)
-
-    #     # Populate headers and data
-    #     for itr in range(n_traces):
-    #         headers[itr]["trace_seq_num_reel"] = itr + 1
-    #         headers[itr]["inline"] = itr + 1
-    #         headers[itr]["crossline"] = 1
-
-    #         # Source position
-    #         headers[itr]["source_coord_x"] = int(source.coordinates[0] * scale)
-    #         if dim == 2:
-    #             headers[itr]["source_coord_y"] = 0
-    #         else:
-    #             headers[itr]["source_coord_y"] = int(source.coordinates[1] * scale)
-    #         headers[itr]["source_surface_elevation"] = int(
-    #             -source.coordinates[-1] * scale
-    #         )
-
-    #         # Receiver position
-    #         headers[itr]["group_coord_x"] = int(group.coordinates[itr, 0] * scale)
-    #         if dim == 2:
-    #             headers[itr]["group_coord_y"] = 0
-    #         else:
-    #             headers[itr]["group_coord_y"] = int(group.coordinates[itr, 1] * scale)
-    #         headers[itr]["receiver_group_elevation"] = int(
-    #             -group.coordinates[itr, -1] * scale
-    #         )
-
-    #         # Trace data (slice out the first n_samples from each trace)
-    #         samples[itr] = self.data[:n_samples, itr].copy()
-
-    #     traces = factory.create_traces(samples=samples, headers=headers)
-
-    #     # Write the file
-    #     with Path(fname).open(mode="wb") as f:
-    #         f.write(txt)
-    #         f.write(bin_)
-    #         f.write(traces)
-
-    #     # sgy = SegyFile(fname)
-    #     # sgy.binary_header.to_dataframe()
-
-    #     # # print(f"file size: {sgy.file_size / 1024**3:0.2f} GiB")
-    #     # # print(f"num traces: {sgy.num_traces:,}")
-    #     # # print(f"sample rate: {sgy.sample_interval}")
-    #     # # print(f"num samples: {sgy.samples_per_trace}")
-    #     # # print(f"sample labels: {sgy.sample_labels // 1000}")
 
 
 @dataclass
@@ -789,3 +670,123 @@ def array_to_segy(
                     }
                 )
                 f.trace[itrace] = np.single(data.copy())
+
+    # def write_segy_TGS(
+    #     self, file: str, units_in: str = "km", units_out: str = "m", **kwargs
+    # ):
+    #     """Write a time-domain shot to a SEGY file.
+
+    #     This version uses TGS's SEGY library that may be convenient for the cloud
+    #     but is lacking documentation and is still under development.
+
+    #     Args:
+    #        fname (str): Output SEGY file name.
+    #        units_in (str): Units of the input coordinates (defaults to "km").
+    #        units_out (str): Units for the output coordinates (defaults to "m"). Must be 'm' or 'ft'.
+    #        kwargs (dict): Additional options, such as 'Tf' for cutoff time.
+
+    #     Raises:
+    #        AssertionError: If shot type is not "TD".
+    #        ValueError: If units_out is not "m" or "ft".
+    #     """
+    #     import datetime
+    #     from pathlib import Path
+
+    #     import pint
+    #     from segy import SegyFile
+    #     from segy.factory import SegyFactory
+    #     from segy.standards import get_segy_standard
+
+    #     # Ensure correct shot type
+    #     assert self.type == "TD", "SEGY output is only valid for time-domain (TD) data."
+
+    #     # Unit conversion checks
+    #     ureg = pint.UnitRegistry()
+    #     if units_out.lower() not in ["m", "ft"]:
+    #         raise ValueError("units_out must be 'm' or 'ft' (meters or feet).")
+    #     iunit = ureg(units_in)
+    #     ounit = ureg.meter if units_out.lower() == "m" else ureg.foot
+    #     scale = iunit.to(ounit).magnitude
+
+    #     # Basic geometry and dimension info
+    #     group = self.receiver_group
+    #     source = self.source
+    #     dim = len(source.coordinates)
+
+    #     # Optional cutoff time
+    #     Tf = kwargs.get("Tf", None)
+    #     nTf, Tf = self.sampling.cutoff(Tf)  # number of time samples after cutoff
+
+    #     n_traces = group.size
+    #     n_samples = nTf
+    #     interval = int(self.sampling.dT * 1e6)  # sample interval in microseconds
+    #     trace_datetime = datetime.datetime.now()
+
+    #     print(interval, n_samples, n_traces)
+
+    #     # Build SEG-Y config
+    #     config = {
+    #         "spec": get_segy_standard(1.0),
+    #         "samples_per_trace": n_samples,
+    #         "sample_interval": interval,
+    #     }
+
+    #     factory = SegyFactory(**config)
+    #     txt = factory.create_textual_header()
+    #     bin_ = factory.create_binary_header()
+
+    #     # # Update binary header schema
+    #     # factory.binary_header_schema.trace_sorting_code = 5  # Common source point
+    #     # factory.binary_header_schema.measurement_system = 1 if units_out.lower() == "m" else 2  # 1 = meters, 2 = feet
+
+    #     # Recreate binary header with updated schema
+    #     bin_ = factory.create_binary_header()
+
+    #     headers = factory.create_trace_header_template(size=n_traces)
+    #     samples = factory.create_trace_sample_template(size=n_traces)
+
+    #     # Populate headers and data
+    #     for itr in range(n_traces):
+    #         headers[itr]["trace_seq_num_reel"] = itr + 1
+    #         headers[itr]["inline"] = itr + 1
+    #         headers[itr]["crossline"] = 1
+
+    #         # Source position
+    #         headers[itr]["source_coord_x"] = int(source.coordinates[0] * scale)
+    #         if dim == 2:
+    #             headers[itr]["source_coord_y"] = 0
+    #         else:
+    #             headers[itr]["source_coord_y"] = int(source.coordinates[1] * scale)
+    #         headers[itr]["source_surface_elevation"] = int(
+    #             -source.coordinates[-1] * scale
+    #         )
+
+    #         # Receiver position
+    #         headers[itr]["group_coord_x"] = int(group.coordinates[itr, 0] * scale)
+    #         if dim == 2:
+    #             headers[itr]["group_coord_y"] = 0
+    #         else:
+    #             headers[itr]["group_coord_y"] = int(group.coordinates[itr, 1] * scale)
+    #         headers[itr]["receiver_group_elevation"] = int(
+    #             -group.coordinates[itr, -1] * scale
+    #         )
+
+    #         # Trace data (slice out the first n_samples from each trace)
+    #         samples[itr] = self.data[:n_samples, itr].copy()
+
+    #     traces = factory.create_traces(samples=samples, headers=headers)
+
+    #     # Write the file
+    #     with Path(fname).open(mode="wb") as f:
+    #         f.write(txt)
+    #         f.write(bin_)
+    #         f.write(traces)
+
+    #     # sgy = SegyFile(fname)
+    #     # sgy.binary_header.to_dataframe()
+
+    #     # # print(f"file size: {sgy.file_size / 1024**3:0.2f} GiB")
+    #     # # print(f"num traces: {sgy.num_traces:,}")
+    #     # # print(f"sample rate: {sgy.sample_interval}")
+    #     # # print(f"num samples: {sgy.samples_per_trace}")
+    #     # # print(f"sample labels: {sgy.sample_labels // 1000}")

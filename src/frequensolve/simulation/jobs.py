@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Union
 
-from numpy import arange
+import numpy as np
 
 from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
 from frequensolve.util.class_registry import class_registry, register_class
@@ -23,39 +23,174 @@ class SimulationJob(ABC):
     name: str
     simulation: BaseSimulation
     workflow: str
-    f_list: List[float]
+    f_list: List[Union[float, complex]]
     overwrite: bool = True
     max_versions: int = 5
     _file: Optional[Path] = None
     _job_id: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, d: dict, project_dir: Optional[Path] = None) -> "SimulationJob":
+    def from_dict(cls, d: dict) -> "SimulationJob":
         class_name = d["_type"]
         if class_name in class_registry:
             job_class = class_registry[class_name]
-            return job_class.from_dict(d, project_dir=project_dir)
+            return job_class.from_dict(d)
         else:
             raise ValueError(f"Unknown job class: {class_name}")
 
     @classmethod
-    def load(cls, path: Path):
-        project_dir = Path(path).parent.parent
-        job = cls.from_dict(json.loads(path.read_text()), project_dir=project_dir)
+    def load(cls, path: Union[Path, str]):
+        path = Path(path).resolve()
+        with open(path, "r") as f:
+            data = json.load(f)
+            job = cls.from_dict(data)
         job._file = path
         return job
 
     def __dict__(self):
         if self.simulation._file is None:
             raise ValueError("Simulation has not been saved.")
-
+        if isinstance(self.f_list[0], complex):
+            f_list = np.array([[f.real, -abs(f.imag)] for f in self.f_list])
+        else:
+            f_list = np.array(self.f_list)
         return {
             "_type": self.__class__.__name__,
             "name": self.name,
             "simulation": str(self.simulation._file),
             "workflow": self.workflow,
-            "f_list": self.f_list,
+            "f_list": f_list,
         }
+
+    @property
+    def n_tasks(self):
+        return len(self.f_list)
+
+    @property
+    def records(self):
+        """Lists records that should be produced by a job.
+
+        Returns:
+            dict: Dictionary containing:
+                - datasets: Dictionary of datasets
+                - frequencies: List of frequencies
+                - simulation: Path to simulation file
+        """
+
+        output = self.trace_outputs
+
+        # For now we have to get entire files (with all sources, etc.)
+        path = output["path"]
+        records = {
+            "groups": output["groups"],
+            "frequencies": {},
+            "simulation": self.simulation._file,
+        }
+        records["groups"] = output["groups"]
+        records["files"] = []
+        for i, freq in enumerate(output["frequencies"]):
+            ifreq = i + 1
+            file = os.path.join(path, f"receivers_{ifreq}.h5")
+            records["files"].append(file)
+            records["frequencies"][ifreq] = freq
+
+        return records
+
+    @property
+    def paraview_outputs(self) -> dict:
+        """Lists ParaView outputs.
+
+        Returns:
+            dict: Dictionary containing:
+                - ParaView: ParaView outputs
+        """
+        sim = self.simulation
+
+        sim_file = sim._file
+        with open(sim_file, "r") as f:
+            sim_data = json.load(f)
+
+        pv_out = {}
+        for out in sim_data["Outputs"]["ParaView"]:
+            pv_out[out["name"]] = out["path"]
+
+        return pv_out
+
+    @property
+    def trace_path(self) -> dict:
+        """Lists receiver trace groups.
+
+        Returns:
+            - traces: Receiver traces
+        """
+        return self.trace_outputs["path"]
+
+    @property
+    def trace_outputs(self) -> dict:
+        """Lists receiver trace groups.
+
+        Returns:
+            - traces: Receiver traces
+        """
+        sim = self.simulation
+        receivers = sim.acquisition.receiver_groups
+
+        sim_file = sim._file
+        with open(sim_file, "r") as f:
+            sim_data = json.load(f)
+
+        out = sim_data["Outputs"]["receivers"]
+
+        recv_out = {}
+        recv_out["path"] = self._result_path / out["path"]
+        recv_out["frequencies"] = self.f_list
+        recv_out["groups"] = []
+        recv_out["components"] = []
+        recv_out["sources"] = []
+
+        for group in receivers:
+            recv_out["groups"].append(group.name)
+            for component in group.device.components:
+                recv_out["components"].append(f"{group.name}:{component.name}")
+
+        for isrc, sgroup in enumerate(sim.acquisition.source_groups):
+            recv_out["sources"].append(f"{isrc+1}")
+
+        return recv_out
+
+    @property
+    def wavefield_outputs(self) -> dict:
+        """Lists wavefield outputs.
+
+        Returns:
+            - wavefields: Wavefield outputs
+        """
+        sim = self.simulation
+        receivers = sim.acquisition.receiver_groups
+
+        sim_file = sim._file
+        with open(sim_file, "r") as f:
+            sim_data = json.load(f)
+
+        outputs = sim_data["Outputs"]["wavefields"]
+
+        wave_out = {}
+        for out in outputs:
+            wave_out["domain"] = (self.__class__.__name__,)
+            wave_out["path"] = out["path"]
+            wave_out["frequencies"] = self.f_list
+            wave_out["grid"] = out["grid"]
+            wave_out["components"] = []
+            wave_out["sources"] = []
+
+            for group in receivers:
+                for component in group.device.components:
+                    wave_out["components"].append(f"{group.name}:{component.name}")
+
+            for isrc, source in enumerate(sim.acquisition.source_group.sources):
+                wave_out["sources"].append(f"{isrc+1}")
+
+        return wave_out
 
     def _new_version(
         self, site: Optional[str] = None, remote_path: Optional[Union[Path, str]] = None
@@ -223,136 +358,6 @@ class SimulationJob(ABC):
     def project_path(self):
         return self.simulation._proj_path
 
-    @property
-    def n_tasks(self):
-        return len(self.f_list)
-
-    @property
-    def records(self):
-        """Lists records that should be produced by a job.
-
-        Returns:
-            dict: Dictionary containing:
-                - datasets: Dictionary of datasets
-                - frequencies: List of frequencies
-                - simulation: Path to simulation file
-        """
-
-        output = self.trace_outputs
-
-        # For now we have to get entire files (with all sources, etc.)
-        path = output["path"]
-        records = {
-            "groups": output["groups"],
-            "frequencies": {},
-            "simulation": self.simulation._file,
-        }
-        records["groups"] = output["groups"]
-        records["files"] = []
-        for i, freq in enumerate(output["frequencies"]):
-            ifreq = i + 1
-            file = os.path.join(path, f"receivers_{ifreq}.h5")
-            records["files"].append(file)
-            records["frequencies"][ifreq] = freq
-
-        return records
-
-    @property
-    def paraview_outputs(self) -> dict:
-        """Lists ParaView outputs.
-
-        Returns:
-            dict: Dictionary containing:
-                - ParaView: ParaView outputs
-        """
-        sim = self.simulation
-
-        sim_file = sim._file
-        with open(sim_file, "r") as f:
-            sim_data = json.load(f)
-
-        pv_out = {}
-        for out in sim_data["Outputs"]["ParaView"]:
-            pv_out[out["name"]] = out["path"]
-
-        return pv_out
-
-    @property
-    def trace_path(self) -> dict:
-        """Lists receiver trace groups.
-
-        Returns:
-            - traces: Receiver traces
-        """
-        return self.trace_outputs["path"]
-
-    @property
-    def trace_outputs(self) -> dict:
-        """Lists receiver trace groups.
-
-        Returns:
-            - traces: Receiver traces
-        """
-        sim = self.simulation
-        receivers = sim.acquisition.receiver_groups
-
-        sim_file = sim._file
-        with open(sim_file, "r") as f:
-            sim_data = json.load(f)
-
-        out = sim_data["Outputs"]["receivers"]
-
-        recv_out = {}
-        recv_out["path"] = self._result_path / out["path"]
-        recv_out["frequencies"] = self.f_list
-        recv_out["groups"] = []
-        recv_out["components"] = []
-        recv_out["sources"] = []
-
-        for group in receivers:
-            recv_out["groups"].append(group.name)
-            for component in group.device.components:
-                recv_out["components"].append(f"{group.name}:{component.name}")
-
-        for isrc, sgroup in enumerate(sim.acquisition.source_groups):
-            recv_out["sources"].append(f"{isrc+1}")
-
-        return recv_out
-
-    @property
-    def wavefield_outputs(self) -> dict:
-        """Lists wavefield outputs.
-
-        Returns:
-            - wavefields: Wavefield outputs
-        """
-        sim = self.simulation
-        receivers = sim.acquisition.receiver_groups
-
-        sim_file = sim._file
-        with open(sim_file, "r") as f:
-            sim_data = json.load(f)
-
-        outputs = sim_data["Outputs"]["wavefields"]
-
-        wave_out = {}
-        for out in outputs:
-            wave_out["domain"] = (self.__class__.__name__,)
-            wave_out["path"] = out["path"]
-            wave_out["frequencies"] = self.f_list
-            wave_out["grid"] = out["grid"]
-            wave_out["components"] = []
-            wave_out["sources"] = []
-
-            for group in receivers:
-                for component in group.device.components:
-                    wave_out["components"].append(f"{group.name}:{component.name}")
-
-            for isrc, source in enumerate(sim.acquisition.source_group.sources):
-                wave_out["sources"].append(f"{isrc+1}")
-
-        return wave_out
-
 
 @register_class
 class FrequencyDomainJob(SimulationJob):
@@ -360,19 +365,31 @@ class FrequencyDomainJob(SimulationJob):
         self,
         name: str,
         simulation: BaseSimulation,
-        f_list: List[float],
+        f_list: List[Union[float, complex]],
         overwrite: bool = True,
         max_versions: int = 5,
     ):
         workflow = "forward"
+
+        # Ensure that imaginary component (laplace) is negative
+        for f in f_list:
+            if isinstance(f, complex):
+                f = f.real - 1j * abs(f.imag)
         super().__init__(name, simulation, workflow, f_list, overwrite, max_versions)
 
     @classmethod
-    def from_dict(cls, d: dict, project_dir: Optional[Path] = None):
+    def from_dict(cls, d: dict):
+        sim = BaseSimulation.load(d["simulation"])
+        shape = d["f_list"].shape
+        if len(shape) == 1:
+            f_list = d["f_list"].tolist()
+        else:
+            f_list = [f[0] - 1j * abs(f[1]) for f in d["f_list"]]
+        f_list = np.array(f_list)
         return cls(
             name=d["name"],
-            simulation=BaseSimulation.load(d["simulation"]),
-            f_list=d["f_list"],
+            simulation=sim,
+            f_list=f_list,
         )
 
 
@@ -384,6 +401,7 @@ class TimeDomainJob(SimulationJob):
         simulation: BaseSimulation,
         f_max: float,
         f_min: float = 0.0,
+        s_laplace: float = 0.0,
         df: Optional[float] = None,
         T_max: Optional[float] = None,
         overwrite: bool = True,
@@ -396,49 +414,34 @@ class TimeDomainJob(SimulationJob):
 
         if f_min == 0.0:
             f_min = f_min + df
-        f_list = arange(f_min, f_max + df / 2, df)
+        f_list = np.arange(f_min, f_max + df / 2, df)
+
+        s_laplace = -abs(s_laplace)
+        f_list = f_list + 1j * s_laplace
 
         workflow = "forward"
         super().__init__(name, simulation, workflow, f_list, overwrite, max_versions)
 
     @classmethod
-    def from_dict(cls, d: dict, project_dir: Optional[Path] = None):
+    def from_dict(cls, d: dict):
+        if isinstance(d["f_list"][0], float):
+            f_min = d["f_list"][0]
+            f_max = d["f_list"][-1]
+            df = d["f_list"][1] - d["f_list"][0]
+            s_laplace = 0.0
+        else:
+            f_min = d["f_list"][0][0]
+            f_max = d["f_list"][-1][0]
+            df = d["f_list"][1][0] - d["f_list"][0][0]
+            s_laplace = d["f_list"][0][1]
+        sim = BaseSimulation.load(d["simulation"])
+        fl = np.arange(f_min, f_max + df / 2, df)
+        fl += 1j * s_laplace
+        assert np.allclose(d["f_list"], fl), "Frequency does not appear to be uniform"
         return cls(
             name=d["name"],
-            simulation=BaseSimulation.load(d["simulation"]),
-            f_list=d["f_list"],
+            simulation=sim,
+            f_min=f_min,
+            f_max=f_max,
+            df=df,
         )
-
-    # @property
-    # def records(self):
-    #     """Lists records that should be produced by a job.
-
-    #     Returns:
-    #         dict: Dictionary containing:
-    #             - datasets: Dictionary of datasets
-    #             - frequencies: List of frequencies
-    #             - simulation: Path to simulation file
-    #     """
-
-    #     output = self.trace_outputs
-
-    #     # For now we have to get entire files (with all sources, etc.)
-    #     path = output["path"]
-    #     records = {
-    #         "datasets": {},
-    #         "frequencies": {},
-    #         "simulation": self.simulation._file,
-    #     }
-    #     for components in output["components"]:
-    #         group, comp = components.split(":")
-    #         for i, freq in enumerate(output["frequencies"]):
-    #             ifreq = i + 1
-    #             for src in output["sources"]:
-    #                 record = group + "_" + str(ifreq) + ".h5"
-    #                 dset = comp + "_" + str(src)
-    #                 file = os.path.join(path, record)
-    #                 if file not in records["datasets"]:
-    #                     records["datasets"][file] = []
-    #                 records["datasets"][file].append(dset)
-    #                 records["frequencies"][ifreq] = freq
-    #     return records

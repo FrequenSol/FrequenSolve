@@ -1,6 +1,6 @@
 """Python structures defining mesh API"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import copy2
 from typing import Dict, List, Optional, Tuple, Union
@@ -54,13 +54,12 @@ class MeshAdaptor:
     jump_tolerance: Optional[float] = None  # 0.2
     jump_factor: Optional[float] = None  # 1.0
     smooth_refs: Optional[bool] = None  # False
-    f_low: Optional[float] = None
-    f_med: Optional[float] = None
     f_adapt: Optional[float] = None
-    # adapt_order:      bool  = False
+    adapt_order: bool = False
+    kwargs: Dict = field(default_factory=dict)
 
     def __dict__(self) -> Dict:
-        return {
+        dict = {
             "min_epw": self.min_epw,
             **({"adapt_sources": self.adapt_sources} if self.adapt_sources else {}),
             **(
@@ -71,23 +70,23 @@ class MeshAdaptor:
             **({"jump_tolerance": self.jump_tolerance} if self.jump_tolerance else {}),
             **({"jump_factor": self.jump_factor} if self.jump_factor else {}),
             **({"smooth_refs": self.smooth_refs} if self.smooth_refs else {}),
-            **({"f_low": self.f_low} if self.f_low else {}),
-            **({"f_med": self.f_med} if self.f_med else {}),
             **({"f_adapt": self.f_adapt} if self.f_adapt else {}),
+            **({"adapt_order": self.adapt_order} if self.adapt_order else {}),
         }
+        dict.update(self.kwargs)
+        return dict
 
     @classmethod
     def from_dict(cls, data: Dict) -> "MeshAdaptor":
         return cls(
-            min_epw=data["min_epw"],
-            adapt_sources=data.get("adapt_sources"),
-            adapt_receivers=data.get("adapt_receivers"),
-            jump_tolerance=data.get("jump_tolerance"),
-            jump_factor=data.get("jump_factor"),
-            smooth_refs=data.get("smooth_refs"),
-            f_low=data.get("f_low"),
-            f_med=data.get("f_med"),
-            f_adapt=data.get("f_adapt"),
+            min_epw=data.pop("min_epw"),
+            adapt_sources=data.pop("adapt_sources", None),
+            adapt_receivers=data.pop("adapt_receivers", None),
+            jump_tolerance=data.pop("jump_tolerance", None),
+            jump_factor=data.pop("jump_factor", None),
+            smooth_refs=data.pop("smooth_refs", None),
+            f_adapt=data.pop("f_adapt", None),
+            adapt_order=data.pop("adapt_order", False),
         )
 
 
@@ -118,9 +117,9 @@ class MeshManager:
         jump_tolerance: Optional[float] = None,
         jump_factor: Optional[float] = None,
         smooth_refs: Optional[bool] = None,
-        f_low: Optional[float] = None,
-        f_med: Optional[float] = None,
         f_adapt: Optional[float] = None,
+        adapt_order: Optional[bool] = False,
+        **kwargs,
     ) -> None:
         """Sets mesh adaptivity options
 
@@ -140,9 +139,9 @@ class MeshManager:
             jump_tolerance=jump_tolerance,
             jump_factor=jump_factor,
             smooth_refs=smooth_refs,
-            f_low=f_low,
-            f_med=f_med,
             f_adapt=f_adapt,
+            adapt_order=adapt_order,
+            **kwargs,
         )
 
     def set_parallel(
@@ -198,9 +197,9 @@ class MeshManager:
                 jump_tolerance=a.pop("jump_tolerance", None),
                 jump_factor=a.pop("jump_factor", None),
                 smooth_refs=a.pop("smooth_refs", False),
-                f_low=a.pop("f_low", None),
-                f_med=a.pop("f_med", None),
                 f_adapt=a.pop("f_adapt", None),
+                adapt_order=a.pop("adapt_order", False),
+                **a,
             )
 
         return manager

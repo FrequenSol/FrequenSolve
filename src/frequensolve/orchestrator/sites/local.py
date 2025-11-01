@@ -1,15 +1,20 @@
 # Set up logging (send Dask logging to files)
+
+from __future__ import annotations
+
+import atexit
 import logging
 import os
 import signal
 import subprocess
 import warnings
+import weakref
 from dataclasses import dataclass, field
 from logging import ERROR, INFO, FileHandler, Formatter, getLogger
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-from dask import config
+from dask import config as dask_config
 from dask.distributed import Client, Future, LocalCluster, get_task_stream, wait
 from dotenv import load_dotenv
 from numpy.typing import ArrayLike
@@ -28,7 +33,7 @@ from frequensolve.util.setup_logger import init_logger
 logging.basicConfig(level=ERROR)
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/local.log")
-logger.setLevel(ERROR)
+logger.setLevel(INFO)
 
 for logger_name in ["distributed", "bokeh", "tornado"]:
     log = getLogger(logger_name)
@@ -143,11 +148,16 @@ class LocalSite(BaseSite):
     n_workers: Optional[int] = None
     threads_per_worker: Optional[int] = None
     memory_per_worker: Optional[int] = None
-    _dask_client: Optional[Client] = field(default=None)
-    _dask_cluster: Optional[LocalCluster] = field(default=None)
-    _futures: List[Future] = field(default_factory=list)
-    _worker_status: Dict[str, str] = field(default_factory=dict)
-    _status_display: Optional[object] = field(default=None)
+
+    _dask_client: Optional[Client] = field(default=None, init=False)
+    _dask_cluster: Optional[LocalCluster] = field(default=None, init=False)
+    _futures: List["Future"] = field(default_factory=list, init=False)
+    _worker_status: Dict[str, str] = field(default_factory=dict, init=False)
+    _status_display: Optional[object] = field(default=None, init=False)
+    _task_stream: Optional[object] = field(default=None, init=False)
+    _closed: bool = field(default=False, init=False)
+
+    # ----------------- lifecycle -----------------
 
     def __post_init__(self):
         self.status = SiteStatus(status="running")
@@ -155,117 +165,15 @@ class LocalSite(BaseSite):
         self.executable = self._get_solver_path()
         self.env = os.environ.copy()
         self.env["FS_SOLVER_PATH"] = os.getenv("FS_SOLVER_PATH")
+        atexit.register(self.close)
+        weakref.finalize(self, LocalSite._finalize, weakref.ref(self))
 
-    def _initialize_dask(self, n_workers: Optional[int] = None):
-        """Initialize Dask client and cluster."""
-
-        if n_workers is None:
-            self.n_workers = self.config.cores
-        else:
-            self.n_workers = n_workers
-
-        if self.threads_per_worker is None:
-            self.threads_per_worker = self.config.cores // self.n_workers
-        if self.memory_per_worker is None:
-            if self.config.memory:
-                self.memory_per_worker = int(
-                    (0.9 * self.config.memory) / self.n_workers
-                )
-            else:
-                self.memory_per_worker = 4096
-
-        total_threads = self.n_workers * self.threads_per_worker
-        total_memory = self.n_workers * self.memory_per_worker
-        if total_threads > self.config.cores:
-            raise ValueError(
-                f"Total threads ({total_threads}) exceed available cores ({self.config.cores})"
-            )
-        if self.config.memory:
-            if total_memory > self.config.memory:
-                raise ValueError(
-                    f"Total memory ({total_memory}MB) exceed available memory ({self.config.memory}MB)"
-                )
-
-        print(
-            f"Dask initialized with {self.n_workers} workers, "
-            f"{self.threads_per_worker} threads per worker, "
-            f"and {self.memory_per_worker}MB memory per worker"
-        )
-        # logger.info(
-        #     f"Dask initialized with {self.n_workers} workers, "
-        #     f"{self.threads_per_worker} threads per worker, "
-        #     f"and {self.memory_per_worker}MB memory per worker"
-        # )
-
-        if self._dask_client is None:
+        # Handle SIGINT/SIGTERM to trigger close()
+        for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                config.set(
-                    {
-                        "distributed.worker.memory.target": 0.6,
-                        "distributed.worker.memory.pause": 0.8,
-                        "distributed.worker.threads": self.threads_per_worker,
-                        "distributed.scheduler.work-stealing": True,
-                        "distributed.scheduler.work-stealing-interval": "1s",
-                        "distributed.scheduler.bandwidth": 1,
-                    }
-                )
-
-                self._dask_cluster = LocalCluster(
-                    n_workers=self.n_workers,
-                    threads_per_worker=self.threads_per_worker,
-                    memory_limit=f"{self.memory_per_worker}MB",
-                    dashboard_address=":0",  # Let Dask choose an available port
-                    local_directory="/tmp/dask-worker-space",
-                    scheduler_port=0,
-                    silence_logs=ERROR,
-                    processes=True,
-                    resources={"CPU": self.threads_per_worker},
-                )
-                self._dask_client = Client(self._dask_cluster)
-                self._dashboard_port = self._dask_cluster.dashboard_link.split(":")[-1]
-                print(
-                    f"Dask Dashboard available at: http://localhost:{self._dashboard_port}"
-                )
-
-                try:
-                    self._dask_client.get_worker_logs()
-                    logger.info("Dask dashboard initialized successfully")
-                except Exception as e:
-                    logger.warning(f"Dashboard may not be fully accessible: {str(e)}")
-
-                try:
-                    self._task_stream = get_task_stream(self._dask_client, plot=False)
-                    logger.info("Task stream initialized successfully")
-                except Exception as e:
-                    logger.warning(f"Task stream not available: {str(e)}")
-
-            except Exception as e:
-                logger.error(f"Failed to initialize Dask cluster: {str(e)}")
-                raise
-
-    def __del__(self):
-        """Cleanup when object is destroyed."""
-        if hasattr(self, "_task_stream"):
-            try:
-                self._task_stream.stop()
-            except:
+                signal.signal(sig, self._signal_handler)
+            except Exception:
                 pass
-        if self._dask_client is not None:
-            self._dask_client.close()
-        if self._dask_cluster is not None:
-            self._dask_cluster.close()
-
-    def _get_solver_path(self) -> str:
-        """Get the solver path."""
-        load_dotenv()
-        executable = os.getenv("LOCAL_SOLVER_EXECUTABLE")
-        if not executable:
-            warnings.warn("LOCAL_SOLVER_EXECUTABLE not set in environment")
-            return None
-        if not Path(executable).exists():
-            warnings.warn(f"Solver executable not found at {executable}")
-            return None
-        return executable
 
     def submit(self, job: SimulationJob, **kwargs) -> List[dict]:
         """Submit job and block until completion with progress tracking.
@@ -279,8 +187,10 @@ class LocalSite(BaseSite):
         """
 
         if self._dask_client is None:
-            if job.n_tasks < self.config.cores:
-                nw = self.config.cores
+            if self.n_workers is None:
+                self.n_workers = self.config.cores
+            if job.n_tasks < self.n_workers:
+                nw = self.n_workers
                 while nw > job.n_tasks:
                     nw = nw // 2
                 self._initialize_dask(n_workers=nw)
@@ -499,3 +409,198 @@ class LocalSite(BaseSite):
             pass
         except ValueError:
             raise ValueError(f"Invalid process ID: {job_id}")
+
+    def _initialize_dask(self, n_workers: Optional[int] = None):
+        """Initialize Dask client and cluster."""
+
+        if n_workers is None:
+            self.n_workers = self.config.cores
+        else:
+            self.n_workers = n_workers
+
+        if self.threads_per_worker is None:
+            self.threads_per_worker = self.config.cores // self.n_workers
+        if self.memory_per_worker is None:
+            if self.config.memory:
+                self.memory_per_worker = int(
+                    (0.9 * self.config.memory) / self.n_workers
+                )
+            else:
+                self.memory_per_worker = 4096
+
+        total_threads = self.n_workers * self.threads_per_worker
+        total_memory = self.n_workers * self.memory_per_worker
+        if total_threads > self.config.cores:
+            raise ValueError(
+                f"Total threads ({total_threads}) exceed available cores ({self.config.cores})"
+            )
+        if self.config.memory:
+            if total_memory > self.config.memory:
+                raise ValueError(
+                    f"Total memory ({total_memory}MB) exceed available memory ({self.config.memory}MB)"
+                )
+
+        print(
+            f"Dask initialized with {self.n_workers} workers, "
+            f"{self.threads_per_worker} threads per worker, "
+            f"and {self.memory_per_worker}MB memory per worker"
+        )
+
+        if self._dask_client is None:
+            try:
+                dask_config.set(
+                    {
+                        "distributed.worker.memory.target": 0.6,
+                        "distributed.worker.memory.pause": 0.8,
+                        "distributed.worker.threads": self.threads_per_worker,
+                        "distributed.scheduler.work-stealing": True,
+                        "distributed.scheduler.work-stealing-interval": "1s",
+                        "distributed.scheduler.bandwidth": 1,
+                        "distributed.comm.timeouts.connect": "10s",
+                        "distributed.comm.timeouts.tcp": "30s",
+                    }
+                )
+
+                self._dask_cluster = LocalCluster(
+                    n_workers=self.n_workers,
+                    threads_per_worker=self.threads_per_worker,
+                    memory_limit=f"{self.memory_per_worker}MB",
+                    dashboard_address=":0",  # Let Dask choose an available port
+                    local_directory="/tmp/dask-worker-space",
+                    scheduler_port=0,
+                    silence_logs=ERROR,
+                    processes=True,
+                    resources={"CPU": self.threads_per_worker},
+                )
+                self._dask_client = Client(self._dask_cluster, timeout="20s")
+
+                try:
+                    self._dashboard_port = self._dask_cluster.dashboard_link.split(":")[
+                        -1
+                    ]
+                    print(
+                        f"Dask Dashboard available at: http://localhost:{self._dashboard_port}"
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    self._dask_client.get_worker_logs()
+                    logger.info("Dask dashboard initialized successfully")
+                except Exception as e:
+                    logger.warning(f"Dashboard may not be fully accessible: {str(e)}")
+
+                try:
+                    self._task_stream = get_task_stream(self._dask_client, plot=False)
+                    logger.info("Task stream initialized successfully")
+                except Exception:
+                    self._task_stream = None
+                    logger.warning(f"Task stream failed to initialize: {str(e)}")
+
+            except Exception as e:
+                logger.error(f"Failed to initialize Dask cluster: {str(e)}")
+                self.close()
+                raise
+
+    def __del__(self):
+        """Cleanup when object is destroyed."""
+        if hasattr(self, "_task_stream"):
+            try:
+                self._task_stream.stop()
+            except:
+                pass
+        if self._dask_client is not None:
+            self._dask_client.close()
+        if self._dask_cluster is not None:
+            self._dask_cluster.close()
+
+    # Robust methods for handling shutdown and interupts
+    def _signal_handler(self, signum, frame):
+        self.close()
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+
+    @staticmethod
+    def _finalize(self_ref):
+        self = self_ref()
+        if self is not None:
+            self.close()
+
+    def __enter__(self) -> "LocalSite":
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def close(self, *, wait: bool = True, retire: bool = True, timeout: float = 30.0):
+        if self._closed:
+            return
+        self._closed = True
+
+        # Stop task stream
+        if getattr(self, "_task_stream", None) is not None:
+            try:
+                self._task_stream.stop()
+            except Exception:
+                pass
+            self._task_stream = None
+
+        # Cancel outstanding futures
+        if self._dask_client is not None and self._futures:
+            try:
+                self._dask_client.cancel(self._futures, force=True)
+            except Exception:
+                pass
+            self._futures.clear()
+
+        # Politely ask workers to go away before closing cluster
+        if retire and self._dask_client is not None:
+            try:
+                # Migrate data off workers and then close them
+                self._dask_client.retire_workers(
+                    workers=None, close_workers=True, remove=True
+                )
+            except Exception:
+                # Fall back to scaling to zero
+                try:
+                    if self._dask_cluster is not None:
+                        self._dask_cluster.scale(0)
+                except Exception:
+                    pass
+
+        # Close client then cluster
+        try:
+            if self._dask_client is not None:
+                self._dask_client.close(timeout=timeout)
+        except Exception:
+            pass
+        finally:
+            self._dask_client = None
+
+        try:
+            if self._dask_cluster is not None:
+                try:
+                    self._dask_cluster.scale(0)
+                except Exception:
+                    pass
+                self._dask_cluster.close(timeout=timeout, fast=not wait)
+        except Exception:
+            pass
+        finally:
+            self._dask_cluster = None
+
+    def stop(self):
+        self.close()
+
+    def _get_solver_path(self) -> str:
+        """Get the solver path."""
+        load_dotenv()
+        executable = os.getenv("LOCAL_SOLVER_EXECUTABLE")
+        if not executable:
+            warnings.warn("LOCAL_SOLVER_EXECUTABLE not set in environment")
+            return None
+        if not Path(executable).exists():
+            warnings.warn(f"Solver executable not found at {executable}")
+            return None
+        return executable

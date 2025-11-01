@@ -311,7 +311,7 @@ class Project:
             dimension=dimension,
             project_path=self.path,
         )
-        sim.misc = kwargs
+        sim.kwargs = kwargs
         self.simulations.append(sim)
         return sim
 
