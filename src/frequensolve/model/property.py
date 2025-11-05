@@ -125,7 +125,6 @@ class Property:
         data: Union[int, float, str, Path, xr.DataArray, DispersionScaling] = 0.0,
         grid: Optional[xr.DataArray] = None,
         scale: float = 1.0,
-        order: str = "xyz",
         **kwargs,
     ):
         # Legacy argument naming convention
@@ -142,8 +141,6 @@ class Property:
             data = Path(data)
         if isinstance(data, (int, np.integer)):
             data = float(data)
-
-        self.order = order
 
         # Check if this is a remote file
         self.is_remote = False

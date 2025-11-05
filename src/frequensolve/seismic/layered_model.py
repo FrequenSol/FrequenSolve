@@ -14,6 +14,7 @@ from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import Property
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.util.class_registry import register_class
+from frequensolve.util.data_file import save_data_if_new
 from frequensolve.util.named_list import NamedList
 
 __all__ = ["SimpleSurface", "Layer", "LayeredModel"]
@@ -52,7 +53,7 @@ class SimpleSurface:
         name: str,
         interface: bool,
         z_ref: Optional[float],
-        z_phys: Property,
+        z_phys: Union[float, str, Path],
         grid: Optional[xr.DataArray] = None,
         scale: float = 1.0,
         **kwargs,
@@ -68,51 +69,42 @@ class SimpleSurface:
 
     @classmethod
     def from_dict(cls, dict: Dict) -> "SimpleSurface":
-        data = dict["z_phys"]
-        if isinstance(data, float):
-            grid = None
+        name = dict["name"]
+        interface = dict["interface"]
+        z_ref = dict["z_ref"]
+        data = dict.get("z_phys", None)
+        grid = None
+        if "file" in data:
+            z_phys = data["file"]
+            grid = CartesianGrid.from_dict(data["grid"]).as_xarray()
         else:
-            grid = CartesianGrid.from_dict(dict["grid"]).as_xarray()
+            z_phys = data["value"]
+
         return cls(
-            name=dict["name"],
-            interface=dict.get("interface", True),
-            z_ref=dict.get("z_ref"),
-            z_phys=data,
-            grid=grid,
+            name=name,
+            interface=interface,
+            z_ref=z_ref,
+            z_phys=z_phys,
+            **({"grid": grid} if grid is not None else {}),
         )
 
     def __dict__(self):
-        if self.z_phys.is_constant:
-            type = "ConstantSurface"
-            z_phys = self.z_phys.get()
-        else:
-            type = "GridSurface"
-            file = self._path / (self.name + ".bin")
-
-            orig_dims = self.z_phys.darr.dims
-            dims = sorted(orig_dims)
-            self.z_phys.darr = self.z_phys.darr.transpose(*dims[::-1])
-            self.z_phys.write(file)
-            self.z_phys.darr = self.z_phys.darr.transpose(*orig_dims)
-            z_phys = file.relative_to(self._proj_path)
-            grid = self.z_phys.grid
-
-            # TODO: This is again a nasty hack to get around not specifying dims in Grid
-            #       update both codes to use named dimensions
-            if len(grid.n) == 3:
-                grid.n = grid.n[:1]
-                grid.dx = grid.dx[:1]
-                grid.x0 = grid.x0[:1]
-                grid.x1 = grid.x1[:1]
-
-        return {
-            "_type": type,
+        data = {
             "name": self.name,
-            "z_phys": z_phys,
-            **({"z_ref": self.z_ref} if self.z_ref is not None else {}),
-            **({"interface": self.interface} if not self.interface else {}),
-            **({"grid": grid} if not self.z_phys.is_constant else {}),
+            "z_ref": self.z_ref,
+            "interface": self.interface,
         }
+        if self.z_phys.is_constant:
+            data["z_phys"] = {"value": self.z_phys.get()}
+        else:
+            file = self._path / (self.name + ".bin")
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file = save_data_if_new(self.z_phys.darr, file)
+            data["z_phys"] = {
+                "file": file.relative_to(self._proj_path),
+                "grid": self.z_phys.grid.__dict__(),
+            }
+        return data
 
     @property
     def data(self):

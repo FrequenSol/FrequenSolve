@@ -54,24 +54,26 @@ class ModelSubdomain:
         self._properties = {}
         for key, val in properties.items():
             if isinstance(val, str) or isinstance(val, Path):
-                order = None
+                dims = None
                 scale = 1.0
                 split = str(val).split("|")
                 if len(split) >= 2:
                     path = split[0]
                     if "x" in split[1]:
-                        order = split[1]
+                        dims = split[1]
                         if len(split) >= 3:
                             scale = split[2]
                     else:
                         scale = split[1]
                         if len(split) >= 3:
-                            order = split[2]
+                            dims = split[2]
+                    if dims is not None:
+                        dims = [d for d in dims]
                     self._properties[key] = Property(
                         data=path,
                         grid=grid,
                         scale=float(scale),
-                        **({"order": order} if order else {}),
+                        **({"dims": dims} if dims else {}),
                     )
                 else:
                     self._properties[key] = Property(data=val, grid=grid)
@@ -112,29 +114,13 @@ class ModelSubdomain:
                             if prop.remote_scale != 1.0
                             else {}
                         ),
-                        **({"order": prop.order} if prop.order != "xyz" else {}),
                     }
                 else:
-                    orig_dims = self.properties[key].darr.dims
-                    dims = sorted(orig_dims)
                     file = self._path / (f"layer_{self.mesh_block_id}_{key}.bin")
                     file.parent.mkdir(parents=True, exist_ok=True)
-
-                    # Transpose to match solver, save, then transpose back
-                    self.properties[key].darr = self.properties[key].darr.transpose(
-                        *dims[::-1]
-                    )
                     file = save_data_if_new(self.properties[key].darr, file)
-                    self.properties[key].darr = self.properties[key].darr.transpose(
-                        *orig_dims
-                    )
                     props[key] = {
                         "file": file.relative_to(self._proj_path),
-                        **(
-                            {"order": self.properties[key].order}
-                            if self.properties[key].order != "xyz"
-                            else {}
-                        ),
                     }
                 grid = self.properties[key].grid
                 props[key]["grid"] = grid.__dict__()
