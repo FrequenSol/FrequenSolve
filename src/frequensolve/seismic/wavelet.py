@@ -225,8 +225,8 @@ class Wavelet:
 
     def _evaluate_initial(self):
         if self.times is None:
-            dt = 1.0 / (10.0 * self.f_max)
-            T_max = 1.0 / (self.f_max / 10.0)
+            dt = 1.0 / (50.0 * self.f_max)
+            T_max = 100.0 / self.f_max
             self.times = np.arange(0.0, T_max + dt, dt)
 
     @staticmethod
@@ -288,17 +288,16 @@ class Wavelet:
 
         self._evaluate_initial()
 
-        # Axis limit kwargs
-        Tf = kwargs.pop("T_max", None)
-        if Tf:
-            if Tf > self.times[-1]:
-                dt = self.times[1] - self.times[0]
-                self.times = np.arange(0.0, Tf + dt, dt)
-            nTf = np.searchsorted(self.times, Tf, side="left")
-            nTf = np.minimum(nTf, len(self.times))
-        else:
-            nTf = len(self.times)
         f_max = kwargs.pop("f_max", self.f_max)
+
+        # Axis limit kwargs
+        Tf = kwargs.pop("T_max", 25.0 / f_max)
+        if Tf > self.times[-1]:
+            dt = self.times[1] - self.times[0]
+            self.times = np.arange(0.0, Tf + dt, dt)
+        nTf = np.searchsorted(self.times, Tf, side="left")
+        nTf = np.minimum(nTf, len(self.times))
+
         nF = np.searchsorted(self.frequencies, f_max, side="left")
         nF = np.minimum(nF, len(self.frequencies))
 
