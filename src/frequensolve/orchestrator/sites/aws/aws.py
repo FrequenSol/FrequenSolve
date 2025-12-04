@@ -11,11 +11,10 @@ from typing import Any, Dict, List, Optional, Union
 
 import boto3
 import requests
-from botocore.exceptions import ClientError, WaiterError
+from botocore.exceptions import ClientError
 
 from frequensolve.orchestrator.config.base import BaseSiteConfig
 from frequensolve.orchestrator.sites.base import BaseSite
-from frequensolve.orchestrator.tasks.base import BaseTask
 from frequensolve.seismic.record_database import RecordDatabase
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
@@ -30,7 +29,7 @@ logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/aws.log")
 class AWSSiteConfig(BaseSiteConfig):
     """Unified configuration for AWS Site with domain-based setup.
 
-    This class provides configuration for both authentication and AWS Batch execution.
+    This class provides configuration for authentication and AWS resource access.
     All configuration is automatically fetched from the domain's public API endpoint.
 
     Usage:
@@ -49,9 +48,7 @@ class AWSSiteConfig(BaseSiteConfig):
         api_url: GraphQL API endpoint URL
         domain: Frontend domain
 
-        # AWS Batch settings (auto-populated from stack info after auth)
-        job_queue: AWS Batch job queue name
-        job_definition: AWS Batch job definition name
+        # AWS settings (auto-populated from stack info after auth)
         s3_bucket: S3 bucket for simulation data
 
         # Shared settings
@@ -67,14 +64,12 @@ class AWSSiteConfig(BaseSiteConfig):
     api_url: Optional[str] = None
     domain: Optional[str] = None
 
-    # AWS Batch configuration (auto-populated from stack info)
-    job_queue: str = ""
-    job_definition: str = ""
+    # AWS configuration (auto-populated from stack info)
     s3_bucket: Optional[str] = None
 
     # Shared configuration
     region: str = "us-east-1"
-    s3_prefix: str = "frequensolve"
+    s3_prefix: str = ""
     max_duration: Optional[str] = None
 
     @classmethod
@@ -193,7 +188,7 @@ class AWSSiteConfig(BaseSiteConfig):
 
 
 class AWSSite(BaseSite):
-    """AWS Batch site for running FrequenSolve simulations.
+    """AWS site for running FrequenSolve simulations.
 
     Automatically authenticates users and configures AWS resources by simply providing
     your FrequenSol domain. All configuration is discovered automatically.
@@ -212,8 +207,8 @@ class AWSSite(BaseSite):
     What happens automatically:
         1. Fetches configuration from domain (User Pool ID, API URL, etc.)
         2. Authenticates with cached credentials (or prompts for login)
-        3. Fetches your infrastructure details (S3 bucket, Batch queue, etc.)
-        4. Ready to submit jobs and upload files!
+        3. Fetches your infrastructure details (S3 bucket, etc.)
+        4. Ready to submit simulations and upload files!
     """
 
     def __init__(
@@ -222,7 +217,7 @@ class AWSSite(BaseSite):
         email: Optional[str] = None,
         password: Optional[str] = None,
     ):
-        """Initialize AWS Batch site with domain-based authentication.
+        """Initialize AWS site with domain-based authentication.
 
         Args:
             domain: Frontend domain (e.g., 'frequensolve.app', 'localhost:5173').
@@ -347,13 +342,9 @@ class AWSSite(BaseSite):
             stack_info = self.graphql_client.get_my_stack()
 
             # Update config with stack information
-            config.job_queue = stack_info["jobQueue"]
-            config.job_definition = stack_info["jobDefinition"]
             config.s3_bucket = stack_info["bucketName"]
 
-            logger.info(
-                f"Stack info loaded: bucket={config.s3_bucket}, queue={config.job_queue}"
-            )
+            logger.info(f"Stack info loaded: bucket={config.s3_bucket}")
 
         except Exception as e:
             logger.error(f"Failed to fetch stack info: {e}")
@@ -363,50 +354,32 @@ class AWSSite(BaseSite):
             ) from e
 
         self.config = config
-        self.batch_client = self.session.client("batch", region_name=self.config.region)
         self.s3_client = self.session.client("s3", region_name=self.config.region)
 
+    @property
+    def work_dir(self) -> Path:
+        """Get the S3 work directory as a Path-like object.
+
+        Returns:
+            Path object representing the S3 prefix.
+        """
+        # Return a Path object that represents the S3 prefix
+        # This is used by project._transfer() to construct remote paths
+        return Path(self.config.s3_prefix)
+
     def _validate_config(self):
-        """Validate AWS Batch configuration."""
+        """Validate AWS configuration."""
         try:
             print("=== AWS Credentials and Access Test ===")
             self._check_credentials()
             self._check_profile()
-            # self._test_aws_access()
-            # self._list_job_definitions()
 
             print("\n=== Configuration Validation ===")
-
-            queues = self.batch_client.describe_job_queues(
-                jobQueues=[self.config.job_queue]
-            )
-            if not queues["jobQueues"]:
-                raise ValueError(f"Job queue '{self.config.job_queue}' not found")
-
-            definitions = self.batch_client.describe_job_definitions(
-                jobDefinitionName=self.config.job_definition
-            )
-            if not definitions["jobDefinitions"]:
-                raise ValueError(
-                    f"Job definition '{self.config.job_definition}' not found"
-                )
-
-            active_definitions = [
-                jd for jd in definitions["jobDefinitions"] if jd["status"] == "ACTIVE"
-            ]
-            if not active_definitions:
-                raise ValueError(
-                    f"Job definition '{self.config.job_definition}' exists but is not ACTIVE. Available statuses: {[jd['status'] for jd in definitions['jobDefinitions']]}"
-                )
-
-            print(f"✓ Found job queue: {queues['jobQueues'][0]['jobQueueArn']}")
-            print(
-                f"✓ Found ACTIVE job definition: {active_definitions[0]['jobDefinitionArn']}"
-            )
+            print(f"✓ S3 bucket: {self.config.s3_bucket}")
             print(f"✓ Configuration validation successful!")
 
-        except ClientError as e:
-            raise RuntimeError(f"Failed to validate AWS Batch configuration: {e}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to validate AWS configuration: {e}")
 
     def _check_credentials(self):
         """Check what AWS credentials are being used."""
@@ -454,12 +427,6 @@ class AWSSite(BaseSite):
             identity = sts_client.get_caller_identity()
             print(f"✓ STS access successful - Account: {identity['Account']}")
 
-            # Test Batch access
-            response = self.batch_client.describe_job_queues()
-            print(
-                f"✓ Batch access successful - Found {len(response['jobQueues'])} job queues"
-            )
-
             # Test S3 access
             response = self.s3_client.list_buckets()
             print(f"✓ S3 access successful - Found {len(response['Buckets'])} buckets")
@@ -473,27 +440,6 @@ class AWSSite(BaseSite):
 
         except Exception as e:
             print(f"✗ AWS access test failed: {e}")
-
-    def _list_job_definitions(self):
-        """List all available job definitions to debug access issues."""
-        try:
-            response = self.batch_client.describe_job_definitions()
-            print(f"Found {len(response['jobDefinitions'])} job definitions:")
-
-            # Group by name and show statuses
-            definitions_by_name = {}
-            for jd in response["jobDefinitions"]:
-                name = jd["jobDefinitionName"]
-                if name not in definitions_by_name:
-                    definitions_by_name[name] = []
-                definitions_by_name[name].append(jd["status"])
-
-            for name, statuses in definitions_by_name.items():
-                status_str = ", ".join(statuses)
-                print(f"  - {name} (Statuses: {status_str})")
-
-        except Exception as e:
-            print(f"Error listing job definitions: {e}")
 
     def sync_s3(self, local_path: Union[str, Path], s3_key: str) -> str:
         """Sync files/directories with S3 using boto3.
@@ -542,12 +488,21 @@ class AWSSite(BaseSite):
         except Exception as e:
             raise RuntimeError(f"Unexpected error syncing {local_path} to S3: {e}")
 
-    # Note: We don't need to sync the whole project with S3, leaving this unimplemented for now
     def sync(self, project):
-        pass
+        """Sync the project to S3.
+
+        Args:
+            project: The Project to sync.
+
+        Raises:
+            RuntimeError: If sync fails.
+        """
+        logger.info(f"Syncing project '{project.name}' to S3...")
+        project._transfer(self)
+        logger.info(f"✓ Project '{project.name}' synced to S3")
 
     def submit(self, job: SimulationJob, **kwargs) -> str:
-        """Submit a job to AWS Batch.
+        """Submit a simulation job.
 
         If using Cognito authentication, submits via GraphQL API.
         Otherwise, uses the traditional REST API method.
@@ -557,22 +512,19 @@ class AWSSite(BaseSite):
             **kwargs: Additional job parameters (vcpu, memory, name, description).
 
         Returns:
-            AWS Batch job ID.
+            Simulation ID (for GraphQL path) or job ID (for REST API path).
 
         Raises:
             RuntimeError: If job submission fails.
         """
         try:
-            # Sync simulation and job data to S3
-            local_sim = job.simulation._path
-            remote_sim = job.simulation._remote_path
-            s3_sim_key = self.sync_s3(local_sim, remote_sim)
-
-            project = remote_sim.parts[0]
+            # Sync job file to S3
+            project = job.simulation._remote_path.parts[0]
             local_job, remote_job = job.save_for_remote(
                 self.__class__.__name__, project
             )
             s3_job_key = self.sync_s3(local_job, remote_job)
+            logger.info(f"✓ Synced job file to S3: {s3_job_key}")
 
             # Check if using Cognito/GraphQL authentication
             if self.graphql_client is not None:
@@ -586,12 +538,12 @@ class AWSSite(BaseSite):
                     job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
                 )
 
-                batch_job_id = result["batchJobId"]
-                logger.info(f"✓ Job submitted: {batch_job_id}")
-                logger.info(f"  Simulation ID: {result['simulationId']}")
+                simulation_id = result["simulationId"]
+                logger.info(f"✓ Simulation submitted")
+                logger.info(f"  Simulation ID: {simulation_id}")
                 logger.info(f"  Status: {result['status']}")
 
-                return batch_job_id
+                return simulation_id
 
             else:
                 # Old path: Submit via REST API (backwards compatibility)
@@ -632,11 +584,25 @@ class AWSSite(BaseSite):
                         f"Job submission failed: {response_data.get('message', 'Unknown error')}"
                     )
 
-                batch_job_id = response_data.get("batch_job_id")
-                if not batch_job_id:
-                    raise RuntimeError("No batch job ID returned from API")
+                # Check if simulation_id is available in REST API response
+                simulation_id = response_data.get("simulation_id")
+                if simulation_id:
+                    logger.info(f"✓ Simulation submitted via REST API")
+                    logger.info(f"  Simulation ID: {simulation_id}")
+                    return simulation_id
 
-                return batch_job_id
+                # Fallback to job_id for backwards compatibility
+                job_id = response_data.get("batch_job_id") or response_data.get(
+                    "job_id"
+                )
+                if not job_id:
+                    raise RuntimeError("No job ID or simulation ID returned from API")
+
+                logger.warning(
+                    "REST API did not return simulation_id, returning job_id. "
+                    "Consider using GraphQL API for full functionality."
+                )
+                return job_id
 
         except Exception as e:
             raise RuntimeError(f"Failed to submit job: {e}")
@@ -784,107 +750,160 @@ class AWSSite(BaseSite):
             warnings.warn(f"API request failed: {e}")
             return {}
 
-    def check_status(self, job_id: str) -> str:
-        """Check the status of a submitted job.
+    def wait_for_completion(
+        self, simulation_id: str, poll_interval: float = 10, timeout: int = 3600
+    ) -> str:
+        """Wait for simulation completion by polling status.
+
+        Polls the simulation status at the specified interval until the
+        simulation reaches a terminal state (SUCCEEDED or FAILED) or timeout.
 
         Args:
-            job_id: AWS Batch job ID.
+            simulation_id: The simulation ID to poll.
+            poll_interval: Interval in seconds between status checks.
+            timeout: Maximum time to wait in seconds (default: 3600).
 
         Returns:
-            Job status string.
+            Final simulation status string ('SUCCEEDED' or 'FAILED').
+
+        Raises:
+            RuntimeError: If simulation not found, polling fails, or timeout exceeded.
         """
-        try:
-            response = self.batch_client.describe_jobs(jobs=[job_id])
-            if response["jobs"]:
-                return response["jobs"][0]["status"]
-            return "unknown"
-        except ClientError:
-            return "unknown"
+        if self.graphql_client is None:
+            raise RuntimeError(
+                "GraphQL client not available. Cannot poll simulation status. "
+                "This method requires Cognito authentication."
+            )
 
-    def wait_for_completion(self, job_id: str, timeout: int = 3600) -> bool:
-        """Wait for job completion.
+        logger.info(
+            f"Polling simulation {simulation_id} every {poll_interval} seconds "
+            f"(timeout: {timeout}s)..."
+        )
 
-        Args:
-            job_id: AWS Batch job ID.
-            timeout: Maximum time to wait in seconds.
-
-        Returns:
-            True if job completed successfully, False otherwise.
-        """
         start_time = time.time()
 
-        while time.time() - start_time < timeout:
-            status = self.check_status(job_id)
+        while True:
+            # Check timeout
+            elapsed_time = time.time() - start_time
+            if elapsed_time >= timeout:
+                raise RuntimeError(
+                    f"Timeout waiting for simulation {simulation_id} to complete "
+                    f"(waited {elapsed_time:.0f}s, timeout: {timeout}s)"
+                )
 
-            if status == "SUCCEEDED":
-                return True
-            elif status in ["FAILED", "CANCELLED"]:
-                return False
-            elif status == "RUNNING":
-                time.sleep(30)  # Check every 30 seconds for running jobs
-            else:
-                time.sleep(10)  # Check every 10 seconds for queued jobs
+            try:
+                status = self.graphql_client.get_simulation_status(simulation_id)
+                logger.debug(f"Simulation {simulation_id} status: {status}")
 
-        return False
+                # Check if simulation is in a terminal state
+                if status in ["SUCCEEDED", "FAILED"]:
+                    logger.info(
+                        f"Simulation {simulation_id} completed with status: {status} "
+                        f"(elapsed: {elapsed_time:.0f}s)"
+                    )
+                    return status
+
+                # Continue polling for PENDING or RUNNING status
+                if status in ["PENDING", "RUNNING"]:
+                    time.sleep(poll_interval)
+                    continue
+
+                # Unknown status - log warning but continue polling
+                logger.warning(
+                    f"Unknown simulation status '{status}' for {simulation_id}. "
+                    "Continuing to poll..."
+                )
+                time.sleep(poll_interval)
+
+            except RuntimeError as e:
+                # Re-raise if it's a clear error (simulation not found, etc.)
+                error_msg = str(e).lower()
+                if "not found" in error_msg or "access denied" in error_msg:
+                    raise RuntimeError(
+                        f"Failed to poll simulation {simulation_id}: {e}"
+                    ) from e
+                # For other errors, log and retry after interval
+                logger.warning(
+                    f"Error polling simulation {simulation_id}: {e}. "
+                    f"Retrying in {poll_interval} seconds..."
+                )
+                time.sleep(poll_interval)
 
     def cancel_job(self, job_id: str) -> None:
-        """Cancel a running job.
+        """Cancel a running simulation.
 
         Args:
-            job_id: AWS Batch job ID.
-        """
-        try:
-            self.batch_client.cancel_job(jobId=job_id, reason="Cancelled by user")
-        except ClientError as e:
-            warnings.warn(f"Failed to cancel job {job_id}: {e}")
+            job_id: The simulation ID to cancel.
 
-    def list_jobs(self, job_status: Optional[str] = None) -> list:
-        """List jobs with optional status filter.
+        Raises:
+            RuntimeError: If cancellation fails or simulation cannot be cancelled.
+        """
+        if self.graphql_client is None:
+            raise RuntimeError(
+                "GraphQL client not available. Cannot cancel simulation. "
+                "This method requires Cognito authentication."
+            )
+
+        # Check simulation status
+        try:
+            status = self.graphql_client.get_simulation_status(job_id)
+        except RuntimeError as e:
+            raise RuntimeError(f"Failed to get simulation status: {e}") from e
+
+        # Check if simulation is in a cancellable state
+        if status in ["SUCCEEDED", "FAILED"]:
+            logger.warning(
+                f"Simulation {job_id} is already in terminal state: {status}. "
+                "Nothing to cancel."
+            )
+            return
+
+        # For now, raise an error indicating cancellation is not yet implemented
+        # This will be implemented when the cancelSimulation GraphQL mutation is available
+        raise NotImplementedError(
+            f"Simulation cancellation is not yet implemented. "
+            f"Simulation {job_id} is currently in state: {status}. "
+            f"Please cancel it manually through the web interface."
+        )
+
+    def put(
+        self,
+        local_path: Union[str, Path],
+        remote_path: Union[str, Path],
+    ):
+        """Transfer files from local path to S3.
 
         Args:
-            job_status: Optional job status to filter by.
-
-        Returns:
-            List of job information dictionaries.
+            local_path: Local path to transfer from
+            remote_path: S3 key path (relative to work_dir) to transfer to
         """
+        local_path = Path(local_path)
+        remote_path = Path(remote_path)
+
+        # Construct full S3 key by combining work_dir (s3_prefix) with remote_path
+        s3_key = str(self.work_dir / remote_path).replace("\\", "/")
+
+        logger.debug(f"Uploading {local_path} to s3://{self.config.s3_bucket}/{s3_key}")
+
         try:
-            params = {"jobQueue": self.config.job_queue}
-            if job_status:
-                params["jobStatus"] = job_status
-
-            response = self.batch_client.list_jobs(**params)
-            return response["jobSummaryList"]
+            if local_path.is_file():
+                # Upload single file
+                self.s3_client.upload_file(
+                    str(local_path), self.config.s3_bucket, s3_key
+                )
+            else:
+                # Upload directory recursively
+                for file_path in local_path.rglob("*"):
+                    if file_path.is_file():
+                        relative_path = file_path.relative_to(local_path)
+                        file_s3_key = f"{s3_key}/{relative_path}".replace("\\", "/")
+                        self.s3_client.upload_file(
+                            str(file_path), self.config.s3_bucket, file_s3_key
+                        )
         except ClientError as e:
-            warnings.warn(f"Failed to list jobs: {e}")
-            return []
-
-    def get_job_logs(self, job_id: str) -> Dict[str, Any]:
-        """Get logs and details for a completed job.
-
-        Args:
-            job_id: AWS Batch job ID.
-
-        Returns:
-            Dictionary containing job logs and details.
-        """
-        try:
-            response = self.batch_client.describe_jobs(jobs=[job_id])
-            if response["jobs"]:
-                job = response["jobs"][0]
-                return {
-                    "status": job["status"],
-                    "started_at": job.get("startedAt"),
-                    "stopped_at": job.get("stoppedAt"),
-                    "exit_code": job.get("attempts", [{}])[-1].get("exitCode"),
-                    "reason": job.get("attempts", [{}])[-1].get("reason"),
-                    "log_stream_name": job.get("attempts", [{}])[-1].get(
-                        "logStreamName"
-                    ),
-                }
-            return {}
-        except ClientError as e:
-            warnings.warn(f"Failed to get job logs for {job_id}: {e}")
-            return {}
+            raise RuntimeError(f"Failed to upload {local_path} to S3: {e}")
+        except Exception as e:
+            raise RuntimeError(f"Unexpected error uploading {local_path} to S3: {e}")
 
     def get(
         self,
@@ -943,21 +962,13 @@ class AWSSite(BaseSite):
 
 # if __name__ == "__main__":
 #     # Example usage
-#     config = AWSSiteConfig(
-#         job_queue="frequensolve-queue",
-#         job_definition="frequensolve-job-definition",
-#         region="us-east-1",
-#         s3_bucket="my-frequensolve-bucket",
-#         api_base_url="https://api.frequensol.com",
-#         api_token="your-api-token-here"
-#     )
+#     config = AWSSiteConfig.from_domain('frequensolve.app')
+#     site = AWSSite(domain='frequensolve.app')
 
-#     site = AWSSite(config)
-
-#     # Example job submission via API
-#     # job_id = site.submit(job)
-#     # print(f"Submitted job: {job_id}")
+#     # Example simulation submission via API
+#     # simulation_id = site.submit(job)
+#     # print(f"Submitted simulation: {simulation_id}")
 #     #
 #     # # Wait for completion
-#     # success = site.wait_for_completion(job_id)
-#     # print(f"Job completed successfully: {success}")
+#     # status = site.wait_for_completion(simulation_id, poll_interval=30, timeout=3600)
+#     # print(f"Simulation completed with status: {status}")

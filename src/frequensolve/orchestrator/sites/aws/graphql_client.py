@@ -97,8 +97,6 @@ class GraphQLClient:
             Dict containing:
                 - stackId: CloudFormation compute stack ID
                 - bucketName: S3 bucket name for simulations (from storage stack)
-                - jobQueue: AWS Batch job queue name (from compute stack)
-                - jobDefinition: AWS Batch job definition name (from compute stack)
                 - status: Combined stack status
 
         Raises:
@@ -214,8 +212,6 @@ class GraphQLClient:
 
         # Merge outputs from both stacks
         bucket_name = storage_outputs.get("StorageBucketName", "")
-        job_queue = compute_outputs.get("BatchJobQueueName", "")
-        job_definition = compute_outputs.get("BatchJobDefinitionName", "")
 
         # Verify all required outputs are present
         if not bucket_name:
@@ -224,24 +220,16 @@ class GraphQLClient:
                 "Please check your storage infrastructure deployment at https://app.frequensol.com"
             )
 
-        if not job_queue or not job_definition:
-            raise RuntimeError(
-                "Compute stack outputs are incomplete. BatchJobQueueName or BatchJobDefinitionName not found. "
-                "Please check your compute infrastructure deployment at https://app.frequensol.com"
-            )
-
         result_dict = {
             "stackId": compute_stack["stackId"],
             "bucketName": bucket_name,
-            "jobQueue": job_queue,
-            "jobDefinition": job_definition,
             "status": f"storage:{storage_stack['status']}, compute:{compute_stack['status']}",
         }
 
         logger.debug("Final merged result:")
         logger.debug(f"  {json.dumps(result_dict, indent=2)}")
 
-        logger.info(f"✓ Stack info loaded: bucket={bucket_name}, queue={job_queue}")
+        logger.info(f"✓ Stack info loaded: bucket={bucket_name}")
 
         return result_dict
 
@@ -252,7 +240,7 @@ class GraphQLClient:
         memory: Optional[int] = None,
         job_name: Optional[str] = None,
     ) -> Dict[str, str]:
-        """Submit a simulation job to AWS Batch.
+        """Submit a simulation job.
 
         Args:
             job_file_s3_key: S3 key of the job configuration file
@@ -263,7 +251,7 @@ class GraphQLClient:
         Returns:
             Dict containing:
                 - simulationId: Database simulation record ID
-                - batchJobId: AWS Batch job ID
+                - batchJobId: Internal job ID (for backwards compatibility)
                 - status: Initial job status (typically 'PENDING')
 
         Raises:
@@ -306,3 +294,41 @@ class GraphQLClient:
             raise RuntimeError("Job submission failed: No response from API")
 
         return result["submitJob"]
+
+    def get_simulation_status(self, simulation_id: str) -> str:
+        """Get simulation status by ID.
+
+        Args:
+            simulation_id: The simulation ID to query.
+
+        Returns:
+            Simulation status string (e.g., 'PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED').
+
+        Raises:
+            RuntimeError: If query fails or simulation not found.
+        """
+        query = """
+            query GetSimulation($id: ID!) {
+                getSimulation(id: $id) {
+                    id
+                    status
+                }
+            }
+        """
+
+        variables = {"id": simulation_id}
+
+        result = self.execute(query, variables)
+
+        if "getSimulation" not in result or not result["getSimulation"]:
+            raise RuntimeError(
+                f"Simulation not found or access denied: {simulation_id}"
+            )
+
+        status = result["getSimulation"].get("status")
+        if not status:
+            raise RuntimeError(
+                f"Simulation status not found in response: {simulation_id}"
+            )
+
+        return status
