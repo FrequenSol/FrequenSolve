@@ -9,7 +9,7 @@ from matplotlib.axes import Axes
 from numpy.typing import ArrayLike
 
 from frequensolve.geometry.grids import CartesianGrid
-from frequensolve.mesh.mesh_generators import HexMeshGenerator
+from frequensolve.mesh.mesh_generators import HexMeshGenerator, TetMeshGenerator
 from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import Property
 from frequensolve.seismic.acquisition import Acquisition
@@ -488,6 +488,17 @@ class LayeredModel(ModelBase):
 
         return HexMeshGenerator(l_bound=l_bound, u_bound=u_bound, n=n)
 
+    def tet_mesh_generator(self, n: Optional[List[int]] = None) -> HexMeshGenerator:
+
+        if self.dimension == 2:
+            l_bound = [self.x_limits[0], self.z_limits[0]]
+            u_bound = [self.x_limits[1], self.z_limits[1]]
+        else:
+            l_bound = [self.x_limits[0], self.y_limits[0], self.z_limits[0]]
+            u_bound = [self.x_limits[1], self.y_limits[1], self.z_limits[1]]
+
+        return TetMeshGenerator(l_bound=l_bound, u_bound=u_bound, n=n)
+
     @classmethod
     def from_dict(cls, data: Dict) -> "LayeredModel":
         """Creates a LayeredModel instance from a dictionary representation.
@@ -783,7 +794,7 @@ class LayeredModel(ModelBase):
             gridded[property] = xr.DataArray(
                 dims=samples.dims,
                 coords=samples.coords,
-                data=np.nan * np.ones(samples.shape),
+                # data=np.nan * np.ones(samples.shape),
             )
         samples = self._physical_to_reference_2d(samples)
 
@@ -915,6 +926,7 @@ class LayeredModel(ModelBase):
                 prop = layer.properties[property].get(samples)
                 mask = self._get_layer_mask(layer, samples)
                 data = prop.where(mask)
+                data = data.transpose(*samples.dims)
                 samples.data = np.where(~np.isnan(data), data, samples.data)
 
         samples = samples.clip(min=vmin, max=vmax)
@@ -1106,6 +1118,7 @@ class LayeredModel(ModelBase):
             & (samples.coords["x"] <= limits["x_max"])
             & (samples.coords["x"] >= limits["x_min"])
         )
+        mask = mask.transpose(*samples.dims)
         return mask
 
     def _reference_to_physical(self, coords: np.ndarray) -> np.ndarray:

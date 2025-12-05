@@ -14,9 +14,11 @@ from frequensolve.util.class_registry import class_registry, register_class
 
 __all__ = [
     "RTMImagingJob",
+    "LSRTMIteration",
     "Misfit",
     "MisfitGroup",
     "RawImage",
+    "extract_frequencies_for_job",
 ]
 
 
@@ -44,57 +46,11 @@ class RawImage:
                 f_list[i] = f["frequency"][()]
         return f_list
 
-    def image_file(self, part: int):
-        return self.path / f"image_{part}.h5"
-
-    def image(self, part: int):
-        import h5py
-
-        file = self.image_file(part + 1)
-        with h5py.File(file, "r") as f:
-            im = np.reshape(f["image"][:], self.shape)
-            return im
-
-    def stack(
-        self, omega_exp: int = 0, wavelet: Optional[Wavelet] = None
-    ) -> np.ndarray:
-        import h5py
-
-        n_freq = self.parts
-        f_list = self.f_list
-
-        weights = np.ones(self.parts, dtype=np.float64)
-        if n_freq > 1 and wavelet is not None:
-            f_max = f_list.max()
-            f_list = np.sort(f_list)
-            df = np.diff(f_list).min()
-
-            sampling = UniformSweepSampling(
-                f_min=0.0,
-                f_max=f_max,
-                df=df,
-            )
-            wavelet.times = sampling.t_list
-
-            frequencies = wavelet.frequencies
-            spectrum = abs(wavelet.spectrum)
-            for i, f in enumerate(self.f_list):
-                idx = abs(frequencies - f).argmin()
-                weights[i] = abs(spectrum[idx])
-
-        w_norm = np.sqrt(np.sum(np.abs(weights) ** 2))
-        weights /= w_norm
-
-        img = np.zeros(self.shape)
-        for i in range(n_freq):
-            file = self.image_file(i + 1)
-            f0 = f_list.max()
-            omega = 2.0 * np.pi * f_list[i]
-            w = omega ** (omega_exp - 2) * weights[i] ** 2
-            with h5py.File(file, "r") as f:
-                im = np.reshape(f["image"][:], self.shape)
-                img += im * w
-        return img
+    def image_file(self, part: Optional[int] = None):
+        if part is None:
+            return self.path / f"image.h5"
+        else:
+            return self.path / f"image_{part}.h5"
 
 
 @dataclass(kw_only=True)
@@ -129,21 +85,21 @@ class MisfitGroup:
 class Misfit:
     """Base class for misfit functions."""
 
-    type: Literal["L2"] = "L2"
+    norm: Literal["L2"] = "L2"
     receiver_groups: List[MisfitGroup] = field(default_factory=list)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
 
     def __dict__(self) -> Dict:
         return {
-            "type": self.type,
+            "norm": self.norm,
             "receiver_groups": [group.__dict__() for group in self.receiver_groups],
         }
 
     @classmethod
     def from_dict(cls, data: Dict) -> "Misfit":
         return cls(
-            type=data["type"],
+            norm=data["norm"],
             receiver_groups=[
                 MisfitGroup.from_dict(group) for group in data["receiver_groups"]
             ],
@@ -161,7 +117,7 @@ class RTMImagingJob(SimulationJob):
     grid: CartesianGrid = field(default_factory=CartesianGrid)
     keep_forward: bool = False
     keep_adjoint: bool = False
-    imaging_condition: Literal["energy", "up_down"] = "energy"
+    images: dict = field(default_factory=dict)
     weights: List[float] = field(default_factory=list)
     reassemble_adjoint: bool = False
 
@@ -172,10 +128,10 @@ class RTMImagingJob(SimulationJob):
         data_path: Union[str, Path],
         f_list: List[float],
         resolution: List[int],
-        imaging_condition: Literal["energy", "up_down"] = "energy",
+        images: dict = field(default_factory=dict),
         weights: Optional[List[float]] = None,
         wavelet: Optional[Wavelet] = None,
-        misfit_type: Literal["L2"] = "L2",
+        misfit_norm: Literal["L2"] = "L2",
         keep_forward: bool = False,
         keep_adjoint: bool = False,
         save_path: Optional[Union[str, Path]] = None,
@@ -224,11 +180,11 @@ class RTMImagingJob(SimulationJob):
             self.weights = weights
 
         self.kwargs = kwargs
-        self.imaging_condition = imaging_condition
+        self.images = images
         self.keep_forward = keep_forward
         self.keep_adjoint = keep_adjoint
 
-        self.misfit = Misfit(type=misfit_type)
+        self.misfit = Misfit(norm=misfit_norm)
         for receiver_group in simulation.acquisition.receiver_groups:
             self.misfit.receiver_groups.append(
                 MisfitGroup(
@@ -273,6 +229,23 @@ class RTMImagingJob(SimulationJob):
         return self.save_path
 
     def __dict__(self) -> Dict:
+        images = []
+        for key, value in self.images.items():
+            tmp = value.split(":")
+            if tmp[0] == "FWI":
+                cond = tmp[0]
+                prop = tmp[1]
+            else:
+                cond = value
+                prop = None
+            images.append(
+                {
+                    "name": key,
+                    "IC": cond,
+                    **({"property": prop} if prop is not None else {}),
+                }
+            )
+
         imaging = {
             "data_path": self.data_path,
             "save_path": self.save_path,
@@ -280,7 +253,7 @@ class RTMImagingJob(SimulationJob):
             "grid": self.grid.__dict__(),
             "keep_forward": self.keep_forward,
             "keep_adjoint": self.keep_adjoint,
-            "imaging_condition": self.imaging_condition,
+            "images": images,
             "weights": self.weights,
             "reassemble_adjoint": self.reassemble_adjoint,
             **self.kwargs,
@@ -295,13 +268,15 @@ class RTMImagingJob(SimulationJob):
         image_data = data.pop("Image")
         grid = image_data.pop("grid", None)
         resolution = grid.pop("n", None)
+        images = image_data.pop("images", None)
+        images = {image["name"]: image["IC"] for image in images}
         job = cls(
             name=data.pop("name", None),
             simulation=SeismicSimulation.load(data.pop("simulation")),
             f_list=data.pop("f_list", None),
             data_path=image_data.pop("data_path", None),
             resolution=resolution,
-            imaging_condition=image_data.pop("imaging_condition", None),
+            images=images,
             keep_forward=image_data.pop("keep_forward", None),
             keep_adjoint=image_data.pop("keep_adjoint", None),
             save_path=image_data.pop("save_path", None),
@@ -313,24 +288,79 @@ class RTMImagingJob(SimulationJob):
         return job
 
 
-# @register_class
-# @dataclass(kw_only=True)
-# class ImagingJob(ABC, SimulationJob):
-#     """Base class for seismic imaging jobs."""
+class LSRTMIteration(RTMImagingJob):
+    """Defines LSRTM iteration."""
 
-#     misfit: Misfit = field(default_factory=Misfit)
-#     data_path: Union[str, Path] = None
-#     save_path: Union[str, Path] = None
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.workflow = "Born"
 
-#     @classmethod
-#     def from_dict(cls, data: Dict) -> "ImagingJob":
-#         class_name = data.pop("_type")
-#         if class_name in class_registry:
-#             image_class = class_registry[class_name]
-#             return image_class.from_dict(data)
-#         else:
-#             raise ValueError(f"Unknown image class: {class_name}")
+    def __dict__(self) -> Dict:
+        return {
+            **super().__dict__(),
+        }
 
-#     @abstractmethod
-#     def __dict__(self) -> Dict:
-#         pass
+
+def extract_frequencies_for_job(job: RTMImagingJob, td):
+    import warnings
+
+    import h5py
+    import xarray as xr
+
+    try:
+        import pyfftw
+
+        pyfftw.interfaces.cache.enable()
+        fft = pyfftw.interfaces.numpy_fft
+        pyfftw.config.NUM_THREADS = 4
+    except:
+        warnings.warn("pyfftw not found, using numpy for FFT (slow)")
+        import numpy.fft as fft
+
+    # Make frequency domain data array
+    shape = list(td.shape)
+    fd_dims = ["time" if d == "frequency" else d for d in td.dims]
+    fd_coords = {d: td.coords[d] for d in fd_dims if d != "time"}
+    fd_coords["frequency"] = job.f_list
+    fd_coords["complex"] = ["real", "imag"]
+    fd_coords["component"] = "v_z"
+    for i, d in enumerate(td.dims):
+        if d == "time":
+            fd_dims[i] = "frequency"
+            shape[i] = len(job.f_list)
+    if "component" not in td.dims:
+        shape.append(1)
+        fd_dims.append("component")
+    fd_dims.append("complex")
+    fd_shape = [*shape, 2]
+    fd = xr.DataArray(
+        np.zeros(fd_shape),
+        dims=fd_dims,
+        coords=fd_coords,
+    )
+    fd = fd.transpose("frequency", "source", "component", "receiver", "complex")
+
+    # Compute frequency domain data
+    taxis = td.coords["time"]
+    dt = taxis[1] - taxis[0]
+    freqs = job.f_list
+    for i, f in enumerate(freqs):
+        exp = xr.DataArray(
+            np.exp(2 * np.pi * 1j * f * td.coords["time"]),
+            dims=["time"],
+            coords={"time": td.coords["time"]},
+        )
+        tmp = (td * exp).sum(dim="time") * dt
+        ctmp = np.empty([*tmp.shape, 2], dtype=np.float32)
+        ctmp[:, :, 0] = tmp.real
+        ctmp[:, :, 1] = tmp.imag
+        fd.data[i] = ctmp.reshape(fd.data[i].shape)
+
+    # Assumes only one receiver group
+    group = job.simulation.acquisition.receiver_groups[0]
+
+    # Write hdf5 files
+    for i, f in enumerate(job.f_list):
+        file = job.data_path / f"receivers_{i + 1}.h5"
+        with h5py.File(file, "w") as f:
+            f[group.name] = fd.data[i].astype(np.float32)

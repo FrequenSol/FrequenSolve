@@ -35,7 +35,7 @@ class Discretization:
         return cls(
             method=d.pop("method", "DPG"),
             order=d.pop("order", 3),
-            kwargs=d,
+            **d,
         )
 
     def __dict__(self) -> Dict[str, Any]:

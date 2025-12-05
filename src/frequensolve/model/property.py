@@ -19,7 +19,7 @@ def _dims_compatible(dims1: List[str], dims2: List[str]) -> bool:
     """Helper function to check if two xarrays have compatible grids."""
     dims1 = set(dims1)
     dims2 = set(dims2)
-    return dims1 == dims2
+    return dims1.issubset(dims2)
 
 
 # Helper functions
@@ -202,7 +202,6 @@ class Property:
                 f"Cannot access data from remote property: {self.remote_path}"
             )
 
-        # If coords not provided, return the property
         if grid is None:
             if self.is_constant:
                 return self.darr.values
@@ -216,26 +215,34 @@ class Property:
             result = self.darr
         # Otherwise, interpolate the property onto coords
         else:
-            if _dims_compatible(self.darr.dims, coords):
-                # Linear interpolation for valid values
-                out = self.darr.interp(coords=coords, method="linear")
-                # Use nearest neighbor interpolation to fill NaNs
-                if np.isnan(out.values).any():
-                    nearest_interp = self.darr.interp(
-                        coords=coords,
-                        method="nearest",
-                        kwargs={"fill_value": "extrapolate"},
-                    )
-                    nan_mask = np.isnan(out.values)
-                    out.values[nan_mask] = nearest_interp.values[nan_mask]
-                result = out
-
-            elif self.is_constant:
+            if self.is_constant:
                 dims = grid.dims
                 shape = tuple(len(coords[dim]) for dim in dims)
                 result = xr.DataArray(
                     data=np.full(shape, self.darr.values), dims=dims, coords=coords
                 )
+            elif _dims_compatible(self.darr.dims, coords):
+
+                # Handles case when coords has more dimensions than the property
+                coords2 = {dim: coords[dim] for dim in self.darr.dims}
+
+                # Linear interpolation for valid values
+                out = self.darr.interp(coords=coords2, method="linear")
+
+                # Use nearest neighbor interpolation to fill NaNs
+                if np.isnan(out.values).any():
+                    nearest_interp = self.darr.interp(
+                        coords=coords2,
+                        method="nearest",
+                        kwargs={"fill_value": "extrapolate"},
+                    )
+                    nan_mask = np.isnan(out.values)
+                    out.values[nan_mask] = nearest_interp.values[nan_mask]
+
+                if len(coords.keys()) != len(out.dims):
+                    out = out.broadcast_like(grid)
+                result = out
+
             else:
                 raise ValueError(
                     f"Incompatible dimensions: {coords} != {self.darr.dims}\n"
@@ -313,15 +320,8 @@ class Property:
     @staticmethod
     def _bin_reader(file: Path, grid: xr.DataArray) -> xr.DataArray:
         """Read a binary file."""
-        dims = sorted(grid.dims)
-        grid = grid.transpose(*dims[::-1])
         data = np.fromfile(file, dtype=np.float32).reshape(grid.shape)
         da = xr.DataArray(data, coords=grid.coords, dims=grid.dims)
-
-        da = _extend_single_coords(da)
-
-        dims = sorted(grid.dims)
-        da = da.transpose(*dims)
         return da
 
     @staticmethod
@@ -414,9 +414,11 @@ class Property:
         dims2 = set(da.dims)
         dims = dims1.intersection(dims2)
         coords = {dim: da.coords[dim] for dim in dims}
-        return self.darr.interp(
+
+        out = self.darr.interp(
             coords=coords, method="nearest", kwargs={"fill_value": "extrapolate"}
         ).broadcast_like(da)
+        return out
 
     def stochastic_perturbation(
         self,

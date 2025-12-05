@@ -149,21 +149,11 @@ class CartesianGrid(Grid):
             else:
                 raise ValueError("Grid must have 1, 2, or 3 dimensions")
 
-        ndim = len(self.n)
-        if ndim == 1:
-            coords = {"x": np.linspace(self.x0[0], self.x1[0], self.n[0])}
-        elif ndim == 2:
-            coords = {
-                dims[0]: np.linspace(self.x0[0], self.x1[0], self.n[0]),
-                dims[1]: np.linspace(self.x0[1], self.x1[1], self.n[1]),
-            }
-        elif ndim == 3:
-            coords = {
-                dims[0]: np.linspace(self.x0[0], self.x1[0], self.n[0]),
-                dims[1]: np.linspace(self.x0[1], self.x1[1], self.n[1]),
-                dims[2]: np.linspace(self.x0[2], self.x1[2], self.n[2]),
-            }
-        return DataArray(dims=dims, coords=coords)
+        coords = {
+            dim: np.linspace(self.x0[i], self.x1[i], self.n[i])
+            for i, dim in enumerate(dims)
+        }
+        return DataArray(dims=dims[::-1], coords=coords)
 
     @classmethod
     def from_xarray(cls, xarr: "xr.DataArray") -> "CartesianGrid":
