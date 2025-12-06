@@ -278,45 +278,55 @@ class RecordDatabase:
         return fd
 
     def read_FD(
-        self, group: str, component: str, shot: int, wavelet: Wavelet, **kwargs
+        self,
+        group: str,
+        component: str,
+        shot: int,
+        wavelet: Optional[Wavelet] = None,
+        **kwargs,
     ):
-        sampling = UniformSweepSampling(
-            f_min=0.0,
-            f_max=self.metadata["f_max"],
-            df=self.metadata["df"],
-        )
-        wavelet.times = sampling.T_list
-        dset = self.read_h5(group)
-        gather = dset.sel(component=component, shot=shot)
-        # gather = gather.where(gather.coords["frequency"] >= 2.0, 0.0)
+        if wavelet is None:
+            dset = self.read_h5(group)
+            gather = dset.sel(component=component, shot=shot)
+            fd = gather.sel(complex="real") + 1j * gather.sel(complex="imag")
+            fd = fd.fillna(0)
+            return fd
+        else:
+            sampling = UniformSweepSampling(
+                f_min=0.0,
+                f_max=self.metadata["f_max"],
+                df=self.metadata["df"],
+            )
+            wavelet.times = sampling.T_list
+            dset = self.read_h5(group)
+            gather = dset.sel(component=component, shot=shot)
 
-        freqs = wavelet.frequencies
-        spectrum = DataArray(
-            wavelet.spectrum, dims=["frequency"], coords={"frequency": freqs}
-        )
-        w = spectrum.interp(
-            frequency=gather.coords["frequency"].values, kwargs={"fill_value": 0}
-        )
-        fd = gather.sel(complex="real") + 1j * gather.sel(complex="imag")
-        fd = fd.fillna(0)
+            freqs = wavelet.frequencies
+            spectrum = DataArray(
+                wavelet.spectrum, dims=["frequency"], coords={"frequency": freqs}
+            )
+            w = spectrum.interp(
+                frequency=gather.coords["frequency"].values, kwargs={"fill_value": 0}
+            )
+            fd = gather.sel(complex="real") + 1j * gather.sel(complex="imag")
+            fd = fd.fillna(0)
 
-        if "f_taper" in kwargs:
-            alpha = kwargs["f_taper"]
-            if alpha > 0:
-                from scipy.signal.windows import tukey
+            if "f_taper" in kwargs:
+                alpha = kwargs["f_taper"]
+                if alpha > 0:
+                    from scipy.signal.windows import tukey
 
-                dim = "frequency"
-                data = tukey(2 * fd.sizes[dim], alpha=alpha)
-                data = data[fd.sizes[dim] :]
-                window = DataArray(
-                    data,
-                    dims=[dim],
-                    coords={dim: fd[dim]},
-                )
-                w *= window
-        fd = fd * w
-
-        return fd
+                    dim = "frequency"
+                    data = tukey(2 * fd.sizes[dim], alpha=alpha)
+                    data = data[fd.sizes[dim] :]
+                    window = DataArray(
+                        data,
+                        dims=[dim],
+                        coords={dim: fd[dim]},
+                    )
+                    w *= window
+            fd = fd * w
+            return fd
 
     def read_TD(
         self,

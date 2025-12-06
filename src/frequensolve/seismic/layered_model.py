@@ -837,6 +837,23 @@ class LayeredModel(ModelBase):
                 layer.set_property(property, gridded[property])
         return self
 
+    def update_from_dataset(self, dataset: xr.Dataset):
+        """Update the model from an Xarray dataset."""
+
+        for property in self.properties:
+            if np.any(np.isnan(dataset[property].data)):
+                filled = dataset[property]
+                for dim in filled.dims:
+                    filled = filled.bfill(dim=dim).ffill(dim=dim)
+                data = filled.data
+            else:
+                data = dataset[property].data
+            dataset[property].data = data
+        for layer in self.layers:
+            for property in layer.properties:
+                layer.set_property(property, dataset[property])
+        return self
+
     def plot(self, property: str, resolution: List[int] = [500, 500], **kwargs):
         """Plot the model."""
         import matplotlib.pyplot as plt
@@ -847,7 +864,6 @@ class LayeredModel(ModelBase):
             samples = xr.DataArray(dims=["x", "z"], coords={"z": z, "x": x})
         elif self.dimension == 3:
             raise NotImplementedError("3D plotting not implemented")
-
         if self.ordering == "top_down":
             self.layers[-1].lower = self.lower_surface()
         else:
@@ -939,7 +955,6 @@ class LayeredModel(ModelBase):
             add_colorbar=add_colorbar,
             **kwargs,
         )
-
         # Plot surfaces
         if show_surfs:
             for surf in self.surfaces:
@@ -947,33 +962,14 @@ class LayeredModel(ModelBase):
                 limits["x"] = self.x_limits
                 if self.y_limits is not None:
                     limits["y"] = self.y_limits
+                surf.plot(limits=limits, ax=ax, **surf_kwargs)
 
-                surf.plot(
-                    limits=limits,
-                    ax=ax,
-                    **surf_kwargs,
-                )
-
-        # Plot acquisition if provided
         if acq is not None:
             self._plot_acquisition(acq, ax, **scatter_kwargs)
         if aspect == "equal":
             ax.set_aspect("equal")
-
-        # Set limits with padding after everything is plotted
-        xL = self.x_limits[1] - self.x_limits[0]
-        zL = self.z_limits[1] - self.z_limits[0]
-        L = max(xL, zL)
-
-        lgrow = 0.0
-        ax.set_xlim([self.x_limits[0] - lgrow * L, self.x_limits[1] + lgrow * L])
-        if self.y_limits is None:
-            ax.set_ylim([self.z_limits[0] - lgrow * L, self.z_limits[1] + lgrow * L])
-        else:
-            raise NotImplementedError("2D plotting not implemented")
         if origin == "upper":
             ax.invert_yaxis()
-
         if save is not None:
             plt.savefig(
                 save, bbox_inches="tight", **({"dpi": dpi} if dpi is not None else {})
@@ -1004,7 +1000,7 @@ class LayeredModel(ModelBase):
                 coords[:, 0],
                 coords[:, -1],
                 marker=".",
-                s=20,
+                s=30,
                 label=f"Receivers ({group.name})",
                 zorder=6,
                 color=colors[igrp],
@@ -1035,17 +1031,20 @@ class LayeredModel(ModelBase):
                     coords[i, :] = xlist[i, :]
 
             # Plot source coordinates as scatter points
+            label = f"Sources" if igrp == 0 else None
             ax.scatter(
                 coords[:, 0],
                 coords[:, -1],
-                marker=".",
-                s=20,
-                label=f"Sources",
+                marker="*",
+                s=120,
+                label=label,
                 zorder=7,
-                color="r",
+                facecolors="#fff700",
+                edgecolors="r",
+                linewidths=0.5,
                 **kwargs,
             )
-            # ax.legend(bbox_to_anchor=(0, 1.02), loc="lower left")
+            ax.legend(bbox_to_anchor=(0, 1.02), loc="lower left")
 
     def _get_layer_samples_ref(self, layer, samples, property):
         prop = layer.properties[property]

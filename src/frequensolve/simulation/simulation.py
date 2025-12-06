@@ -199,6 +199,9 @@ class SeismicSimulation(BaseSimulation):
                 coords = grp.coordinates.get()
                 grp.coordinates = CoordsArray(coordinates=coords)
 
+        # Change file path
+        sim_copy._file = file.parent.parent / name / name
+        sim_copy._set_path(self.project_path, Path("simulations") / name)
         return sim_copy
 
     def __dict__(self) -> Dict:

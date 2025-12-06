@@ -12,107 +12,9 @@ from frequensolve.util.stochastic_fields import von_karman_stochastic_field
 __all__ = ["Property"]
 
 
-# --------------------------------------------------------------------------------------------------
-# Helper functions
-# --------------------------------------------------------------------------------------------------
-def _dims_compatible(dims1: List[str], dims2: List[str]) -> bool:
-    """Helper function to check if two xarrays have compatible grids."""
-    dims1 = set(dims1)
-    dims2 = set(dims2)
-    return dims1.issubset(dims2)
-
-
-# Helper functions
-def _dims_in(dims1: List[str], dims2: List[str]) -> bool:
-    """Helper function to check if all dimensions in dims1 are in dims2."""
-    dims1 = set(dims1)
-    dims2 = set(dims2)
-    return dims1.issubset(dims2)
-
-
-def _extend_single_coords(da: xr.DataArray) -> xr.DataArray:
-    """Ensure each dimension has at least 2 coordinate points.
-
-    If any dimension has only 1 coordinate point, add another coordinate
-    at distance 1 from the existing one and copy the data to the new dimension.
-
-    Args:
-        da: Input DataArray
-
-    Returns:
-        DataArray with at least 2 coordinate points in each dimension
-    """
-    if da.ndim == 0:
-        return da
-
-    new_coords = {}
-    new_data = da.values.copy()
-    new_dims = list(da.dims)
-
-    for dim in da.dims:
-        coords = da.coords[dim].values
-        if len(coords) == 1:
-            # Add a second coordinate at distance 1 from the existing one
-            new_coord_value = coords[0] + 1.0
-            new_coords[dim] = np.array([coords[0], new_coord_value])
-
-            dim_idx = da.dims.index(dim)
-            new_shape = list(new_data.shape)
-            new_shape[dim_idx] = 2
-
-            expanded_data = np.zeros(new_shape, dtype=new_data.dtype)
-            if dim_idx == 0:
-                expanded_data[0, ...] = new_data[0, ...]
-                expanded_data[1, ...] = new_data[0, ...]
-            elif dim_idx == 1:
-                expanded_data[:, 0, ...] = new_data[:, 0, ...]
-                expanded_data[:, 1, ...] = new_data[:, 0, ...]
-            elif dim_idx == 2:
-                expanded_data[:, :, 0, ...] = new_data[:, :, 0, ...]
-                expanded_data[:, :, 1, ...] = new_data[:, :, 0, ...]
-            else:
-                slices = [slice(None)] * len(new_data.shape)
-                slices[dim_idx] = 0
-                slices0 = slices.copy()
-                expanded_data[tuple(slices)] = new_data[tuple(slices0)]
-                slices[dim_idx] = 1
-                expanded_data[tuple(slices)] = new_data[tuple(slices0)]
-
-            new_data = expanded_data
-        else:
-            new_coords[dim] = coords
-
-    result = xr.DataArray(
-        data=new_data, coords=new_coords, dims=new_dims, attrs=da.attrs
-    )
-    return result
-
-
-def _coords_compatible(
-    coords1: Dict[str, ArrayLike],
-    coords2: Dict[str, ArrayLike],
-    rtol: float = 1e-06,
-    atol: float = 1e-08,
-) -> bool:
-    """Helper function to check if two xarrays have compatible grids."""
-    dims1 = set(coords1.keys())
-    dims2 = set(coords2.keys())
-    if not _dims_compatible(dims1, dims2):
-        return False
-
-    for dim in coords1.keys():
-        if dim not in coords2:
-            return False
-        if len(coords1[dim]) != len(coords2[dim]):
-            return False
-        if not np.allclose(coords1[dim].values, coords2[dim].values, rtol=rtol):
-            return False
-    return True
-
-
-# ----------------------------------------------------------------------------
+# ------------------------------------------------------------------------
 # Property class
-# ----------------------------------------------------------------------------
+# ------------------------------------------------------------------------
 class Property:
     """Class defining properties.
 
@@ -158,10 +60,6 @@ class Property:
             self.darr = data
         else:
             raise ValueError(f"Unknown property type: {type(data)}")
-
-        # Ensure each dimension has at least 2 coordinate points
-        if not self.is_constant and not self.is_remote:
-            self.darr = _extend_single_coords(self.darr)
 
         if scale != 1.0 and not self.is_remote:
             self.darr.values = self.darr.values * scale
@@ -239,7 +137,7 @@ class Property:
                     nan_mask = np.isnan(out.values)
                     out.values[nan_mask] = nearest_interp.values[nan_mask]
 
-                if len(coords.keys()) != len(out.dims):
+                if len(coords.keys()) != len(out.coords.keys()):
                     out = out.broadcast_like(grid)
                 result = out
 
@@ -248,10 +146,6 @@ class Property:
                     f"Incompatible dimensions: {coords} != {self.darr.dims}\n"
                     f"Note that in 2D the dimensions should be x and z, this is a point of confusion."
                 )
-
-        # Ensure the result has at least 2 coordinate points in each dimension
-        if not self.is_constant and result.ndim > 0:
-            result = _extend_single_coords(result)
 
         return result
 
@@ -482,3 +376,43 @@ class Property:
                     self.darr = self._like(grid) * (1 + da)
         else:
             raise ValueError(f"Unknown perturbation method: {method}")
+
+
+# ------------------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------------------
+def _dims_compatible(dims1: List[str], dims2: List[str]) -> bool:
+    """Helper function to check if two xarrays have compatible grids."""
+    dims1 = set(dims1)
+    dims2 = set(dims2)
+    return dims1.issubset(dims2)
+
+
+# Helper functions
+def _dims_in(dims1: List[str], dims2: List[str]) -> bool:
+    """Helper function to check if all dimensions in dims1 are in dims2."""
+    dims1 = set(dims1)
+    dims2 = set(dims2)
+    return dims1.issubset(dims2)
+
+
+def _coords_compatible(
+    coords1: Dict[str, ArrayLike],
+    coords2: Dict[str, ArrayLike],
+    rtol: float = 1e-06,
+    atol: float = 1e-08,
+) -> bool:
+    """Helper function to check if two xarrays have compatible grids."""
+    dims1 = set(coords1.keys())
+    dims2 = set(coords2.keys())
+    if not _dims_compatible(dims1, dims2):
+        return False
+
+    for dim in coords1.keys():
+        if dim not in coords2:
+            return False
+        if len(coords1[dim]) != len(coords2[dim]):
+            return False
+        if not np.allclose(coords1[dim].values, coords2[dim].values, rtol=rtol):
+            return False
+    return True
