@@ -857,136 +857,13 @@ class LayeredModel(ModelBase):
     def plot(self, property: str, resolution: List[int] = [500, 500], **kwargs):
         """Plot the model."""
         import matplotlib.pyplot as plt
-        
-        # --- 3D PLOTTING using PyVista ---
-        if self.dimension == 3:
-            try:
-                import pyvista as pv
-                if pv.OFF_SCREEN:
-                    pv.set_jupyter_backend('static')
-            except ImportError:
-                raise ImportError(
-                    "PyVista is required for 3D plotting. Please install it via 'pip install pyvista[jupyter]'."
-                )
-
-            # Setup Grid
-            if len(resolution) == 2:
-                resolution = [*resolution, resolution[1]]
-
-            x = np.linspace(self.x_limits[0], self.x_limits[1], resolution[0])
-            y = np.linspace(self.y_limits[0], self.y_limits[1], resolution[1])
-            z = np.linspace(self.z_limits[0], self.z_limits[1], resolution[2])
-
-            samples = xr.DataArray(
-                np.nan * np.zeros((resolution[0], resolution[1], resolution[2])),
-                dims=["x", "y", "z"],
-                coords={"x": x, "y": y, "z": z},
-            )
-
-            # Populate Data 
-            vmin, vmax = self.extreme_values(property)
-            vmin = kwargs.pop("vmin", vmin)
-            vmax = kwargs.pop("vmax", vmax)
-            cmap = kwargs.pop("cmap", "viridis")
-
-            for layer in self.layers:
-                if property not in layer.properties:
-                    continue
-
-                if layer.frame == "reference":
-                    samp = self._get_layer_samples_ref(layer, samples, property)
-                    subset = samp[property]
-
-                    # Ensure dimensions match (x, y, z)
-                    if subset.dims != samples.dims:
-                        subset = subset.transpose(*samples.dims)
-
-                    samples.loc[{"z": subset.coords["z"]}] = subset
-                    
-                else:
-                    prop = layer.properties[property].get(samples)
-                    mask = self._get_layer_mask(layer, samples)
-                    data = prop.where(mask)
-                    
-                    if data.shape != samples.shape:
-                        data = data.transpose(*samples.dims)
-                        
-                    samples.data = np.where(~np.isnan(data), data, samples.data)
-
-            # Create PyVista Mesh
-            mx, my, mz = np.meshgrid(x, y, z, indexing='ij')
-            grid = pv.StructuredGrid(mx, my, mz)
-            grid[property] = samples.values.flatten(order='F')
-
-            # Plotting
-            p = pv.Plotter()
-            cargs = dict(
-                vertical=True,     
-                height=0.5,         
-                width=0.05,       
-                position_x=0.85,  
-                position_y=0.25,    
-                title_font_size=14,
-                label_font_size=12,
-                fmt="%.2f",
-                title=kwargs.get("label", property),
-                color="black"
-            )
-
-            if kwargs.pop("slices", True):
-                p.add_mesh_slice_orthogonal(
-                                        grid, 
-                                        scalars=property, 
-                                        cmap=cmap, 
-                                        rng=[vmin, vmax],
-                                        scalar_bar_args=cargs
-                                    )
-                # p.add_mesh(grid.outline(), color="k")
-            else:
-                p.add_mesh(
-                        grid, 
-                        scalars=property, 
-                        cmap=cmap, 
-                        opacity=kwargs.pop("opacity", 1.0), 
-                        rng=[vmin, vmax],
-                        scalar_bar_args=cargs
-                    )
-
-            z_scale = kwargs.pop("z_scale", 1)
-            p.set_scale(zscale=z_scale)
-
-            if kwargs.pop("surfaces", True):
-                for surf in self.surfaces:
-                    try:
-                        sx, sy = np.meshgrid(x, y, indexing='ij')
-                        surf_coords = xr.DataArray(dims=["x", "y"], coords={"x": x, "y": y})
-                        sz = surf.z_phys.get(surf_coords).values
-                        sgrid = pv.StructuredGrid(sx, sy, sz)
-                        p.add_mesh(sgrid, color='black', opacity=0.3, style='wireframe')
-                    except Exception:
-                        pass 
-            p.show_grid(
-                font_size=kwargs.pop("fontsize", 12),
-                xtitle="X",             
-                ytitle="Y",
-                ztitle="Z"
-            )
-            p.show_axes()
-            interactive = kwargs.pop("interactive", False)
-            if interactive:
-                p.show()
-            else:
-                p.show(jupyter_backend='static')
-                
-            return
 
         if self.dimension == 2:
             x = np.linspace(self.x_limits[0], self.x_limits[1], resolution[0])
             z = np.linspace(self.z_limits[0], self.z_limits[1], resolution[1])
             samples = xr.DataArray(dims=["x", "z"], coords={"z": z, "x": x})
-        # elif self.dimension == 3:
-        #     raise NotImplementedError("3D plotting not implemented")
-
+        elif self.dimension == 3:
+            raise NotImplementedError("3D plotting not implemented")
         if self.ordering == "top_down":
             self.layers[-1].lower = self.lower_surface()
         else:
@@ -1170,12 +1047,8 @@ class LayeredModel(ModelBase):
             ax.legend(bbox_to_anchor=(0, 1.02), loc="lower left")
 
     def _get_layer_samples_ref(self, layer, samples, property):
-        """
-        Extract layer samples in reference frame (supports 2D and 3D).
-        """
         prop = layer.properties[property]
         xgrid = samples.coords["x"]
-        
         upper = (
             self.upper_surface(layer)
             if self.ordering == "top_down"
@@ -1189,60 +1062,27 @@ class LayeredModel(ModelBase):
 
         z_min = upper.z_ref
         z_max = lower.z_ref
+        z0 = upper.z_phys.get(xgrid)
+        z1 = lower.z_phys.get(xgrid)
 
         mask = samples.coords["z"].values > z_min
         mask &= samples.coords["z"].values < z_max
         zgrid = samples.coords["z"].values[mask]
 
-        # 3D
-        if "y" in samples.coords:
-            ygrid = samples.coords["y"]
-            
-            coords_query = xr.DataArray(dims=["x", "y"], coords={"x": xgrid, "y": ygrid})
-            z0 = upper.z_phys.get(coords_query).values
-            z1 = lower.z_phys.get(coords_query).values
+        tmp = xr.DataArray(
+            dims=["z", "x"],
+            coords={"x": xgrid, "z": [z_min, z_max]},
+            data=[z0, z1],
+        )
+        zvals = tmp.interp(coords={"x": xgrid, "z": zgrid})
 
-            tmp = xr.DataArray(
-                data=np.stack([z0, z1], axis=0), 
-                dims=["z", "x", "y"], # Note order depends on how z0 was returned. Usually (x,y).
-                coords={"z": [z_min, z_max], "x": xgrid, "y": ygrid},
-            )
-
-            zvals = tmp.interp(coords={"x": xgrid, "y": ygrid, "z": zgrid})
-            
-            zvals_t = zvals.transpose("x", "y", "z")
-
-            samp = xr.Dataset({property: prop.get(zvals)})
-            
-            samp = samp.assign_coords(
-                {
-                    "Xcoord": (("x", "y", "z"), xgrid.broadcast_like(zvals_t).values),
-                    "Ycoord": (("x", "y", "z"), ygrid.broadcast_like(zvals_t).values),
-                    "Zcoord": (("x", "y", "z"), zvals_t.values),
-                }
-            )
-
-        # 2D 
-        else:
-            z0 = upper.z_phys.get(xgrid)
-            z1 = lower.z_phys.get(xgrid)
-
-            tmp = xr.DataArray(
-                dims=["z", "x"],
-                coords={"x": xgrid, "z": [z_min, z_max]},
-                data=[z0, z1],
-            )
-            
-            zvals = tmp.interp(coords={"x": xgrid, "z": zgrid})
-
-            samp = xr.Dataset({property: prop.get(zvals)})
-            samp = samp.assign_coords(
-                {
-                    "Xcoord": (("x", "z"), xgrid.broadcast_like(zvals).values.T),
-                    "Zcoord": (("x", "z"), zvals.values.T),
-                }
-            )
-            
+        samp = xr.Dataset({property: prop.get(zvals)})
+        samp = samp.assign_coords(
+            {
+                "Xcoord": (("x", "z"), xgrid.broadcast_like(zvals).values.T),
+                "Zcoord": (("x", "z"), zvals.values.T),
+            }
+        )
         return samp
 
     def _get_layer_mask(self, layer, samples):
@@ -1261,21 +1101,15 @@ class LayeredModel(ModelBase):
         limits = {}
         limits["x_min"] = self.x_limits[0]
         limits["x_max"] = self.x_limits[1]
-        
-        if self.y_limits is not None and "y" in samples.coords:
+        if self.y_limits is not None:
             limits["y_min"] = self.y_limits[0]
             limits["y_max"] = self.y_limits[1]
-            ygrid = samples.coords["y"]
-            coords_query = xr.DataArray(dims=["x", "y"], coords={"x": xgrid, "y": ygrid})
-        else:
-            coords_query = xgrid
-
         if layer.frame == "reference":
             limits["z_min"] = upper.z_ref
             limits["z_max"] = lower.z_ref
         else:
-            limits["z_min"] = upper.z_phys.get(coords_query)
-            limits["z_max"] = lower.z_phys.get(coords_query)
+            limits["z_min"] = upper.z_phys.get(xgrid)
+            limits["z_max"] = lower.z_phys.get(xgrid)
 
         mask = (
             (samples.coords["z"] <= limits["z_max"])
@@ -1283,11 +1117,6 @@ class LayeredModel(ModelBase):
             & (samples.coords["x"] <= limits["x_max"])
             & (samples.coords["x"] >= limits["x_min"])
         )
-        
-        if "y" in samples.coords:
-             mask &= (samples.coords["y"] <= limits["y_max"])
-             mask &= (samples.coords["y"] >= limits["y_min"])
-
         mask = mask.transpose(*samples.dims)
         return mask
 
