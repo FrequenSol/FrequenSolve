@@ -105,11 +105,17 @@ class GraphQLClient:
         import json
 
         # Query storage stack
+        # Accept any "_COMPLETE" status except "DELETE_COMPLETE"
         storage_query = """
             query ListStorageStacks {
                 listStacks(filter: {
                     stackType: { eq: "storage" }
-                    status: { eq: "CREATE_COMPLETE" }
+                    or: [
+                        { status: { eq: "CREATE_COMPLETE" } },
+                        { status: { eq: "UPDATE_COMPLETE" } },
+                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
+                        { status: { eq: "ROLLBACK_COMPLETE" } }
+                    ]
                 }) {
                     items {
                         stackId
@@ -122,11 +128,17 @@ class GraphQLClient:
         """
 
         # Query compute stack
+        # Accept any "_COMPLETE" status except "DELETE_COMPLETE"
         compute_query = """
             query ListComputeStacks {
                 listStacks(filter: {
                     stackType: { eq: "compute" }
-                    status: { eq: "CREATE_COMPLETE" }
+                    or: [
+                        { status: { eq: "CREATE_COMPLETE" } },
+                        { status: { eq: "UPDATE_COMPLETE" } },
+                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
+                        { status: { eq: "ROLLBACK_COMPLETE" } }
+                    ]
                 }) {
                     items {
                         stackId
