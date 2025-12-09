@@ -148,7 +148,10 @@ class Project:
         if HAS_LOCAL_SITE and isinstance(site, LocalSite):
             return
 
-        remote = site.work_dir
+        # Use project directory name (e.g., "ex_01") as the base remote path
+        # This matches how jobs determine the project name in AWSSite.submit()
+        project_dir_name = Path(self.path).name
+        remote = site.work_dir / project_dir_name
         proj_file = (Path(self.path) / f"{self.name}").with_suffix(".json")
         sim_dir = Path(self.path) / "simulations"
 
