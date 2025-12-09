@@ -189,8 +189,7 @@ class RecordDatabase:
         return self.summary
 
     def consolidate_h5(self):
-        """Consolidate records into single h5 files to improve efficiency and convenience.
-
+        """
         Creates a virtual HDF5 dataset that combines datasets from each frequency file
         along a new dimension. This allows efficient access to the full dataset without
         loading all data into memory.
@@ -210,8 +209,6 @@ class RecordDatabase:
                 freqs.append(freq)
 
             for group in self.metadata["groups"]:
-
-                # Get shape and dimensions
                 with h5py.File(self.records[0], "r") as f:
                     if group not in f:
                         raise KeyError(
@@ -220,15 +217,11 @@ class RecordDatabase:
                     dset_shape = f[group].shape
                     dset_dtype = f[group].dtype
                     dims = f[group].attrs["dims"]
-                    dims = [process_string(d) for d in dims]
+                    dims = [d for d in dims]
                     coords = {}
                     for dim in dims:
                         if dim in f[group].attrs:
                             coord = f[group].attrs[dim]
-                            if isinstance(coord[0], bytes):
-                                coord = [process_string(c) for c in coord]
-                            else:
-                                coord = np.array(coord).tolist()
                         else:
                             coord = np.arange(1, dset_shape[dims[::-1].index(dim)] + 1)
                         coords[dim] = coord
@@ -250,7 +243,6 @@ class RecordDatabase:
                 for dim, coord in coords.items():
                     if len(coord) < 10000:
                         dset.attrs[dim] = coord
-
         self._consolidated = Path(new_file)
 
     def read_h5(self, group: str) -> ShotRecord:
