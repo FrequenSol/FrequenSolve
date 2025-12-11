@@ -13,17 +13,16 @@ from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.util.class_registry import class_registry, register_class
 
 __all__ = [
-    "RTMImagingJob",
-    "LSRTMIteration",
+    "ImagingJob",
     "Misfit",
     "MisfitGroup",
-    "RawImage",
+    "ImageDatabase",
     "extract_frequencies_for_job",
 ]
 
 
 @dataclass(kw_only=True)
-class RawImage:
+class ImageDatabase:
     """Raw image."""
 
     path: Path
@@ -51,6 +50,40 @@ class RawImage:
             return self.path / f"image.h5"
         else:
             return self.path / f"image_{part}.h5"
+
+    @property
+    def raw_images(self):
+        return self.read_images("raw")
+
+    @property
+    def smoothed_images(self):
+        return self.read_images("smooth")
+
+    def read_images(self, group):
+        import h5py
+        import xarray as xr
+
+        images = xr.Dataset()
+        file = self.image_file()
+        with h5py.File(file, "r") as f:
+            h5group = f["image"][group]
+            properties = [p.decode("utf-8") for p in h5group["properties"]]
+            for prop in properties:
+                attrs = h5group[prop].attrs
+                x0 = attrs.get("x0", None)[::-1]
+                x1 = attrs.get("x1", None)[::-1]
+                n = attrs.get("n_grid", None)[::-1]
+                dims = attrs.get("dims", None)[::-1]
+                coords = {}
+                for i, dim in enumerate(dims):
+                    coords[dim] = np.linspace(x0[i], x1[i], n[i])
+                im = xr.DataArray(
+                    data=h5group[prop][:].reshape(n),
+                    dims=dims,
+                    coords=coords,
+                )
+                images[prop] = im
+        return images
 
 
 @dataclass(kw_only=True)
@@ -108,8 +141,8 @@ class Misfit:
 
 @register_class
 @dataclass(kw_only=True)
-class RTMImagingJob(SimulationJob):
-    """Defines RTM image."""
+class ImagingJob(SimulationJob):
+    """Defines imaging job."""
 
     misfit: Misfit = field(default_factory=Misfit)
     data_path: Union[str, Path]
@@ -117,6 +150,7 @@ class RTMImagingJob(SimulationJob):
     grid: CartesianGrid = field(default_factory=CartesianGrid)
     keep_forward: bool = False
     keep_adjoint: bool = False
+    keep_unstacked: bool = False
     images: dict = field(default_factory=dict)
     weights: List[float] = field(default_factory=list)
     reassemble_adjoint: bool = False
@@ -134,6 +168,8 @@ class RTMImagingJob(SimulationJob):
         misfit_norm: Literal["L2"] = "L2",
         keep_forward: bool = False,
         keep_adjoint: bool = False,
+        keep_unstacked: bool = False,
+        regularization: Optional[dict] = None,
         save_path: Optional[Union[str, Path]] = None,
         reassemble_adjoint: bool = False,
         overwrite: bool = True,
@@ -176,14 +212,24 @@ class RTMImagingJob(SimulationJob):
                 idx = abs(frequencies - f).argmin()
                 self.weights.append(spectrum[idx])
         else:
-            assert weights is not None, "Either wavelet or weights must be provided"
-            self.weights = weights
+            self.weights = None
+
+        if regularization is not None:
+            self.regularization = regularization
+        else:
+            self.regularization = {
+                "type": "TV",
+                "lambda": 1.0,
+                "epsilon": 1.0,
+                "iterations": 5,
+            }
 
         self.kwargs = kwargs
         self.images = images
         self.keep_forward = keep_forward
         self.keep_adjoint = keep_adjoint
-
+        self.keep_unstacked = keep_unstacked
+        self.regularization = regularization
         self.misfit = Misfit(norm=misfit_norm)
         for receiver_group in simulation.acquisition.receiver_groups:
             self.misfit.receiver_groups.append(
@@ -253,9 +299,11 @@ class RTMImagingJob(SimulationJob):
             "grid": self.grid.__dict__(),
             "keep_forward": self.keep_forward,
             "keep_adjoint": self.keep_adjoint,
+            "keep_unstacked": self.keep_unstacked,
             "images": images,
             "weights": self.weights,
             "reassemble_adjoint": self.reassemble_adjoint,
+            "Smoothing": self.regularization,
             **self.kwargs,
         }
         return {
@@ -264,7 +312,7 @@ class RTMImagingJob(SimulationJob):
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "RTMImagingJob":
+    def from_dict(cls, data: Dict) -> "ImagingJob":
         image_data = data.pop("Image")
         grid = image_data.pop("grid", None)
         resolution = grid.pop("n", None)
@@ -279,7 +327,9 @@ class RTMImagingJob(SimulationJob):
             images=images,
             keep_forward=image_data.pop("keep_forward", None),
             keep_adjoint=image_data.pop("keep_adjoint", None),
+            keep_unstacked=image_data.pop("keep_unstacked", None),
             save_path=image_data.pop("save_path", None),
+            regularization=image_data.pop("Smoothing", None),
             weights=image_data.pop("weights", None),
             reassemble_adjoint=image_data.pop("reassemble_adjoint", None),
             **image_data,
@@ -288,20 +338,7 @@ class RTMImagingJob(SimulationJob):
         return job
 
 
-class LSRTMIteration(RTMImagingJob):
-    """Defines LSRTM iteration."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.workflow = "Born"
-
-    def __dict__(self) -> Dict:
-        return {
-            **super().__dict__(),
-        }
-
-
-def extract_frequencies_for_job(job: RTMImagingJob, td):
+def extract_frequencies_for_job(job: ImagingJob, td):
     import warnings
 
     import h5py

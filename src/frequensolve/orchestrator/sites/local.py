@@ -26,7 +26,7 @@ from frequensolve.orchestrator.sites.base import (
     _wait_for_path,
 )
 from frequensolve.seismic.record_database import RecordDatabase
-from frequensolve.simulation.imaging import RawImage, RTMImagingJob
+from frequensolve.simulation.imaging import ImageDatabase, ImagingJob
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
 
@@ -74,9 +74,7 @@ def run_task(
         Dict containing task results
     """
     _wait_for_path(job_file)
-
     threads_per_rank = n_threads // n_ranks
-
     if n_ranks > 1:
         args = [
             "mpirun",
@@ -92,17 +90,17 @@ def run_task(
         f"{threads_per_rank}",
         "-j",
         f"{job_file}",
-        "-i",
-        f"{task_id + 1}",
     ]
-
+    if task_id == -2:
+        args += ["--smooth"]
+    else:
+        args += ["-i", f"{task_id + 1}"]
     logger.info(f"Executing: {' '.join(args)}")
 
     if stdout_dir:
         stdout_file = os.path.join(stdout_dir, f"task_{task_id+1}.out")
     else:
         stdout_file = None
-
     try:
         with (
             open(stdout_file, "w") if stdout_file else open(os.devnull, "w") as stdout,
@@ -111,7 +109,6 @@ def run_task(
                 args, stdout=stdout, stderr=stdout, env=env, text=True
             )
             return_code = proc.wait()
-
             if return_code != 0:
                 raise subprocess.CalledProcessError(return_code, args)
 
@@ -219,6 +216,19 @@ class LocalSite(BaseSite):
 
         results = wait(futures)
         pbar.close()
+
+        if isinstance(job, ImagingJob):
+            smooth_future = self._dask_client.submit(
+                run_task,
+                job._file,
+                -2,
+                self.executable,
+                self.env,
+                n_ranks=1,
+                n_threads=self.threads_per_worker,
+                resources={"CPU": self.threads_per_worker},
+            )
+            smooth_future.result()
         return results
 
     def submit_async(self, job: SimulationJob, **kwargs) -> List[Future]:
@@ -317,20 +327,18 @@ class LocalSite(BaseSite):
 
     def fetch_image(
         self,
-        job: Union[RTMImagingJob, List[RTMImagingJob]],
+        job: Union[ImagingJob, List[ImagingJob]],
     ) -> ArrayLike:
         """Gets and accumulates images."""
 
-        if isinstance(job, RTMImagingJob):
+        if isinstance(job, ImagingJob):
             jobs = [job]
         else:
             jobs = job
-
         images = {}
-
         for job in jobs:
             local = job._local_image_path
-            image = RawImage(
+            image = ImageDatabase(
                 path=local,
                 shape=job.grid.shape,
                 parts=job.n_tasks,

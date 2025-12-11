@@ -46,7 +46,7 @@ from frequensolve.orchestrator.sites.base import (
 )
 from frequensolve.orchestrator.ssh import SSHClientClass, SSHProxy
 from frequensolve.seismic.record_database import RecordDatabase
-from frequensolve.simulation.imaging import RawImage, RTMImagingJob
+from frequensolve.simulation.imaging import ImageDatabase, ImagingJob
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
 
@@ -484,6 +484,7 @@ class Stampede3Site(BaseSite):
             procs_per_node=procs_per_node,
             procs_per_task=procs_per_task,
             duration=duration,
+            imaging_job=isinstance(job, ImagingJob),
             **({"queue": queue} if queue is not None else {}),
             **({"account": account} if account is not None else {}),
             **({"notify_on": notify_on} if notify_on is not None else {}),
@@ -532,8 +533,6 @@ class Stampede3Site(BaseSite):
         print(
             f"Job {job_id} submitted successfully to Stampede3:{queue or self.config.queue}"
         )
-
-        # Set job ID in job object
         job._job_id = job_id
 
         return job_id
@@ -869,15 +868,15 @@ class Stampede3Site(BaseSite):
 
     def fetch_image(
         self,
-        job: Union[RTMImagingJob, List[RTMImagingJob]],
+        job: Union[ImagingJob, List[ImagingJob]],
     ):
         """Get image files from Stampede3.
 
         Args:
-            job: A RTMImagingJob object.
+            job: An ImagingJob object.
         """
 
-        if isinstance(job, RTMImagingJob):
+        if isinstance(job, ImagingJob):
             jobs = [job]
         else:
             jobs = job
@@ -890,7 +889,7 @@ class Stampede3Site(BaseSite):
                 local = job._local_image_path
                 self.get(remote, local)
 
-                images[job.name] = RawImage(
+                images[job.name] = ImageDatabase(
                     path=local,
                     shape=job.grid.shape,
                     parts=job.n_tasks,
@@ -1190,6 +1189,7 @@ class Stampede3Site(BaseSite):
             mpi=self.mpi_cmd,
             dir_out=dir_out,
             executable=self.executable,
+            imaging_job=isinstance(job, ImagingJob),
             fs_dir=str(Path(self.executable).parent),
             **kwargs,
         )
@@ -1209,6 +1209,7 @@ class Stampede3Site(BaseSite):
         notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
         notify_email: Optional[str] = None,
         run_path: Optional[str] = None,
+        imaging_job: bool = False,
         **kwargs,
     ) -> str:
         """Generate a SLURM sweep script.
@@ -1257,6 +1258,7 @@ class Stampede3Site(BaseSite):
             duration=duration,
             queue=queue,
             account=account,
+            imaging_job=imaging_job,
             mpi=self.mpi_cmd,
             executable=self.executable,
             fs_dir=str(Path(self.executable).parent),

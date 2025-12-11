@@ -79,6 +79,10 @@ for i in $(seq 1 $n_tasks); do
 done
 wait
 
+{% if imaging_job %}
+$executable -j $input_file --smooth
+{% endif %}
+
 # skip_slots=(1)
 # allowed=()
 # for ((s=0; s<n_workers; s++)); do
