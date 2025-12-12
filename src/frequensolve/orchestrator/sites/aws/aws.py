@@ -337,21 +337,31 @@ class AWSSite(BaseSite):
         # Initialize GraphQL client
         self.graphql_client = GraphQLClient(config.api_url, auth)
 
-        # Fetch stack info from API to populate config
+        # Fetch storage stack info from API to populate config
+        # Storage stack is required for S3 operations; compute stack will be created on-demand
         try:
-            stack_info = self.graphql_client.get_my_stack()
-
-            # Update config with stack information
-            config.s3_bucket = stack_info["bucketName"]
-
+            # Try to get storage stack info
+            storage_info = self.graphql_client.get_storage_stack_info()
+            config.s3_bucket = storage_info["bucketName"]
             logger.info(f"Stack info loaded: bucket={config.s3_bucket}")
-
+        except RuntimeError as e:
+            error_msg = str(e).lower()
+            # If storage stack doesn't exist, we'll create it on first sync
+            if "no active storage stack" in error_msg:
+                logger.info(
+                    "Storage stack not found. It will be created automatically on first sync."
+                )
+                # Don't set bucket yet - it will be set after stack creation in sync()
+                config.s3_bucket = None
+            else:
+                logger.error(f"Failed to fetch storage stack info: {e}")
+                raise RuntimeError(
+                    f"Failed to fetch storage stack information: {e}\n"
+                    f"Storage stack will be created automatically on first sync."
+                ) from e
         except Exception as e:
             logger.error(f"Failed to fetch stack info: {e}")
-            raise RuntimeError(
-                f"Failed to fetch stack information: {e}\n"
-                f"Please ensure you have deployed both storage and compute infrastructure at https://{config.domain}"
-            ) from e
+            raise RuntimeError(f"Failed to fetch stack information: {e}") from e
 
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
@@ -491,18 +501,64 @@ class AWSSite(BaseSite):
     def sync(self, project):
         """Sync the project to S3.
 
+        Automatically creates storage stack if it doesn't exist.
+
         Args:
             project: The Project to sync.
 
         Raises:
-            RuntimeError: If sync fails.
+            RuntimeError: If sync fails or stack creation fails.
         """
+        # Ensure we have a bucket name (create storage stack if needed)
+        if self.graphql_client is not None:
+            # Check if we need to get/create storage stack
+            if (
+                not self.config.s3_bucket
+                or not self.graphql_client._check_storage_stack_exists()
+            ):
+                # Try to get existing storage stack first
+                try:
+                    storage_info = self.graphql_client.get_storage_stack_info()
+                    self.config.s3_bucket = storage_info["bucketName"]
+                    logger.info(
+                        f"Using existing storage stack: bucket={self.config.s3_bucket}"
+                    )
+                except RuntimeError:
+                    # Storage stack doesn't exist, create it
+                    logger.info(
+                        "Storage stack not found. Creating storage infrastructure..."
+                    )
+                    try:
+                        environment = getattr(self.config, "environment", "dev")
+
+                        # Deploy storage stack (userId extracted automatically from auth context)
+                        deploy_result = self.graphql_client.deploy_storage_stack(
+                            environment
+                        )
+
+                        # Wait for stack to be ready
+                        logger.info("Waiting for storage stack to be ready...")
+                        self.graphql_client.wait_for_stack_ready("storage")
+
+                        # Get storage stack info to update bucket name
+                        storage_info = self.graphql_client.get_storage_stack_info()
+                        self.config.s3_bucket = storage_info["bucketName"]
+                        logger.info(
+                            f"✓ Storage stack ready: bucket={storage_info['bucketName']}"
+                        )
+                    except Exception as create_error:
+                        raise RuntimeError(
+                            f"Failed to create storage stack: {create_error}"
+                        ) from create_error
+
         logger.info(f"Syncing project '{project.name}' to S3...")
         project._transfer(self)
         logger.info(f"✓ Project '{project.name}' synced to S3")
 
     def submit(self, job: SimulationJob, **kwargs) -> str:
         """Submit a simulation job.
+
+        Automatically creates compute stack if it doesn't exist.
 
         If using Cognito authentication, submits via GraphQL API.
         Otherwise, uses the traditional REST API method.
@@ -515,8 +571,39 @@ class AWSSite(BaseSite):
             Simulation ID (for GraphQL path) or job ID (for REST API path).
 
         Raises:
-            RuntimeError: If job submission fails.
+            RuntimeError: If job submission fails or stack creation fails.
         """
+        # Check if compute stack exists, create if missing
+        if self.graphql_client is not None:
+            if not self.graphql_client._check_compute_stack_exists():
+                # Compute stack doesn't exist, create it
+                logger.info(
+                    "Compute stack not found. Creating compute infrastructure..."
+                )
+                try:
+                    environment = getattr(self.config, "environment", "dev")
+
+                    # Deploy compute stack - backend will automatically fetch and use user's compute settings
+                    # (userId extracted automatically from auth context)
+                    deploy_result = self.graphql_client.deploy_compute_stack(
+                        environment
+                    )
+
+                    # Wait for stack to be ready, passing the stackId from deployment for accurate matching
+                    logger.info("Waiting for compute stack to be ready...")
+                    expected_stack_id = deploy_result.get("stackId")
+                    stack_info = self.graphql_client.wait_for_stack_ready(
+                        "compute", expected_stack_id=expected_stack_id
+                    )
+
+                    logger.info(
+                        f"✓ Compute stack ready: {stack_info.get('stackId', 'unknown')}"
+                    )
+                except Exception as create_error:
+                    raise RuntimeError(
+                        f"Failed to create compute stack: {create_error}"
+                    ) from create_error
+
         try:
             # Sync job file to S3
             project = job.simulation._remote_path.parts[0]
