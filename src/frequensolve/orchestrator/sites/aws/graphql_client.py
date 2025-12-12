@@ -539,15 +539,14 @@ class GraphQLClient:
     def deploy_compute_stack(
         self,
         environment: str = "dev",
-        parameters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Deploy compute infrastructure stack.
 
         User ID is automatically extracted from the authentication context by AppSync.
+        Stack parameters are automatically fetched from user's compute settings in the database.
 
         Args:
             environment: Environment name (default: "dev")
-            parameters: Optional stack parameters dict (will be JSON stringified)
 
         Returns:
             Dict containing stackId, stackName, status, outputs, error
@@ -558,11 +557,9 @@ class GraphQLClient:
         mutation = """
             mutation DeployComputeInfrastructure(
                 $environment: String
-                $parameters: String
             ) {
                 deployComputeInfrastructure(
                     environment: $environment
-                    parameters: $parameters
                 ) {
                     stackId
                     stackName
@@ -576,9 +573,6 @@ class GraphQLClient:
         variables = {
             "environment": environment,
         }
-
-        if parameters:
-            variables["parameters"] = json.dumps(parameters)
 
         logger.info(f"Deploying compute stack in environment {environment}...")
         result = self.execute(mutation, variables)
