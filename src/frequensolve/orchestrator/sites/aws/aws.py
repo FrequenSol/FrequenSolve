@@ -843,7 +843,7 @@ class AWSSite(BaseSite):
         """Wait for simulation completion by polling status.
 
         Polls the simulation status at the specified interval until the
-        simulation reaches a terminal state (SUCCEEDED or FAILED) or timeout.
+        simulation reaches a terminal state (SUCCEEDED, FAILED, or CANCELED) or timeout.
 
         Args:
             simulation_id: The simulation ID to poll.
@@ -851,7 +851,7 @@ class AWSSite(BaseSite):
             timeout: Maximum time to wait in seconds (default: 3600).
 
         Returns:
-            Final simulation status string ('SUCCEEDED' or 'FAILED').
+            Final simulation status string ('SUCCEEDED', 'FAILED', or 'CANCELED').
 
         Raises:
             RuntimeError: If simulation not found, polling fails, or timeout exceeded.
@@ -883,7 +883,7 @@ class AWSSite(BaseSite):
                 logger.debug(f"Simulation {simulation_id} status: {status}")
 
                 # Check if simulation is in a terminal state
-                if status in ["SUCCEEDED", "FAILED"]:
+                if status in ["SUCCEEDED", "FAILED", "CANCELED"]:
                     logger.info(
                         f"Simulation {simulation_id} completed with status: {status} "
                         f"(elapsed: {elapsed_time:.0f}s)"
@@ -938,7 +938,7 @@ class AWSSite(BaseSite):
             raise RuntimeError(f"Failed to get simulation status: {e}") from e
 
         # Check if simulation is in a cancellable state
-        if status in ["SUCCEEDED", "FAILED"]:
+        if status in ["SUCCEEDED", "FAILED", "CANCELED"]:
             logger.warning(
                 f"Simulation {job_id} is already in terminal state: {status}. "
                 "Nothing to cancel."

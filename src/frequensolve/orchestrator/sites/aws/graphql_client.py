@@ -454,7 +454,7 @@ class GraphQLClient:
             simulation_id: The simulation ID to query.
 
         Returns:
-            Simulation status string (e.g., 'PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED').
+            Simulation status string (e.g., 'PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELED').
 
         Raises:
             RuntimeError: If query fails or simulation not found.
