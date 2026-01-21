@@ -87,11 +87,7 @@ class AWSSiteConfig(BaseSiteConfig):
             ValueError: If domain is not provided and cannot be inferred
             requests.RequestException: If configuration cannot be fetched
         """
-        domain = domain or os.getenv("FREQUENSOL_DOMAIN")
-        if not domain:
-            raise ValueError(
-                "Domain is required. Pass domain parameter or set FREQUENSOL_DOMAIN environment variable."
-            )
+        domain = domain or os.getenv("FREQUENSOL_DOMAIN") or "app.frequensol.com"
 
         # Fetch configuration from domain
         config_data = cls._fetch_config_from_domain(domain)
