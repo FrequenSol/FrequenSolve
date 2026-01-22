@@ -11,21 +11,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 try:
-    from paraview.simple import (  # noqa
-        ColorBy,
-        Delete,
-        GetActiveViewOrCreate,
-        GetColorTransferFunction,
-        Hide,
-        ResetCamera,
-        SaveScreenshot,
-        Show,
-        XDMFReader,
-    )
+    import pyvista as pv
 
-    HAS_PARAVIEW = True
+    HAS_PYVISTA = True
 except Exception:
-    HAS_PARAVIEW = False
+    HAS_PYVISTA = False
 
 logger = logging.getLogger(__name__)
 
@@ -58,37 +48,33 @@ def _render_xmf(
     xmf_path: Path,
     output_file: Path,
     field: Optional[str] = None,
-    representation: str = "Surface",
+    show_edges: bool = False,
     resolution: Tuple[int, int] = (1280, 720),
 ) -> None:
-    if not HAS_PARAVIEW:
-        raise RuntimeError("ParaView Python modules not available in this environment.")
+    if not HAS_PYVISTA:
+        raise RuntimeError("PyVista is not available in this environment.")
 
-    reader = XDMFReader(FileNames=[str(xmf_path)])
-    view = GetActiveViewOrCreate("RenderView")
-    display = Show(reader, view)
-    display.Representation = representation
+    mesh = pv.read(str(xmf_path))
 
-    if field:
-        try:
-            ColorBy(display, ("POINTS", field))
-            field_lut = GetColorTransferFunction(field)
-            display.LookupTable = field_lut
-            display.RescaleTransferFunctionToDataRange(True)
-        except Exception as exc:
-            logger.warning("Failed to apply field %s for %s: %s", field, xmf_path, exc)
-            ColorBy(display, None)
+    plotter = pv.Plotter(off_screen=True, window_size=list(resolution))
+    if field and field in mesh.array_names:
+        plotter.add_mesh(
+            mesh,
+            scalars=field,
+            show_edges=show_edges,
+            lighting=False,
+        )
     else:
-        ColorBy(display, None)
+        if field:
+            logger.warning(
+                "Field %s not found in %s. Rendering geometry only.",
+                field,
+                xmf_path,
+            )
+        plotter.add_mesh(mesh, show_edges=show_edges, color="white", lighting=False)
 
-    ResetCamera(view)
-    view.Update()
-
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    SaveScreenshot(str(output_file), view, ImageResolution=list(resolution))
-
-    Hide(reader, view)
-    Delete(reader)
+    plotter.camera_position = "xy"
+    plotter.show(screenshot=str(output_file), auto_close=True)
 
 
 def render_results(config: RenderConfig) -> Dict:
@@ -114,7 +100,7 @@ def render_results(config: RenderConfig) -> Dict:
         xmf_files[0],
         mesh_output,
         field=None,
-        representation="Surface With Edges",
+        show_edges=True,
         resolution=config.resolution,
     )
     manifest["mesh"] = {"file": str(mesh_output)}
@@ -139,7 +125,7 @@ def render_results(config: RenderConfig) -> Dict:
                 xmf_path,
                 output_file,
                 field=field,
-                representation="Surface",
+                show_edges=False,
                 resolution=config.resolution,
             )
             image_entry["images"][field] = str(output_file)
