@@ -27,6 +27,10 @@ class Vertex:
 
     coords: np.ndarray
 
+    def get_coords(self) -> np.ndarray:
+        """Return vertex coordinates as a NumPy array."""
+        return self.coords
+
     def __dict__(self) -> Dict:
         return {"coords": self.coords.tolist()}
 
