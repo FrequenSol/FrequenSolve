@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass, field
 from logging import ERROR, INFO, FileHandler, Formatter, getLogger
 from pathlib import Path
+from shutil import copy2
 from typing import Dict, List, Optional, Union
 
 from dask import config
@@ -22,6 +23,7 @@ from frequensolve.orchestrator.sites.base import (
 from frequensolve.seismic.record_database import RecordDatabase
 from frequensolve.simulation.imaging import RTMImagingJob
 from frequensolve.simulation.jobs import SimulationJob
+from frequensolve.simulation.simulation import BaseSimulation
 from frequensolve.util.setup_logger import init_logger
 
 logging.basicConfig(level=ERROR)
@@ -403,6 +405,40 @@ class LocalSite(BaseSite):
                 )
                 db_map[j.name] = db
             return db_map
+
+    def fetch_mesh(
+        self,
+        target: Union[SimulationJob, BaseSimulation],
+        path: Optional[Union[str, Path]] = None,
+    ) -> Path:
+        """Return (or copy) the mesh file for a simulation."""
+        sim = target.simulation if isinstance(target, SimulationJob) else target
+        if sim.mesh is None or sim.mesh.file is None:
+            local_sim = sim._path.resolve()
+            matches = sorted(local_sim.rglob("*.gmp"))
+            if matches:
+                return matches[0]
+
+            raise FileNotFoundError(
+                f"No .gmp mesh file found in {local_sim} for simulation."
+            )
+
+        mesh_file = Path(sim.mesh.file)
+        project_path = Path(sim.project_path)
+        mesh_rel = (
+            mesh_file.relative_to(project_path)
+            if mesh_file.is_absolute()
+            else mesh_file
+        )
+
+        local_base = Path(path) if path is not None else project_path
+        local_path = (local_base / mesh_rel).resolve()
+        if local_path == mesh_file:
+            return local_path
+
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        copy2(mesh_file, local_path)
+        return local_path
 
     def fetch_image(
         self,

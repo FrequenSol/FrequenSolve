@@ -17,6 +17,7 @@ from frequensolve.orchestrator.config.base import BaseSiteConfig
 from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.seismic.record_database import RecordDatabase
 from frequensolve.simulation.jobs import SimulationJob
+from frequensolve.simulation.simulation import BaseSimulation
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
@@ -775,6 +776,80 @@ class AWSSite(BaseSite):
             return db_map[jobs[0].name]
         else:
             return db_map
+
+    def fetch_paraview(
+        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
+    ) -> Dict[str, Path]:
+        """Fetch ParaView outputs from S3 for a job.
+
+        Args:
+            job: Simulation job containing ParaView outputs.
+            path: Local base path to save outputs (defaults to project path).
+        """
+        if path is None:
+            path = job.project_path
+        else:
+            path = Path(path)
+
+        project_name = job.simulation._remote_path.parts[0]
+        pv_map: Dict[str, Path] = {}
+        for pv_name, pv_path in job.paraview_outputs.items():
+            s3_path = f"s3://{self.config.s3_bucket}/{project_name}/{pv_path}"
+            local_path = path / pv_path
+            self.get(s3_path, local_path)
+            pv_map[pv_name] = local_path
+
+        return pv_map
+
+    def fetch_mesh(
+        self,
+        target: Union[SimulationJob, BaseSimulation],
+        path: Optional[Union[str, Path]] = None,
+    ) -> Path:
+        """Fetch the mesh file for a simulation from S3.
+
+        Args:
+            target: SimulationJob or Simulation object.
+            path: Local base path to save the mesh (defaults to project path).
+        """
+        sim = target.simulation if isinstance(target, SimulationJob) else target
+        if sim.mesh is None or sim.mesh.file is None:
+            project_name = sim._remote_path.parts[0]
+            sim_rel = sim._remote_path.relative_to(project_name)
+            s3_sim_path = (
+                f"s3://{self.config.s3_bucket}/{project_name}/{sim_rel.as_posix()}"
+            )
+
+            local_base = Path(path) if path is not None else Path(sim.project_path)
+            local_sim = (local_base / sim_rel).resolve()
+            local_sim.mkdir(parents=True, exist_ok=True)
+            self.get(s3_sim_path, local_sim)
+
+            matches = sorted(local_sim.rglob("*.gmp"))
+            if matches:
+                return matches[0]
+
+            raise FileNotFoundError(
+                f"No .gmp mesh file found in {local_sim} after download."
+            )
+
+        mesh_file = Path(sim.mesh.file)
+        project_path = Path(sim.project_path)
+        mesh_rel = (
+            mesh_file.relative_to(project_path)
+            if mesh_file.is_absolute()
+            else mesh_file
+        )
+
+        project_name = sim._remote_path.parts[0]
+        s3_key = f"s3://{self.config.s3_bucket}/{project_name}/{mesh_rel.as_posix()}"
+
+        local_base = Path(path) if path is not None else project_path
+        local_dir = (local_base / mesh_rel.parent).resolve()
+        local_dir.mkdir(parents=True, exist_ok=True)
+        self.get(s3_key, local_dir)
+
+        return local_dir / mesh_rel.name
 
     def test_api_connectivity(self) -> bool:
         """Test connectivity to the FrequenSol API endpoint.

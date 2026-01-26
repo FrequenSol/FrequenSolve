@@ -99,6 +99,10 @@ class Element:
     def __dict__(self) -> Dict:
         return asdict(self)
 
+    def indices(self) -> List[int]:
+        """Return vertex indices for this element."""
+        return self.vertices
+
 
 class Mesh:
     """Container for mesh vertices and elements with support for I/O and manipulation.
@@ -212,7 +216,7 @@ class Mesh:
             # Write element blocks
             elem_by_kind = {}
             for elem in active_elems:
-                kind = elem.kind()
+                kind = elem.kind
                 if kind not in elem_by_kind:
                     elem_by_kind[kind] = []
                 elem_by_kind[kind].append(elem)
@@ -280,9 +284,10 @@ class Mesh:
             f.write("$Elements\n")
             f.write(f"{len(active_elems)}\n")
             for i, elem in enumerate(active_elems, 1):
-                elem_type = elem.kind()
+                elem_type = elem.kind
                 indices = elem.indices()
-                f.write(f"{i} {elem_type} 2 {elem.domain()} {elem.domain()}")
+                domain = elem.domain if elem.domain is not None else 0
+                f.write(f"{i} {elem_type} 2 {domain} {domain}")
                 for idx in indices:
                     f.write(f" {idx}")
                 f.write("\n")

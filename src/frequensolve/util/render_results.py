@@ -34,7 +34,17 @@ class RenderConfig:
 
 
 def _find_xmf_files(paraview_dir: Path) -> List[Path]:
-    return sorted(paraview_dir.glob("*.xmf"))
+    candidates = sorted(paraview_dir.glob("*.xmf"))
+    excluded = {"receivers.xmf", "sources.xmf"}
+    filtered = [path for path in candidates if path.name.lower() not in excluded]
+    if len(filtered) != len(candidates):
+        logger.info(
+            "Skipping non-field XMFs: %s",
+            ", ".join(
+                sorted(excluded.intersection({p.name.lower() for p in candidates}))
+            ),
+        )
+    return filtered
 
 
 def _extract_index(file_name: str) -> Optional[int]:
