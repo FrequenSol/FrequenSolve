@@ -288,12 +288,11 @@ def create_simulation(project):
     SeismicSimulation
         The created simulation instance
     """
-    sim = SeismicSimulation(
+    sim = project.new_simulation(
         name="simulation_01",
         physics="acoustic",
         dimension=2,
     )
-    project += sim
     return sim
 
 
