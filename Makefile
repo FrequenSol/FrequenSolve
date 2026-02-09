@@ -6,6 +6,7 @@ generate_reference_images:
 test:
 	poetry run pytest \
 	-ra -k "not integration" \
+	-m "not interactive" \
 	--cov=src/ --cov-report=xml \
 	--mpl --mpl-baseline-path=tests/reference_images/ --mpl-generate-summary=html --mpl-results-path=tests/output/ \
 	tests/

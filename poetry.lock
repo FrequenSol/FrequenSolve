@@ -5401,4 +5401,4 @@ seismic = ["cython", "multidimio", "pyasdf", "segyio", "zfpy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "cb7a48009cd8eb38fa58fc7c3701502651c2ff97c25d10384b4a607a401dc143"
+content-hash = "9ebf7c96900cffea277fb3d5f4fd0959aabc8f4d5924f180532fd2d5c21f2420"

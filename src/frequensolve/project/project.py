@@ -10,7 +10,6 @@ from typing import Any, Dict, Optional, Union
 from warnings import warn
 
 from frequensolve.orchestrator.sites.base import BaseSite
-from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project.migrate_version import Version
 from frequensolve.project.workflows import BaseWorkflow
 from frequensolve.seismic.record_database import RecordDatabase
@@ -18,6 +17,15 @@ from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
 from frequensolve.util.encoders import CustomJSONEncoder
 from frequensolve.util.named_list import NamedList
 from frequensolve.util.setup_logger import disable_jupyter_logging, set_log_level
+
+# Import LocalSite conditionally (requires dask dependency)
+try:
+    from frequensolve.orchestrator.sites.local import LocalSite
+
+    HAS_LOCAL_SITE = True
+except ImportError:
+    LocalSite = None
+    HAS_LOCAL_SITE = False
 
 __all__ = ["Project", "BaseProjectComponent"]
 
@@ -137,10 +145,13 @@ class Project:
     def _transfer(self, site: BaseSite):
         """Transfer project files to remote site with path substitution."""
 
-        if isinstance(site, LocalSite):
+        if HAS_LOCAL_SITE and isinstance(site, LocalSite):
             return
 
-        remote = site.work_dir
+        # Use project directory name (e.g., "ex_01") as the base remote path
+        # This matches how jobs determine the project name in AWSSite.submit()
+        project_dir_name = Path(self.path).name
+        remote = site.work_dir / project_dir_name
         proj_file = (Path(self.path) / f"{self.name}").with_suffix(".json")
         sim_dir = Path(self.path) / "simulations"
 

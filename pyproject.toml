@@ -24,6 +24,7 @@ dependencies = [
    "werkzeug (>=3.1.3,<4.0.0)",
    "flask (>=3.1.0,<4.0.0)",
    "boto3 (>=1.36.23,<2.0.0)",
+   "requests (>=2.31.0,<3.0.0)",
    "nptyping (>=2.5.0,<3.0.0)",
    "blake3 (>=1.0.5,<2.0.0)",
 ]
@@ -188,6 +189,7 @@ multidimio = ">=0.8.0,<0.9.0"
 distributed = ">=2024.12.0"
 bokeh = ">=3.4.2,<4.0.0"
 zfpy = ">=1.0.1,<2.0.0"
+requests = ">=2.31.0,<3.0.0"
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -204,6 +206,10 @@ filterwarnings = [
     "ignore::UserWarning",
 ]
 mpl_baseline_path = "tests/reference_images"  # Path to store reference images
+markers = [
+    "interactive: marks tests that require user input (deselect with '-m \"not interactive\"')",
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+]
 
 [tool.coverage.run]
 source = ["src/frequensolve"]
