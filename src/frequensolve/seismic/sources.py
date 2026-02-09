@@ -132,7 +132,7 @@ class SourceGroup:
         self._rel_path = rel_path
 
     # TODO: fix this, point source will need to make 2D array
-    def get_coordinates(self) -> NPArray:
+    def coordinates(self) -> NPArray:
         return NPArray([self.source.coordinates])
 
     @property

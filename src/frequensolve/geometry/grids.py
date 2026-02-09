@@ -72,6 +72,7 @@ class CartesianGrid(Grid):
     x0: List[float] = field(default_factory=list)
     x1: List[float] = field(default_factory=list)
     dx: List[float] = field(default_factory=list)
+    dims: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         if len(self.x1) == 0:
@@ -84,6 +85,14 @@ class CartesianGrid(Grid):
             self.n = [
                 int((x1 - x0) / dx + 1) for x0, x1, dx in zip(self.x0, self.x1, self.dx)
             ]
+
+        if len(self.dims) == 0:
+            if len(self.n) == 1:
+                self.dims = ["x"]
+            elif len(self.n) == 2:
+                self.dims = ["x", "z"]
+            elif len(self.n) == 3:
+                self.dims = ["x", "y", "z"]
 
     def __eq__(self, other):
         g1 = np.array([self.x0, self.x1, self.n])
@@ -128,50 +137,37 @@ class CartesianGrid(Grid):
         """Converts the grid to an xarray Dataset (without variables)."""
         from xarray import DataArray
 
-        ndim = len(self.n)
-        if ndim == 1:
-            dims = ["x"]
-            coords = {"x": np.linspace(self.x0[0], self.x1[0], self.n[0])}
-        elif ndim == 2:
-            dims = ["x", "z"]
-            coords = {
-                "x": np.linspace(self.x0[0], self.x1[0], self.n[0]),
-                "z": np.linspace(self.x0[1], self.x1[1], self.n[1]),
-            }
-        elif ndim == 3:
-            dims = ["x", "y", "z"]
-            coords = {
-                "x": np.linspace(self.x0[0], self.x1[0], self.n[0]),
-                "y": np.linspace(self.x0[1], self.x1[1], self.n[1]),
-                "z": np.linspace(self.x0[2], self.x1[2], self.n[2]),
-            }
-        return DataArray(dims=dims, coords=coords)
+        if len(self.dims) == len(self.n):
+            dims = self.dims
+        else:
+            if len(self.n) == 1:
+                dims = ["x"]
+            elif len(self.n) == 2:
+                dims = ["x", "z"]
+            elif len(self.n) == 3:
+                dims = ["x", "y", "z"]
+            else:
+                raise ValueError("Grid must have 1, 2, or 3 dimensions")
+
+        coords = {
+            dim: np.linspace(self.x0[i], self.x1[i], self.n[i])
+            for i, dim in enumerate(dims)
+        }
+        return DataArray(dims=dims[::-1], coords=coords)
 
     @classmethod
-    def from_xarray(cls, xarr):
+    def from_xarray(cls, xarr: "xr.DataArray") -> "CartesianGrid":
         """Converts the grid to an xarray Dataset (without variables)."""
         from xarray import Dataset
 
-        # TODO: This is a gnarly hack since the Fortran code assumes all indices present.
-        dims = sorted(xarr.coords.dims)
         coords = xarr.coords
-        # if "y" in dims:
-        #     intended = ["x", "y", "z"]
-        # elif "z" in dims:
-        #     intended = ["x", "z"]
-        # else:
-        #     intended = ["x"]
-
-        # for dim in intended:
-        #     if dim not in dims:
-        #         coords[dim] = [0]
-        # dims = intended
+        dims = xarr.dims[::-1]
 
         n = [coords[dim].size for dim in dims]
         x0 = [float(coords[dim].values.min()) for dim in dims]
         x1 = [float(coords[dim].values.max()) for dim in dims]
 
-        grid = cls(n=n, x0=x0, x1=x1)
+        grid = cls(n=n, x0=x0, x1=x1, dims=dims)
 
         for i, dim in enumerate(dims):
             if len(coords[dim]) > 1:
@@ -180,7 +176,6 @@ class CartesianGrid(Grid):
                     raise ValueError(
                         f"Grid coordinates do not align with xarray coordinates for {dim}"
                     )
-
         return grid
 
     @property
@@ -243,6 +238,7 @@ class CartesianGrid(Grid):
         """
         return {
             "_type": self.__class__.__name__,
+            "dims": self.dims,
             "n": self.n,
             "x0": self.x0,
             "x1": self.x1,
@@ -259,4 +255,13 @@ class CartesianGrid(Grid):
         Returns:
            CartesianGrid: A new CartesianGrid instance.
         """
-        return cls(n=data["n"], x0=data["x0"], x1=data["x1"], dx=data["dx"])
+        if "dims" in data:
+            dims = data["dims"]
+        else:
+            if len(data["n"]) == 1:
+                dims = ["x"]
+            elif len(data["n"]) == 2:
+                dims = ["x", "z"]
+            elif len(data["n"]) == 3:
+                dims = ["x", "y", "z"]
+        return cls(n=data["n"], x0=data["x0"], x1=data["x1"], dx=data["dx"], dims=dims)

@@ -1,6 +1,7 @@
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Set, Tuple, Union
 
 import numpy as np
 import xarray as xr
@@ -8,15 +9,15 @@ from matplotlib.axes import Axes
 from numpy.typing import ArrayLike
 
 from frequensolve.geometry.grids import CartesianGrid
-from frequensolve.mesh.mesh_generators import HexMeshGenerator
+from frequensolve.mesh.mesh_generators import HexMeshGenerator, TetMeshGenerator
 from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import Property
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.util.class_registry import register_class
+from frequensolve.util.data_file import save_data_if_new
 from frequensolve.util.named_list import NamedList
 
 __all__ = ["SimpleSurface", "Layer", "LayeredModel"]
-
 
 # TODO: make a way to work in depth or elevation coordinates
 
@@ -51,63 +52,58 @@ class SimpleSurface:
         name: str,
         interface: bool,
         z_ref: Optional[float],
-        z_phys: Property,
-        xarr: Optional[xr.DataArray] = None,
+        z_phys: Union[float, str, Path],
+        grid: Optional[xr.DataArray] = None,
         scale: float = 1.0,
+        **kwargs,
     ):
+        # Legacy argument naming convention
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
+
         self.name = name
         self.interface = interface
         self.z_ref = z_ref
-        self.z_phys = Property(data=z_phys, xarr=xarr, scale=scale)
+        self.z_phys = Property(data=z_phys, grid=grid, scale=scale)
 
     @classmethod
     def from_dict(cls, dict: Dict) -> "SimpleSurface":
-        data = dict["z_phys"]
-        if isinstance(data, float):
-            xarr = None
+        name = dict["name"]
+        interface = dict["interface"]
+        z_ref = dict["z_ref"]
+        data = dict.get("z_phys", None)
+        grid = None
+        if "file" in data:
+            z_phys = data["file"]
+            grid = CartesianGrid.from_dict(data["grid"]).as_xarray()
         else:
-            xarr = CartesianGrid.from_dict(dict["grid"]).as_xarray()
+            z_phys = data["value"]
+
         return cls(
-            name=dict["name"],
-            interface=dict.get("interface", True),
-            z_ref=dict.get("z_ref"),
-            z_phys=data,
-            xarr=xarr,
+            name=name,
+            interface=interface,
+            z_ref=z_ref,
+            z_phys=z_phys,
+            **({"grid": grid} if grid is not None else {}),
         )
 
     def __dict__(self):
-        if self.z_phys.is_constant:
-            type = "ConstantSurface"
-            z_phys = self.z_phys.get()
-        else:
-
-            type = "GridSurface"
-            file = self._path / (self.name + ".bin")
-
-            orig_dims = self.z_phys.darr.dims
-            dims = sorted(orig_dims)
-            self.z_phys.darr = self.z_phys.darr.transpose(*dims[::-1])
-            self.z_phys.write(file)
-            self.z_phys.darr = self.z_phys.darr.transpose(*orig_dims)
-            z_phys = file.relative_to(self._proj_path)
-            grid = self.z_phys.grid
-
-            # TODO: This is again a nasty hack to get around not specifying dims in Grid
-            #       update both codes to use named dimensions
-            if len(grid.n) == 3:
-                grid.n = grid.n[:1]
-                grid.dx = grid.dx[:1]
-                grid.x0 = grid.x0[:1]
-                grid.x1 = grid.x1[:1]
-
-        return {
-            "_type": type,
+        data = {
             "name": self.name,
-            "z_phys": z_phys,
-            **({"z_ref": self.z_ref} if self.z_ref is not None else {}),
-            **({"interface": self.interface} if not self.interface else {}),
-            **({"grid": grid} if not self.z_phys.is_constant else {}),
+            "z_ref": self.z_ref,
+            "interface": self.interface,
         }
+        if self.z_phys.is_constant:
+            data["z_phys"] = {"value": self.z_phys.get()}
+        else:
+            file = self._path / (self.name + ".bin")
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file = save_data_if_new(self.z_phys.darr, file)
+            data["z_phys"] = {
+                "file": file.relative_to(self._proj_path),
+                "grid": self.z_phys.grid.__dict__(),
+            }
+        return data
 
     @property
     def data(self):
@@ -136,17 +132,18 @@ class SimpleSurface:
     def perturb(
         self,
         std: float,
-        xarr: Optional[xr.DataArray] = None,
+        grid: Optional[xr.DataArray] = None,
         L0: Union[float, List[float]] = 1.0,
         nu: float = 1.0,
         seed: Optional[int] = None,
+        **kwargs,
     ) -> None:
-        """Perturb the dataset by a Von Karmanstochastic field.
+        """Perturb the dataset by a von Karman stochastic field.
 
         std (float):
            Standard deviation of the perturbation
-        xarr (xr.DataArray):
-           Xarray with final shape of the perturbation
+        grid (xr.DataArray):
+           Xarray defining the grid for the perturbation
         L0 (float):
            Characteristic length scale of the perturbation
         nu (float):
@@ -155,6 +152,11 @@ class SimpleSurface:
         seed (int):
            Random seed (for reproducibility)
         """
+
+        # Legacy argument naming convention
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
+
         if isinstance(L0, float):
             L0 = [L0]
         k0 = []
@@ -163,7 +165,7 @@ class SimpleSurface:
         self.z_phys.stochastic_perturbation(
             std=std,
             method="von_karman",
-            xarr=xarr,
+            grid=grid,
             k0=k0,
             nu=nu,
             seed=seed,
@@ -176,8 +178,8 @@ class SimpleSurface:
 
         if self.z_phys.is_constant:
             dims = sorted(limits.keys())
-            xarr = xr.DataArray(dims=dims, coords=limits)
-            surf = self.z_phys.get(xarr=xarr)
+            grid = xr.DataArray(dims=dims, coords=limits)
+            surf = self.z_phys.get(grid=grid)
         else:
             surf = self.z_phys.get()
 
@@ -225,11 +227,12 @@ class Layer(ModelSubdomain):
         self,
         property: Union[str, List[str]],
         std: float,
-        xarr: Optional[xr.DataArray] = None,
         L0: Union[float, List[float]] = 1.0,
         nu: float = 0.5,
         anisotropy: Optional[List[float]] = None,
+        grid: Optional[xr.DataArray] = None,
         seed: Optional[int] = None,
+        **kwargs,
     ) -> None:
         """Perturb the dataset by a Von Karmanstochastic field.
 
@@ -240,8 +243,8 @@ class Layer(ModelSubdomain):
               Name of the property to perturb
            std (float):
               Standard deviation of the perturbation
-           xarr (xr.DataArray):
-              Xarray with final shape of the perturbation
+           grid (xr.DataArray):
+              Xarray defining the grid for the perturbation
            L0 (float):
               Characteristic length scale of the perturbation
            nu (float):
@@ -252,6 +255,12 @@ class Layer(ModelSubdomain):
            seed (int):
               Random seed (for reproducibility)
         """
+
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
+
+        if grid is None:
+            grid = self.grid
 
         if isinstance(property, str):
             properties = [property]
@@ -273,7 +282,7 @@ class Layer(ModelSubdomain):
             self.properties[property].stochastic_perturbation(
                 std=std,
                 method="von_karman",
-                xarr=xarr,
+                grid=grid,
                 k0=k0,
                 nu=nu,
                 anisotropy=anisotropy,
@@ -342,10 +351,13 @@ class LayeredModel(ModelBase):
     y_limits: Optional[List[float]] = None
     surfaces: NamedList = field(default_factory=NamedList)
     ordering: Literal["top_down", "bottom_up"] = "top_down"
+    kwargs: Dict = field(default_factory=dict)
+
     _last_added: str = "none"
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
-    _names: List[str] = field(default_factory=list)
+    _surface_names: Set[str] = field(default_factory=set)
+    _layer_names: Set[str] = field(default_factory=set)
 
     def add_layer(
         self,
@@ -353,7 +365,8 @@ class LayeredModel(ModelBase):
         mesh_block_id: int = -1,
         frame: str = "physical",
         properties: Optional[dict] = None,
-        xarr: Optional[xr.DataArray] = None,
+        grid: Optional[xr.DataArray] = None,
+        **kwargs,
     ) -> None:
         """Add a layer to the model.
 
@@ -366,26 +379,35 @@ class LayeredModel(ModelBase):
               Frame of the layer.
            properties (dict):
               Properties of the layer.
-           xarr (xr.DataArray, optional):
-              Xarray with final shape of the layer (required for reading file formats
+           grid (xr.DataArray, optional):
+              Xarray defining the grid for the layer (required for reading file formats
               where grid is not stored with data)
         """
+
+        # Legacy argument naming convention
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
+
+        name = self._get_unique_name(name, self._layer_names)
+        self._layer_names.add(name)
+
         layer = Layer(
             name=name,
             mesh_block_id=mesh_block_id,
             frame=frame,
             properties=properties,
-            xarr=xarr,
+            grid=grid,
         )
         self += layer
 
     def add_surface(
         self,
         z: Union[float, str, Path, xr.DataArray],
-        name: str = "surface",
+        name: Optional[str] = None,
         z_ref: Optional[float] = None,
-        xarr: Optional[xr.DataArray] = None,
+        grid: Optional[xr.DataArray] = None,
         scale: float = 1.0,
+        **kwargs,
     ):
         """Add a surface to the model.
 
@@ -393,21 +415,29 @@ class LayeredModel(ModelBase):
            z (float, str, Path, xr.DataArray):
               Coordinates of the surface. Can be defined as a float (constant surface),
               via a file, or as an xr.DataArray (gridded surface).
-           name (str):
+           name (str, optional):
               Name of the surface.
            z_ref (float):
               Reference z-coordinate of the surface.
-           xarr (xr.DataArray, optional):
-              Xarray with final shape of the surface.
+           grid (xr.DataArray, optional):
+              Xarray defining the grid for the surface.
         """
 
         interface = len(self.surfaces) == 0
+
+        # Legacy argument naming convention
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
+
+        name = self._get_unique_name(name, self._surface_names)
+        self._surface_names.add(name)
+
         surface = SimpleSurface(
             name=name,
             interface=interface,
             z_ref=z_ref,
             z_phys=z,
-            xarr=xarr,
+            grid=grid,
             scale=scale,
         )
         if z_ref is None:
@@ -457,6 +487,17 @@ class LayeredModel(ModelBase):
 
         return HexMeshGenerator(l_bound=l_bound, u_bound=u_bound, n=n)
 
+    def tet_mesh_generator(self, n: Optional[List[int]] = None) -> HexMeshGenerator:
+
+        if self.dimension == 2:
+            l_bound = [self.x_limits[0], self.z_limits[0]]
+            u_bound = [self.x_limits[1], self.z_limits[1]]
+        else:
+            l_bound = [self.x_limits[0], self.y_limits[0], self.z_limits[0]]
+            u_bound = [self.x_limits[1], self.y_limits[1], self.z_limits[1]]
+
+        return TetMeshGenerator(l_bound=l_bound, u_bound=u_bound, n=n)
+
     @classmethod
     def from_dict(cls, data: Dict) -> "LayeredModel":
         """Creates a LayeredModel instance from a dictionary representation.
@@ -470,15 +511,14 @@ class LayeredModel(ModelBase):
            LayeredModel: New LayeredModel instance created from dictionary data.
         """
         # Create copy and remove surfaces to pass rest to parent
-        data_copy = data.copy()
-        surfs = data_copy.pop("surfaces")
-        layers = data_copy.pop("subdomains")
+        surfs = data.pop("surfaces")
+        layers = data.pop("subdomains")
 
-        name = data["name"]
-        dimension = data["dimension"]
-        x_limits = data["x_limits"]
-        y_limits = data.get("y_limits")
-        ordering = data.get("ordering", "top_down")
+        name = data.pop("name", None)
+        dimension = data.pop("dimension", None)
+        x_limits = data.pop("x_limits", None)
+        y_limits = data.pop("y_limits", None)
+        ordering = data.pop("ordering", "top_down")
         model = LayeredModel(
             name=name,
             dimension=dimension,
@@ -486,14 +526,14 @@ class LayeredModel(ModelBase):
             y_limits=y_limits,
             ordering=ordering,
         )
+        model.kwargs = data
 
         model += SimpleSurface.from_dict(surfs[0])
 
-        nsurfs = len(surfs)
-        nlayers = len(layers)
+        n_surf = len(surfs)
         isurf = 1
         ilayer = 0
-        while isurf < nsurfs:
+        while isurf < n_surf:
             # Add layer
             model += Layer.from_dict(layers[ilayer])
             ilayer += 1
@@ -523,6 +563,7 @@ class LayeredModel(ModelBase):
                 "surfaces": [surface.__dict__() for surface in self.surfaces],
             }
         )
+        base_dict.update(self.kwargs)
         return base_dict
 
     def __iadd__(self, other):
@@ -674,6 +715,7 @@ class LayeredModel(ModelBase):
         samples = self._physical_to_reference(samples.coords)
 
         for layer in self.layers:
+            layer.properties.keys()
             if property not in layer.properties:
                 continue
             prop = layer.properties[property].get(samples)
@@ -751,7 +793,7 @@ class LayeredModel(ModelBase):
             gridded[property] = xr.DataArray(
                 dims=samples.dims,
                 coords=samples.coords,
-                data=np.nan * np.ones(samples.shape),
+                # data=np.nan * np.ones(samples.shape),
             )
         samples = self._physical_to_reference_2d(samples)
 
@@ -780,25 +822,169 @@ class LayeredModel(ModelBase):
 
         gridded = self.sample_uniform(n)
         for property in self.properties:
-            gridded[property].data = gaussian_filter(
-                gridded[property].data, sigma=sigma, **kwargs
-            )
+            if np.any(np.isnan(gridded[property].data)):
+                filled = gridded[property]
+                for dim in filled.dims:
+                    filled = filled.bfill(dim=dim).ffill(dim=dim)
+                data = filled.data
+            else:
+                data = gridded[property].data
 
+            gridded[property].data = gaussian_filter(data, sigma=sigma, **kwargs)
         for layer in self.layers:
             for property in layer.properties:
                 layer.set_property(property, gridded[property])
+        return self
+
+    def update_from_dataset(self, dataset: xr.Dataset):
+        """Update the model from an Xarray dataset."""
+
+        for property in self.properties:
+            if np.any(np.isnan(dataset[property].data)):
+                filled = dataset[property]
+                for dim in filled.dims:
+                    filled = filled.bfill(dim=dim).ffill(dim=dim)
+                data = filled.data
+            else:
+                data = dataset[property].data
+            dataset[property].data = data
+        for layer in self.layers:
+            for property in layer.properties:
+                layer.set_property(property, dataset[property])
         return self
 
     def plot(self, property: str, resolution: List[int] = [500, 500], **kwargs):
         """Plot the model."""
         import matplotlib.pyplot as plt
 
+        # --- 3D PLOTTING using PyVista ---
+        if self.dimension == 3:
+            try:
+                import pyvista as pv
+
+                if pv.OFF_SCREEN:
+                    pv.set_jupyter_backend("static")
+            except ImportError:
+                raise ImportError(
+                    "PyVista is required for 3D plotting. Please install it via 'pip install pyvista[jupyter]'."
+                )
+
+            # Setup Grid
+            if len(resolution) == 2:
+                resolution = [*resolution, resolution[1]]
+
+            x = np.linspace(self.x_limits[0], self.x_limits[1], resolution[0])
+            y = np.linspace(self.y_limits[0], self.y_limits[1], resolution[1])
+            z = np.linspace(self.z_limits[0], self.z_limits[1], resolution[2])
+
+            samples = xr.DataArray(
+                np.nan * np.zeros((resolution[0], resolution[1], resolution[2])),
+                dims=["x", "y", "z"],
+                coords={"x": x, "y": y, "z": z},
+            )
+
+            # Populate Data
+            vmin, vmax = self.extreme_values(property)
+            vmin = kwargs.pop("vmin", vmin)
+            vmax = kwargs.pop("vmax", vmax)
+            cmap = kwargs.pop("cmap", "viridis")
+
+            for layer in self.layers:
+                if property not in layer.properties:
+                    continue
+
+                if layer.frame == "reference":
+                    samp = self._get_layer_samples_ref(layer, samples, property)
+                    subset = samp[property]
+
+                    # Ensure dimensions match (x, y, z)
+                    if subset.dims != samples.dims:
+                        subset = subset.transpose(*samples.dims)
+
+                    samples.loc[{"z": subset.coords["z"]}] = subset
+
+                else:
+                    prop = layer.properties[property].get(samples)
+                    mask = self._get_layer_mask(layer, samples)
+                    data = prop.where(mask)
+
+                    if data.shape != samples.shape:
+                        data = data.transpose(*samples.dims)
+
+                    samples.data = np.where(~np.isnan(data), data, samples.data)
+
+            # Create PyVista Mesh
+            mx, my, mz = np.meshgrid(x, y, z, indexing="ij")
+            grid = pv.StructuredGrid(mx, my, mz)
+            grid[property] = samples.values.flatten(order="F")
+
+            # Plotting
+            p = pv.Plotter()
+            cargs = dict(
+                vertical=True,
+                height=0.5,
+                width=0.05,
+                position_x=0.85,
+                position_y=0.25,
+                title_font_size=14,
+                label_font_size=12,
+                fmt="%.2f",
+                title=kwargs.get("label", property),
+                color="black",
+            )
+
+            if kwargs.pop("slices", True):
+                p.add_mesh_slice_orthogonal(
+                    grid,
+                    scalars=property,
+                    cmap=cmap,
+                    rng=[vmin, vmax],
+                    scalar_bar_args=cargs,
+                )
+                # p.add_mesh(grid.outline(), color="k")
+            else:
+                p.add_mesh(
+                    grid,
+                    scalars=property,
+                    cmap=cmap,
+                    opacity=kwargs.pop("opacity", 1.0),
+                    rng=[vmin, vmax],
+                    scalar_bar_args=cargs,
+                )
+
+            z_scale = kwargs.pop("z_scale", 1)
+            p.set_scale(zscale=z_scale)
+
+            if kwargs.pop("surfaces", True):
+                for surf in self.surfaces:
+                    try:
+                        sx, sy = np.meshgrid(x, y, indexing="ij")
+                        surf_coords = xr.DataArray(
+                            dims=["x", "y"], coords={"x": x, "y": y}
+                        )
+                        sz = surf.z_phys.get(surf_coords).values
+                        sgrid = pv.StructuredGrid(sx, sy, sz)
+                        p.add_mesh(sgrid, color="black", opacity=0.3, style="wireframe")
+                    except Exception:
+                        pass
+            p.show_grid(
+                font_size=kwargs.pop("fontsize", 12), xtitle="X", ytitle="Y", ztitle="Z"
+            )
+            p.show_axes()
+            interactive = kwargs.pop("interactive", False)
+            if interactive:
+                p.show()
+            else:
+                p.show(jupyter_backend="static")
+
+            return
+
         if self.dimension == 2:
             x = np.linspace(self.x_limits[0], self.x_limits[1], resolution[0])
             z = np.linspace(self.z_limits[0], self.z_limits[1], resolution[1])
             samples = xr.DataArray(dims=["x", "z"], coords={"z": z, "x": x})
-        elif self.dimension == 3:
-            raise NotImplementedError("3D plotting not implemented")
+        # elif self.dimension == 3:
+        #     raise NotImplementedError("3D plotting not implemented")
 
         if self.ordering == "top_down":
             self.layers[-1].lower = self.lower_surface()
@@ -878,6 +1064,7 @@ class LayeredModel(ModelBase):
                 prop = layer.properties[property].get(samples)
                 mask = self._get_layer_mask(layer, samples)
                 data = prop.where(mask)
+                data = data.transpose(*samples.dims)
                 samples.data = np.where(~np.isnan(data), data, samples.data)
 
         samples = samples.clip(min=vmin, max=vmax)
@@ -890,7 +1077,6 @@ class LayeredModel(ModelBase):
             add_colorbar=add_colorbar,
             **kwargs,
         )
-
         # Plot surfaces
         if show_surfs:
             for surf in self.surfaces:
@@ -898,32 +1084,14 @@ class LayeredModel(ModelBase):
                 limits["x"] = self.x_limits
                 if self.y_limits is not None:
                     limits["y"] = self.y_limits
+                surf.plot(limits=limits, ax=ax, **surf_kwargs)
 
-                surf.plot(
-                    limits=limits,
-                    ax=ax,
-                    **surf_kwargs,
-                )
-
-        # Plot acquisition if provided
         if acq is not None:
             self._plot_acquisition(acq, ax, **scatter_kwargs)
         if aspect == "equal":
             ax.set_aspect("equal")
-
-        # Set limits with padding after everything is plotted
-        xL = self.x_limits[1] - self.x_limits[0]
-        zL = self.z_limits[1] - self.z_limits[0]
-        L = max(xL, zL)
-
-        ax.set_xlim([self.x_limits[0] - 0.02 * L, self.x_limits[1] + 0.02 * L])
-        if self.y_limits is None:
-            ax.set_ylim([self.z_limits[0] - 0.02 * L, self.z_limits[1] + 0.02 * L])
-        else:
-            raise NotImplementedError("2D plotting not implemented")
         if origin == "upper":
             ax.invert_yaxis()
-
         if save is not None:
             plt.savefig(
                 save, bbox_inches="tight", **({"dpi": dpi} if dpi is not None else {})
@@ -954,7 +1122,7 @@ class LayeredModel(ModelBase):
                 coords[:, 0],
                 coords[:, -1],
                 marker=".",
-                s=20,
+                s=30,
                 label=f"Receivers ({group.name})",
                 zorder=6,
                 color=colors[igrp],
@@ -967,8 +1135,7 @@ class LayeredModel(ModelBase):
 
         # Plot sources
         for igrp, group in enumerate(acquisition.source_groups):
-
-            coords = group.get_coordinates()
+            coords = group.coordinates()
             color = colors[len(acquisition.receiver_groups)]
 
             # Map reference coordinates to physical coordinates
@@ -985,21 +1152,28 @@ class LayeredModel(ModelBase):
                     coords[i, :] = xlist[i, :]
 
             # Plot source coordinates as scatter points
+            label = f"Sources" if igrp == 0 else None
             ax.scatter(
                 coords[:, 0],
                 coords[:, -1],
-                marker=".",
-                s=20,
-                label=f"Sources",
+                marker="*",
+                s=120,
+                label=label,
                 zorder=7,
-                color="r",
+                facecolors="#fff700",
+                edgecolors="r",
+                linewidths=0.5,
                 **kwargs,
             )
-            # ax.legend(bbox_to_anchor=(0, 1.02), loc="lower left")
+            ax.legend(bbox_to_anchor=(0, 1.02), loc="lower left")
 
     def _get_layer_samples_ref(self, layer, samples, property):
+        """
+        Extract layer samples in reference frame (supports 2D and 3D).
+        """
         prop = layer.properties[property]
         xgrid = samples.coords["x"]
+
         upper = (
             self.upper_surface(layer)
             if self.ordering == "top_down"
@@ -1013,27 +1187,66 @@ class LayeredModel(ModelBase):
 
         z_min = upper.z_ref
         z_max = lower.z_ref
-        z0 = upper.z_phys.get(xgrid)
-        z1 = lower.z_phys.get(xgrid)
 
         mask = samples.coords["z"].values > z_min
         mask &= samples.coords["z"].values < z_max
         zgrid = samples.coords["z"].values[mask]
 
-        tmp = xr.DataArray(
-            dims=["z", "x"],
-            coords={"x": xgrid, "z": [z_min, z_max]},
-            data=[z0, z1],
-        )
-        zvals = tmp.interp(coords={"x": xgrid, "z": zgrid})
+        # 3D
+        if "y" in samples.coords:
+            ygrid = samples.coords["y"]
 
-        samp = xr.Dataset({property: prop.get(zvals)})
-        samp = samp.assign_coords(
-            {
-                "Xcoord": (("x", "z"), xgrid.broadcast_like(zvals).values.T),
-                "Zcoord": (("x", "z"), zvals.values.T),
-            }
-        )
+            coords_query = xr.DataArray(
+                dims=["x", "y"], coords={"x": xgrid, "y": ygrid}
+            )
+            z0 = upper.z_phys.get(coords_query).values
+            z1 = lower.z_phys.get(coords_query).values
+
+            tmp = xr.DataArray(
+                data=np.stack([z0, z1], axis=0),
+                dims=[
+                    "z",
+                    "x",
+                    "y",
+                ],  # Note order depends on how z0 was returned. Usually (x,y).
+                coords={"z": [z_min, z_max], "x": xgrid, "y": ygrid},
+            )
+
+            zvals = tmp.interp(coords={"x": xgrid, "y": ygrid, "z": zgrid})
+
+            zvals_t = zvals.transpose("x", "y", "z")
+
+            samp = xr.Dataset({property: prop.get(zvals)})
+
+            samp = samp.assign_coords(
+                {
+                    "Xcoord": (("x", "y", "z"), xgrid.broadcast_like(zvals_t).values),
+                    "Ycoord": (("x", "y", "z"), ygrid.broadcast_like(zvals_t).values),
+                    "Zcoord": (("x", "y", "z"), zvals_t.values),
+                }
+            )
+
+        # 2D
+        else:
+            z0 = upper.z_phys.get(xgrid)
+            z1 = lower.z_phys.get(xgrid)
+
+            tmp = xr.DataArray(
+                dims=["z", "x"],
+                coords={"x": xgrid, "z": [z_min, z_max]},
+                data=[z0, z1],
+            )
+
+            zvals = tmp.interp(coords={"x": xgrid, "z": zgrid})
+
+            samp = xr.Dataset({property: prop.get(zvals)})
+            samp = samp.assign_coords(
+                {
+                    "Xcoord": (("x", "z"), xgrid.broadcast_like(zvals).values.T),
+                    "Zcoord": (("x", "z"), zvals.values.T),
+                }
+            )
+
         return samp
 
     def _get_layer_mask(self, layer, samples):
@@ -1052,15 +1265,23 @@ class LayeredModel(ModelBase):
         limits = {}
         limits["x_min"] = self.x_limits[0]
         limits["x_max"] = self.x_limits[1]
-        if self.y_limits is not None:
+
+        if self.y_limits is not None and "y" in samples.coords:
             limits["y_min"] = self.y_limits[0]
             limits["y_max"] = self.y_limits[1]
+            ygrid = samples.coords["y"]
+            coords_query = xr.DataArray(
+                dims=["x", "y"], coords={"x": xgrid, "y": ygrid}
+            )
+        else:
+            coords_query = xgrid
+
         if layer.frame == "reference":
             limits["z_min"] = upper.z_ref
             limits["z_max"] = lower.z_ref
         else:
-            limits["z_min"] = upper.z_phys.get(xgrid)
-            limits["z_max"] = lower.z_phys.get(xgrid)
+            limits["z_min"] = upper.z_phys.get(coords_query)
+            limits["z_max"] = lower.z_phys.get(coords_query)
 
         mask = (
             (samples.coords["z"] <= limits["z_max"])
@@ -1068,6 +1289,12 @@ class LayeredModel(ModelBase):
             & (samples.coords["x"] <= limits["x_max"])
             & (samples.coords["x"] >= limits["x_min"])
         )
+
+        if "y" in samples.coords:
+            mask &= samples.coords["y"] <= limits["y_max"]
+            mask &= samples.coords["y"] >= limits["y_min"]
+
+        mask = mask.transpose(*samples.dims)
         return mask
 
     def _reference_to_physical(self, coords: np.ndarray) -> np.ndarray:
@@ -1260,6 +1487,26 @@ class LayeredModel(ModelBase):
             raise ValueError("Some points were not found in any layer")
 
         return xr.DataArray(dims=["z", "x"], coords={"z": z_ref, "x": coords["x"]})
+
+    @staticmethod
+    def _get_unique_name(name: Optional[str], names: Set[str]) -> str:
+        orig_name = name
+        warn_flag = True
+        if name is None:
+            warn_flag = False
+            name = "no_name"
+
+        if name in names:
+            i = 1
+            while f"{name}_{i}" in names and i < 1000:
+                i += 1
+            name = f"{name}_{i}"
+
+        if warn_flag and orig_name != name:
+            warnings.warn(
+                f"\nSurface name '{orig_name}' was not unique; name was changed to '{name}'\n\n"
+            )
+        return name
 
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path

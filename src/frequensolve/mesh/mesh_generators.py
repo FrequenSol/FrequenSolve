@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 from ..util.class_registry import class_registry, register_class
 
-__all__ = ["BaseMeshGenerator", "HexMeshGenerator"]
+__all__ = ["BaseMeshGenerator", "HexMeshGenerator", "TetMeshGenerator"]
 
 
 @register_class
@@ -73,6 +73,29 @@ class HexMeshGenerator(BaseMeshGenerator):
 
     @classmethod
     def from_dict(cls, data: Dict) -> "HexMeshGenerator":
+        return cls(
+            n=data["n"],
+            l_bound=data["l_bound"],
+            u_bound=data["u_bound"],
+        )
+
+
+@register_class
+@dataclass
+class TetMeshGenerator(HexMeshGenerator):
+    """Generates a tetrahedral mesh
+
+    Attributes:
+       l_bound (List[float]):
+          The lower bounds of a 'box' domain
+       u_bound (List[float]):
+          The upper bounds of a 'box' domain
+       n (List[int]):
+          Number of elements in each direction
+    """
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "TetMeshGenerator":
         return cls(
             n=data["n"],
             l_bound=data["l_bound"],

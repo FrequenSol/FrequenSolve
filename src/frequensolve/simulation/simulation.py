@@ -42,7 +42,6 @@ class BaseSimulation(SimulationConfig):
     solver: SolverConfig = field(default_factory=SolverConfig)
     discretization: Discretization = field(default_factory=Discretization)
     outputs: OutputManager = field(default_factory=OutputManager)
-    user_parameters: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         from frequensolve.util.printing import print_note
@@ -70,7 +69,14 @@ class BaseSimulation(SimulationConfig):
         """Load seismic simulation from JSON file."""
         with open(path, "r") as f:
             data = json.load(f)
-            return cls.from_dict(data)
+        class_name = data["_type"]
+        if class_name in class_registry:
+            sim_class = class_registry[class_name]
+            sim = sim_class.from_dict(data)
+            sim._file = path
+            return sim
+        else:
+            raise Exception(f"Unknown simulation class: {class_name}")
 
     def __dict__(self) -> Dict:
         from frequensolve.util.printing import print_note
@@ -96,7 +102,6 @@ class BaseSimulation(SimulationConfig):
                 else {}
             ),
             **({"Outputs": self.outputs.__dict__()} if self.outputs else {}),
-            **({"UserParameters": self.user_parameters}),
         }
 
 
@@ -127,8 +132,7 @@ class SeismicSimulation(BaseSimulation):
     discretization: Discretization = field(default_factory=Discretization)
     outputs: OutputManager = field(default_factory=OutputManager)
     acquisition: Acquisition = field(default_factory=Acquisition)
-    user_parameters: Dict = field(default_factory=dict)
-    misc: Dict = field(default_factory=dict)
+    kwargs: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         if self.project_path is None:
@@ -175,11 +179,9 @@ class SeismicSimulation(BaseSimulation):
                 sim.outputs = OutputManager.from_dict(data.pop("Outputs"))
             if "Acquisition" in data:
                 sim.acquisition = Acquisition.from_dict(data.pop("Acquisition"))
-            if "UserParameters" in data:
-                sim.user_parameters = data.pop("UserParameters")
 
             os.chdir(cwd)
-        sim.misc = data
+        sim.kwargs = data
         sim._set_path(project_path, Path("simulations"))
         return sim
 
@@ -197,23 +199,16 @@ class SeismicSimulation(BaseSimulation):
                 coords = grp.coordinates.get()
                 grp.coordinates = CoordsArray(coordinates=coords)
 
+        # Change file path
+        sim_copy._file = file.parent.parent / name / name
+        sim_copy._set_path(self.project_path, Path("simulations") / name)
         return sim_copy
-
-    @classmethod
-    def load(cls, path: Union[str, Path], **kwargs) -> "SeismicSimulation":
-        """Load seismic simulation from JSON file."""
-
-        with open(path, "r") as f:
-            data = json.load(f)
-        sim = cls.from_dict(data)
-        sim._file = path
-        return sim
 
     def __dict__(self) -> Dict:
         dict = super().__dict__()
         dict["_type"] = self.__class__.__name__
         dict["Acquisition"] = self.acquisition.__dict__()
-        dict.update(self.misc)
+        dict.update(self.kwargs)
         return dict
 
     def __iadd__(self, other):

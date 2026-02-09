@@ -37,8 +37,10 @@ def hash_array_blake3(array: np.ndarray) -> str:
     Returns:
         str: The blake3 hex digest of the array
     """
+    if not array.flags["C_CONTIGUOUS"]:
+        array = np.ascontiguousarray(array)
     h = blake3.blake3()
-    h.update(array.tobytes())
+    h.update(memoryview(array).cast("B"))
     return h.hexdigest()
 
 
@@ -52,11 +54,23 @@ def hash_dataarray_blake3(da: "xr.DataArray") -> str:
     Returns:
         str: The blake3 hex digest of the DataArray
     """
+    # Assumes backed by a numpy array
+    if not da.data.flags["C_CONTIGUOUS"]:
+        da.data = np.ascontiguousarray(da.data)
+
     h = blake3.blake3()
-    h.update(da.values.tobytes())
+    h.update(memoryview(da.data).cast("B"))
     for dim in da.dims:
         coord_values = da.coords[dim].values
-        h.update(coord_values.tobytes())
+        h.update(memoryview(coord_values).cast("B"))
+
+    # if da.name is not None:
+    #     h.update(b"name:")
+    #     h.update(da.name.encode())
+    # if da.attrs:
+    #     for k in sorted(da.attrs):
+    #         h.update(k.encode())
+    #         h.update(repr(da.attrs[k]).encode())
     return h.hexdigest()
 
 

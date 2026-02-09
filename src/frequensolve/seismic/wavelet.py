@@ -225,8 +225,9 @@ class Wavelet:
 
     def _evaluate_initial(self):
         if self.times is None:
-            dt = 1.0 / (20 * self.f_max)
-            self.times = np.arange(0.0, 1.0 + dt, dt)
+            dt = 1.0 / (50.0 * self.f_max)
+            T_max = 100.0 / self.f_max
+            self.times = np.arange(0.0, T_max + dt, dt)
 
     @staticmethod
     def _get_window_callable(
@@ -287,14 +288,16 @@ class Wavelet:
 
         self._evaluate_initial()
 
-        # Axis limit kwargs
-        Tf = kwargs.pop("T_max", None)
-        if Tf:
-            nTf = np.searchsorted(self.times, Tf, side="left")
-            nTf = np.minimum(nTf, len(self.times))
-        else:
-            nTf = len(self.times)
         f_max = kwargs.pop("f_max", self.f_max)
+
+        # Axis limit kwargs
+        Tf = kwargs.pop("T_max", 25.0 / f_max)
+        if Tf > self.times[-1]:
+            dt = self.times[1] - self.times[0]
+            self.times = np.arange(0.0, Tf + dt, dt)
+        nTf = np.searchsorted(self.times, Tf, side="left")
+        nTf = np.minimum(nTf, len(self.times))
+
         nF = np.searchsorted(self.frequencies, f_max, side="left")
         nF = np.minimum(nF, len(self.frequencies))
 
@@ -341,9 +344,9 @@ class Wavelet:
             plt.xlabel("Frequency [Hz]")
             plt.ylabel("Amplitude [dB]")
             plt.grid(True, alpha=0.3)
-            plt.yticks(np.arange(-60, 1, 20))
-            plt.yticks(np.arange(-60, 1, 10), minor=True)
-            plt.ylim(-60, 1)
+            plt.yticks(np.arange(-80, 1, 20))
+            plt.yticks(np.arange(-80, 1, 10), minor=True)
+            plt.ylim(-80, 1)
         else:
             plt.plot(self.frequencies[:nF], np.abs(self.spectrum[:nF]))
             plt.xlabel("Frequency [Hz]")

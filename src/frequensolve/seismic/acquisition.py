@@ -187,16 +187,29 @@ class Acquisition:
         for group in self.source_groups:
             group._set_path(proj_path, rel_path)
 
-    def receiver_locations(self) -> Dict:
-        """Get receiver locations in physical and reference frames.
+    def receiver_coords(self, group: Optional[str] = None):
+        """Get receiver coordinates."""
+        if group is None:
+            group_locations = {}
+            for group in self.receiver_groups:
+                group_locations[group.name] = group.coordinates.get()
+            return group_locations
+        else:
+            return self.receiver_groups[group].coordinates.get()
 
-        Returns:
-           Dict: Dictionary containing physical and reference locations.
-        """
-        group_locations = {}
-        for group in self.receiver_groups:
-            group_locations[group.name] = group.coordinates.get()
-        return group_locations
+    def source_coords(self, src: Optional[int] = None):
+        """Get source locations for all sources."""
+        if src is None:
+            return np.array([src.coordinates()[0] for src in self.source_groups])
+        else:
+            isrc = int(src - 1)
+            return self.source_groups[isrc].coordinates()[0]
+
+    def offsets(self, src: int, group: str) -> Dict:
+        """Get receiver offsets."""
+        diff = self.receiver_coords(group) - self.source_coords(src)
+        offsets = np.hypot(diff[:, 0], diff[:, 1])
+        return offsets
 
     @property
     def _path(self) -> Path:

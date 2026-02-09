@@ -309,20 +309,27 @@ class Project:
     def new_simulation(
         self, name: str, physics: str, dimension: int, **kwargs
     ) -> BaseSimulation:
+        """Create a new simulation in the project.
+
+        Args:
+            name (str): The name of the simulation.
+            physics (str): The physics of the simulation.
+            dimension (int): The dimension of the simulation.
+        """
         sim = SeismicSimulation(
             name=name,
             physics=physics,
             dimension=dimension,
             project_path=self.path,
         )
-        sim.misc = kwargs
+        sim.kwargs = kwargs
         self.simulations.append(sim)
         return sim
 
     def __iadd__(
         self, base: Union[BaseSimulation, BaseWorkflow, BaseProjectComponent]
     ) -> "Project":
-        """Overrides += operator"""
+        """Overrides += operator to add simulations, workflows, and extras to the project."""
         if isinstance(base, BaseSimulation):
             base.project_path = self.path
             self.simulations.append(base)

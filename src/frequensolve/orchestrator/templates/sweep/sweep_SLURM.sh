@@ -40,23 +40,21 @@ procs_per_task=$2
 {% if run_path %}
 cd {{run_path}}
 {% endif %}
-{% if batch_job %}
-dir_out=jobs/batch/$SLURM_JOB_ID
-mkdir -p $dir_out
-{% else %}
-dir_out=jobs/out/
+
+dir_out={{dir_out}}
 rm -rf $dir_out
 mkdir -p $dir_out
-{% endif %}
+mkdir -p $dir_out
 
-ml phdf5
+ml phdf5 petsc/3.23 fftw3
+module list
 
 {% if n_tasks > 1 %}
 export FS_DISABLE_PARAVIEW=1
 {% endif %}
 export FS_SOLVER_PATH={{fs_dir}}
 
-export KMP_STACKSIZE=16M
+export KMP_STACKSIZE=80M
 
 mpi_exec={{mpi}}
 executable={{executable}}
@@ -68,16 +66,58 @@ n_workers=$((n_procs / procs_per_task))
 
 start_time=$(date +%s)
 
+$executable -j $input_file -i 0
+
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
    echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file -i $i"
-   $mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file -i $i >> $dir_out/j${i}.txt 2>&1 &
+   $mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file -i $i >> $dir_out/task_${i}.txt 2>&1 &
    if [[ $((($i - 1) % n_workers)) -eq $((n_workers - 1)) ]]; then
       wait
       echo "Group done"
    fi
 done
 wait
+
+{% if imaging_job %}
+$executable -j $input_file --smooth
+{% endif %}
+
+# skip_slots=(1)
+# allowed=()
+# for ((s=0; s<n_workers; s++)); do
+#    skip=0
+#    for k in "${skip_slots[@]}"; do
+#       if (( s == k )); then skip=1; break; fi
+#    done
+#    (( skip == 0 )) && allowed+=("$s")
+# done
+
+# n_active=3
+# if (( n_active == 0 )); then
+#    echo "No usable slots after skipping ${skip_slots[*]}"; exit 1
+# fi
+
+# launched=0
+# for i in $(seq 1 "$n_tasks"); do
+#    if ! (( (i - 7) % 16 == 0 )); then
+#       continue
+#    fi
+
+#    slot=${allowed[$(( launched % n_active ))]}
+#    off=$(( procs_per_task * slot ))
+
+#    echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file -i $i"
+#    $mpi_exec -n "$procs_per_task" -o "$off" task_affinity "$executable" \
+#       -nthreads "$n_threads" -j "$input_file" -i "$i" >> "$dir_out/task_${i}.txt" 2>&1 &
+
+#    ((launched++))
+#    if (( launched % n_active == 0 )); then
+#       wait
+#       echo "Group done"
+#    fi
+# done
+# wait
 
 # Calculate and print total time taken
 end_time=$(date +%s)
