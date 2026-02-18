@@ -7,6 +7,7 @@ This module handles:
 - AWS credential exchange via Cognito Identity Pool
 """
 
+import base64
 import json
 import logging
 import os
@@ -18,6 +19,33 @@ import boto3
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_jwt_payload(token: str) -> dict:
+    """Decode JWT payload without verification (for reading our own token claims).
+
+    Args:
+        token: JWT string (header.payload.signature)
+
+    Returns:
+        Decoded payload dict
+
+    Raises:
+        ValueError: If token is invalid
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise ValueError("Invalid JWT format")
+        payload_b64 = parts[1]
+        # Add padding if needed for base64
+        padding = 4 - len(payload_b64) % 4
+        if padding != 4:
+            payload_b64 += "=" * padding
+        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+        return json.loads(payload_bytes.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"Failed to decode JWT payload: {e}") from e
 
 
 class CognitoAuth:
@@ -320,3 +348,26 @@ class CognitoAuth:
         """Remove cached credentials file."""
         if self.credentials_path.exists():
             self.credentials_path.unlink()
+
+    def get_account_id(self) -> Optional[str]:
+        """Get account ID from the current ID token's custom claims.
+
+        Required for multi-tenant operations; the backend filters stacks by
+        userId + accountId. Without accountId, the Python client may see stacks
+        that submitJob cannot use.
+
+        Returns:
+            The custom:accountId claim value, or None if not present
+        """
+        try:
+            tokens = self.get_cached_tokens()
+        except (ValueError, OSError):
+            return None
+        try:
+            id_token = tokens.get("id_token")
+            if not id_token:
+                return None
+            payload = _decode_jwt_payload(id_token)
+            return payload.get("custom:accountId")
+        except (ValueError, KeyError):
+            return None

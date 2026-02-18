@@ -536,9 +536,12 @@ class AWSSite(BaseSite):
                             environment
                         )
 
-                        # Wait for stack to be ready
+                        # Wait for stack to be ready (pass stackId so we wait for the one we just created)
                         logger.info("Waiting for storage stack to be ready...")
-                        self.graphql_client.wait_for_stack_ready("storage")
+                        expected_stack_id = deploy_result.get("stackId")
+                        self.graphql_client.wait_for_stack_ready(
+                            "storage", expected_stack_id=expected_stack_id
+                        )
 
                         # Get storage stack info to update bucket name
                         storage_info = self.graphql_client.get_storage_stack_info()

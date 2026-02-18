@@ -88,34 +88,68 @@ class GraphQLClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"API request failed: {e}") from e
 
+    def _build_storage_stack_filter(self, account_id: Optional[str] = None) -> dict:
+        """Build filter for storage stack queries.
+
+        Uses same criteria as submitJob backend: userId (via owner auth),
+        accountId (explicit), stackType, and status. This ensures the Python
+        client only considers stacks that submitJob will accept.
+        """
+        base_filter = {
+            "stackType": {"eq": "storage"},
+            "or": [
+                {"status": {"eq": "CREATE_COMPLETE"}},
+                {"status": {"eq": "UPDATE_COMPLETE"}},
+                {"status": {"eq": "UPDATE_ROLLBACK_COMPLETE"}},
+                {"status": {"eq": "ROLLBACK_COMPLETE"}},
+            ],
+        }
+        if account_id:
+            base_filter["accountId"] = {"eq": account_id}
+        return base_filter
+
+    def _build_compute_stack_filter(self, account_id: Optional[str] = None) -> dict:
+        """Build filter for compute stack queries.
+
+        Uses same criteria as submitJob backend: userId (via owner auth),
+        accountId (explicit), stackType. Ensures the Python client only considers
+        stacks that submitJob will accept.
+        """
+        base_filter = {"stackType": {"eq": "compute"}}
+        if account_id:
+            base_filter["accountId"] = {"eq": account_id}
+        return base_filter
+
     def _check_storage_stack_exists(self) -> bool:
         """Check if storage stack exists.
 
-        Returns:
-            True if storage stack exists, False otherwise
+        Uses same filter as submitJob backend (accountId when available) so
+        we don't report a stack that submit won't accept.
         """
-        storage_query = """
-            query ListStorageStacks {
-                listStacks(filter: {
-                    stackType: { eq: "storage" }
-                    or: [
-                        { status: { eq: "CREATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
-                        { status: { eq: "ROLLBACK_COMPLETE" } }
-                    ]
-                }) {
-                    items {
-                        stackId
-                        outputs
-                        status
-                        createdAt
+        account_id = (
+            self.auth.get_account_id() if hasattr(self.auth, "get_account_id") else None
+        )
+        if account_id:
+            logger.debug(
+                "Filtering storage stacks by accountId to match submitJob backend"
+            )
+        try:
+            filter_obj = self._build_storage_stack_filter(account_id)
+            # Build query with dynamic filter
+            variables = {"filter": filter_obj}
+            storage_query = """
+                query ListStorageStacks($filter: ModelStackFilterInput) {
+                    listStacks(filter: $filter) {
+                        items {
+                            stackId
+                            outputs
+                            status
+                            createdAt
+                        }
                     }
                 }
-            }
-        """
-        try:
-            result = self.execute(storage_query)
+            """
+            result = self.execute(storage_query, variables)
             return (
                 "listStacks" in result
                 and result["listStacks"]["items"]
@@ -127,6 +161,9 @@ class GraphQLClient:
     def get_storage_stack_info(self) -> Dict[str, str]:
         """Get storage stack information (bucket name).
 
+        Uses same filter as submitJob backend (accountId when available) so
+        we only return stacks that submit will accept.
+
         Returns:
             Dict containing:
                 - bucketName: S3 bucket name for simulations
@@ -136,17 +173,14 @@ class GraphQLClient:
         Raises:
             RuntimeError: If storage stack not found
         """
+        account_id = (
+            self.auth.get_account_id() if hasattr(self.auth, "get_account_id") else None
+        )
+        filter_obj = self._build_storage_stack_filter(account_id)
+        variables = {"filter": filter_obj}
         storage_query = """
-            query ListStorageStacks {
-                listStacks(filter: {
-                    stackType: { eq: "storage" }
-                    or: [
-                        { status: { eq: "CREATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
-                        { status: { eq: "ROLLBACK_COMPLETE" } }
-                    ]
-                }) {
+            query ListStorageStacks($filter: ModelStackFilterInput) {
+                listStacks(filter: $filter) {
                     items {
                         stackId
                         outputs
@@ -158,7 +192,7 @@ class GraphQLClient:
         """
 
         logger.debug("Executing GraphQL query: listStacks (storage)")
-        storage_result = self.execute(storage_query)
+        storage_result = self.execute(storage_query, variables)
 
         if (
             "listStacks" not in storage_result
@@ -639,13 +673,21 @@ class GraphQLClient:
                 )
 
             try:
-                # Query for the specific stack type
+                # Use same filter as get_storage_stack_info / submitJob (accountId when available)
+                # so we only consider stacks that will be accepted downstream
+                account_id = (
+                    self.auth.get_account_id()
+                    if hasattr(self.auth, "get_account_id")
+                    else None
+                )
                 if stack_type == "storage":
+                    filter_obj = self._build_storage_stack_filter(account_id)
+                    # Relax status for polling - we want to see IN_PROGRESS too
+                    filter_obj.pop("or", None)  # Remove status filter to see any status
+                    variables = {"filter": filter_obj}
                     query = """
-                        query ListStorageStacks {
-                            listStacks(filter: {
-                                stackType: { eq: "storage" }
-                            }) {
+                        query ListStorageStacks($filter: ModelStackFilterInput) {
+                            listStacks(filter: $filter) {
                                 items {
                                     stackId
                                     outputs
@@ -655,12 +697,13 @@ class GraphQLClient:
                             }
                         }
                     """
+                    result = self.execute(query, variables)
                 elif stack_type == "compute":
+                    filter_obj = self._build_compute_stack_filter(account_id)
+                    variables = {"filter": filter_obj}
                     query = """
-                        query ListComputeStacks {
-                            listStacks(filter: {
-                                stackType: { eq: "compute" }
-                            }) {
+                        query ListComputeStacks($filter: ModelStackFilterInput) {
+                            listStacks(filter: $filter) {
                                 items {
                                     stackId
                                     outputs
@@ -670,12 +713,11 @@ class GraphQLClient:
                             }
                         }
                     """
+                    result = self.execute(query, variables)
                 else:
                     raise ValueError(
                         f"Invalid stack_type: {stack_type}. Must be 'storage' or 'compute'"
                     )
-
-                result = self.execute(query)
 
                 stacks = result.get("listStacks", {}).get("items", [])
 
