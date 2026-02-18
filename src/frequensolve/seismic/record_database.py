@@ -149,7 +149,9 @@ class RecordDatabase:
         if "receiver" in f[group].attrs:
             recv = f[group].attrs["receiver"]
         else:
-            recv = np.arange(1, f[group].shape[0] + 1)
+            dims = f[group].attrs["dims"][::-1]
+            ind = np.where(dims == "receiver")[0][0]
+            recv = np.arange(1, f[group].shape[ind] + 1)
         return recv
 
     @property

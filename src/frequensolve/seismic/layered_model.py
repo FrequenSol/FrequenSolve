@@ -1142,8 +1142,9 @@ class LayeredModel(ModelBase):
             ilist = []
             xlist = []
             if group.source.frame == "reference":
-                ilist.append(i)
-                xlist.append(coords[i, :])
+                for i in range(len(coords)):
+                    ilist.append(i)
+                    xlist.append(coords[i, :])
 
             if len(xlist) > 0:
                 xlist = np.array(xlist)
@@ -1230,7 +1231,6 @@ class LayeredModel(ModelBase):
         else:
             z0 = upper.z_phys.get(xgrid)
             z1 = lower.z_phys.get(xgrid)
-
             tmp = xr.DataArray(
                 dims=["z", "x"],
                 coords={"x": xgrid, "z": [z_min, z_max]},
@@ -1238,7 +1238,6 @@ class LayeredModel(ModelBase):
             )
 
             zvals = tmp.interp(coords={"x": xgrid, "z": zgrid})
-
             samp = xr.Dataset({property: prop.get(zvals)})
             samp = samp.assign_coords(
                 {
@@ -1261,7 +1260,6 @@ class LayeredModel(ModelBase):
             if self.ordering == "top_down"
             else self.upper_surface(layer)
         )
-
         limits = {}
         limits["x_min"] = self.x_limits[0]
         limits["x_max"] = self.x_limits[1]
@@ -1494,7 +1492,7 @@ class LayeredModel(ModelBase):
         warn_flag = True
         if name is None:
             warn_flag = False
-            name = "no_name"
+            name = "unlabeled"
 
         if name in names:
             i = 1

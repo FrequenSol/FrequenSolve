@@ -518,6 +518,7 @@ class LocalSite(BaseSite):
             except:
                 pass
         if self._dask_client is not None:
+            self._dask_client.shutdown()
             self._dask_client.close()
         if self._dask_cluster is not None:
             self._dask_cluster.close()
