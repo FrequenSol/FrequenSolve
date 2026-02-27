@@ -150,8 +150,8 @@ class ModelSubdomain:
 
         return cls(
             mesh_block_id=data["mesh_block_id"],
-            name = data["name"],
-            frame = data["frame"],
+            name=data["name"],
+            frame=data["frame"],
             properties=props,
             **({"grid": grid} if grid is not None else {}),
         )

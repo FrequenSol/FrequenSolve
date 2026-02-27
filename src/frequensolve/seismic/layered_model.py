@@ -1326,17 +1326,12 @@ class LayeredModel(ModelBase):
             zl = upper.z_phys.get(x_coords).values
             zu = lower.z_phys.get(x_coords).values
 
-            layer_mask = (z_coords >= z_min) & (z_coords <= z_max) & ~found
+            mask = (z_coords >= z_min) & (z_coords <= z_max) & ~found
 
-            if np.any(layer_mask):
-                if layer.frame == "reference":
-                    alpha = (z_coords[layer_mask] - z_min) / (z_max - z_min)
-                    z_phys[layer_mask] = zl[layer_mask] + alpha * (
-                        zu[layer_mask] - zl[layer_mask]
-                    )
-                else:
-                    z_phys[layer_mask] = z_coords[layer_mask]
-                found[layer_mask] = True
+            if np.any(mask):
+                alpha = (z_coords[mask] - z_min) / (z_max - z_min)
+                z_phys[mask] = zl[mask] + alpha * (zu[mask] - zl[mask])
+                found[mask] = True
 
         if not np.all(found):
             raise ValueError("Some points were not found in any layer")

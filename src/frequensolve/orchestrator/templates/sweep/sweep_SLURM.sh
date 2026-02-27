@@ -46,7 +46,7 @@ rm -rf $dir_out
 mkdir -p $dir_out
 mkdir -p $dir_out
 
-ml phdf5 petsc/3.23 fftw3
+ml intel/25.1 phdf5 petsc/3.23 fftw3
 module list
 
 {% if n_tasks > 1 %}
@@ -66,7 +66,7 @@ n_workers=$((n_procs / procs_per_task))
 
 start_time=$(date +%s)
 
-$executable -j $input_file -i 0
+$mpi_exec -n $n_procs $executable $n_threads -j $input_file --init
 
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
