@@ -97,8 +97,6 @@ class ModelSubdomain:
     def __getitem__(self, key: str):
         return self.properties[key].get()
 
-    # TODO: This is nasty to be compatible with the solver code;
-    #       need to implement TensorStore for zarr or HDF5 format.
     def __dict__(self) -> Dict:
         props = {}
         for key, prop in self._properties.items():
@@ -241,6 +239,8 @@ class ModelBase:
            id (int): Unique mesh block identifier
            **kwargs: Additional subdomain parameters.
         """
+        if subdomain.name is None:
+            subdomain.name = f"unlabeled_{len(self.subdomains)}"
         self.subdomains.append(subdomain)
 
     def __iadd__(self, other):

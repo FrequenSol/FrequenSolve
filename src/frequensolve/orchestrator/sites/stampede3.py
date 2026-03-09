@@ -447,10 +447,10 @@ class Stampede3Site(BaseSite):
         self,
         job: SimulationJob,
         nodes: int,
-        procs_per_node: int = 2,
-        procs_per_task: Optional[int] = None,
         wait: bool = False,
         duration: str = "00-02:00:00",
+        procs_per_node: Optional[int] = None,
+        procs_per_task: Optional[int] = None,
         queue: Optional[str] = None,
         account: Optional[str] = None,
         notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
@@ -474,17 +474,18 @@ class Stampede3Site(BaseSite):
             run_path:       Path where the slurm job will be run
         """
 
-        if procs_per_task is None:
-            procs_per_task = max(1, (nodes * procs_per_node) // job.n_tasks)
-
         script = self._sweep_SLURM_script(
             n_tasks=job.n_tasks,
             n_nodes=nodes,
             stdout=str(job._remote_path(self.work_dir) / "logs"),
-            procs_per_node=procs_per_node,
-            procs_per_task=procs_per_task,
             duration=duration,
             imaging_job=isinstance(job, ImagingJob),
+            **(
+                {"procs_per_task": procs_per_task} if procs_per_task is not None else {}
+            ),
+            **(
+                {"procs_per_node": procs_per_node} if procs_per_node is not None else {}
+            ),
             **({"queue": queue} if queue is not None else {}),
             **({"account": account} if account is not None else {}),
             **({"notify_on": notify_on} if notify_on is not None else {}),
@@ -492,20 +493,17 @@ class Stampede3Site(BaseSite):
             **({"run_path": run_path} if run_path is not None else {}),
             **kwargs,
         )
-
-        if procs_per_node * nodes > procs_per_task * job.n_tasks:
-            raise ValueError(
-                f"Number of workers ({procs_per_node * nodes}) "
-                f"is greater than number of tasks ({procs_per_task * job.n_tasks}), "
-                "reduce the number of workers (by decreasing the "
-                "n_nodes or processes_per_node) or increase the number of "
-                "tasks."
-            )
+        # if procs_per_node * nodes > procs_per_task * job.n_tasks:
+        #     raise ValueError(
+        #         f"Number of workers ({procs_per_node * nodes}) "
+        #         f"is greater than number of tasks ({procs_per_task * job.n_tasks}), "
+        #         "reduce the number of workers (by decreasing the "
+        #         "n_nodes or processes_per_node) or increase the number of "
+        #         "tasks."
+        #     )
 
         if run_path is None:
             run_path = self.work_dir
-
-        # Transfer job and script to Stampede3
         remote_script, remote_job = self._transfer_SLURM_job(script, job)
 
         cmd = f"mkdir -p {run_path}/jobs/batch && "
@@ -535,6 +533,8 @@ class Stampede3Site(BaseSite):
         )
         job._job_id = job_id
 
+        if wait:
+            self.wait_completion(job)
         return job_id
 
     def wait_completion(self, job: Union[SimulationJob, List[SimulationJob]]):
@@ -880,9 +880,7 @@ class Stampede3Site(BaseSite):
             jobs = [job]
         else:
             jobs = job
-
         images = {}
-
         for job in jobs:
             try:
                 remote = job._remote_image_path(self.work_dir)
@@ -903,6 +901,146 @@ class Stampede3Site(BaseSite):
             return images[jobs[0].name]
         else:
             return images
+
+    def fetch_logs(
+        self,
+        job: Union[SimulationJob, List[SimulationJob]],
+        local_dir: Optional[Union[str, Path]] = None,
+        include_batch: bool = False,
+        show: bool = False,
+    ) -> Union[Path, dict]:
+        """Fetch log files from Stampede3 to the local machine.
+
+        Downloads the task log directory (e.g. task_1.txt, task_2.txt, ...) from
+        the remote job run. Optionally fetches SLURM batch stdout/stderr files
+        (job_<id>.o, job_<id>.e) when include_batch is True.
+
+        Args:
+            job: A SimulationJob or list of SimulationJobs whose logs to fetch.
+            local_dir: Optional local directory to write logs into. If None,
+                logs are written to job._local_path / "logs" for each job.
+            include_batch: If True, also fetch SLURM batch logs from
+                run_path/jobs/batch/ (requires job._job_id and run_path).
+            print: If True, print log contents after fetching. When
+                include_batch is True, prints in order: batch .o file, batch
+                .e file, then the last (highest index) task log file. Otherwise
+                prints only the last task log file.
+
+        Returns:
+            If a single job: Path to the local log directory. If a list of jobs:
+            dict mapping job name to Path of that job's local log directory.
+        """
+        if isinstance(job, SimulationJob):
+            jobs = [job]
+            single = True
+        else:
+            jobs = job
+            single = False
+        log_dir = Path(local_dir) if local_dir is not None else job._local_path / "logs"
+        result = {}
+
+        for j in jobs:
+            remote_log_dir = j._remote_path(self.work_dir) / "logs"
+            try:
+                print("Fetching Logs:\nfrom: ", remote_log_dir, "\nto: ", log_dir)
+                self.get(remote_log_dir, log_dir)
+                result[j.name] = log_dir
+
+                if include_batch and getattr(j, "_job_id", None):
+                    batch_remote = self.work_dir / "jobs" / "batch"
+                    batch_local = log_dir.parent / "batch"
+                    print(
+                        "Fetching Batch Logs:\nfrom: ",
+                        batch_remote,
+                        "\nto: ",
+                        batch_local,
+                    )
+                    for suffix in (".o", ".e"):
+                        remote_batch = batch_remote / f"job_{j._job_id}{suffix}"
+                        local_batch = batch_local / f"job_{j._job_id}{suffix}"
+                        try:
+                            self.get(remote_batch, local_batch)
+                        except Exception as e:
+                            logger.debug(
+                                "Could not fetch batch log %s: %s",
+                                remote_batch,
+                                e,
+                            )
+                elif include_batch:
+                    logger.warning(
+                        "Job %s has no _job_id; skipping SLURM batch logs",
+                        j.name,
+                    )
+
+                if show:
+                    self._print_fetched_logs(
+                        job_name=j.name,
+                        log_dir=log_dir,
+                        include_batch=include_batch,
+                        job_id=getattr(j, "_job_id", None),
+                    )
+            except Exception as e:
+                logger.exception("Error fetching logs for job %s: %s", j.name, e)
+                raise
+        if single:
+            return result[jobs[0].name]
+        return result
+
+    def _print_fetched_logs(
+        self,
+        job_name: str,
+        log_dir: Path,
+        include_batch: bool,
+        job_id: Optional[str],
+    ) -> None:
+        """Print batch logs (if requested) and the latest task log file.
+
+        Order when include_batch: batch .o, batch .e, then highest-index task log.
+        """
+        log_path = Path(log_dir)
+
+        if include_batch and job_id:
+            batch_dir = log_path.parent / "batch"
+            for suffix, label in ((".o", "batch stdout"), (".e", "batch stderr")):
+                f = batch_dir / f"job_{job_id}{suffix}"
+                if f.exists():
+                    self._print_file_with_header(str(f), f"[{job_name}] {label}")
+
+        last_task = self._latest_task_log_path(log_path)
+        if last_task is not None:
+            self._print_file_with_header(
+                str(last_task),
+                f"[{job_name}] task log (highest index)",
+            )
+
+    @staticmethod
+    def _latest_task_log_path(log_dir: Union[str, Path]) -> Optional[Path]:
+        """Return path to the task log file with the highest index (task_N.txt or task_N.out)."""
+        log_path = Path(log_dir)
+        if not log_path.is_dir():
+            return None
+        best_index = -1
+        best_path = None
+        for pattern in ("task_*.txt", "task_*.out"):
+            for f in log_path.glob(pattern):
+                try:
+                    n = int(f.stem.rsplit("_", 1)[-1])
+                    if n > best_index:
+                        best_index = n
+                        best_path = f
+                except (ValueError, IndexError):
+                    continue
+        return best_path
+
+    @staticmethod
+    def _print_file_with_header(path: str, header: str) -> None:
+        """Print a file's contents with a clear header."""
+        try:
+            text = Path(path).read_text(errors="replace")
+        except OSError as e:
+            print(f"--- {header} (could not read: {e}) ---")
+            return
+        print(f"\n{'='*60}\n{header}\n{path}\n{'='*60}\n{text}\n")
 
     def download_record_files(self, records: dict, project_dir: Union[str, Path]):
         """Download records from Stampede3.
@@ -964,12 +1102,9 @@ class Stampede3Site(BaseSite):
         remote_path = Path(remote_path)
 
         try:
-            parent_path = str(local_path.parent)
-            self.run_login(f"mkdir -p {parent_path}")
-
+            local_path.parent.mkdir(parents=True, exist_ok=True)
             if self.transfer_method == "sftp":
                 logger.debug("Transferring %s to %s (SFTP)", remote_path, local_path)
-                # Use SFTP through existing connection
                 sftp = self.login_client.open_sftp()
                 try:
                     if remote_path.is_dir():
@@ -1178,7 +1313,7 @@ class Stampede3Site(BaseSite):
         env_dir = self._FS_dir / "src/frequensolve/orchestrator/templates"
         env = Environment(
             loader=FileSystemLoader(env_dir),
-            keep_trailing_newline=True,
+            keep_trailing_newline=False,
         )
         template = env.get_template("sweep/sweep_SLURM.sh")
         script = template.render(
@@ -1201,14 +1336,10 @@ class Stampede3Site(BaseSite):
         n_nodes: int,
         stdout: str,
         name: str = "FrequenSolve",
-        procs_per_node: int = 2,
-        procs_per_task: int = 2,
         duration: str = "00-02:00:00",
-        queue: Optional[str] = None,
-        account: Optional[str] = None,
+        procs_per_node: int = 8,
         notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
         notify_email: Optional[str] = None,
-        run_path: Optional[str] = None,
         imaging_job: bool = False,
         **kwargs,
     ) -> str:
@@ -1227,34 +1358,42 @@ class Stampede3Site(BaseSite):
             **kwargs:       Additional keyword arguments
         """
 
-        if account is None:
-            account = self.config.account
-        if queue is None:
-            queue = self.config.queue
+        # Unpack keyword arguments
+        queue = str(kwargs.pop("queue", self.config.queue))
         config = Stampede3Config(queue)
-
-        # Check that job fits in queue limits
+        account = str(kwargs.pop("account", self.config.account))
+        run_path = str(kwargs.pop("run_path", self.work_dir))
+        mem_cushion = float(kwargs.pop("mem_cushion", 0.85))
+        min_ranks = int(kwargs.pop("min_ranks", 1))
+        round_to = int(kwargs.pop("round_to", 1))
+        cap_fraction = float(kwargs.pop("cap_fraction", 1.0))
+        tail_threshold = int(kwargs.pop("tail_threshold", 8))
+        boost_max_factor = float(kwargs.pop("boost_max_factor", 8.0))
+        sizing_json = kwargs.pop("sizing_json", None)
+        proc_memory = (config.memory_per_node / procs_per_node) / 1024.0
         duration = config.validate_request(n_nodes, n_nodes * procs_per_node, duration)
 
-        if run_path is None:
-            run_path = self.work_dir
-
-        # Load and populate Jinja2 template
         env_dir = self._FS_dir / "src/frequensolve/orchestrator/templates"
         env = Environment(
             loader=FileSystemLoader(env_dir),
-            keep_trailing_newline=True,
+            keep_trailing_newline=False,
         )
-        template = env.get_template("sweep/sweep_SLURM.sh")
+        template = env.get_template("sweep/adaptive_sweep.sh")
         script = template.render(
             batch_job=True,
             name=name,
             dir_out=stdout,
+            proc_memory=proc_memory,
+            mem_cushion=mem_cushion,
+            min_ranks=min_ranks,
+            round_to=round_to,
+            cap_fraction=cap_fraction,
+            tail_threshold=tail_threshold,
+            boost_max_factor=boost_max_factor,
             n_nodes=n_nodes,
             n_procs=n_nodes * procs_per_node,
             n_threads=config.cores_per_node // procs_per_node,
             n_tasks=n_tasks,
-            procs_per_task=procs_per_task,
             duration=duration,
             queue=queue,
             account=account,
@@ -1262,6 +1401,7 @@ class Stampede3Site(BaseSite):
             mpi=self.mpi_cmd,
             executable=self.executable,
             fs_dir=str(Path(self.executable).parent),
+            **({"sizing_json": sizing_json} if sizing_json is not None else {}),
             **({"run_path": run_path} if run_path is not None else {}),
             **({"notify_on": notify_on.upper()} if notify_on is not None else {}),
             **({"notify_email": notify_email} if notify_email is not None else {}),

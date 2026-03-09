@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union
 from warnings import warn
 
+from frequensolve.orchestrator.sites.aws import AWSSite
 from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.project.migrate_version import Version
 from frequensolve.project.workflows import BaseWorkflow
@@ -148,10 +149,14 @@ class Project:
         if HAS_LOCAL_SITE and isinstance(site, LocalSite):
             return
 
-        # Use project directory name (e.g., "ex_01") as the base remote path
-        # This matches how jobs determine the project name in AWSSite.submit()
-        project_dir_name = Path(self.path).name
-        remote = site.work_dir / project_dir_name
+        # TODO: there's a conflict here, HPC sites want just the work_dir specified
+        if isinstance(site, AWSSite):
+            # Use project directory name (e.g., "ex_01") as the base remote path
+            # This matches how jobs determine the project name in AWSSite.submit()
+            project_dir_name = Path(self.path).name
+            remote = site.work_dir / project_dir_name
+        else:
+            remote = site.work_dir
         proj_file = (Path(self.path) / f"{self.name}").with_suffix(".json")
         sim_dir = Path(self.path) / "simulations"
 

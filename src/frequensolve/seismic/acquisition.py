@@ -104,6 +104,12 @@ class Acquisition:
         direction: Optional[np.ndarray] = None,
         domain: Optional[int] = None,
     ):
+        if isinstance(coords, list):
+            coords = np.array(coords)
+        if isinstance(weights, list):
+            weights = np.array(weights)
+        if isinstance(direction, list):
+            direction = np.array(direction)
         isrc = len(self.source_groups)
         if direction is None:
             direction = np.ones((len(coords), 1))

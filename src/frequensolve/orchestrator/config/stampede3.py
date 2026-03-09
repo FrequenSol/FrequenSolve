@@ -189,6 +189,10 @@ class Stampede3Config:
         return self._base_config._memory_per_node
 
     @property
+    def memory_per_core(self):
+        return self._base_config._memory_per_node / self.cores_per_node
+
+    @property
     def account(self):
         return self._base_config._account
 
