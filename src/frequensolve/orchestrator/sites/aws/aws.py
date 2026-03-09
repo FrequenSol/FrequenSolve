@@ -366,6 +366,24 @@ class AWSSite(BaseSite):
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
 
+    def _refresh_s3_credentials(self) -> None:
+        """Refresh session and S3 client with fresh Identity Pool credentials.
+
+        Call when credentials may have expired (e.g. after a long simulation).
+        Only applies when using Cognito authentication.
+        """
+        if not hasattr(self, "cognito_auth") or self.cognito_auth is None:
+            return
+        credentials = self.cognito_auth.get_aws_credentials()
+        self.session = boto3.Session(
+            aws_access_key_id=credentials["AccessKeyId"],
+            aws_secret_access_key=credentials["SecretKey"],
+            aws_session_token=credentials["SessionToken"],
+            region_name=self.config.region,
+        )
+        self.s3_client = self.session.client("s3", region_name=self.config.region)
+        logger.debug("Refreshed S3 credentials from Identity Pool")
+
     @property
     def work_dir(self) -> Path:
         """Get the S3 work directory as a Path-like object.
@@ -1001,50 +1019,68 @@ class AWSSite(BaseSite):
         local_path: Union[str, Path],
         overwrite: bool = False,
     ):
-        """Transfer files from S3 path to local path using aws s3 sync.
+        """Transfer files from S3 path to local path using boto3.
+
+        Uses the site's Cognito-backed S3 client (not AWS CLI) so that
+        temporary credentials from the Identity Pool are used. The AWS CLI
+        subprocess would use default credentials (e.g. IAM user) which may
+        not have access to the Amplify-deployed storage bucket.
+
+        Refreshes credentials automatically if they expired (e.g. after a
+        long simulation wait). Identity Pool credentials typically expire
+        in 1 hour.
 
         Args:
             s3_path: S3 path to transfer from (e.g., 's3://bucket/key' or 's3://bucket/key/')
             local_path: Local path to transfer to
-            overwrite: Overwrite existing files (not used with aws s3 sync as it always overwrites)
+            overwrite: Overwrite existing files (not used; always overwrites)
         """
         logger.debug("Attempting to transfer from %s to %s", s3_path, local_path)
 
         local_path = Path(local_path)
-        s3_path = str(s3_path)
+        s3_path_str = str(s3_path)
+
+        def _do_get() -> None:
+            # Parse s3://bucket/key/ format
+            if not s3_path_str.startswith("s3://"):
+                raise ValueError(f"Invalid S3 path: {s3_path_str}")
+            path_parts = s3_path_str[5:].split("/", 1)  # Remove 's3://'
+            bucket = path_parts[0]
+            prefix = path_parts[1].rstrip("/") + "/" if len(path_parts) > 1 else ""
+
+            # Create local directory
+            local_path.mkdir(parents=True, exist_ok=True)
+
+            # List and download objects using Cognito-backed s3_client
+            paginator = self.s3_client.get_paginator("list_objects_v2")
+            downloaded = 0
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    if key.endswith("/"):
+                        continue
+                    # Preserve relative path under prefix
+                    rel_key = key[len(prefix) :] if prefix else key
+                    local_file = local_path / rel_key
+                    local_file.parent.mkdir(parents=True, exist_ok=True)
+                    self.s3_client.download_file(bucket, key, str(local_file))
+                    downloaded += 1
+
+            logger.debug("Transfer completed successfully (%d files)", downloaded)
 
         try:
-            # Create parent directory on local if it doesn't exist
-            parent_path = str(local_path.parent)
-            os.makedirs(parent_path, exist_ok=True)
-
-            # Use aws s3 sync command
-            # The sync command will:
-            # - Download all files from the S3 path to the local path
-            # - Automatically handle directories vs files
-            # - Skip files that are already up-to-date
-            # - Overwrite files that have changed
-            sync_cmd = ["aws", "s3", "sync", s3_path, str(local_path)]
-
-            logger.debug("aws s3 sync command: %s", " ".join(sync_cmd))
-
-            result = subprocess.run(
-                sync_cmd,
-                capture_output=True,
-                text=True,
-                check=True,  # This will raise CalledProcessError if the command fails
-            )
-
-            if result.stdout:
-                logger.debug("aws s3 sync output: %s", result.stdout.strip())
-
-            logger.debug("Transfer completed successfully")
-
-        except subprocess.CalledProcessError as e:
-            logger.error(
-                "aws s3 sync failed with return code %d: %s", e.returncode, e.stderr
-            )
-            raise RuntimeError(f"aws s3 sync failed: {e.stderr}")
+            _do_get()
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code in ("ExpiredToken", "InvalidToken") and hasattr(
+                self, "cognito_auth"
+            ):
+                logger.info("Credentials expired, refreshing from Identity Pool...")
+                self._refresh_s3_credentials()
+                _do_get()
+            else:
+                logger.error("S3 transfer failed: %s", e)
+                raise RuntimeError(f"S3 transfer failed: {e}") from e
         except Exception as e:
             logger.exception("Error during S3 file transfer: %s", str(e))
             raise

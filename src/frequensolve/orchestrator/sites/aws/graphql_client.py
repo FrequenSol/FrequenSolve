@@ -95,13 +95,14 @@ class GraphQLClient:
         accountId (explicit), stackType, and status. This ensures the Python
         client only considers stacks that submitJob will accept.
         """
+        # ROLLBACK_COMPLETE = failed initial creation, no usable resources.
+        # Only CREATE_COMPLETE, UPDATE_COMPLETE, UPDATE_ROLLBACK_COMPLETE are usable.
         base_filter = {
             "stackType": {"eq": "storage"},
             "or": [
                 {"status": {"eq": "CREATE_COMPLETE"}},
                 {"status": {"eq": "UPDATE_COMPLETE"}},
                 {"status": {"eq": "UPDATE_ROLLBACK_COMPLETE"}},
-                {"status": {"eq": "ROLLBACK_COMPLETE"}},
             ],
         }
         if account_id:
@@ -238,8 +239,7 @@ class GraphQLClient:
                     or: [
                         { status: { eq: "CREATE_COMPLETE" } },
                         { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
-                        { status: { eq: "ROLLBACK_COMPLETE" } }
+                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } }
                     ]
                 }) {
                     items {
@@ -279,7 +279,8 @@ class GraphQLClient:
         import json
 
         # Query storage stack
-        # Accept any "_COMPLETE" status except "DELETE_COMPLETE"
+        # Only usable states: CREATE_COMPLETE, UPDATE_COMPLETE, UPDATE_ROLLBACK_COMPLETE.
+        # ROLLBACK_COMPLETE = failed initial creation, no usable resources.
         storage_query = """
             query ListStorageStacks {
                 listStacks(filter: {
@@ -287,8 +288,7 @@ class GraphQLClient:
                     or: [
                         { status: { eq: "CREATE_COMPLETE" } },
                         { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
-                        { status: { eq: "ROLLBACK_COMPLETE" } }
+                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } }
                     ]
                 }) {
                     items {
@@ -302,7 +302,8 @@ class GraphQLClient:
         """
 
         # Query compute stack
-        # Accept any "_COMPLETE" status except "DELETE_COMPLETE"
+        # Only usable states: CREATE_COMPLETE, UPDATE_COMPLETE, UPDATE_ROLLBACK_COMPLETE.
+        # ROLLBACK_COMPLETE = failed initial creation, no usable resources.
         compute_query = """
             query ListComputeStacks {
                 listStacks(filter: {
@@ -310,8 +311,7 @@ class GraphQLClient:
                     or: [
                         { status: { eq: "CREATE_COMPLETE" } },
                         { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
-                        { status: { eq: "ROLLBACK_COMPLETE" } }
+                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } }
                     ]
                 }) {
                     items {
