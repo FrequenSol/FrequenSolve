@@ -138,6 +138,10 @@ class Project:
             workflows=old.workflows,
             extras=old.extras,
         )
+        # Update project_path on simulations so they save to the new location
+        for sim in new.simulations:
+            if hasattr(sim, "project_path"):
+                sim.project_path = dest
         new.save()
         del new, old
 
@@ -180,8 +184,11 @@ class Project:
 
                     # Create temporary file with modified project_path
                     if "project_path" in sim_data:
-                        rel_path = Path(sim._file).relative_to(self.path)
+                        # Use sim name for path; sim._file may be outside self.path
+                        # (e.g. when project was copied from another directory)
+                        rel_path = Path("simulations") / sim.name / f"{sim.name}.json"
                         temp_file = temp_dir / rel_path
+                        temp_file.parent.mkdir(parents=True, exist_ok=True)
                         sim_data["project_path"] = str(remote)
                         with open(temp_file, "w") as f:
                             json.dump(sim_data, f, cls=CustomJSONEncoder, indent=3)

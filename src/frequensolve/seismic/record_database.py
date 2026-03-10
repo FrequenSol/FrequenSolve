@@ -65,9 +65,30 @@ class RecordDatabase:
         records = job.records
         proj_path = Path(job.project_path).resolve()
 
+        all_files = records["files"]
         f_map = records["frequencies"]
+
+        # Filter to only files that exist (e.g. if a frequency job failed, we may have
+        # fewer files than the job expects)
+        files = [f for f in all_files if os.path.exists(f)]
+        if len(files) < len(all_files):
+            missing = set(all_files) - set(files)
+            warnings.warn(
+                f"Only {len(files)} of {len(all_files)} receiver files found; "
+                f"missing {len(missing)} file(s). Using available files only."
+            )
+            # Filter f_map to match existing files (keys are 1-based indices)
+            existing_keys = {
+                i + 1 for i, f in enumerate(all_files) if os.path.exists(f)
+            }
+            f_map = {k: v for k, v in f_map.items() if k in existing_keys}
+
+        if not files:
+            raise FileNotFoundError(
+                f"No receiver files found. Expected files like {all_files[0] if all_files else 'receivers_1.h5'}"
+            )
+
         for key, value in f_map.items():
-            f_map[key] = value
             if isinstance(value, complex):
                 f_map[key] = value.real
         f_list = np.sort(list(f_map.values()))
@@ -85,8 +106,6 @@ class RecordDatabase:
             "f_max": f_max,
             "f_map": f_map,
         }
-
-        files = records["files"]
         db = cls(metadata=meta, records=files, upscale=upscale)
         db.consolidate_h5()
         return db

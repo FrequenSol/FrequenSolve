@@ -395,6 +395,54 @@ class AWSSite(BaseSite):
         # This is used by project._transfer() to construct remote paths
         return Path(self.config.s3_prefix)
 
+    @property
+    def provisioned(self) -> bool:
+        """Check if the site is provisioned.
+
+        AWS provisions compute resources automatically on demand when jobs are
+        submitted. This property always returns True to maintain interface
+        compatibility with other sites (e.g. HPC sites that require explicit
+        provisioning before job submission).
+        """
+        return True
+
+    def fetch_paraview(
+        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
+    ) -> None:
+        """Get ParaView files from S3.
+
+        Downloads the results/ParaView/ directory for the job from the
+        project's S3 bucket to the local project path.
+
+        Args:
+            job: A SimulationJob object.
+            path: Optional local path to save results. If None, uses
+                job.project_path.
+        """
+        if path is None:
+            path = job.project_path
+        else:
+            path = Path(path)
+
+        project_name = job.simulation._remote_path.parts[0]
+        simulation_name = job.simulation.name
+        job_name = job.name
+        results_paraview_path = f"jobs/{simulation_name}/{job_name}/results/ParaView"
+        s3_results_path = (
+            f"s3://{self.config.s3_bucket}/{project_name}/{results_paraview_path}"
+        )
+        local_results_path = path / results_paraview_path
+
+        try:
+            logger.info(
+                "Fetching ParaView outputs from %s to %s",
+                s3_results_path,
+                local_results_path,
+            )
+            self.get(s3_results_path, local_results_path)
+        except Exception as e:
+            logger.exception("Error downloading ParaView outputs: %s", str(e))
+
     def _validate_config(self):
         """Validate AWS configuration."""
         try:
@@ -576,7 +624,13 @@ class AWSSite(BaseSite):
         project._transfer(self)
         logger.info(f"✓ Project '{project.name}' synced to S3")
 
-    def submit(self, job: SimulationJob, **kwargs) -> str:
+    def submit(
+        self,
+        job: SimulationJob,
+        vcpu: int = 4,
+        memory: int = 2048 * 4,
+        **kwargs,
+    ) -> str:
         """Submit a simulation job.
 
         Automatically creates compute stack if it doesn't exist.
@@ -586,7 +640,9 @@ class AWSSite(BaseSite):
 
         Args:
             job: The task to submit.
-            **kwargs: Additional job parameters (vcpu, memory, name, description).
+            vcpu: Number of vCPUs for the resource planner phase (default: 4).
+            memory: Memory in MB for the resource planner phase (default: 8192).
+            **kwargs: Additional job parameters (name, description).
 
         Returns:
             Simulation ID (for GraphQL path) or job ID (for REST API path).
@@ -641,8 +697,8 @@ class AWSSite(BaseSite):
 
                 result = self.graphql_client.submit_job(
                     job_file_s3_key=str(s3_job_key),
-                    vcpu=kwargs.get("vcpu"),
-                    memory=kwargs.get("memory"),
+                    vcpu=vcpu,
+                    memory=memory,
                     job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
                 )
 
@@ -662,12 +718,9 @@ class AWSSite(BaseSite):
                     "name": kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
                     "description": kwargs.get("description", ""),
                     "job_s3_key": str(s3_job_key),
+                    "vcpu": vcpu,
+                    "memory": memory,
                 }
-
-                if "vcpu" in kwargs:
-                    api_data["vcpu"] = kwargs["vcpu"]
-                if "memory" in kwargs:
-                    api_data["memory"] = kwargs["memory"]
 
                 # Make API request to submit the job
                 headers = {}
@@ -858,7 +911,7 @@ class AWSSite(BaseSite):
             warnings.warn(f"API request failed: {e}")
             return {}
 
-    def wait_for_completion(
+    def wait_completion(
         self, simulation_id: str, poll_interval: float = 10, timeout: int = 3600
     ) -> str:
         """Wait for simulation completion by polling status.
@@ -1096,5 +1149,5 @@ class AWSSite(BaseSite):
 #     # print(f"Submitted simulation: {simulation_id}")
 #     #
 #     # # Wait for completion
-#     # status = site.wait_for_completion(simulation_id, poll_interval=30, timeout=3600)
+#     # status = site.wait_completion(simulation_id, poll_interval=30, timeout=3600)
 #     # print(f"Simulation completed with status: {status}")

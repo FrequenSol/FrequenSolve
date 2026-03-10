@@ -313,6 +313,17 @@ class CoordsFromFile(ReceiverCoords):
                 dset = "coords"
         return cls(file=Path(file), format=format, dset=dset)
 
+    def _set_path(self, proj_path: Path, rel_path: Path):
+        """Update file path when project path changes (e.g. Project.copy)."""
+        if self._proj_path is not None and self.file.is_absolute():
+            try:
+                rel = self.file.relative_to(self._proj_path)
+                self.file = (proj_path / rel).resolve()
+            except ValueError:
+                pass
+        self._proj_path = proj_path
+        self._rel_path = rel_path
+
     @property
     def size(self) -> int:
         """Get the total number of receivers.

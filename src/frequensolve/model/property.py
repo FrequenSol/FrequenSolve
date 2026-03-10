@@ -298,11 +298,16 @@ class Property:
 
     def _like(self, da: xr.DataArray) -> xr.DataArray:
         """Interpolate properties onto a new grid."""
-        # if _dims_in(da.dims, self.darr.dims):
-        #    return self.darr.interp(coords=da.coords)
-        # else:
         if self.is_remote:
             raise ValueError(f"Cannot interpolate remote property: {self.remote_path}")
+
+        if self.is_constant:
+            dims = da.dims
+            coords = {dim: da.coords[dim] for dim in dims}
+            shape = tuple(len(coords[dim]) for dim in dims)
+            return xr.DataArray(
+                data=np.full(shape, self.darr.values), dims=dims, coords=coords
+            )
 
         dims1 = set(self.darr.dims)
         dims2 = set(da.dims)
@@ -364,7 +369,11 @@ class Property:
 
             da = von_karman_stochastic_field(grid, mean, std, k0, nu, anisotropy, seed)
 
-            if _coords_compatible(self.darr.coords, grid.coords):
+            # Use in-place only when coords match AND dimensions match (in-place ops
+            # cannot change dimensions, e.g. constant scalar -> gridded array).
+            coords_ok = _coords_compatible(self.darr.coords, grid.coords)
+            dims_ok = self.darr.dims == da.dims
+            if coords_ok and dims_ok:
                 if type == "additive":
                     self.darr += da
                 elif type == "multiplicative":
