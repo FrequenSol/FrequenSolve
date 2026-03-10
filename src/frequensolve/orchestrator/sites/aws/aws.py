@@ -789,7 +789,7 @@ class AWSSite(BaseSite):
 
                 # TODO: Copy job, simulation file to database so that it can be read independently.
 
-                db = RecordDatabase.from_results(job.records, path.resolve(), upscale)
+                db = RecordDatabase.from_job(job, upscale)
                 db_map[job.name] = db
 
             except Exception as e:
