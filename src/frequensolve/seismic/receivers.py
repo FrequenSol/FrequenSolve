@@ -544,7 +544,7 @@ class CoordsArray(ReceiverCoords):
     @classmethod
     def from_dict(cls, data: Dict) -> "CoordsArray":
         coords = np.array(data["coords"])
-        return cls(name=data["name"], coords=coords)
+        return cls(coordinates=coords)
 
 
 # ----------------------------------------------------------------------

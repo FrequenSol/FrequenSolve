@@ -57,7 +57,7 @@ class ImageDatabase:
 
     @property
     def smoothed_images(self):
-        return self.read_images("smooth")
+        return self.read_images("phi")
 
     def read_images(self, group):
         import h5py

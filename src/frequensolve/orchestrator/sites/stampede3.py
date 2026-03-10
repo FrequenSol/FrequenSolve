@@ -986,62 +986,6 @@ class Stampede3Site(BaseSite):
             return result[jobs[0].name]
         return result
 
-    def _print_fetched_logs(
-        self,
-        job_name: str,
-        log_dir: Path,
-        include_batch: bool,
-        job_id: Optional[str],
-    ) -> None:
-        """Print batch logs (if requested) and the latest task log file.
-
-        Order when include_batch: batch .o, batch .e, then highest-index task log.
-        """
-        log_path = Path(log_dir)
-
-        if include_batch and job_id:
-            batch_dir = log_path.parent / "batch"
-            for suffix, label in ((".o", "batch stdout"), (".e", "batch stderr")):
-                f = batch_dir / f"job_{job_id}{suffix}"
-                if f.exists():
-                    self._print_file_with_header(str(f), f"[{job_name}] {label}")
-
-        last_task = self._latest_task_log_path(log_path)
-        if last_task is not None:
-            self._print_file_with_header(
-                str(last_task),
-                f"[{job_name}] task log (highest index)",
-            )
-
-    @staticmethod
-    def _latest_task_log_path(log_dir: Union[str, Path]) -> Optional[Path]:
-        """Return path to the task log file with the highest index (task_N.txt or task_N.out)."""
-        log_path = Path(log_dir)
-        if not log_path.is_dir():
-            return None
-        best_index = -1
-        best_path = None
-        for pattern in ("task_*.txt", "task_*.out"):
-            for f in log_path.glob(pattern):
-                try:
-                    n = int(f.stem.rsplit("_", 1)[-1])
-                    if n > best_index:
-                        best_index = n
-                        best_path = f
-                except (ValueError, IndexError):
-                    continue
-        return best_path
-
-    @staticmethod
-    def _print_file_with_header(path: str, header: str) -> None:
-        """Print a file's contents with a clear header."""
-        try:
-            text = Path(path).read_text(errors="replace")
-        except OSError as e:
-            print(f"--- {header} (could not read: {e}) ---")
-            return
-        print(f"\n{'='*60}\n{header}\n{path}\n{'='*60}\n{text}\n")
-
     def download_record_files(self, records: dict, project_dir: Union[str, Path]):
         """Download records from Stampede3.
 
@@ -1363,7 +1307,7 @@ class Stampede3Site(BaseSite):
         config = Stampede3Config(queue)
         account = str(kwargs.pop("account", self.config.account))
         run_path = str(kwargs.pop("run_path", self.work_dir))
-        mem_cushion = float(kwargs.pop("mem_cushion", 0.85))
+        mem_cushion = float(kwargs.pop("mem_cushion", 1.5))
         min_ranks = int(kwargs.pop("min_ranks", 1))
         round_to = int(kwargs.pop("round_to", 1))
         cap_fraction = float(kwargs.pop("cap_fraction", 1.0))
@@ -1448,6 +1392,62 @@ class Stampede3Site(BaseSite):
             mpi=self.config.mpi_wrapper,
             **({"notify_email": notify_email} if notify_email is not None else {}),
         )
+
+    def _print_fetched_logs(
+        self,
+        job_name: str,
+        log_dir: Path,
+        include_batch: bool,
+        job_id: Optional[str],
+    ) -> None:
+        """Print batch logs (if requested) and the latest task log file.
+
+        Order when include_batch: batch .o, batch .e, then highest-index task log.
+        """
+        log_path = Path(log_dir)
+
+        if include_batch and job_id:
+            batch_dir = log_path.parent / "batch"
+            for suffix, label in ((".o", "batch stdout"), (".e", "batch stderr")):
+                f = batch_dir / f"job_{job_id}{suffix}"
+                if f.exists():
+                    self._print_file_with_header(str(f), f"[{job_name}] {label}")
+
+        last_task = self._latest_task_log_path(log_path)
+        if last_task is not None:
+            self._print_file_with_header(
+                str(last_task),
+                f"[{job_name}] task log (highest index)",
+            )
+
+    @staticmethod
+    def _latest_task_log_path(log_dir: Union[str, Path]) -> Optional[Path]:
+        """Return path to the task log file with the highest index (task_N.txt or task_N.out)."""
+        log_path = Path(log_dir)
+        if not log_path.is_dir():
+            return None
+        best_index = -1
+        best_path = None
+        for pattern in ("task_*.txt", "task_*.out"):
+            for f in log_path.glob(pattern):
+                try:
+                    n = int(f.stem.rsplit("_", 1)[-1])
+                    if n > best_index:
+                        best_index = n
+                        best_path = f
+                except (ValueError, IndexError):
+                    continue
+        return best_path
+
+    @staticmethod
+    def _print_file_with_header(path: str, header: str) -> None:
+        """Print a file's contents with a clear header."""
+        try:
+            text = Path(path).read_text(errors="replace")
+        except OSError as e:
+            print(f"--- {header} (could not read: {e}) ---")
+            return
+        print(f"\n{'='*60}\n{header}\n{path}\n{'='*60}\n{text}\n")
 
     def _get_job_host(self, job_id: int) -> str:
         """Get the job host."""

@@ -1,18 +1,12 @@
 import json
 import os
 import warnings
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Optional
 
-import h5py
 import numpy as np
 from xarray import DataArray
 
 from frequensolve.seismic.receivers import ReceiverFiber, ReceiverGroup
 from frequensolve.seismic.sources import SourceGroup
-from frequensolve.seismic.wavelet import Wavelet
-from frequensolve.simulation.sampling import Sampling, UniformSweepSampling
 
 try:
     import pyfftw
