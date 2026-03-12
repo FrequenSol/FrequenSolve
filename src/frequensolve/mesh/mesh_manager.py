@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import copy2
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Union
 
 from .mesh import *  # noqa
 from .mesh_generators import *  # noqa
@@ -49,8 +49,6 @@ class MeshAdaptor:
     """
 
     min_epw: Union[float, Dict[str, float]]
-    adapt_sources: Optional[int] = None  # 2
-    adapt_receivers: Optional[int] = None  # 0
     jump_tolerance: Optional[float] = None  # 0.2
     jump_factor: Optional[float] = None  # 1.0
     smooth_refs: Optional[bool] = None  # False
@@ -61,12 +59,6 @@ class MeshAdaptor:
     def __dict__(self) -> Dict:
         dict = {
             "min_epw": self.min_epw,
-            **({"adapt_sources": self.adapt_sources} if self.adapt_sources else {}),
-            **(
-                {"adapt_receivers": self.adapt_receivers}
-                if self.adapt_receivers
-                else {}
-            ),
             **({"jump_tolerance": self.jump_tolerance} if self.jump_tolerance else {}),
             **({"jump_factor": self.jump_factor} if self.jump_factor else {}),
             **({"smooth_refs": self.smooth_refs} if self.smooth_refs else {}),
@@ -80,13 +72,12 @@ class MeshAdaptor:
     def from_dict(cls, data: Dict) -> "MeshAdaptor":
         return cls(
             min_epw=data.pop("min_epw"),
-            adapt_sources=data.pop("adapt_sources", None),
-            adapt_receivers=data.pop("adapt_receivers", None),
             jump_tolerance=data.pop("jump_tolerance", None),
             jump_factor=data.pop("jump_factor", None),
             smooth_refs=data.pop("smooth_refs", None),
             f_adapt=data.pop("f_adapt", None),
             adapt_order=data.pop("adapt_order", False),
+            kwargs=data,
         )
 
 
@@ -112,8 +103,6 @@ class MeshManager:
     def set_adapt(
         self,
         min_epw: Union[float, Dict[str, float]],
-        adapt_sources: Optional[int] = None,
-        adapt_receivers: Optional[int] = None,
         jump_tolerance: Optional[float] = None,
         jump_factor: Optional[float] = None,
         smooth_refs: Optional[bool] = None,
@@ -134,14 +123,12 @@ class MeshManager:
         """
         self.adapt = MeshAdaptor(
             min_epw=min_epw,
-            adapt_sources=adapt_sources,
-            adapt_receivers=adapt_receivers,
             jump_tolerance=jump_tolerance,
             jump_factor=jump_factor,
             smooth_refs=smooth_refs,
             f_adapt=f_adapt,
             adapt_order=adapt_order,
-            **kwargs,
+            kwargs=kwargs,
         )
 
     def set_parallel(

@@ -24,6 +24,7 @@ __all__ = [
     "ReceiverNodeArray",
     "ReceiverNode",
     "ReceiverFiber",
+    "ReceiverFiberOld",
 ]
 
 
@@ -140,6 +141,32 @@ class ReceiverFiber(ReceiverDevice):
 
     @classmethod
     def from_dict(cls, data: dict) -> "ReceiverFiber":
+        return cls(
+            name=data["name"],
+            components=[ReceiverComponent.from_dict(c) for c in data["components"]],
+            response=data.get("response"),
+            L_gauge=data["L_gauge"],
+            n_gauge=data["n_gauge"],
+            radius=data.get("radius"),
+            pitch=data.get("pitch"),
+        )
+
+
+@register_class
+@dataclass(kw_only=True)
+class ReceiverFiberOld(ReceiverFiber):
+    """Same as ReceiverFiber, but uses old API.
+
+    In particular, guages are centered on coords, with specified gauge length."""
+
+    def __dict__(self) -> dict:
+        return {
+            "_type": self.__class__.__name__,
+            **super().__dict__(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ReceiverFiberOld":
         return cls(
             name=data["name"],
             components=[ReceiverComponent.from_dict(c) for c in data["components"]],
