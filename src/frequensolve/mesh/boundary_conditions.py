@@ -99,7 +99,7 @@ class BoundaryConditionManager:
             for boundary in overlap:
                 bc.boundaries.remove(boundary)
                 print_warn(
-                    f"Warning: Boundary {boundary} already assigned a boundary condition;"
+                    f"Boundary {boundary} already assigned a boundary condition; "
                     "duplicate definition has been ignored."
                 )
         self._boundaries.update(bc.boundaries)

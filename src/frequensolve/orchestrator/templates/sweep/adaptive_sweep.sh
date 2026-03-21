@@ -75,6 +75,7 @@ $mpi_exec -n $n_procs $executable -nthreads $n_threads -j $job_file --size
 export FS_JOB_FILE="$job_file"
 export DIR_OUT="$dir_out"
 export EXE="$executable"
+export MPI_EXEC="$mpi_exec"
 export TOTAL_RANKS="$TOTAL_RANKS"
 export OMP_THREADS="$n_threads"
 export MEM_PER_RANK_GIB="$MEM_PER_RANK_GIB"
@@ -84,7 +85,6 @@ export CAP_FRACTION="$CAP_FRACTION"
 export MEM_CUSHION="$MEM_CUSHION"
 export BOOST_MAX_FACTOR="$BOOST_MAX_FACTOR"
 
-
 python3 - <<'PY'
 import json, math, os, re, subprocess, time
 from collections import deque
@@ -92,19 +92,19 @@ from collections import deque
 # --------------------------
 # Read policy knobs / inputs
 # --------------------------
-job_file   = os.environ["FS_JOB_FILE"]
-dir_out      = os.environ["DIR_OUT"]
-exe          = os.environ["EXE"]
-total_ranks  = int(os.environ.get("TOTAL_RANKS", "1"))
-omp_threads  = int(os.environ.get("OMP_THREADS", "1"))
+job_file      = os.environ["FS_JOB_FILE"]
+dir_out       = os.environ["DIR_OUT"]
+exe           = os.environ["EXE"]
+mpi_exec      = os.environ.get("MPI_EXEC", "ibrun")
+total_ranks   = int(os.environ.get("TOTAL_RANKS", "1"))
+omp_threads   = int(os.environ.get("OMP_THREADS", "1"))
+mem_per_rank  = float(os.environ["MEM_PER_RANK_GIB"])  # GiB per MPI rank from driver
 
-mem_per_rank = float(os.environ["MEM_PER_RANK_GIB"])  # GiB per MPI rank from driver
-
-MIN_RANKS       = int(os.environ.get("MIN_RANKS", "1"))
-ROUND_TO        = int(os.environ.get("ROUND_TO", "2"))
-CAP_FRACTION    = float(os.environ.get("CAP_FRACTION", "1.0"))
-MEM_CUSHION     = float(os.environ.get("MEM_CUSHION", "1.5"))
-BOOST_MAX_FACTOR= float(os.environ.get("BOOST_MAX_FACTOR", "4.0"))
+MIN_RANKS        = int(os.environ.get("MIN_RANKS", "1"))
+ROUND_TO         = int(os.environ.get("ROUND_TO", "2"))
+CAP_FRACTION     = float(os.environ.get("CAP_FRACTION", "1.0"))
+MEM_CUSHION      = float(os.environ.get("MEM_CUSHION", "1.5"))
+BOOST_MAX_FACTOR = float(os.environ.get("BOOST_MAX_FACTOR", "4.0"))
 
 sizing_json = os.environ.get("FS_SIZING_JSON")
 print(f"[scheduler] sizing_json={sizing_json}", flush=True)
@@ -116,7 +116,7 @@ print(f"[scheduler] sizing_json={sizing_json}", flush=True)
 max_ranks_per_task = max(1, int(total_ranks * CAP_FRACTION))
 
 print(f"[scheduler] total_ranks={total_ranks} omp_threads={omp_threads}", flush=True)
-print(f"[scheduler] mem_per_rank={mem_per_rank:.3f} GiB  cushion={MEM_CUSHION}", flush=True)
+print(f"[scheduler] mem_per_rank={mem_per_rank:.3f} GiB cushion={MEM_CUSHION}", flush=True)
 print(f"[scheduler] min_ranks={MIN_RANKS} round_to={ROUND_TO} cap_fraction={CAP_FRACTION}", flush=True)
 print(f"[scheduler] boost_max_factor={BOOST_MAX_FACTOR}", flush=True)
 
@@ -124,17 +124,20 @@ print(f"[scheduler] boost_max_factor={BOOST_MAX_FACTOR}", flush=True)
 # Helpers
 # --------------------------
 def parse_mem_to_gib(s: str) -> float:
-    # Examples: "852.6 MB", "1.1 GB", "3.9 GB"
     s = s.strip()
     m = re.match(r"([0-9]*\.?[0-9]+)\s*(KB|MB|GB|TB)", s, re.I)
     if not m:
         raise ValueError(f"Unrecognized memory string: {s!r}")
     val = float(m.group(1))
     unit = m.group(2).upper()
-    if unit == "KB": return val / (1024**2)
-    if unit == "MB": return val / 1024
-    if unit == "GB": return val
-    if unit == "TB": return val * 1024
+    if unit == "KB":
+        return val / (1024 ** 2)
+    if unit == "MB":
+        return val / 1024
+    if unit == "GB":
+        return val
+    if unit == "TB":
+        return val * 1024
     raise ValueError(unit)
 
 def round_up(x: int, base: int) -> int:
@@ -143,7 +146,6 @@ def round_up(x: int, base: int) -> int:
     return int(math.ceil(x / base) * base)
 
 def choose_base_ranks(task_mem_gib: float) -> int:
-    # Memory-driven rank sizing (deterministic, no SLURM env needed)
     r = int(math.ceil(task_mem_gib * MEM_CUSHION / mem_per_rank))
     r = max(r, MIN_RANKS)
     r = min(r, max_ranks_per_task, total_ranks)
@@ -167,6 +169,48 @@ def load_task_mems():
         mems.append(parse_mem_to_gib(t["memory"]))
     return mems
 
+def total_free_ranks(intervals):
+    return sum(length for _, length in intervals)
+
+def allocate_interval(intervals, ranks: int):
+    """
+    First-fit allocation from a list of (start, length) free intervals.
+    Returns (offset, new_intervals) or (None, intervals) if no contiguous fit exists.
+    """
+    for i, (start, length) in enumerate(intervals):
+        if length >= ranks:
+            offset = start
+            new_intervals = list(intervals)
+            if length == ranks:
+                del new_intervals[i]
+            else:
+                new_intervals[i] = (start + ranks, length - ranks)
+            return offset, new_intervals
+    return None, intervals
+
+def free_interval(intervals, offset: int, ranks: int):
+    """
+    Insert (offset, ranks) and coalesce adjacent intervals.
+    """
+    merged = []
+    inserted = False
+    new_start = offset
+    new_end = offset + ranks
+
+    for start, length in sorted(intervals + [(offset, ranks)]):
+        end = start + length
+        if not merged:
+            merged.append([start, end])
+            continue
+
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1][1] = max(last_end, end)
+        else:
+            merged.append([start, end])
+
+    return [(start, end - start) for start, end in merged]
+
 # --------------------------
 # Load tasks
 # --------------------------
@@ -174,49 +218,55 @@ mem_gib = load_task_mems()
 n_tasks = len(mem_gib)
 print(f"[scheduler] tasks={n_tasks}", flush=True)
 
-# Largest-first reduces fragmentation and speeds up big tasks
+# Largest-first reduces fragmentation
 order = sorted(range(1, n_tasks + 1), key=lambda i: mem_gib[i - 1], reverse=True)
 queue = deque(order)
 
-running: list[tuple[subprocess.Popen, int, int, float]] = []  # (proc, ranks, task_id, mem_gib)
-free_ranks = total_ranks
+# running entries: (proc, offset, ranks, task_id, mem_gib)
+running = []
 
-def launch(task_id: int, ranks: int):
-    global free_ranks
+# Track actual free slot intervals in hostfile slot space
+free_intervals = [(0, total_ranks)]
+
+def launch(task_id: int, offset: int, ranks: int):
     out_path = os.path.join(dir_out, f"task_{task_id}.log")
     cmd = [
-        "{{mpi}}",
-        "--exclusive",
+        mpi_exec,
         "-n", str(ranks),
+        "-o", str(offset),
+        "task_affinity",
         exe,
         "-nthreads", str(omp_threads),
         "-j", job_file,
         "-i", str(task_id),
     ]
-    with open(out_path, "ab", buffering=0) as out:
+    out = open(out_path, "ab", buffering=0)
+    try:
         p = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT)
-    free_ranks -= ranks
+    except Exception:
+        out.close()
+        raise
+
     m = mem_gib[task_id - 1]
-    running.append((p, ranks, task_id, m))
-    print(f"[scheduler] launch task={task_id} mem≈{m:.2f}GiB ranks={ranks} free_ranks={free_ranks}", flush=True)
+    running.append((p, offset, ranks, task_id, m, out))
+    print(
+        f"[scheduler] launch task={task_id} mem≈{m:.2f}GiB "
+        f"offset={offset} ranks={ranks} free={total_free_ranks(free_intervals)} "
+        f"intervals={free_intervals}",
+        flush=True,
+    )
 
 # --------------------------
-# Scheduling loop (planned packing)
+# Scheduling loop
 # --------------------------
 while queue or running:
     launched_any = False
 
-    # Snapshot running mems for boosting logic
-    running_mems = [m for _, _, _, m in running]
+    running_mems = [m for _, _, _, _, m, _ in running]
+    free_ranks = total_free_ranks(free_intervals)
 
-    # --------------------------
-    # Build candidate list for current tick
-    # --------------------------
-    # Each entry: (task_id, need_min, need_max, mem_gib)
     cands = []
     remaining = len(queue) + len(running)
-
-    # Remaining total memory (queue + running), used for weighted share
     remaining_mem_gib = (
         sum(mem_gib[tid - 1] for tid in queue) +
         sum(running_mems)
@@ -226,7 +276,6 @@ while queue or running:
         base = choose_base_ranks(mem_gib[tid - 1])
         need_min = base
 
-        # Compute boosted target (need_max)
         if len(queue) == 1:
             need_max = free_ranks
         elif remaining < total_ranks:
@@ -237,16 +286,15 @@ while queue or running:
                 share = base
 
             boosted = max(base, share)
-            boosted = min(boosted, int(math.ceil(8 * base)))
+            boosted = min(boosted, int(math.ceil(BOOST_MAX_FACTOR * base)))
             need_max = boosted
         elif remaining < 2 * total_ranks:
-            need_max = int(math.ceil(4 * base))
+            need_max = int(math.ceil(min(BOOST_MAX_FACTOR, 4.0) * base))
         elif remaining < 4 * total_ranks:
-            need_max = int(math.ceil(2 * base))
+            need_max = int(math.ceil(min(BOOST_MAX_FACTOR, 2.0) * base))
         else:
             need_max = base
 
-        # Apply caps (keep your approach; no extra rounding)
         need_min = min(need_min, max_ranks_per_task, total_ranks)
         need_min = max(need_min, MIN_RANKS)
         need_min = min(need_min, total_ranks)
@@ -257,41 +305,44 @@ while queue or running:
 
         cands.append((tid, need_min, need_max, mem_gib[tid - 1]))
 
-    # --------------------------
-    # Plan launches for this tick
-    # --------------------------
-    free = free_ranks
-    plan = []  # list of (task_id, alloc_ranks)
-
-    # Phase A: pick a set of boosted launches that fit best (best-fit)
-    # Sort bigger boosted first, tie-breaker by memory
-    boost_pool = sorted(cands, key=lambda x: (x[2], x[3]), reverse=True)
+    # Plan against interval state, not just a scalar rank count
+    sim_intervals = list(free_intervals)
+    plan = []  # list of (task_id, offset, alloc_ranks)
     chosen = set()
+
+    # Phase A: boosted launches, best-fit by smallest leftover in a fitting interval
+    boost_pool = sorted(cands, key=lambda x: (x[2], x[3]), reverse=True)
 
     while True:
         best = None
-        best_slack = None
+        best_metric = None
 
         for tid, need_min, need_max, m in boost_pool:
             if tid in chosen:
                 continue
-            if need_max <= free:
-                slack = free - need_max
-                if best is None or slack < best_slack:
-                    best = (tid, need_min, need_max, m)
-                    best_slack = slack
+
+            offset, trial_intervals = allocate_interval(sim_intervals, need_max)
+            if offset is None:
+                continue
+
+            leftover = total_free_ranks(trial_intervals)
+            largest_gap = max((length for _, length in trial_intervals), default=0)
+            metric = (leftover, largest_gap)
+
+            if best is None or metric < best_metric:
+                best = (tid, offset, need_max, trial_intervals, m)
+                best_metric = metric
 
         if best is None:
             break
 
-        tid, need_min, need_max, m = best
-        plan.append((tid, need_max))
+        tid, offset, alloc, trial_intervals, m = best
+        plan.append((tid, offset, alloc))
+        sim_intervals = trial_intervals
         chosen.add(tid)
-        free -= need_max
         launched_any = True
 
-    # Phase B: fill remaining capacity with minimum-size launches
-    # Prefer larger minimums first so you don't strand unusable slack
+    # Phase B: fill with minimum-size launches, preferring larger minimums first
     min_pool = sorted(
         [(tid, need_min) for (tid, need_min, need_max, m) in cands if tid not in chosen],
         key=lambda x: x[1],
@@ -299,37 +350,50 @@ while queue or running:
     )
 
     for tid, need_min in min_pool:
-        if need_min <= free:
-            plan.append((tid, need_min))
-            chosen.add(tid)
-            free -= need_min
-            launched_any = True
+        offset, trial_intervals = allocate_interval(sim_intervals, need_min)
+        if offset is None:
+            continue
+        plan.append((tid, offset, need_min))
+        sim_intervals = trial_intervals
+        chosen.add(tid)
+        launched_any = True
 
     # Execute plan
     if plan:
-        # Remove from queue before launching (so bookkeeping stays consistent)
-        for tid, _ in plan:
+        for tid, _, _ in plan:
             queue.remove(tid)
 
-        for tid, alloc in plan:
-            launch(tid, alloc)
+        for tid, offset, alloc in plan:
+            actual_offset, new_intervals = allocate_interval(free_intervals, alloc)
+            if actual_offset is None:
+                raise RuntimeError(
+                    f"Internal scheduler error: planned task={tid} alloc={alloc} "
+                    f"but no fitting interval remained. free_intervals={free_intervals}"
+                )
+            if actual_offset != offset:
+                print(
+                    f"[scheduler] note: planned offset {offset} changed to {actual_offset} "
+                    f"for task={tid}",
+                    flush=True,
+                )
+            free_intervals = new_intervals
+            launch(tid, actual_offset, alloc)
 
-        free_ranks = free
-
-    # --------------------------
     # Reap finished steps
-    # --------------------------
     if running:
         time.sleep(1)
         still = []
-        for p, ranks, tid, m in running:
+        for p, offset, ranks, tid, m, out in running:
             rc = p.poll()
             if rc is None:
-                still.append((p, ranks, tid, m))
+                still.append((p, offset, ranks, tid, m, out))
             else:
-                free_ranks += ranks
+                out.close()
+                free_intervals = free_interval(free_intervals, offset, ranks)
                 print(
-                    f"[scheduler] finish task={tid} rc={rc} freed={ranks} free_ranks={free_ranks}",
+                    f"[scheduler] finish task={tid} rc={rc} "
+                    f"freed_offset={offset} freed_ranks={ranks} "
+                    f"free={total_free_ranks(free_intervals)} intervals={free_intervals}",
                     flush=True,
                 )
         running = still
