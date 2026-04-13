@@ -46,7 +46,7 @@ ml intel/25.1 phdf5 petsc/3.23 fftw3
 module list
 
 export FS_SOLVER_PATH={{fs_dir}}
-export KMP_STACKSIZE=80M
+export KMP_STACKSIZE=30M
 
 mpi_exec={{mpi}}
 n_procs={{n_procs}}
@@ -255,6 +255,7 @@ def launch(task_id: int, offset: int, ranks: int):
         f"intervals={free_intervals}",
         flush=True,
     )
+    time.sleep(float(os.environ.get("LAUNCH_DELAY_SEC", "0.25")))
 
 # --------------------------
 # Scheduling loop
@@ -286,12 +287,8 @@ while queue or running:
                 share = base
 
             boosted = max(base, share)
-            boosted = min(boosted, int(math.ceil(BOOST_MAX_FACTOR * base)))
+            boosted = min(boosted, int(math.ceil(max(2.0, BOOST_MAX_FACTOR) * base)))
             need_max = boosted
-        elif remaining < 2 * total_ranks:
-            need_max = int(math.ceil(min(BOOST_MAX_FACTOR, 4.0) * base))
-        elif remaining < 4 * total_ranks:
-            need_max = int(math.ceil(min(BOOST_MAX_FACTOR, 2.0) * base))
         else:
             need_max = base
 

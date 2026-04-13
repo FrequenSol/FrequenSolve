@@ -662,8 +662,8 @@ class Stampede3Site(BaseSite):
         # Submit job to SLURM queue
         else:
             raise ValueError(
-                "This submit method requires the site to"
-                "be provisioned (attached to a running job)."
+                "This submit method requires the site to "
+                "be provisioned (attached to a running job). "
                 "Use submit_SLURM to queue a job."
             )
 

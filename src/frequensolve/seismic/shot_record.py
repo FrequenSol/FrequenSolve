@@ -1,9 +1,10 @@
 import json
 import os
 import warnings
+from typing import Any
 
 import numpy as np
-from xarray import DataArray
+from xarray import DataArray, set_options
 
 from frequensolve.seismic.receivers import ReceiverFiber, ReceiverGroup
 from frequensolve.seismic.sources import SourceGroup
@@ -41,9 +42,78 @@ class ShotRecord(DataArray):
     """
 
     __slots__ = ()
+    _required_attrs = (
+        "simulation",
+        "source_group",
+        "receiver_group",
+        "project_path",
+    )
+
+    @classmethod
+    def _from_dataarray(cls, da: DataArray, attrs: dict | None = None) -> "ShotRecord":
+        """
+        Rebuild a ShotRecord from an arbitrary DataArray.
+        """
+        out = cls(
+            data=da.data,
+            coords=da.coords,
+            dims=da.dims,
+            name=da.name,
+            attrs=dict(da.attrs),
+            indexes=da.indexes,
+        )
+        if attrs is not None:
+            out.attrs.update(attrs)
+        return out
+
+    def _wrap_result(self, result: Any) -> Any:
+        """
+        Convert DataArray results back into ShotRecord and ensure metadata is preserved.
+        Leave scalars / Dataset / other types untouched.
+        """
+        if isinstance(result, DataArray) and not isinstance(result, ShotRecord):
+            merged_attrs = dict(self.attrs)
+            merged_attrs.update(result.attrs)
+            return self._from_dataarray(result, attrs=merged_attrs)
+
+        if isinstance(result, ShotRecord):
+            merged_attrs = dict(self.attrs)
+            merged_attrs.update(result.attrs)
+            result.attrs = merged_attrs
+            return result
+
+        return result
+
+    def _preserved_attrs(self) -> dict:
+        # preserve only the metadata needed for export / provenance
+        return dict(self.attrs)
+
+    def _binary_op(self, other, f, reflexive: bool = False):
+        with set_options(keep_attrs=True):
+            result = super()._binary_op(other, f, reflexive=reflexive)
+
+        if isinstance(result, DataArray) and not isinstance(result, ShotRecord):
+            result = self._from_dataarray(result, attrs=self._preserved_attrs())
+        elif isinstance(result, ShotRecord):
+            result.attrs.update(self._preserved_attrs())
+
+        return result
+
+    def _inplace_binary_op(self, other, f):
+        with set_options(keep_attrs=True):
+            result = super()._inplace_binary_op(other, f)
+
+        # xarray may mutate in place and return self, but make sure attrs survive
+        if isinstance(result, DataArray):
+            result.attrs.update(self._preserved_attrs())
+        return result
+
+    def copy(self, deep: bool = True, data=None):
+        result = super().copy(deep=deep, data=data)
+        return self._wrap_result(result)
 
     @property
-    def _source_group(self) -> SourceGroup:
+    def _source_group(self):
         with open(self.attrs["simulation"], "r") as f:
             sim = json.load(f)
         shot = self.attrs["source_group"]
@@ -51,22 +121,22 @@ class ShotRecord(DataArray):
         return SourceGroup.from_dict(sgroup)
 
     @property
-    def _receiver_group(self) -> ReceiverGroup:
+    def _receiver_group(self):
         with open(self.attrs["simulation"], "r") as f:
             sim = json.load(f)
 
-        # TODO: this is a hack since receivers read from project path
         cwd = os.getcwd()
         os.chdir(self.attrs["project_path"])
-        group = self.attrs["receiver_group"]
-        for rgroup in sim["Acquisition"]["receiver_groups"]:
-            if rgroup["name"] == group:
-                break
-        else:
-            raise ValueError(f"Receiver group {group} not found in simulation.")
-        rgrp = ReceiverGroup.from_dict(rgroup)
-        os.chdir(cwd)
-        return rgrp
+        try:
+            group = self.attrs["receiver_group"]
+            for rgroup in sim["Acquisition"]["receiver_groups"]:
+                if rgroup["name"] == group:
+                    break
+            else:
+                raise ValueError(f"Receiver group {group} not found in simulation.")
+            return ReceiverGroup.from_dict(rgroup)
+        finally:
+            os.chdir(cwd)
 
     def to_segy(self, file: str, units_in: str = "km", units_out: str = "m", **kwargs):
         """
@@ -133,9 +203,9 @@ class ShotRecord(DataArray):
 
         # Get sampling parameters
         n_traces = rgroup.size
-        t0 = td.coords["time"].values[0] / 1000
+        t0 = td.coords["time"].values[0]
         dt = td.coords["time"].values[1] - td.coords["time"].values[0]  # Seconds
-        sample_interval = int(dt * 1e3)  # Microseconds
+        sample_interval = int(dt * 1e6)  # Microseconds
         time_samples = td.coords["time"].values
 
         now = datetime.datetime.now()
@@ -151,7 +221,7 @@ class ShotRecord(DataArray):
         # SEGY file settings
         spec = segyio.spec()
         spec.format = 5
-        spec.samples = time_samples  # Time samples (milliseconds)
+        spec.samples = time_samples * 1e3  # Time samples (milliseconds)
         spec.sample_rate = sample_interval
         spec.tracecount = n_traces
 
@@ -160,7 +230,7 @@ class ShotRecord(DataArray):
             f.bin[segyio.BinField.MeasurementSystem] = (
                 coordinate_units  # 1 for meters, 2 for feet
             )
-            f.bin[segyio.BinField.Interval] = int(dt * 1e3)
+            f.bin[segyio.BinField.Interval] = sample_interval
 
             for itrace in range(n_traces):
                 recv_x = int((rgroup.coordinates[itrace, 0] * scale))
