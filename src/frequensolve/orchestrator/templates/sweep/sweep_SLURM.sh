@@ -71,7 +71,7 @@ $mpi_exec -n $n_procs $executable $n_threads -j $input_file --init
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
    echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file -i $i"
-   $mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file -i $i >> $dir_out/task_${i}.txt 2>&1 &
+   $mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file -i $i >> $dir_out/task_${i}.log 2>&1 &
    if [[ $((($i - 1) % n_workers)) -eq $((n_workers - 1)) ]]; then
       wait
       echo "Group done"

@@ -94,8 +94,9 @@ class SuperPatch:
     @classmethod
     def from_dict(cls, data: Dict) -> "SuperPatch":
         return cls(
-            grid=data.get("grid"),
-            domain=data.get("domain"),
+            grid=data.pop("grid"),
+            domain=data.pop("domain"),
+            **data,
         )
 
     def __dict__(self) -> Dict:
@@ -123,11 +124,23 @@ class SolverConfig:
     tolerance: float = 1.0e-4
     grids: int = 4
     hp_switch: Optional[int] = None
-    refinement_kind: Literal["uniform", "adapt_indicator", "adapt_wavespeed"] = (
-        "adapt_wavespeed"
-    )
-    refinement_flags: List[Literal["h", "p"]] = field(default_factory=list)
     kwargs: Dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        solve_on: Literal["final", "all"] = "final",
+        max_iter: int = 300,
+        tolerance: float = 1.0e-4,
+        grids: int = 4,
+        hp_switch: Optional[int] = None,
+        **kwargs,
+    ):
+        self.solve_on = solve_on
+        self.max_iter = max_iter
+        self.tolerance = tolerance
+        self.grids = grids
+        self.hp_switch = hp_switch
+        self.kwargs = kwargs
 
     @classmethod
     def from_dict(cls, data: Dict) -> "SolverConfig":
@@ -138,8 +151,6 @@ class SolverConfig:
             tolerance=data.pop("tolerance", 1.0e-4),
             grids=ngrids,
             hp_switch=data.pop("hp_switch", ngrids),
-            refinement_kind=data.pop("refinement_kind", "adapt_wavespeed"),
-            refinement_flags=data.pop("refinement_flags", []),
         )
         obj.kwargs = data
         return obj
@@ -159,10 +170,8 @@ class SolverConfig:
             "tolerance": self.tolerance,
             "grids": self.grids,
             "hp_switch": hp_switch,
-            "refinement_kind": self.refinement_kind,
-            "refinement_flags": self.refinement_flags,
+            **self.kwargs,
         }
-        dict.update(self.kwargs)
         return dict
 
 

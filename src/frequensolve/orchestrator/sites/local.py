@@ -93,12 +93,14 @@ def run_task(
     ]
     if task_id == -2:
         args += ["--smooth"]
+    elif task_id == -1:
+        args += ["--mesh"]
     else:
         args += ["-i", f"{task_id + 1}"]
     logger.info(f"Executing: {' '.join(args)}")
 
     if stdout_dir:
-        stdout_file = os.path.join(stdout_dir, f"task_{task_id+1}.out")
+        stdout_file = os.path.join(stdout_dir, f"task_{task_id+1}.log")
     else:
         stdout_file = None
     try:
@@ -116,7 +118,7 @@ def run_task(
             "task_id": task_id,
             "status": "success",
             "stdout": (
-                os.path.join(stdout_dir, f"task_{task_id+1}.out")
+                os.path.join(stdout_dir, f"task_{task_id+1}.log")
                 if stdout_dir
                 else None
             ),
@@ -127,7 +129,7 @@ def run_task(
             "status": "error",
             "error": str(e),
             "stdout": (
-                os.path.join(stdout_dir, f"task_{task_id+1}.out")
+                os.path.join(stdout_dir, f"task_{task_id+1}.log")
                 if stdout_dir
                 else None
             ),

@@ -206,7 +206,13 @@ class ModelBase:
         # Label any unlabeled subdomains
         labels = {}
         for i, subdomain in enumerate(self.subdomains):
-            labels[subdomain.mesh_block_id] = i
+            id = subdomain.mesh_block_id
+            if id >= 0:
+                if id in labels:
+                    raise ValueError(
+                        f"Mesh block ids must be unique: {id} is was repeated"
+                    )
+            labels[id] = i
 
         j = 1
         for i, subdomain in enumerate(self.subdomains):

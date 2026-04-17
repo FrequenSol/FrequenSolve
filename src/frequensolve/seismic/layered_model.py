@@ -715,8 +715,7 @@ class LayeredModel(ModelBase):
         samples = self._physical_to_reference(samples.coords)
 
         for layer in self.layers:
-            layer.properties.keys()
-            if property not in layer.properties:
+            if property not in layer.properties.keys():
                 continue
             prop = layer.properties[property].get(samples)
             dims = sorted(prop.dims)
@@ -742,8 +741,6 @@ class LayeredModel(ModelBase):
 
         if self.dimension == 3:
             raise NotImplementedError("3D plotting not implemented")
-        if isinstance(property, str):
-            property = [property]
 
         property_units = kwargs.pop("property_units", "km/s")
         property_label = kwargs.pop("property_label", f"{property} [{property_units}]")

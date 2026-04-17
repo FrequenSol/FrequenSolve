@@ -367,10 +367,11 @@ class AWSSite(BaseSite):
         self.s3_client = self.session.client("s3", region_name=self.config.region)
 
     def _refresh_s3_credentials(self) -> None:
-        """Refresh session and S3 client with fresh Identity Pool credentials.
+        """Reload boto3 session and S3 client from the Identity Pool.
 
         Call when credentials may have expired (e.g. after a long simulation).
-        Only applies when using Cognito authentication.
+        No-op when not using Cognito authentication. Refreshed keys match what
+        :meth:`_aws_cli_env` would pass to the AWS CLI.
         """
         if not hasattr(self, "cognito_auth") or self.cognito_auth is None:
             return
@@ -382,7 +383,40 @@ class AWSSite(BaseSite):
             region_name=self.config.region,
         )
         self.s3_client = self.session.client("s3", region_name=self.config.region)
-        logger.debug("Refreshed S3 credentials from Identity Pool")
+        logger.debug("Refreshed AWS session and S3 client from Identity Pool")
+
+    def _aws_cli_env(self) -> Dict[str, str]:
+        """Build a process environment so the AWS CLI uses Cognito Identity Pool credentials.
+
+        Copies the current process environment, sets ``AWS_ACCESS_KEY_ID``,
+        ``AWS_SECRET_ACCESS_KEY``, ``AWS_SESSION_TOKEN``, and ``AWS_DEFAULT_REGION``
+        from this site's session, and clears ``AWS_PROFILE`` / ``AWS_DEFAULT_PROFILE``
+        so the CLI does not fall back to ``~/.aws/credentials``.
+        """
+        creds = self.session.get_credentials()
+        if creds is None:
+            raise RuntimeError(
+                "No AWS credentials available for the AWS CLI. "
+                "Re-authenticate with AWSSite (Cognito login)."
+            )
+        frozen = creds.get_frozen_credentials()
+        env = os.environ.copy()
+        env["AWS_ACCESS_KEY_ID"] = frozen.access_key
+        env["AWS_SECRET_ACCESS_KEY"] = frozen.secret_key
+        if frozen.token:
+            env["AWS_SESSION_TOKEN"] = frozen.token
+        else:
+            env.pop("AWS_SESSION_TOKEN", None)
+        env["AWS_DEFAULT_REGION"] = self.config.region
+        env.pop("AWS_PROFILE", None)
+        env.pop("AWS_DEFAULT_PROFILE", None)
+        return env
+
+    def _run_aws_cli(self, argv: List[str], **kwargs) -> subprocess.CompletedProcess:
+        """Run an ``aws`` subprocess using Identity Pool credentials (not ~/.aws)."""
+        run_kw = dict(kwargs)
+        run_kw["env"] = self._aws_cli_env()
+        return subprocess.run(argv, **run_kw)
 
     @property
     def work_dir(self) -> Path:
@@ -481,9 +515,7 @@ class AWSSite(BaseSite):
             print(f"Current profile: {current_profile}")
 
             # List available profiles
-            import subprocess
-
-            result = subprocess.run(
+            result = self._run_aws_cli(
                 ["aws", "configure", "list-profiles"],
                 capture_output=True,
                 text=True,
@@ -1074,14 +1106,10 @@ class AWSSite(BaseSite):
     ):
         """Transfer files from S3 path to local path using boto3.
 
-        Uses the site's Cognito-backed S3 client (not AWS CLI) so that
-        temporary credentials from the Identity Pool are used. The AWS CLI
-        subprocess would use default credentials (e.g. IAM user) which may
-        not have access to the Amplify-deployed storage bucket.
-
-        Refreshes credentials automatically if they expired (e.g. after a
-        long simulation wait). Identity Pool credentials typically expire
-        in 1 hour.
+        Uses the site's Cognito-backed S3 client so Identity Pool temporary
+        credentials apply (same principal as :meth:`_run_aws_cli`). Refreshes
+        credentials on expiry (e.g. after a long simulation wait; typical
+        lifetime ~1 hour).
 
         Args:
             s3_path: S3 path to transfer from (e.g., 's3://bucket/key' or 's3://bucket/key/')

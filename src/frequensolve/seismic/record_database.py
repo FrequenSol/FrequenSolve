@@ -225,9 +225,13 @@ class RecordDatabase:
 
         with h5py.File(new_file, "w") as nf:
             for i, file in enumerate(self.records):
-                with h5py.File(file, "r") as f:
-                    freq = f["frequency"][()]
-                freqs.append(freq)
+                try:
+                    with h5py.File(file, "r") as f:
+                        freq = f["frequency"][()]
+                    freqs.append(freq)
+                except Exception as e:
+                    print(f"Error reading {file}: {e}")
+                    continue
 
             for group in self.metadata["groups"]:
                 with h5py.File(self.records[0], "r") as f:

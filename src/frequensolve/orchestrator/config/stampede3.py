@@ -99,7 +99,7 @@ class _Stampede3SPRConfig(BaseSiteConfig):
     _sockets_per_node: int = 2
     _gpus_per_node: int = 0
     _cores_per_socket: int = 56
-    _memory_per_node: int = 198000
+    _memory_per_node: int = 128000
     _account: str = field(default_factory=lambda: os.getenv("TACC_ACCOUNT", ""))
 
 
