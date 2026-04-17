@@ -366,6 +366,51 @@ class AWSSite(BaseSite):
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
 
+    def _refresh_s3_credentials(self) -> None:
+        """Reload boto3 session and S3 client from the Identity Pool (same keys as CLI env)."""
+        credentials = self.cognito_auth.get_aws_credentials()
+        self.session = boto3.Session(
+            aws_access_key_id=credentials["AccessKeyId"],
+            aws_secret_access_key=credentials["SecretKey"],
+            aws_session_token=credentials["SessionToken"],
+            region_name=self.config.region,
+        )
+        self.s3_client = self.session.client("s3", region_name=self.config.region)
+        logger.debug("Refreshed AWS session from Identity Pool")
+
+    def _aws_cli_env(self) -> Dict[str, str]:
+        """Build a process environment so the AWS CLI uses Cognito Identity Pool credentials.
+
+        Copies the current process environment, sets ``AWS_ACCESS_KEY_ID``,
+        ``AWS_SECRET_ACCESS_KEY``, ``AWS_SESSION_TOKEN``, and ``AWS_DEFAULT_REGION``
+        from this site's session, and clears ``AWS_PROFILE`` / ``AWS_DEFAULT_PROFILE``
+        so the CLI does not fall back to ``~/.aws/credentials``.
+        """
+        creds = self.session.get_credentials()
+        if creds is None:
+            raise RuntimeError(
+                "No AWS credentials available for the AWS CLI. "
+                "Re-authenticate with AWSSite (Cognito login)."
+            )
+        frozen = creds.get_frozen_credentials()
+        env = os.environ.copy()
+        env["AWS_ACCESS_KEY_ID"] = frozen.access_key
+        env["AWS_SECRET_ACCESS_KEY"] = frozen.secret_key
+        if frozen.token:
+            env["AWS_SESSION_TOKEN"] = frozen.token
+        else:
+            env.pop("AWS_SESSION_TOKEN", None)
+        env["AWS_DEFAULT_REGION"] = self.config.region
+        env.pop("AWS_PROFILE", None)
+        env.pop("AWS_DEFAULT_PROFILE", None)
+        return env
+
+    def _run_aws_cli(self, argv: List[str], **kwargs) -> subprocess.CompletedProcess:
+        """Run an ``aws`` subprocess using Identity Pool credentials (not ~/.aws)."""
+        run_kw = dict(kwargs)
+        run_kw["env"] = self._aws_cli_env()
+        return subprocess.run(argv, **run_kw)
+
     @property
     def work_dir(self) -> Path:
         """Get the S3 work directory as a Path-like object.
@@ -415,9 +460,7 @@ class AWSSite(BaseSite):
             print(f"Current profile: {current_profile}")
 
             # List available profiles
-            import subprocess
-
-            result = subprocess.run(
+            result = self._run_aws_cli(
                 ["aws", "configure", "list-profiles"],
                 capture_output=True,
                 text=True,
@@ -998,7 +1041,10 @@ class AWSSite(BaseSite):
         local_path: Union[str, Path],
         overwrite: bool = False,
     ):
-        """Transfer files from S3 path to local path using aws s3 sync.
+        """Transfer files from S3 path to local path using ``aws s3 sync``.
+
+        The CLI is run with **Cognito Identity Pool** credentials in the process
+        environment (same principal as boto3), not ``~/.aws/credentials``.
 
         Args:
             s3_path: S3 path to transfer from (e.g., 's3://bucket/key' or 's3://bucket/key/')
@@ -1010,38 +1056,59 @@ class AWSSite(BaseSite):
         local_path = Path(local_path)
         s3_path = str(s3_path)
 
+        sync_cmd = [
+            "aws",
+            "s3",
+            "sync",
+            s3_path,
+            str(local_path),
+            "--region",
+            self.config.region,
+        ]
+
         try:
-            # Create parent directory on local if it doesn't exist
             parent_path = str(local_path.parent)
             os.makedirs(parent_path, exist_ok=True)
 
-            # Use aws s3 sync command
-            # The sync command will:
-            # - Download all files from the S3 path to the local path
-            # - Automatically handle directories vs files
-            # - Skip files that are already up-to-date
-            # - Overwrite files that have changed
-            sync_cmd = ["aws", "s3", "sync", s3_path, str(local_path)]
-
             logger.debug("aws s3 sync command: %s", " ".join(sync_cmd))
 
-            result = subprocess.run(
-                sync_cmd,
-                capture_output=True,
-                text=True,
-                check=True,  # This will raise CalledProcessError if the command fails
-            )
+            for attempt in range(2):
+                try:
+                    result = self._run_aws_cli(
+                        sync_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    break
+                except subprocess.CalledProcessError as e:
+                    combined = ((e.stderr or "") + (e.stdout or "")).lower()
+                    if attempt == 0 and (
+                        "expiredtoken" in combined
+                        or "request expired" in combined
+                        or "invalidtoken" in combined
+                        or "security token included in the request is invalid"
+                        in combined
+                    ):
+                        logger.info(
+                            "AWS CLI reported expired credentials; refreshing from "
+                            "Identity Pool and retrying sync..."
+                        )
+                        self._refresh_s3_credentials()
+                        continue
+                    logger.error(
+                        "aws s3 sync failed with return code %d: %s",
+                        e.returncode,
+                        e.stderr,
+                    )
+                    raise RuntimeError(f"aws s3 sync failed: {e.stderr}") from e
 
             if result.stdout:
                 logger.debug("aws s3 sync output: %s", result.stdout.strip())
-
             logger.debug("Transfer completed successfully")
 
-        except subprocess.CalledProcessError as e:
-            logger.error(
-                "aws s3 sync failed with return code %d: %s", e.returncode, e.stderr
-            )
-            raise RuntimeError(f"aws s3 sync failed: {e.stderr}")
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.exception("Error during S3 file transfer: %s", str(e))
             raise
