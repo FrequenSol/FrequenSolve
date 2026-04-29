@@ -4,8 +4,9 @@ from abc import ABC
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
+import blake3
 import numpy as np
 
 from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
@@ -61,6 +62,107 @@ class SimulationJob(ABC):
             "workflow": self.workflow,
             "f_list": f_list,
         }
+
+    @staticmethod
+    def _hash_payload(payload: Any) -> str:
+        encoded = json.dumps(
+            payload,
+            cls=CustomJSONEncoder,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"blake3:{blake3.blake3(encoded).hexdigest()}"
+
+    @staticmethod
+    def _hash_json_file(path: Union[str, Path]) -> str:
+        with open(path, "r") as f:
+            payload = json.load(f)
+        return SimulationJob._hash_payload(payload)
+
+    def fingerprint_payload(self) -> Dict[str, Any]:
+        job_data = self.__dict__()
+        simulation_hash = self._hash_json_file(self.simulation._file)
+        return {
+            "schema": "frequensolve-job-fingerprint-1",
+            "job": {
+                "_type": job_data["_type"],
+                "workflow": job_data["workflow"],
+                "f_list": job_data["f_list"],
+            },
+            "simulation": {
+                "path": str(Path(self.simulation._file).resolve()),
+                "hash": simulation_hash,
+            },
+        }
+
+    def fingerprint(self) -> str:
+        return self._hash_payload(self.fingerprint_payload())
+
+    @property
+    def run_state_file(self) -> Path:
+        return self._result_path / "_fs_python_run.json"
+
+    def expected_trace_files(self) -> List[Path]:
+        try:
+            return [Path(file) for file in self.records["files"]]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _legacy_trace_file(path: Path) -> Path:
+        return path.with_name(path.name.replace("traces_", "receivers_", 1))
+
+    @classmethod
+    def _trace_file_exists(cls, path: Path) -> bool:
+        return path.exists() or cls._legacy_trace_file(path).exists()
+
+    def trace_outputs_exist(self) -> bool:
+        files = self.expected_trace_files()
+        return bool(files) and all(self._trace_file_exists(path) for path in files)
+
+    def run_state(self) -> Dict[str, Any]:
+        if not self.run_state_file.exists():
+            return {}
+        try:
+            return json.loads(self.run_state_file.read_text())
+        except json.JSONDecodeError:
+            return {}
+
+    def is_run_current(self) -> bool:
+        state = self.run_state()
+        if not state:
+            return False
+        if state.get("fingerprint") != self.fingerprint():
+            return False
+        if state.get("status") not in {"completed", "skipped"}:
+            return False
+        return self.trace_outputs_exist()
+
+    def write_run_state(self, status: str = "completed", **extra) -> Path:
+        self._result_path.mkdir(parents=True, exist_ok=True)
+        files = []
+        for path in self.expected_trace_files():
+            existing = path if path.exists() else self._legacy_trace_file(path)
+            file_path = existing if existing.exists() else path
+            try:
+                stored_path = str(file_path.resolve().relative_to(self.project_path))
+            except Exception:
+                stored_path = str(file_path)
+            files.append({"path": stored_path, "exists": file_path.exists()})
+
+        payload = {
+            "schema": "frequensolve-python-run-1",
+            "status": status,
+            "updated_at": datetime.now().isoformat(),
+            "fingerprint": self.fingerprint(),
+            "fingerprint_payload": self.fingerprint_payload(),
+            "outputs": {"traces": files},
+        }
+        payload.update(extra)
+        self.run_state_file.write_text(
+            json.dumps(payload, cls=CustomJSONEncoder, indent=3)
+        )
+        return self.run_state_file
 
     def _new_version(
         self, site: Optional[str] = None, remote_path: Optional[Union[Path, str]] = None
@@ -242,7 +344,7 @@ class SimulationJob(ABC):
         records["files"] = []
         for i, freq in enumerate(output["frequencies"]):
             ifreq = i + 1
-            file = os.path.join(path, f"receivers_{ifreq}.h5")
+            file = os.path.join(path, f"traces_{ifreq}.h5")
             records["files"].append(file)
             records["frequencies"][ifreq] = freq
 
@@ -291,7 +393,8 @@ class SimulationJob(ABC):
         with open(sim_file, "r") as f:
             sim_data = json.load(f)
 
-        out = sim_data["Outputs"]["receivers"]
+        outputs = sim_data["Outputs"]
+        out = outputs.get("traces", outputs.get("receivers"))
 
         recv_out = {}
         recv_out["path"] = self._result_path / out["path"]
@@ -309,6 +412,11 @@ class SimulationJob(ABC):
             recv_out["sources"].append(f"{isrc+1}")
 
         return recv_out
+
+    @property
+    def traces(self):
+        """Preferred name for receiver trace outputs."""
+        return self.records
 
     @property
     def wavefield_outputs(self) -> dict:

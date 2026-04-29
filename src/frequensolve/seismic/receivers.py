@@ -3,6 +3,7 @@
 This module defines the various types of receivers and their locations.
 """
 
+import copy
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,9 +13,13 @@ import h5py
 import numpy as np
 import xarray as xr
 
+from frequensolve.geometry.frame import Direction, direction_to_fs
 from frequensolve.geometry.grids import CartesianGrid, Grid
+from frequensolve.seismic.sparse_survey import ReceiverSampling
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.util.class_registry import class_registry, register_class
+from frequensolve.util.fields import canonical_field
+from frequensolve.util.mixins import merge_extra
 
 __all__ = [
     "ReceiverComponent",
@@ -25,6 +30,7 @@ __all__ = [
     "ReceiverNode",
     "ReceiverFiber",
     "ReceiverFiberOld",
+    "ReceiverSampling",
 ]
 
 
@@ -43,19 +49,40 @@ class ReceiverComponent:
 
     name: str = "name"
     field: Literal["pressure", "velocity", "displacement", "stress", "strain"]
-    direction: Optional[List[float]] = None
+    direction: Optional[Union[List[float], Direction]] = None
+    units: Optional[str] = None
+    weight: Optional[Union[float, List[float], Dict]] = None
 
-    def __dict__(self) -> dict:
+    def __post_init__(self) -> None:
+        self.field = canonical_field(self.field)
+
+    def to_fs(self, ctx=None) -> dict:
         return {
             "name": self.name,
-            "field": self.field,
-            **({"direction": self.direction} if self.direction is not None else {}),
+            "field": canonical_field(self.field),
+            **(
+                {"direction": direction_to_fs(self.direction)}
+                if self.direction is not None
+                else {}
+            ),
+            **({"units": self.units} if self.units is not None else {}),
+            **({"weight": self.weight} if self.weight is not None else {}),
         }
+
+    def __dict__(self) -> dict:
+        return self.to_fs()
 
     @classmethod
     def from_dict(cls, data: dict) -> "ReceiverComponent":
+        data = copy.deepcopy(data)
+        if "direction" in data:
+            data["direction"] = Direction.from_fs(data["direction"])
         return cls(
-            name=data["name"], field=data["field"], direction=data.get("direction")
+            name=data["name"],
+            field=canonical_field(data["field"]),
+            direction=data.get("direction"),
+            units=data.get("units"),
+            weight=data.get("weight"),
         )
 
 
@@ -80,20 +107,33 @@ class ReceiverDevice(ABC):
     def add_component(
         self, name: str, field: str, direction: Optional[List[float]] = None
     ) -> "ReceiverComponent":
-        component = ReceiverComponent(name=name, field=field, direction=direction)
+        component = ReceiverComponent(
+            name=name,
+            field=canonical_field(field),
+            direction=direction,
+        )
         self.components.append(component)
         return component
 
-    def __dict__(self) -> dict:
+    def to_fs(self, ctx=None) -> dict:
         return {
             "name": self.name,
-            "components": [c.__dict__() for c in self.components],
+            "components": [c.to_fs(ctx) for c in self.components],
             **(
-                {"response": self.response.__dict__()}
+                {
+                    "response": (
+                        self.response.to_fs(ctx)
+                        if hasattr(self.response, "to_fs")
+                        else self.response.__dict__()
+                    )
+                }
                 if self.response is not None
                 else {}
             ),
         }
+
+    def __dict__(self) -> dict:
+        return self.to_fs()
 
     @classmethod
     def from_dict(cls, data: dict) -> "ReceiverDevice":
@@ -126,10 +166,10 @@ class ReceiverFiber(ReceiverDevice):
     radius: Optional[float] = None
     pitch: Optional[float] = None
 
-    def __dict__(self) -> dict:
+    def to_fs(self, ctx=None) -> dict:
         return {
             "_type": self.__class__.__name__,
-            **super().__dict__(),
+            **super().to_fs(ctx),
             "L_gauge": self.L_gauge,
             "n_gauge": self.n_gauge,
             **(
@@ -138,6 +178,9 @@ class ReceiverFiber(ReceiverDevice):
                 else {}
             ),
         }
+
+    def __dict__(self) -> dict:
+        return self.to_fs()
 
     @classmethod
     def from_dict(cls, data: dict) -> "ReceiverFiber":
@@ -159,11 +202,14 @@ class ReceiverFiberOld(ReceiverFiber):
 
     In particular, guages are centered on coords, with specified gauge length."""
 
-    def __dict__(self) -> dict:
+    def to_fs(self, ctx=None) -> dict:
         return {
             "_type": self.__class__.__name__,
-            **super().__dict__(),
+            **super().to_fs(ctx),
         }
+
+    def __dict__(self) -> dict:
+        return self.to_fs()
 
     @classmethod
     def from_dict(cls, data: dict) -> "ReceiverFiberOld":
@@ -195,12 +241,15 @@ class ReceiverNodeArray(ReceiverDevice):
 
     offsets: List[List[float]] = field(default_factory=list)
 
-    def __dict__(self) -> dict:
+    def to_fs(self, ctx=None) -> dict:
         return {
             "_type": self.__class__.__name__,
-            **super().__dict__(),
+            **super().to_fs(ctx),
             "offsets": self.offsets,
         }
+
+    def __dict__(self) -> dict:
+        return self.to_fs()
 
     @classmethod
     def from_dict(cls, data: dict) -> "ReceiverNodeArray":
@@ -217,8 +266,11 @@ class ReceiverNodeArray(ReceiverDevice):
 class ReceiverNode(ReceiverDevice):
     """Defines a node receiver."""
 
+    def to_fs(self, ctx=None) -> dict:
+        return {"_type": self.__class__.__name__, **super().to_fs(ctx)}
+
     def __dict__(self) -> dict:
-        return {"_type": self.__class__.__name__, **super().__dict__()}
+        return self.to_fs()
 
     @classmethod
     def from_dict(cls, data: dict) -> "ReceiverNode":
@@ -315,19 +367,27 @@ class CoordsFromFile(ReceiverCoords):
     file: Path
     format: Literal["HDF5"]
     dset: Optional[str] = None
+    units: Optional[str] = None
+    system: Optional[str] = None
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
 
     def __init__(
         self,
-        file: Union[str, Path],
-        format: Literal["HDF5"],
+        file: Union[str, Path] = None,
+        format: Literal["HDF5"] = "HDF5",
         dset: Optional[str] = None,
+        units: Optional[str] = None,
+        system: Optional[str] = None,
         **kwargs,
     ):
+        if file is None and "path" in kwargs:
+            file = kwargs.pop("path")
         self.file = Path(file).resolve()
         self.format = format
         self.dset = dset
+        self.units = units
+        self.system = system
 
     @classmethod
     def from_dict(cls, data: Dict) -> "CoordsFromFile":
@@ -335,10 +395,16 @@ class CoordsFromFile(ReceiverCoords):
         format = data["format"]
         if format == "HDF5":
             if ":" in file:
-                file, dset = file.split(":")
+                file, dset = file.split(":", 1)
             else:
                 dset = "coords"
-        return cls(file=Path(file), format=format, dset=dset)
+        return cls(
+            file=Path(file),
+            format=format,
+            dset=dset,
+            units=data.get("units"),
+            system=data.get("system"),
+        )
 
     @property
     def size(self) -> int:
@@ -388,8 +454,11 @@ class CoordsFromFile(ReceiverCoords):
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
-    def __dict__(self) -> Dict:
-        rel_path = self.file.relative_to(self._proj_path)
+    def to_fs(self, ctx=None) -> Dict:
+        try:
+            rel_path = self.file.relative_to(self._proj_path)
+        except Exception:
+            rel_path = self.file
 
         if self.format == "HDF5":
             if self.dset is None:
@@ -399,7 +468,16 @@ class CoordsFromFile(ReceiverCoords):
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
-        return {"_type": self.__class__.__name__, "file": file, "format": self.format}
+        return {
+            "_type": self.__class__.__name__,
+            "file": file,
+            "format": self.format,
+            **({"units": self.units} if self.units is not None else {}),
+            **({"system": self.system} if self.system is not None else {}),
+        }
+
+    def __dict__(self) -> Dict:
+        return self.to_fs()
 
 
 @register_class
@@ -412,6 +490,8 @@ class CoordsGrid(ReceiverCoords):
     """
 
     grid: CartesianGrid
+    units: Optional[str] = None
+    system: Optional[str] = None
 
     @property
     def size(self) -> int:
@@ -477,12 +557,24 @@ class CoordsGrid(ReceiverCoords):
         else:
             raise ValueError("Invalid indices type")
 
+    def to_fs(self, ctx=None) -> Dict:
+        payload = {"_type": self.__class__.__name__, "grid": self.grid.to_fs(ctx)}
+        if self.units is not None:
+            payload["units"] = self.units
+        if self.system is not None:
+            payload["system"] = self.system
+        return payload
+
     def __dict__(self) -> Dict:
-        return {"_type": self.__class__.__name__, "grid": self.grid.__dict__()}
+        return self.to_fs()
 
     @classmethod
     def from_dict(cls, data: Dict) -> "CoordsGrid":
-        return cls(grid=CartesianGrid.from_dict(data["grid"]))
+        return cls(
+            grid=CartesianGrid.from_dict(data["grid"]),
+            units=data.get("units"),
+            system=data.get("system"),
+        )
 
 
 @register_class
@@ -495,6 +587,8 @@ class CoordsArray(ReceiverCoords):
     """
 
     coordinates: Union[xr.DataArray, np.ndarray]
+    units: Optional[str] = None
+    system: Optional[str] = None
 
     def __post_init__(self):
         if isinstance(self.coordinates, np.ndarray):
@@ -560,18 +654,36 @@ class CoordsArray(ReceiverCoords):
         else:
             raise NotImplementedError(f"Format {format} not implemented")
 
-        return CoordsFromFile(file=file, dset="coords", format=format)
+        return CoordsFromFile(
+            file=file,
+            dset="coords",
+            format=format,
+            units=self.units,
+            system=self.system,
+        )
+
+    def to_fs(self, ctx=None) -> Dict:
+        values = self.coordinates.values.tolist()
+        payload = {"_type": self.__class__.__name__}
+        if self.units is not None or self.system is not None:
+            payload["value"] = values
+            if self.units is not None:
+                payload["units"] = self.units
+            if self.system is not None:
+                payload["system"] = self.system
+        else:
+            payload["coords"] = values
+        return payload
 
     def __dict__(self) -> Dict:
-        return {
-            "_type": self.__class__.__name__,
-            "coords": self.coordinates.values.tolist(),
-        }
+        return self.to_fs()
 
     @classmethod
     def from_dict(cls, data: Dict) -> "CoordsArray":
-        coords = np.array(data["coords"])
-        return cls(coordinates=coords)
+        coords = np.array(data.get("coords", data.get("value")))
+        return cls(
+            coordinates=coords, units=data.get("units"), system=data.get("system")
+        )
 
 
 # ----------------------------------------------------------------------
@@ -597,6 +709,8 @@ class ReceiverGroup:
     frame: Literal["physical", "reference"] = "physical"
     domain: Optional[int] = None
     coordinates: ReceiverCoords = field(default_factory=ReceiverCoords)
+    sampling: Optional[ReceiverSampling] = None
+    extra: Dict = field(default_factory=dict)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
 
@@ -614,15 +728,44 @@ class ReceiverGroup:
         coordinates: Union[np.ndarray, xr.DataArray, str, Path, Grid, ReceiverCoords],
         frame: str = "physical",
         domain: Optional[int] = None,
+        sampling: Optional[Union[str, Dict, ReceiverSampling]] = None,
+        survey: Optional[Union[str, ReceiverSampling]] = None,
+        extra: Optional[Dict] = None,
         **kwargs,
     ) -> None:
         coords = self._clean_coordinates(coordinates)
+        sampling_obj = ReceiverSampling.from_value(sampling)
+        survey_obj = ReceiverSampling.from_value(survey)
+        if sampling_obj is None:
+            sampling_obj = survey_obj
+        elif survey_obj is not None and sampling_obj.survey is None:
+            sampling_obj.survey = survey_obj.survey
         self.name = name
         self.device = device
         self.frame = frame
         self.coordinates = coords
         self.domain = domain
-        self.kwargs = kwargs
+        self.sampling = sampling_obj
+        self.extra = copy.deepcopy(dict(extra or {}))
+        self.extra.update(copy.deepcopy(kwargs))
+
+    @property
+    def survey(self) -> Optional[str]:
+        if self.sampling is None:
+            return None
+        return self.sampling.survey
+
+    @survey.setter
+    def survey(self, value: Optional[Union[str, ReceiverSampling]]) -> None:
+        self.sampling = ReceiverSampling.from_value(value)
+
+    @property
+    def kwargs(self) -> Dict:
+        return self.extra
+
+    @kwargs.setter
+    def kwargs(self, value: Dict) -> None:
+        self.extra = copy.deepcopy(dict(value))
 
     @staticmethod
     def _clean_coordinates(coords):
@@ -636,8 +779,9 @@ class ReceiverGroup:
         elif isinstance(coords, np.ndarray) or isinstance(coords, xr.DataArray):
             out = CoordsArray(coordinates=coords)
         elif isinstance(coords, str) or isinstance(coords, Path):
-            if coords.endswith(".h5") or coords.endswith(".hdf5"):
-                out = CoordsFromFile(path=coords, format="HDF5")
+            suffix = Path(coords).suffix.lower()
+            if suffix in [".h5", ".hdf5"]:
+                out = CoordsFromFile(file=coords, format="HDF5")
             else:
                 raise ValueError(f"Unknown coordinates file extension: {coords}")
         elif isinstance(coords, Grid):
@@ -646,28 +790,63 @@ class ReceiverGroup:
             raise ValueError(f"Unknown coordinates type: {type(coords)}")
         return out
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         coords = self.coordinates
         if isinstance(coords, CoordsArray):
-            if coords.size > 10:
+            if (
+                coords.size > 10
+                and ctx is not None
+                and getattr(ctx, "store", None) is not None
+            ):
+                dataset = f"inputs/acquisition/receivers/{self.name}/coordinates"
+                attrs = {"fs_kind": "receiver_coordinates"}
+                if coords.units is not None:
+                    attrs["units"] = coords.units
+                if coords.system is not None:
+                    attrs["system"] = coords.system
+                ref = ctx.store.put_dataarray(dataset, coords.coordinates, attrs=attrs)
+                coords_payload = {
+                    "_type": "CoordsFromFile",
+                    "file": ref.locator(),
+                    "format": "HDF5",
+                    "hash": f"blake3:{ref.hash}",
+                    **({"units": coords.units} if coords.units is not None else {}),
+                    **({"system": coords.system} if coords.system is not None else {}),
+                }
+            elif coords.size > 10:
                 dump = coords.to_file(file_name="coords.h5", format="HDF5")
                 dump._set_path(
                     proj_path=self._proj_path, rel_path=self._rel_path / self.name
                 )
                 self.coordinates = dump
+                coords_payload = self.coordinates.to_fs(ctx)
+            else:
+                coords_payload = coords.to_fs(ctx)
+        else:
+            coords_payload = self.coordinates.to_fs(ctx)
 
-        return {
+        payload = {
             "name": self.name,
-            "device": self.device.__dict__(),
+            "device": self.device.to_fs(ctx),
             "frame": self.frame,
             **({"domain": self.domain} if self.domain is not None else {}),
-            "coordinates": self.coordinates.__dict__(),
-            **self.kwargs,
+            **(
+                {"sampling": self.sampling.to_fs(ctx)}
+                if self.sampling is not None
+                else {}
+            ),
+            "coordinates": coords_payload,
         }
+        return merge_extra(payload, self.extra, "ReceiverGroup")
+
+    def __dict__(self) -> Dict:
+        return self.to_fs()
 
     @classmethod
     def from_dict(cls, data: Dict) -> "ReceiverGroup":
+        data = copy.deepcopy(data)
         coords = ReceiverCoords.from_dict(data.pop("coordinates", None))
+        sampling = data.pop("sampling", None)
 
         return cls(
             name=data.pop("name", None),
@@ -675,6 +854,7 @@ class ReceiverGroup:
             frame=data.pop("frame", None),
             coordinates=coords,
             domain=data.pop("domain", None),
+            sampling=sampling,
             **data,
         )
 

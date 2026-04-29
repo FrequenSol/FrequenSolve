@@ -1,0 +1,135 @@
+"""Unit helpers for FrequenSolve authoring objects.
+
+Pint quantities are accepted at API boundaries and serialized into the solver's
+contract form: {"value": ..., "units": "..."}.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, Mapping, Optional
+
+import numpy as np
+import pint
+
+from frequensolve.util.mixins import merge_extra
+
+ureg = pint.UnitRegistry()
+Q_ = ureg.Quantity
+
+
+def unit_expression(units: Any) -> str:
+    """Return a compact units_m-friendly unit expression."""
+    if units is None:
+        return ""
+    if isinstance(units, str):
+        return units
+    expr = f"{units:~}"
+    expr = expr.replace(" ** ", "^").replace("**", "^")
+    expr = expr.replace(" / ", "/").replace(" * ", "*")
+    expr = expr.replace(" ", "")
+    return expr
+
+
+def is_quantity(value: Any) -> bool:
+    return isinstance(value, pint.Quantity)
+
+
+def _plain_value(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.integer, np.floating, np.bool_)):
+        return value.item()
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        return value.tolist()
+    return value
+
+
+def quantity_to_fs(value: Any) -> Dict[str, Any]:
+    if not is_quantity(value):
+        raise TypeError(f"Expected Pint quantity, got {type(value)}")
+    return {
+        "value": _plain_value(value.magnitude),
+        "units": unit_expression(value.units),
+    }
+
+
+def value_and_units_to_fs(value: Any, units: Optional[Any] = None) -> Any:
+    """Serialize a numeric value, xarray object, or Pint quantity with optional units."""
+    if is_quantity(value):
+        return quantity_to_fs(value)
+
+    detected_units = units
+    if detected_units is None and hasattr(value, "attrs"):
+        detected_units = value.attrs.get("units")
+
+    plain = value.values if hasattr(value, "values") else value
+    plain = _plain_value(plain)
+    if detected_units:
+        return {"value": plain, "units": unit_expression(detected_units)}
+    return plain
+
+
+@dataclass
+class UnitConfig:
+    """Simulation-level unit scaling and output-unit defaults."""
+
+    disable_scaling: Optional[bool] = None
+    f0: Optional[Any] = None
+    length_scale: Optional[Any] = None
+    time_scale: Optional[Any] = None
+    mass_scale: Optional[Any] = None
+    defaults: Dict[str, Any] = field(default_factory=dict)
+    scales: Dict[str, Any] = field(default_factory=dict)
+    units_extra: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "UnitConfig":
+        payload = dict(data)
+        units = dict(payload.pop("Units", payload.pop("units", {})) or {})
+        defaults = dict(units.pop("defaults", {}))
+        scales = dict(units.pop("scales", {}))
+        known = {
+            key: payload.pop(key, None)
+            for key in [
+                "disable_scaling",
+                "f0",
+                "length_scale",
+                "time_scale",
+                "mass_scale",
+            ]
+        }
+        return cls(
+            defaults=defaults, scales=scales, units_extra=units, extra=payload, **known
+        )
+
+    def to_fs(self, ctx=None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        units_payload = dict(self.units_extra)
+        if self.scales:
+            units_payload["scales"] = {
+                key: unit_expression(value) for key, value in self.scales.items()
+            }
+        for key in [
+            "disable_scaling",
+            "f0",
+            "length_scale",
+            "time_scale",
+            "mass_scale",
+        ]:
+            value = getattr(self, key)
+            if value is not None:
+                if is_quantity(value):
+                    q = quantity_to_fs(value)
+                    payload[key] = q["value"]
+                    units_payload.setdefault("scales", {})[key] = q["units"]
+                else:
+                    payload[key] = _plain_value(value)
+        if self.defaults:
+            units_payload["defaults"] = {
+                key: unit_expression(value) for key, value in self.defaults.items()
+            }
+        if units_payload:
+            payload["Units"] = units_payload
+        return merge_extra(payload, self.extra, "UnitConfig")

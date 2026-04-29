@@ -25,8 +25,8 @@ class CustomJSONEncoder(json.JSONEncoder):
             return obj.values.tolist()
         if isinstance(obj, Path):
             return str(obj)
-        if hasattr(obj, "__dict__"):
-            return obj.__dict__()
+        if hasattr(obj, "to_fs"):
+            return obj.to_fs()
         return super().default(obj)
 
 

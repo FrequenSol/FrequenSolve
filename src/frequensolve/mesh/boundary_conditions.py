@@ -49,7 +49,7 @@ class BoundaryCondition:
             stretch_limit=data.get("stretch_limit", 1.0),
         )
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         bc_dict = {
             "name": self.name,
             "kind": self.kind,
@@ -67,6 +67,9 @@ class BoundaryCondition:
             ),
         }
         return bc_dict
+
+    def __dict__(self) -> Dict:
+        return self.to_fs()
 
 
 # TODO: Make class for geometric labels (since right now it accepts multiple values)
@@ -146,8 +149,11 @@ class BoundaryConditionManager:
         return cls(label_type=label_type, boundary_conditions=boundary_conditions)
 
     # TODO: change to to_dict
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         return {
             "label_type": self.label_type,
-            "boundary_conditions": [bc.__dict__() for bc in self.boundary_conditions],
+            "boundary_conditions": [bc.to_fs(ctx) for bc in self.boundary_conditions],
         }
+
+    def __dict__(self) -> Dict:
+        return self.to_fs()

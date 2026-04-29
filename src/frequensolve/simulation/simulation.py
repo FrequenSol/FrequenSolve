@@ -1,9 +1,11 @@
+import copy
 import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
+from frequensolve.geometry.frame import CoordinateSystem
 from frequensolve.mesh.boundary_conditions import BoundaryConditionManager
 from frequensolve.mesh.mesh import Mesh
 from frequensolve.mesh.mesh_generators import BaseMeshGenerator
@@ -14,9 +16,12 @@ from frequensolve.seismic.receivers import CoordsArray
 from frequensolve.simulation.config import SimulationConfig
 from frequensolve.simulation.numerics_manager import Discretization, SolverConfig
 from frequensolve.simulation.output_manager import OutputManager
+from frequensolve.units import UnitConfig
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.encoders import CustomJSONEncoder, CustomTOMLEncoder
 from frequensolve.util.memoization import memoized_func, quantize
+from frequensolve.util.mixins import ExportContext, merge_extra
+from frequensolve.util.store import SimulationStore
 
 __all__ = [
     "CustomJSONEncoder",
@@ -78,7 +83,7 @@ class BaseSimulation(SimulationConfig):
         else:
             raise Exception(f"Unknown simulation class: {class_name}")
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         from frequensolve.util.printing import print_note
 
         if isinstance(self.mesh, Mesh) or isinstance(self.mesh, BaseMeshGenerator):
@@ -89,20 +94,74 @@ class BaseSimulation(SimulationConfig):
                 f"your own."
             )
             self.mesh = MeshManager(self.mesh)
+        ctx = ctx or ExportContext(self._proj_path, self._rel_path)
         return {
             "_type": self.__class__.__name__,
             **super().__dict__(),
-            **({"Model": self.model.__dict__()} if self.model else {}),
-            **({"Mesh": self.mesh.__dict__()} if self.mesh else {}),
-            **({"BCs": self.BCs.__dict__()} if self.BCs else {}),
-            **({"Solver": self.solver.__dict__()} if self.solver else {}),
             **(
-                {"Discretization": self.discretization.__dict__()}
+                {"Model": self.model.to_fs(ctx.child(self.model.name))}
+                if self.model
+                else {}
+            ),
+            **(
+                {
+                    "Mesh": (
+                        self.mesh.to_fs(ctx.child("mesh"))
+                        if hasattr(self.mesh, "to_fs")
+                        else self.mesh.__dict__()
+                    )
+                }
+                if self.mesh
+                else {}
+            ),
+            **(
+                {
+                    "BCs": (
+                        self.BCs.to_fs(ctx)
+                        if hasattr(self.BCs, "to_fs")
+                        else self.BCs.__dict__()
+                    )
+                }
+                if self.BCs
+                else {}
+            ),
+            **(
+                {
+                    "Solver": (
+                        self.solver.to_fs(ctx)
+                        if hasattr(self.solver, "to_fs")
+                        else self.solver.__dict__()
+                    )
+                }
+                if self.solver
+                else {}
+            ),
+            **(
+                {
+                    "Discretization": (
+                        self.discretization.to_fs(ctx)
+                        if hasattr(self.discretization, "to_fs")
+                        else self.discretization.__dict__()
+                    )
+                }
                 if self.discretization
                 else {}
             ),
-            **({"Outputs": self.outputs.__dict__()} if self.outputs else {}),
+            **(
+                {
+                    "Outputs": (
+                        self.outputs.to_fs(ctx)
+                        if hasattr(self.outputs, "to_fs")
+                        else self.outputs.__dict__()
+                    )
+                }
+                if self.outputs
+                else {}
+            ),
         }
+
+    def __dict__(self) -> Dict:
+        return self.to_fs()
 
 
 @register_class
@@ -132,7 +191,10 @@ class SeismicSimulation(BaseSimulation):
     discretization: Discretization = field(default_factory=Discretization)
     outputs: OutputManager = field(default_factory=OutputManager)
     acquisition: Acquisition = field(default_factory=Acquisition)
-    kwargs: Dict = field(default_factory=dict)
+    units: UnitConfig = field(default_factory=UnitConfig)
+    global_coordinate_system: Optional[CoordinateSystem] = None
+    coordinate_systems: List[CoordinateSystem] = field(default_factory=list)
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.project_path is None:
@@ -147,6 +209,9 @@ class SeismicSimulation(BaseSimulation):
 
     @classmethod
     def from_dict(cls, data: Dict) -> "SeismicSimulation":
+        data = copy.deepcopy(data)
+        data.pop("schema", None)
+        data.pop("_type", None)
         name = data.pop("name")
         physics = data.pop("physics")
         dimension = data.pop("dimension")
@@ -158,30 +223,46 @@ class SeismicSimulation(BaseSimulation):
             project_path=project_path,
         )
 
-        # Load simulation from project directory
-        if os.getcwd() != project_path:
-            cwd = os.getcwd()
-            os.chdir(project_path)
+        unit_payload = {}
+        for key in [
+            "disable_scaling",
+            "f0",
+            "length_scale",
+            "time_scale",
+            "mass_scale",
+            "Units",
+            "units",
+        ]:
+            if key in data:
+                unit_payload[key] = data.pop(key)
+        sim.units = UnitConfig.from_fs(unit_payload)
 
-            if "Model" in data:
-                sim.model = ModelBase.from_dict(data.pop("Model"))
-            if "Mesh" in data:
-                sim.mesh = MeshManager.from_dict(data.pop("Mesh"))
-            if "BCs" in data:
-                sim.BCs = BoundaryConditionManager.from_dict(data.pop("BCs"))
-            if "Solver" in data:
-                sim.solver = SolverConfig.from_dict(data.pop("Solver"))
-            if "Discretization" in data:
-                sim.discretization = Discretization.from_dict(
-                    data.pop("Discretization")
-                )
-            if "Outputs" in data:
-                sim.outputs = OutputManager.from_dict(data.pop("Outputs"))
-            if "Acquisition" in data:
-                sim.acquisition = Acquisition.from_dict(data.pop("Acquisition"))
+        if "global_coordinate_system" in data:
+            sim.global_coordinate_system = CoordinateSystem.from_fs(
+                data.pop("global_coordinate_system")
+            )
+        if "coordinate_systems" in data:
+            sim.coordinate_systems = [
+                CoordinateSystem.from_fs(item)
+                for item in data.pop("coordinate_systems")
+            ]
 
-            os.chdir(cwd)
-        sim.kwargs = data
+        if "Model" in data:
+            sim.model = ModelBase.from_dict(data.pop("Model"))
+        if "Mesh" in data:
+            sim.mesh = MeshManager.from_dict(data.pop("Mesh"))
+        if "BCs" in data:
+            sim.BCs = BoundaryConditionManager.from_dict(data.pop("BCs"))
+        if "Solver" in data:
+            sim.solver = SolverConfig.from_dict(data.pop("Solver"))
+        if "Discretization" in data:
+            sim.discretization = Discretization.from_dict(data.pop("Discretization"))
+        if "Outputs" in data:
+            sim.outputs = OutputManager.from_dict(data.pop("Outputs"))
+        if "Acquisition" in data:
+            sim.acquisition = Acquisition.from_dict(data.pop("Acquisition"))
+
+        sim.extra = data
         sim._set_path(project_path, Path("simulations"))
         return sim
 
@@ -204,12 +285,35 @@ class SeismicSimulation(BaseSimulation):
         sim_copy._set_path(self.project_path, Path("simulations") / name)
         return sim_copy
 
+    @property
+    def kwargs(self) -> Dict[str, Any]:
+        return self.extra
+
+    @kwargs.setter
+    def kwargs(self, value: Dict[str, Any]) -> None:
+        self.extra = copy.deepcopy(dict(value))
+
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
+        ctx = ctx or self.export_context()
+        payload = super().to_fs(ctx)
+        payload["schema"] = "fs-simulation-1"
+        payload["_type"] = self.__class__.__name__
+        payload.update(self.units.to_fs(ctx))
+        if self.global_coordinate_system is not None:
+            payload["global_coordinate_system"] = self.global_coordinate_system.to_fs()
+        if self.coordinate_systems:
+            payload["coordinate_systems"] = [
+                cs.to_fs() for cs in self.coordinate_systems
+            ]
+        payload["Acquisition"] = (
+            self.acquisition.to_fs(ctx)
+            if hasattr(self.acquisition, "to_fs")
+            else self.acquisition.__dict__()
+        )
+        return merge_extra(payload, self.extra, "Simulation")
+
     def __dict__(self) -> Dict:
-        dict = super().__dict__()
-        dict["_type"] = self.__class__.__name__
-        dict["Acquisition"] = self.acquisition.__dict__()
-        dict.update(self.kwargs)
-        return dict
+        return self.to_fs()
 
     def __iadd__(self, other):
         if isinstance(other, ModelBase):
@@ -232,12 +336,19 @@ class SeismicSimulation(BaseSimulation):
             raise ValueError(f"Cannot add {type(other)} to simulation")
         return self
 
+    def export_context(self) -> ExportContext:
+        proj_path = self._proj_path or Path(self.project_path)
+        rel_path = self._rel_path or Path("simulations") / self.name
+        store = SimulationStore(
+            proj_path / rel_path / f"{self.name}.h5",
+            project_path=proj_path,
+        )
+        return ExportContext(proj_path, rel_path, store=store)
+
     def as_json(self, **kwargs) -> str:
         """Convert simulation to JSON string."""
         indent = kwargs.get("indent", 3)
-        return json.dumps(
-            self.__dict__(), cls=CustomJSONEncoder, indent=indent, **kwargs
-        )
+        return json.dumps(self.to_fs(), cls=CustomJSONEncoder, indent=indent, **kwargs)
 
     def save(self, **json_kwargs) -> Path:
         """Save seismic simulation to JSON file."""
@@ -250,9 +361,10 @@ class SeismicSimulation(BaseSimulation):
 
         self._file = file
         indent = json_kwargs.pop("indent", 3)
+        ctx = self.export_context()
         with open(file, "w") as f:
             json.dump(
-                self.__dict__(), f, cls=CustomJSONEncoder, indent=indent, **json_kwargs
+                self.to_fs(ctx), f, cls=CustomJSONEncoder, indent=indent, **json_kwargs
             )
         return file
 

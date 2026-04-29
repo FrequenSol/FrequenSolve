@@ -37,7 +37,7 @@ class ShotRecord(DataArray):
        sampling (Sampling): A Sampling object describing frequency/time ranges.
        source (Source): The associated Source object for this shot.
        receiver_group (ReceiverGroup): The associated ReceiverGroup object.
-       field (str): Field name (e.g. "pressure", "displacement").
+       field (str): Field name (e.g. "pressure", "velocity").
        data (np.ndarray): The raw data array, shape depends on FD or TD usage.
     """
 
@@ -157,6 +157,9 @@ class ShotRecord(DataArray):
 
         # TODO: check these and make conversion
         src_code = {
+            "v_z": 1,
+            "v_y": 2,
+            "v_x": 3,
             "u_z": 1,
             "u_y": 2,
             "u_x": 3,
@@ -169,6 +172,9 @@ class ShotRecord(DataArray):
             "generic": 1,
             "signal": 9,
             "pressure": 11,
+            "v_z": 12,
+            "v_y": 13,
+            "v_x": 14,
             "u_z": 12,
             "u_y": 13,
             "u_x": 14,

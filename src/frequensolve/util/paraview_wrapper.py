@@ -945,23 +945,23 @@ if __name__ == "__main__":
     # Hide axes
     pv.hide_axes()
 
-    # Plot Displacement Components
+    # Plot velocity components
     for comp in ["X", "Y"]:
         pv.show_field(
-            field="disp_1_im",
+            field="velocity_1_im",
             comp=comp,
             colorbar=False,
             colormap="RdGy",
             limits=[-5, 5],
         )
-        pv.screenshot(f"./disp_{comp}.pdf")
+        pv.screenshot(f"./velocity_{comp}.pdf")
 
-    # Plot Displacement Amplitude
+    # Plot velocity amplitude
     pv.show_field(
-        field="disp_1_abs",
+        field="velocity_1_abs",
         comp="Magnitude",
         colorbar=False,
         colormap="RdGy",
         limits=[0, 5],
     )
-    pv.screenshot(f"./disp.pdf")
+    pv.screenshot(f"./velocity.pdf")

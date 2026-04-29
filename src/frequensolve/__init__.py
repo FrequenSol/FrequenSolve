@@ -18,6 +18,7 @@ from frequensolve.orchestrator import *
 from frequensolve.project import *
 from frequensolve.seismic import *
 from frequensolve.simulation import *
+from frequensolve.units import *
 
 # Core imports that don't depend on others
 from frequensolve.util import *

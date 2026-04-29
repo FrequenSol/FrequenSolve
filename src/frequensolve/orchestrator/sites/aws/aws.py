@@ -15,7 +15,7 @@ from botocore.exceptions import ClientError
 
 from frequensolve.orchestrator.config.base import BaseSiteConfig
 from frequensolve.orchestrator.sites.base import BaseSite
-from frequensolve.seismic.record_database import RecordDatabase
+from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
 
@@ -742,7 +742,7 @@ class AWSSite(BaseSite):
         job: Union[SimulationJob, List[SimulationJob]],
         path: Optional[Union[str, Path]] = None,
         upscale: int = 1,
-    ) -> Union[RecordDatabase, Dict[str, RecordDatabase]]:
+    ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
         """Get results from Stampede3.
 
         Args:
@@ -787,13 +787,14 @@ class AWSSite(BaseSite):
 
                 # Build the path for the s3 results directory and the local results directory.
                 # The job results are stored in the job's result_path, not the simulation path
-                # Format: ex_01/jobs/simulation_name/job_name/results/receivers/
+                # Format: ex_01/jobs/simulation_name/job_name/results/traces/
                 project_name = job.simulation._remote_path.parts[0]  # e.g., "ex_01"
                 simulation_name = job.simulation.name  # e.g., "simple_acoustic"
                 job_name = job.name  # e.g., "time"
+                trace_dir_name = Path(job.trace_outputs["path"]).name
 
                 results_receivers_path = (
-                    f"jobs/{simulation_name}/{job_name}/results/receivers"
+                    f"jobs/{simulation_name}/{job_name}/results/{trace_dir_name}"
                 )
                 s3_results_path = f"s3://{self.config.s3_bucket}/{project_name}/{results_receivers_path}"
                 local_results_path = path / results_receivers_path
@@ -811,7 +812,7 @@ class AWSSite(BaseSite):
 
                 # TODO: Copy job, simulation file to database so that it can be read independently.
 
-                db = RecordDatabase.from_results(job.records, path.resolve(), upscale)
+                db = TraceDataset.from_job(job, upscale, project_path=path.resolve())
                 db_map[job.name] = db
 
             except Exception as e:

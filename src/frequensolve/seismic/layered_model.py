@@ -1,7 +1,8 @@
+import copy
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union
 
 import numpy as np
 import xarray as xr
@@ -15,6 +16,7 @@ from frequensolve.model.property import Property
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.util.class_registry import register_class
 from frequensolve.util.data_file import save_data_if_new
+from frequensolve.util.mixins import merge_extra
 from frequensolve.util.named_list import NamedList
 
 __all__ = ["SimpleSurface", "Layer", "LayeredModel"]
@@ -75,7 +77,8 @@ class SimpleSurface:
         grid = None
         if "file" in data:
             z_phys = data["file"]
-            grid = CartesianGrid.from_dict(data["grid"]).as_xarray()
+            if "grid" in data:
+                grid = CartesianGrid.from_dict(data["grid"]).as_xarray()
         else:
             z_phys = data["value"]
 
@@ -87,23 +90,34 @@ class SimpleSurface:
             **({"grid": grid} if grid is not None else {}),
         )
 
-    def __dict__(self):
+    def to_fs(self, ctx=None):
         data = {
             "name": self.name,
             "z_ref": self.z_ref,
             "interface": self.interface,
         }
-        if self.z_phys.is_constant:
-            data["z_phys"] = {"value": self.z_phys.get()}
-        else:
-            file = self._path / (self.name + ".bin")
-            file.parent.mkdir(parents=True, exist_ok=True)
-            file = save_data_if_new(self.z_phys.darr, file)
-            data["z_phys"] = {
-                "file": file.relative_to(self._proj_path),
-                "grid": self.z_phys.grid.__dict__(),
-            }
+        ctx = ctx or self.export_context()
+        use_store = getattr(ctx, "store", None) is not None
+        file = (
+            None
+            if self.z_phys.is_constant or use_store
+            else self._path / (self.name + ".bin")
+        )
+        dataset = f"inputs/model/surfaces/{self.name}/z_phys"
+        data["z_phys"] = self.z_phys.to_fs(
+            ctx=ctx,
+            file=file,
+            dataset=dataset,
+        )
         return data
+
+    def __dict__(self):
+        return self.to_fs()
+
+    def export_context(self):
+        from frequensolve.util.mixins import ExportContext
+
+        return ExportContext(self._proj_path, self._rel_path)
 
     @property
     def data(self):
@@ -291,7 +305,7 @@ class Layer(ModelSubdomain):
             )
 
     def set_property(self, key: str, value: Union[float, xr.DataArray]):
-        self._properties[key] = Property(data=value)
+        self.properties[key] = value
 
 
 # Helper class for LayeredModel
@@ -351,7 +365,7 @@ class LayeredModel(ModelBase):
     y_limits: Optional[List[float]] = None
     surfaces: NamedList = field(default_factory=NamedList)
     ordering: Literal["top_down", "bottom_up"] = "top_down"
-    kwargs: Dict = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     _last_added: str = "none"
     _proj_path: Optional[Path] = None
@@ -510,11 +524,14 @@ class LayeredModel(ModelBase):
         Returns:
            LayeredModel: New LayeredModel instance created from dictionary data.
         """
+        data = copy.deepcopy(data)
         # Create copy and remove surfaces to pass rest to parent
         surfs = data.pop("surfaces")
         layers = data.pop("subdomains")
 
         name = data.pop("name", None)
+        data.pop("_type", None)
+        data.pop("schema", None)
         dimension = data.pop("dimension", None)
         x_limits = data.pop("x_limits", None)
         y_limits = data.pop("y_limits", None)
@@ -526,7 +543,7 @@ class LayeredModel(ModelBase):
             y_limits=y_limits,
             ordering=ordering,
         )
-        model.kwargs = data
+        model.extra = data
 
         model += SimpleSurface.from_dict(surfs[0])
 
@@ -549,22 +566,24 @@ class LayeredModel(ModelBase):
 
         return model
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         # Mark bottom surface as interface
         self.surfaces[-1].interface = True
 
-        base_dict = super().__dict__()
+        base_dict = super().to_fs(ctx)
         base_dict.update(
             {
                 "_type": self.__class__.__name__,
                 "x_limits": self.x_limits,
                 **({"y_limits": self.y_limits} if self.y_limits is not None else {}),
                 "ordering": self.ordering,
-                "surfaces": [surface.__dict__() for surface in self.surfaces],
+                "surfaces": [surface.to_fs(ctx) for surface in self.surfaces],
             }
         )
-        base_dict.update(self.kwargs)
-        return base_dict
+        return merge_extra(base_dict, self.extra, "LayeredModel")
+
+    def __dict__(self) -> Dict:
+        return self.to_fs()
 
     def __iadd__(self, other):
         if isinstance(other, SimpleSurface):

@@ -39,6 +39,30 @@ def process_string(raw):
     return s
 
 
+def _decode_h5_strings(values):
+    values = np.asarray(values)
+    if values.dtype.kind in {"S", "O"}:
+        return np.array(
+            [
+                item.decode("utf-8", "ignore") if isinstance(item, bytes) else str(item)
+                for item in values
+            ]
+        )
+    return values
+
+
+def _unique_preserve_order(values):
+    out = []
+    seen = set()
+    for value in values:
+        key = value.item() if hasattr(value, "item") else value
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return np.asarray(out)
+
+
 @dataclass
 class RecordDatabase:
     metadata: Dict[str, Any]
@@ -123,8 +147,13 @@ class RecordDatabase:
 
     @property
     def groups(self) -> list[str]:
-        f = h5py.File(self._consolidated, "r")
-        return list(f.keys())
+        with h5py.File(self._consolidated, "r") as f:
+            return [
+                name
+                for name, item in f.items()
+                if isinstance(item, h5py.Dataset)
+                and name not in {"frequency", "laplace", "source_file"}
+            ]
 
     def dims(self, group) -> list[str]:
         f = h5py.File(self._consolidated, "r")
@@ -132,27 +161,60 @@ class RecordDatabase:
         return dims
 
     def components(self, group) -> list[str]:
-        f = h5py.File(self._consolidated, "r")
-        return f[group].attrs["component"]
+        with h5py.File(self._consolidated, "r") as f:
+            path = f"survey/receiver_groups/{group}/traces/component_name"
+            if path in f:
+                return _unique_preserve_order(_decode_h5_strings(f[path][()]))
+            if "component" in f[group].attrs:
+                return _decode_h5_strings(f[group].attrs["component"])
+            return np.arange(1, f[group].shape[-2] + 1)
 
     def shots(self, group) -> list[str]:
-        f = h5py.File(self._consolidated, "r")
-        return f[group].attrs["shot"]
+        with h5py.File(self._consolidated, "r") as f:
+            path = f"survey/receiver_groups/{group}/traces/source_id"
+            if path in f:
+                return _unique_preserve_order(f[path][()])
+            if "shot" in f[group].attrs:
+                return f[group].attrs["shot"]
+            return np.arange(1, f[group].shape[-1] + 1)
 
     def frequencies(self, group) -> list[str]:
-        f = h5py.File(self._consolidated, "r")
-        return f[group].attrs["frequency"]
+        with h5py.File(self._consolidated, "r") as f:
+            if "frequency" in f:
+                return f["frequency"][()]
+            if "frequency" in f[group].attrs:
+                return f[group].attrs["frequency"]
+            return np.array(list(self.metadata["f_map"].values()))
 
     def receivers(self, group) -> list[str]:
-        f = h5py.File(self._consolidated, "r")
-
-        if "receiver" in f[group].attrs:
-            recv = f[group].attrs["receiver"]
-        else:
+        with h5py.File(self._consolidated, "r") as f:
+            path = f"survey/receiver_groups/{group}/traces/receiver_id"
+            if path in f:
+                return _unique_preserve_order(f[path][()])
+            if "receiver" in f[group].attrs:
+                return f[group].attrs["receiver"]
             dims = f[group].attrs["dims"][::-1]
             ind = np.where(dims == "receiver")[0][0]
-            recv = np.arange(1, f[group].shape[ind] + 1)
-        return recv
+            return np.arange(1, f[group].shape[ind] + 1)
+
+    def survey_tables(self) -> Dict[str, Any]:
+        if self._consolidated is None:
+            self.consolidate_h5()
+
+        def read_group(group):
+            out = {}
+            for key, item in group.items():
+                if isinstance(item, h5py.Dataset):
+                    value = item[()]
+                    out[key] = _decode_h5_strings(value).tolist()
+                elif isinstance(item, h5py.Group):
+                    out[key] = read_group(item)
+            return out
+
+        with h5py.File(self._consolidated, "r") as f:
+            if "survey" not in f:
+                return {}
+            return read_group(f["survey"])
 
     @property
     def summary(self, colorize: bool = True) -> str:
@@ -213,6 +275,24 @@ class RecordDatabase:
                 except Exception as e:
                     print(f"Error reading {file}: {e}")
                     continue
+
+            if freqs:
+                nf.create_dataset("frequency", data=np.asarray(freqs, dtype=float))
+            string_dtype = h5py.string_dtype(encoding="utf-8")
+            nf.create_dataset(
+                "source_file",
+                data=np.asarray(
+                    [str(file) for file in self.records], dtype=string_dtype
+                ),
+            )
+
+            for file in self.records:
+                if not os.path.exists(file):
+                    continue
+                with h5py.File(file, "r") as f:
+                    if "survey" in f:
+                        f.copy("survey", nf)
+                        break
 
             for group in self.metadata["groups"]:
                 with h5py.File(self.records[0], "r") as f:

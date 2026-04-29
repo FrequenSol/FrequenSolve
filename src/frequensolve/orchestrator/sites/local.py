@@ -25,7 +25,7 @@ from frequensolve.orchestrator.sites.base import (
     SiteStatus,
     _wait_for_path,
 )
-from frequensolve.seismic.record_database import RecordDatabase
+from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.imaging import ImageDatabase, ImagingJob
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
@@ -184,19 +184,9 @@ class LocalSite(BaseSite):
         Returns:
             List of results from completed tasks
         """
-
-        if self._dask_client is None:
-            if self.n_workers is None:
-                self.n_workers = self.config.cores
-            if job.n_tasks < self.n_workers:
-                nw = self.n_workers
-                while nw > job.n_tasks:
-                    nw = nw // 2
-                self._initialize_dask(n_workers=nw)
-            else:
-                self._initialize_dask(self.n_workers)
-
         futures = self.submit_async(job, **kwargs)
+        if not futures:
+            return []
 
         if self._is_notebook:
             from tqdm.notebook import tqdm
@@ -218,6 +208,9 @@ class LocalSite(BaseSite):
 
         results = wait(futures)
         pbar.close()
+        for future in futures:
+            future.result()
+        job.write_run_state(status="completed")
 
         if isinstance(job, ImagingJob):
             smooth_future = self._dask_client.submit(
@@ -247,9 +240,23 @@ class LocalSite(BaseSite):
             raise RuntimeError("Solver executable not found, cannot submit job")
 
         job_file = job.save()
+        force = kwargs.get("force", False) or kwargs.get("rerun", False)
+        if not force and job.is_run_current():
+            logger.info(
+                "Skipping job %s; fingerprint matches and expected trace outputs exist.",
+                job.name,
+            )
+            job.write_run_state(status="skipped")
+            return []
 
         if self._dask_client is None:
-            self._initialize_dask()
+            if self.n_workers is None:
+                self.n_workers = self.config.cores
+            n_workers = self.n_workers
+            if job.n_tasks < n_workers:
+                while n_workers > job.n_tasks and n_workers > 1:
+                    n_workers = n_workers // 2
+            self._initialize_dask(max(1, n_workers))
 
         n_ranks = kwargs.get("procs_per_job", 1)
 
@@ -316,14 +323,18 @@ class LocalSite(BaseSite):
         job: Union[SimulationJob, List[SimulationJob]],
         upscale: int = 1,
         path: Optional[Union[str, Path]] = None,
-    ) -> Union[RecordDatabase, Dict[str, RecordDatabase]]:
+        combine: bool = False,
+    ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
+        project_path = Path(path).resolve() if path is not None else None
         if isinstance(job, SimulationJob):
-            db = RecordDatabase.from_job(job, upscale)
+            db = TraceDataset.from_job(job, upscale, project_path=project_path)
             return db
+        if combine:
+            return TraceDataset.from_jobs(job, upscale, project_path=project_path)
         else:
             db_map = {}
             for j in job:
-                db = RecordDatabase.from_job(j, upscale)
+                db = TraceDataset.from_job(j, upscale, project_path=project_path)
                 db_map[j.name] = db
             return db_map
 

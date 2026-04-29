@@ -1,5 +1,8 @@
-from dataclasses import asdict, dataclass, field
+import copy
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Union
+
+from frequensolve.util.mixins import merge_extra
 
 __all__ = ["Discretization", "SolverConfig", "SuperPatch", "NumericsManager"]
 
@@ -18,7 +21,7 @@ class Discretization:
 
     method: str = "DPG"
     order: Union[int, Dict[str, int]] = 3
-    kwargs: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
         self,
@@ -28,22 +31,34 @@ class Discretization:
     ):
         self.method = method
         self.order = order
-        self.kwargs = kwargs
+        self.extra = kwargs
+
+    @property
+    def kwargs(self) -> Dict[str, Any]:
+        return self.extra
+
+    @kwargs.setter
+    def kwargs(self, value: Dict[str, Any]) -> None:
+        self.extra = copy.deepcopy(dict(value))
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Discretization":
+        d = copy.deepcopy(d)
         return cls(
             method=d.pop("method", "DPG"),
             order=d.pop("order", 3),
             **d,
         )
 
-    def __dict__(self) -> Dict[str, Any]:
-        return {
+    def to_fs(self, ctx=None) -> Dict[str, Any]:
+        payload = {
             "method": self.method,
             "order": self.order,
-            **self.kwargs,
         }
+        return merge_extra(payload, self.extra, "Discretization")
+
+    def __dict__(self) -> Dict[str, Any]:
+        return self.to_fs()
 
 
 @dataclass
@@ -69,7 +84,7 @@ class SuperPatch:
     grid: int = 0
     domain: List[int] = field(default_factory=list)
     warning_acknowledged: bool = False
-    options: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
         self,
@@ -89,22 +104,26 @@ class SuperPatch:
             domain = [domain]
         self.grid = grid
         self.domain = domain
-        self.options = kwargs
+        self.extra = kwargs
 
     @classmethod
     def from_dict(cls, data: Dict) -> "SuperPatch":
+        data = copy.deepcopy(data)
         return cls(
             grid=data.pop("grid"),
             domain=data.pop("domain"),
             **data,
         )
 
-    def __dict__(self) -> Dict:
-        return {
+    def to_fs(self, ctx=None) -> Dict:
+        payload = {
             "grid": self.grid,
             "domain": self.domain,
-            **self.options,
         }
+        return merge_extra(payload, self.extra, "SuperPatch")
+
+    def __dict__(self) -> Dict:
+        return self.to_fs()
 
 
 @dataclass
@@ -124,7 +143,7 @@ class SolverConfig:
     tolerance: float = 1.0e-4
     grids: int = 4
     hp_switch: Optional[int] = None
-    kwargs: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
         self,
@@ -140,10 +159,19 @@ class SolverConfig:
         self.tolerance = tolerance
         self.grids = grids
         self.hp_switch = hp_switch
-        self.kwargs = kwargs
+        self.extra = kwargs
+
+    @property
+    def kwargs(self) -> Dict[str, Any]:
+        return self.extra
+
+    @kwargs.setter
+    def kwargs(self, value: Dict[str, Any]) -> None:
+        self.extra = copy.deepcopy(dict(value))
 
     @classmethod
     def from_dict(cls, data: Dict) -> "SolverConfig":
+        data = copy.deepcopy(data)
         ngrids = data.pop("grids", 4)
         obj = cls(
             solve_on=data.pop("solve_on", "final"),
@@ -152,17 +180,17 @@ class SolverConfig:
             grids=ngrids,
             hp_switch=data.pop("hp_switch", ngrids),
         )
-        obj.kwargs = data
+        obj.extra = data
         return obj
 
     def __iadd__(self, other: SuperPatch) -> "SolverConfig":
         if isinstance(other, SuperPatch):
-            if "super_patches" not in self.kwargs:
-                self.kwargs["super_patches"] = []
-            self.kwargs["super_patches"].append(other.__dict__())
+            if "super_patches" not in self.extra:
+                self.extra["super_patches"] = []
+            self.extra["super_patches"].append(other.to_fs())
         return self
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         hp_switch = self.hp_switch if self.hp_switch is not None else self.grids
         dict = {
             "solve_on": self.solve_on,
@@ -170,9 +198,11 @@ class SolverConfig:
             "tolerance": self.tolerance,
             "grids": self.grids,
             "hp_switch": hp_switch,
-            **self.kwargs,
         }
-        return dict
+        return merge_extra(dict, self.extra, "SolverConfig")
+
+    def __dict__(self) -> Dict:
+        return self.to_fs()
 
 
 @dataclass
@@ -189,10 +219,17 @@ class NumericsManager:
 
     @classmethod
     def from_dict(cls, data: Dict) -> "NumericsManager":
+        data = copy.deepcopy(data)
         return cls(
             solver=SolverConfig.from_dict(data["solver"]),
             discretization=Discretization.from_dict(data["discretization"]),
         )
 
+    def to_fs(self, ctx=None) -> Dict:
+        return {
+            "solver": self.solver.to_fs(ctx),
+            "discretization": self.discretization.to_fs(ctx),
+        }
+
     def __dict__(self) -> Dict:
-        return asdict(self)
+        return self.to_fs()

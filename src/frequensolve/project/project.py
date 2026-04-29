@@ -299,17 +299,23 @@ class Project:
         return file
 
     def as_json(self, **kwargs) -> str:
-        return json.dumps(self.__dict__(), cls=CustomJSONEncoder, **kwargs)
+        return json.dumps(self.to_fs(), cls=CustomJSONEncoder, **kwargs)
 
-    def __dict__(self) -> Dict:
+    def to_fs(self) -> Dict:
         return {
             "name": self.name,
             **({"pretty_name": self.pretty_name} if self.pretty_name else {}),
             "version": str(self.version),
-            "simulations": [sim.__dict__() for sim in self.simulations],
+            "simulations": [
+                sim.to_fs() if hasattr(sim, "to_fs") else sim.__dict__()
+                for sim in self.simulations
+            ],
             "workflows": [wf.__dict__() for wf in self.workflows.values()],
             "extras": [extra.__dict__() for extra in self.extras.values()],
         }
+
+    def __dict__(self) -> Dict:
+        return self.to_fs()
 
     def new_simulation(
         self, name: str, physics: str, dimension: int, **kwargs

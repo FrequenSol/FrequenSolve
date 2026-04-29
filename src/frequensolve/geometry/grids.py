@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import numpy as np
 
@@ -73,6 +73,8 @@ class CartesianGrid(Grid):
     x1: List[float] = field(default_factory=list)
     dx: List[float] = field(default_factory=list)
     dims: List[str] = field(default_factory=list)
+    units: Optional[str] = None
+    system: Optional[str] = None
 
     def __post_init__(self):
         if len(self.x1) == 0:
@@ -230,7 +232,7 @@ class CartesianGrid(Grid):
         else:
             raise ValueError("Grid must have 1, 2, or 3 dimensions")
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         """Converts the grid to a dictionary representation.
 
         Returns:
@@ -243,7 +245,12 @@ class CartesianGrid(Grid):
             "x0": self.x0,
             "x1": self.x1,
             "dx": self.dx,
+            **({"units": self.units} if self.units is not None else {}),
+            **({"system": self.system} if self.system is not None else {}),
         }
+
+    def __dict__(self) -> Dict:
+        return self.to_fs()
 
     @classmethod
     def from_dict(cls, data: Dict) -> "CartesianGrid":
@@ -264,4 +271,12 @@ class CartesianGrid(Grid):
                 dims = ["x", "z"]
             elif len(data["n"]) == 3:
                 dims = ["x", "y", "z"]
-        return cls(n=data["n"], x0=data["x0"], x1=data["x1"], dx=data["dx"], dims=dims)
+        return cls(
+            n=data["n"],
+            x0=data["x0"],
+            x1=data["x1"],
+            dx=data.get("dx", []),
+            dims=dims,
+            units=data.get("units"),
+            system=data.get("system"),
+        )

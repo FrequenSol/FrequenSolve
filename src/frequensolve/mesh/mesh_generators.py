@@ -53,8 +53,10 @@ class HexMeshGenerator(BaseMeshGenerator):
     l_bound: Optional[List[float]] = None
     u_bound: Optional[List[float]] = None
     n: Optional[List[int]] = None
+    units: Optional[str] = None
+    system: Optional[str] = None
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         if self.l_bound is not None:
             assert self.u_bound is not None
             l_bound = self.l_bound
@@ -69,7 +71,12 @@ class HexMeshGenerator(BaseMeshGenerator):
             "n": self.n,
             "l_bound": l_bound,
             "u_bound": u_bound,
+            **({"units": self.units} if self.units is not None else {}),
+            **({"system": self.system} if self.system is not None else {}),
         }
+
+    def __dict__(self) -> Dict:
+        return self.to_fs()
 
     @classmethod
     def from_dict(cls, data: Dict) -> "HexMeshGenerator":
@@ -77,6 +84,8 @@ class HexMeshGenerator(BaseMeshGenerator):
             n=data["n"],
             l_bound=data["l_bound"],
             u_bound=data["u_bound"],
+            units=data.get("units"),
+            system=data.get("system"),
         )
 
 
@@ -100,4 +109,6 @@ class TetMeshGenerator(HexMeshGenerator):
             n=data["n"],
             l_bound=data["l_bound"],
             u_bound=data["u_bound"],
+            units=data.get("units"),
+            system=data.get("system"),
         )
