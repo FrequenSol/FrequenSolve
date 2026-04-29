@@ -33,6 +33,7 @@ class BoundaryCondition:
     pml_wavelengths: float = 2.0
     pml_exponent: float = 3.0
     pml_constant: float = 20.0
+    pml_reflection: float = 1e-4
     stretch_limit: float = 0.25
 
     @classmethod
@@ -44,6 +45,7 @@ class BoundaryCondition:
             pml_wavelengths=data.get("pml_wavelengths", 2.0),
             pml_exponent=data.get("pml_exponent", 3.0),
             pml_constant=data.get("pml_constant", 20.0),
+            pml_reflection=data.get("pml_reflection", 1e-4),
             stretch_limit=data.get("stretch_limit", 1.0),
         )
 
@@ -57,6 +59,7 @@ class BoundaryCondition:
                     "pml_wavelengths": self.pml_wavelengths,
                     "pml_exponent": self.pml_exponent,
                     "pml_constant": self.pml_constant,
+                    "pml_reflection": self.pml_reflection,
                     "stretch_limit": self.stretch_limit,
                 }
                 if self.kind == "pml"

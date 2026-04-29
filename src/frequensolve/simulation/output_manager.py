@@ -67,6 +67,7 @@ class ParaviewOutput(Output):
     path: Union[str, Path] = ("ParaView",)
     fields: Optional[List[str]] = None
     properties: Optional[List[str]] = None
+    sources: Optional[List[int]] = None
     upscale: int = 1
     show_pml: bool = True
 
@@ -76,14 +77,20 @@ class ParaviewOutput(Output):
         path: Union[str, Path] = "ParaView",
         fields: Optional[List[str]] = None,
         properties: Optional[List[str]] = None,
+        sources: Optional[List[int]] = None,
         upscale: int = 1,
         show_pml: bool = True,
         **kwargs,
     ):
+
+        if sources is None:
+            sources = [1]
+
         self.name = name
         self.path = path
         self.fields = fields
         self.properties = properties
+        self.sources = sources
         self.upscale = upscale
         self.show_pml = show_pml
         self.kwargs = kwargs
@@ -98,6 +105,7 @@ class ParaviewOutput(Output):
             "path": self.path,
             "fields": self.fields,
             "properties": self.properties,
+            "sources": self.sources,
             "upscale": self.upscale,
             "show_pml": self.show_pml,
             **self.kwargs,

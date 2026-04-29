@@ -158,7 +158,7 @@ class SimulationJob(ABC):
 
     @property
     def _local_path(self):
-        project_path = self.project_path
+        project_path = Path(self.project_path)
         return project_path / "jobs" / self.simulation.name / self.name
 
     @property
