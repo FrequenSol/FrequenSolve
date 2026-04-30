@@ -23,6 +23,7 @@ from frequensolve.orchestrator.sites.aws import AWSSiteConfig
 from frequensolve.orchestrator.sites.aws.cognito import CognitoAuth
 
 
+@pytest.mark.cloud
 @pytest.mark.interactive
 def test_login():
     """Test Cognito authentication flow."""
@@ -66,7 +67,7 @@ def test_login():
         use_cached = input("\n  Use cached tokens? [Y/n]: ").strip().lower()
         if use_cached == "n":
             raise ValueError("User chose to re-authenticate")
-    except (ValueError, FileNotFoundError) as e:
+    except (ValueError, FileNotFoundError):
         print("  ℹ No cached tokens found - authentication required")
 
         # Prompt for credentials

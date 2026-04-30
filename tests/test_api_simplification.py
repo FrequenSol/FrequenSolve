@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
 
@@ -14,9 +15,9 @@ from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import Property, prop
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
-from frequensolve.seismic.record_database import TraceStore
 from frequensolve.seismic.sparse_survey import SparseSurvey
 from frequensolve.seismic.traces import TraceDataset
+from frequensolve.simulation.artifacts import TraceManifest
 from frequensolve.simulation.jobs import FrequencyDomainJob
 from frequensolve.simulation.output_manager import (
     OutputManager,
@@ -45,6 +46,25 @@ def test_property_map_is_editable_and_canonicalizes_names():
     assert set(payload["properties"]) == {"vp", "rho"}
     assert payload["properties"]["vp"] == {"value": 2.0, "units": "km/s"}
     assert payload["properties"]["rho"] == {"value": 2.2, "units": "g/cm^3"}
+
+
+def test_property_does_not_mutate_input_dataarray_when_scaled():
+    data = xr.DataArray(np.array([1.0, 2.0]), dims=["x"], coords={"x": [0.0, 1.0]})
+
+    prop = Property(data, scale=2.0)
+
+    assert data.values.tolist() == [1.0, 2.0]
+    assert prop.get().values.tolist() == [2.0, 4.0]
+
+
+def test_property_map_copies_property_instances_on_assignment():
+    source = Property(1.0)
+    props = ModelSubdomain(mesh_block_id=1, properties={"vp": source}).properties
+
+    source += 1.0
+
+    assert props["vp"].get() == 1.0
+    assert source.get() == 2.0
 
 
 def test_structured_remote_property_ref_does_not_touch_filesystem():
@@ -148,7 +168,7 @@ def test_derived_property_expressions_roundtrip_without_mutating_input():
     }
     original = copy.deepcopy(data)
 
-    subdomain = ModelSubdomain.from_dict(data)
+    subdomain = ModelSubdomain.from_fs(data)
     payload = subdomain.to_fs()
 
     assert data == original
@@ -177,31 +197,240 @@ def test_coordinate_aware_values_export_to_contract_shape():
     }
 
 
-def test_elastic_velocity_is_canonical_and_displacement_is_legacy_alias():
+def test_surface_coordinate_system_helpers_export_acquisition_metadata():
+    surface = CoordinateSystem.surface("free_surface", surface="top", normal="up")
+
+    assert surface.to_fs() == {
+        "type": "surface",
+        "name": "free_surface",
+        "surface": "top",
+        "normal": "up",
+    }
+    assert surface.on([0.5, 1.5], units="km").to_fs() == {
+        "value": [[0.5, 0.0], [1.5, 0.0]],
+        "units": "km",
+        "system": "free_surface",
+    }
+    assert surface.points(np.array([0.5, 1.5]) * u.km).to_fs() == {
+        "value": [[0.5, 0.0], [1.5, 0.0]],
+        "units": "km",
+        "system": "free_surface",
+    }
+    assert surface.points(np.array([0.5]) * u.km, offset=-25.0 * u.m).to_fs() == {
+        "value": [[0.5, -0.025]],
+        "units": "km",
+        "system": "free_surface",
+    }
+    assert surface.above(np.array([0.5]) * u.km, 25.0 * u.m).to_fs() == {
+        "value": [[0.5, 0.025]],
+        "units": "km",
+        "system": "free_surface",
+    }
+    assert surface.below(np.array([0.5]) * u.km, 25.0 * u.m).to_fs() == {
+        "value": [[0.5, -0.025]],
+        "units": "km",
+        "system": "free_surface",
+    }
+    assert surface.below(np.array([[0.5, 0.025]]) * u.km).to_fs() == {
+        "value": [[0.5, -0.025]],
+        "units": "km",
+        "system": "free_surface",
+    }
+    depth_surface = CoordinateSystem.surface(
+        "depth_surface", surface="top", normal="down"
+    )
+    assert depth_surface.above(np.array([0.5]) * u.km, 25.0 * u.m).to_fs() == {
+        "value": [[0.5, -0.025]],
+        "units": "km",
+        "system": "depth_surface",
+    }
+    assert depth_surface.below(np.array([0.5]) * u.km, 25.0 * u.m).to_fs() == {
+        "value": [[0.5, 0.025]],
+        "units": "km",
+        "system": "depth_surface",
+    }
+    assert surface.on([[0.0, 1.0], [2.0, 3.0]], offset=[0.0, 10.0]).to_fs() == {
+        "value": [[0.0, 1.0, 0.0], [2.0, 3.0, 10.0]],
+        "system": "free_surface",
+    }
+
+    acq = Acquisition()
+    acq.add_source_group(
+        kind="scalar",
+        coords=surface.points(np.array([0.5]) * u.km, offset=-25.0 * u.m),
+    )
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(
+        name="surface",
+        device=hydrophone,
+        coords=surface.on([0.0, 1.0], units="km"),
+    )
+
+    payload = acq.to_fs()
+    assert payload["source_groups"][0]["source"]["coordinates"] == {
+        "value": [0.5, -0.025],
+        "units": "km",
+        "system": "free_surface",
+    }
+    assert payload["receiver_groups"][0]["coordinates"] == {
+        "_type": "CoordsArray",
+        "value": [[0.0, 0.0], [1.0, 0.0]],
+        "units": "km",
+        "system": "free_surface",
+    }
+
+
+def test_simulation_registers_surface_coordinate_system(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    system = sim.add_surface_coordinate_system("free_surface", "top", normal="up")
+    payload = sim.to_fs()
+
+    assert system.name == "free_surface"
+    assert payload["coordinate_systems"] == [
+        {
+            "type": "surface",
+            "name": "free_surface",
+            "surface": "top",
+            "normal": "up",
+        }
+    ]
+
+
+def test_simulation_model_surface_helper_uses_surface_offsets_in_points(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    top = sim.model_surface("top")
+    sources = top.below(np.array([0.5]) * u.km, 25.0 * u.m)
+    receivers = top.points(np.array([0.0, 1.0]) * u.km)
+
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=sources)
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=receivers)
+    sim.acquisition = acq
+
+    payload = sim.to_fs()
+
+    assert payload["coordinate_systems"] == [
+        {"type": "surface", "name": "top", "surface": "top", "normal": "up"},
+    ]
+    assert payload["Acquisition"]["source_groups"][0]["source"]["coordinates"] == {
+        "value": [0.5, -0.025],
+        "units": "km",
+        "system": "top",
+    }
+    assert payload["Acquisition"]["receiver_groups"][0]["coordinates"] == {
+        "_type": "CoordsArray",
+        "value": [[0.0, 0.0], [1.0, 0.0]],
+        "units": "km",
+        "system": "top",
+    }
+
+
+def test_solver_frame_key_is_not_exported_and_legacy_input_is_ignored():
+    subdomain = ModelSubdomain.from_fs(
+        {"mesh_block_id": 1, "frame": "reference", "properties": {"vp": 1500.0}}
+    )
+    assert "frame" not in subdomain.to_fs()
+
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=[[0.0, 0.0]])
+
+    payload = acq.to_fs()
+    assert "frame" not in payload["source_groups"][0]["source"]
+    assert "frame" not in payload["receiver_groups"][0]
+
+    legacy = Acquisition.from_fs(
+        {
+            "source_groups": [
+                {
+                    "source": {
+                        "_type": "PointSource",
+                        "name": "shot",
+                        "kind": "scalar",
+                        "frame": "reference",
+                        "coordinates": [0.5, 0.0],
+                    }
+                }
+            ],
+            "receiver_groups": [
+                {
+                    "name": "surface",
+                    "device": hydrophone.to_fs(),
+                    "frame": "reference",
+                    "coordinates": {"_type": "CoordsArray", "coords": [[0.0, 0.0]]},
+                }
+            ],
+        }
+    )
+    legacy_payload = legacy.to_fs()
+    assert "frame" not in legacy_payload["source_groups"][0]["source"]
+    assert "frame" not in legacy_payload["receiver_groups"][0]
+
+    with pytest.raises(TypeError, match="frame"):
+        acq.add_receiver_group(
+            name="bad", device=hydrophone, coords=[[0.0, 0.0]], frame="reference"
+        )
+
+
+def test_elastic_velocity_is_canonical_and_displacement_is_removed():
     assert ElasticComponents.primary == ["velocity", "stress"]
-    assert ElasticComponents.check_components(["displacement", "stress"]) == [
+    assert ElasticComponents.check_components(["velocity", "stress"]) == [
         "velocity",
         "stress",
     ]
+    with pytest.raises(ValueError, match="displacement"):
+        ElasticComponents.check_components(["displacement", "stress"])
 
-    component = ReceiverComponent(name="vz", field="displacement")
+    component = ReceiverComponent(name="vz", field="velocity")
     assert component.field == "velocity"
     assert component.to_fs()["field"] == "velocity"
-    assert (
-        ReceiverComponent.from_dict({"name": "vz", "field": "displacement"}).field
-        == "velocity"
-    )
 
-    paraview = ParaviewOutput(fields=["displacement", "stress"])
+    paraview = ParaviewOutput(fields=["velocity", "stress"])
     assert paraview.fields == ["velocity", "stress"]
     assert paraview.to_fs()["fields"] == [
         "velocity",
         "stress",
     ]
-    assert WavefieldOutput(fields=["displacement"]).fields == ["velocity"]
-    assert WavefieldOutput.from_dict({"fields": ["displacement"]}).fields == [
-        "velocity"
-    ]
+    assert WavefieldOutput(fields=["velocity"]).fields == ["velocity"]
+    assert WavefieldOutput.from_fs({"fields": ["velocity"]}).fields == ["velocity"]
+
+
+def test_output_paths_must_be_relative_to_result_directory():
+    with pytest.raises(ValueError, match="relative"):
+        TraceOutput(path="/tmp/traces")
+    with pytest.raises(ValueError, match="relative"):
+        ParaviewOutput(path="/tmp/paraview")
+    with pytest.raises(ValueError, match="relative"):
+        WavefieldOutput(path="/tmp/wavefields")
+
+
+def test_output_manager_add_and_disable_traces():
+    outputs = OutputManager()
+
+    outputs.disable_traces().add(ParaviewOutput(name="pv", fields=["pressure"]))
+    payload = outputs.to_fs()
+
+    assert "traces" not in payload
+    assert payload["ParaView"][0]["name"] == "pv"
 
 
 def test_extra_fields_are_preserved_but_cannot_collide():
@@ -282,7 +511,7 @@ def test_simulation_export_includes_units_coordinates_and_extra_without_mutating
     }
     original = copy.deepcopy(data)
 
-    sim = SeismicSimulation.from_dict(data)
+    sim = SeismicSimulation.from_fs(data)
     payload = sim.to_fs()
 
     assert data == original
@@ -450,7 +679,7 @@ def test_mesh_surface_gradings_roundtrip_and_preserve_extra():
     }
     original = copy.deepcopy(data)
 
-    manager = MeshManager.from_dict(data)
+    manager = MeshManager.from_fs(data)
     payload = manager.to_fs()
 
     assert data == original
@@ -540,7 +769,7 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
         assert "inputs/acquisition/receivers/surface/coordinates" in h5
 
 
-def test_trace_output_exports_new_and_legacy_keys(tmp_path):
+def test_trace_output_exports_only_traces_key(tmp_path):
     sim = SeismicSimulation(
         name="simple",
         physics="acoustic",
@@ -554,7 +783,7 @@ def test_trace_output_exports_new_and_legacy_keys(tmp_path):
     payload = sim.to_fs()
 
     assert payload["Outputs"]["traces"]["path"] == "traces"
-    assert payload["Outputs"]["receivers"]["path"] == "traces"
+    assert "receivers" not in payload["Outputs"]
 
 
 def test_job_trace_files_use_new_names(tmp_path):
@@ -571,10 +800,12 @@ def test_job_trace_files_use_new_names(tmp_path):
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
     job.save()
 
-    assert job.traces["files"] == [
+    assert isinstance(job.trace_manifest, TraceManifest)
+    assert [str(file) for file in job.trace_manifest.files] == [
         str(tmp_path / "jobs/simple/freq/results/traces/traces_1.h5"),
         str(tmp_path / "jobs/simple/freq/results/traces/traces_2.h5"),
     ]
+    assert job.traces.manifest == job.trace_manifest
 
 
 def test_trace_dataset_resolves_legacy_receiver_files(tmp_path):
@@ -597,6 +828,22 @@ def test_trace_dataset_resolves_legacy_receiver_files(tmp_path):
     traces = TraceDataset.from_job(job)
 
     assert traces.files == [str(legacy)]
+    assert traces.paths == [legacy]
+
+
+def test_trace_dataset_rejects_empty_manifest(tmp_path):
+    manifest = TraceManifest(
+        files=[],
+        frequencies={},
+        groups=[],
+        simulation=tmp_path / "sim.json",
+        result_path=tmp_path,
+        output_path=tmp_path,
+        project_path=tmp_path,
+    )
+
+    with pytest.raises(ValueError, match="at least one trace file"):
+        TraceDataset.from_manifest(manifest)
 
 
 def test_job_run_fingerprint_requires_matching_outputs_and_changes_with_simulation(
@@ -629,6 +876,49 @@ def test_job_run_fingerprint_requires_matching_outputs_and_changes_with_simulati
     assert not job.is_run_current()
 
 
+def test_job_run_current_accepts_sauce_run_manifest_hashes(tmp_path):
+    def sha256(path):
+        return f"sha256:{hashlib.sha256(Path(path).read_bytes()).hexdigest()}"
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.outputs = OutputManager()
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+
+    trace_file = tmp_path / "jobs/simple/freq/results/traces/traces_1.h5"
+    trace_file.parent.mkdir(parents=True)
+    trace_file.touch()
+
+    run_dir = job._result_path / "_fs_run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-run-manifest-1",
+                "exit_status": "success",
+                "job_file_sha256": sha256(job._file),
+                "simulation_file_sha256": sha256(sim._file),
+            }
+        )
+    )
+
+    assert job.is_run_current()
+
+    payload = json.loads(sim._file.read_text())
+    payload["Solver"]["max_iter"] = 123
+    sim._file.write_text(json.dumps(payload))
+
+    assert not job.is_run_current()
+
+
 def test_trace_dataset_combines_jobs_by_frequency_and_deduplicates_overlap(tmp_path):
     sim = SeismicSimulation(
         name="simple",
@@ -645,7 +935,7 @@ def test_trace_dataset_combines_jobs_by_frequency_and_deduplicates_overlap(tmp_p
     low.save()
     high.save()
     for job in [low, high]:
-        for file in job.traces["files"]:
+        for file in job.trace_manifest.files:
             path = Path(file)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
@@ -671,7 +961,7 @@ def test_trace_store_uses_dataset_backed_survey_trace_tables(tmp_path):
             h5.create_dataset("frequency", data=freq)
             dset = h5.create_dataset(
                 "surface",
-                data=np.zeros((2, 2, 2, 1), dtype=np.float32),
+                data=np.zeros((2, 2, 1, 2), dtype=np.float32),
             )
             dset.attrs["dims"] = ["receiver", "component", "shot"]
             trace_group = h5.require_group("/survey/receiver_groups/surface/traces")
@@ -692,23 +982,34 @@ def test_trace_store_uses_dataset_backed_survey_trace_tables(tmp_path):
                 data=np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64),
             )
 
-    db = TraceStore(
-        metadata={
-            "groups": ["surface"],
-            "df": 10.0,
-            "f_max": 20.0,
-            "f_map": {1: 10.0, 2: 20.0},
-        },
-        files=trace_files,
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=[Path(file) for file in trace_files],
+            frequencies={1: 10.0, 2: 20.0},
+            groups=["surface"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=tmp_path / "results" / "traces",
+            project_path=tmp_path,
+        )
     )
-    db.consolidate_h5()
+    traces.consolidate()
 
-    assert db.groups == ["surface"]
-    assert db.receivers("surface").tolist() == [101, 102]
-    assert db.shots("surface").tolist() == [7]
-    assert db.components("surface").tolist() == ["p", "vx"]
-    assert db.frequencies("surface").tolist() == [10.0, 20.0]
-    assert db.survey_tables()["receivers"]["coordinates"] == [[0.0, 0.0], [1.0, 0.0]]
+    assert traces.groups == ["surface"]
+    assert traces.receivers("surface").tolist() == [101, 102]
+    assert traces.sources("surface").tolist() == [7]
+    assert traces.components("surface").tolist() == ["p", "vx"]
+    assert traces.frequencies("surface").tolist() == [10.0, 20.0]
+    assert traces.survey_tables()["receivers"]["coordinates"] == [
+        [0.0, 0.0],
+        [1.0, 0.0],
+    ]
+    fd = traces.fd("surface", "p", source=7)
+    assert fd.dims == ("frequency", "receiver")
+    assert fd.coords["frequency"].values.tolist() == [10.0, 20.0]
+    assert fd.coords["receiver"].values.tolist() == [101, 102]
+    assert type(fd).__name__ == "DataArray"
+    assert (tmp_path / "results" / "_fs_run" / "cache" / "traces_vds.h5").exists()
 
 
 def test_sparse_survey_authoring_exports_sauce_contract():
@@ -817,7 +1118,7 @@ def test_sparse_survey_roundtrip_does_not_mutate_input():
     }
     original = copy.deepcopy(data)
 
-    survey = SparseSurvey.from_dict(data)
+    survey = SparseSurvey.from_fs(data)
     payload = survey.to_fs()
 
     assert data == original

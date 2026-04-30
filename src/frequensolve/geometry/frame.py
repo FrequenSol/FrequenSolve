@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Union
 
+import numpy as np
+
 from frequensolve.units import (
     is_quantity,
     quantity_to_fs,
@@ -114,6 +116,8 @@ class CoordinateSystem:
     name: Optional[str] = None
     origin: Optional[Union[CoordinateValue, Any]] = None
     axis_alignment: Optional[Dict[str, str]] = None
+    surface_ref: Optional[Union[str, int]] = None
+    normal: Optional[str] = None
     earth_radius: Optional[Any] = None
     ndim: Optional[int] = None
     fixed_axis: Optional[str] = None
@@ -137,6 +141,38 @@ class CoordinateSystem:
         return cls(name=name, type="geographic", **kwargs)
 
     @classmethod
+    def surface(
+        cls,
+        name: str,
+        surface: Union[str, int],
+        *,
+        normal: str = "up",
+        offset: Optional[Any] = None,
+        offset_units: Optional[Any] = None,
+        **kwargs,
+    ) -> "CoordinateSystem":
+        """Coordinate system tied to a named model surface.
+
+        Positive offsets in point coordinates are measured along the surface
+        ``up`` axis. In 2D, point values are ``[x, up]``. In 3D, point values
+        are ``[x, y, up]``.
+        """
+
+        if offset is not None:
+            kwargs.setdefault("ndim", 2)
+            kwargs.setdefault("fixed_axis", "up")
+            kwargs.setdefault(
+                "fixed_value", value_and_units_to_fs(offset, offset_units)
+            )
+        return cls(
+            name=name,
+            type="surface",
+            surface_ref=surface,
+            normal=normal,
+            **kwargs,
+        )
+
+    @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "CoordinateSystem":
         payload = dict(data)
         origin = CoordinateValue.from_fs(payload.pop("origin", None))
@@ -145,6 +181,8 @@ class CoordinateSystem:
             name=payload.pop("name", None),
             origin=origin,
             axis_alignment=payload.pop("axis_alignment", None),
+            surface_ref=payload.pop("surface", None),
+            normal=payload.pop("normal", payload.pop("normal_direction", None)),
             earth_radius=payload.pop("earth_radius", None),
             ndim=payload.pop("ndim", None),
             fixed_axis=payload.pop("fixed_axis", None),
@@ -160,6 +198,10 @@ class CoordinateSystem:
             payload["origin"] = coordinate_value_to_fs(self.origin)
         if self.axis_alignment is not None:
             payload["axis_alignment"] = self.axis_alignment
+        if self.surface_ref is not None:
+            payload["surface"] = self.surface_ref
+        if self.normal is not None:
+            payload["normal"] = self.normal
         if self.earth_radius is not None:
             payload["earth_radius"] = value_and_units_to_fs(self.earth_radius)
         if self.ndim is not None:
@@ -167,8 +209,149 @@ class CoordinateSystem:
         if self.fixed_axis is not None:
             payload["fixed_axis"] = self.fixed_axis
         if self.fixed_value is not None:
-            payload["fixed_value"] = value_and_units_to_fs(self.fixed_value)
+            payload["fixed_value"] = (
+                dict(self.fixed_value)
+                if isinstance(self.fixed_value, Mapping)
+                else value_and_units_to_fs(self.fixed_value)
+            )
         return merge_extra(payload, self.extra, "CoordinateSystem")
+
+    def with_offset(
+        self,
+        name: str,
+        offset: Any,
+        *,
+        units: Optional[Any] = None,
+        normal: Optional[str] = None,
+    ) -> "CoordinateSystem":
+        """Return a copy with a fixed signed offset along the surface up axis."""
+
+        payload = self.to_fs()
+        payload["name"] = name
+        payload.setdefault("ndim", 2)
+        if normal is not None:
+            payload["normal"] = normal
+        payload["fixed_axis"] = "up"
+        payload["fixed_value"] = value_and_units_to_fs(offset, units)
+        return self.from_fs(payload)
+
+    def above(
+        self,
+        values: Any,
+        distance: Optional[Any] = None,
+        *,
+        units: Optional[Any] = None,
+    ) -> CoordinateValue:
+        """Coordinate-aware points above the model surface."""
+
+        sign = self._above_sign()
+        if distance is None:
+            return self._signed_surface_points(values, sign=sign, units=units)
+        return self.on_surface(values, units=units, offset=sign * distance)
+
+    def below(
+        self,
+        values: Any,
+        distance: Optional[Any] = None,
+        *,
+        units: Optional[Any] = None,
+    ) -> CoordinateValue:
+        """Coordinate-aware points below the model surface."""
+
+        sign = self._below_sign()
+        if distance is None:
+            return self._signed_surface_points(values, sign=sign, units=units)
+        return self.on_surface(values, units=units, offset=sign * distance)
+
+    def _above_sign(self) -> int:
+        return -1 if str(self.normal or "up").strip().lower() == "down" else 1
+
+    def _below_sign(self) -> int:
+        return 1 if str(self.normal or "up").strip().lower() == "down" else -1
+
+    def _signed_surface_points(
+        self, values: Any, *, sign: int, units: Optional[Any] = None
+    ) -> CoordinateValue:
+        coord_values, coord_units = _split_quantity(values, units)
+        coords = np.asarray(_surface_coordinate_values(coord_values), dtype=float)
+        coords[:, -1] = sign * np.abs(coords[:, -1])
+        return CoordinateValue(coords.tolist(), units=coord_units, system=self.name)
+
+    def points(
+        self,
+        values: Any,
+        *,
+        units: Optional[Any] = None,
+        offset: Optional[Any] = None,
+    ) -> CoordinateValue:
+        """Coordinate-aware point values in this system."""
+
+        if self.type in {"surface", "surface_relative", "topographic"}:
+            return self.on_surface(values, units=units, offset=offset)
+        return CoordinateValue(values, units=units, system=self.name)
+
+    def on_surface(
+        self,
+        lateral: Any,
+        *,
+        units: Optional[Any] = None,
+        offset: Optional[Any] = None,
+    ) -> CoordinateValue:
+        """Point values on or offset from this surface coordinate system.
+
+        ``lateral`` can be a sequence of x positions, an explicit ``(n, 2)``
+        array of ``[x, up]`` coordinates for 2D models, or an explicit
+        ``(n, 3)`` array of ``[x, y, up]`` coordinates for 3D models. Passing
+        ``offset`` appends a constant or per-point up offset to one-column
+        2D laterals or two-column 3D laterals.
+        """
+
+        lateral_values, lateral_units = _split_quantity(lateral, units)
+        offset_values, offset_units = _split_quantity(offset, lateral_units)
+        if offset_units is not None and lateral_units is None:
+            lateral_units = offset_units
+        values = _surface_coordinate_values(lateral_values, offset=offset_values)
+        return CoordinateValue(values, units=lateral_units, system=self.name)
+
+    on = on_surface
+
+
+def _split_quantity(
+    value: Any, units: Optional[Any] = None
+) -> tuple[Any, Optional[Any]]:
+    if is_quantity(value):
+        target_units = units or value.units
+        return value.to(target_units).magnitude, target_units
+    return value, units
+
+
+def _surface_coordinate_values(lateral: Any, offset: Optional[Any] = None) -> Any:
+    values = np.asarray(lateral, dtype=float)
+    if values.ndim == 0:
+        values = values.reshape(1, 1)
+    elif values.ndim == 1:
+        values = values.reshape(-1, 1)
+    if values.ndim != 2 or values.shape[1] not in (1, 2, 3):
+        raise ValueError(
+            "surface coordinates must have shape (n,), (n, 1), (n, 2), or (n, 3)"
+        )
+
+    n = values.shape[0]
+    if offset is None:
+        if values.shape[1] > 1:
+            return values.tolist()
+        return np.column_stack([values[:, 0], np.zeros(n)]).tolist()
+
+    if values.shape[1] == 3:
+        raise ValueError(
+            "surface offset cannot be supplied with explicit 3D coordinates"
+        )
+    offset_values = np.asarray(offset, dtype=float)
+    if offset_values.ndim == 0:
+        offset_values = np.full(n, float(offset_values))
+    if offset_values.shape != (n,):
+        raise ValueError("surface offset must be scalar or one value per point")
+    return np.column_stack([values, offset_values]).tolist()
 
 
 def coordinate_value_to_fs(value: Any) -> Any:

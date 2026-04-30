@@ -2,13 +2,13 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from frequensolve.util.mixins import merge_extra
+from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
 
 __all__ = ["Discretization", "SolverConfig", "SuperPatch", "NumericsManager"]
 
 
 @dataclass
-class Discretization:
+class Discretization(ExtraFieldsMixin):
     """Class representing discretization parameters.
 
     Args:
@@ -31,18 +31,10 @@ class Discretization:
     ):
         self.method = method
         self.order = order
-        self.extra = kwargs
-
-    @property
-    def kwargs(self) -> Dict[str, Any]:
-        return self.extra
-
-    @kwargs.setter
-    def kwargs(self, value: Dict[str, Any]) -> None:
-        self.extra = copy.deepcopy(dict(value))
+        self._init_extra(None, **kwargs)
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Discretization":
+    def from_fs(cls, d: Dict[str, Any]) -> "Discretization":
         d = copy.deepcopy(d)
         return cls(
             method=d.pop("method", "DPG"),
@@ -57,12 +49,9 @@ class Discretization:
         }
         return merge_extra(payload, self.extra, "Discretization")
 
-    def __dict__(self) -> Dict[str, Any]:
-        return self.to_fs()
-
 
 @dataclass
-class SuperPatch:
+class SuperPatch(ExtraFieldsMixin):
     """*** ADVANCED FEATURE ***
 
     Class grouping elements in a domain into a single patch.
@@ -104,10 +93,10 @@ class SuperPatch:
             domain = [domain]
         self.grid = grid
         self.domain = domain
-        self.extra = kwargs
+        self._init_extra(None, **kwargs)
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "SuperPatch":
+    def from_fs(cls, data: Dict) -> "SuperPatch":
         data = copy.deepcopy(data)
         return cls(
             grid=data.pop("grid"),
@@ -122,12 +111,9 @@ class SuperPatch:
         }
         return merge_extra(payload, self.extra, "SuperPatch")
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
 
 @dataclass
-class SolverConfig:
+class SolverConfig(ExtraFieldsMixin):
     """
     Defines solver configuration.
 
@@ -159,18 +145,10 @@ class SolverConfig:
         self.tolerance = tolerance
         self.grids = grids
         self.hp_switch = hp_switch
-        self.extra = kwargs
-
-    @property
-    def kwargs(self) -> Dict[str, Any]:
-        return self.extra
-
-    @kwargs.setter
-    def kwargs(self, value: Dict[str, Any]) -> None:
-        self.extra = copy.deepcopy(dict(value))
+        self._init_extra(None, **kwargs)
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "SolverConfig":
+    def from_fs(cls, data: Dict) -> "SolverConfig":
         data = copy.deepcopy(data)
         ngrids = data.pop("grids", 4)
         obj = cls(
@@ -180,7 +158,7 @@ class SolverConfig:
             grids=ngrids,
             hp_switch=data.pop("hp_switch", ngrids),
         )
-        obj.extra = data
+        obj._init_extra(data)
         return obj
 
     def __iadd__(self, other: SuperPatch) -> "SolverConfig":
@@ -201,9 +179,6 @@ class SolverConfig:
         }
         return merge_extra(dict, self.extra, "SolverConfig")
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
 
 @dataclass
 class NumericsManager:
@@ -218,11 +193,11 @@ class NumericsManager:
     discretization: Discretization = field(default_factory=Discretization)
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "NumericsManager":
+    def from_fs(cls, data: Dict) -> "NumericsManager":
         data = copy.deepcopy(data)
         return cls(
-            solver=SolverConfig.from_dict(data["solver"]),
-            discretization=Discretization.from_dict(data["discretization"]),
+            solver=SolverConfig.from_fs(data["solver"]),
+            discretization=Discretization.from_fs(data["discretization"]),
         )
 
     def to_fs(self, ctx=None) -> Dict:
@@ -230,6 +205,3 @@ class NumericsManager:
             "solver": self.solver.to_fs(ctx),
             "discretization": self.discretization.to_fs(ctx),
         }
-
-    def __dict__(self) -> Dict:
-        return self.to_fs()

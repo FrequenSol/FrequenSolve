@@ -1,17 +1,19 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Dict, Generator, List, Optional, Tuple
 
 import numpy as np
+import xarray as xr
 
-from ..util.class_registry import *  # noqa
+from frequensolve.util.class_registry import class_registry, register_class
+from frequensolve.util.mixins import TypeTaggedMixin
 
 __all__ = ["Grid", "CartesianGrid"]
 
 
 @register_class
 @dataclass
-class Grid(ABC):
+class Grid(TypeTaggedMixin, ABC):
     """Base class for all grid types."""
 
     @abstractmethod
@@ -35,18 +37,13 @@ class Grid(ABC):
         pass
 
     @abstractmethod
-    def __dict__(self) -> Dict:
-        """Converts the grid to a dictionary representation."""
+    def to_fs(self, ctx=None) -> Dict:
+        """Convert the grid to a solver payload."""
         pass
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "Grid":
-        class_name = data["_type"]
-        if class_name in class_registry:
-            grid_class = class_registry[class_name]
-            return grid_class.from_dict(data)
-        else:
-            raise ValueError(f"Unknown grid class: {class_name}")
+    def from_fs(cls, data: Dict) -> "Grid":
+        return cls.dispatch_from_fs(data, class_registry)
 
 
 # ----------------------------------------------------------------------
@@ -160,7 +157,6 @@ class CartesianGrid(Grid):
     @classmethod
     def from_xarray(cls, xarr: "xr.DataArray") -> "CartesianGrid":
         """Converts the grid to an xarray Dataset (without variables)."""
-        from xarray import Dataset
 
         coords = xarr.coords
         dims = xarr.dims[::-1]
@@ -249,11 +245,8 @@ class CartesianGrid(Grid):
             **({"system": self.system} if self.system is not None else {}),
         }
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
     @classmethod
-    def from_dict(cls, data: Dict) -> "CartesianGrid":
+    def from_fs(cls, data: Dict) -> "CartesianGrid":
         """Creates a CartesianGrid instance from a dictionary.
 
         Args:

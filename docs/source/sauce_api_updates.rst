@@ -1,0 +1,186 @@
+Sauce Backend API Updates
+=========================
+
+This page is the implementation checklist for Sauce/FrequenSolve solver
+contracts required by the public Python SDK. The Python SDK now treats these
+features as first-class API concepts and keeps any legacy compatibility private.
+
+Input Layout
+------------
+
+The SDK is converging on a two-file default export:
+
+* ``sim.json`` contains solver configuration, model references, acquisition,
+  output requests, units, coordinate-system declarations, rerun fingerprints,
+  and any structured metadata needed by the solver.
+* ``sim.h5`` contains materialized local arrays, grids, sparse survey tables,
+  source/receiver metadata, and compact input datasets.
+
+The solver should continue to accept external model files when a user explicitly
+references a file-backed property, SEG-Y input, or another specialized format.
+The SDK will not read or validate server-only files before export.
+
+Units And Coordinate Systems
+----------------------------
+
+Scalar or vector quantities may be written as objects:
+
+.. code-block:: json
+
+   {"value": [0.0, 100.0, 250.0], "units": "m", "system": "global"}
+
+Sauce should preserve the following fields wherever a coordinate-bearing value
+is accepted:
+
+* ``value``: scalar, vector, or array payload.
+* ``units``: optional Pint-compatible unit string.
+* ``system``: optional coordinate-system name.
+* additional advanced fields supplied by SDK ``extra`` dictionaries.
+
+Simulations may include ``global_coordinate_system`` and ``coordinate_systems``.
+Solver outputs should store physical source and receiver coordinates in the
+global frame even when the input uses local coordinate systems.
+
+Material Properties
+-------------------
+
+Properties are authored as a dictionary and exported with canonical lowercase
+names such as ``vp``, ``vs``, ``rho``, ``qp``, and ``qs``. Sauce should accept
+structured property payloads in addition to scalar values.
+
+File-backed property:
+
+.. code-block:: json
+
+   {
+     "file": "/server/data/vp.bin",
+     "scale": 0.001,
+     "units": "m/s",
+     "grid": "model_grid",
+     "absolute": true
+   }
+
+Expression-backed property:
+
+.. code-block:: json
+
+   {
+     "expression": {
+       "op": "multiply",
+       "args": [
+         {"value": 0.5},
+         {"property": "vp"}
+       ]
+     },
+     "units": "m/s"
+   }
+
+Sauce should evaluate expression-backed properties after loading referenced base
+properties. Expression nodes currently used by the SDK are ``property``,
+``value``, ``op``, and ``args``. Required operations are ``add``, ``subtract``,
+``multiply``, ``divide``, and ``power``.
+
+Sparse Surveys
+--------------
+
+The acquisition contract now supports sparse survey tables for many-to-many
+source/receiver selections. Sauce should treat survey tables as authoritative
+when present instead of assuming dense source by receiver Cartesian products.
+
+Expected HDF5 datasets:
+
+* ``source_ids``: integer or string source identifiers.
+* ``receiver_ids``: integer or string receiver identifiers.
+* ``source_index`` and ``receiver_index``: row mappings into source and receiver
+  metadata tables.
+* optional per-row weights, masks, components, and extra survey columns.
+
+Trace Storage
+-------------
+
+Public SDK naming is now ``TraceDataset``. Trace reads return plain
+``xarray.DataArray`` objects with FrequenSolve helpers available through the
+``.fs`` accessor. Sauce should
+rename receiver-output folders and files from ``receivers`` to ``traces`` when
+writing new outputs. Legacy readers may remain internal while existing data is
+migrated.
+
+Sauce may continue writing one trace HDF5 file per frequency/task, because
+frequency tasks are run in parallel processes and HDF5 should not be shared by
+independent writers. The Python SDK models this as one typed
+``TraceManifest`` pointing at many physical files:
+
+.. code-block:: text
+
+   results/
+     traces/
+       traces_1.h5
+       traces_2.h5
+       traces_3.h5
+     _fs_run/
+       run_manifest.json
+       outputs.json
+       timings.json
+
+Each per-frequency trace HDF5 file should be self-contained enough to be read
+independently:
+
+* store receiver ids as datasets, not long HDF5 attributes;
+* store source ids as datasets;
+* store physical receiver coordinates in the global coordinate frame;
+* store physical source coordinates in the global coordinate frame;
+* store source/receiver component metadata and coordinate units;
+* include enough frequency/task metadata to combine adjacent frequency-band jobs
+  without task-number conflicts.
+
+Combined trace datasets should identify each frequency by physical frequency
+value and source job metadata, not only by task number.
+
+When possible, ``outputs.json`` should list every produced trace file with
+``kind: "hdf5"``, a stable ``relative_path``, and the trace schema version. The
+SDK can then use Sauce's output manifest as the authoritative artifact list
+instead of guessing file names.
+
+Rerun Fingerprints
+------------------
+
+Sauce already writes useful run metadata under ``results/_fs_run``. The SDK now
+uses this directory when deciding whether a completed job is current. Required
+or strongly preferred files:
+
+* ``run_manifest.json`` with ``schema``, ``solver_version``, ``build_id``,
+  ``job_file``, ``job_file_sha256``, ``simulation_file``,
+  ``simulation_file_sha256``, ``result_path``, ``start_time``, ``end_time``,
+  ``exit_status``, and ``exit_code``.
+* ``outputs.json`` with ``schema`` and a ``files`` list containing produced
+  output files, relative paths, kinds, schemas, and key dataset paths where
+  known.
+* ``timings.json`` with run timing summaries.
+* ``error.json`` when a run fails.
+
+A job can be skipped or treated as complete only when:
+
+* ``run_manifest.json`` reports ``exit_status: "success"``;
+* ``job_file_sha256`` matches the current job JSON;
+* ``simulation_file_sha256`` matches the current simulation JSON;
+* every required trace file from the SDK ``TraceManifest`` or Sauce
+  ``outputs.json`` exists locally/remotely.
+
+Large local datasets may also carry dataset-level hashes in ``sim.h5``. Sauce
+should use those hashes to avoid rewriting unchanged input datasets and to
+diagnose stale solver outputs. The old sidecar ``data_manifest.json`` workflow
+is not part of the public contract.
+
+Mesh Adaptivity
+---------------
+
+Sauce should expose the mesh adaptivity options used by ``adapt_mesh.F90`` as
+structured JSON fields. The SDK currently models:
+
+* distance and surface grading specifications;
+* grading fields compatible with ``grading_fields_m``;
+* source refinement controls;
+* receiver refinement controls.
+
+Refinement payloads should be extensible and accept solver-specific advanced
+fields without requiring SDK changes.

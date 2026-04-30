@@ -78,9 +78,6 @@ class FSSerializableMixin:
 
         return json.dumps(self.to_fs(), cls=CustomJSONEncoder, **kwargs)
 
-    def __dict__(self) -> Dict[str, Any]:
-        return self.to_fs()
-
 
 class ExtraFieldsMixin:
     """Mixin for standardized advanced/pass-through solver fields."""
@@ -129,9 +126,7 @@ class TypeTaggedMixin(FSSerializableMixin):
             target_cls = registry[class_name]
         except KeyError:
             raise ValueError(f"Unknown {cls.__name__} class: {class_name}") from None
-        if hasattr(target_cls, "from_fs"):
-            return target_cls.from_fs(payload)
-        return target_cls.from_dict(payload)
+        return target_cls.from_fs(payload)
 
 
 class PathContextMixin:
@@ -159,6 +154,20 @@ def fs_serialize(value: Any, ctx: Optional[ExportContext] = None) -> Any:
     """Serialize nested values into JSON-compatible solver payloads."""
     if hasattr(value, "to_fs"):
         return value.to_fs(ctx)
+    try:
+        import numpy as np
+        from xarray import DataArray
+
+        if isinstance(value, (np.integer, np.floating, np.bool_)):
+            return value.item()
+        if isinstance(value, np.complexfloating):
+            return [value.real.item(), value.imag.item()]
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, DataArray):
+            return value.values.tolist()
+    except ImportError:
+        pass
     if isinstance(value, Mapping):
         return {k: fs_serialize(v, ctx) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

@@ -1,16 +1,27 @@
-"""Plotting functions for seismic data.
+"""Plotting helpers for seismic trace arrays."""
 
-This module is primarily for plotting time-domain data, or at least
-uniformly sampled in frequency.
-"""
+from __future__ import annotations
 
-from warnings import warn
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
 
-import matplotlib.animation as animation
-import matplotlib.pyplot as plt
 import numpy as np
+import xarray as xr
 
-from .trace_record import TraceRecord  # noqa
+from frequensolve.seismic.analysis import compute_timelag, phase_velocity_transform
+from frequensolve.seismic.animate import animate_gather
+from frequensolve.seismic.trace_geometry import (
+    as_trace_array,
+    coordinate_label,
+    coordinate_values,
+    ensure_monotonic,
+    receiver_axis,
+    require_dims,
+    select_time,
+    time_limit,
+    trace_values,
+)
 
 __all__ = [
     "plot_gather",
@@ -19,994 +30,352 @@ __all__ = [
     "plot_xf",
     "plot_cf",
     "plot_timelag",
-    "compute_timelag",
-    "compute_nrms",
 ]
 
-try:
-    plt.rcParams["font.family"] = "sans-serif"
-    plt.rcParams["font.sans-serif"] = ["Helvetica"]
-except Exception:
-    pass
+
+def _pyplot():
+    import matplotlib.pyplot as plt
+
+    return plt
 
 
-# --------------------------------------------
-# Time-domain Plot Functions
-# --------------------------------------------
-def plot_gather(shot: TraceRecord, **kwargs):
-    """Plot a 2D shot gather for a time-domain shot.
+def _amplitude_limit(values: np.ndarray, limit: float | None) -> float:
+    if limit is not None:
+        return float(limit)
+    finite = np.asarray(values)[np.isfinite(values)]
+    if finite.size == 0:
+        return 1.0
+    maximum = float(np.nanmax(np.abs(finite)))
+    return maximum if maximum > 0 else 1.0
 
-    Renders a simple 2D image of amplitude over (receiver X-position) vs. time.
-    Useful for visualizing wavefield arrivals at multiple receivers. The plot shows
-    amplitude variations using a specified colormap, with time increasing downward
-    and receiver position along the horizontal axis.
 
-    Args:
-       shot (TraceRecord):     A TraceRecord object of type='TD' containing time-domain data.
+def _finalize_figure(fig, *, save: str | Path | None, show: bool) -> None:
+    fig.tight_layout()
+    if save is not None:
+        fig.savefig(save, bbox_inches="tight")
+    if show:
+        _pyplot().show()
 
-    Keyword Args:
-       A (float):       Amplitude scaling for display (default 1).
-       units (str):     Length units for labeling X axis (default "km").
-       cmap (str):      Matplotlib colormap name (default "Greys").
-       figsize (tuple): Figure size (width, height) (default (8,8)).
-       fontsize (int):  Font size for labels/ticks (default 14).
-       Tf (float):      Cutoff time in seconds. If None, uses full time range.
-       save (str):      If provided, saves the figure to this path.
 
-    Raises:
-       AssertionError:  If shot is not a time-domain shot (type != "TD").
+def _image_extent(x: np.ndarray, y: np.ndarray) -> list[float]:
+    return [float(x[0]), float(x[-1]), float(y[-1]), float(y[0])]
+
+
+def _prepare_time_gather(
+    trace: xr.DataArray,
+    *,
+    T_max: float | None = None,
+    Tf: float | None = None,
+) -> xr.DataArray:
+    trace = select_time(as_trace_array(trace), time_limit(T_max, Tf))
+    require_dims(trace, "time", "receiver")
+    trace = trace.transpose("time", "receiver")
+    time = coordinate_values(trace, "time", require_numeric=True)
+    ensure_monotonic(time, name="time")
+    return trace
+
+
+def _prepare_frequency_gather(trace: xr.DataArray) -> xr.DataArray:
+    trace = as_trace_array(trace)
+    require_dims(trace, "frequency", "receiver")
+    trace = trace.transpose("frequency", "receiver")
+    frequency = coordinate_values(trace, "frequency", require_numeric=True)
+    ensure_monotonic(frequency, name="frequency")
+    return trace
+
+
+def _apply_font_size(fontsize: float | None) -> None:
+    if fontsize is not None:
+        _pyplot().rcParams.update({"font.size": fontsize})
+
+
+def plot_gather(
+    trace: xr.DataArray,
+    *,
+    ax=None,
+    A: float | None = None,
+    units: str = "",
+    cmap: str = "Greys",
+    figsize: tuple[float, float] = (5, 5),
+    fontsize: float | None = 12,
+    Tf: float | None = None,
+    T_max: float | None = None,
+    L_scale: float = 1.0,
+    T_scale: float = 1.0,
+    aspect: str | float = "auto",
+    interpolation: str = "bilinear",
+    title: str | None = None,
+    save: str | Path | None = None,
+    show: bool = False,
+    colorbar: bool = False,
+    **imshow_kwargs: Any,
+):
+    """Plot a time-domain trace gather.
+
+    ``trace`` must have ``time`` and ``receiver`` dimensions.  The function
+    returns ``(fig, ax)`` and never mutates the input trace.
     """
-    assert shot.type == "TD"
 
-    A = kwargs.get("A", 1)
-    units = kwargs.get("units", "km")
-    cmap = kwargs.get("cmap", "Greys")
-    figsize = kwargs.get("figsize", (5, 5))
-    fontsize = kwargs.get("fontsize", 12)
-    aspect = kwargs.get("aspect", "auto")
+    trace = _prepare_time_gather(trace, T_max=T_max, Tf=Tf)
+    values = trace_values(trace)
+    x_axis = receiver_axis(trace, units=units, scale=L_scale)
+    time = coordinate_values(trace, "time", scale=T_scale, require_numeric=True)
+    limit = _amplitude_limit(values, A)
 
-    plt.rcParams.update({"font.size": fontsize})
+    plt = _pyplot()
+    _apply_font_size(fontsize)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
 
-    Tf = kwargs.get("Tf", None)
-    nTf, Tf = shot.sampling.cutoff(Tf)
-    t0 = shot.sampling.t0
-
-    group = shot.receiver_group
-
-    x_min, x_max = group.coordinates.bounds
-    idir = -1
-    x0 = 0
-    x1 = 0
-    while x0 == x1:
-        idir += 1
-        x0 = x_min[idir]
-        x1 = x_max[idir]
-        xlabel = f"{['X', 'Y', 'Z'][idir]} [{units}]"
-        if idir == len(x_min):
-            x0 = 0
-            x1 = np.shape(group.coordinates)[-1]
-            break
-
-    fig = plt.figure(1, figsize=figsize)
-    plt.clf()
-
-    plt.title(f"Shot {shot.number}: {shot.field}")
-    plt.xlabel(xlabel)
-    plt.ylabel("Time [s]")
-
-    if isinstance(aspect, (int, float)):
-        aspect *= (x1 - x0) / (Tf - t0)
-    # Plot gather as an image
-    plt.imshow(
-        shot.data[:nTf, :],
+    image = ax.imshow(
+        values,
         origin="upper",
         cmap=cmap,
-        extent=[x0, x1, Tf, t0],
-        vmin=-A,
-        vmax=A,
+        extent=_image_extent(x_axis.values, time),
+        vmin=-limit,
+        vmax=limit,
         aspect=aspect,
-        interpolation="bilinear",
+        interpolation=interpolation,
+        **imshow_kwargs,
     )
-    plt.tight_layout()
+    ax.set_xlabel(x_axis.label)
+    ax.set_ylabel(coordinate_label(trace, "time", "Time"))
+    if title is not None:
+        ax.set_title(title)
+    if colorbar:
+        fig.colorbar(image, ax=ax)
 
-    if "save" in kwargs:
-        file = kwargs["save"]
-        plt.savefig(file, bbox_inches="tight")
-        plt.close()
-    else:
-        plt.show()
-
-
-def animate_gather(shot: TraceRecord, **kwargs):
-    """Animate a shot gather on a 2D grid (time-domain).
-
-    This function assumes the receiver group data can be reshaped into a 2D grid
-    (e.g. for snapshot-like visualization in time).
-
-    Args:
-       shot (TraceRecord): A TraceRecord object of type='TD'.
-
-    Keyword Args:
-       A (float):        Amplitude scaling for display (default 1).
-       cmap (str):       Matplotlib colormap (default "RdGy").
-       interval (int):   Animation interval in milliseconds (default 50).
-       units (str):      Length units for labeling X, Z axes (default "km").
-       figsize (tuple):  Figure size (width, height) (default (8,8)).
-       fontsize (int):   Font size for labels/ticks (default 10).
-       Tf (float):       Cutoff time in seconds.
-       save (str):       Path (with extension) to save figure to.
-
-    Raises:
-       ValueError: If the associated receiver group is not grid-based.
-    """
-    assert shot.type == "TD"
-
-    def plot_frame(u, i, fig, frames):
-        frames.append(
-            [
-                plt.imshow(
-                    u[i, :, :].transpose(),
-                    origin="upper",
-                    cmap=cmap,
-                    vmin=-A,
-                    vmax=A,
-                    # extent=[x0[0], x1[0], x1[1], x0[1]],
-                )
-            ]
-        )
-
-    Tf = kwargs.get("Tf", None)
-    nTf, Tf = shot.sampling.cutoff(Tf)
-
-    A = kwargs.get("A", 1)
-    units = kwargs.get("units", "km")
-    interval = kwargs.get("interval", 50)
-    cmap = kwargs.get("cmap", "Greys")
-    figsize = kwargs.get("figsize", (5, 5))
-    fontsize = kwargs.get("fontsize", 12)
-
-    plt.rcParams.update({"font.size": fontsize})
-
-    Tf = kwargs.get("Tf", None)
-    nTf, Tf = shot.sampling.cutoff(Tf)
-
-    group = shot.receiver_group
-
-    try:
-        x0 = group.grid.x0
-        x1 = group.grid.x1
-        n = group.grid.n
-        shot.data = shot.data[:nTf, :].reshape((nTf, n[0], n[1]))
-    except OSError as e:
-        raise ValueError(
-            "animate_gather currently only works with 'grid' receivers"
-        ) from e
-
-    frames = []
-    fig = plt.figure(1, figsize=figsize)
-
-    plt.xlabel(f"X [{units}]")
-    plt.ylabel(f"Z [{units}]")
-
-    ax = plt.gca()
-    ax.set_axis_off()
-
-    for i in range(nTf):
-        plot_frame(shot.data, i, fig, frames)
-
-    ani = animation.ArtistAnimation(fig, frames, interval=interval, blit=True)
-    if "save" in kwargs:
-        file = kwargs["save"]
-        if file.endswith(".mp4"):
-            file = file.replace(".mp4", "")
-        ani.save(f"{file}.mp4")
-    else:
-        plt.show()
-
-    del (frames, fig)
+    _finalize_figure(fig, save=save, show=show)
+    return fig, ax
 
 
-def plot_gather_diff(shot1: TraceRecord, shot2: TraceRecord, **kwargs):
-    """Plot the difference between two time-domain shot gathers side-by-side.
+def plot_gather_diff(
+    baseline: xr.DataArray,
+    monitor: xr.DataArray,
+    *,
+    ax=None,
+    A: float | None = None,
+    units: str = "",
+    cmap: str = "Greys",
+    figsize: tuple[float, float] = (10, 4),
+    fontsize: float | None = 12,
+    Tf: float | None = None,
+    T_max: float | None = None,
+    L_scale: float = 1.0,
+    T_scale: float = 1.0,
+    aspect: str | float = "auto",
+    amplify_diff: float = 1.0,
+    titles: Sequence[str] = ("Baseline", "Monitor", "Difference"),
+    stack: str = "horizontal",
+    save: str | Path | None = None,
+    show: bool = False,
+    **imshow_kwargs: Any,
+):
+    """Plot baseline, monitor, and difference gathers."""
 
-    Shows the "baseline", "perturbed", and "difference" in a 3-panel figure.
+    baseline = _prepare_time_gather(baseline, T_max=T_max, Tf=Tf)
+    monitor = _prepare_time_gather(monitor, T_max=T_max, Tf=Tf)
+    baseline, monitor = xr.align(baseline, monitor, join="exact")
 
-    Args:
-       shot1 (TraceRecord):     First TD TraceRecord (baseline).
-       shot2 (TraceRecord):     Second TD TraceRecord (perturbed).
+    data = [trace_values(baseline), trace_values(monitor)]
+    data.append(amplify_diff * (data[1] - data[0]))
+    limit = _amplitude_limit(np.stack(data), A)
+    x_axis = receiver_axis(baseline, units=units, scale=L_scale)
+    time = coordinate_values(baseline, "time", scale=T_scale, require_numeric=True)
 
-    Keyword Args:
-       A (float):        Amplitude scaling for display (default 1.0).
-       units (str):      Length units for labeling X axis (default "km").
-       cmap (str):       Matplotlib colormap (default "Greys").
-       figsize (tuple):  Figure size (width, height) (default (15,4)).
-       fontsize (int):   Font size for labels/ticks (default 12).
-       Tf (float):       Cutoff time in seconds.
-       save (str):       Path (with extension) to save figure to.
-
-    Raises:
-       AssertionError:   If shots are not time-domain or time lengths differ.
-    """
-    assert shot1.type == "TD" and shot2.type == "TD"
-    assert (
-        shot1.sampling.nTime == shot2.sampling.nTime
-        and shot1.sampling.T == shot2.sampling.T
-    )
-
-    A = kwargs.get("A", 1)
-    L_units = kwargs.get("L_units", "km")
-    T_units = kwargs.get("T_units", "s")
-    cmap = kwargs.get("cmap", "Greys")
-    figsize = kwargs.get("figsize", (10, 4))
-    fontsize = kwargs.get("fontsize", 12)
-    plt.rcParams.update({"font.size": fontsize})
-
-    dpi = kwargs.pop("dpi", None)
-    flip = kwargs.pop("flip", False)
-    aspect = kwargs.get("aspect", "auto")
-    wspace = kwargs.pop("wspace", 0.2)
-    stack = kwargs.pop("stack", "horizontal")
-
-    Cdiff = kwargs.pop("amplify_diff", 1.0)
-    title1 = kwargs.get("title1", "Baseline")
-    title2 = kwargs.get("title2", "Perturbed")
-    title3 = kwargs.get("title3", "Difference")
-    if Cdiff != 1.0:
-        title3 = f"{title3} ({Cdiff}x amplified)"
-
-    x_scale = kwargs.pop("L_scale", 1.0)
-    t_scale = kwargs.pop("T_scale", 1.0)
-
-    if "ax" in kwargs:
-        ax = kwargs.pop("ax")
-        show = False
-    else:
-        show = True
-        if stack == "horizontal":
-            fig, ax = plt.subplots(1, 3, figsize=figsize, sharey=True)
-        elif stack == "vertical":
-            fig, ax = plt.subplots(3, 1, figsize=figsize, sharex=True)
-
-    if stack == "horizontal":
-        if flip:
-            axes_y = [ax[0]]
-            axes_x = ax
+    plt = _pyplot()
+    _apply_font_size(fontsize)
+    if ax is None:
+        if stack == "vertical":
+            fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
+        elif stack == "horizontal":
+            fig, axes = plt.subplots(1, 3, figsize=figsize, sharey=True)
         else:
-            axes_y = [ax[0]]
-            axes_x = ax
-    elif stack == "vertical":
-        if flip:
-            axes_x = [ax[2]]
-            axes_y = ax
-        else:
-            axes_x = [ax[2]]
-            axes_y = ax
+            raise ValueError("stack must be 'horizontal' or 'vertical'")
+    else:
+        axes = np.asarray(ax).ravel()
+        if axes.size != 3:
+            raise ValueError("ax must contain three axes")
+        fig = axes[0].figure
 
-    Tf = kwargs.get("Tf", None)
-    nTf, Tf = shot1.sampling.cutoff(Tf)
-    t0 = shot1.sampling.t0
-    sgroup = shot1.source_group
-    rgroup = shot1.receiver_group
-
-    x_min, x_max = rgroup.coordinates.bounds
-    idir = -1
-    x0 = 0
-    x1 = 0
-    while x0 == x1:
-        idir += 1
-        x0 = x_min[idir]
-        x1 = x_max[idir]
-        xlabel = f"{['X', 'Depth'][idir]} [{L_units}]"
-        if idir == len(x_min):
-            x0 = 0
-            x1 = np.shape(rgroup.coordinates)[-1]
-            break
-    tlabel = f"Time [{T_units}]"
-
-    # Scale axes
-    t0 *= t_scale
-    Tf *= t_scale
-    x0 *= x_scale
-    x1 *= x_scale
-
-    if isinstance(aspect, (int, float)):
-        aspect *= (x1 - x0) / (Tf - t0)
-
-    plt.subplots_adjust(wspace=wspace)
-
-    ax[0].set_title(title1)
-    ax[1].set_title(title2)
-    ax[2].set_title(title3)
-
-    # Plot data
-    if flip:
-        for axis in axes_y:
-            axis.set_ylabel(xlabel)
-        for axis in axes_x:
-            axis.set_xlabel(tlabel)
-
-        kwargs_imshow = dict(
+    for axis, values, panel_title in zip(axes, data, titles):
+        axis.imshow(
+            values,
             origin="upper",
             cmap=cmap,
-            extent=[Tf, t0, x1, x0],
-            vmin=-A,
-            vmax=A,
+            extent=_image_extent(x_axis.values, time),
+            vmin=-limit,
+            vmax=limit,
             aspect=aspect,
+            **imshow_kwargs,
         )
+        axis.set_title(panel_title)
+        axis.set_xlabel(x_axis.label)
+    axes[0].set_ylabel(coordinate_label(baseline, "time", "Time"))
 
-        # Flip the data horizontally by reversing the time axis
-        ax[0].imshow(shot1.data[nTf:1:-1, :].T, **kwargs_imshow)
-        ax[1].imshow(shot2.data[nTf:1:-1, :].T, **kwargs_imshow)
-        ax[2].imshow(
-            Cdiff * (shot1.data[nTf:1:-1, :].T - shot2.data[nTf:1:-1, :].T),
-            **kwargs_imshow,
-        )
+    _finalize_figure(fig, save=save, show=show)
+    return fig, axes
+
+
+def plot_xf(
+    trace: xr.DataArray,
+    *,
+    ax=None,
+    A: float | None = None,
+    units: str = "",
+    cmap: str = "Greys",
+    figsize: tuple[float, float] = (5, 5),
+    fontsize: float | None = 12,
+    mode: str = "real",
+    save: str | Path | None = None,
+    show: bool = False,
+    colorbar: bool = False,
+    **imshow_kwargs: Any,
+):
+    """Plot a frequency-domain receiver gather."""
+
+    trace = _prepare_frequency_gather(trace)
+    values_complex = trace_values(trace, complex_=True)
+    if mode == "real":
+        values = values_complex.real
+        symmetric = True
+    elif mode == "imag":
+        values = values_complex.imag
+        symmetric = True
+    elif mode == "abs":
+        values = np.abs(values_complex)
+        symmetric = False
     else:
-        for axis in axes_y:
-            axis.set_ylabel(tlabel)
-        for axis in axes_x:
-            axis.set_xlabel(xlabel)
+        raise ValueError("mode must be 'real', 'imag', or 'abs'")
 
-        kwargs_imshow = dict(
-            origin="upper",
-            cmap=cmap,
-            extent=[x0, x1, Tf, t0],
-            vmin=-A,
-            vmax=A,
-            aspect=aspect,
-        )
-        ax[0].imshow(shot1.data[:nTf, :], **kwargs_imshow)
-        ax[1].imshow(shot2.data[:nTf, :], **kwargs_imshow)
-        ax[2].imshow(
-            Cdiff * (shot1.data[:nTf, :] - shot2.data[:nTf, :]), **kwargs_imshow
-        )
+    x_axis = receiver_axis(trace, units=units)
+    frequency = coordinate_values(trace, "frequency", require_numeric=True)
+    limit = _amplitude_limit(values, A)
 
-    if "save" in kwargs:
-        file = kwargs["save"]
-        plt.savefig(
-            file, bbox_inches="tight", **({"dpi": dpi} if dpi is not None else {})
-        )
-        plt.close()
+    plt = _pyplot()
+    _apply_font_size(fontsize)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
     else:
-        if show:
-            plt.show()
-            plt.close()
+        fig = ax.figure
 
-
-def hilbert_envelope(x: np.ndarray, axis: int = 0):
-    """Compute the Hilbert envelope of a signal."""
-    try:
-        from pyfftw.interfaces import numpy_fft as fft
-    except ImportError:
-        warn("pyfftw not found, using numpy for FFT (slow)")
-        import numpy.fft as fft
-
-    N = x.shape[axis]
-
-    Xf = fft.fft(x, N, axis=axis)
-    h = np.zeros(N, dtype=Xf.dtype)
-    if N % 2 == 0:
-        h[0] = h[N // 2] = 1
-        h[1 : N // 2] = 2
-    else:
-        h[0] = 1
-        h[1 : (N + 1) // 2] = 2
-
-    if x.ndim > 1:
-        ind = [np.newaxis] * x.ndim
-        ind[axis] = slice(None)
-        h = h[tuple(ind)]
-    x = fft.ifft(Xf * h, axis=axis)
-    return np.abs(x)
-
-
-def pick_first_arrivals(
-    signal: np.ndarray,
-    threshold_ratio: float,
-):
-    """Window and extract first arrivals from a pair of seismic signals.
-
-    Uses the Hilbert transform to identify first arrivals and apply a smooth window
-    around them. This is useful for isolating primary arrivals before cross-correlation
-    or other analysis.
-
-    Args:
-       signal (np.ndarray):          Primary time series to analyze for first arrival.
-       signal2 (np.ndarray):         Secondary time series to window (same length as signal).
-       sampling_rate (float):        Sampling rate in samples per second (default 1.0).
-       threshold_ratio (float):      Fraction of peak envelope amplitude for first-arrival detection (default 0.2).
-       window_length (float):        Total length of the time window in seconds (default 0.01).
-       window_type ('tukey' or 'gaussian'):  Type of window to apply. (default 'tukey')
-       alpha (float, optional):      Shape parameter for Tukey window (default 0.5).
-
-    Returns:
-       tuple[np.ndarray, np.ndarray]: A tuple containing:
-          - smoothed1: The windowed primary signal
-          - smoothed2: The windowed secondary signal
-
-    Raises:
-       ValueError: If window_type is not 'tukey' or 'gaussian'.
-       ValueError: If signals have different lengths.
-    """
-    envelope = hilbert_envelope(signal)
-    threshold = threshold_ratio * np.max(envelope, axis=0)
-    first_arrivals = np.argmax(envelope > threshold, axis=0)
-    return first_arrivals
-
-
-def window_first_arrivals(
-    signal: np.ndarray,
-    signal2: np.ndarray,
-    sampling_rate: float,
-    threshold_ratio: float,
-    window_length: float,
-    alpha: float = 0.5,
-    **kwargs,
-):
-    """Pick and window first arrivals from a pair of seismic signals.
-
-    Args:
-        signal (np.ndarray): Primary time series to analyze for first arrival.
-        signal2 (np.ndarray): Secondary time series to window (same length as signal).
-        sampling_rate (float): Sampling rate in samples per second.
-        threshold_ratio (float): Fraction of peak envelope amplitude for first-arrival detection.
-        window_length (float): Total length of the time window in seconds.
-        alpha (float, optional): Shape parameter for Tukey window. Defaults to 0.5.
-
-    Returns:
-        tuple[np.ndarray, np.ndarray] or tuple[np.ndarray, np.ndarray, np.ndarray]:
-            If ifirst is not requested: (smoothed1, smoothed2)
-            If ifirst is requested: (smoothed1, smoothed2, ifirst)
-    """
-    from scipy.signal.windows import tukey
-
-    ifirst = pick_first_arrivals(signal.data, threshold_ratio)
-
-    def full_window(signal, ifirst, wl):
-        """Apply a simple window, centered around first threshold crossing."""
-
-        # Step 3: Window length in samples
-        hwl = int(wl * sampling_rate / 2)
-        window = tukey(2 * hwl, alpha=alpha)
-
-        out = np.zeros_like(signal)
-        for i in range(signal.shape[1]):
-            i1 = ifirst[i] - hwl
-            i2 = ifirst[i] + hwl
-            j1 = 0
-            j2 = len(window)
-            if i1 < 0:
-                j1 = -i1
-                i1 = 0
-            if i2 > len(signal):
-                j2 -= i2 - len(signal)
-                i2 = len(signal) - 1
-            out[i1:i2, i] = window[j1:j2] * signal[i1:i2, i]
-        return out
-
-    def small_window(signal, ifirst, wl):
-        """Apply a simple window, centered around first threshold crossing."""
-
-        # Step 3: Window length in samples
-        hwl = int(wl * sampling_rate / 2)
-        window = tukey(2 * hwl, alpha=alpha)
-
-        out = np.zeros((2 * hwl, signal.shape[1]), dtype=np.single)
-        for i in range(signal.shape[1]):
-            i1 = ifirst[i] - hwl
-            i2 = ifirst[i] + hwl
-            j1 = 0
-            j2 = len(window)
-            if i1 < 0:
-                j1 = -i1
-                i1 = 0
-            if i2 > len(signal):
-                j2 -= i2 - len(signal)
-                i2 = len(signal) - 1
-            out[j1:j2, i] = window[j1:j2] * signal[i1:i2, i]
-        return out
-
-    def apply_window(sig, ifirst):
-        """Apply a simple window, centered around maximum amplitude of simple window."""
-        small = full_window(sig, ifirst, window_length)
-        # small = small_window(sig, ifirst, window_length)
-        return small
-
-    import xarray as xr
-
-    full1 = full_window(signal.data, ifirst, window_length)
-    ifirst = np.argmax(full1, axis=0)
-    ifirst = xr.DataArray(
-        ifirst,
-        dims=["z"],
-        coords={
-            "z": signal._receiver_group.coordinates[:, -1],
-        },
-    )
-    ifirst2 = ifirst.interp(
-        z=signal2._receiver_group.coordinates[:, -1], method="nearest"
-    )
-    ifirst2 = ifirst2.data.astype(int)
-
-    # if len(ifirst2) == 70:
-    #     np.save('ifirst_DAS.npy', ifirst2)
-    # else:
-    #     np.save('ifirst_geo.npy', ifirst2)
-
-    # Step 5: Apply window
-    smoothed = apply_window(signal2.data, ifirst2)
-
-    import inspect
-
-    frame = inspect.currentframe()
-    try:
-        caller_source = inspect.getframeinfo(frame.f_back).code_context[0]
-        if "=" in caller_source and "," in caller_source:
-            lhs = caller_source.split("=")[0].strip()
-            num_vars = len(lhs.split(","))
-            if num_vars == 3:
-                return smoothed, ifirst2
-    finally:
-        del frame
-
-    return smoothed, ifirst2
-
-
-def compute_nrms(
-    base: TraceRecord,
-    shot1: TraceRecord,
-    shot2: TraceRecord,
-    threshold=0.2,
-    window_length=0.01,
-    **kwargs,
-):
-    """Compute time lag between two time-domain shots.
-
-    Performs cross-correlation between corresponding traces in two shots to estimate
-    time shifts. Useful for analyzing velocity perturbations or timing differences
-    between baseline and monitor surveys.
-
-    Args:
-       shot1 (TraceRecord):     First TD TraceRecord (baseline).
-       shot2 (TraceRecord):     Second TD TraceRecord (monitor/perturbed).
-
-    Keyword Args:
-       A (float):        Amplitude scaling for display (default 1.0).
-       units (str):      Length units for labeling X axis (default "km").
-       cmap (str):       Matplotlib colormap (default "Greys").
-       figsize (tuple):  Figure size (width, height) in inches (default (8,8)).
-       fontsize (int):   Font size for labels/ticks (default 14).
-       Tf (float):       Cutoff time in seconds.
-       save (str):       If provided, saves figure to this path.
-       max_lag (float):  Maximum time lag to consider in seconds (default 1.0).
-
-    Raises:
-       AssertionError:   If shots are not time-domain or have different geometries.
-       ValueError:       If shots have incompatible sampling.
-    """
-
-    sgroup = base._source_group
-    rgroup = base._receiver_group
-
-    nT = len(base.coords["time"])
-    n_recv = rgroup.size
-    T = base.coords["time"][-1] - base.coords["time"][0]
-    rate = (nT - 1) / T
-
-    T_max = kwargs.get("T_max", None)
-    if T_max is not None:
-        base = base.sel(time=slice(0, T_max))
-        shot1 = shot1.sel(time=slice(0, T_max))
-        shot2 = shot2.sel(time=slice(0, T_max))
-
-    win1, f1 = window_first_arrivals(
-        base,
-        shot1,
-        rate,
-        threshold_ratio=threshold,
-        window_length=window_length,
-    )
-
-    win2, f2 = window_first_arrivals(
-        base,
-        shot2,
-        rate,
-        threshold_ratio=threshold,
-        window_length=window_length,
-        ifirst_ref=f1,
-    )
-    wind = win1 - win2
-
-    fig, ax = plt.subplots(1, 4, figsize=(16, 4))
-    hwl = int(window_length * rate / 2)
-    print(hwl)
-    A = 4 * np.std(np.abs(shot1.data))
-    ax[0].imshow(shot1.data, cmap="gray", aspect="auto", vmin=-A, vmax=A)
-    ax[0].set_title("Baseline")
-    ax[0].plot(f1 - hwl, linewidth=1, color="red")
-    ax[0].plot(f1 + hwl, linewidth=1, color="red")
-    ax[1].imshow(shot2.data, cmap="gray", aspect="auto", vmin=-A, vmax=A)
-    ax[1].set_title("Day 1")
-    ax[2].imshow(wind, cmap="gray", aspect="auto", vmin=-A, vmax=A)
-    ax[2].set_title("Windowed Difference")
-
-    rms1 = np.sqrt(np.mean(np.square(win1), axis=0))
-    rms2 = np.sqrt(np.mean(np.square(win2), axis=0))
-    rmsd = np.sqrt(np.mean(np.square(wind), axis=0))
-    nrms = 100 * rmsd / ((rms1 + rms2) / 2)
-    ax[3].set_title("NRMS")
-    ax[3].plot(nrms, linewidth=2)
-    plt.show()
-
-    return nrms
-
-
-def compute_timelag(
-    shot1: TraceRecord, shot2: TraceRecord, threshold=0.1, window_length=0.01, **kwargs
-):
-    """Compute time lag between two time-domain shots.
-
-    Performs cross-correlation between corresponding traces in two shots to estimate
-    time shifts. Useful for analyzing velocity perturbations or timing differences
-    between baseline and monitor surveys.
-
-    Args:
-       shot1 (TraceRecord):     First TD TraceRecord (baseline).
-       shot2 (TraceRecord):     Second TD TraceRecord (monitor/perturbed).
-
-    Keyword Args:
-       A (float):        Amplitude scaling for display (default 1.0).
-       units (str):      Length units for labeling X axis (default "km").
-       cmap (str):       Matplotlib colormap (default "Greys").
-       figsize (tuple):  Figure size (width, height) in inches (default (8,8)).
-       fontsize (int):   Font size for labels/ticks (default 14).
-       Tf (float):       Cutoff time in seconds.
-       save (str):       If provided, saves figure to this path.
-       max_lag (float):  Maximum time lag to consider in seconds (default 1.0).
-
-    Raises:
-       AssertionError:   If shots are not time-domain or have different geometries.
-       ValueError:       If shots have incompatible sampling.
-    """
-
-    assert shot1.type == "TD" and shot2.type == "TD"
-    assert (
-        shot1.sampling.nTime == shot2.sampling.nTime
-        and shot1.sampling.T == shot2.sampling.T
-    )
-
-    sgroup = shot1.source_group
-    rgroup = shot1.receiver_group
-
-    nT = shot1.sampling.nTime
-    n_recv = rgroup.size
-    rate = (nT - 1) / shot1.sampling.T  # samples/second
-
-    Tmax = kwargs.get("Tmax", None)
-    nTmax, Tmax = shot1.sampling.cutoff(Tmax)
-
-    win1, win2 = window_first_arrivals(
-        shot1.data[:nTmax, :],
-        shot2.data[:nTmax, :],
-        rate,
-        threshold_ratio=threshold,
-        window_length=window_length,
-    )
-
-    nW = np.shape(win1)[0]
-
-    # Compute lag time per receiver
-    lag = np.zeros((n_recv), dtype=np.single)
-    for i in range(n_recv):
-        tr1 = win1[:, i]
-        tr2 = win2[:, i]
-        cor = np.correlate(tr1, tr2, "full")
-        icor = np.argmax(cor) - (nW - 1)
-        lag[i] = -(icor / rate * 1000)  # ms
-
-    # Clip lag values
-    lag[lag < 0] = 0
-
-    return lag
-
-
-def plot_timelag(shot1: TraceRecord, shot2: TraceRecord, threshold=0.1, **kwargs):
-    """Plot time lag analysis between two time-domain shots.
-
-    Performs cross-correlation between corresponding traces in two shots to estimate
-    time shifts. Useful for analyzing velocity perturbations or timing differences
-    between baseline and monitor surveys.
-
-    Args:
-       shot1 (TraceRecord):     First TD TraceRecord (baseline).
-       shot2 (TraceRecord):     Second TD TraceRecord (monitor/perturbed).
-
-    Keyword Args:
-       A (float):        Amplitude scaling for display (default 1.0).
-       units (str):      Length units for labeling X axis (default "km").
-       cmap (str):       Matplotlib colormap (default "Greys").
-       figsize (tuple):  Figure size (width, height) in inches (default (8,8)).
-       fontsize (int):   Font size for labels/ticks (default 14).
-       Tf (float):       Cutoff time in seconds.
-       save (str):       If provided, saves figure to this path.
-       max_lag (float):  Maximum time lag to consider in seconds (default 1.0).
-
-    Raises:
-       AssertionError:   If shots are not time-domain or have different geometries.
-       ValueError:       If shots have incompatible sampling.
-    """
-    assert shot1.type == "TD" and shot2.type == "TD"
-    assert (
-        shot1.sampling.nTime == shot2.sampling.nTime
-        and shot1.sampling.T == shot2.sampling.T
-    )
-
-    A = kwargs.get("A", 1)
-    units = kwargs.get("units", "km")
-    cmap = kwargs.get("cmap", "Greys")
-    figsize = kwargs.get("figsize", (5, 5))
-    fontsize = kwargs.get("fontsize", 12)
-
-    sgroup = shot1.source_group
-    rgroup = shot1.receiver_group
-
-    # TODO; check that source/receiver positions align
-
-    x_min, x_max = rgroup.coordinates.bounds
-    idir = -1
-    x0 = 0
-    x1 = 0
-    while x0 == x1:
-        idir += 1
-        x0 = x_min[idir]
-        x1 = x_max[idir]
-        # TODO: different for 2D; make getting axis limits a member of shot
-        xlabel = f"{['X', 'Y', 'Z'][idir]} [{units}]"
-        if idir == len(x_min):
-            x0 = 0
-            x1 = np.shape(rgroup.coordinates)[-1]
-            break
-
-    x_s = sgroup.source.coordinates
-    i_r = np.argmin(np.abs(rgroup.coordinates[:, idir] - x_s[idir]))
-
-    plt.rcParams.update({"font.size": fontsize})
-
-    t0 = shot1.sampling.t0
-    Tf = kwargs.get("Tf", None)
-    nTf, Tf = shot1.sampling.cutoff(Tf)
-
-    Tmax = kwargs.get("Tmax", None)
-    nTmax, Tmax = shot1.sampling.cutoff(Tmax)
-
-    nT = shot1.sampling.nTime
-    n_recv = rgroup.size
-    rate = (nT - 1) / shot1.sampling.T  # samples/second
-
-    win1, win2 = window_first_arrivals(
-        shot1.data[:nTmax, :],
-        shot2.data[:nTmax, :],
-        rate,
-        threshold_ratio=threshold,
-        window_length=0.005,
-    )
-
-    # Compute lag time per receiver
-    lag = np.zeros((n_recv), dtype=np.single)
-    for i in range(n_recv):
-        tr1 = win1[:, i]
-        tr2 = win2[:, i]
-        cor = np.argmax(np.correlate(tr1, tr2, "full"))
-        cor -= nT - 1
-        lag[i] = -(cor / rate * 1000)  # ms
-
-    print("lag: ", lag[i_r], max(lag))
-
-    x = np.linspace(x0, x1, n_recv)
-
-    fig = plt.figure(1, figsize=figsize)
-    plt.clf()
-    plt.title(f"Shot {shot1.number}: {shot1.field}")
-    plt.xlabel(xlabel)
-    plt.ylabel("Time [s]")
-
-    A = 0.5 * np.max(np.abs(win1))
-    plt.imshow(
-        win1[:nTf, :],
-        origin="upper",
-        cmap=cmap,
-        extent=[x0, x1, Tf, t0],
-        vmin=-A,
-        vmax=A,
-        aspect="auto",
-        interpolation="nearest",
-    )
-
-    plt.tight_layout()
-    plt.show()
-
-    # fig = plt.figure(1, figsize=figsize)
-    # plt.clf()
-
-    # plt.plot(x, lag)
-    # ax = plt.gca()
-    # ax.set_xlim([x0, x1])
-    # ax.set_ylim([0, 1.0])  # may adjust for range of lag
-    # plt.xlabel(xlabel)
-    # plt.ylabel("Δt (ms)")
-
-    # if "save" in kwargs:
-    #     file = kwargs["save"]
-    #     plt.savefig(file, bbox_inches="tight")
-    #     plt.close()
-    # else:
-    #     plt.show()
-    # plt.close()
-
-    return i_r, lag
-
-
-# --------------------------------------------
-# Frequency-domain Plot Functions
-# --------------------------------------------
-def plot_xf(shot: TraceRecord, **kwargs):
-    """Plot a frequency-domain shot gather.
-
-    Creates a 2D plot showing amplitude vs frequency and receiver position.
-    Useful for analyzing frequency content at different receiver locations.
-
-    Args:
-       shot (TraceRecord):      A TraceRecord object of type='FD' containing frequency-domain data.
-
-    Keyword Args:
-       A (float):        Amplitude scaling for display (default 1).
-       units (str):      Length units for labeling X axis (default "km").
-       cmap (str):       Matplotlib colormap name (default "RdYlBu_r").
-       figsize (tuple):  Figure size (width, height) in inches(default (8,8)).
-       fontsize (int):   Font size for labels/ticks (default 14).
-       save (str):       If provided, saves the figure to this path.
-
-    Raises:
-       AssertionError:   If shot is not a frequency-domain shot (type != "FD").
-    """
-    assert shot.type == "FD"
-
-    A = kwargs.get("A", 1)
-    units = kwargs.get("units", "km")
-    cmap = kwargs.get("cmap", "Greys")
-    figsize = kwargs.get("figsize", (5, 5))
-    fontsize = kwargs.get("fontsize", 12)
-
-    plt.rcParams.update({"font.size": fontsize})
-
-    f_min = shot.sampling.f_min
-    f_max = shot.sampling.f_max
-    nf = shot.sampling.nfreq
-
-    rgroup = shot.receiver_group
-
-    x_min, x_max = rgroup.coordinates.bounds
-    x0 = x_min[0]
-    x1 = x_max[0]
-    xlabel = f"X [{units}]"
-    if x0 == x1:
-        x0 = x_min[1]
-        x1 = x_max[1]
-        xlabel = f"Depth [{units}]"
-
-    # Plot
-    plt.ylabel("f (Hz)")
-    plt.imshow(
-        shot.data[:, :].real,
+    image = ax.imshow(
+        values,
         origin="lower",
         cmap=cmap,
-        extent=[x0, x1, 0, f_max],
+        extent=[
+            float(x_axis.values[0]),
+            float(x_axis.values[-1]),
+            float(frequency[0]),
+            float(frequency[-1]),
+        ],
+        vmin=-limit if symmetric else 0,
+        vmax=limit,
         aspect="auto",
+        **imshow_kwargs,
     )
+    ax.set_xlabel(x_axis.label)
+    ax.set_ylabel(coordinate_label(trace, "frequency", "Frequency"))
+    if colorbar:
+        fig.colorbar(image, ax=ax)
 
-    if "save" in kwargs:
-        file = kwargs["save"]
-        plt.savefig(file, bbox_inches="tight")
+    _finalize_figure(fig, save=save, show=show)
+    return fig, ax
+
+
+def plot_cf(
+    trace: xr.DataArray,
+    *,
+    ax=None,
+    A: float | None = 1.0,
+    units: str = "",
+    cmap: str = "RdYlBu_r",
+    figsize: tuple[float, float] = (5, 5),
+    fontsize: float | None = 14,
+    c_min: float = 0.5,
+    c_max: float = 6.0,
+    n_c: int = 500,
+    smooth: float | None = None,
+    save: str | Path | None = None,
+    show: bool = False,
+    colorbar: bool = False,
+    **imshow_kwargs: Any,
+):
+    """Plot a frequency/phase-velocity diagnostic transform."""
+
+    transform = phase_velocity_transform(
+        trace,
+        c_min=c_min,
+        c_max=c_max,
+        n_c=n_c,
+        units=units,
+        smooth=smooth,
+    )
+    values = trace_values(transform)
+    frequency = coordinate_values(transform, "frequency", require_numeric=True)
+    velocity = coordinate_values(transform, "phase_velocity", require_numeric=True)
+    vmax = None if A is None else float(A) * _amplitude_limit(values, None)
+
+    plt = _pyplot()
+    _apply_font_size(fontsize)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
     else:
-        plt.show()
+        fig = ax.figure
 
-
-def plot_cf(shot: TraceRecord, **kwargs):
-    """Create a CF (phase velocity vs. frequency) plot using a smooth-windowed Radon transform.
-
-    For a frequency-domain shot, estimates wave speed distribution by testing different
-    velocities (c) for a given frequency (f). Uses a windowed Radon transform approach
-    to identify dominant wave speeds at each frequency.
-
-    Args:
-       shot (TraceRecord):      A frequency-domain TraceRecord object.
-
-    Keyword Args:
-       A (float):        Amplitude scaling for color max (default 1).
-       units (str):      Label for distance ("km" or "m").
-       cmap (str):       Matplotlib colormap (default "RdYlBu_r").
-       figsize (tuple):  Figure size (width, height) (default (8,8)).
-       fontsize (int):   Font size for labels/ticks (default 14).
-       c_min (float):    Minimum wave speed for transform (default 0.5).
-       c_max (float):    Maximum wave speed for transform (default 6.0).
-       n_c (int):        Number of wave speed samples (default 500).
-       save (str):       File path to save figure.
-
-    Raises:
-       AssertionError:   If shot is not a frequency-domain shot (type != "FD").
-       ValueError:       If receiver geometry is incompatible with transform.
-    """
-    assert shot.type == "FD"
-    from scipy.ndimage import gaussian_filter1d
-
-    A = kwargs.get("A", 1)
-    units = kwargs.get("units", "km")
-    cmap = kwargs.get("cmap", "RdYlBu_r")
-    figsize = kwargs.get("figsize", (5, 5))
-    fontsize = kwargs.get("fontsize", 14)
-
-    symm = kwargs.get("symm", False)
-    c_min = kwargs.get("c_min", 0.5)
-    c_max = kwargs.get("c_max", 6.0)
-    n_c = kwargs.get("n_c", 500)
-
-    sgroup = shot.source_group
-    rgroup = shot.receiver_group
-
-    x_min, x_max = rgroup.coordinates.bounds
-    idir = -1
-    x0 = 0
-    x1 = 0
-    while x0 == x1:
-        idir += 1
-        x0 = x_min[idir]
-        x1 = x_max[idir]
-        xlabel = f"{['X', 'Y', 'Z'][idir]} [{units}]"
-        if idir == len(x_min):
-            x0 = 0
-            x1 = np.shape(rgroup.coordinates)[-1]
-            break
-
-    n1 = rgroup.size
-    xl = rgroup.coordinates[:, idir] - sgroup.source.coordinates[idir]
-
-    shot.data[:, xl < 0] = 0
-
-    f_max = shot.sampling.f_max
-    nf = shot.sampling.nfreq
-
-    fl = np.linspace(0, f_max, nf)
-    cl = np.linspace(c_min, c_max, n_c)
-    cf = np.zeros((nf, n_c), dtype=np.single)
-
-    # Define window function for spatial damping
-    w = np.zeros((n1), dtype=np.single)
-    i1 = n1 // 8
-    i2 = n1 - i1
-    w[i1:i2] = 1
-    w = gaussian_filter1d(w, n1 // 16)
-
-    # Evaluate radon-like transform
-    for ifreq, f in enumerate(fl):
-        for ic, c in enumerate(cl):
-            v = np.exp(1j * f * 2 * np.pi * xl / c) * w
-            cf[ifreq, ic] = np.abs(np.dot(shot.data[ifreq, :], v))
-
-    plt.figure()
-    plt.xlabel("f [Hz]")
-    plt.ylabel(f"c [{units}/s]")
-    plt.imshow(
-        cf[:, :].transpose(),
+    image = ax.imshow(
+        values.T,
         origin="lower",
         cmap=cmap,
         vmin=0,
-        vmax=A * np.max(cf),
-        extent=[0, f_max, c_min, c_max],
+        vmax=vmax,
+        extent=[
+            float(frequency[0]),
+            float(frequency[-1]),
+            float(velocity[0]),
+            float(velocity[-1]),
+        ],
         aspect="auto",
+        **imshow_kwargs,
     )
+    ax.set_xlabel(coordinate_label(transform, "frequency", "Frequency"))
+    ax.set_ylabel(coordinate_label(transform, "phase_velocity", "Phase velocity"))
+    if colorbar:
+        fig.colorbar(image, ax=ax)
 
-    if "save" in kwargs:
-        file = kwargs["save"]
-        plt.savefig(file, bbox_inches="tight")
+    _finalize_figure(fig, save=save, show=show)
+    return fig, ax
+
+
+def plot_timelag(
+    baseline: xr.DataArray,
+    monitor: xr.DataArray,
+    *,
+    ax=None,
+    units: str = "",
+    figsize: tuple[float, float] = (5, 3),
+    fontsize: float | None = 12,
+    save: str | Path | None = None,
+    show: bool = False,
+    **kwargs: Any,
+):
+    """Plot receiver-by-receiver lag computed by ``analysis.compute_timelag``."""
+
+    baseline = as_trace_array(baseline)
+    lag = compute_timelag(baseline, monitor, **kwargs)
+    x_axis = receiver_axis(baseline, units=units)
+
+    plt = _pyplot()
+    _apply_font_size(fontsize)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
     else:
-        plt.show()
+        fig = ax.figure
+
+    ax.plot(x_axis.values, trace_values(lag), linewidth=2)
+    ax.set_xlabel(x_axis.label)
+    ax.set_ylabel("Lag [ms]")
+    _finalize_figure(fig, save=save, show=show)
+    return fig, ax

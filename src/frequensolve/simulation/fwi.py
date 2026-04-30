@@ -174,7 +174,7 @@ def normalize_grid(
     if isinstance(grid, Mapping):
         data = dict(grid)
         if "_type" in data:
-            return CartesianGrid.from_dict(data)
+            return CartesianGrid.from_fs(data)
         return CartesianGrid(**data)
     if isinstance(grid, Sequence) and not isinstance(grid, (str, bytes)):
         n = [int(value) for value in grid]

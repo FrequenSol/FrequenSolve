@@ -3,21 +3,22 @@
 import copy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 
+from frequensolve.geometry.frame import CoordinateValue
 from frequensolve.seismic.receivers import ReceiverDevice, ReceiverGroup
 from frequensolve.seismic.sources import CompoundSource, PointSource, SourceGroup
 from frequensolve.seismic.sparse_survey import ReceiverSampling, SparseSurvey
-from frequensolve.util.mixins import merge_extra
+from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
 from frequensolve.util.named_list import NamedList
 
 __all__ = ["Acquisition"]
 
 
 @dataclass
-class Acquisition:
+class Acquisition(ExtraFieldsMixin):
     """Defines a seismic source and receiver configuration.
 
     This class reads the input file to retrieve blocks describing sources, receivers, and
@@ -37,26 +38,23 @@ class Acquisition:
     _rel_path: Optional[Path] = None
 
     @classmethod
-    def from_dict(cls, dict: Dict) -> "Acquisition":
-        dict = copy.deepcopy(dict)
+    def from_fs(cls, data: Dict) -> "Acquisition":
+        data = copy.deepcopy(data)
         return cls(
             source_groups=NamedList(
-                [
-                    SourceGroup.from_dict(group)
-                    for group in dict.pop("source_groups", [])
-                ]
+                [SourceGroup.from_fs(group) for group in data.pop("source_groups", [])]
             ),
             receiver_groups=NamedList(
                 [
-                    ReceiverGroup.from_dict(group)
-                    for group in dict.pop("receiver_groups", [])
+                    ReceiverGroup.from_fs(group)
+                    for group in data.pop("receiver_groups", [])
                 ]
             ),
             surveys=NamedList(
-                [SparseSurvey.from_dict(survey) for survey in dict.pop("surveys", [])]
+                [SparseSurvey.from_fs(survey) for survey in data.pop("surveys", [])]
             ),
-            max_batch=dict.pop("max_batch", None),
-            extra=dict,
+            max_batch=data.pop("max_batch", None),
+            extra=data,
         )
 
     def to_fs(self, ctx=None) -> Dict:
@@ -89,23 +87,10 @@ class Acquisition:
                     survey.to_fs(
                         ctx, component_map=survey_component_maps.get(survey.name)
                     )
-                    if hasattr(survey, "to_fs")
-                    else survey
                 )
                 for survey in self.surveys
             ]
         return merge_extra(payload, self.extra, "Acquisition")
-
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
-    @property
-    def kwargs(self) -> Dict:
-        return self.extra
-
-    @kwargs.setter
-    def kwargs(self, value: Dict) -> None:
-        self.extra = copy.deepcopy(dict(value))
 
     def add_source_group(
         self,
@@ -113,26 +98,20 @@ class Acquisition:
         coords: np.ndarray,
         direction: Optional[np.ndarray] = None,
         domain: Optional[int] = None,
-        frame: str = "physical",
     ):
-        """Add a group of sources with common kind, frame, and direction.
+        """Add a group of sources with common kind and direction.
 
         Args:
            kind (str):              Kind of the source group.
            coords (np.ndarray):     Coordinates of the source group.
            direction (np.ndarray):  Direction of the source group.
-           frame (str):             Frame of the source group (e.g., "physical", "global").
-           domain (int):            Domain in which the source group should be evaluated
-                                    (if a source is defined between multiple domains, responses
-                                     will be evaluated in all and averaged by default, setting this
-                                     specifies a specific domain to evaluate, neglecting others).
+           domain (int):            Optional domain in which the source group should be evaluated.
         """
 
-        for row in coords:
+        for row in _source_coordinate_rows(coords):
             isrc = len(self.source_groups)
             source = PointSource(
                 kind=kind,
-                frame=frame,
                 coordinates=row,
                 direction=direction,
                 domain=domain,
@@ -161,7 +140,6 @@ class Acquisition:
             direction[i, :] *= weights[i]
         source = CompoundSource(
             kind=kind,
-            frame="physical",
             coordinates=coords,
             direction=direction,
             domain=domain,
@@ -174,28 +152,29 @@ class Acquisition:
         name: str,
         device: ReceiverDevice,
         coords: np.ndarray,
-        frame: str = "physical",
         domain: Optional[int] = None,
         **kwargs,
     ):
-        """Add a group of receivers with common device, frame, and coordinates.
+        """Add a group of receivers with common device and coordinates.
 
         Args:
            name (str):                Name of the receiver group.
            device (ReceiverDevice):   Device defining receiver type and components.
            coordinates (np.ndarray):  Coordinates of the receiver group.
-           frame (str):               Frame of the receiver group (e.g., "physical", "global").
-           domain (int):              Domain in which the receiver group should be evaluated
-                                      (if a receiver is defined between multiple domains, responses
-                                       will be evaluated in all and averaged by default, setting this
-                                       specifies a specific domain to evaluate, neglecting others).
+           domain (int):              Optional domain in which the receiver group should be evaluated.
         """
+        deprecated_frame_keys = {"frame", "source_frame", "receiver_frame"} & set(
+            kwargs
+        )
+        if deprecated_frame_keys:
+            raise TypeError(
+                "add_receiver_group frame is no longer supported; receiver coordinates are physical"
+            )
 
         self.receiver_groups.append(
             ReceiverGroup(
                 name=name,
                 device=device,
-                frame=frame,
                 coordinates=coords,
                 domain=domain,
                 **kwargs,
@@ -206,7 +185,7 @@ class Acquisition:
         """Add or replace a named sparse survey layout."""
 
         if isinstance(survey, dict):
-            survey = SparseSurvey.from_dict(survey)
+            survey = SparseSurvey.from_fs(survey)
         try:
             self.surveys[survey.name] = survey
         except ValueError:
@@ -224,7 +203,6 @@ class Acquisition:
         device: ReceiverDevice,
         coords: np.ndarray,
         survey: Optional[Union[str, SparseSurvey, Dict]] = None,
-        frame: str = "physical",
         domain: Optional[int] = None,
         **kwargs,
     ) -> ReceiverGroup:
@@ -234,13 +212,20 @@ class Acquisition:
         dictionary loaded from JSON. Survey objects are added to
         ``Acquisition.surveys`` automatically.
         """
+        deprecated_frame_keys = {"frame", "source_frame", "receiver_frame"} & set(
+            kwargs
+        )
+        if deprecated_frame_keys:
+            raise TypeError(
+                "add_sparse_receiver_group frame is no longer supported; receiver coordinates are physical"
+            )
 
         if survey is None:
             raise ValueError(
                 "add_sparse_receiver_group requires a survey name or SparseSurvey"
             )
         if isinstance(survey, dict):
-            survey = SparseSurvey.from_dict(survey)
+            survey = SparseSurvey.from_fs(survey)
         if isinstance(survey, SparseSurvey):
             self.add_survey(survey)
             sampling = survey.sampling()
@@ -250,7 +235,6 @@ class Acquisition:
         group = ReceiverGroup(
             name=name,
             device=device,
-            frame=frame,
             coordinates=coords,
             domain=domain,
             sampling=sampling,
@@ -339,3 +323,28 @@ class Acquisition:
     @property
     def _path(self) -> Path:
         return self._proj_path / self._rel_path
+
+
+def _source_coordinate_rows(coords):
+    if isinstance(coords, CoordinateValue):
+        values = np.asarray(coords.value, dtype=float)
+        if values.ndim == 1:
+            values = values.reshape(1, -1)
+        if values.ndim != 2:
+            raise ValueError("source coordinates must be a 2D array")
+        return [
+            CoordinateValue(
+                row.tolist(),
+                units=coords.units,
+                system=coords.system,
+                extra=copy.deepcopy(coords.extra),
+            )
+            for row in values
+        ]
+
+    if isinstance(coords, list):
+        coords = np.array(coords)
+    values = np.asarray(coords)
+    if values.ndim == 1:
+        values = values.reshape(1, -1)
+    return values

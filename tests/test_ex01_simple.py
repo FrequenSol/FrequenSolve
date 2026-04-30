@@ -138,18 +138,27 @@ See Also
 ex01_simple.ipynb : The example notebook that this test suite verifies
 """
 
-import logging
 import os
-import shutil
 from contextlib import redirect_stdout
 from io import StringIO
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from frequensolve import *
+from frequensolve.mesh import BoundaryCondition, BoundaryConditionManager
+from frequensolve.project import Project
+from frequensolve.seismic import Acquisition, ReceiverNode
+from frequensolve.seismic.layered_model import LayeredModel
+from frequensolve.seismic.plotting import plot_cf, plot_gather
+from frequensolve.seismic.wavelet import RickerWavelet
+from frequensolve.simulation import (
+    Discretization,
+    OutputManager,
+    ParaviewOutput,
+    SolverConfig,
+    TimeDomainJob,
+)
 
 # =============================================================================
 # Test Parameters
@@ -354,7 +363,6 @@ def setup_complete_simulation(simulation):
         name=ACQUISITION_PARAMS["receivers"]["name"],
         device=hydrophone,
         coords=coords,
-        frame="reference",
     )
     simulation += acq
 
@@ -387,6 +395,8 @@ def run_time_domain_simulation(project, simulation):
     tuple
         (trace_db, wavelet) containing the simulation results
     """
+    from frequensolve.orchestrator.sites.local import LocalSite
+
     # Save the project to ensure simulation file exists
     project.save()
 
@@ -631,9 +641,7 @@ def test_acquisition_setup(simulation):
     hydrophone.add_component(name="p", field="pressure")
 
     coords = [[x, 0.0] for x in np.linspace(0.0, 1.0, 1001)]
-    acq.add_receiver_group(
-        name="surface_hydrophones", device=hydrophone, coords=coords, frame="reference"
-    )
+    acq.add_receiver_group(name="surface_hydrophones", device=hydrophone, coords=coords)
 
     simulation += acq
 
@@ -679,9 +687,7 @@ def test_output_configuration(simulation):
     assert pv_output.name == "simple", "Output name should match notebook"
     assert pv_output.fields == ["pressure"], "Should output pressure field"
     assert pv_output.upscale == 1, "Upscale should match notebook"
-    assert (
-        simulation.outputs.write_receivers is True
-    ), "Should write receiver data by default"
+    assert simulation.outputs.traces is not None, "Should write traces by default"
 
 
 def test_simulation_setup(simulation):
@@ -829,6 +835,7 @@ def test_time_domain_simulation_basic(project, simulation):
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0)
 def test_model_plot(simulation):
     """Test basic plotting functionality without requiring the solver.
@@ -864,6 +871,7 @@ def test_model_plot(simulation):
 
 
 @pytest.mark.integration
+@pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
 def test_time_domain_wavelet_time_plot(time_domain_results):
     """Test the time-domain wavelet plot from time domain simulation.
@@ -882,6 +890,7 @@ def test_time_domain_wavelet_time_plot(time_domain_results):
 
 
 @pytest.mark.integration
+@pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
 def test_time_domain_wavelet_freq_plot(time_domain_results):
     """Test the frequency-domain wavelet plot from time domain simulation.
@@ -900,6 +909,7 @@ def test_time_domain_wavelet_freq_plot(time_domain_results):
 
 
 @pytest.mark.integration
+@pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0)
 def test_time_domain_common_frequency_plot(time_domain_results):
     """Test the common frequency plot from time domain simulation.
@@ -918,6 +928,7 @@ def test_time_domain_common_frequency_plot(time_domain_results):
 
 
 @pytest.mark.integration
+@pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0)
 def test_time_domain_gather_plot(time_domain_results):
     """Test the gather plot from time domain simulation.

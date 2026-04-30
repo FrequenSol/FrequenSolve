@@ -33,6 +33,7 @@ from frequensolve.orchestrator.sites.aws.cognito import CognitoAuth
 from frequensolve.orchestrator.sites.aws.graphql_client import GraphQLClient
 
 
+@pytest.mark.cloud
 @pytest.mark.interactive
 def test_s3_upload(domain="localhost:5173"):
     """Test S3 upload with Identity Pool credentials."""
@@ -73,7 +74,7 @@ def test_s3_upload(domain="localhost:5173"):
         password = getpass.getpass("  Password: ")
         try:
             auth.login(email, password)
-            print(f"  ✓ Login successful")
+            print("  ✓ Login successful")
         except Exception as e:
             print(f"❌ Login failed: {e}")
             return False
@@ -88,17 +89,17 @@ def test_s3_upload(domain="localhost:5173"):
             aws_session_token=creds["SessionToken"],
             region_name=config.region,
         )
-        print(f"  ✓ AWS session created")
+        print("  ✓ AWS session created")
         print(f"  ✓ Identity ID: {creds['IdentityId']}")
     except Exception as e:
         error_msg = str(e)
         if "expired" in error_msg.lower() or "token" in error_msg.lower():
-            print(f"  Credentials expired, please login again:")
+            print("  Credentials expired, please login again:")
             email = input("  Email: ")
             password = getpass.getpass("  Password: ")
             try:
                 auth.login(email, password)
-                print(f"  ✓ Login successful, retrying...")
+                print("  ✓ Login successful, retrying...")
                 creds = auth.get_aws_credentials()
                 session = boto3.Session(
                     aws_access_key_id=creds["AccessKeyId"],
@@ -106,7 +107,7 @@ def test_s3_upload(domain="localhost:5173"):
                     aws_session_token=creds["SessionToken"],
                     region_name=config.region,
                 )
-                print(f"  ✓ AWS session created")
+                print("  ✓ AWS session created")
                 print(f"  ✓ Identity ID: {creds['IdentityId']}")
             except Exception as login_error:
                 print(f"❌ Login/retry failed: {login_error}")
@@ -121,7 +122,7 @@ def test_s3_upload(domain="localhost:5173"):
         gql_client = GraphQLClient(config.api_url, auth)
         stack_info = gql_client.get_my_stack()
         bucket_name = stack_info["bucketName"]
-        print(f"  ✓ Stack info retrieved")
+        print("  ✓ Stack info retrieved")
         print(f"  ✓ Bucket: {bucket_name}")
         print(f"  ✓ Job Queue: {stack_info['jobQueue']}")
         print(f"  ✓ Job Definition: {stack_info['jobDefinition']}")
@@ -163,7 +164,7 @@ def test_s3_upload(domain="localhost:5173"):
         # Cleanup
         s3_client.delete_object(Bucket=bucket_name, Key=s3_key)
         os.unlink(test_file)
-        print(f"  ✓ Test file cleaned up")
+        print("  ✓ Test file cleaned up")
 
     except Exception as e:
         print(f"❌ S3 operation failed: {e}")

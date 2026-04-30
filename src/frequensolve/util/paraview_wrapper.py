@@ -12,7 +12,7 @@ try:
 except ImportError:
     HAS_PARAVIEW = False
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional
 
 if HAS_PARAVIEW:
@@ -355,7 +355,7 @@ class AxesManager:
         """Called automatically after dataclass __init__ to set default titles and labels."""
         if self.titles is None:
             if self.dim == 2:
-                self.titles = [f"X ({self.units})\n", f"Depth ({self.units})     ", f""]
+                self.titles = [f"X ({self.units})\n", f"Depth ({self.units})     ", ""]
             else:
                 self.titles = [
                     f"X ({self.units})\n",
@@ -938,7 +938,7 @@ if __name__ == "__main__":
         # Show axes
         pv.show_axes()
 
-    # Hide sources & recievers
+    # Hide sources & receivers
     pv.hide_sources()
     pv.hide_receivers()
 
@@ -964,4 +964,4 @@ if __name__ == "__main__":
         colormap="RdGy",
         limits=[0, 5],
     )
-    pv.screenshot(f"./velocity.pdf")
+    pv.screenshot("./velocity.pdf")

@@ -8,9 +8,8 @@ import numpy as np
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.jobs import SimulationJob
-from frequensolve.simulation.sampling import UniformSweepSampling
 from frequensolve.simulation.simulation import SeismicSimulation
-from frequensolve.util.class_registry import class_registry, register_class
+from frequensolve.util.class_registry import register_class
 
 __all__ = [
     "ImagingJob",
@@ -47,7 +46,7 @@ class ImageDatabase:
 
     def image_file(self, part: Optional[int] = None):
         if part is None:
-            return self.path / f"image.h5"
+            return self.path / "image.h5"
         else:
             return self.path / f"image_{part}.h5"
 
@@ -104,7 +103,7 @@ class MisfitGroup:
             return path / self.name
         return path
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         return {
             "name": self.name,
             "observed": self.observed,
@@ -112,7 +111,7 @@ class MisfitGroup:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "MisfitGroup":
+    def from_fs(cls, data: Dict) -> "MisfitGroup":
         return cls(
             name=data["name"],
             observed=data["observed"],
@@ -129,18 +128,18 @@ class Misfit:
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         return {
             "norm": self.norm,
-            "receiver_groups": [group.__dict__() for group in self.receiver_groups],
+            "receiver_groups": [group.to_fs(ctx) for group in self.receiver_groups],
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "Misfit":
+    def from_fs(cls, data: Dict) -> "Misfit":
         return cls(
             norm=data["norm"],
             receiver_groups=[
-                MisfitGroup.from_dict(group) for group in data["receiver_groups"]
+                MisfitGroup.from_fs(group) for group in data["receiver_groups"]
             ],
         )
 
@@ -179,8 +178,6 @@ class ImagingJob(SimulationJob):
         regularization: Optional[dict] = None,
         save_path: Optional[Union[str, Path]] = None,
         reassemble_adjoint: bool = False,
-        overwrite: bool = True,
-        max_versions: int = 5,
         **kwargs,
     ) -> None:
         if "misfit_type" in kwargs:
@@ -191,15 +188,16 @@ class ImagingJob(SimulationJob):
             simulation=simulation,
             f_list=f_list,
             workflow="RTM",
-            overwrite=overwrite,
-            max_versions=max_versions,
         )
 
-        # This is a simple way to ensure that recevier paths are correct
+        # This is a simple way to ensure that trace paths are correct.
         sim_file = simulation._file
         with open(sim_file, "r") as f:
             sim_data = json.load(f)
-        f_sim = self._result_path / sim_data["Outputs"]["receivers"]["path"]
+        trace_output = sim_data["Outputs"].get("traces") or sim_data["Outputs"].get(
+            "receivers"
+        )
+        f_sim = self._result_path / trace_output["path"]
 
         self.data_path = Path(data_path)
         if not self.data_path.exists():
@@ -291,7 +289,7 @@ class ImagingJob(SimulationJob):
     def _local_image_path(self):
         return self.save_path
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         images = []
         for key, value in self.images.items():
             tmp = value.split(":")
@@ -312,8 +310,8 @@ class ImagingJob(SimulationJob):
         imaging = {
             "data_path": self.data_path,
             "save_path": self.save_path,
-            "misfit": self.misfit.__dict__(),
-            "grid": self.grid.__dict__(),
+            "misfit": self.misfit.to_fs(ctx),
+            "grid": self.grid.to_fs(ctx),
             "keep_forward": self.keep_forward,
             "keep_adjoint": self.keep_adjoint,
             "keep_unstacked": self.keep_unstacked,
@@ -324,18 +322,22 @@ class ImagingJob(SimulationJob):
             **self.kwargs,
         }
         return {
-            **super().__dict__(),
+            **super().to_fs(),
             "Image": imaging,
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "ImagingJob":
+    def from_fs(
+        cls, data: Dict, base_path: Optional[Union[str, Path]] = None
+    ) -> "ImagingJob":
+        data = dict(data)
         image_data = data.pop("Image", data.pop("Imaging", None))
         if image_data is None:
             raise KeyError("ImagingJob data must include an 'Image' section")
         grid = image_data.pop("grid", None)
-        grid_obj = CartesianGrid.from_dict(grid) if grid is not None else None
+        grid_obj = CartesianGrid.from_fs(grid) if grid is not None else None
         resolution = list(grid_obj.n) if grid_obj is not None else None
+        misfit = Misfit.from_fs(image_data.pop("misfit"))
         images = image_data.pop("images", None) or []
         images = {
             image["name"]: (
@@ -362,25 +364,13 @@ class ImagingJob(SimulationJob):
             reassemble_adjoint=image_data.pop("reassemble_adjoint", None),
             **image_data,
         )
-        job.misfit = Misfit.from_dict(image_data["misfit"])
+        job.misfit = misfit
         return job
 
 
 def extract_frequencies_for_job(job: ImagingJob, td):
-    import warnings
-
     import h5py
     import xarray as xr
-
-    try:
-        import pyfftw
-
-        pyfftw.interfaces.cache.enable()
-        fft = pyfftw.interfaces.numpy_fft
-        pyfftw.config.NUM_THREADS = 4
-    except ImportError:
-        warnings.warn("pyfftw not found, using numpy for FFT (slow)")
-        import numpy.fft as fft
 
     # Make frequency domain data array
     shape = list(td.shape)
@@ -426,6 +416,6 @@ def extract_frequencies_for_job(job: ImagingJob, td):
 
     # Write hdf5 files
     for i, f in enumerate(job.f_list):
-        file = job.data_path / f"receivers_{i + 1}.h5"
+        file = job.data_path / f"traces_{i + 1}.h5"
         with h5py.File(file, "w") as f:
             f[group.name] = fd.data[i].astype(np.float32)

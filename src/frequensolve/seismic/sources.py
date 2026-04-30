@@ -2,7 +2,7 @@ import copy
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional
 
 from numpy import array as NPArray
 
@@ -13,26 +13,21 @@ from frequensolve.geometry.frame import (
     direction_to_fs,
 )
 from frequensolve.util.class_registry import class_registry, register_class
+from frequensolve.util.mixins import TypeTaggedMixin
 
 __all__ = ["SourceGroup", "Source", "RuptureSource", "PointSource", "CompoundSource"]
 
 
 @register_class
 @dataclass
-class Source(ABC):
+class Source(TypeTaggedMixin, ABC):
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "Source":
-        data = copy.deepcopy(data)
-        class_name = data.pop("_type")
-        if class_name in class_registry:
-            source_class = class_registry[class_name]
-            return source_class.from_dict(data)
-        else:
-            raise ValueError(f"Unknown source class: {class_name}")
+    def from_fs(cls, data: Dict) -> "Source":
+        return cls.dispatch_from_fs(data, class_registry)
 
     @abstractmethod
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         pass
 
 
@@ -54,11 +49,8 @@ class RuptureSource(Source):
     name: str = "rupture"
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "RuptureSource":
+    def from_fs(cls, data: Dict) -> "RuptureSource":
         return cls(**data)
-
-    def __dict__(self) -> Dict:
-        return self.to_fs()
 
     def to_fs(self, ctx=None) -> Dict:
         return {"_type": self.__class__.__name__, **asdict(self)}
@@ -68,15 +60,15 @@ class RuptureSource(Source):
 @dataclass
 class PointSource(Source):
     kind: Literal["scalar", "vector", "moment", "monopole", "dipole"]
-    frame: Literal["physical", "reference"] = "physical"
     coordinates: Any = field(default_factory=list)
     direction: Optional[Any] = None
     domain: Optional[int] = None
     name: str = "point"
 
     @classmethod
-    def from_dict(cls, data: Dict):
+    def from_fs(cls, data: Dict):
         data = copy.deepcopy(data)
+        data.pop("frame", None)
         if "coordinates" in data:
             data["coordinates"] = CoordinateValue.from_fs(data["coordinates"])
         if "direction" in data:
@@ -88,7 +80,6 @@ class PointSource(Source):
             "_type": self.__class__.__name__,
             "name": self.name,
             "kind": self.kind,
-            "frame": self.frame,
             "coordinates": coordinate_value_to_fs(self.coordinates),
             **(
                 {"direction": direction_to_fs(self.direction)}
@@ -98,24 +89,21 @@ class PointSource(Source):
             **({"domain": self.domain} if self.domain is not None else {}),
         }
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
 
 @register_class
 @dataclass
 class CompoundSource(Source):
     kind: Literal["scalar", "vector"]
-    frame: Literal["physical", "reference"] = "physical"
     coordinates: Any = field(default_factory=list)
     direction: Any = field(default_factory=list)
     domain: Optional[int] = None
     name: str = "compound"
 
     @classmethod
-    def from_dict(cls, data: Dict):
+    def from_fs(cls, data: Dict):
         data = copy.deepcopy(data)
         data.pop("n_points", None)
+        data.pop("frame", None)
         if "coordinates" in data:
             data["coordinates"] = CoordinateValue.from_fs(data["coordinates"])
         if "direction" in data:
@@ -127,7 +115,6 @@ class CompoundSource(Source):
             "_type": self.__class__.__name__,
             "name": self.name,
             "kind": self.kind,
-            "frame": self.frame,
             "n_points": len(self.coordinates),
             "coordinates": coordinate_value_to_fs(self.coordinates),
             **(
@@ -137,9 +124,6 @@ class CompoundSource(Source):
             ),
             **({"domain": self.domain} if self.domain is not None else {}),
         }
-
-    def __dict__(self) -> Dict:
-        return self.to_fs()
 
 
 @dataclass
@@ -155,21 +139,12 @@ class SourceGroup:
     _rel_path: Path = None
 
     @classmethod
-    def from_dict(cls, data: Dict):
-        source = Source.from_dict(copy.deepcopy(data.get("source", {})))
+    def from_fs(cls, data: Dict):
+        source = Source.from_fs(copy.deepcopy(data.get("source", {})))
         return cls(source=source)
 
     def to_fs(self, ctx=None) -> Dict:
-        return {
-            "source": (
-                self.source.to_fs(ctx)
-                if hasattr(self.source, "to_fs")
-                else self.source.__dict__()
-            )
-        }
-
-    def __dict__(self) -> Dict:
-        return self.to_fs()
+        return {"source": self.source.to_fs(ctx)}
 
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path

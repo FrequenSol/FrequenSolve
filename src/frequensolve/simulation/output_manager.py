@@ -1,13 +1,11 @@
 import copy
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Type, Union
 
 from frequensolve.geometry.grids import CartesianGrid
-from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.fields import canonical_fields
-from frequensolve.util.mixins import merge_extra
+from frequensolve.util.mixins import ExtraFieldsMixin, TypeTaggedMixin, merge_extra
 
 __all__ = [
     "Output",
@@ -18,39 +16,49 @@ __all__ = [
 ]
 
 
-@register_class
+def _relative_output_path(path: Union[str, Path], field: str = "path") -> str:
+    value = Path(path)
+    if value.is_absolute():
+        raise ValueError(f"{field} must be relative to the job result directory")
+    return str(value)
+
+
 @dataclass(kw_only=True)
-class Output(ABC):
+class Output(TypeTaggedMixin, ExtraFieldsMixin):
     """Base class for all outputs.
 
-    Note path will be relative to result_path, specified in the job."""
+    Paths are relative to the job result directory.
+    """
 
     name: str = ""
     path: Union[str, Path] = None
+    extra: Dict = field(default_factory=dict)
 
-    @abstractmethod
-    def __dict__(self) -> Dict:
-        pass
+    def to_fs(self, ctx=None) -> Dict:
+        payload = {
+            "_type": self.__class__.__name__,
+            "name": self.name,
+            "path": self.path,
+        }
+        return merge_extra(payload, self.extra, self.__class__.__name__)
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "Output":
-        data = copy.deepcopy(data)
-        class_name = data["_type"]
-        if class_name in class_registry:
-            out_class = class_registry[class_name]
-            return out_class.from_dict(data)
-        else:
-            raise ValueError(f"Unknown output class: {class_name}")
+    def from_fs(cls, data: Dict) -> "Output":
+        output_types: Dict[str, Type[Output]] = {
+            "TraceOutput": TraceOutput,
+            "ParaviewOutput": ParaviewOutput,
+            "WavefieldOutput": WavefieldOutput,
+        }
+        return cls.dispatch_from_fs(data, output_types)
 
 
-@register_class
 @dataclass(kw_only=True)
 class TraceOutput(Output):
-    path: Optional[Path] = None
+    path: Optional[Union[str, Path]] = None
 
     def __init__(self, path: Union[str, Path] = "traces", **kwargs):
-        self.path = path
-        self.extra = kwargs
+        self.path = _relative_output_path(path)
+        self._init_extra(None, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
         return merge_extra(
@@ -59,32 +67,13 @@ class TraceOutput(Output):
             self.__class__.__name__,
         )
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
     @classmethod
-    def from_dict(cls, data: Dict) -> "TraceOutput":
+    def from_fs(cls, data: Dict) -> "TraceOutput":
         data = copy.deepcopy(data)
         data.pop("_type", None)
         return cls(path=data.pop("path", "traces"), **data)
 
 
-@register_class
-@dataclass(kw_only=True)
-class ReceiverOutput(TraceOutput):
-    """Backward-compatible name for trace output configuration."""
-
-    def __init__(self, path: Union[str, Path] = "receivers", **kwargs):
-        super().__init__(path=path, **kwargs)
-
-    @classmethod
-    def from_dict(cls, data: Dict) -> "ReceiverOutput":
-        data = copy.deepcopy(data)
-        data.pop("_type", None)
-        return cls(path=data.pop("path", "receivers"), **data)
-
-
-@register_class
 @dataclass(kw_only=True)
 class ParaviewOutput(Output):
     """
@@ -119,23 +108,17 @@ class ParaviewOutput(Output):
 
         if sources is None:
             sources = [1]
+        if upscale < 1:
+            raise ValueError("ParaviewOutput upscale must be >= 1")
 
         self.name = name
-        self.path = path
+        self.path = _relative_output_path(path)
         self.fields = canonical_fields(fields) if fields is not None else None
-        self.properties = properties
-        self.sources = sources
-        self.upscale = upscale
-        self.show_pml = show_pml
-        self.extra = kwargs
-
-    @property
-    def kwargs(self) -> Dict:
-        return self.extra
-
-    @kwargs.setter
-    def kwargs(self, value: Dict) -> None:
-        self.extra = copy.deepcopy(dict(value))
+        self.properties = list(properties) if properties is not None else None
+        self.sources = list(sources)
+        self.upscale = int(upscale)
+        self.show_pml = bool(show_pml)
+        self._init_extra(None, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
         fields = canonical_fields(self.fields) if self.fields is not None else ["all"]
@@ -152,11 +135,8 @@ class ParaviewOutput(Output):
         }
         return merge_extra(payload, self.extra, "ParaviewOutput")
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
     @classmethod
-    def from_dict(cls, data: Dict) -> "ParaviewOutput":
+    def from_fs(cls, data: Dict) -> "ParaviewOutput":
         data = copy.deepcopy(data)
         data.pop("_type", None)
         if data.get("path") is not None:
@@ -164,7 +144,6 @@ class ParaviewOutput(Output):
         return cls(**data)
 
 
-@register_class
 @dataclass(kw_only=True)
 class WavefieldOutput(Output):
     """
@@ -185,10 +164,10 @@ class WavefieldOutput(Output):
         **kwargs,
     ):
         self.name = name
-        self.path = path
+        self.path = _relative_output_path(path)
         self.fields = canonical_fields(fields) if fields is not None else None
         self.grid = grid
-        self.extra = kwargs
+        self._init_extra(None, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
         fields = (
@@ -196,33 +175,26 @@ class WavefieldOutput(Output):
         )
         grid = self.grid if self.grid is not None else CartesianGrid(x0=[], x1=[], n=[])
 
-        path = self.path
-        if isinstance(path, Path) and getattr(self, "_proj_path", None) is not None:
-            path = path.relative_to(self._proj_path)
-
         payload = {
             "_type": self.__class__.__name__,
             "name": self.name,
-            "path": path,
+            "path": self.path,
             "fields": fields,
-            "grid": grid.to_fs(ctx) if hasattr(grid, "to_fs") else grid.__dict__(),
+            "grid": grid.to_fs(ctx),
         }
         return merge_extra(payload, self.extra, "WavefieldOutput")
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
     @classmethod
-    def from_dict(cls, dict: Dict) -> "WavefieldOutput":
-        dict = copy.deepcopy(dict)
-        dict.pop("_type", None)
-        grid = dict.pop("grid", None)
+    def from_fs(cls, data: Dict) -> "WavefieldOutput":
+        data = copy.deepcopy(data)
+        data.pop("_type", None)
+        grid = data.pop("grid", None)
         return cls(
-            name=dict.pop("name", "wavefield"),
-            path=dict.pop("path", "wavefields"),
-            fields=dict.pop("fields", None),
-            grid=CartesianGrid.from_dict(grid) if grid is not None else None,
-            **dict,
+            name=data.pop("name", "wavefield"),
+            path=data.pop("path", "wavefields"),
+            fields=data.pop("fields", None),
+            grid=CartesianGrid.from_fs(grid) if grid is not None else None,
+            **data,
         )
 
 
@@ -231,16 +203,13 @@ class OutputManager:
     """
     Manages FrequenSolve outputs.
 
-    Receiver output is enabled by default.
-
     Attributes:
-       receivers (TraceOutput):                  Backward-compatible trace output path
-       paraview (List[ParaviewOutput]):          List of paraview outputs
-       wavefields (List[WavefieldOutput]):       List of wavefield outputs
+       traces (Optional[TraceOutput]):           Trace output request. None disables traces.
+       paraview (List[ParaviewOutput]):          List of ParaView outputs.
+       wavefields (List[WavefieldOutput]):       List of wavefield outputs.
     """
 
-    write_receivers: bool = True
-    receivers: TraceOutput = field(default_factory=TraceOutput)
+    traces: Optional[TraceOutput] = field(default_factory=TraceOutput)
     paraview: List[ParaviewOutput] = field(default_factory=list)
     wavefields: List[WavefieldOutput] = field(default_factory=list)
     _proj_path: Optional[Path] = None
@@ -248,65 +217,52 @@ class OutputManager:
 
     def __iadd__(self, output: Output) -> "OutputManager":
         """Overrides += operator to add output"""
-        if isinstance(output, (TraceOutput, ReceiverOutput)):
-            self.receivers = output
-            self.write_receivers = True
+        if isinstance(output, TraceOutput):
+            self.traces = output
         elif isinstance(output, ParaviewOutput):
             self.paraview.append(output)
         elif isinstance(output, WavefieldOutput):
             self.wavefields.append(output)
+        else:
+            raise TypeError(f"Unsupported output type: {type(output).__name__}")
+        return self
+
+    def add(self, output: Output) -> "OutputManager":
+        self += output
+        return self
+
+    def disable_traces(self) -> "OutputManager":
+        self.traces = None
         return self
 
     def to_fs(self, ctx=None) -> Dict:
-        trace_payload = self.receivers.to_fs(ctx) if self.write_receivers else None
-        receiver_payload = copy.deepcopy(trace_payload) if trace_payload else None
-        if receiver_payload is not None:
-            receiver_payload["_type"] = "ReceiverOutput"
-        dict = {
-            **(
-                {"traces": trace_payload, "receivers": receiver_payload}
-                if trace_payload
-                else {}
-            ),
+        trace_payload = self.traces.to_fs(ctx) if self.traces is not None else None
+        payload = {
+            **({"traces": trace_payload} if trace_payload else {}),
             "ParaView": [pv_out.to_fs(ctx) for pv_out in self.paraview],
             "wavefields": [wf_out.to_fs(ctx) for wf_out in self.wavefields],
         }
-        return {k: v for k, v in dict.items() if v}
-
-    def __dict__(self) -> Dict:
-        return self.to_fs()
+        return {key: value for key, value in payload.items() if value}
 
     @classmethod
-    def from_dict(cls, dict: Dict) -> None:
-        dict = copy.deepcopy(dict)
-        traces = dict.get("traces")
-        receivers = dict.get("receivers")
+    def from_fs(cls, data: Dict) -> "OutputManager":
+        data = copy.deepcopy(data)
+        traces = data.get("traces")
+        # Load-only compatibility for pre-traces solver/API payloads.
+        receivers = data.get("receivers")
         paraview = [
-            ParaviewOutput.from_dict(pv_out) for pv_out in dict.get("ParaView", [])
+            ParaviewOutput.from_fs(pv_out) for pv_out in data.get("ParaView", [])
         ]
         wavefields = [
-            WavefieldOutput.from_dict(wf_out) for wf_out in dict.get("wavefields", [])
+            WavefieldOutput.from_fs(wf_out) for wf_out in data.get("wavefields", [])
         ]
-        receiver_output = (
-            TraceOutput.from_dict(traces)
+        trace_output = (
+            TraceOutput.from_fs(traces)
             if traces is not None
-            else (
-                ReceiverOutput.from_dict(receivers)
-                if receivers is not None
-                else TraceOutput()
-            )
+            else (TraceOutput.from_fs(receivers) if receivers is not None else None)
         )
         return cls(
-            write_receivers=traces is not None or receivers is not None,
-            receivers=receiver_output,
+            traces=trace_output,
             paraview=paraview,
             wavefields=wavefields,
         )
-
-    @property
-    def traces(self) -> TraceOutput:
-        return self.receivers
-
-    @traces.setter
-    def traces(self, value: TraceOutput) -> None:
-        self.receivers = value

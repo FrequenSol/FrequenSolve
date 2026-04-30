@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from frequensolve.orchestrator.sites.aws import AWSSite
 
 
+@pytest.mark.cloud
 @pytest.mark.interactive
 def test_awssite():
     """Test AWSSite with Cognito authentication."""

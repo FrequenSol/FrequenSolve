@@ -11,22 +11,11 @@ class CustomJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder for Simulation objects."""
 
     def default(self, obj):
-        import numpy as np
-        from numpy import ndarray
-        from xarray import DataArray
+        from frequensolve.util.mixins import fs_serialize
 
-        if isinstance(obj, (np.integer, np.floating, np.bool_)):
-            return obj.item()
-        if isinstance(obj, (np.complex64, np.complex128)):
-            return [obj.real.item(), obj.imag.item()]
-        if isinstance(obj, ndarray):
-            return obj.tolist()
-        if isinstance(obj, DataArray):
-            return obj.values.tolist()
-        if isinstance(obj, Path):
-            return str(obj)
-        if hasattr(obj, "to_fs"):
-            return obj.to_fs()
+        serialized = fs_serialize(obj)
+        if serialized is not obj:
+            return serialized
         return super().default(obj)
 
 
@@ -58,34 +47,3 @@ else:
 
         def __init__(self, *args, **kwargs):
             raise ImportError("toml is required to use CustomTOMLEncoder")
-
-
-# import yaml
-# class CustomYAMLEncoder(yaml.Dumper):
-#     def numpy_representer(dumper, data):
-#         """Convert numpy values to native Python types."""
-#         return dumper.represent_float(float(data))
-
-#     indent = kwargs.get("indent", 3)
-#     try:
-#         import numpy as np
-
-#         yaml.add_representer(np.float64, numpy_representer)
-#         yaml.add_representer(np.float32, numpy_representer)
-#         yaml.add_representer(
-#             np.int64, lambda dumper, data: dumper.represent_int(int(data))
-#         )
-#         yaml.add_representer(
-#             np.int32, lambda dumper, data: dumper.represent_int(int(data))
-#         )
-
-#         return yaml.dump(
-#             self.__dict__(),
-#             indent=indent,
-#             default_flow_style=False,
-#             sort_keys=False,
-#             **kwargs,
-#         )
-#     except Exception as e:
-#         print(f"Failed to convert to YAML: {e}")
-#         return self.__repr__()

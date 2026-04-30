@@ -2,12 +2,12 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Union
+from typing import Literal, Optional, Union
 
 from frequensolve.orchestrator.config.stampede3 import Stampede3Config
 from frequensolve.orchestrator.credentials import Credentials
 from frequensolve.orchestrator.pool import PoolInfo
-from frequensolve.orchestrator.sites.hpc import SlurmSite
+from frequensolve.orchestrator.sites.hpc import SlurmRunConfig, SlurmSite
 from frequensolve.orchestrator.ssh import SSHClientClass
 
 __all__ = ["TACCLoginCredentials", "Stampede3Site"]
@@ -56,9 +56,13 @@ class Stampede3Site(SlurmSite):
         rel_path: Union[str, Path],
         transfer_method: Literal["rsync", "sftp"] = "rsync",
         default_queue: str = "skx-dev",
+        run_config: Optional[SlurmRunConfig] = None,
+        verbose: bool = False,
     ):
         super().__init__(
             rel_path=rel_path,
             transfer_method=transfer_method,
             default_queue=default_queue,
+            run_config=run_config,
+            verbose=verbose,
         )

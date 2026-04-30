@@ -226,9 +226,13 @@ class PropertyMap(MutableMapping):
         self,
         values: Optional[Mapping[str, Any]] = None,
         grid: Optional[xr.DataArray] = None,
+        units: Optional[Any] = None,
+        system: Optional[str] = None,
     ):
         self._store: Dict[str, Property] = {}
         self.grid = grid
+        self.units = unit_expression(units) if units is not None else None
+        self.system = system
         if values:
             self.update(values)
 
@@ -236,9 +240,16 @@ class PropertyMap(MutableMapping):
         return self._store[canonical_property_name(key)]
 
     def __setitem__(self, key: str, value: Any) -> None:
-        self._store[canonical_property_name(key)] = Property.from_value(
-            value, grid=self.grid
+        prop = (
+            copy.deepcopy(value)
+            if isinstance(value, Property)
+            else Property.from_value(value, grid=self.grid)
         )
+        if self.units is not None and prop.units is None:
+            prop.units = self.units
+        if self.system is not None and prop.system is None:
+            prop.system = self.system
+        self._store[canonical_property_name(key)] = prop
 
     def __delitem__(self, key: str) -> None:
         del self._store[canonical_property_name(key)]
@@ -282,6 +293,10 @@ class PropertyMap(MutableMapping):
             payload[key] = prop.to_fs(ctx=ctx, file=file, dataset=dataset)
         return payload
 
+    def __repr__(self) -> str:
+        keys = ", ".join(self._store)
+        return f"PropertyMap({{{keys}}})"
+
 
 class Property:
     """A solver property specification.
@@ -319,7 +334,7 @@ class Property:
         self.format = format
         self.absolute = bool(absolute)
         self.extra = dict(kwargs)
-        self.file_path: Optional[Path] = None
+        self.file_path: Optional[Union[Path, str]] = None
         self.file_grid = grid
         self.darr: Optional[xr.DataArray] = None
         self.expression: Optional[PropertyExpression] = None
@@ -337,7 +352,12 @@ class Property:
             self.units = q["units"]
 
         if isinstance(data, Mapping):
-            other = self.from_value(data, grid=grid)
+            payload = dict(data)
+            if self.units is not None and "units" not in payload:
+                payload["units"] = self.units
+            if self.system is not None and "system" not in payload:
+                payload["system"] = self.system
+            other = self.from_value(payload, grid=grid)
             self.__dict__.update(other.__dict__)
             return
 
@@ -380,17 +400,19 @@ class Property:
             if read:
                 self.darr = Property.read(data.resolve(), grid=grid)
                 if self.scale != 1.0:
+                    self.darr = self.darr.copy(deep=True)
                     self.darr.values = self.darr.values * self.scale
             else:
                 self.darr = None
         elif isinstance(data, xr.DataArray):
-            self.darr = data
+            self.darr = data.copy(deep=True)
             if self.units is None and "units" in data.attrs:
                 self.units = data.attrs["units"]
         else:
             raise ValueError(f"Unknown property type: {type(data)}")
 
         if self.scale != 1.0 and self.darr is not None and self.file_path is None:
+            self.darr = self.darr.copy(deep=True)
             self.darr.values = self.darr.values * self.scale
 
     @classmethod
@@ -460,9 +482,10 @@ class Property:
                     **payload,
                 )
             if "value" in payload and "file" not in payload:
+                prop_grid = payload.pop("grid", grid)
                 return cls(
                     payload.pop("value"),
-                    grid=grid,
+                    grid=prop_grid,
                     units=payload.pop("units", None),
                     system=payload.pop("system", None),
                     **payload,
@@ -524,7 +547,7 @@ class Property:
         if isinstance(self.file_grid, CartesianGrid):
             return self.file_grid
         if isinstance(self.file_grid, Mapping):
-            return CartesianGrid.from_dict(dict(self.file_grid))
+            return CartesianGrid.from_fs(dict(self.file_grid))
         if isinstance(self.file_grid, xr.DataArray):
             return CartesianGrid.from_xarray(self.file_grid)
         if self.darr is None:
@@ -614,7 +637,7 @@ class Property:
                 payload["grid"] = (
                     self.grid.to_fs()
                     if hasattr(self.grid, "to_fs")
-                    else self.grid.__dict__()
+                    else self.grid.to_fs()
                 )
 
         if self.units is not None:
@@ -643,14 +666,12 @@ class Property:
             payload["scale"] = self.scale
         try:
             grid = self.grid
-            payload["grid"] = (
-                grid.to_fs() if hasattr(grid, "to_fs") else grid.__dict__()
-            )
+            payload["grid"] = grid.to_fs()
         except ValueError:
             pass
         return payload
 
-    def __iadd__(self, other: Union[float, xr.DataArray]) -> None:
+    def __iadd__(self, other: Union[float, xr.DataArray]) -> "Property":
         if self.is_remote or self.darr is None:
             raise ValueError(
                 f"Cannot perform addition on file property: {self.file_path}"
@@ -665,9 +686,12 @@ class Property:
                 self.darr = self.darr.interp(other.coords) + other
         else:
             raise ValueError(f"Unknown type for addition: {type(other)}")
+        return self
 
-    def __add__(self, other: Union[float, xr.DataArray]) -> None:
-        return self.__iadd__(other)
+    def __add__(self, other: Union[float, xr.DataArray]) -> "Property":
+        prop = copy.deepcopy(self)
+        prop += other
+        return prop
 
     def write(self, file: Path):
         if self.is_remote or self.darr is None:
@@ -676,6 +700,25 @@ class Property:
             file.parent.mkdir(parents=True)
         self.darr.values.astype(np.single).tofile(file)
         return file
+
+    def __repr__(self) -> str:
+        if self.expression is not None:
+            kind = "expression"
+        elif self.file_path is not None and self.darr is None:
+            kind = f"file={self.file_path!s}"
+        elif self.is_constant:
+            kind = f"value={self.get()!r}"
+        elif self.darr is not None:
+            kind = f"array shape={self.darr.shape}"
+        else:
+            kind = "empty"
+        suffix = []
+        if self.units is not None:
+            suffix.append(f"units={self.units!r}")
+        if self.system is not None:
+            suffix.append(f"system={self.system!r}")
+        detail = ", ".join([kind, *suffix])
+        return f"Property({detail})"
 
     @staticmethod
     def read(file: Path, grid: Optional[xr.DataArray] = None) -> xr.DataArray:

@@ -113,7 +113,7 @@ def test_natural_imaging_syntax_serializes_to_legacy_solver_contract(tmp_path):
         weights=[1.0],
         misfit_type="L2",
     )
-    payload = job.__dict__()
+    payload = job.to_fs()
 
     assert isinstance(job, ImagingJob)
     assert "Image" in payload
@@ -143,7 +143,7 @@ def test_legacy_imaging_images_syntax_still_serializes(tmp_path):
         images={"dVp": "FWI:Vp", "p": "pressure"},
         weights=[1.0],
     )
-    payload = job.__dict__()
+    payload = job.to_fs()
 
     assert payload["Image"]["images"] == [
         {"name": "dVp", "IC": "FWI", "property": "Vp"},

@@ -1,9 +1,10 @@
 """Internal HDF5 trace-store reader.
 
-``TraceStore`` backs the public ``TraceDataset`` facade. ``RecordDatabase`` is
-kept as a compatibility alias for older user code.
+``TraceStore`` backs the public ``TraceDataset`` facade.
 """
 
+import hashlib
+import json
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,21 +14,11 @@ import h5py
 import numpy as np
 from xarray import DataArray
 
-from frequensolve.seismic.trace_record import TraceRecord
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.sampling import UniformSweepSampling
+from frequensolve.util.fft import get_fft_backend
 
-__all__ = ["TraceStore", "RecordDatabase"]
-
-try:
-    import pyfftw
-
-    pyfftw.interfaces.cache.enable()
-    fft = pyfftw.interfaces.numpy_fft
-    pyfftw.config.NUM_THREADS = 4
-except ImportError:
-    warnings.warn("pyfftw not found, using numpy for FFT (slow)")
-    import numpy.fft as fft
+__all__: list[str] = []
 
 
 def process_string(raw):
@@ -81,37 +72,25 @@ class TraceStore:
     files: List[str]
     _upscale: int
     _consolidated: Optional[Path] = None
+    _cache_dir: Optional[Path] = None
+    _open_files: List[h5py.File]
 
     def __init__(
         self,
         metadata: Dict[str, Any],
         files: Optional[Iterable[Union[str, Path]]] = None,
-        *,
-        records: Optional[Iterable[Union[str, Path]]] = None,
         upscale: int = 1,
+        cache_dir: Optional[Union[str, Path]] = None,
     ):
-        record_files = _as_file_list(records) if records is not None else None
-        if files is None:
-            files = record_files
-        else:
-            files = _as_file_list(files)
-        if record_files is not None and files != record_files:
-            raise ValueError("files and legacy records arguments do not match")
         if files is None:
             raise TypeError("TraceStore requires trace files")
+        files = _as_file_list(files)
         self.metadata = metadata
         self.files = [str(file) for file in files]
         self.upscale = upscale
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else None
         self._consolidated = None
-
-    @property
-    def records(self) -> List[str]:
-        """Compatibility alias for ``files``."""
-        return self.files
-
-    @records.setter
-    def records(self, value: Iterable[Union[str, Path]]) -> None:
-        self.files = [str(file) for file in value]
+        self._open_files = []
 
     @classmethod
     def from_job(cls, job, upscale: int = 1):
@@ -146,8 +125,25 @@ class TraceStore:
         }
 
         db = cls(metadata=meta, files=traces["files"], upscale=upscale)
-        db.consolidate_h5()
+        db.consolidate()
         return db
+
+    def __enter__(self) -> "TraceStore":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
+        return False
+
+    def close(self) -> None:
+        """Close HDF5 file handles owned by this reader."""
+
+        for handle in self._open_files:
+            try:
+                handle.close()
+            except Exception:
+                pass
+        self._open_files.clear()
 
     @property
     def upscale(self) -> int:
@@ -205,7 +201,7 @@ class TraceStore:
                 return _decode_h5_strings(f[group].attrs["component"])
             return np.arange(1, f[group].shape[-2] + 1)
 
-    def shots(self, group) -> list[str]:
+    def sources(self, group) -> list[str]:
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             path = f"survey/receiver_groups/{group}/traces/source_id"
@@ -214,6 +210,11 @@ class TraceStore:
             if "shot" in f[group].attrs:
                 return f[group].attrs["shot"]
             return np.arange(1, f[group].shape[-1] + 1)
+
+    def shots(self, group) -> list[str]:
+        """Compatibility alias for ``sources``."""
+
+        return self.sources(group)
 
     def frequencies(self, group) -> list[str]:
         self._ensure_consolidated()
@@ -293,14 +294,18 @@ class TraceStore:
 
     def _ensure_consolidated(self) -> None:
         if self._consolidated is None:
-            self.consolidate_h5()
+            self.consolidate()
 
     @staticmethod
-    def _consolidated_path(first_record: Union[str, Path]) -> Path:
+    def _consolidated_path(
+        first_record: Union[str, Path],
+        cache_dir: Optional[Union[str, Path]] = None,
+    ) -> Path:
         first_record = Path(first_record)
         stem = first_record.stem
         prefix = stem.rsplit("_", 1)[0] if "_" in stem else stem
-        return first_record.with_name(f"{prefix}_consolidated.h5")
+        directory = Path(cache_dir) if cache_dir is not None else first_record.parent
+        return directory / f"{prefix}_vds.h5"
 
     @staticmethod
     def _read_trace_frequency(file: Path) -> float:
@@ -309,7 +314,39 @@ class TraceStore:
                 raise KeyError(f"'frequency' dataset not found in {file}")
             return float(h5["frequency"][()])
 
-    def consolidate_h5(self):
+    @staticmethod
+    def _source_signature(records: List[Path], freqs: List[float]) -> str:
+        payload = []
+        for record, freq in zip(records, freqs):
+            stat = record.stat()
+            payload.append(
+                {
+                    "path": str(record.resolve()),
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "frequency": float(freq),
+                }
+            )
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+    @staticmethod
+    def _cached_vds_is_current(path: Path, signature: str) -> bool:
+        if not path.exists():
+            return False
+        try:
+            with h5py.File(path, "r") as h5:
+                return h5.attrs.get("source_signature") == signature
+        except OSError:
+            return False
+
+    def consolidate(
+        self,
+        cache_dir: Optional[Union[str, Path]] = None,
+        force: bool = False,
+    ) -> Path:
         """
         Creates a virtual HDF5 dataset that combines datasets from each frequency file
         along a new dimension. This allows efficient access to the full dataset without
@@ -335,11 +372,22 @@ class TraceStore:
         if not valid_records:
             raise FileNotFoundError("No readable trace files were found")
 
-        new_file = self._consolidated_path(valid_records[0])
+        cache_dir = Path(cache_dir) if cache_dir is not None else self._cache_dir
+        if cache_dir is not None:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        new_file = self._consolidated_path(valid_records[0], cache_dir=cache_dir)
+        signature = self._source_signature(valid_records, freqs)
+        if not force and self._cached_vds_is_current(new_file, signature):
+            self._consolidated = Path(new_file)
+            return self._consolidated
+
+        self.close()
         if new_file.exists():
             new_file.unlink()
 
         with h5py.File(new_file, "w") as nf:
+            nf.attrs["schema"] = "frequensolve-trace-vds-1"
+            nf.attrs["source_signature"] = signature
             nf.create_dataset("frequency", data=np.asarray(freqs, dtype=float))
             string_dtype = h5py.string_dtype(encoding="utf-8")
             nf.create_dataset(
@@ -390,43 +438,75 @@ class TraceStore:
                     if len(coord) < 10000:
                         dset.attrs[dim] = coord
         self._consolidated = Path(new_file)
+        return self._consolidated
 
-    def read_h5(self, group: str) -> TraceRecord:
+    def consolidate_h5(self):
+        """Compatibility alias for ``consolidate``."""
+
+        return self.consolidate()
+
+    def read_h5(self, group: str) -> DataArray:
         import dask.array as da
 
         self._ensure_consolidated()
-        f = h5py.File(self._consolidated, "r")
-        dset = f[group]
-        dims = _decode_dim_list(dset.attrs["dims"])
+        h5 = h5py.File(self._consolidated, "r")
+        self._open_files.append(h5)
+        dset = h5[group]
+        raw_dims = _decode_dim_list(dset.attrs["dims"])
+        if raw_dims and raw_dims[-1] == "frequency":
+            raw_dims = raw_dims[:-1]
+        dims = ["frequency"] + list(raw_dims)
+        if len(dset.shape) == len(dims) + 1:
+            dims.append("complex")
+        dims = ["source" if dim == "shot" else dim for dim in dims]
         coords = {}
-        for dim in dims:
-            if dim in dset.attrs:
-                coords[dim] = dset.attrs[dim]
+        for axis, dim in enumerate(dims):
+            if dim == "complex":
+                coords[dim] = (
+                    ["real", "imag"]
+                    if dset.shape[axis] == 2
+                    else np.arange(1, dset.shape[axis] + 1)
+                )
+                continue
+            attr_dim = "shot" if dim == "source" and "shot" in dset.attrs else dim
+            survey_path = None
+            if dim == "receiver":
+                survey_path = f"survey/receiver_groups/{group}/traces/receiver_id"
+            elif dim == "source":
+                survey_path = f"survey/receiver_groups/{group}/traces/source_id"
+            elif dim == "component":
+                survey_path = f"survey/receiver_groups/{group}/traces/component_name"
+
+            if survey_path is not None and survey_path in h5:
+                values = _unique_preserve_order(_decode_h5_strings(h5[survey_path][()]))
+                coords[dim] = (
+                    values
+                    if len(values) == dset.shape[axis]
+                    else np.arange(1, dset.shape[axis] + 1)
+                )
+            elif attr_dim in dset.attrs:
+                coords[dim] = dset.attrs[attr_dim]
             else:
-                idx = np.where(np.array(dims[::-1]) == dim)[0][0]
-                coords[dim] = np.arange(1, dset.shape[idx] + 1)
-        tmp = ["complex"]
-        for dim in dims:
-            tmp.append(dim)
-        dims = tmp
-        coords["complex"] = ["real", "imag"]
+                coords[dim] = np.arange(1, dset.shape[axis] + 1)
+        if "complex" in dims and "complex" not in coords:
+            coords["complex"] = ["real", "imag"]
 
         chunks = (dset.shape[0], 1, 1, *dset.shape[3:])
         data = da.from_array(dset, chunks=chunks)
-        fd = TraceRecord(data, dims=dims[::-1], coords=coords)
+        fd = DataArray(data, dims=dims, coords=coords)
         return fd
 
     def read_FD(
         self,
         group: str,
         component: str,
-        shot: int,
+        source: int,
         wavelet: Optional[Wavelet] = None,
         **kwargs,
     ):
         if wavelet is None:
             dset = self.read_h5(group)
-            gather = dset.sel(component=component, shot=shot)
+            gather = dset.sel(component=component, source=source)
             fd = gather.sel(complex="real") + 1j * gather.sel(complex="imag")
             fd = fd.fillna(0)
             return fd
@@ -438,7 +518,7 @@ class TraceStore:
             )
             wavelet.times = sampling.T_list
             dset = self.read_h5(group)
-            gather = dset.sel(component=component, shot=shot)
+            gather = dset.sel(component=component, source=source)
 
             freqs = wavelet.frequencies
             spectrum = DataArray(
@@ -471,22 +551,23 @@ class TraceStore:
         self,
         group: str,
         component: str,
-        shot: int,
+        source: int,
         wavelet: Wavelet,
         upscale: int = 1,
         T_max: Optional[float] = None,
         **kwargs,
-    ) -> TraceRecord:
+    ) -> DataArray:
         sampling = UniformSweepSampling(
             f_min=0.0,
             f_max=self.metadata["f_max"],
             df=self.metadata["df"],
             upscale=upscale,
         )
-        fd = self.read_FD(group, component, shot, wavelet, **kwargs)
+        fd = self.read_FD(group, component, source, wavelet, **kwargs)
         wavelet.times = sampling.T_list
 
         fd = fd.interp(frequency=sampling.F_list, kwargs={"fill_value": 0})
+        fft = get_fft_backend()
         td = fft.irfft(fd.data, axis=0)
         dims = ["time" if d == "frequency" else d for d in fd.dims]
         coords = {}
@@ -496,11 +577,11 @@ class TraceStore:
             else:
                 coords[d] = sampling.T_list[:-1] - wavelet.center
 
-        td = TraceRecord(data=td, dims=dims, coords=coords)
+        td = DataArray(data=td, dims=dims, coords=coords)
         if T_max is not None:
             td = td.sel(time=slice(None, T_max))
 
-        td.attrs["source_group"] = shot
+        td.attrs["source_group"] = source
         td.attrs["receiver_group"] = group
         # NOTE: this is a temporary hack since receivers read from project path
         td.attrs["project_path"] = str(self.metadata["project"])
@@ -549,28 +630,29 @@ class TraceStore:
         self,
         group: str,
         component: str,
-        shot: int,
+        source: int,
         wavelet: Wavelet,
         window: DataArray,
         N_window: int,
         upscale: int = 1,
         T_max: Optional[float] = None,
         **kwargs,
-    ) -> TraceRecord:
+    ) -> DataArray:
         sampling = UniformSweepSampling(
             f_min=0.0,
             f_max=self.metadata["f_max"],
             df=self.metadata["df"],
             upscale=upscale,
         )
-        fd = self.read_FD(group, component, shot, wavelet, **kwargs)
+        fd = self.read_FD(group, component, source, wavelet, **kwargs)
         wavelet.times = sampling.T_list
 
         fd = fd.interp(frequency=sampling.F_list, kwargs={"fill_value": 0})
 
         N = len(window.data)
 
-        W = np.fft.fft(window.data) / N
+        fft = get_fft_backend()
+        W = fft.fft(window.data) / N
         offs = np.arange(-N_window, N_window + 1)
         offs2 = np.arange(-2 * N_window, 2 * N_window + 1)
         idxs = offs % N
@@ -595,11 +677,11 @@ class TraceStore:
             else:
                 coords[d] = sampling.T_list[:-1] - wavelet.center
 
-        td = TraceRecord(data=td, dims=dims, coords=coords)
+        td = DataArray(data=td, dims=dims, coords=coords)
         if T_max is not None:
             td = td.sel(time=slice(None, T_max))
 
-        td.attrs["source_group"] = shot
+        td.attrs["source_group"] = source
         td.attrs["receiver_group"] = group
         # NOTE: this is a temporary hack since receivers read from project path
         td.attrs["project_path"] = str(self.metadata["project"])
@@ -614,6 +696,3 @@ class TraceStore:
                 td.coords[d].attrs["units"] = "Hz"
                 td.coords[d].attrs["description"] = "Frequency"
         return td
-
-
-RecordDatabase = TraceStore

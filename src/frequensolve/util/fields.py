@@ -4,11 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable, List
 
-FIELD_ALIASES = {
-    # Elasticity has always solved velocity; older Python APIs called it
-    # displacement. Keep accepting the old name but never emit it.
-    "displacement": "velocity",
-}
+FIELD_ALIASES = {}
 
 FIELD_PASSTHROUGH = {"all", "primary", "secondary"}
 

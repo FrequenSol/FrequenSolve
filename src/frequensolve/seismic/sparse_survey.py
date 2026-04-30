@@ -15,7 +15,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import h5py
 import numpy as np
 
-from frequensolve.util.mixins import ExportContext, merge_extra
+from frequensolve.units import value_and_units_to_fs
+from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
 
 __all__ = [
     "ReceiverSampling",
@@ -64,7 +65,7 @@ def _as_trace(value: Union["SparseTrace", Mapping[str, Any]]) -> "SparseTrace":
     if isinstance(value, SparseTrace):
         return value
     if isinstance(value, Mapping):
-        return SparseTrace.from_dict(value)
+        return SparseTrace.from_fs(value)
     raise TypeError(f"Cannot convert {type(value)} to SparseTrace")
 
 
@@ -72,7 +73,7 @@ def _as_eval_sample(value: Union["EvalSample", Mapping[str, Any]]) -> "EvalSampl
     if isinstance(value, EvalSample):
         return value
     if isinstance(value, Mapping):
-        return EvalSample.from_dict(value)
+        return EvalSample.from_fs(value)
     raise TypeError(f"Cannot convert {type(value)} to EvalSample")
 
 
@@ -80,12 +81,12 @@ def _as_trace_sample(value: Union["TraceSample", Mapping[str, Any]]) -> "TraceSa
     if isinstance(value, TraceSample):
         return value
     if isinstance(value, Mapping):
-        return TraceSample.from_dict(value)
+        return TraceSample.from_fs(value)
     raise TypeError(f"Cannot convert {type(value)} to TraceSample")
 
 
 @dataclass
-class ReceiverSampling:
+class ReceiverSampling(ExtraFieldsMixin):
     """Receiver-group sampling block.
 
     Dense receiver groups omit this object. Sparse receiver groups usually use
@@ -114,13 +115,13 @@ class ReceiverSampling:
         if isinstance(value, str):
             return cls(kind="Sparse", survey=value)
         if isinstance(value, Mapping):
-            return cls.from_dict(value)
+            return cls.from_fs(value)
         if hasattr(value, "name"):
             return cls(kind=getattr(value, "kind", "Sparse"), survey=value.name)
         raise TypeError(f"Cannot convert {type(value)} to ReceiverSampling")
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ReceiverSampling":
+    def from_fs(cls, data: Mapping[str, Any]) -> "ReceiverSampling":
         payload = copy.deepcopy(dict(data))
         kind = payload.pop("_type", payload.pop("kind", "Sparse"))
         survey = payload.pop("survey", None)
@@ -132,12 +133,9 @@ class ReceiverSampling:
             payload["survey"] = self.survey
         return merge_extra(payload, self.extra, "ReceiverSampling")
 
-    def __dict__(self) -> Dict[str, Any]:
-        return self.to_fs()
-
 
 @dataclass(init=False)
-class SparseTrace:
+class SparseTrace(ExtraFieldsMixin):
     """One output trace row in a Sauce sparse receiver layout.
 
     Parameters use 1-based ids to match the solver. ``source`` and ``receiver``
@@ -225,11 +223,10 @@ class SparseTrace:
         self.source_name = source_name
         self.receiver_name = receiver_name
         self.component_name = component_name
-        self.extra = copy.deepcopy(dict(extra or {}))
-        self.extra.update(copy.deepcopy(kwargs))
+        self._init_extra(extra, **kwargs)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SparseTrace":
+    def from_fs(cls, data: Mapping[str, Any]) -> "SparseTrace":
         payload = copy.deepcopy(dict(data))
         if "recv_pos_id" in payload and "receiver_position_id" not in payload:
             payload["receiver_position_id"] = payload.pop("recv_pos_id")
@@ -281,12 +278,9 @@ class SparseTrace:
             payload["component_name"] = self.component_name
         return merge_extra(payload, self.extra, "SparseTrace")
 
-    def __dict__(self) -> Dict[str, Any]:
-        return self.to_fs(self.trace_id or 1)
-
 
 @dataclass(init=False)
-class EvalSample:
+class EvalSample(ExtraFieldsMixin):
     """Optional sparse sample row used for weighted/fiber-style traces."""
 
     sample_id: Optional[int]
@@ -322,11 +316,10 @@ class EvalSample:
         )
         self.x = None if x is None else list(x)
         self.direction = None if direction is None else list(direction)
-        self.extra = copy.deepcopy(dict(extra or {}))
-        self.extra.update(copy.deepcopy(kwargs))
+        self._init_extra(extra, **kwargs)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "EvalSample":
+    def from_fs(cls, data: Mapping[str, Any]) -> "EvalSample":
         payload = copy.deepcopy(dict(data))
         if "recveiver_position_id" in payload and "receiver_position_id" not in payload:
             payload["receiver_position_id"] = payload.pop("recveiver_position_id")
@@ -351,12 +344,9 @@ class EvalSample:
             payload["direction"] = list(self.direction)
         return merge_extra(payload, self.extra, "EvalSample")
 
-    def __dict__(self) -> Dict[str, Any]:
-        return self.to_fs(self.sample_id or 1)
-
 
 @dataclass(init=False)
-class TraceSample:
+class TraceSample(ExtraFieldsMixin):
     """Optional sparse trace/sample weight row."""
 
     trace_row: int
@@ -389,11 +379,10 @@ class TraceSample:
         self.sample_id = int(sample_id)
         self.component = component
         self.weight = float(weight)
-        self.extra = copy.deepcopy(dict(extra or {}))
-        self.extra.update(copy.deepcopy(kwargs))
+        self._init_extra(extra, **kwargs)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "TraceSample":
+    def from_fs(cls, data: Mapping[str, Any]) -> "TraceSample":
         return cls(**copy.deepcopy(dict(data)))
 
     def to_fs(
@@ -407,12 +396,9 @@ class TraceSample:
         }
         return merge_extra(payload, self.extra, "TraceSample")
 
-    def __dict__(self) -> Dict[str, Any]:
-        return self.to_fs()
-
 
 @dataclass(init=False)
-class SparseSurvey:
+class SparseSurvey(ExtraFieldsMixin):
     """Named Sauce sparse survey layout.
 
     The default form exports inline JSON accepted by Sauce's ``Sparse`` layout
@@ -429,6 +415,7 @@ class SparseSurvey:
     source_file: Optional[Union[str, Path]]
     receiver_file: Optional[Union[str, Path]]
     relation_file: Optional[Union[str, Path]]
+    offset_domain: Optional[Mapping[str, Any]]
     extra: Dict[str, Any]
     _proj_path: Optional[Path]
     _rel_path: Optional[Path]
@@ -445,12 +432,15 @@ class SparseSurvey:
         source_file: Optional[Union[str, Path]] = None,
         receiver_file: Optional[Union[str, Path]] = None,
         relation_file: Optional[Union[str, Path]] = None,
+        offset_domain: Optional[Mapping[str, Any]] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         if kind is None:
             if layout_file is not None:
                 kind = "HDF5TraceStore"
+            elif offset_domain is not None:
+                kind = "OffsetDomain"
             elif (
                 source_file is not None
                 or receiver_file is not None
@@ -470,13 +460,13 @@ class SparseSurvey:
         self.source_file = source_file
         self.receiver_file = receiver_file
         self.relation_file = relation_file
-        self.extra = copy.deepcopy(dict(extra or {}))
-        self.extra.update(copy.deepcopy(kwargs))
+        self.offset_domain = copy.deepcopy(dict(offset_domain or {})) or None
+        self._init_extra(extra, **kwargs)
         self._proj_path = None
         self._rel_path = None
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SparseSurvey":
+    def from_fs(cls, data: Mapping[str, Any]) -> "SparseSurvey":
         payload = copy.deepcopy(dict(data))
         kind = payload.pop("_type", payload.pop("kind", "Sparse"))
         return cls(kind=kind, **payload)
@@ -511,6 +501,36 @@ class SparseSurvey:
             source_file=source_file,
             receiver_file=receiver_file,
             relation_file=relation_file,
+            **kwargs,
+        )
+
+    @classmethod
+    def offset_domain(
+        cls,
+        name: str,
+        *,
+        min: Optional[float] = None,
+        max: Optional[float] = None,
+        metric: str = "horizontal",
+        axis: Optional[Sequence[float]] = None,
+        absolute: bool = True,
+        kind: str = "OffsetDomain",
+        **kwargs: Any,
+    ) -> "SparseSurvey":
+        offset_domain: Dict[str, Any] = {
+            "metric": metric,
+            "absolute": bool(absolute),
+        }
+        if min is not None:
+            offset_domain["min"] = value_and_units_to_fs(min)
+        if max is not None:
+            offset_domain["max"] = value_and_units_to_fs(max)
+        if axis is not None:
+            offset_domain["axis"] = list(axis)
+        return cls(
+            name=name,
+            kind=kind,
+            offset_domain=offset_domain,
             **kwargs,
         )
 
@@ -614,6 +634,8 @@ class SparseSurvey:
             payload["receiver_file"] = _path_to_fs(self.receiver_file, ctx)
         if self.relation_file is not None:
             payload["relation_file"] = _path_to_fs(self.relation_file, ctx)
+        if self.offset_domain is not None:
+            payload["offset_domain"] = copy.deepcopy(dict(self.offset_domain))
 
         if kind == "sparse" or self.traces:
             payload["traces"] = [
@@ -849,6 +871,3 @@ class SparseSurvey:
     def _set_path(self, proj_path: Path, rel_path: Path) -> None:
         self._proj_path = proj_path
         self._rel_path = rel_path
-
-    def __dict__(self) -> Dict[str, Any]:
-        return self.to_fs()

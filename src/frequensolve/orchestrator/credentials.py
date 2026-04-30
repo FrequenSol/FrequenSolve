@@ -1,6 +1,6 @@
 import getpass
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import cached_property
 
 from dotenv import load_dotenv
@@ -62,7 +62,7 @@ class Credentials:
             print(
                 f"Avoid providing this each time by adding the {self.ssh_key_env} to FrequenSolve/.env"
             )
-            passphrase = getpass.getpass(f"SSH key passphrase: ")
+            passphrase = getpass.getpass("SSH key passphrase: ")
         return passphrase
 
     @property

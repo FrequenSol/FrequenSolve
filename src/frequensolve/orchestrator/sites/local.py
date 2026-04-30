@@ -1,28 +1,27 @@
-# Set up logging (send Dask logging to files)
-
 from __future__ import annotations
 
-import atexit
-import logging
 import os
+import shutil
 import signal
 import subprocess
+import time
 import warnings
-import weakref
 from dataclasses import dataclass, field
-from logging import ERROR, INFO, FileHandler, Formatter, getLogger
+from logging import ERROR, INFO
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Union
 
 from dask import config as dask_config
-from dask.distributed import Client, Future, LocalCluster, get_task_stream, wait
+from dask.distributed import Client, Future, LocalCluster, wait
 from dotenv import load_dotenv
 from numpy.typing import ArrayLike
 
 from frequensolve.orchestrator.config.local import LocalSiteConfig
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
-    SiteStatus,
+    JobStatus,
+    RunHandle,
+    RunResult,
     _wait_for_path,
 )
 from frequensolve.seismic.traces import TraceDataset
@@ -30,21 +29,8 @@ from frequensolve.simulation.imaging import ImageDatabase, ImagingJob
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
 
-logging.basicConfig(level=ERROR)
-
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/local.log")
 logger.setLevel(INFO)
-
-for logger_name in ["distributed", "bokeh", "tornado"]:
-    log = getLogger(logger_name)
-    log.setLevel(INFO)
-    log.handlers = []
-    handler = FileHandler("/tmp/log/frequensolve/local.log")
-    handler.setFormatter(
-        Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    )
-    log.addHandler(handler)
-    log.propagate = False
 
 __all__ = ["LocalSite"]
 
@@ -74,7 +60,9 @@ def run_task(
         Dict containing task results
     """
     _wait_for_path(job_file)
-    threads_per_rank = n_threads // n_ranks
+    if n_ranks < 1:
+        raise ValueError("n_ranks must be at least 1")
+    threads_per_rank = max(1, n_threads // n_ranks)
     if n_ranks > 1:
         args = [
             "mpirun",
@@ -103,10 +91,10 @@ def run_task(
         stdout_file = os.path.join(stdout_dir, f"task_{task_id+1}.log")
     else:
         stdout_file = None
+    started = time.perf_counter()
     try:
-        with (
-            open(stdout_file, "w") if stdout_file else open(os.devnull, "w") as stdout,
-        ):
+        stdout_path = stdout_file if stdout_file else os.devnull
+        with open(stdout_path, "w") as stdout:
             proc = subprocess.Popen(
                 args, stdout=stdout, stderr=stdout, env=env, text=True
             )
@@ -117,6 +105,8 @@ def run_task(
         return {
             "task_id": task_id,
             "status": "success",
+            "returncode": return_code,
+            "duration_seconds": time.perf_counter() - started,
             "stdout": (
                 os.path.join(stdout_dir, f"task_{task_id+1}.log")
                 if stdout_dir
@@ -128,6 +118,7 @@ def run_task(
             "task_id": task_id,
             "status": "error",
             "error": str(e),
+            "duration_seconds": time.perf_counter() - started,
             "stdout": (
                 os.path.join(stdout_dir, f"task_{task_id+1}.log")
                 if stdout_dir
@@ -140,94 +131,219 @@ def run_task(
 class LocalSite(BaseSite):
     """Site for local execution."""
 
-    status: SiteStatus = field(default_factory=SiteStatus)
     config: LocalSiteConfig = field(init=False)
     executable: str = field(init=False)
     env: dict = field(default_factory=dict)
     n_workers: Optional[int] = None
     threads_per_worker: Optional[int] = None
     memory_per_worker: Optional[int] = None
+    shutdown_on_completion: bool = True
 
     _dask_client: Optional[Client] = field(default=None, init=False)
     _dask_cluster: Optional[LocalCluster] = field(default=None, init=False)
     _futures: List["Future"] = field(default_factory=list, init=False)
-    _worker_status: Dict[str, str] = field(default_factory=dict, init=False)
-    _status_display: Optional[object] = field(default=None, init=False)
-    _task_stream: Optional[object] = field(default=None, init=False)
-    _closed: bool = field(default=False, init=False)
+    _dashboard_port: Optional[str] = field(default=None, init=False)
+    _closed: bool = field(default=True, init=False)
 
     # ----------------- lifecycle -----------------
 
     def __post_init__(self):
-        self.status = SiteStatus(status="running")
         self.config = LocalSiteConfig()
         self.executable = self._get_solver_path()
         self.env = os.environ.copy()
         self.env["FS_SOLVER_PATH"] = os.getenv("FS_SOLVER_PATH")
-        atexit.register(self.close)
-        weakref.finalize(self, LocalSite._finalize, weakref.ref(self))
 
-        # Handle SIGINT/SIGTERM to trigger close()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                signal.signal(sig, self._signal_handler)
-            except Exception:
-                pass
-
-    def submit(self, job: SimulationJob, **kwargs) -> List[dict]:
-        """Submit job and block until completion with progress tracking.
+    def submit(self, job: SimulationJob, **kwargs) -> RunHandle:
+        """Submit job and return an awaitable run handle.
 
         Args:
             job: The simulation job to run
             **kwargs: Additional arguments for task configuration
 
         Returns:
-            List of results from completed tasks
+            RunHandle for the submitted tasks
         """
-        futures = self.submit_async(job, **kwargs)
-        if not futures:
-            return []
-
-        if self._is_notebook:
-            from tqdm.notebook import tqdm
-        else:
-            from tqdm import tqdm
-
-        pbar = tqdm(
-            total=len(futures),
-            desc=f"Running: {job.name}",
-            bar_format="{desc} {n_fmt}/{total_fmt} |{bar}| Elapsed time: {elapsed}s",
-            colour="#4ec9b0",
+        force = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
+        shutdown_on_completion = bool(
+            kwargs.pop("shutdown_on_completion", self.shutdown_on_completion)
         )
-
-        def update_progress(future):
-            pbar.update(1)
-
-        for future in futures:
-            future.add_done_callback(update_progress)
-
-        results = wait(futures)
-        pbar.close()
-        for future in futures:
-            future.result()
-        job.write_run_state(status="completed")
-
-        if isinstance(job, ImagingJob):
-            smooth_future = self._dask_client.submit(
-                run_task,
-                job._file,
-                -2,
-                self.executable,
-                self.env,
-                n_ranks=1,
-                n_threads=self.threads_per_worker,
-                resources={"CPU": self.threads_per_worker},
+        self.prepare_job(job)
+        if not force and job.is_run_current():
+            logger.info(
+                "Skipping job %s; fingerprint matches and expected trace outputs exist.",
+                job.name,
             )
-            smooth_future.result()
-        return results
+            job.write_run_state(status="skipped")
+            return RunHandle.skipped(self, job)
 
-    def submit_async(self, job: SimulationJob, **kwargs) -> List[Future]:
-        """Submit job asynchronously and return Dask futures.
+        try:
+            futures = self._submit_local_tasks(job, **kwargs)
+        except Exception:
+            if shutdown_on_completion:
+                self.close(wait=False, retire=False)
+            raise
+        handle = RunHandle(
+            site=self,
+            job=job,
+            id=f"local:{job.name}",
+            mode="local",
+            poll_interval=0.5,
+            _status_fn=self._poll_local_run,
+            _wait_fn=self._wait_local_run,
+            _cancel_fn=self._cancel_local_run,
+        )
+        handle.backend["futures"] = futures
+        handle.backend["shutdown_on_completion"] = shutdown_on_completion
+        return handle
+
+    def _poll_local_run(self, run: RunHandle) -> JobStatus:
+        futures = run.backend.get("futures", [])
+        if not futures:
+            return JobStatus(state="skipped", return_code=0, job_id=run.id)
+        statuses = [getattr(future, "status", "unknown") for future in futures]
+        if any(status == "error" for status in statuses):
+            return JobStatus(
+                state="failed", return_code=1, job_id=run.id, raw={"statuses": statuses}
+            )
+        if all(status == "finished" for status in statuses):
+            return JobStatus(
+                state="completed",
+                return_code=0,
+                job_id=run.id,
+                raw={"statuses": statuses},
+            )
+        return JobStatus(state="running", job_id=run.id, raw={"statuses": statuses})
+
+    def _wait_local_run(
+        self,
+        run: RunHandle,
+        timeout: Optional[float] = None,
+        poll_interval: Optional[float] = None,
+    ) -> RunResult:
+        futures = run.backend.get("futures", [])
+        if not futures:
+            status = JobStatus(state="skipped", return_code=0, job_id=run.id)
+            return run._make_result(status)
+
+        pbar = None
+        smooth_future = None
+        all_futures = list(futures)
+
+        try:
+            if self._is_notebook:
+                from tqdm.notebook import tqdm
+            else:
+                from tqdm import tqdm
+
+            pbar = tqdm(
+                total=len(futures),
+                desc=f"Running: {run.job.name}",
+                bar_format=(
+                    "{desc} {n_fmt}/{total_fmt} |{bar}| Elapsed time: {elapsed}s"
+                ),
+                colour="#4ec9b0",
+            )
+
+            def update_progress(future):
+                pbar.update(1)
+
+            for future in futures:
+                future.add_done_callback(update_progress)
+
+            wait_result = wait(futures, timeout=timeout)
+            not_done = list(getattr(wait_result, "not_done", []))
+            if not_done:
+                self._cancel_futures(not_done)
+                status = JobStatus(
+                    state="timeout",
+                    return_code=1,
+                    job_id=run.id,
+                    message=f"Timed out waiting for local run after {timeout} seconds",
+                    raw={"unfinished": len(not_done)},
+                )
+                run.job.write_run_state(status="timeout")
+                return run._make_result(status)
+
+            task_results = [future.result() for future in futures]
+            task_errors = [
+                result for result in task_results if result.get("status") != "success"
+            ]
+            if task_errors:
+                status = JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message=f"{len(task_errors)} local tasks failed",
+                    raw={"tasks": task_results},
+                )
+                run.job.write_run_state(
+                    status="failed", tasks=task_results, errors=task_errors
+                )
+                return run._make_result(status)
+
+            if isinstance(run.job, ImagingJob):
+                smooth_future = self._dask_client.submit(
+                    run_task,
+                    run.job._file,
+                    -2,
+                    self.executable,
+                    self.env,
+                    n_ranks=1,
+                    n_threads=self.threads_per_worker,
+                    resources={"CPU": self.threads_per_worker},
+                )
+                all_futures.append(smooth_future)
+                smooth_result = smooth_future.result()
+                if smooth_result.get("status") != "success":
+                    status = JobStatus(
+                        state="failed",
+                        return_code=1,
+                        job_id=run.id,
+                        message="Image smoothing task failed",
+                        raw={"smooth": smooth_result, "tasks": task_results},
+                    )
+                    run.job.write_run_state(
+                        status="failed", tasks=task_results, smooth=smooth_result
+                    )
+                    return run._make_result(status)
+
+            run.job.write_run_state(status="completed", tasks=task_results)
+            status = JobStatus(
+                state="completed",
+                return_code=0,
+                job_id=run.id,
+                raw={"tasks": task_results},
+            )
+            return run._make_result(status)
+        except Exception as exc:
+            self._cancel_futures(all_futures)
+            try:
+                run.job.write_run_state(status="failed", error=str(exc))
+            except Exception:
+                logger.debug("Could not write failed run state", exc_info=True)
+            return run._make_result(
+                JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message=str(exc),
+                )
+            )
+        finally:
+            if pbar is not None:
+                pbar.close()
+            self._release_futures(all_futures)
+            if run.backend.get("shutdown_on_completion", self.shutdown_on_completion):
+                self.close(wait=True, retire=True)
+
+    def _cancel_local_run(self, run: RunHandle) -> None:
+        self._cancel_futures(run.backend.get("futures", []))
+        self._release_futures(run.backend.get("futures", []))
+        if run.backend.get("shutdown_on_completion", self.shutdown_on_completion):
+            self.close(wait=False, retire=False)
+
+    def _submit_local_tasks(self, job: SimulationJob, **kwargs) -> List[Future]:
+        """Submit job tasks to the local Dask executor.
 
         Args:
             job: The simulation job to run
@@ -240,14 +356,6 @@ class LocalSite(BaseSite):
             raise RuntimeError("Solver executable not found, cannot submit job")
 
         job_file = job.save()
-        force = kwargs.get("force", False) or kwargs.get("rerun", False)
-        if not force and job.is_run_current():
-            logger.info(
-                "Skipping job %s; fingerprint matches and expected trace outputs exist.",
-                job.name,
-            )
-            job.write_run_state(status="skipped")
-            return []
 
         if self._dask_client is None:
             if self.n_workers is None:
@@ -257,6 +365,8 @@ class LocalSite(BaseSite):
                 while n_workers > job.n_tasks and n_workers > 1:
                     n_workers = n_workers // 2
             self._initialize_dask(max(1, n_workers))
+        else:
+            self._prune_futures()
 
         n_ranks = kwargs.get("procs_per_job", 1)
 
@@ -279,9 +389,12 @@ class LocalSite(BaseSite):
             n_threads=1,
             resources={"CPU": 1},
         )
-        future.result()
-
-        # TODO: Verify success of mesh and size before submitting other tasks
+        try:
+            mesh_result = future.result()
+            if mesh_result.get("status") != "success":
+                raise RuntimeError(f"Mesh task failed: {mesh_result.get('error')}")
+        finally:
+            self._release_futures([future])
 
         # Loop tasks in reverse order for improved load balancing
         for i in range(job.n_tasks - 1, -1, -1):
@@ -301,23 +414,14 @@ class LocalSite(BaseSite):
                     pure=True,
                     resources={"CPU": self.threads_per_worker},
                 )
-
-                # # Set up callback to update status display periodically
-                # def make_callback():
-                #     def callback(fut):
-                #         self._print_worker_status()
-                #     return callback
-
-                # future.add_done_callback(make_callback())
                 futures.append(future)
             except Exception as e:
-                logger.error(f"Failed to submit task {i}: {str(e)}")
+                logger.error("Failed to submit task %s: %s", i, str(e))
                 raise
 
         self._futures.extend(futures)
         return futures
 
-    # TODO: use path (will need changes elsewhere to support)
     def fetch_traces(
         self,
         job: Union[SimulationJob, List[SimulationJob]],
@@ -366,33 +470,21 @@ class LocalSite(BaseSite):
     def fetch_paraview(
         self, job: SimulationJob, path: Optional[Union[str, Path]] = None
     ):
-        """Dummy method for consistency."""
-        for name, pv_path in job.paraview_outputs.items():
-            print(f"Fetching ParaView output '{name}' from {pv_path}")
-        pass
+        """Return local ParaView output paths for a job."""
+        return job.paraview_outputs
 
     @property
     def provisioned(self) -> bool:
-        """Dummy method for consistency."""
+        """Local execution is always immediately available."""
         return True
 
     def sync(self, project):
-        """Dummy method for consistency."""
-        pass
+        """Local execution does not require explicit synchronization."""
+        return project
 
     def _sync_project(self, project):
-        """Dummy method for consistency."""
-        pass
-
-    def connect_to_existing_job(self):
-        """Dummy method for consistency."""
-        pass
-
-    def wait_completion(self, jobs: List[SimulationJob]):
-        """Wait for all jobs to complete."""
-        # TODO: Wait specific jobs
-        # return wait(self._dask_client.futures())
-        pass
+        """Local execution does not require explicit synchronization."""
+        return project
 
     def get(
         self,
@@ -400,12 +492,25 @@ class LocalSite(BaseSite):
         local_path: Union[str, Path],
         overwrite: bool = False,
     ):
-        """Download a file or directory from the site."""
-        pass
+        """Copy a local file or directory."""
+        remote_path = Path(remote_path)
+        local_path = Path(local_path)
+        if not remote_path.exists():
+            raise FileNotFoundError(remote_path)
+        if local_path.exists() and not overwrite:
+            return local_path
+        if remote_path.is_dir():
+            if local_path.exists():
+                shutil.rmtree(local_path)
+            shutil.copytree(remote_path, local_path)
+        else:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(remote_path, local_path)
+        return local_path
 
     def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
         """Send a file or directory to the site."""
-        pass
+        return self.get(local_path, remote_path, overwrite=True)
 
     @property
     def dashboard_url(self) -> Optional[str]:
@@ -434,6 +539,9 @@ class LocalSite(BaseSite):
     def _initialize_dask(self, n_workers: Optional[int] = None):
         """Initialize Dask client and cluster."""
 
+        if self._dask_client is not None:
+            return
+
         if n_workers is None:
             self.n_workers = self.config.cores
         else:
@@ -461,92 +569,58 @@ class LocalSite(BaseSite):
                     f"Total memory ({total_memory}MB) exceed available memory ({self.config.memory}MB)"
                 )
 
-        print(
-            f"Dask initialized with {self.n_workers} workers, "
-            f"{self.threads_per_worker} threads per worker, "
-            f"and {self.memory_per_worker}MB memory per worker"
+        logger.info(
+            "Initializing Dask with %d workers, %d threads per worker, %dMB memory per worker",
+            self.n_workers,
+            self.threads_per_worker,
+            self.memory_per_worker,
         )
 
-        if self._dask_client is None:
+        try:
+            dask_config.set(
+                {
+                    "distributed.worker.memory.target": 0.6,
+                    "distributed.worker.memory.pause": 0.8,
+                    "distributed.worker.threads": self.threads_per_worker,
+                    "distributed.scheduler.work-stealing": True,
+                    "distributed.scheduler.work-stealing-interval": "1s",
+                    "distributed.scheduler.bandwidth": 1,
+                    "distributed.comm.timeouts.connect": "10s",
+                    "distributed.comm.timeouts.tcp": "30s",
+                }
+            )
+
+            self._dask_cluster = LocalCluster(
+                n_workers=self.n_workers,
+                threads_per_worker=self.threads_per_worker,
+                memory_limit=f"{self.memory_per_worker}MB",
+                dashboard_address=":0",
+                local_directory="/tmp/dask-worker-space",
+                scheduler_port=0,
+                silence_logs=ERROR,
+                processes=True,
+                resources={"CPU": self.threads_per_worker},
+            )
+            self._dask_client = Client(self._dask_cluster, timeout="20s")
+            self._closed = False
+
             try:
-                dask_config.set(
-                    {
-                        "distributed.worker.memory.target": 0.6,
-                        "distributed.worker.memory.pause": 0.8,
-                        "distributed.worker.threads": self.threads_per_worker,
-                        "distributed.scheduler.work-stealing": True,
-                        "distributed.scheduler.work-stealing-interval": "1s",
-                        "distributed.scheduler.bandwidth": 1,
-                        "distributed.comm.timeouts.connect": "10s",
-                        "distributed.comm.timeouts.tcp": "30s",
-                    }
-                )
+                self._dashboard_port = self._dask_cluster.dashboard_link.split(":")[-1]
+                logger.info("Dask dashboard available at %s", self.dashboard_url)
+            except Exception:
+                self._dashboard_port = None
 
-                self._dask_cluster = LocalCluster(
-                    n_workers=self.n_workers,
-                    threads_per_worker=self.threads_per_worker,
-                    memory_limit=f"{self.memory_per_worker}MB",
-                    dashboard_address=":0",  # Let Dask choose an available port
-                    local_directory="/tmp/dask-worker-space",
-                    scheduler_port=0,
-                    silence_logs=ERROR,
-                    processes=True,
-                    resources={"CPU": self.threads_per_worker},
-                )
-                self._dask_client = Client(self._dask_cluster, timeout="20s")
-
-                try:
-                    self._dashboard_port = self._dask_cluster.dashboard_link.split(":")[
-                        -1
-                    ]
-                    print(
-                        f"Dask Dashboard available at: http://localhost:{self._dashboard_port}"
-                    )
-                except Exception:
-                    pass
-
-                try:
-                    self._dask_client.get_worker_logs()
-                    logger.info("Dask dashboard initialized successfully")
-                except Exception as e:
-                    logger.warning(f"Dashboard may not be fully accessible: {str(e)}")
-
-                try:
-                    self._task_stream = get_task_stream(self._dask_client, plot=False)
-                    logger.info("Task stream initialized successfully")
-                except Exception as e:
-                    self._task_stream = None
-                    logger.warning(f"Task stream failed to initialize: {str(e)}")
-
-            except Exception as e:
-                logger.error(f"Failed to initialize Dask cluster: {str(e)}")
-                self.close()
-                raise
+        except Exception as e:
+            logger.error("Failed to initialize Dask cluster: %s", str(e))
+            self.close(wait=False, retire=False)
+            raise
 
     def __del__(self):
         """Cleanup when object is destroyed."""
-        if hasattr(self, "_task_stream"):
-            try:
-                self._task_stream.stop()
-            except Exception:
-                pass
-        if self._dask_client is not None:
-            self._dask_client.shutdown()
-            self._dask_client.close()
-        if self._dask_cluster is not None:
-            self._dask_cluster.close()
-
-    # Robust methods for handling shutdown and interupts
-    def _signal_handler(self, signum, frame):
-        self.close()
-        if signum == signal.SIGINT:
-            raise KeyboardInterrupt
-
-    @staticmethod
-    def _finalize(self_ref):
-        self = self_ref()
-        if self is not None:
-            self.close()
+        try:
+            self.close(wait=False, retire=False, timeout=2.0)
+        except Exception:
+            pass
 
     def __enter__(self) -> "LocalSite":
         return self
@@ -556,17 +630,9 @@ class LocalSite(BaseSite):
         return False
 
     def close(self, *, wait: bool = True, retire: bool = True, timeout: float = 30.0):
-        if self._closed:
+        if self._closed and self._dask_client is None and self._dask_cluster is None:
             return
         self._closed = True
-
-        # Stop task stream
-        if getattr(self, "_task_stream", None) is not None:
-            try:
-                self._task_stream.stop()
-            except Exception:
-                pass
-            self._task_stream = None
 
         # Cancel outstanding futures
         if self._dask_client is not None and self._futures:
@@ -611,18 +677,64 @@ class LocalSite(BaseSite):
             pass
         finally:
             self._dask_cluster = None
+            self._dashboard_port = None
 
     def stop(self):
         self.close()
+
+    def _cancel_futures(self, futures: Iterable[Future]) -> None:
+        futures = list(futures)
+        if not futures:
+            return
+        if self._dask_client is not None:
+            try:
+                self._dask_client.cancel(futures, force=True)
+                return
+            except Exception:
+                logger.debug("Dask future cancellation failed", exc_info=True)
+        for future in futures:
+            try:
+                future.cancel()
+            except Exception:
+                logger.debug("Future cancellation failed", exc_info=True)
+
+    def _release_futures(self, futures: Iterable[Future]) -> None:
+        future_set = set(futures)
+        for future in future_set:
+            try:
+                future.release()
+            except Exception:
+                logger.debug("Future release failed", exc_info=True)
+        if future_set:
+            self._futures = [
+                future for future in self._futures if future not in future_set
+            ]
+        self._prune_futures()
+
+    def _prune_futures(self) -> None:
+        terminal = {"finished", "error", "cancelled", "lost"}
+        active = []
+        for future in self._futures:
+            if getattr(future, "status", None) in terminal:
+                try:
+                    future.release()
+                except Exception:
+                    logger.debug("Future release failed", exc_info=True)
+            else:
+                active.append(future)
+        self._futures = active
 
     def _get_solver_path(self) -> str:
         """Get the solver path."""
         load_dotenv()
         executable = os.getenv("LOCAL_SOLVER_EXECUTABLE")
         if not executable:
-            warnings.warn("LOCAL_SOLVER_EXECUTABLE not set in environment")
+            warnings.warn(
+                "LOCAL_SOLVER_EXECUTABLE not set in environment",
+                stacklevel=2,
+            )
             return None
         if not Path(executable).exists():
-            warnings.warn(f"Solver executable not found at {executable}")
+            warnings.warn(f"Solver executable not found at {executable}", stacklevel=2)
             return None
         return executable

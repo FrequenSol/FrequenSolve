@@ -1,10 +1,9 @@
 """Python structures defining boundary conditions"""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Union
 
 from ..util.printing import print_warn
-from .mesh import Mesh
 
 __all__ = ["BoundaryCondition", "BoundaryConditionManager"]
 
@@ -37,7 +36,7 @@ class BoundaryCondition:
     stretch_limit: float = 0.25
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "BoundaryCondition":
+    def from_fs(cls, data: Dict) -> "BoundaryCondition":
         return cls(
             name=data["name"],
             kind=data["kind"],
@@ -67,9 +66,6 @@ class BoundaryCondition:
             ),
         }
         return bc_dict
-
-    def __dict__(self) -> Dict:
-        return self.to_fs()
 
 
 # TODO: Make class for geometric labels (since right now it accepts multiple values)
@@ -117,7 +113,7 @@ class BoundaryConditionManager:
         self.add_BC(bc)
         return self
 
-    def verify(self, mesh: Mesh) -> None:
+    def verify(self, mesh: Any) -> None:
         """Verifies that the boundary conditions are valid, and that each boundary has a BC assigned to it"""
         if self.label_type == "geometric":
             if mesh.dimension == 2:
@@ -140,20 +136,16 @@ class BoundaryConditionManager:
                     raise ValueError(f"Boundary {boundary} is not assigned a BC")
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "BoundaryConditionManager":
+    def from_fs(cls, data: Dict) -> "BoundaryConditionManager":
         label_type = data["label_type"]
         boundary_conditions = [
-            BoundaryCondition.from_dict(bc_data)
+            BoundaryCondition.from_fs(bc_data)
             for bc_data in data["boundary_conditions"]
         ]
         return cls(label_type=label_type, boundary_conditions=boundary_conditions)
 
-    # TODO: change to to_dict
     def to_fs(self, ctx=None) -> Dict:
         return {
             "label_type": self.label_type,
             "boundary_conditions": [bc.to_fs(ctx) for bc in self.boundary_conditions],
         }
-
-    def __dict__(self) -> Dict:
-        return self.to_fs()

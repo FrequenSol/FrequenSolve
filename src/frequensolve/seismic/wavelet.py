@@ -1,24 +1,13 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from functools import cached_property
 from typing import Callable, List, Literal, Optional, Tuple, Union
-from warnings import warn
 
 import numpy as np
 from pylops.utils.wavelets import klauder, ormsby, ricker
 from scipy.signal import hilbert
 from scipy.stats import norm
 
-# Convert to time domain using FFT
-try:
-    import pyfftw
-
-    pyfftw.interfaces.cache.enable()
-    fft = pyfftw.interfaces.numpy_fft
-    pyfftw.config.NUM_THREADS = 4
-except ImportError:
-    warn("pyfftw not found, using numpy for FFT (slow)")
-    import numpy.fft as fft
+from frequensolve.util.fft import get_fft_backend
 
 __all__ = [
     "WindowFunction",
@@ -199,6 +188,7 @@ class Wavelet:
         """
         if self._spectrum is None:
             self._evaluate_initial()
+            fft = get_fft_backend()
             self._spectrum = fft.rfft(self.signal).astype(np.complex64)
         return self._spectrum
 
@@ -213,6 +203,7 @@ class Wavelet:
             self._evaluate_initial()
             n = len(self._times) - 1
             dt = self.times[1] - self.times[0]
+            fft = get_fft_backend()
             self._frequencies = fft.rfftfreq(n, d=dt).astype(np.float32)
         return self._frequencies
 
@@ -265,6 +256,7 @@ class Wavelet:
             Causal (minimum phase) version of input signal
         """
         n = len(signal)
+        fft = get_fft_backend()
 
         # Get spectrum and add small constant for stability
         spectrum = fft.rfft(signal)

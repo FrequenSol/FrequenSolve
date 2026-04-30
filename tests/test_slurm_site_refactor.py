@@ -1,11 +1,14 @@
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from frequensolve.orchestrator.pool import PoolStatus
 from frequensolve.orchestrator.sites import hpc
+from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.hpc import (
     SlurmLoginCredentials,
+    SlurmRunConfig,
     SlurmSite,
     SlurmSiteConfig,
     _normalize_slurm_state,
@@ -83,6 +86,33 @@ class DummySlurmSite(SlurmSite):
         return DummyRawClient()
 
 
+class DummyJob:
+    name = "dummy"
+    n_tasks = 4
+    _job_id = None
+
+    def is_run_current(self):
+        return False
+
+    def write_run_state(self, status="completed", **extra):
+        self.last_run_state = status
+
+
+class DummyBaseSite(BaseSite):
+    def submit(self, job, **kwargs):
+        self.submit_kwargs = kwargs
+        return RunHandle(
+            site=self,
+            job=job,
+            id="base",
+            poll_interval=0,
+            _status_fn=lambda run: JobStatus(state="completed", return_code=0),
+        )
+
+    def cancel_job(self, job_id: str) -> None:
+        self.cancelled = job_id
+
+
 def test_generic_slurm_site_can_be_instantiated_without_site_specific_class(
     monkeypatch,
 ):
@@ -119,17 +149,286 @@ def test_slurm_state_and_sbatch_parsing_helpers():
         _parse_sbatch_job_id("no job id")
 
 
-def test_submit_slurm_alias_delegates(monkeypatch):
+def test_legacy_slurm_public_methods_are_removed():
+    assert not hasattr(SlurmSite, "submit_SLURM")
+    assert not hasattr(SlurmSite, "submit_slurm")
+    assert not hasattr(SlurmSite, "wait_completion")
+    assert not hasattr(SlurmSite, "attach_to_existing_job")
+    assert not hasattr(SlurmSite, "wait_provisioned")
+
+
+def test_run_handle_wait_and_await():
+    site = DummyBaseSite()
+    job = DummyJob()
+    states = iter(["pending", "running", "completed"])
+
+    def poll(run):
+        return JobStatus(state=next(states), return_code=0, job_id="1")
+
+    run = RunHandle(site=site, job=job, id="1", poll_interval=0.0, _status_fn=poll)
+
+    result = run.wait(timeout=1.0)
+
+    assert result.successful
+    assert result.status.state == "completed"
+
+    async_states = iter(["pending", "completed"])
+    async_run = RunHandle(
+        site=site,
+        job=job,
+        id="2",
+        poll_interval=0.0,
+        _status_fn=lambda run: JobStatus(
+            state=next(async_states), return_code=0, job_id="2"
+        ),
+    )
+
+    async def wait_for_run():
+        return await async_run
+
+    async_result = asyncio.run(wait_for_run())
+
+    assert async_result.successful
+    assert async_result.status.state == "completed"
+
+
+def test_run_handle_verbose_status_output(capsys):
+    site = DummyBaseSite(verbose=True)
+    run = site.submit(DummyJob())
+
+    run.wait(timeout=1.0, poll_interval=0.0)
+
+    captured = capsys.readouterr()
+    assert "DummyBaseSite: completed" in captured.out
+
+
+def test_run_handle_cancel_delegates_to_site():
+    site = DummyBaseSite()
+    run = RunHandle(site=site, job=DummyJob(), id="123")
+
+    run.cancel()
+
+    assert site.cancelled == "123"
+
+
+def test_site_run_separates_submit_and_wait_options():
+    site = DummyBaseSite()
+
+    result = site.run(DummyJob(), timeout=1.0, poll_interval=0.0, force=True)
+
+    assert result.successful
+    assert site.submit_kwargs == {"force": True}
+
+
+def test_base_handle_requires_polling_support():
+    class SiteWithoutPolling(BaseSite):
+        def submit(self, job, **kwargs):
+            raise NotImplementedError
+
+        def cancel_job(self, job_id: str) -> None:
+            pass
+
+    with pytest.raises(NotImplementedError, match="cannot poll"):
+        SiteWithoutPolling().handle(DummyJob(), job_id="1")
+
+
+def test_slurm_site_accepts_run_config(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+
+    run_config = SlurmRunConfig(queue="normal", nodes=2, duration="00-00:30:00")
+    site = DummySlurmSite("project/run", run_config=run_config)
+
+    assert site.run_config is run_config
+    assert site.run_config.nodes == 2
+
+
+def test_slurm_site_verbose_initialization(monkeypatch, capsys):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+
+    DummySlurmSite("project/run", verbose=True)
+
+    captured = capsys.readouterr()
+    assert "Dummy initialized with work_dir: /scratch/user/project/run" in captured.out
+
+
+def test_slurm_submit_auto_uses_batch_when_not_attached(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite(
+        "project/run",
+        run_config=SlurmRunConfig(queue="debug", nodes=2, duration="00-00:30:00"),
+    )
+    seen = {}
+
+    def fake_submit(job, config, **kwargs):
+        seen["config"] = config
+        return "77"
+
+    monkeypatch.setattr(site, "_submit_slurm_batch", fake_submit)
+
+    run = site.submit(DummyJob())
+
+    assert isinstance(run, RunHandle)
+    assert run.id == "77"
+    assert run.mode == "batch"
+    assert seen["config"].nodes == 2
+    assert seen["config"].queue == "debug"
+
+
+def test_slurm_submit_overrides_site_run_config(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite(
+        "project/run",
+        run_config=SlurmRunConfig(queue="debug", nodes=1, duration="00-00:30:00"),
+    )
+    seen = {}
+
+    def fake_submit(job, config, **kwargs):
+        seen["config"] = config
+        return "78"
+
+    monkeypatch.setattr(site, "_submit_slurm_batch", fake_submit)
+
+    site.submit(DummyJob(), nodes=3, queue="normal", duration="00-00:45:00")
+
+    assert seen["config"].nodes == 3
+    assert seen["config"].queue == "normal"
+    assert seen["config"].duration == "00-00:45:00"
+
+
+def test_slurm_submit_attached_requires_active_allocation(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+
+    with pytest.raises(RuntimeError, match="No active compute allocation"):
+        site.submit(DummyJob(), mode="attached")
+
+
+def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
+    site = DummySlurmSite("project/run")
+
+    class DummyFuture:
+        def done(self):
+            return False
+
+    monkeypatch.setattr(
+        site, "_submit_attached", lambda job, procs_per_task=2: DummyFuture()
+    )
+
+    run = site.submit(DummyJob())
+
+    assert run.mode == "attached"
+    assert run.status().state == "running"
+
+
+def test_slurm_allocation_attach_returns_awaitable_handle(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+    states = iter(["pending", "running"])
+    attached = {}
+
+    monkeypatch.setattr(site, "update_status", lambda job_id=None: next(states))
+    monkeypatch.setattr(
+        site, "_attach_compute_client", lambda: attached.setdefault("ok", True)
+    )
+
+    allocation = site.attach_allocation("99")
+    result = allocation.wait(poll_interval=0.0)
+
+    assert allocation.mode == "allocation"
+    assert result.successful
+    assert result.status.raw["scheduler_state"] == "running"
+    assert attached["ok"] is True
+
+
+def test_slurm_attach_allocation_requires_explicit_id_when_multiple_jobs(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+    monkeypatch.setattr(
+        site,
+        "_list_jobs",
+        lambda: "101 node01 1 R 00:10\n102 node02 1 PD 00:20\n",
+    )
+
+    with pytest.raises(RuntimeError, match="pass job_id explicitly"):
+        site.attach_allocation()
+
+
+def test_slurm_context_manager_closes_clients(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
-    def fake_submit(*args, **kwargs):
-        return args, kwargs
+    site.close()
 
-    site.submit_SLURM = fake_submit
+    assert site._login_client is None
+    assert site._compute_client is None
 
-    assert site.submit_slurm("job", nodes=1) == (("job",), {"nodes": 1})
+
+def test_slurm_provision_returns_allocation_handle(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+
+    monkeypatch.setattr(site, "put", lambda local, remote: None)
+    monkeypatch.setattr(site, "_submit_sbatch", lambda cmd: "44")
+    monkeypatch.setattr(
+        site, "_generate_provision_script", lambda *args, **kwargs: "script"
+    )
+
+    allocation = site.provision(nodes=1, tasks=1, duration="00-00:10:00")
+
+    assert isinstance(allocation, RunHandle)
+    assert allocation.id == "44"
+    assert allocation.mode == "allocation"
+
+
+def test_slurm_attached_run_is_awaitable(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
+    site = DummySlurmSite("project/run")
+
+    async def submit_and_wait():
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(None)
+        monkeypatch.setattr(
+            site, "_submit_attached", lambda job, procs_per_task=2: future
+        )
+        run = site.submit(DummyJob())
+        return await run
+
+    result = asyncio.run(submit_and_wait())
+
+    assert result.successful
+    assert result.status.state == "completed"
+
+
+def test_slurm_attached_sync_wait_inside_event_loop_has_clear_error(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+
+    async def call_sync_wait():
+        future = asyncio.get_running_loop().create_future()
+        run = RunHandle(site=site, job=DummyJob(), id="attached", mode="attached")
+        run.backend["future"] = future
+        with pytest.raises(RuntimeError, match="use 'await run' instead"):
+            site._wait_attached_run(run)
+
+    asyncio.run(call_sync_wait())
 
 
 def test_slurm_site_config_validates_node_and_duration_requests():

@@ -6,26 +6,22 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..util.class_registry import class_registry, register_class
+from ..util.mixins import TypeTaggedMixin
 
 __all__ = ["BaseMeshGenerator", "HexMeshGenerator", "TetMeshGenerator"]
 
 
 @register_class
 @dataclass
-class BaseMeshGenerator(ABC):
+class BaseMeshGenerator(TypeTaggedMixin, ABC):
     """Base class for mesh generators"""
 
     _proj_path: Path = Path()
     _rel_path: Path = Path()
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "BaseMeshGenerator":
-        class_name = data["_type"]
-        if class_name in class_registry:
-            mesh_class = class_registry[class_name]
-            return mesh_class.from_dict(data)
-        else:
-            raise ValueError(f"Unknown mesh generator class: {class_name}")
+    def from_fs(cls, data: Dict) -> "BaseMeshGenerator":
+        return cls.dispatch_from_fs(data, class_registry)
 
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path
@@ -75,11 +71,8 @@ class HexMeshGenerator(BaseMeshGenerator):
             **({"system": self.system} if self.system is not None else {}),
         }
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
     @classmethod
-    def from_dict(cls, data: Dict) -> "HexMeshGenerator":
+    def from_fs(cls, data: Dict) -> "HexMeshGenerator":
         return cls(
             n=data["n"],
             l_bound=data["l_bound"],
@@ -104,7 +97,7 @@ class TetMeshGenerator(HexMeshGenerator):
     """
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "TetMeshGenerator":
+    def from_fs(cls, data: Dict) -> "TetMeshGenerator":
         return cls(
             n=data["n"],
             l_bound=data["l_bound"],

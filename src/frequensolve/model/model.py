@@ -3,34 +3,33 @@
 import copy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional, Union
 
 import xarray as xr
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.property import Property, PropertyMap
 from frequensolve.util.class_registry import class_registry, register_class
-from frequensolve.util.mixins import ExportContext, merge_extra
+from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
 from frequensolve.util.named_list import NamedList
 
 __all__ = ["ModelSubdomain", "ModelBase"]
 
 
 @dataclass(kw_only=True)
-class ModelSubdomain:
+class ModelSubdomain(ExtraFieldsMixin):
     """A subdomain within a model with associated properties.
 
     Attributes:
        mesh_block_id (int):  Unique identifier for the mesh block.
        name (Optional[str]): Optional name for the mesh block.
-       frame (str):          Coordinate frame for mapping subdomain materials ('physical' or 'reference').
+       physics (Optional[str]): Optional physics model name for the subdomain.
        properties (Dict[str, Union[float, str, xarray.DataArray]]): Dictionary of subdomain properties.
           Keys are property names, values can be numeric constants, file paths, or xarray DataArrays.
     """
 
     mesh_block_id: int = -1
     name: Optional[str] = None
-    frame: str = "physical"
     physics: Optional[str] = None
     properties: PropertyMap = field(default_factory=PropertyMap)
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -41,34 +40,41 @@ class ModelSubdomain:
         self,
         mesh_block_id: int,
         name: Optional[str] = None,
-        frame: str = "physical",
         physics: Optional[str] = None,
         properties: Optional[Dict[str, Union[float, str, Path, xr.DataArray]]] = None,
         grid: Optional[xr.DataArray] = None,
+        units: Optional[Any] = None,
+        system: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
         # Legacy argument naming convention
         if "xarr" in kwargs:
             grid = kwargs.pop("xarr")
+        if "frame" in kwargs:
+            raise TypeError(
+                "ModelSubdomain frame is no longer supported; material coordinates are physical"
+            )
+        coordinate_system = kwargs.pop("coordinate_system", None)
+        if coordinate_system is not None:
+            if system is not None and system != coordinate_system:
+                raise ValueError("Specify only one of system or coordinate_system")
+            system = coordinate_system
 
         self.mesh_block_id = mesh_block_id
         self.name = name
-        self.frame = frame
         self.physics = physics
-        self.properties = PropertyMap(properties or {}, grid=grid)
-        self.extra = {}
-        if extra:
-            self.extra.update(copy.deepcopy(extra))
-        self.extra.update(kwargs)
-
-    @property
-    def kwargs(self) -> Dict[str, Any]:
-        return self.extra
-
-    @kwargs.setter
-    def kwargs(self, value: Dict[str, Any]) -> None:
-        self.extra = copy.deepcopy(dict(value))
+        self.properties = PropertyMap(
+            properties or {},
+            grid=grid,
+            units=units,
+            system=system,
+        )
+        if extra and "frame" in extra:
+            raise TypeError(
+                "ModelSubdomain frame is no longer supported; material coordinates are physical"
+            )
+        self._init_extra(extra, **kwargs)
 
     def set_property(self, key: str, value: Union[float, xr.DataArray]):
         self.properties[key] = value
@@ -88,7 +94,6 @@ class ModelSubdomain:
         payload = {
             "mesh_block_id": self.mesh_block_id,
             "name": self.name,
-            "frame": self.frame,
             **({"physics": self.physics} if self.physics is not None else {}),
             "properties": self.properties.to_fs(
                 ctx=ctx,
@@ -98,26 +103,23 @@ class ModelSubdomain:
         }
         return merge_extra(payload, self.extra, "Subdomain")
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
     @classmethod
-    def from_dict(cls, data: Dict) -> "ModelSubdomain":
+    def from_fs(cls, data: Dict) -> "ModelSubdomain":
         data = copy.deepcopy(data)
         props = {}
         grid = None
         for prop, value in data.pop("properties").items():
             if isinstance(value, dict) and "file" in value and "grid" in value:
                 try:
-                    grid = CartesianGrid.from_dict(value["grid"]).as_xarray()
+                    grid = CartesianGrid.from_fs(value["grid"]).as_xarray()
                 except Exception:
                     grid = None
             props[prop] = value
 
+        data.pop("frame", None)
         return cls(
             mesh_block_id=data.pop("mesh_block_id"),
             name=data.pop("name", None),
-            frame=data.pop("frame", "physical"),
             physics=data.pop("physics", None),
             properties=props,
             extra=data,
@@ -146,7 +148,7 @@ class ModelSubdomain:
 
 @register_class
 @dataclass(kw_only=True)
-class ModelBase:
+class ModelBase(ExtraFieldsMixin):
     """Base class for simulation models.
 
     Provides common attributes and functionality shared by different model types.
@@ -167,14 +169,6 @@ class ModelBase:
     extra: Dict[str, Any] = field(default_factory=dict)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
-
-    @property
-    def kwargs(self) -> Dict[str, Any]:
-        return self.extra
-
-    @kwargs.setter
-    def kwargs(self, value: Dict[str, Any]) -> None:
-        self.extra = copy.deepcopy(dict(value))
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
 
@@ -208,11 +202,8 @@ class ModelBase:
         }
         return merge_extra(payload, self.extra, "Model")
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
     @classmethod
-    def from_dict(cls, data: Dict) -> "ModelBase":
+    def from_fs(cls, data: Dict) -> "ModelBase":
         data = copy.deepcopy(data)
         data.pop("schema", None)
         class_name = data.pop("_type", cls.__name__)
@@ -222,14 +213,14 @@ class ModelBase:
                 name=data.pop("name", "model"),
                 dimension=data.pop("dimension", 0),
                 subdomains=NamedList(
-                    [ModelSubdomain.from_dict(item) for item in subdomains]
+                    [ModelSubdomain.from_fs(item) for item in subdomains]
                 ),
             )
             model.extra = data
             return model
         if class_name in class_registry:
             model_class = class_registry[class_name]
-            return model_class.from_dict(data)
+            return model_class.from_fs(data)
         else:
             raise ValueError(f"Unknown model class: {class_name}")
 

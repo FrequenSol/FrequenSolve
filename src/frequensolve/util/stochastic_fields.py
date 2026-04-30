@@ -37,14 +37,9 @@ def von_karman_stochastic_field(
        seed (int):
           Random seed (setting a value fixes the seed for reproducibility).
     """
-    import warnings
+    from frequensolve.util.fft import get_fft_backend
 
-    try:
-        import pyfftw.interfaces.numpy_fft as fft
-    except ImportError:
-        warnings.warn("pyfftw not found, using numpy for FFT (slower)")
-        import numpy.fft as fft
-
+    fft = get_fft_backend()
     ndim = len(xarr.dims)
     n = np.zeros(ndim, dtype=int)
     L = np.zeros(ndim, dtype=np.single)

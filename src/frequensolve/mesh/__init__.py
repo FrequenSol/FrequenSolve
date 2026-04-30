@@ -1,5 +1,31 @@
-from . import boundary_conditions, mesh, mesh_generators, mesh_manager
-from .boundary_conditions import *  # noqa
-from .mesh import *  # noqa
-from .mesh_generators import *  # noqa
-from .mesh_manager import *  # noqa
+"""Mesh authoring APIs."""
+
+from frequensolve.mesh.boundary_conditions import (
+    BoundaryCondition,
+    BoundaryConditionManager,
+)
+from frequensolve.mesh.mesh_generators import (
+    BaseMeshGenerator,
+    HexMeshGenerator,
+    TetMeshGenerator,
+)
+from frequensolve.mesh.mesh_manager import (
+    DistanceGrading,
+    MeshAdaptor,
+    MeshManager,
+    MeshParallelism,
+    SurfaceGrading,
+)
+
+__all__ = [
+    "BaseMeshGenerator",
+    "BoundaryCondition",
+    "BoundaryConditionManager",
+    "DistanceGrading",
+    "HexMeshGenerator",
+    "MeshAdaptor",
+    "MeshManager",
+    "MeshParallelism",
+    "SurfaceGrading",
+    "TetMeshGenerator",
+]

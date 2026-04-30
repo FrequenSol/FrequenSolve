@@ -7,8 +7,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 
-from frequensolve.seismic.record_database import TraceStore
+from frequensolve.seismic.trace_store import TraceStore
 from frequensolve.seismic.wavelet import Wavelet
+from frequensolve.simulation.artifacts import TraceManifest
 from frequensolve.simulation.sampling import UniformSweepSampling
 
 
@@ -21,10 +22,49 @@ class TraceDataset:
     current solver's legacy `receivers_*.h5` files.
     """
 
-    metadata: Dict[str, Any]
-    files: List[str]
+    manifest: TraceManifest
     upscale: int = 1
     _store: Optional[TraceStore] = None
+
+    def __post_init__(self) -> None:
+        if self.upscale < 1:
+            raise ValueError("TraceDataset upscale must be >= 1")
+        if not self.manifest.files:
+            raise ValueError("TraceDataset requires at least one trace file")
+        if not self.manifest.frequencies:
+            raise ValueError("TraceDataset requires frequency metadata")
+
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        f_list = np.sort(np.asarray(list(self.manifest.frequencies.values())))
+        df = float(np.diff(f_list).min()) if len(f_list) > 1 else 1.0
+        return {
+            "project": self.manifest.project_path,
+            "simulation": self.manifest.simulation,
+            "result_path": self.manifest.result_path,
+            "output_path": self.manifest.output_path,
+            "groups": self.manifest.groups,
+            "df": df,
+            "f_max": float(f_list[-1]),
+            "f_map": dict(self.manifest.frequencies),
+            **(
+                {
+                    "duplicate_frequencies": self.manifest.run.state[
+                        "duplicate_frequencies"
+                    ]
+                }
+                if "duplicate_frequencies" in self.manifest.run.state
+                else {}
+            ),
+        }
+
+    @property
+    def files(self) -> List[str]:
+        return [str(file) for file in self.manifest.files]
+
+    @property
+    def paths(self) -> List[Path]:
+        return [Path(file) for file in self.manifest.files]
 
     @classmethod
     def from_job(
@@ -33,40 +73,63 @@ class TraceDataset:
         upscale: int = 1,
         project_path: Optional[Path] = None,
     ) -> "TraceDataset":
-        traces = job.traces
-        source_project = Path(job.project_path).resolve()
-        project_path = (
-            Path(project_path).resolve() if project_path is not None else source_project
+        return cls.from_manifest(
+            TraceManifest.from_job(
+                job,
+                project_path=project_path,
+                resolve_legacy=True,
+            ),
+            upscale=upscale,
         )
 
-        f_map = dict(traces["frequencies"])
-        for key, value in list(f_map.items()):
-            if isinstance(value, complex):
-                f_map[key] = value.real
-        f_list = np.sort(list(f_map.values()))
-        f_max = f_list[-1]
-        df = np.diff(f_list).min() if len(f_list) > 1 else 1.0
-
-        files = [
-            str(
-                cls._resolve_trace_file(
-                    cls._map_project_path(path, source_project, project_path)
-                )
-            )
-            for path in traces["files"]
-        ]
-        simulation = cls._map_project_path(
-            traces["simulation"], source_project, project_path
+    @classmethod
+    def from_manifest(
+        cls,
+        manifest: TraceManifest,
+        upscale: int = 1,
+    ) -> "TraceDataset":
+        files = [TraceManifest.resolve_trace_file(file) for file in manifest.files]
+        return cls(
+            manifest=TraceManifest(
+                files=files,
+                frequencies=dict(manifest.frequencies),
+                groups=list(manifest.groups),
+                simulation=manifest.simulation,
+                result_path=manifest.result_path,
+                output_path=manifest.output_path,
+                project_path=manifest.project_path,
+                components=list(manifest.components),
+                sources=list(manifest.sources),
+                artifacts=dict(manifest.artifacts),
+                run=manifest.run,
+            ),
+            upscale=upscale,
         )
-        metadata = {
-            "project": project_path,
-            "simulation": simulation,
-            "groups": traces["groups"],
-            "df": df,
-            "f_max": f_max,
-            "f_map": f_map,
-        }
-        return cls(metadata=metadata, files=files, upscale=upscale)
+
+    @classmethod
+    def open(
+        cls,
+        source,
+        upscale: int = 1,
+        project_path: Optional[Path] = None,
+    ) -> "TraceDataset":
+        if isinstance(source, TraceManifest):
+            return cls.from_manifest(source, upscale=upscale)
+        if hasattr(source, "trace_manifest"):
+            return cls.from_job(source, upscale=upscale, project_path=project_path)
+        path = Path(source)
+        if not path.exists():
+            raise FileNotFoundError(f"Trace file not found: {path}")
+        manifest = TraceManifest(
+            files=[TraceManifest.resolve_trace_file(path)],
+            frequencies={1: TraceStore._read_trace_frequency(path)},
+            groups=[],
+            simulation=path,
+            result_path=path.parent,
+            output_path=path.parent,
+            project_path=path.parent,
+        )
+        return cls.from_manifest(manifest, upscale=upscale)
 
     @classmethod
     def from_jobs(
@@ -94,73 +157,17 @@ class TraceDataset:
         if duplicate not in {"first", "last", "error"}:
             raise ValueError("duplicate must be 'first', 'last', or 'error'")
 
-        groups = datasets[0].metadata["groups"]
-        for dataset in datasets[1:]:
-            if dataset.metadata["groups"] != groups:
-                raise ValueError("Cannot combine trace datasets with different groups")
-
-        entries: Dict[float, Dict[str, Any]] = {}
-        duplicates = []
-        for dataset in datasets:
-            f_items = sorted(
-                dataset.metadata["f_map"].items(), key=lambda item: int(item[0])
-            )
-            for (_, freq), file in zip(f_items, dataset.files):
-                key = float(freq)
-                if key in entries:
-                    duplicates.append(key)
-                    if duplicate == "error":
-                        raise ValueError(f"Duplicate trace frequency: {key}")
-                    if duplicate == "first":
-                        continue
-                entries[key] = {"frequency": key, "file": file}
-
-        ordered = [entries[freq] for freq in sorted(entries)]
-        f_list = np.array([entry["frequency"] for entry in ordered], dtype=float)
-        df = np.diff(f_list).min() if len(f_list) > 1 else 1.0
-        metadata = {
-            "project": datasets[0].metadata["project"],
-            "simulation": datasets[0].metadata["simulation"],
-            "simulations": [dataset.metadata["simulation"] for dataset in datasets],
-            "groups": groups,
-            "df": df,
-            "f_max": float(f_list[-1]),
-            "f_map": {i + 1: float(freq) for i, freq in enumerate(f_list)},
-            "combined": True,
-            "source_count": len(datasets),
-        }
-        if duplicates:
-            metadata["duplicate_frequencies"] = sorted(set(duplicates))
+        manifest = TraceManifest.combine(
+            [dataset.manifest for dataset in datasets],
+            duplicate=duplicate,
+        )
+        if "duplicate_frequencies" in manifest.run.state:
             warnings.warn(
                 "Duplicate trace frequencies were encountered while combining jobs; "
                 f"using duplicate='{duplicate}'.",
                 RuntimeWarning,
             )
-        return cls(
-            metadata=metadata,
-            files=[entry["file"] for entry in ordered],
-            upscale=datasets[0].upscale,
-        )
-
-    @staticmethod
-    def _map_project_path(path: str, source_project: Path, project_path: Path) -> Path:
-        path = Path(path)
-        if path.is_absolute():
-            try:
-                return project_path / path.resolve().relative_to(source_project)
-            except Exception:
-                return path
-        return project_path / path
-
-    @staticmethod
-    def _resolve_trace_file(path: str) -> Path:
-        path = Path(path)
-        if path.exists():
-            return path
-        legacy = path.with_name(path.name.replace("traces_", "receivers_", 1))
-        if legacy.exists():
-            return legacy
-        return path
+        return cls.from_manifest(manifest, upscale=datasets[0].upscale)
 
     @property
     def store(self) -> TraceStore:
@@ -169,15 +176,52 @@ class TraceDataset:
                 metadata=self.metadata,
                 files=self.files,
                 upscale=self.upscale,
+                cache_dir=self._default_cache_dir(),
             )
-            store.consolidate_h5()
             self._store = store
         return self._store
 
-    @property
-    def record_db(self) -> TraceStore:
-        """Compatibility alias for the internal trace store."""
-        return self.store
+    def close(self) -> None:
+        """Close any open HDF5 handles owned by this dataset."""
+
+        if self._store is not None:
+            self._store.close()
+
+    def __enter__(self) -> "TraceDataset":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
+        return False
+
+    def __len__(self) -> int:
+        return len(self.manifest.files)
+
+    def __repr__(self) -> str:
+        return (
+            "TraceDataset("
+            f"files={len(self.manifest.files)}, "
+            f"frequencies={len(self.manifest.frequencies)}, "
+            f"groups={len(self.manifest.groups)}"
+            ")"
+        )
+
+    def _default_cache_dir(self) -> Optional[Path]:
+        if self.manifest.result_path is None:
+            return None
+        return Path(self.manifest.result_path) / "_fs_run" / "cache"
+
+    def consolidate(
+        self,
+        cache_dir: Optional[Path] = None,
+        force: bool = False,
+    ) -> Path:
+        """Build or refresh the trace VDS cache and return its path."""
+
+        return self.store.consolidate(
+            cache_dir=cache_dir or self._default_cache_dir(),
+            force=force,
+        )
 
     def times(self, upscale: Optional[int] = None) -> np.ndarray:
         upscale = self.upscale if upscale is None else upscale
@@ -193,6 +237,20 @@ class TraceDataset:
     def groups(self) -> list[str]:
         return self.store.groups
 
+    def components(self, group: str):
+        return self.store.components(group)
+
+    def sources(self, group: str):
+        return self.store.sources(group)
+
+    def receivers(self, group: str):
+        return self.store.receivers(group)
+
+    def frequencies(self, group: Optional[str] = None):
+        if group is not None:
+            return self.store.frequencies(group)
+        return np.sort(np.asarray(list(self.metadata["f_map"].values())))
+
     @property
     def summary(self) -> str:
         return self.store.summary
@@ -203,7 +261,7 @@ class TraceDataset:
     def survey_tables(self) -> Dict[str, Any]:
         return self.store.survey_tables()
 
-    def fd(
+    def frequency_domain(
         self,
         group: str,
         component: str,
@@ -213,7 +271,7 @@ class TraceDataset:
     ):
         return self.store.read_FD(group, component, source, wavelet=wavelet, **kwargs)
 
-    def td(
+    def time_domain(
         self,
         group: str,
         component: str,
@@ -233,23 +291,36 @@ class TraceDataset:
             **kwargs,
         )
 
-    def read_FD(self, group: str, component: str, shot: int, wavelet=None, **kwargs):
-        return self.fd(group, component, source=shot, wavelet=wavelet, **kwargs)
-
-    def read_TD(
+    def fd(
         self,
         group: str,
         component: str,
-        shot: int,
+        source: int = 1,
+        wavelet: Optional[Wavelet] = None,
+        **kwargs,
+    ):
+        return self.frequency_domain(
+            group,
+            component,
+            source=source,
+            wavelet=wavelet,
+            **kwargs,
+        )
+
+    def td(
+        self,
+        group: str,
+        component: str,
+        source: int,
         wavelet: Wavelet,
         upscale: int = 1,
         T_max: Optional[float] = None,
         **kwargs,
     ):
-        return self.td(
+        return self.time_domain(
             group,
             component,
-            source=shot,
+            source=source,
             wavelet=wavelet,
             upscale=upscale,
             T_max=T_max,

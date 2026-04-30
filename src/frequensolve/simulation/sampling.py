@@ -1,4 +1,3 @@
-import os
 from abc import ABC
 from dataclasses import dataclass
 from typing import List, Optional
@@ -29,7 +28,7 @@ class DiscreteSampling(Sampling):
     def nfreq(self):
         return len(self.freqs)
 
-    def __dict__(self) -> dict:
+    def to_fs(self, ctx=None) -> dict:
         return {
             "f_list": self.f_list,
         }
@@ -122,7 +121,7 @@ class UniformSweepSampling(Sampling):
         else:
             return self.nTime, self.T
 
-    def __dict__(self) -> dict:
+    def to_fs(self, ctx=None) -> dict:
         return {
             "f_min": self.f_min,
             "f_max": self.f_max,
@@ -131,7 +130,7 @@ class UniformSweepSampling(Sampling):
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Sampling":
+    def from_fs(cls, data: dict) -> "Sampling":
         return cls(
             f_min=data["f_min"],
             f_max=data["f_max"],

@@ -1,24 +1,40 @@
-from . import (
-    acquisition,
-    layered_model,
-    plotting,
-    receivers,
-    shot_record,
-    signals,
-    sources,
-    sparse_survey,
-    trace_record,
-    traces,
-    wavelet,
+"""Seismic authoring and trace-reading APIs."""
+
+from frequensolve.seismic.acquisition import Acquisition
+from frequensolve.seismic.receivers import (
+    ReceiverComponent,
+    ReceiverDevice,
+    ReceiverFiber,
+    ReceiverGroup,
+    ReceiverNode,
+    ReceiverNodeArray,
 )
-from .acquisition import *  # noqa
-from .layered_model import *  # noqa
-from .plotting import *  # noqa
-from .receivers import *  # noqa
-from .shot_record import *  # noqa
-from .signals import *  # noqa
-from .sources import *  # noqa
-from .sparse_survey import *  # noqa
-from .trace_record import *  # noqa
-from .traces import *  # noqa
-from .wavelet import *  # noqa
+from frequensolve.seismic.sources import (
+    CompoundSource,
+    PointSource,
+    RuptureSource,
+    Source,
+    SourceGroup,
+)
+from frequensolve.seismic.sparse_survey import ReceiverSampling, SparseSurvey
+from frequensolve.seismic.survey import Survey
+from frequensolve.seismic.traces import TraceDataset
+
+__all__ = [
+    "Acquisition",
+    "CompoundSource",
+    "PointSource",
+    "ReceiverComponent",
+    "ReceiverDevice",
+    "ReceiverFiber",
+    "ReceiverGroup",
+    "ReceiverNode",
+    "ReceiverNodeArray",
+    "ReceiverSampling",
+    "RuptureSource",
+    "Source",
+    "SourceGroup",
+    "SparseSurvey",
+    "Survey",
+    "TraceDataset",
+]

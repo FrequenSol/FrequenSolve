@@ -5,7 +5,6 @@ avoid re-authenticating each time a connection is made.
 
 import subprocess
 import time
-from io import BytesIO
 
 from paramiko import SSHClient
 

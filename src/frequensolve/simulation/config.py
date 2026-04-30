@@ -22,7 +22,7 @@ class SimulationConfig:
     _rel_path: Optional[Path] = None
     _file: Optional[Path] = None
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         return {
             "name": self.name,
             "physics": self.physics,
@@ -31,7 +31,7 @@ class SimulationConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "SimulationConfig":
+    def from_fs(cls, data: Dict) -> "SimulationConfig":
         return cls(
             name=data.get("name"),
             physics=data.get("physics"),

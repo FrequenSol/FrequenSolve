@@ -12,7 +12,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 import boto3
 from botocore.exceptions import ClientError

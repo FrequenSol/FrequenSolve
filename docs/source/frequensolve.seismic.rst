@@ -25,6 +25,22 @@ Plotting
    :show-inheritance:
    :noindex:
 
+Animation
+---------
+
+.. automodule:: frequensolve.seismic.animate
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Analysis
+--------
+
+.. automodule:: frequensolve.seismic.analysis
+   :members:
+   :show-inheritance:
+   :noindex:
+
 Receivers
 ---------
 

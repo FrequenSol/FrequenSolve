@@ -30,11 +30,11 @@ class Signal:
     def get(self, i: int):
         raise NotImplementedError("This class must be overwritten by subclasses.")
 
-    def __dict__(self):
+    def to_fs(self, ctx=None):
         raise NotImplementedError("This class must be overwritten by subclasses.")
 
     @classmethod
-    def from_dict(cls, sim: SimulationConfig, data: Dict):
+    def from_fs(cls, sim: SimulationConfig, data: Dict):
         raise NotImplementedError("This class must be overwritten by subclasses.")
 
 
@@ -55,7 +55,7 @@ class AnalyticalSignal(Signal):
     sigma: Optional[float] = None
 
     @classmethod
-    def from_dict(cls, sim: SimulationConfig, data: Dict) -> "AnalyticalSignal":
+    def from_fs(cls, sim: SimulationConfig, data: Dict) -> "AnalyticalSignal":
         kind = data["kind"]
         f_pts = data["f_pts"]
 
@@ -84,7 +84,7 @@ class AnalyticalSignal(Signal):
             phase=data.get("phase"),
         )
 
-    def __dict__(self):
+    def to_fs(self, ctx=None):
         return {
             "type": self.type,
             "kind": self.kind,
@@ -125,7 +125,7 @@ class SignalFromFile(Signal):
     samples_in: Optional[np.ndarray] = None
     id_format: Tuple[str, str] = ("", "")
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         return {
             "file": str(self.file),
             "file_format": self.file_format,

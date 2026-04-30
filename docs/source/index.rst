@@ -36,6 +36,12 @@ If you're new to FrequenSolve, we recommend starting with:
    user_guide/index
 
 .. toctree::
+   :maxdepth: 1
+   :caption: Backend Contracts
+
+   sauce_api_updates
+
+.. toctree::
    :maxdepth: 2
    :caption: API Reference
 

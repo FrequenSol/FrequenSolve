@@ -12,6 +12,7 @@ __pycache__/
 .Python
 build/
 dist/
+*.egg-info/
 lib/
 var/
 wheels/
@@ -55,6 +56,7 @@ db.sqlite3-journal
 
 # Sphinx documentation
 docs/_build/
+docs/build/
 docs/jupyter_execute/
 
 # PyBuilder
@@ -160,4 +162,14 @@ terraform.rc
 tests/output/*
 !tests/output/.gitkeep
 
+# Solver and example run outputs
 examples/scratch/
+examples/fort.*
+examples/*.slurm
+examples/**/*.slurm
+examples/plots/
+*.out
+*.err
+*.h5.tmp
+_fs_run/
+run_logs/

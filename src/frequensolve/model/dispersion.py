@@ -1,30 +1,22 @@
 from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
-
-import xarray as xr
-from numpy.typing import ArrayLike
+from typing import Any, Dict, List
 
 from frequensolve.util.class_registry import class_registry, register_class
+from frequensolve.util.mixins import TypeTaggedMixin
 
 
 @register_class
-class DispersionRelation(ABC):
+class DispersionRelation(TypeTaggedMixin, ABC):
     """
     Abstract base class for dispersion relations.
     """
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "DispersionRelation":
-        class_name = data.pop("_type")
-        if class_name in class_registry:
-            source_class = class_registry[class_name]
-            return source_class.from_dict(data)
-        else:
-            raise ValueError(f"Unknown source class: {class_name}")
+    def from_fs(cls, data: Dict) -> "DispersionRelation":
+        return cls.dispatch_from_fs(data, class_registry)
 
     @abstractmethod
-    def to_dict(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         """
         Serialize the dispersion relation to a dictionary.
         """
@@ -48,10 +40,6 @@ class DispersionRelation(ABC):
         """
         return DispersionScaling(property=other, dispersion=self)
 
-    # For backward compatibility with your code
-    def __dict__(self) -> Dict:
-        return self.to_dict()
-
 
 @register_class
 class PowerLawDispersion(DispersionRelation):
@@ -64,10 +52,10 @@ class PowerLawDispersion(DispersionRelation):
         self.alpha = alpha
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "PowerLawDispersion":
+    def from_fs(cls, data: Dict) -> "PowerLawDispersion":
         return cls(**data)
 
-    def to_dict(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         return {"_type": self.__class__.__name__, "f0": self.f0, "alpha": self.alpha}
 
 
@@ -90,10 +78,10 @@ class TablulatedDispersion(DispersionRelation):
         self.extrapolation = extrapolation
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "TablulatedDispersion":
+    def from_fs(cls, data: Dict) -> "TablulatedDispersion":
         return cls(**data)
 
-    def to_dict(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         return {
             "_type": self.__class__.__name__,
             "frequencies": self.frequencies,

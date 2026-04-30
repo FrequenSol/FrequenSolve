@@ -6,10 +6,9 @@ from pathlib import Path
 from shutil import copy2
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 
-from frequensolve.util.mixins import ExportContext, merge_extra
+from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
 
-from .mesh import *  # noqa
-from .mesh_generators import *  # noqa
+from .mesh_generators import BaseMeshGenerator
 
 __all__ = [
     "MeshParallelism",
@@ -33,11 +32,8 @@ class MeshParallelism:
             **({"partitioner": self.partitioner} if self.partitioner else {}),
         }
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
     @classmethod
-    def from_dict(cls, data: Dict) -> "MeshParallelism":
+    def from_fs(cls, data: Dict) -> "MeshParallelism":
         return cls(
             distribute=data["distribute"],
             ranks_per_part=data.get("ranks_per_part"),
@@ -70,7 +66,7 @@ def _normalize_grade_mode(mode: str) -> str:
 
 
 @dataclass
-class DistanceGrading:
+class DistanceGrading(ExtraFieldsMixin):
     """Distance-based source/receiver mesh grading.
 
     This maps to Sauce's ``kd_grade_t`` JSON contract. ``d0`` is the distance
@@ -90,14 +86,6 @@ class DistanceGrading:
                 "Use either 'mult' or 'mult_max' for DistanceGrading, not both"
             )
 
-    @property
-    def kwargs(self) -> Dict[str, Any]:
-        return self.extra
-
-    @kwargs.setter
-    def kwargs(self, value: Mapping[str, Any]) -> None:
-        self.extra = copy.deepcopy(dict(value))
-
     def to_fs(self, ctx=None) -> Dict[str, Any]:
         mult = self.mult if self.mult is not None else self.mult_max
         payload = {
@@ -107,11 +95,8 @@ class DistanceGrading:
         }
         return merge_extra(payload, self.extra, "DistanceGrading")
 
-    def __dict__(self) -> Dict[str, Any]:
-        return self.to_fs()
-
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "DistanceGrading":
+    def from_fs(cls, data: Mapping[str, Any]) -> "DistanceGrading":
         payload = copy.deepcopy(dict(data))
         return cls(
             d0=payload.pop("d0", 0.0),
@@ -130,12 +115,12 @@ def _coerce_distance_grading(
     if isinstance(value, DistanceGrading):
         return value
     if isinstance(value, Mapping):
-        return DistanceGrading.from_dict(value)
+        return DistanceGrading.from_fs(value)
     raise TypeError(f"Expected DistanceGrading or mapping, got {type(value).__name__}")
 
 
 @dataclass
-class SurfaceGrading:
+class SurfaceGrading(ExtraFieldsMixin):
     """Geometric mesh grading around a named implicit surface.
 
     The exported JSON follows Sauce's ``grading_fields_m`` contract. ``d0`` is
@@ -162,14 +147,6 @@ class SurfaceGrading:
                 "Use either 'mult' or 'mult_max' for SurfaceGrading, not both"
             )
 
-    @property
-    def kwargs(self) -> Dict[str, Any]:
-        return self.extra
-
-    @kwargs.setter
-    def kwargs(self, value: Mapping[str, Any]) -> None:
-        self.extra = copy.deepcopy(dict(value))
-
     def to_fs(self, ctx=None) -> Dict[str, Any]:
         payload = {
             "surface": self.surface,
@@ -183,11 +160,8 @@ class SurfaceGrading:
         }
         return merge_extra(payload, self.extra, "SurfaceGrading")
 
-    def __dict__(self) -> Dict[str, Any]:
-        return self.to_fs()
-
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SurfaceGrading":
+    def from_fs(cls, data: Mapping[str, Any]) -> "SurfaceGrading":
         payload = copy.deepcopy(dict(data))
         return cls(
             surface=payload.pop("surface"),
@@ -208,7 +182,7 @@ def _coerce_surface_grading(
     if isinstance(value, SurfaceGrading):
         return value
     if isinstance(value, Mapping):
-        return SurfaceGrading.from_dict(value)
+        return SurfaceGrading.from_fs(value)
     raise TypeError(f"Expected SurfaceGrading or mapping, got {type(value).__name__}")
 
 
@@ -235,14 +209,14 @@ def _coerce_surface_gradings(
             else:
                 payload = copy.deepcopy(dict(grading))
                 payload.setdefault("surface", surface)
-                item = SurfaceGrading.from_dict(payload)
+                item = SurfaceGrading.from_fs(payload)
             out.append(item)
         return out
     return [_coerce_surface_grading(item) for item in gradings]
 
 
 @dataclass
-class MeshAdaptor:
+class MeshAdaptor(ExtraFieldsMixin):
     """Sets mesh adaptivity options
 
     Attributes:
@@ -270,14 +244,6 @@ class MeshAdaptor:
         self.source_grading = _coerce_distance_grading(self.source_grading)
         self.receiver_grading = _coerce_distance_grading(self.receiver_grading)
         self.surface_gradings = _coerce_surface_gradings(self.surface_gradings)
-
-    @property
-    def kwargs(self) -> Dict:
-        return self.extra
-
-    @kwargs.setter
-    def kwargs(self, value: Dict) -> None:
-        self.extra = copy.deepcopy(dict(value))
 
     def to_fs(self, ctx=None) -> Dict:
         payload = {
@@ -309,11 +275,8 @@ class MeshAdaptor:
         }
         return merge_extra(payload, self.extra, "MeshAdaptor")
 
-    def __dict__(self) -> Dict:
-        return self.to_fs()
-
     @classmethod
-    def from_dict(cls, data: Dict) -> "MeshAdaptor":
+    def from_fs(cls, data: Dict) -> "MeshAdaptor":
         data = copy.deepcopy(data)
         return cls(
             min_epw=data.pop("min_epw"),
@@ -374,13 +337,12 @@ class MeshManager:
     """Defines mesh type, dimension, refinement, etc.
 
     Attributes:
-       mesh (Optional[Mesh]): The mesh object
        mesh_generator (Optional[BaseMeshGenerator]): The mesh generator object
        parallel (Optional[MeshParallelism]): Mesh parallelism options
        adapt (Optional[MeshAdaptor]): Mesh adaptivity options
     """
 
-    mesh: Optional[Union[Mesh, BaseMeshGenerator]] = None
+    mesh: Optional[BaseMeshGenerator] = None
     file: Optional[str] = None
     format: Optional[str] = None
     parallel: Optional[MeshParallelism] = None
@@ -495,7 +457,7 @@ class MeshManager:
         )
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "MeshManager":
+    def from_fs(cls, data: Dict) -> "MeshManager":
         data = copy.deepcopy(data)
         manager = cls()
 
@@ -505,11 +467,10 @@ class MeshManager:
         if file is not None and format is not None:
             manager.file = file
             manager.format = format
-            manager.mesh = Mesh.read_mesh(file, format)
 
         # From generator
         if "generator" in data:
-            manager.mesh = BaseMeshGenerator.from_dict(data["generator"])
+            manager.mesh = BaseMeshGenerator.from_fs(data["generator"])
 
         # Parallel
         if "parallel" in data:
@@ -572,23 +533,9 @@ class MeshManager:
 
         # Mesh determined by generator (defined in backend)
         elif isinstance(self.mesh, BaseMeshGenerator):
-            mesh_dict["generator"] = (
-                self.mesh.to_fs(ctx)
-                if hasattr(self.mesh, "to_fs")
-                else self.mesh.__dict__()
-            )
-
-        # Write mesh to file (if mesh is a Mesh object)
-        elif isinstance(self.mesh, Mesh):
-            path = self._path / "mesh"
-            self.mesh.write_mesh(path, "gmp")
-            mesh_dict["file"] = path.relative_to(self._proj_path)
-            mesh_dict["format"] = "gmp"
+            mesh_dict["generator"] = self.mesh.to_fs(ctx)
 
         return mesh_dict
-
-    def __dict__(self) -> Dict:
-        return self.to_fs()
 
     def _set_path(self, proj_path: Path, rel_path: Path):
         self._proj_path = proj_path

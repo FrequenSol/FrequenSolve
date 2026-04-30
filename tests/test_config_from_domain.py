@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from frequensolve.orchestrator.sites.aws import AWSSiteConfig
 
 
+@pytest.mark.cloud
 @pytest.mark.interactive
 def test_config_from_localhost():
     """Test fetching config from local dev server."""
@@ -52,6 +53,7 @@ def test_config_from_localhost():
         return False
 
 
+@pytest.mark.cloud
 @pytest.mark.interactive
 def test_config_from_cache():
     """Test that cached config is used on second fetch."""
@@ -63,7 +65,7 @@ def test_config_from_cache():
 
     try:
         # This should use the cached config from previous test
-        config = AWSSiteConfig.from_domain("localhost:5173")
+        AWSSiteConfig.from_domain("localhost:5173")
         print("✅ Configuration loaded from cache!")
         return True
 
