@@ -1,5 +1,5 @@
 """
-SSH manager for Frontera and Stampede3 that uses a master socket to
+SSH manager for SLURM/HPC sites that uses a master socket to
 avoid re-authenticating each time a connection is made.
 """
 

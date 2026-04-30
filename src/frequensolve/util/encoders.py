@@ -30,31 +30,34 @@ class CustomJSONEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-class CustomTOMLEncoder(toml.TomlEncoder):
-    """Custom TOML encoder for Simulation objects."""
+if toml is not None:
 
-    def __init__(self):
-        super().__init__()
+    class CustomTOMLEncoder(toml.TomlEncoder):
+        """Custom TOML encoder for Simulation objects."""
 
-    def dump_value(self, obj):
-        from numpy import bool_, floating, integer, ndarray
-        from xarray import DataArray
+        def dump_value(self, obj):
+            from numpy import bool_, floating, integer, ndarray
+            from xarray import DataArray
 
-        if isinstance(obj, (integer, floating, bool_)):
-            return obj.item()
-        if isinstance(obj, ndarray):
-            return obj.tolist()
-        if isinstance(obj, DataArray):
-            return obj.values.tolist()
-        if isinstance(obj, Path):
+            if isinstance(obj, (integer, floating, bool_)):
+                return obj.item()
+            if isinstance(obj, ndarray):
+                return obj.tolist()
+            if isinstance(obj, DataArray):
+                return obj.values.tolist()
+            if isinstance(obj, Path):
+                return str(obj)
+            if hasattr(obj, "tolist"):
+                return obj.tolist()
             return str(obj)
-        if hasattr(obj, "tolist"):
-            return obj.tolist()
-        try:
-            return str(obj)
-        except:
-            print(f"Cannot encode object of type {type(obj)}")
-            return None
+
+else:
+
+    class CustomTOMLEncoder:
+        """Placeholder that fails clearly when TOML support is unavailable."""
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError("toml is required to use CustomTOMLEncoder")
 
 
 # import yaml

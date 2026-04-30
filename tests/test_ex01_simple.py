@@ -817,11 +817,11 @@ def test_time_domain_simulation_basic(project, simulation):
     ), "Frequency step should be 1/T_max"
 
     # Run locally
-    td_results = td_job.records
+    td_results = td_job.traces
 
     # Basic validation of results
     assert td_results is not None, "Should have simulation results"
-    assert len(td_results) > 0, "Should have at least one record"
+    assert len(td_results) > 0, "Should have at least one trace"
 
 
 # -----------------------------------------------------------------------------

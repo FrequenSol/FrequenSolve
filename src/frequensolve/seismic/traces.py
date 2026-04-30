@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 
-from frequensolve.seismic.record_database import RecordDatabase
+from frequensolve.seismic.record_database import TraceStore
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.sampling import UniformSweepSampling
 
@@ -16,7 +16,7 @@ from frequensolve.simulation.sampling import UniformSweepSampling
 class TraceDataset:
     """Small facade for reading solver trace outputs.
 
-    This is the preferred replacement for direct `RecordDatabase` use. It keeps
+    This is the preferred replacement for direct `TraceStore` use. It keeps
     the common API centered on traces while preserving compatibility with the
     current solver's legacy `receivers_*.h5` files.
     """
@@ -24,7 +24,7 @@ class TraceDataset:
     metadata: Dict[str, Any]
     files: List[str]
     upscale: int = 1
-    _record_db: Optional[RecordDatabase] = None
+    _store: Optional[TraceStore] = None
 
     @classmethod
     def from_job(
@@ -33,13 +33,13 @@ class TraceDataset:
         upscale: int = 1,
         project_path: Optional[Path] = None,
     ) -> "TraceDataset":
-        records = job.traces
+        traces = job.traces
         source_project = Path(job.project_path).resolve()
         project_path = (
             Path(project_path).resolve() if project_path is not None else source_project
         )
 
-        f_map = dict(records["frequencies"])
+        f_map = dict(traces["frequencies"])
         for key, value in list(f_map.items()):
             if isinstance(value, complex):
                 f_map[key] = value.real
@@ -53,15 +53,15 @@ class TraceDataset:
                     cls._map_project_path(path, source_project, project_path)
                 )
             )
-            for path in records["files"]
+            for path in traces["files"]
         ]
         simulation = cls._map_project_path(
-            records["simulation"], source_project, project_path
+            traces["simulation"], source_project, project_path
         )
         metadata = {
             "project": project_path,
             "simulation": simulation,
-            "groups": records["groups"],
+            "groups": traces["groups"],
             "df": df,
             "f_max": f_max,
             "f_map": f_map,
@@ -163,16 +163,21 @@ class TraceDataset:
         return path
 
     @property
-    def record_db(self) -> RecordDatabase:
-        if self._record_db is None:
-            db = RecordDatabase(
+    def store(self) -> TraceStore:
+        if self._store is None:
+            store = TraceStore(
                 metadata=self.metadata,
-                records=self.files,
+                files=self.files,
                 upscale=self.upscale,
             )
-            db.consolidate_h5()
-            self._record_db = db
-        return self._record_db
+            store.consolidate_h5()
+            self._store = store
+        return self._store
+
+    @property
+    def record_db(self) -> TraceStore:
+        """Compatibility alias for the internal trace store."""
+        return self.store
 
     def times(self, upscale: Optional[int] = None) -> np.ndarray:
         upscale = self.upscale if upscale is None else upscale
@@ -186,17 +191,17 @@ class TraceDataset:
 
     @property
     def groups(self) -> list[str]:
-        return self.record_db.groups
+        return self.store.groups
 
     @property
     def summary(self) -> str:
-        return self.record_db.summary
+        return self.store.summary
 
     def open_frequency_domain(self, group: str):
-        return self.record_db.read_h5(group)
+        return self.store.read_h5(group)
 
     def survey_tables(self) -> Dict[str, Any]:
-        return self.record_db.survey_tables()
+        return self.store.survey_tables()
 
     def fd(
         self,
@@ -206,9 +211,7 @@ class TraceDataset:
         wavelet: Optional[Wavelet] = None,
         **kwargs,
     ):
-        return self.record_db.read_FD(
-            group, component, source, wavelet=wavelet, **kwargs
-        )
+        return self.store.read_FD(group, component, source, wavelet=wavelet, **kwargs)
 
     def td(
         self,
@@ -220,7 +223,7 @@ class TraceDataset:
         T_max: Optional[float] = None,
         **kwargs,
     ):
-        return self.record_db.read_TD(
+        return self.store.read_TD(
             group,
             component,
             source,

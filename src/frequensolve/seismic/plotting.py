@@ -10,7 +10,7 @@ import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .shot_record import ShotRecord  # noqa
+from .trace_record import TraceRecord  # noqa
 
 __all__ = [
     "plot_gather",
@@ -26,14 +26,14 @@ __all__ = [
 try:
     plt.rcParams["font.family"] = "sans-serif"
     plt.rcParams["font.sans-serif"] = ["Helvetica"]
-except:
+except Exception:
     pass
 
 
 # --------------------------------------------
 # Time-domain Plot Functions
 # --------------------------------------------
-def plot_gather(shot: ShotRecord, **kwargs):
+def plot_gather(shot: TraceRecord, **kwargs):
     """Plot a 2D shot gather for a time-domain shot.
 
     Renders a simple 2D image of amplitude over (receiver X-position) vs. time.
@@ -42,7 +42,7 @@ def plot_gather(shot: ShotRecord, **kwargs):
     and receiver position along the horizontal axis.
 
     Args:
-       shot (ShotRecord):     A ShotRecord object of type='TD' containing time-domain data.
+       shot (TraceRecord):     A TraceRecord object of type='TD' containing time-domain data.
 
     Keyword Args:
        A (float):       Amplitude scaling for display (default 1).
@@ -117,14 +117,14 @@ def plot_gather(shot: ShotRecord, **kwargs):
         plt.show()
 
 
-def animate_gather(shot: ShotRecord, **kwargs):
+def animate_gather(shot: TraceRecord, **kwargs):
     """Animate a shot gather on a 2D grid (time-domain).
 
     This function assumes the receiver group data can be reshaped into a 2D grid
     (e.g. for snapshot-like visualization in time).
 
     Args:
-       shot (ShotRecord): A ShotRecord object of type='TD'.
+       shot (TraceRecord): A TraceRecord object of type='TD'.
 
     Keyword Args:
        A (float):        Amplitude scaling for display (default 1).
@@ -206,14 +206,14 @@ def animate_gather(shot: ShotRecord, **kwargs):
     del (frames, fig)
 
 
-def plot_gather_diff(shot1: ShotRecord, shot2: ShotRecord, **kwargs):
+def plot_gather_diff(shot1: TraceRecord, shot2: TraceRecord, **kwargs):
     """Plot the difference between two time-domain shot gathers side-by-side.
 
     Shows the "baseline", "perturbed", and "difference" in a 3-panel figure.
 
     Args:
-       shot1 (ShotRecord):     First TD ShotRecord (baseline).
-       shot2 (ShotRecord):     Second TD ShotRecord (perturbed).
+       shot1 (TraceRecord):     First TD TraceRecord (baseline).
+       shot2 (TraceRecord):     Second TD TraceRecord (perturbed).
 
     Keyword Args:
        A (float):        Amplitude scaling for display (default 1.0).
@@ -377,7 +377,7 @@ def hilbert_envelope(x: np.ndarray, axis: int = 0):
     """Compute the Hilbert envelope of a signal."""
     try:
         from pyfftw.interfaces import numpy_fft as fft
-    except:
+    except ImportError:
         warn("pyfftw not found, using numpy for FFT (slow)")
         import numpy.fft as fft
 
@@ -553,9 +553,9 @@ def window_first_arrivals(
 
 
 def compute_nrms(
-    base: ShotRecord,
-    shot1: ShotRecord,
-    shot2: ShotRecord,
+    base: TraceRecord,
+    shot1: TraceRecord,
+    shot2: TraceRecord,
     threshold=0.2,
     window_length=0.01,
     **kwargs,
@@ -567,8 +567,8 @@ def compute_nrms(
     between baseline and monitor surveys.
 
     Args:
-       shot1 (ShotRecord):     First TD ShotRecord (baseline).
-       shot2 (ShotRecord):     Second TD ShotRecord (monitor/perturbed).
+       shot1 (TraceRecord):     First TD TraceRecord (baseline).
+       shot2 (TraceRecord):     Second TD TraceRecord (monitor/perturbed).
 
     Keyword Args:
        A (float):        Amplitude scaling for display (default 1.0).
@@ -642,7 +642,7 @@ def compute_nrms(
 
 
 def compute_timelag(
-    shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, window_length=0.01, **kwargs
+    shot1: TraceRecord, shot2: TraceRecord, threshold=0.1, window_length=0.01, **kwargs
 ):
     """Compute time lag between two time-domain shots.
 
@@ -651,8 +651,8 @@ def compute_timelag(
     between baseline and monitor surveys.
 
     Args:
-       shot1 (ShotRecord):     First TD ShotRecord (baseline).
-       shot2 (ShotRecord):     Second TD ShotRecord (monitor/perturbed).
+       shot1 (TraceRecord):     First TD TraceRecord (baseline).
+       shot2 (TraceRecord):     Second TD TraceRecord (monitor/perturbed).
 
     Keyword Args:
        A (float):        Amplitude scaling for display (default 1.0).
@@ -710,7 +710,7 @@ def compute_timelag(
     return lag
 
 
-def plot_timelag(shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, **kwargs):
+def plot_timelag(shot1: TraceRecord, shot2: TraceRecord, threshold=0.1, **kwargs):
     """Plot time lag analysis between two time-domain shots.
 
     Performs cross-correlation between corresponding traces in two shots to estimate
@@ -718,8 +718,8 @@ def plot_timelag(shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, **kwargs):
     between baseline and monitor surveys.
 
     Args:
-       shot1 (ShotRecord):     First TD ShotRecord (baseline).
-       shot2 (ShotRecord):     Second TD ShotRecord (monitor/perturbed).
+       shot1 (TraceRecord):     First TD TraceRecord (baseline).
+       shot2 (TraceRecord):     Second TD TraceRecord (monitor/perturbed).
 
     Keyword Args:
        A (float):        Amplitude scaling for display (default 1.0).
@@ -849,14 +849,14 @@ def plot_timelag(shot1: ShotRecord, shot2: ShotRecord, threshold=0.1, **kwargs):
 # --------------------------------------------
 # Frequency-domain Plot Functions
 # --------------------------------------------
-def plot_xf(shot: ShotRecord, **kwargs):
+def plot_xf(shot: TraceRecord, **kwargs):
     """Plot a frequency-domain shot gather.
 
     Creates a 2D plot showing amplitude vs frequency and receiver position.
     Useful for analyzing frequency content at different receiver locations.
 
     Args:
-       shot (ShotRecord):      A ShotRecord object of type='FD' containing frequency-domain data.
+       shot (TraceRecord):      A TraceRecord object of type='FD' containing frequency-domain data.
 
     Keyword Args:
        A (float):        Amplitude scaling for display (default 1).
@@ -911,7 +911,7 @@ def plot_xf(shot: ShotRecord, **kwargs):
         plt.show()
 
 
-def plot_cf(shot: ShotRecord, **kwargs):
+def plot_cf(shot: TraceRecord, **kwargs):
     """Create a CF (phase velocity vs. frequency) plot using a smooth-windowed Radon transform.
 
     For a frequency-domain shot, estimates wave speed distribution by testing different
@@ -919,7 +919,7 @@ def plot_cf(shot: ShotRecord, **kwargs):
     to identify dominant wave speeds at each frequency.
 
     Args:
-       shot (ShotRecord):      A frequency-domain ShotRecord object.
+       shot (TraceRecord):      A frequency-domain TraceRecord object.
 
     Keyword Args:
        A (float):        Amplitude scaling for color max (default 1).

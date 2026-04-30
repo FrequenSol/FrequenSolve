@@ -1,5 +1,6 @@
 from . import (
     config,
+    fwi,
     imaging,
     jobs,
     numerics_manager,
@@ -8,6 +9,7 @@ from . import (
     simulation,
 )
 from .config import *  # noqa
+from .fwi import *  # noqa
 from .imaging import *  # noqa
 from .jobs import *  # noqa
 from .numerics_manager import *  # noqa

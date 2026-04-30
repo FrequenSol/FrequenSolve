@@ -72,7 +72,7 @@ class Acquisition:
                     i += 1
                 group.name = f"{name}_{i}"
                 print_warn(
-                    f"Duplicate reciever group names detected. Renaming receiver group {name} to {group.name}"
+                    f"Duplicate receiver group names detected. Renaming receiver group {name} to {group.name}"
                 )
             names[group.name] = group.name
 
@@ -115,13 +115,13 @@ class Acquisition:
         domain: Optional[int] = None,
         frame: str = "physical",
     ):
-        """Add a group of recievers with common kind, frame, and direction.
+        """Add a group of sources with common kind, frame, and direction.
 
         Args:
-           kind (str):              Kind of the receiver group (e.g., "station", "geophone", "fiber").
-           coords (np.ndarray):     Coordinates of the receiver group.
-           direction (np.ndarray):  Direction of the receiver group.
-           frame (str):             Frame of the receiver group (e.g., "physical", "global").
+           kind (str):              Kind of the source group.
+           coords (np.ndarray):     Coordinates of the source group.
+           direction (np.ndarray):  Direction of the source group.
+           frame (str):             Frame of the source group (e.g., "physical", "global").
            domain (int):            Domain in which the source group should be evaluated
                                     (if a source is defined between multiple domains, responses
                                      will be evaluated in all and averaged by default, setting this
@@ -178,7 +178,7 @@ class Acquisition:
         domain: Optional[int] = None,
         **kwargs,
     ):
-        """Add a group of recievers with common kind, frame, and direction.
+        """Add a group of receivers with common device, frame, and coordinates.
 
         Args:
            name (str):                Name of the receiver group.

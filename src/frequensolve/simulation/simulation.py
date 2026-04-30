@@ -285,6 +285,61 @@ class SeismicSimulation(BaseSimulation):
         sim_copy._set_path(self.project_path, Path("simulations") / name)
         return sim_copy
 
+    def fwi(
+        self,
+        observed,
+        frequencies=None,
+        parameters=None,
+        grid=None,
+        site=None,
+        **kwargs,
+    ):
+        """Create an elastic FWI problem bound to this simulation.
+
+        The returned object exposes PyLops-compatible Jacobian and adjoint
+        operators. The adjoint is the inverse-problem transpose, not a true
+        inverse solve.
+        """
+
+        from frequensolve.simulation.fwi import FWIProblem
+
+        return FWIProblem(
+            simulation=self,
+            observed=observed,
+            frequencies=frequencies,
+            parameters=parameters,
+            grid=grid,
+            site=site,
+            **kwargs,
+        )
+
+    def imaging(
+        self,
+        observed,
+        frequencies=None,
+        parameters=None,
+        grid=None,
+        fields=None,
+        condition=None,
+        images=None,
+        **kwargs,
+    ):
+        """Create an imaging job using natural parameter/field specifications."""
+
+        from frequensolve.simulation.fwi import build_imaging_job
+
+        return build_imaging_job(
+            self,
+            observed=observed,
+            frequencies=frequencies,
+            parameters=parameters,
+            grid=grid,
+            fields=fields,
+            condition=condition,
+            images=images,
+            **kwargs,
+        )
+
     @property
     def kwargs(self) -> Dict[str, Any]:
         return self.extra

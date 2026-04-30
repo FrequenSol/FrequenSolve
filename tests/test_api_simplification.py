@@ -14,7 +14,7 @@ from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import Property, prop
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
-from frequensolve.seismic.record_database import RecordDatabase
+from frequensolve.seismic.record_database import TraceStore
 from frequensolve.seismic.sparse_survey import SparseSurvey
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import FrequencyDomainJob
@@ -571,7 +571,7 @@ def test_job_trace_files_use_new_names(tmp_path):
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
     job.save()
 
-    assert job.records["files"] == [
+    assert job.traces["files"] == [
         str(tmp_path / "jobs/simple/freq/results/traces/traces_1.h5"),
         str(tmp_path / "jobs/simple/freq/results/traces/traces_2.h5"),
     ]
@@ -645,7 +645,7 @@ def test_trace_dataset_combines_jobs_by_frequency_and_deduplicates_overlap(tmp_p
     low.save()
     high.save()
     for job in [low, high]:
-        for file in job.records["files"]:
+        for file in job.traces["files"]:
             path = Path(file)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
@@ -661,12 +661,12 @@ def test_trace_dataset_combines_jobs_by_frequency_and_deduplicates_overlap(tmp_p
     ]
 
 
-def test_record_database_uses_dataset_backed_survey_trace_tables(tmp_path):
-    records = []
+def test_trace_store_uses_dataset_backed_survey_trace_tables(tmp_path):
+    trace_files = []
     string_dtype = h5py.string_dtype(encoding="utf-8")
     for idx, freq in enumerate([10.0, 20.0], start=1):
         file = tmp_path / f"traces_{idx}.h5"
-        records.append(str(file))
+        trace_files.append(str(file))
         with h5py.File(file, "w") as h5:
             h5.create_dataset("frequency", data=freq)
             dset = h5.create_dataset(
@@ -692,14 +692,14 @@ def test_record_database_uses_dataset_backed_survey_trace_tables(tmp_path):
                 data=np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64),
             )
 
-    db = RecordDatabase(
+    db = TraceStore(
         metadata={
             "groups": ["surface"],
             "df": 10.0,
             "f_max": 20.0,
             "f_map": {1: 10.0, 2: 20.0},
         },
-        records=records,
+        files=trace_files,
     )
     db.consolidate_h5()
 

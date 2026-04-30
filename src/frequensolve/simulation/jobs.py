@@ -104,7 +104,7 @@ class SimulationJob(ABC):
 
     def expected_trace_files(self) -> List[Path]:
         try:
-            return [Path(file) for file in self.records["files"]]
+            return [Path(file) for file in self.traces["files"]]
         except Exception:
             return []
 
@@ -321,13 +321,13 @@ class SimulationJob(ABC):
         return len(self.f_list)
 
     @property
-    def records(self):
-        """Lists records that should be produced by a job.
+    def trace_manifest(self):
+        """Lists trace files that should be produced by a job.
 
         Returns:
             dict: Dictionary containing:
-                - datasets: Dictionary of datasets
                 - frequencies: List of frequencies
+                - files: Trace HDF5 files
                 - simulation: Path to simulation file
         """
 
@@ -335,20 +335,25 @@ class SimulationJob(ABC):
 
         # For now we have to get entire files (with all sources, etc.)
         path = output["path"]
-        records = {
+        traces = {
             "groups": output["groups"],
             "frequencies": {},
             "simulation": self.simulation._file,
         }
-        records["groups"] = output["groups"]
-        records["files"] = []
+        traces["groups"] = output["groups"]
+        traces["files"] = []
         for i, freq in enumerate(output["frequencies"]):
             ifreq = i + 1
             file = os.path.join(path, f"traces_{ifreq}.h5")
-            records["files"].append(file)
-            records["frequencies"][ifreq] = freq
+            traces["files"].append(file)
+            traces["frequencies"][ifreq] = freq
 
-        return records
+        return traces
+
+    @property
+    def records(self):
+        """Compatibility alias for ``trace_manifest``."""
+        return self.trace_manifest
 
     @property
     def paraview_outputs(self) -> dict:
@@ -416,7 +421,7 @@ class SimulationJob(ABC):
     @property
     def traces(self):
         """Preferred name for receiver trace outputs."""
-        return self.records
+        return self.trace_manifest
 
     @property
     def wavefield_outputs(self) -> dict:

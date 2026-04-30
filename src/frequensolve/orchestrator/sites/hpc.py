@@ -897,7 +897,7 @@ class SlurmSite(BaseSite):
                 db_map[j.name] = db
 
             except Exception as e:
-                logger.exception("Error downloading records: %s", str(e))
+                logger.exception("Error downloading traces: %s", str(e))
                 raise
 
         if single:
@@ -1040,18 +1040,18 @@ class SlurmSite(BaseSite):
             return result[jobs[0].name]
         return result
 
-    def download_record_files(self, records: dict, project_dir: Union[str, Path]):
-        """Download records from the remote site.
+    def download_trace_files(self, traces: dict, project_dir: Union[str, Path]):
+        """Download trace files from the remote site.
 
         Args:
-            records: A dictionary of records to get.
-            project_dir: The directory to download the records to.
+            traces: A dictionary of trace files to get.
+            project_dir: The directory to download the traces to.
         """
         project_dir = Path(project_dir)
-        files = records["datasets"].keys()
+        files = traces["datasets"].keys()
         try:
             # Create temporary directory name for the payload
-            payload_name = f"records_{int(time.time())}"
+            payload_name = f"traces_{int(time.time())}"
             remote_payload = self.work_dir / f"{payload_name}.tar.gz"
             local_payload = project_dir / f"{payload_name}.tar.gz"
 
@@ -1072,11 +1072,15 @@ class SlurmSite(BaseSite):
 
             local_payload.unlink()
             self.run_login(f"rm {remote_payload}")
-            return records
+            return traces
 
         except Exception as e:
-            logger.exception("Error downloading records: %s", str(e))
+            logger.exception("Error downloading traces: %s", str(e))
             raise
+
+    def download_record_files(self, records: dict, project_dir: Union[str, Path]):
+        """Compatibility alias for ``download_trace_files``."""
+        return self.download_trace_files(records, project_dir)
 
     def get(
         self,
@@ -1664,7 +1668,7 @@ class SlurmSite(BaseSite):
                     if line:
                         print(line, flush=True)
                     if "Sweep Complete" in line:
-                        future.set_result(job.records)
+                        future.set_result(job.traces)
                         logger.info("Sweep job completed successfully")
                         if interactive:
                             if isinstance(interactive, subprocess.Popen):

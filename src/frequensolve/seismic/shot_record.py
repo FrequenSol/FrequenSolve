@@ -1,6 +1,6 @@
 import json
-import os
 import warnings
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -15,21 +15,23 @@ try:
     pyfftw.interfaces.cache.enable()
     fft = pyfftw.interfaces.numpy_fft
     pyfftw.config.NUM_THREADS = 4
-except:
+except ImportError:
     warnings.warn("pyfftw not found, using numpy for FFT (slow)")
     import numpy.fft as fft
 
 __all__ = [
+    "TraceRecord",
     "ShotRecord",
     "array_to_segy",
 ]
 
 
-class ShotRecord(DataArray):
-    """Container for storing a shot record, including source, receiver info, and field data.
+class TraceRecord(DataArray):
+    """Container for one trace gather, including source/receiver metadata and field data.
 
-    A ShotRecord may represent frequency-domain (FD) or time-domain (TD) data, along with the
-    sampling info. It is aware of the source, receiver configuration, and raw data arrays.
+    A TraceRecord may represent frequency-domain (FD) or time-domain (TD) data,
+    along with the sampling info. It is aware of the source, receiver
+    configuration, and raw data arrays.
 
     Attributes:
        type (str): "FD" or "TD" indicating frequency- or time-domain data.
@@ -50,9 +52,9 @@ class ShotRecord(DataArray):
     )
 
     @classmethod
-    def _from_dataarray(cls, da: DataArray, attrs: dict | None = None) -> "ShotRecord":
+    def _from_dataarray(cls, da: DataArray, attrs: dict | None = None) -> "TraceRecord":
         """
-        Rebuild a ShotRecord from an arbitrary DataArray.
+        Rebuild a TraceRecord from an arbitrary DataArray.
         """
         out = cls(
             data=da.data,
@@ -68,15 +70,15 @@ class ShotRecord(DataArray):
 
     def _wrap_result(self, result: Any) -> Any:
         """
-        Convert DataArray results back into ShotRecord and ensure metadata is preserved.
+        Convert DataArray results back into TraceRecord and preserve metadata.
         Leave scalars / Dataset / other types untouched.
         """
-        if isinstance(result, DataArray) and not isinstance(result, ShotRecord):
+        if isinstance(result, DataArray) and not isinstance(result, TraceRecord):
             merged_attrs = dict(self.attrs)
             merged_attrs.update(result.attrs)
             return self._from_dataarray(result, attrs=merged_attrs)
 
-        if isinstance(result, ShotRecord):
+        if isinstance(result, TraceRecord):
             merged_attrs = dict(self.attrs)
             merged_attrs.update(result.attrs)
             result.attrs = merged_attrs
@@ -92,9 +94,9 @@ class ShotRecord(DataArray):
         with set_options(keep_attrs=True):
             result = super()._binary_op(other, f, reflexive=reflexive)
 
-        if isinstance(result, DataArray) and not isinstance(result, ShotRecord):
+        if isinstance(result, DataArray) and not isinstance(result, TraceRecord):
             result = self._from_dataarray(result, attrs=self._preserved_attrs())
-        elif isinstance(result, ShotRecord):
+        elif isinstance(result, TraceRecord):
             result.attrs.update(self._preserved_attrs())
 
         return result
@@ -125,18 +127,22 @@ class ShotRecord(DataArray):
         with open(self.attrs["simulation"], "r") as f:
             sim = json.load(f)
 
-        cwd = os.getcwd()
-        os.chdir(self.attrs["project_path"])
-        try:
-            group = self.attrs["receiver_group"]
-            for rgroup in sim["Acquisition"]["receiver_groups"]:
-                if rgroup["name"] == group:
-                    break
-            else:
-                raise ValueError(f"Receiver group {group} not found in simulation.")
-            return ReceiverGroup.from_dict(rgroup)
-        finally:
-            os.chdir(cwd)
+        group = self.attrs["receiver_group"]
+        for rgroup in sim["Acquisition"]["receiver_groups"]:
+            if rgroup["name"] == group:
+                break
+        else:
+            raise ValueError(f"Receiver group {group} not found in simulation.")
+
+        coordinates = rgroup.get("coordinates")
+        if (
+            isinstance(coordinates, dict)
+            and coordinates.get("_type") == "CoordsFromFile"
+        ):
+            file = Path(coordinates["file"])
+            if not file.is_absolute():
+                coordinates["file"] = str(Path(self.attrs["project_path"]) / file)
+        return ReceiverGroup.from_dict(rgroup)
 
     def to_segy(self, file: str, units_in: str = "km", units_out: str = "m", **kwargs):
         """
@@ -276,7 +282,7 @@ class ShotRecord(DataArray):
         if preview:
             with segyio.open(file, mode="r", strict=False) as sgy:
                 print(f"\nSEGY File Contents:")
-                print(f"File size: {os.path.getsize(file) / 1024:.1f} KB")
+                print(f"File size: {Path(file).stat().st_size / 1024:.1f} KB")
                 print(f"Number of traces: {sgy.tracecount}")
                 print(f"Samples per trace: {sgy.samples}")
                 print(f"Sample interval: {sgy.bin[segyio.BinField.Interval]} μs")
@@ -300,6 +306,10 @@ class ShotRecord(DataArray):
                 print(
                     f"Data min/max: {sgy.trace[0].min():.2e} / {sgy.trace[0].max():.2e}"
                 )
+
+
+# Backward-compatible name. New code should use TraceRecord.
+ShotRecord = TraceRecord
 
 
 # --------------------------------------------

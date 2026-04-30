@@ -514,7 +514,7 @@ class LocalSite(BaseSite):
                 try:
                     self._task_stream = get_task_stream(self._dask_client, plot=False)
                     logger.info("Task stream initialized successfully")
-                except Exception:
+                except Exception as e:
                     self._task_stream = None
                     logger.warning(f"Task stream failed to initialize: {str(e)}")
 
@@ -528,7 +528,7 @@ class LocalSite(BaseSite):
         if hasattr(self, "_task_stream"):
             try:
                 self._task_stream.stop()
-            except:
+            except Exception:
                 pass
         if self._dask_client is not None:
             self._dask_client.shutdown()

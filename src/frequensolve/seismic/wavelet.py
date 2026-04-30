@@ -16,7 +16,7 @@ try:
     pyfftw.interfaces.cache.enable()
     fft = pyfftw.interfaces.numpy_fft
     pyfftw.config.NUM_THREADS = 4
-except:
+except ImportError:
     warn("pyfftw not found, using numpy for FFT (slow)")
     import numpy.fft as fft
 

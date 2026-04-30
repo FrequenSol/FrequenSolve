@@ -17,7 +17,7 @@ __all__ = ["Credentials", "CloudCredentials"]
 # ----------------------------------
 @dataclass
 class Credentials:
-    """Credentials for Frontera HPC."""
+    """Credentials for SSH-backed HPC sites."""
 
     user_env: str
     pw_env: str

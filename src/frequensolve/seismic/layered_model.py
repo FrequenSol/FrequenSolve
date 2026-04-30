@@ -15,7 +15,6 @@ from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import Property
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.util.class_registry import register_class
-from frequensolve.util.data_file import save_data_if_new
 from frequensolve.util.mixins import merge_extra
 from frequensolve.util.named_list import NamedList
 

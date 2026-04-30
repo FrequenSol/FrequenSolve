@@ -38,11 +38,11 @@ def _seconds_to_hms(seconds: int) -> str:
 
 
 # ----------------------------------
-# Frontera queue and machine info
+# Stampede3 queue and machine info
 # ----------------------------------
 @dataclass(frozen=True)
 class _BaseQueue:
-    """Base class for Frontera queues."""
+    """Base class for Stampede3 queues."""
 
     _name: str
     _max_duration: str
@@ -52,7 +52,7 @@ class _BaseQueue:
 
 @dataclass(frozen=True)
 class _SPRQueue(_BaseQueue):
-    """Frontera Large queue."""
+    """Stampede3 SPR queue."""
 
     _name: str = "spr"
     _max_duration: str = "2-00:00:00"
@@ -62,7 +62,7 @@ class _SPRQueue(_BaseQueue):
 
 @dataclass(frozen=True)
 class _SKXQueue(_BaseQueue):
-    """Frontera Normal queue."""
+    """Stampede3 SKX queue."""
 
     _name: str = "skx"
     _max_duration: str = "2-00:00:00"
@@ -72,7 +72,7 @@ class _SKXQueue(_BaseQueue):
 
 @dataclass(frozen=True)
 class _ICXQueue(_BaseQueue):
-    """Frontera Normal queue."""
+    """Stampede3 ICX queue."""
 
     _name: str = "icx"
     _max_duration: str = "2-00:00:00"
@@ -82,7 +82,7 @@ class _ICXQueue(_BaseQueue):
 
 @dataclass(frozen=True)
 class _DebugQueue(_BaseQueue):
-    """Frontera Debug queue."""
+    """Stampede3 development queue."""
 
     _name: str = "skx-dev"
     _max_duration: str = "02:00:00"
@@ -131,7 +131,7 @@ class _Stampede3ICXConfig(BaseSiteConfig):
 
 @dataclass
 class Stampede3Config:
-    """Combines immutable base configuration with queue info for Frontera."""
+    """Combines immutable base configuration with queue info for Stampede3."""
 
     _queue: _BaseQueue
     _base_config: BaseSiteConfig

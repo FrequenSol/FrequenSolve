@@ -764,10 +764,10 @@ class AWSSite(BaseSite):
 
         for job in jobs:
             try:
-                # files = job.records["datasets"].keys()
+                # files = job.traces["datasets"].keys()
 
                 # # Create temporary directory name for the payload
-                # payload_name = f"records_{int(time.time())}"
+                # payload_name = f"traces_{int(time.time())}"
                 # remote_payload = self.work_dir / f"{payload_name}.tar.gz"
                 # local_payload = path / f"{payload_name}.tar.gz"
 
@@ -816,7 +816,7 @@ class AWSSite(BaseSite):
                 db_map[job.name] = db
 
             except Exception as e:
-                logger.exception("Error downloading records: %s", str(e))
+                logger.exception("Error downloading traces: %s", str(e))
                 raise
 
         if len(db_map) == 1:

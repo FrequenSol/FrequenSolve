@@ -95,8 +95,14 @@ class MisfitGroup:
     simulated: Union[str, Path] = ""
 
     def __post_init__(self):
-        self.observed = Path(self.observed) / f"receivers"
-        self.simulated = Path(self.simulated) / f"receivers"
+        self.observed = self._with_group(self.observed)
+        self.simulated = self._with_group(self.simulated)
+
+    def _with_group(self, path: Union[str, Path]) -> Path:
+        path = Path(path)
+        if self.name and path.name != self.name:
+            return path / self.name
+        return path
 
     def __dict__(self) -> Dict:
         return {
@@ -161,8 +167,9 @@ class ImagingJob(SimulationJob):
         simulation: SeismicSimulation,
         data_path: Union[str, Path],
         f_list: List[float],
-        resolution: List[int],
-        images: dict = field(default_factory=dict),
+        resolution: Optional[List[int]] = None,
+        grid: Optional[CartesianGrid] = None,
+        images: Optional[dict] = None,
         weights: Optional[List[float]] = None,
         wavelet: Optional[Wavelet] = None,
         misfit_norm: Literal["L2"] = "L2",
@@ -176,6 +183,8 @@ class ImagingJob(SimulationJob):
         max_versions: int = 5,
         **kwargs,
     ) -> None:
+        if "misfit_type" in kwargs:
+            misfit_norm = kwargs.pop("misfit_type")
         simulation.save()
         super().__init__(
             name=name,
@@ -211,6 +220,8 @@ class ImagingJob(SimulationJob):
             for f in self.f_list:
                 idx = abs(frequencies - f).argmin()
                 self.weights.append(spectrum[idx])
+        elif weights is not None:
+            self.weights = np.asarray(weights, dtype=float).tolist()
         else:
             self.weights = None
 
@@ -225,7 +236,7 @@ class ImagingJob(SimulationJob):
             }
 
         self.kwargs = kwargs
-        self.images = images
+        self.images = dict(images or {})
         self.keep_forward = keep_forward
         self.keep_adjoint = keep_adjoint
         self.keep_unstacked = keep_unstacked
@@ -240,8 +251,12 @@ class ImagingJob(SimulationJob):
                 )
             )
 
+        if grid is not None:
+            self.grid = grid
         # TODO: this will only work for a layered model right now
-        if simulation.model.dimension == 2:
+        elif simulation.model.dimension == 2:
+            if resolution is None:
+                raise ValueError("resolution is required when grid is not provided")
             x_limits = simulation.model.x_limits
             z_limits = simulation.model.z_limits
             x0 = [x_limits[0], z_limits[0]]
@@ -249,7 +264,10 @@ class ImagingJob(SimulationJob):
             assert (
                 len(resolution) == 2
             ), "For 2D models, resolution must be a length 2 array"
+            self.grid = CartesianGrid(x0=x0, x1=x1, n=resolution)
         elif simulation.model.dimension == 3:
+            if resolution is None:
+                raise ValueError("resolution is required when grid is not provided")
             x_limits = simulation.model.x_limits
             y_limits = simulation.model.y_limits
             z_limits = simulation.model.z_limits
@@ -258,10 +276,9 @@ class ImagingJob(SimulationJob):
             assert (
                 len(resolution) == 3
             ), "For 3D models, resolution must be a length 3 array"
+            self.grid = CartesianGrid(x0=x0, x1=x1, n=resolution)
         else:
             raise ValueError(f"Unknown model dimension: {simulation.model.dimension}")
-
-        self.grid = CartesianGrid(x0=x0, x1=x1, n=resolution)
         self.reassemble_adjoint = reassemble_adjoint
 
     def _remote_image_path(self, work_dir: Union[Path, str]):
@@ -308,22 +325,33 @@ class ImagingJob(SimulationJob):
         }
         return {
             **super().__dict__(),
-            "Imaging": imaging,
+            "Image": imaging,
         }
 
     @classmethod
     def from_dict(cls, data: Dict) -> "ImagingJob":
-        image_data = data.pop("Image")
+        image_data = data.pop("Image", data.pop("Imaging", None))
+        if image_data is None:
+            raise KeyError("ImagingJob data must include an 'Image' section")
         grid = image_data.pop("grid", None)
-        resolution = grid.pop("n", None)
-        images = image_data.pop("images", None)
-        images = {image["name"]: image["IC"] for image in images}
+        grid_obj = CartesianGrid.from_dict(grid) if grid is not None else None
+        resolution = list(grid_obj.n) if grid_obj is not None else None
+        images = image_data.pop("images", None) or []
+        images = {
+            image["name"]: (
+                f"FWI:{image['property']}"
+                if image.get("IC") == "FWI" and image.get("property") is not None
+                else image["IC"]
+            )
+            for image in images
+        }
         job = cls(
             name=data.pop("name", None),
             simulation=SeismicSimulation.load(data.pop("simulation")),
             f_list=data.pop("f_list", None),
             data_path=image_data.pop("data_path", None),
             resolution=resolution,
+            grid=grid_obj,
             images=images,
             keep_forward=image_data.pop("keep_forward", None),
             keep_adjoint=image_data.pop("keep_adjoint", None),
@@ -350,7 +378,7 @@ def extract_frequencies_for_job(job: ImagingJob, td):
         pyfftw.interfaces.cache.enable()
         fft = pyfftw.interfaces.numpy_fft
         pyfftw.config.NUM_THREADS = 4
-    except:
+    except ImportError:
         warnings.warn("pyfftw not found, using numpy for FFT (slow)")
         import numpy.fft as fft
 

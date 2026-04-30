@@ -4,6 +4,7 @@ Current support for JSON and YAML.
 """
 
 import json
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from inspect import Signature
@@ -43,10 +44,10 @@ class Serializer(ABC):
             raise KeyError(f"Key mismatch: {observed}, expected {expected}")
 
         if len(observed) != len(expected):
-            print(f"Ignoring extra key: {observed - expected}")
-            payload = {key: payload[key] for key in expected}
+            warnings.warn(f"Ignoring extra key(s): {observed - expected}")
+            data = {key: data[key] for key in expected}
 
-        return payload
+        return data
 
 
 def get_serializer(stream_format: str) -> Callable:

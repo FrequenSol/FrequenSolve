@@ -1,24 +1,23 @@
-"""
-Not used yet; this will complement survey.py for reading and visualizing
-data when finished.
+"""Internal HDF5 trace-store reader.
 
-Right now this is just a hodge-podge of code that was displaced in
-the refactoring process.
+``TraceStore`` backs the public ``TraceDataset`` facade. ``RecordDatabase`` is
+kept as a compatibility alias for older user code.
 """
 
-import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import h5py
 import numpy as np
 from xarray import DataArray
 
-from frequensolve.seismic.shot_record import ShotRecord
+from frequensolve.seismic.trace_record import TraceRecord
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.sampling import UniformSweepSampling
+
+__all__ = ["TraceStore", "RecordDatabase"]
 
 try:
     import pyfftw
@@ -26,7 +25,7 @@ try:
     pyfftw.interfaces.cache.enable()
     fft = pyfftw.interfaces.numpy_fft
     pyfftw.config.NUM_THREADS = 4
-except:
+except ImportError:
     warnings.warn("pyfftw not found, using numpy for FFT (slow)")
     import numpy.fft as fft
 
@@ -51,6 +50,13 @@ def _decode_h5_strings(values):
     return values
 
 
+def _decode_dim_list(values) -> list[str]:
+    return [
+        item.decode("utf-8", "ignore") if isinstance(item, bytes) else str(item)
+        for item in values
+    ]
+
+
 def _unique_preserve_order(values):
     out = []
     seen = set()
@@ -63,33 +69,62 @@ def _unique_preserve_order(values):
     return np.asarray(out)
 
 
-@dataclass
-class RecordDatabase:
+def _as_file_list(files: Iterable[Union[str, Path]]) -> List[Union[str, Path]]:
+    if isinstance(files, (str, Path)):
+        return [files]
+    return list(files)
+
+
+@dataclass(init=False)
+class TraceStore:
     metadata: Dict[str, Any]
-    records: List[str]
+    files: List[str]
     _upscale: int
     _consolidated: Optional[Path] = None
 
-    def __init__(self, metadata: Dict[str, Any], records: List[str], upscale: int = 1):
+    def __init__(
+        self,
+        metadata: Dict[str, Any],
+        files: Optional[Iterable[Union[str, Path]]] = None,
+        *,
+        records: Optional[Iterable[Union[str, Path]]] = None,
+        upscale: int = 1,
+    ):
+        record_files = _as_file_list(records) if records is not None else None
+        if files is None:
+            files = record_files
+        else:
+            files = _as_file_list(files)
+        if record_files is not None and files != record_files:
+            raise ValueError("files and legacy records arguments do not match")
+        if files is None:
+            raise TypeError("TraceStore requires trace files")
         self.metadata = metadata
-        self.records = records
+        self.files = [str(file) for file in files]
         self.upscale = upscale
+        self._consolidated = None
+
+    @property
+    def records(self) -> List[str]:
+        """Compatibility alias for ``files``."""
+        return self.files
+
+    @records.setter
+    def records(self, value: Iterable[Union[str, Path]]) -> None:
+        self.files = [str(file) for file in value]
 
     @classmethod
     def from_job(cls, job, upscale: int = 1):
-        """Create a RecordDatabase from a dictionary of results.
+        """Create a TraceStore from a simulation job.
 
         Args:
-            results: A dictionary of results from a Frontera job.
-            proj_path: The path to the project directory.
-
-        Returns:
-            A RecordDatabase object.
+            job: A SimulationJob-like object.
+            upscale: Time-domain upscale factor.
         """
-        records = job.records
+        traces = job.traces
         proj_path = Path(job.project_path).resolve()
 
-        f_map = records["frequencies"]
+        f_map = dict(traces["frequencies"])
         for key, value in f_map.items():
             f_map[key] = value
             if isinstance(value, complex):
@@ -103,15 +138,14 @@ class RecordDatabase:
 
         meta = {
             "project": proj_path,
-            "simulation": proj_path / records["simulation"],
-            "groups": records["groups"],
+            "simulation": proj_path / traces["simulation"],
+            "groups": traces["groups"],
             "df": df,
             "f_max": f_max,
             "f_map": f_map,
         }
 
-        files = records["files"]
-        db = cls(metadata=meta, records=files, upscale=upscale)
+        db = cls(metadata=meta, files=traces["files"], upscale=upscale)
         db.consolidate_h5()
         return db
 
@@ -124,7 +158,7 @@ class RecordDatabase:
         self._upscale = upscale
 
     def times(self, upscale: Optional[int] = None) -> np.ndarray:
-        """Returns the times of the records."""
+        """Returns the trace sample times."""
 
         upscale = self.upscale if upscale is None else upscale
         sampling = UniformSweepSampling(
@@ -136,7 +170,7 @@ class RecordDatabase:
         return sampling.T_list
 
     def __len__(self) -> int:
-        """Returns the number of records in the database."""
+        """Returns the number of traces in the store."""
         size = 0
         for group in self.groups:
             recv = self.receivers(group)
@@ -147,6 +181,7 @@ class RecordDatabase:
 
     @property
     def groups(self) -> list[str]:
+        self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             return [
                 name
@@ -156,11 +191,12 @@ class RecordDatabase:
             ]
 
     def dims(self, group) -> list[str]:
-        f = h5py.File(self._consolidated, "r")
-        dims = f[group].attrs["dims"]
-        return dims
+        self._ensure_consolidated()
+        with h5py.File(self._consolidated, "r") as f:
+            return _decode_dim_list(f[group].attrs["dims"])
 
     def components(self, group) -> list[str]:
+        self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             path = f"survey/receiver_groups/{group}/traces/component_name"
             if path in f:
@@ -170,6 +206,7 @@ class RecordDatabase:
             return np.arange(1, f[group].shape[-2] + 1)
 
     def shots(self, group) -> list[str]:
+        self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             path = f"survey/receiver_groups/{group}/traces/source_id"
             if path in f:
@@ -179,6 +216,7 @@ class RecordDatabase:
             return np.arange(1, f[group].shape[-1] + 1)
 
     def frequencies(self, group) -> list[str]:
+        self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             if "frequency" in f:
                 return f["frequency"][()]
@@ -187,13 +225,14 @@ class RecordDatabase:
             return np.array(list(self.metadata["f_map"].values()))
 
     def receivers(self, group) -> list[str]:
+        self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             path = f"survey/receiver_groups/{group}/traces/receiver_id"
             if path in f:
                 return _unique_preserve_order(f[path][()])
             if "receiver" in f[group].attrs:
                 return f[group].attrs["receiver"]
-            dims = f[group].attrs["dims"][::-1]
+            dims = np.asarray(_decode_dim_list(f[group].attrs["dims"])[::-1])
             ind = np.where(dims == "receiver")[0][0]
             return np.arange(1, f[group].shape[ind] + 1)
 
@@ -252,6 +291,24 @@ class RecordDatabase:
     def __str__(self) -> str:
         return self.summary
 
+    def _ensure_consolidated(self) -> None:
+        if self._consolidated is None:
+            self.consolidate_h5()
+
+    @staticmethod
+    def _consolidated_path(first_record: Union[str, Path]) -> Path:
+        first_record = Path(first_record)
+        stem = first_record.stem
+        prefix = stem.rsplit("_", 1)[0] if "_" in stem else stem
+        return first_record.with_name(f"{prefix}_consolidated.h5")
+
+    @staticmethod
+    def _read_trace_frequency(file: Path) -> float:
+        with h5py.File(file, "r") as h5:
+            if "frequency" not in h5:
+                raise KeyError(f"'frequency' dataset not found in {file}")
+            return float(h5["frequency"][()])
+
     def consolidate_h5(self):
         """
         Creates a virtual HDF5 dataset that combines datasets from each frequency file
@@ -259,51 +316,54 @@ class RecordDatabase:
         loading all data into memory.
         """
 
-        file = self.records[0]
-        base = "_".join(file.split("_")[:-1])
-        new_file = f"{base}_consolidated.h5"
-        if os.path.exists(new_file):
-            os.remove(new_file)
+        valid_records = []
         freqs = []
+        for record in [Path(file) for file in self.files]:
+            if not record.exists():
+                warnings.warn(
+                    f"Trace file does not exist and will be skipped: {record}"
+                )
+                continue
+            try:
+                freqs.append(self._read_trace_frequency(record))
+                valid_records.append(record)
+            except Exception as exc:
+                warnings.warn(
+                    f"Trace file could not be read and will be skipped: {record}: {exc}"
+                )
+
+        if not valid_records:
+            raise FileNotFoundError("No readable trace files were found")
+
+        new_file = self._consolidated_path(valid_records[0])
+        if new_file.exists():
+            new_file.unlink()
 
         with h5py.File(new_file, "w") as nf:
-            for i, file in enumerate(self.records):
-                try:
-                    with h5py.File(file, "r") as f:
-                        freq = f["frequency"][()]
-                    freqs.append(freq)
-                except Exception as e:
-                    print(f"Error reading {file}: {e}")
-                    continue
-
-            if freqs:
-                nf.create_dataset("frequency", data=np.asarray(freqs, dtype=float))
+            nf.create_dataset("frequency", data=np.asarray(freqs, dtype=float))
             string_dtype = h5py.string_dtype(encoding="utf-8")
             nf.create_dataset(
                 "source_file",
                 data=np.asarray(
-                    [str(file) for file in self.records], dtype=string_dtype
+                    [str(file) for file in valid_records], dtype=string_dtype
                 ),
             )
 
-            for file in self.records:
-                if not os.path.exists(file):
-                    continue
+            for file in valid_records:
                 with h5py.File(file, "r") as f:
                     if "survey" in f:
                         f.copy("survey", nf)
                         break
 
             for group in self.metadata["groups"]:
-                with h5py.File(self.records[0], "r") as f:
+                with h5py.File(valid_records[0], "r") as f:
                     if group not in f:
                         raise KeyError(
-                            f"Group '{group}' not found in HDF5 {self.records[0]}"
+                            f"Group '{group}' not found in HDF5 {valid_records[0]}"
                         )
                     dset_shape = f[group].shape
                     dset_dtype = f[group].dtype
-                    dims = f[group].attrs["dims"]
-                    dims = [d for d in dims]
+                    dims = _decode_dim_list(f[group].attrs["dims"])
                     coords = {}
                     for dim in dims:
                         if dim in f[group].attrs:
@@ -314,10 +374,10 @@ class RecordDatabase:
 
                 # Create virtual layout for data
                 layout = h5py.VirtualLayout(
-                    shape=(len(self.records),) + dset_shape, dtype=dset_dtype
+                    shape=(len(valid_records),) + dset_shape, dtype=dset_dtype
                 )
-                for i, file in enumerate(self.records):
-                    vsource = h5py.VirtualSource(file, group, shape=dset_shape)
+                for i, file in enumerate(valid_records):
+                    vsource = h5py.VirtualSource(str(file), group, shape=dset_shape)
                     layout[i] = vsource
                 nf.create_virtual_dataset(group, layout)
 
@@ -331,12 +391,13 @@ class RecordDatabase:
                         dset.attrs[dim] = coord
         self._consolidated = Path(new_file)
 
-    def read_h5(self, group: str) -> ShotRecord:
+    def read_h5(self, group: str) -> TraceRecord:
         import dask.array as da
 
+        self._ensure_consolidated()
         f = h5py.File(self._consolidated, "r")
         dset = f[group]
-        dims = dset.attrs["dims"]
+        dims = _decode_dim_list(dset.attrs["dims"])
         coords = {}
         for dim in dims:
             if dim in dset.attrs:
@@ -352,7 +413,7 @@ class RecordDatabase:
 
         chunks = (dset.shape[0], 1, 1, *dset.shape[3:])
         data = da.from_array(dset, chunks=chunks)
-        fd = ShotRecord(data, dims=dims[::-1], coords=coords)
+        fd = TraceRecord(data, dims=dims[::-1], coords=coords)
         return fd
 
     def read_FD(
@@ -415,7 +476,7 @@ class RecordDatabase:
         upscale: int = 1,
         T_max: Optional[float] = None,
         **kwargs,
-    ) -> ShotRecord:
+    ) -> TraceRecord:
         sampling = UniformSweepSampling(
             f_min=0.0,
             f_max=self.metadata["f_max"],
@@ -435,7 +496,7 @@ class RecordDatabase:
             else:
                 coords[d] = sampling.T_list[:-1] - wavelet.center
 
-        td = ShotRecord(data=td, dims=dims, coords=coords)
+        td = TraceRecord(data=td, dims=dims, coords=coords)
         if T_max is not None:
             td = td.sel(time=slice(None, T_max))
 
@@ -495,7 +556,7 @@ class RecordDatabase:
         upscale: int = 1,
         T_max: Optional[float] = None,
         **kwargs,
-    ) -> ShotRecord:
+    ) -> TraceRecord:
         sampling = UniformSweepSampling(
             f_min=0.0,
             f_max=self.metadata["f_max"],
@@ -534,7 +595,7 @@ class RecordDatabase:
             else:
                 coords[d] = sampling.T_list[:-1] - wavelet.center
 
-        td = ShotRecord(data=td, dims=dims, coords=coords)
+        td = TraceRecord(data=td, dims=dims, coords=coords)
         if T_max is not None:
             td = td.sel(time=slice(None, T_max))
 
@@ -553,3 +614,6 @@ class RecordDatabase:
                 td.coords[d].attrs["units"] = "Hz"
                 td.coords[d].attrs["description"] = "Frequency"
         return td
+
+
+RecordDatabase = TraceStore

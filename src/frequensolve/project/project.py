@@ -1,19 +1,15 @@
-import asyncio
 import json
 import logging
-import os
 import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
-from warnings import warn
 
 from frequensolve.orchestrator.sites.aws import AWSSite
 from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.project.migrate_version import Version
 from frequensolve.project.workflows import BaseWorkflow
-from frequensolve.seismic.record_database import RecordDatabase
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
 from frequensolve.util.encoders import CustomJSONEncoder
 from frequensolve.util.named_list import NamedList
@@ -73,8 +69,15 @@ class Project:
         """Load project from file and check version."""
         self.path = Path(self.path).resolve()
         if self.load_if_exists:
-            if self.path.exists() and self.path.suffix == ".json":
-                self = Project.load(self.path)
+            project_file = (
+                self.path
+                if self.path.suffix == ".json"
+                else self.path / f"{self.name}.json"
+            )
+            if project_file.exists():
+                loaded = Project.load(project_file, auto_migrate=self.auto_migrate)
+                self.__dict__.update(loaded.__dict__)
+                return
 
         set_log_level(self.log_level)
 
@@ -243,13 +246,11 @@ class Project:
                 )
                 # project.check_version()
 
-                # Change directory to project path for loading files
-                current_dir = os.getcwd()
-                os.chdir(path)
-
                 # Load simulations
                 for sim_file in sim_files:
-                    sim_file = Path(path) / sim_file
+                    sim_file = Path(sim_file)
+                    if not sim_file.is_absolute():
+                        sim_file = path / sim_file
                     sim = SeismicSimulation.load(sim_file)
                     project.simulations.append(sim)
 
@@ -263,7 +264,6 @@ class Project:
                 #    extra = BaseProjectComponent.load(file)
                 #    project.extras[extra.name] = extra
 
-                os.chdir(current_dir)
                 project._set_path_deep()
                 return project
             else:
@@ -271,7 +271,7 @@ class Project:
         except Exception as e:
             raise ValueError(f"Failed to load project: {e}")
 
-    def save(self, file: Optional[Union[str, Path]] = None, **json_kwargs) -> str:
+    def save(self, file: Optional[Union[str, Path]] = None, **json_kwargs) -> Path:
         """Save project to JSON file."""
 
         self._set_path_deep()
@@ -382,4 +382,7 @@ class Project:
 
     def __del__(self):
         """Cleanup method called when project object is destroyed."""
-        self.terminate_jobs()
+        try:
+            self.terminate_jobs()
+        except Exception:
+            pass
