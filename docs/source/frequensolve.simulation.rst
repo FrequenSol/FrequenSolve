@@ -1,10 +1,10 @@
 Simulations
 ===========
 
-Output Manager
---------------
+Outputs
+-------
 
-.. automodule:: frequensolve.simulation.output_manager
+.. automodule:: frequensolve.simulation.outputs
    :members:
    :show-inheritance:
    :noindex:

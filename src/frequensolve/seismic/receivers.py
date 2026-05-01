@@ -23,6 +23,9 @@ from frequensolve.util.fields import canonical_field
 from frequensolve.util.mixins import ExtraFieldsMixin, TypeTaggedMixin, merge_extra
 
 __all__ = [
+    "CoordsArray",
+    "CoordsFromFile",
+    "CoordsGrid",
     "ReceiverComponent",
     "ReceiverGroup",
     "ReceiverCoords",
@@ -30,7 +33,6 @@ __all__ = [
     "ReceiverNodeArray",
     "ReceiverNode",
     "ReceiverFiber",
-    "ReceiverFiberOld",
     "ReceiverSampling",
 ]
 
@@ -165,32 +167,6 @@ class ReceiverFiber(ReceiverDevice):
 
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverFiber":
-        return cls(
-            name=data["name"],
-            components=[ReceiverComponent.from_fs(c) for c in data["components"]],
-            response=data.get("response"),
-            L_gauge=data["L_gauge"],
-            n_gauge=data["n_gauge"],
-            radius=data.get("radius"),
-            pitch=data.get("pitch"),
-        )
-
-
-@register_class
-@dataclass(kw_only=True)
-class ReceiverFiberOld(ReceiverFiber):
-    """Same as ReceiverFiber, but uses old API.
-
-    In particular, guages are centered on coords, with specified gauge length."""
-
-    def to_fs(self, ctx=None) -> dict:
-        return {
-            "_type": self.__class__.__name__,
-            **super().to_fs(ctx),
-        }
-
-    @classmethod
-    def from_fs(cls, data: dict) -> "ReceiverFiberOld":
         return cls(
             name=data["name"],
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
@@ -350,7 +326,9 @@ class CoordsFromFile(ReceiverCoords):
     ):
         if file is None and "path" in kwargs:
             file = kwargs.pop("path")
-        self.file = Path(file).resolve()
+        self.file = Path(file).expanduser()
+        if self.file.is_absolute():
+            self.file = self.file.resolve()
         self.format = format
         self.dset = dset
         self.units = units
@@ -372,6 +350,38 @@ class CoordsFromFile(ReceiverCoords):
             units=data.get("units"),
             system=data.get("system"),
         )
+
+    def _set_path(self, proj_path: Path, rel_path: Path):
+        proj_path = Path(proj_path).resolve()
+        rel_path = Path(rel_path)
+        file = Path(self.file).expanduser()
+
+        if not file.is_absolute():
+            file = proj_path / file
+        else:
+            simulation_path = rel_path.parent
+            expected = proj_path / simulation_path / f"{simulation_path.name}.h5"
+            is_simulation_store = (
+                file.name == expected.name
+                and file.parent.name == simulation_path.name
+                and file.parent.parent.name == "simulations"
+            )
+            if is_simulation_store and expected.exists():
+                file = expected
+
+        self.file = file
+        self._proj_path = proj_path
+        self._rel_path = rel_path
+
+    def _relative_file(self, ctx=None) -> Path:
+        project_path = getattr(ctx, "project_path", None) or self._proj_path
+        file = Path(self.file)
+        if project_path is None:
+            return file
+        try:
+            return file.resolve().relative_to(Path(project_path).resolve())
+        except Exception:
+            return file
 
     @property
     def size(self) -> int:
@@ -422,10 +432,7 @@ class CoordsFromFile(ReceiverCoords):
             raise NotImplementedError(f"Format {self.format} not implemented")
 
     def to_fs(self, ctx=None) -> Dict:
-        try:
-            rel_path = self.file.relative_to(self._proj_path)
-        except Exception:
-            rel_path = self.file
+        rel_path = self._relative_file(ctx)
 
         if self.format == "HDF5":
             if self.dset is None:
@@ -677,7 +684,7 @@ class ReceiverGroup(ExtraFieldsMixin):
         return self.coordinates.size
 
     # TODO: option to correct signature for device response
-    # TODO: method to define receviers
+    # TODO: method to define receivers
 
     def __init__(
         self,

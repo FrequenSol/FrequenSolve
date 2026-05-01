@@ -1,4 +1,3 @@
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple, Union
@@ -190,14 +189,7 @@ class ImagingJob(SimulationJob):
             workflow="RTM",
         )
 
-        # This is a simple way to ensure that trace paths are correct.
-        sim_file = simulation._file
-        with open(sim_file, "r") as f:
-            sim_data = json.load(f)
-        trace_output = sim_data["Outputs"].get("traces") or sim_data["Outputs"].get(
-            "receivers"
-        )
-        f_sim = self._result_path / trace_output["path"]
+        f_sim = self.trace_outputs.path
 
         self.data_path = Path(data_path)
         if not self.data_path.exists():

@@ -41,7 +41,7 @@ Here's a more complete example with a layered model:
 .. code-block:: python
 
    from frequensolve.project import Project
-   from frequensolve.seismic.layered_model import LayeredModel
+   from frequensolve.model import LayeredModel
    from frequensolve.simulation import SeismicSimulation
 
    # Create model

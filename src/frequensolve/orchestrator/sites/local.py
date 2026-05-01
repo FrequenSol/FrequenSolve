@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import signal
@@ -7,13 +8,24 @@ import subprocess
 import time
 import warnings
 from dataclasses import dataclass, field
-from logging import ERROR, INFO
+from logging import ERROR
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Union
 
-from dask import config as dask_config
-from dask.distributed import Client, Future, LocalCluster, wait
-from dotenv import load_dotenv
+from frequensolve._optional import optional_dependency_error
+
+try:
+    from dask import config as dask_config
+    from dask.distributed import Client, Future, LocalCluster, wait
+    from dotenv import load_dotenv
+except ModuleNotFoundError as exc:
+    raise optional_dependency_error(
+        "LocalSite",
+        extra="parallel",
+        dependencies=("dask", "distributed", "python-dotenv"),
+        error=exc,
+    ) from exc
+
 from numpy.typing import ArrayLike
 
 from frequensolve.orchestrator.config.local import LocalSiteConfig
@@ -27,10 +39,8 @@ from frequensolve.orchestrator.sites.base import (
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.imaging import ImageDatabase, ImagingJob
 from frequensolve.simulation.jobs import SimulationJob
-from frequensolve.util.setup_logger import init_logger
 
-logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/local.log")
-logger.setLevel(INFO)
+logger = logging.getLogger(__name__)
 
 __all__ = ["LocalSite"]
 
@@ -152,6 +162,7 @@ class LocalSite(BaseSite):
         self.executable = self._get_solver_path()
         self.env = os.environ.copy()
         self.env["FS_SOLVER_PATH"] = os.getenv("FS_SOLVER_PATH")
+        self._quiet_dependency_loggers()
 
     def submit(self, job: SimulationJob, **kwargs) -> RunHandle:
         """Submit job and return an awaitable run handle.
@@ -541,6 +552,7 @@ class LocalSite(BaseSite):
 
         if self._dask_client is not None:
             return
+        self._quiet_dependency_loggers()
 
         if n_workers is None:
             self.n_workers = self.config.cores
@@ -603,6 +615,7 @@ class LocalSite(BaseSite):
             )
             self._dask_client = Client(self._dask_cluster, timeout="20s")
             self._closed = False
+            self._quiet_dependency_loggers()
 
             try:
                 self._dashboard_port = self._dask_cluster.dashboard_link.split(":")[-1]
@@ -614,6 +627,12 @@ class LocalSite(BaseSite):
             logger.error("Failed to initialize Dask cluster: %s", str(e))
             self.close(wait=False, retire=False)
             raise
+
+    @staticmethod
+    def _quiet_dependency_loggers() -> None:
+        for name in ("dask", "distributed", "tornado", "bokeh"):
+            logger = logging.getLogger(name)
+            logger.setLevel(getattr(logger, "_frequensolve_dependency_level", ERROR))
 
     def __del__(self):
         """Cleanup when object is destroyed."""

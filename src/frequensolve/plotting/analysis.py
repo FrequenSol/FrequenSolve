@@ -1,4 +1,4 @@
-"""Numerical analysis helpers for seismic trace arrays."""
+"""Numerical analysis helpers for trace arrays."""
 
 from __future__ import annotations
 

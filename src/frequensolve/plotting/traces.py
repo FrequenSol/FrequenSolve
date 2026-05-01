@@ -1,4 +1,4 @@
-"""Plotting helpers for seismic trace arrays."""
+"""Plotting helpers for trace arrays."""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ from typing import Any
 import numpy as np
 import xarray as xr
 
-from frequensolve.seismic.analysis import compute_timelag, phase_velocity_transform
-from frequensolve.seismic.animate import animate_gather
+from frequensolve._optional import optional_dependency_error
+from frequensolve.plotting.analysis import compute_timelag, phase_velocity_transform
+from frequensolve.plotting.animate import animate_gather
 from frequensolve.seismic.trace_geometry import (
     as_trace_array,
     coordinate_label,
@@ -34,7 +35,15 @@ __all__ = [
 
 
 def _pyplot():
-    import matplotlib.pyplot as plt
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise optional_dependency_error(
+            "Seismic plotting",
+            extra="visual",
+            dependencies=("matplotlib",),
+            error=exc,
+        ) from exc
 
     return plt
 

@@ -3,11 +3,21 @@ import os
 from dataclasses import dataclass
 from functools import cached_property
 
-from dotenv import load_dotenv
-from paramiko import (
-    PasswordRequiredException,
-    RSAKey,
-)
+from frequensolve._optional import optional_dependency_error
+
+try:
+    from dotenv import load_dotenv
+    from paramiko import (
+        PasswordRequiredException,
+        RSAKey,
+    )
+except ModuleNotFoundError as exc:
+    raise optional_dependency_error(
+        "HPC credentials",
+        extra="hpc",
+        dependencies=("paramiko", "python-dotenv"),
+        error=exc,
+    ) from exc
 
 __all__ = ["Credentials", "CloudCredentials"]
 

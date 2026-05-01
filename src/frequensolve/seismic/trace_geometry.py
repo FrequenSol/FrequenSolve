@@ -9,8 +9,9 @@ import numpy as np
 import xarray as xr
 
 # Register the ``trace.fs`` accessor when available.  The import is intentionally
-# light: optional SEGY dependencies in ``trace_record`` remain lazy.
-from frequensolve.seismic import trace_record as _trace_record  # noqa: F401
+# direct so this helper does not depend on ``frequensolve.seismic`` package
+# exports during initialization.
+import frequensolve.seismic.trace_record as _trace_record  # noqa: F401
 
 
 @dataclass(frozen=True)

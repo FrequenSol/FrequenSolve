@@ -10,7 +10,17 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-import requests
+from frequensolve._optional import optional_dependency_error
+
+try:
+    import requests
+except ModuleNotFoundError as exc:
+    raise optional_dependency_error(
+        "GraphQLClient",
+        extra="cloud",
+        dependencies=("requests",),
+        error=exc,
+    ) from exc
 
 from .cognito import CognitoAuth
 

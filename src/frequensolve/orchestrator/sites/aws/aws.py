@@ -8,9 +8,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-import boto3
-import requests
-from botocore.exceptions import ClientError
+from frequensolve._optional import optional_dependency_error
+
+try:
+    import boto3
+    import requests
+    from botocore.exceptions import ClientError
+except ModuleNotFoundError as exc:
+    raise optional_dependency_error(
+        "AWSSite",
+        extra="cloud",
+        dependencies=("boto3", "botocore", "requests"),
+        error=exc,
+    ) from exc
 
 from frequensolve.orchestrator.config.base import BaseSiteConfig
 from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle

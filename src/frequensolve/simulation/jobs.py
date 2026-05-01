@@ -1,10 +1,10 @@
 import hashlib
 import json
 from abc import ABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 
 import blake3
 import numpy as np
@@ -14,6 +14,10 @@ from frequensolve.simulation.artifacts import (
     TraceManifest,
     TraceOutputHandle,
     TraceOutputSpec,
+)
+from frequensolve.simulation.outputs import (
+    JobOutputs,
+    Output,
 )
 from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
 from frequensolve.util.class_registry import class_registry, register_class
@@ -28,6 +32,7 @@ class SimulationJob(ABC):
     simulation: BaseSimulation
     workflow: str
     f_list: List[Union[float, complex]]
+    outputs: JobOutputs = field(default_factory=JobOutputs)
     _file: Optional[Path] = None
     _job_id: Optional[str] = None
 
@@ -40,6 +45,23 @@ class SimulationJob(ABC):
         if frequencies.size == 0:
             raise ValueError("SimulationJob requires at least one frequency")
         self.f_list = frequencies.tolist()
+        if not isinstance(self.outputs, JobOutputs):
+            self.outputs = JobOutputs(self.outputs)
+
+    def __iadd__(self, output: Union[Output, Iterable[Output]]) -> "SimulationJob":
+        self.outputs += output
+        return self
+
+    def add_output(self, output: Union[Output, Iterable[Output]]) -> "SimulationJob":
+        self += output
+        return self
+
+    def validate_outputs(self) -> None:
+        if self.outputs.paraview and len(self.f_list) != 1:
+            raise ValueError(
+                "ParaView outputs currently require a single-frequency job. "
+                "Create one FrequencyDomainJob per plotted frequency."
+            )
 
     @classmethod
     def from_fs(
@@ -141,6 +163,7 @@ class SimulationJob(ABC):
         return Path(project_path).resolve()
 
     def to_fs(self, *, project_relative: bool = False) -> Dict[str, Any]:
+        self.validate_outputs()
         f_list = self._encoded_frequencies()
         payload = {
             "schema": "frequensolve-job-1",
@@ -150,6 +173,7 @@ class SimulationJob(ABC):
             "simulation": self._simulation_path(project_relative=project_relative),
             "workflow": self.workflow,
             "f_list": f_list,
+            "Outputs": self.outputs.to_fs(),
         }
         if self._job_id is not None:
             payload["job_id"] = self._job_id
@@ -190,6 +214,7 @@ class SimulationJob(ABC):
                 "_type": job_data["_type"],
                 "workflow": job_data["workflow"],
                 "f_list": job_data["f_list"],
+                "Outputs": job_data["Outputs"],
             },
             "simulation": {
                 "path": str(Path(self.simulation._file).resolve()),
@@ -442,7 +467,17 @@ class SimulationJob(ABC):
                 "No per-task timings were found in run metadata for this job"
             )
 
-        import matplotlib.pyplot as plt
+        try:
+            import matplotlib.pyplot as plt
+        except ModuleNotFoundError as exc:
+            from frequensolve._optional import optional_dependency_error
+
+            raise optional_dependency_error(
+                "Job timing plotting",
+                extra="visual",
+                dependencies=("matplotlib",),
+                error=exc,
+            ) from exc
 
         if ax is None:
             _, ax = plt.subplots()
@@ -620,17 +655,7 @@ class SimulationJob(ABC):
             dict: Dictionary containing:
                 - ParaView: ParaView outputs
         """
-        sim = self.simulation
-
-        sim_file = sim._file
-        with open(sim_file, "r") as f:
-            sim_data = json.load(f)
-
-        pv_out = {}
-        for out in sim_data["Outputs"]["ParaView"]:
-            pv_out[out["name"]] = out["path"]
-
-        return pv_out
+        return {out.name: out.path for out in self.outputs.paraview}
 
     @property
     def trace_path(self) -> Path:
@@ -651,15 +676,6 @@ class SimulationJob(ABC):
         sim = self.simulation
         receivers = sim.acquisition.receiver_groups
 
-        sim_file = sim._file
-        with open(sim_file, "r") as f:
-            sim_data = json.load(f)
-
-        outputs = sim_data.get("Outputs", {})
-        out = outputs.get("traces") or outputs.get("receivers")
-        if out is None:
-            raise ValueError("Simulation does not request trace output")
-
         groups = []
         components = []
         sources = []
@@ -673,7 +689,7 @@ class SimulationJob(ABC):
             sources.append(f"{isrc + 1}")
 
         return TraceOutputSpec(
-            path=self._result_path / out["path"],
+            path=self._result_path / self.outputs.traces.path,
             frequencies=self.f_list,
             groups=groups,
             components=components,
@@ -692,30 +708,28 @@ class SimulationJob(ABC):
         Returns:
             - wavefields: Wavefield outputs
         """
-        sim = self.simulation
-        receivers = sim.acquisition.receiver_groups
-
-        sim_file = sim._file
-        with open(sim_file, "r") as f:
-            sim_data = json.load(f)
-
-        outputs = sim_data["Outputs"]["wavefields"]
-
+        receivers = self.simulation.acquisition.receiver_groups
         wave_out = {}
-        for out in outputs:
-            wave_out["domain"] = (self.__class__.__name__,)
-            wave_out["path"] = out["path"]
-            wave_out["frequencies"] = self.f_list
-            wave_out["grid"] = out["grid"]
-            wave_out["components"] = []
-            wave_out["sources"] = []
+        for out in self.outputs.wavefields:
+            wave_out[out.name] = {
+                "domain": (self.__class__.__name__,),
+                "path": out.path,
+                "frequencies": self.f_list,
+                "grid": out.grid.to_fs() if out.grid is not None else None,
+                "components": [],
+                "sources": [],
+            }
 
             for group in receivers:
                 for component in group.device.components:
-                    wave_out["components"].append(f"{group.name}:{component.name}")
+                    wave_out[out.name]["components"].append(
+                        f"{group.name}:{component.name}"
+                    )
 
-            for isrc, _source_group in enumerate(sim.acquisition.source_groups):
-                wave_out["sources"].append(f"{isrc + 1}")
+            for isrc, _source_group in enumerate(
+                self.simulation.acquisition.source_groups
+            ):
+                wave_out[out.name]["sources"].append(f"{isrc + 1}")
         return wave_out
 
     def _remote_path(self, work_dir: Union[Path, str]):
@@ -731,6 +745,7 @@ class FrequencyDomainJob(SimulationJob):
         name: str,
         simulation: BaseSimulation,
         f_list: List[Union[float, complex]],
+        outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
     ):
         workflow = "forward"
         frequencies = np.asarray(f_list)
@@ -741,6 +756,7 @@ class FrequencyDomainJob(SimulationJob):
             simulation,
             workflow,
             frequencies.tolist(),
+            JobOutputs(outputs),
         )
 
     @classmethod
@@ -756,6 +772,7 @@ class FrequencyDomainJob(SimulationJob):
             name=d["name"],
             simulation=sim,
             f_list=f_list,
+            outputs=JobOutputs.from_fs(d.get("Outputs")),
         )
         job._job_id = d.get("job_id")
         return job
@@ -772,6 +789,7 @@ class TimeDomainJob(SimulationJob):
         s_laplace: float = 0.0,
         df: Optional[float] = None,
         T_max: Optional[float] = None,
+        outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
     ):
         if df is None and T_max is None:
             raise ValueError("TimeDomainJob requires either df or T_max")
@@ -794,7 +812,7 @@ class TimeDomainJob(SimulationJob):
         f_list = f_list + 1j * s_laplace
 
         workflow = "forward"
-        super().__init__(name, simulation, workflow, f_list)
+        super().__init__(name, simulation, workflow, f_list, JobOutputs(outputs))
 
     @classmethod
     def from_fs(cls, d: dict, base_path: Optional[Union[str, Path]] = None):
@@ -823,6 +841,7 @@ class TimeDomainJob(SimulationJob):
             f_max=f_max,
             df=df,
             s_laplace=s_laplace,
+            outputs=JobOutputs.from_fs(d.get("Outputs")),
         )
         job._job_id = d.get("job_id")
         return job

@@ -10,12 +10,60 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional
 
 import numpy as np
-import pint
 
 from frequensolve.util.mixins import merge_extra
 
-ureg = pint.UnitRegistry()
-Q_ = ureg.Quantity
+__all__ = [
+    "Q_",
+    "UnitConfig",
+    "is_quantity",
+    "quantity_to_fs",
+    "unit_expression",
+    "ureg",
+    "value_and_units_to_fs",
+]
+
+
+def _load_pint():
+    try:
+        import pint
+    except ModuleNotFoundError as exc:
+        raise ImportError(
+            "FrequenSolve unit support requires `pint`. Reinstall FrequenSolve "
+            "with its core dependencies or install `pint`."
+        ) from exc
+    return pint
+
+
+class UnitRegistryProxy:
+    """Lazy proxy for the shared Pint unit registry."""
+
+    _registry = None
+
+    def _load(self):
+        if self._registry is None:
+            self._registry = _load_pint().UnitRegistry()
+        return self._registry
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._load(), name)
+
+    def __call__(self, *args, **kwargs) -> Any:
+        return self._load()(*args, **kwargs)
+
+    def __repr__(self) -> str:
+        if self._registry is None:
+            return "<lazy Pint UnitRegistry>"
+        return repr(self._registry)
+
+
+ureg = UnitRegistryProxy()
+
+
+def Q_(*args, **kwargs):
+    """Construct a Pint quantity using FrequenSolve's shared unit registry."""
+
+    return ureg.Quantity(*args, **kwargs)
 
 
 def unit_expression(units: Any) -> str:
@@ -32,6 +80,9 @@ def unit_expression(units: Any) -> str:
 
 
 def is_quantity(value: Any) -> bool:
+    if value is None:
+        return False
+    pint = _load_pint()
     return isinstance(value, pint.Quantity)
 
 

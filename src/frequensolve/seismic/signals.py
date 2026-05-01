@@ -159,7 +159,17 @@ class SignalFromFile(Signal):
                 T = (n - 1) * self.interval
                 self.samples_in = np.linspace(0, T, n)
             elif self.file_format == "SEGY":
-                import segyio
+                try:
+                    import segyio
+                except ModuleNotFoundError as exc:
+                    from frequensolve._optional import optional_dependency_error
+
+                    raise optional_dependency_error(
+                        "SEG-Y signal reader",
+                        extra="seismic-io",
+                        dependencies=("segyio",),
+                        error=exc,
+                    ) from exc
 
                 with segyio.open(self.file, ignore_geometry=True) as f:
                     self.samples_in = f.samples
@@ -205,7 +215,17 @@ class SignalFromFile(Signal):
 
     def _read_segy(self, fname: Union[str, Path]) -> np.ndarray:
         """Read data from a SEG-Y file."""
-        import segyio
+        try:
+            import segyio
+        except ModuleNotFoundError as exc:
+            from frequensolve._optional import optional_dependency_error
+
+            raise optional_dependency_error(
+                "SEG-Y signal reader",
+                extra="seismic-io",
+                dependencies=("segyio",),
+                error=exc,
+            ) from exc
 
         trace = int(fname.split(":")[1])
         with segyio.open(fname, ignore_geometry=True) as f:

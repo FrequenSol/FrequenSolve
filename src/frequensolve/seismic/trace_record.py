@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 from xarray import DataArray, register_dataarray_accessor
 
+from frequensolve._optional import optional_dependency_error
 from frequensolve.seismic.receivers import ReceiverGroup
 from frequensolve.seismic.sources import SourceGroup
 
@@ -78,7 +79,16 @@ class TraceAccessor:
         import datetime
 
         import pint
-        import segyio
+
+        try:
+            import segyio
+        except ModuleNotFoundError as exc:
+            raise optional_dependency_error(
+                "SEG-Y trace export",
+                extra="seismic-io",
+                dependencies=("segyio",),
+                error=exc,
+            ) from exc
 
         trace = self._trace
         coordinates = {"length": 1, "arcseconds": 2, "degrees": 3, "DMS": 4}
@@ -179,7 +189,16 @@ def array_to_segy(
     import datetime
 
     import pint
-    import segyio
+
+    try:
+        import segyio
+    except ModuleNotFoundError as exc:
+        raise optional_dependency_error(
+            "SEG-Y trace export",
+            extra="seismic-io",
+            dependencies=("segyio",),
+            error=exc,
+        ) from exc
 
     ureg = pint.UnitRegistry()
     if units_out not in {"m", "ft"}:

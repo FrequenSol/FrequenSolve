@@ -12,6 +12,8 @@ from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.artifacts import TraceManifest
 from frequensolve.simulation.sampling import UniformSweepSampling
 
+__all__ = ["TraceDataset"]
+
 
 @dataclass
 class TraceDataset:
@@ -100,7 +102,7 @@ class TraceDataset:
                 project_path=manifest.project_path,
                 components=list(manifest.components),
                 sources=list(manifest.sources),
-                artifacts=dict(manifest.artifacts),
+                artifacts=list(manifest.artifacts),
                 run=manifest.run,
             ),
             upscale=upscale,

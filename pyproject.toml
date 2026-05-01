@@ -36,7 +36,6 @@ dependencies = [
     "jinja2>=3.1.5,<4.0.0",
     "numpy>=1.24,<3.0",
     "pint>=0.24.4,<1.0",
-    "pylops>=2.4.0,<3.0",
     "scipy>=1.13,<2.0",
     "toml>=0.10.2,<0.11.0",
     "xarray>=2025.1.1,<2026.0.0",
@@ -67,6 +66,13 @@ parallel = [
     "pyfftw>=0.14,<0.16",
     "python-dotenv>=1.0.1,<2.0.0",
 ]
+hpc = [
+    "paramiko>=3.5.0,<4.0.0",
+    "python-dotenv>=1.0.1,<2.0.0",
+]
+inversion = [
+    "pylops>=2.4.0,<3.0",
+]
 seismic-io = [
     "bitarray>=3.0.0,<4.0.0",
     "cython>=3.0.12,<4.0.0",
@@ -77,6 +83,7 @@ seismic-io = [
 ]
 visual = [
     "matplotlib>=3.7,<4.0",
+    "pyvista>=0.44,<0.47",
 ]
 docs = [
     "furo>=2024.8.6",

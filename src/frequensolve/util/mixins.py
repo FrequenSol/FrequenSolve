@@ -4,6 +4,16 @@ from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Dict, Mapping, Optional
 
+__all__ = [
+    "ExportContext",
+    "ExtraFieldsMixin",
+    "FSSerializableMixin",
+    "MaterializeMixin",
+    "PathContextMixin",
+    "TypeTaggedMixin",
+    "merge_extra",
+]
+
 
 class ExportContext:
     """Context used while exporting solver-facing JSON."""

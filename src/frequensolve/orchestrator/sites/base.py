@@ -135,6 +135,20 @@ class RunResult:
 
         return TraceDataset.from_job(self.job, upscale=upscale)
 
+    def output_files(
+        self,
+        *,
+        kind: Optional[str] = None,
+        suffix: Optional[Union[str, tuple[str, ...]]] = None,
+        existing: bool = False,
+    ) -> list[Path]:
+        """Return output files reported by the completed run."""
+
+        metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
+        if metadata is None:
+            return []
+        return metadata.output_files(kind=kind, suffix=suffix, existing=existing)
+
 
 @dataclass
 class RunHandle:

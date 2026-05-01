@@ -24,14 +24,25 @@ from pathlib import Path
 from select import select
 from typing import Any, Dict, List, Literal, Optional, Type, Union
 
-from dotenv import load_dotenv
+from frequensolve._optional import optional_dependency_error
+
+try:
+    from dotenv import load_dotenv
+    from paramiko import (
+        AuthenticationException,
+        AutoAddPolicy,
+        SSHClient,
+        Transport,
+    )
+except ModuleNotFoundError as exc:
+    raise optional_dependency_error(
+        "SlurmSite",
+        extra="hpc",
+        dependencies=("paramiko", "python-dotenv"),
+        error=exc,
+    ) from exc
+
 from jinja2 import Environment, FileSystemLoader
-from paramiko import (
-    AuthenticationException,
-    AutoAddPolicy,
-    SSHClient,
-    Transport,
-)
 
 from frequensolve.orchestrator.config.base import BaseSiteConfig
 from frequensolve.orchestrator.credentials import Credentials

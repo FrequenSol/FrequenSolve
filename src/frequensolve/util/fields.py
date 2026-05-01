@@ -8,6 +8,8 @@ FIELD_ALIASES = {}
 
 FIELD_PASSTHROUGH = {"all", "primary", "secondary"}
 
+__all__ = ["canonical_field", "canonical_fields"]
+
 
 def canonical_field(field: str) -> str:
     """Return the canonical API/export name for a field."""

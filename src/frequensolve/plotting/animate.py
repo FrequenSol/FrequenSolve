@@ -1,4 +1,4 @@
-"""Animation helpers for seismic trace arrays."""
+"""Animation helpers for trace arrays."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import xarray as xr
 
+from frequensolve._optional import optional_dependency_error
 from frequensolve.seismic.trace_geometry import (
     as_trace_array,
     receiver_grid_shape,
@@ -21,13 +22,29 @@ __all__ = ["animate_gather"]
 
 
 def _pyplot():
-    import matplotlib.pyplot as plt
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise optional_dependency_error(
+            "Trace animation",
+            extra="visual",
+            dependencies=("matplotlib",),
+            error=exc,
+        ) from exc
 
     return plt
 
 
 def _animation():
-    import matplotlib.animation as animation
+    try:
+        import matplotlib.animation as animation
+    except ModuleNotFoundError as exc:
+        raise optional_dependency_error(
+            "Trace animation",
+            extra="visual",
+            dependencies=("matplotlib",),
+            error=exc,
+        ) from exc
 
     return animation
 

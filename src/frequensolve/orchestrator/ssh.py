@@ -6,7 +6,17 @@ avoid re-authenticating each time a connection is made.
 import subprocess
 import time
 
-from paramiko import SSHClient
+from frequensolve._optional import optional_dependency_error
+
+try:
+    from paramiko import SSHClient
+except ModuleNotFoundError as exc:
+    raise optional_dependency_error(
+        "SSH-backed HPC support",
+        extra="hpc",
+        dependencies=("paramiko",),
+        error=exc,
+    ) from exc
 
 __all__ = ["SSHProxy", "SSHClientClass"]
 

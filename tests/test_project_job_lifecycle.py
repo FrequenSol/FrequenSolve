@@ -6,19 +6,17 @@ from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project.project import Project
+from frequensolve.simulation.artifacts import RunMetadata
 from frequensolve.simulation.jobs import (
     FrequencyDomainJob,
     SimulationJob,
     TimeDomainJob,
 )
-from frequensolve.simulation.output_manager import OutputManager, TraceOutput
 
 
 def _project_with_trace_simulation(tmp_path):
     project = Project(name="project", path=tmp_path / "project")
     sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
-    sim.outputs = OutputManager()
-    sim.outputs += TraceOutput()
     sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
     return project, sim
 
@@ -36,6 +34,29 @@ def test_project_save_load_uses_relative_simulation_paths(tmp_path):
     assert loaded.simulations["simple"]._project is loaded
 
 
+def test_run_metadata_filters_output_files(tmp_path):
+    result_path = tmp_path / "results"
+    metadata = RunMetadata(
+        outputs={
+            "files": [
+                {
+                    "relative_path": "ParaView/pv_00000.vtu",
+                    "kind": "vtk",
+                },
+                {
+                    "relative_path": "traces/traces_1.h5",
+                    "kind": "hdf5",
+                },
+            ]
+        },
+        result_path=result_path,
+    )
+
+    assert metadata.output_files(kind="vtk", suffix=".vtu") == [
+        result_path / "ParaView/pv_00000.vtu"
+    ]
+
+
 def test_job_save_load_persists_required_simulation_inputs(tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
@@ -47,6 +68,7 @@ def test_job_save_load_persists_required_simulation_inputs(tmp_path):
     assert sim._file.exists()
     assert job_file.exists()
     assert payload["simulation"] == "simulations/simple/simple.json"
+    assert payload["Outputs"]["traces"]["path"] == "traces"
     assert "overwrite" not in payload
     assert "max_versions" not in payload
     assert not (job_file.parent / "manifest.json").exists()

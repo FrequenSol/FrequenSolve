@@ -11,7 +11,8 @@ from numpy.typing import ArrayLike
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.mesh.mesh_generators import HexMeshGenerator, TetMeshGenerator
 from frequensolve.model.model import ModelBase, ModelSubdomain
-from frequensolve.model.property import Property
+from frequensolve.model.property import Property, canonical_property_name
+from frequensolve.units import unit_expression, ureg
 from frequensolve.util.class_registry import register_class
 from frequensolve.util.mixins import merge_extra
 from frequensolve.util.named_list import NamedList
@@ -20,6 +21,44 @@ __all__ = ["SimpleSurface", "Layer", "LayeredModel"]
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
+
+
+def _property_units(prop: Property) -> Optional[str]:
+    if prop.units:
+        return unit_expression(prop.units)
+    if prop.data is not None and hasattr(prop.data, "attrs"):
+        units = prop.data.attrs.get("units")
+        if units:
+            return unit_expression(units)
+    return None
+
+
+def _convert_units(
+    value: float, source_units: Optional[str], target_units: Optional[str]
+):
+    if not source_units or not target_units or source_units == target_units:
+        return value
+    return (value * ureg(source_units)).to(target_units).magnitude
+
+
+def _convert_dataarray_units(
+    data: xr.DataArray,
+    source_units: Optional[str],
+    target_units: Optional[str],
+) -> xr.DataArray:
+    if target_units is None:
+        if source_units is not None:
+            data = data.copy(deep=True)
+            data.attrs["units"] = source_units
+        return data
+    if source_units is None or source_units == target_units:
+        data = data.copy(deep=True)
+        data.attrs["units"] = target_units
+        return data
+    converted = data.copy(deep=True)
+    converted.data = (converted.data * ureg(source_units)).to(target_units).magnitude
+    converted.attrs["units"] = target_units
+    return converted
 
 
 # ----------------------------------------------------------------------
@@ -194,7 +233,17 @@ class SimpleSurface:
 
     def plot(self, limits: Dict[str, ArrayLike], **kwargs):
         """Plot the surface."""
-        import matplotlib.pyplot as plt
+        try:
+            import matplotlib.pyplot as plt
+        except ModuleNotFoundError as exc:
+            from frequensolve._optional import optional_dependency_error
+
+            raise optional_dependency_error(
+                "Surface plotting",
+                extra="visual",
+                dependencies=("matplotlib",),
+                error=exc,
+            ) from exc
 
         if self.depth.is_constant:
             dims = sorted(limits.keys())
@@ -545,15 +594,55 @@ class LayeredModel(ModelBase):
         _, z1 = self.surfaces[-1].extrema
         return float(z0), float(z1)
 
-    def extreme_values(self, property: str) -> Tuple[float, float]:
+    def property_units(self, property: str) -> Optional[str]:
+        """Return the first declared units for a model property."""
+
+        property = canonical_property_name(property)
+        for layer in self.layers:
+            if property not in layer.properties:
+                continue
+            units = _property_units(layer.properties[property])
+            if units:
+                return units
+        return None
+
+    def convert_property_units(
+        self,
+        data: xr.DataArray,
+        property: str,
+        units: Optional[Any],
+    ) -> xr.DataArray:
+        """Convert sampled property data to requested display units."""
+
+        target_units = unit_expression(units) if units is not None else None
+        source_units = data.attrs.get("units") or self.property_units(property)
+        if target_units is None:
+            target_units = source_units
+        return _convert_dataarray_units(data, source_units, target_units)
+
+    def extreme_values(
+        self,
+        property: str,
+        units: Optional[Any] = None,
+    ) -> Tuple[float, float]:
+        property = canonical_property_name(property)
+        target_units = (
+            unit_expression(units)
+            if units is not None
+            else self.property_units(property)
+        )
         vmin = 1.0e8
         vmax = -1.0e8
         for layer in self.layers:
             if property not in layer.properties:
                 continue
-            prop_min, prop_max = layer.properties[property].extrema
+            prop = layer.properties[property]
+            prop_min, prop_max = prop.extrema
+            source_units = _property_units(prop)
             prop_min = float(prop_min)
             prop_max = float(prop_max)
+            prop_min = float(_convert_units(prop_min, source_units, target_units))
+            prop_max = float(_convert_units(prop_max, source_units, target_units))
             vmin = min(prop_min, vmin)
             vmax = max(prop_max, vmax)
         if vmin == 1.0e8:
@@ -793,6 +882,7 @@ class LayeredModel(ModelBase):
         dz: float,
         z_min: Optional[float] = None,
         z_max: Optional[float] = None,
+        units: Optional[Any] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get a 1D well-log of a property."""
 
@@ -811,15 +901,29 @@ class LayeredModel(ModelBase):
             dims=["x", "z"],
             coords={"x": [x], "z": depths},
         )
+        property = canonical_property_name(property)
+        target_units = (
+            unit_expression(units)
+            if units is not None
+            else self.property_units(property)
+        )
 
         for layer in self.layers:
             if property not in layer.properties.keys():
                 continue
-            prop = layer.properties[property].get(samples)
+            layer_prop = layer.properties[property]
+            prop = layer_prop.get(samples)
             prop = prop.transpose(*samples.dims)
+            prop = _convert_dataarray_units(
+                prop,
+                _property_units(layer_prop),
+                target_units,
+            )
             mask = self._get_layer_mask(layer, samples)
             data = prop.where(mask)
             samples.data = np.where(~np.isnan(data), data, samples.data)
+        if target_units is not None:
+            samples.attrs["units"] = target_units
 
         return depths, samples.data[0]
 
@@ -838,16 +942,23 @@ class LayeredModel(ModelBase):
         if self.dimension == 3:
             raise NotImplementedError("3D plotting not implemented")
 
-        property_units = kwargs.pop("property_units", "km/s")
+        property_units = kwargs.pop("property_units", self.property_units(property))
         property_label = kwargs.pop(
             "property_label",
-            f"{property} [{property_units}]",
+            f"{property} [{property_units}]" if property_units else property,
         )
         aspect = kwargs.pop("aspect", None)
         show_legend = kwargs.pop("show_legend", True)
         legend_coords = kwargs.pop("legend_coords", (1.8, 1))
 
-        depths, data = self.get_1D_log(property, x, dz, z_min, z_max)
+        depths, data = self.get_1D_log(
+            property,
+            x,
+            dz,
+            z_min,
+            z_max,
+            units=property_units,
+        )
         ax.plot(data, depths, label=property_label, **kwargs)
 
         # Set aspect ratio
@@ -892,10 +1003,12 @@ class LayeredModel(ModelBase):
 
         gridded = xr.Dataset(coords=samples.coords)
         for name in self.properties:
+            units = self.property_units(name)
             gridded[name] = xr.DataArray(
                 dims=samples.dims,
                 coords=samples.coords,
                 data=np.nan * np.ones(samples.shape),
+                attrs={"units": units} if units is not None else {},
             )
         for layer in self.layers:
             mask = self._get_layer_mask(layer, samples)
@@ -904,11 +1017,17 @@ class LayeredModel(ModelBase):
                 if name not in layer.properties:
                     continue
                 prop = layer.properties[name]
+                target_units = gridded[name].attrs.get("units")
+                source_units = _property_units(prop)
+                if target_units is None and source_units is not None:
+                    target_units = source_units
+                    gridded[name].attrs["units"] = target_units
 
                 if prop.is_constant:
                     data = xr.full_like(samples, prop.get(), dtype=float)
                 else:
                     data = prop.get(samples).transpose(*samples.dims)
+                data = _convert_dataarray_units(data, source_units, target_units)
                 gridded[name].data = np.where(
                     mask.values,
                     data.values,
@@ -960,7 +1079,7 @@ class LayeredModel(ModelBase):
 
     def plot(self, property: str, resolution: Optional[List[int]] = None, **kwargs):
         """Plot the model."""
-        from frequensolve.seismic.layered_plotting import plot_layered_model
+        from frequensolve.plotting.layered import plot_layered_model
 
         resolution = resolution or [500, 500]
         return plot_layered_model(self, property, resolution, **kwargs)

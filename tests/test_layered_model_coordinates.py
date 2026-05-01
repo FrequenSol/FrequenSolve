@@ -1,8 +1,11 @@
+import matplotlib
 import numpy as np
 import pytest
 import xarray as xr
 
-from frequensolve.seismic.layered_model import LayeredModel
+matplotlib.use("Agg")
+
+from frequensolve.model.layered import LayeredModel
 from frequensolve.units import ureg as u
 
 
@@ -84,6 +87,48 @@ def test_layered_model_samples_physical_grid_without_reference_remap():
             [1.0, 1.0, 1.0, 2.0, 2.0],
         ],
     )
+
+
+def test_layered_model_sampling_converts_mixed_property_units():
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="upper", properties={"Vp": 1.5 * u.km / u.s})
+    model.add_surface(name="interface", depth=0.5)
+    model.add_layer(name="lower", properties={"Vp": 2000.0 * u.m / u.s})
+    model.add_surface(name="bottom", depth=1.0)
+
+    sampled = model.sample_uniform([2, 3])
+    depths, log = model.get_1D_log("Vp", x=0.5, dz=0.5, units="m/s")
+
+    assert sampled["vp"].attrs["units"] == "km/s"
+    np.testing.assert_allclose(
+        sampled["vp"].values,
+        [[1.5, 2.0, 2.0], [1.5, 2.0, 2.0]],
+    )
+    assert model.extreme_values("Vp") == (1.5, 2.0)
+    assert model.extreme_values("Vp", units="m/s") == (1500.0, 2000.0)
+    np.testing.assert_allclose(depths, [0.0, 0.5])
+    np.testing.assert_allclose(log, [1500.0, 2000.0])
+
+
+def test_layered_model_plot_uses_property_units():
+    import matplotlib.pyplot as plt
+
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="layer", properties={"Vp": 1500.0 * u.m / u.s})
+    model.add_surface(name="bottom", depth=1.0)
+
+    fig, ax = plt.subplots()
+    image = model.plot(
+        "Vp",
+        resolution=[2, 2],
+        ax=ax,
+        surfaces=False,
+    )
+
+    assert image.colorbar.ax.get_ylabel() == "Vp [m/s]"
+    plt.close(fig)
 
 
 def test_layered_model_export_does_not_mutate_bottom_surface_interface():

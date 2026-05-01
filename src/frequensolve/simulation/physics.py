@@ -7,6 +7,8 @@ from typing import ClassVar, Iterable, List, Mapping
 
 from frequensolve.util.fields import FIELD_ALIASES
 
+__all__ = ["AcousticComponents", "ElasticComponents", "EMComponents"]
+
 
 class ValidComponents(ABC):
     """Valid components for each physics type.

@@ -171,6 +171,56 @@ should use those hashes to avoid rewriting unchanged input datasets and to
 diagnose stale solver outputs. The old sidecar ``data_manifest.json`` workflow
 is not part of the public contract.
 
+ParaView Outputs
+----------------
+
+Outputs are now owned by job JSON rather than simulation JSON. Sauce should read
+``Outputs`` from ``frequensolve-job-1`` files and write output paths relative to
+the job result directory. Trace output is always requested under
+``Outputs.traces`` and new runs should write ``traces/traces_<task>.h5``.
+
+The public SDK exposes a deliberately small ParaView API and emits the richer
+Sauce contract internally. The default writer is VTK ``.vtu`` with appended
+binary data:
+
+.. code-block:: json
+
+   {"format": "vtu", "encoding": "appended"}
+
+The only alternate writer exposed publicly for now is XDMF backed by HDF5:
+
+.. code-block:: json
+
+   {"format": "xdmf", "encoding": "hdf5"}
+
+Simple volume output continues to use ``fields`` and ``properties``. Surface
+output is exposed through shell, boundary-label, model-surface, and plane
+selectors. The SDK also exposes regular grid targets.
+
+.. code-block:: json
+
+   {
+     "kind": "surface",
+     "coordinates": {"system": "global"},
+     "mesh": {"order": 3, "upscale": 2, "show_pml": false},
+     "selection": [
+       {"kind": "model_surface", "name": "top"},
+       {"kind": "plane", "system": "global", "axis": "z",
+        "value": {"value": 0.5, "units": "km"},
+       "tolerance": {"value": 10.0, "units": "m"}}
+     ]
+   }
+
+The only public complex field-part names are ``real``, ``imag``, and ``abs``.
+When a user requests parts, the SDK emits normalized ``items`` internally.
+
+Alternate data sources, VTR, field-component bases, arbitrary item objects, and
+other specialized controls are intentionally not part of the public Python API
+yet. They may still be supplied through advanced ``extra`` dictionaries when
+needed for internal solver testing. Advanced nested writer fields should be
+supplied through the ``writer`` argument so the SDK can keep the enforced public
+``format`` and ``encoding`` defaults intact.
+
 Mesh Adaptivity
 ---------------
 

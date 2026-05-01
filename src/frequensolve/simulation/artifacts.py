@@ -7,6 +7,14 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
+__all__ = [
+    "OutputArtifact",
+    "RunMetadata",
+    "TraceManifest",
+    "TraceOutputHandle",
+    "TraceOutputSpec",
+]
+
 
 def _real_frequency(value: Union[float, complex]) -> float:
     if isinstance(value, complex):
@@ -84,6 +92,7 @@ class RunMetadata:
     timings: Dict[str, Any] = field(default_factory=dict)
     error: Dict[str, Any] = field(default_factory=dict)
     state: Dict[str, Any] = field(default_factory=dict)
+    result_path: Optional[Path] = None
 
     @classmethod
     def read(cls, result_path: Union[str, Path]) -> "RunMetadata":
@@ -104,6 +113,7 @@ class RunMetadata:
             timings=read_json(run_dir / "timings.json"),
             error=read_json(run_dir / "error.json"),
             state=read_json(result_path / "_fs_python_run.json"),
+            result_path=result_path,
         )
 
     @property
@@ -121,6 +131,44 @@ class RunMetadata:
     @property
     def simulation_file_hash(self) -> Optional[str]:
         return self.manifest.get("simulation_file_sha256")
+
+    @property
+    def artifacts(self) -> List[OutputArtifact]:
+        """Output files reported by Sauce for this run."""
+
+        files = self.outputs.get("files", []) if self.outputs else []
+        return [
+            OutputArtifact.from_fs(file, result_path=self.result_path) for file in files
+        ]
+
+    def output_files(
+        self,
+        *,
+        kind: Optional[str] = None,
+        suffix: Optional[Union[str, Sequence[str]]] = None,
+        existing: bool = False,
+    ) -> List[Path]:
+        """Return output file paths filtered by kind and suffix."""
+
+        suffixes: Optional[tuple[str, ...]]
+        if suffix is None:
+            suffixes = None
+        elif isinstance(suffix, str):
+            suffixes = (suffix,)
+        else:
+            suffixes = tuple(suffix)
+
+        files = []
+        for artifact in self.artifacts:
+            path = artifact.path
+            if kind is not None and artifact.kind != kind:
+                continue
+            if suffixes is not None and not path.name.endswith(suffixes):
+                continue
+            if existing and not path.exists():
+                continue
+            files.append(path)
+        return files
 
 
 @dataclass(frozen=True)

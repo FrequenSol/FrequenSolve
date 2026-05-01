@@ -544,7 +544,17 @@ class Survey:
         receiver_kwargs: Optional[Mapping[str, Any]] = None,
         link_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> Any:
-        import matplotlib.pyplot as plt
+        try:
+            import matplotlib.pyplot as plt
+        except ModuleNotFoundError as exc:
+            from frequensolve._optional import optional_dependency_error
+
+            raise optional_dependency_error(
+                "Survey plotting",
+                extra="visual",
+                dependencies=("matplotlib",),
+                error=exc,
+            ) from exc
 
         if ax is None:
             _, ax = plt.subplots()

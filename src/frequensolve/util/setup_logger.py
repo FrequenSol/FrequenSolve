@@ -9,10 +9,11 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional, Union
+from typing import Iterable, Optional, Union
 
 logging_level = logging.INFO
 DEFAULT_FORMAT = "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s"
+DEFAULT_DEPENDENCY_LOGGERS = ("dask", "distributed", "tornado", "bokeh")
 
 
 def normalize_log_level(level: Union[int, str]) -> int:
@@ -84,6 +85,8 @@ def configure_logging(
     level: Union[int, str] = logging.INFO,
     log_file: Optional[Union[str, Path]] = None,
     console: bool = False,
+    dependency_level: Optional[Union[int, str]] = logging.WARNING,
+    dependency_loggers: Iterable[str] = DEFAULT_DEPENDENCY_LOGGERS,
     max_bytes: int = 10 * 1024 * 1024,
     backup_count: int = 3,
 ) -> None:
@@ -93,6 +96,9 @@ def configure_logging(
         level: Logging level as an integer or name such as ``"INFO"``.
         log_file: Optional file path for rotating package logs.
         console: If True, also emit logs to stderr.
+        dependency_level: Optional level applied to known noisy dependency loggers.
+            Use ``None`` to leave dependency loggers unchanged.
+        dependency_loggers: Logger-name prefixes controlled by ``dependency_level``.
         max_bytes: Maximum rotating log file size.
         backup_count: Number of rotated log files to keep.
     """
@@ -133,6 +139,13 @@ def configure_logging(
         handler.setFormatter(formatter)
         handler.setLevel(level)
         package_logger.addHandler(handler)
+
+    if dependency_level is not None:
+        dependency_level = normalize_log_level(dependency_level)
+        for name in dependency_loggers:
+            logger = logging.getLogger(name)
+            logger.setLevel(dependency_level)
+            logger._frequensolve_dependency_level = dependency_level
 
 
 def set_log_level(level: Union[int, str]):

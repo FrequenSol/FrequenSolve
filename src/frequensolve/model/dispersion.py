@@ -4,6 +4,13 @@ from typing import Any, Dict, List
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.mixins import TypeTaggedMixin
 
+__all__ = [
+    "DispersionRelation",
+    "DispersionScaling",
+    "PowerLawDispersion",
+    "TablulatedDispersion",
+]
+
 
 @register_class
 class DispersionRelation(TypeTaggedMixin, ABC):

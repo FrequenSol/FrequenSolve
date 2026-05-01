@@ -13,7 +13,6 @@ from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import CoordsArray
 from frequensolve.simulation.config import SimulationConfig
 from frequensolve.simulation.numerics_manager import Discretization, SolverConfig
-from frequensolve.simulation.output_manager import OutputManager
 from frequensolve.units import UnitConfig
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.encoders import CustomJSONEncoder
@@ -26,7 +25,7 @@ from frequensolve.util.mixins import (
 from frequensolve.util.store import SimulationStore
 
 __all__ = [
-    "CustomJSONEncoder",
+    "BaseSimulation",
     "SeismicSimulation",
 ]
 
@@ -89,7 +88,6 @@ class BaseSimulation(SimulationConfig):
        mesh (MeshManager):              Mesh configuration.
        BCs (BoundaryConditionManager):  Boundary condition configuration.
        numerics (NumericsManager):      Numerics configuration.
-       output (OutputManager):          Output configuration.
     """
 
     model: Optional[ModelBase] = None
@@ -97,7 +95,6 @@ class BaseSimulation(SimulationConfig):
     BCs: BoundaryConditionManager = field(default_factory=BoundaryConditionManager)
     solver: SolverConfig = field(default_factory=SolverConfig)
     discretization: Discretization = field(default_factory=Discretization)
-    outputs: OutputManager = field(default_factory=OutputManager)
 
     def __post_init__(self):
         from frequensolve.util.printing import print_note
@@ -162,7 +159,6 @@ class BaseSimulation(SimulationConfig):
                 if self.discretization
                 else {}
             ),
-            **({"Outputs": self.outputs.to_fs(ctx)} if self.outputs else {}),
         }
 
 
@@ -178,7 +174,6 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
        BCs (BoundaryConditionManager):  Boundary condition configuration.
        solver (SolverConfig):           Solver configuration.
        discretization (Discretization): Discretization configuration.
-       output (OutputManager):          Output configuration.
        acquisition (Acquisition):       Acquisition configuration.
     """
 
@@ -191,7 +186,6 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
     BCs: BoundaryConditionManager = field(default_factory=BoundaryConditionManager)
     solver: SolverConfig = field(default_factory=SolverConfig)
     discretization: Discretization = field(default_factory=Discretization)
-    outputs: OutputManager = field(default_factory=OutputManager)
     acquisition: Acquisition = field(default_factory=Acquisition)
     units: UnitConfig = field(default_factory=UnitConfig)
     global_coordinate_system: Optional[CoordinateSystem] = None
@@ -259,8 +253,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             sim.solver = SolverConfig.from_fs(data.pop("Solver"))
         if "Discretization" in data:
             sim.discretization = Discretization.from_fs(data.pop("Discretization"))
-        if "Outputs" in data:
-            sim.outputs = OutputManager.from_fs(data.pop("Outputs"))
+        data.pop("Outputs", None)
         if "Acquisition" in data:
             sim.acquisition = Acquisition.from_fs(data.pop("Acquisition"))
 
@@ -430,8 +423,6 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             self.solver = other
         elif isinstance(other, Discretization):
             self.discretization = other
-        elif isinstance(other, OutputManager):
-            self.outputs = other
         elif isinstance(other, Acquisition):
             self.acquisition = other
         else:

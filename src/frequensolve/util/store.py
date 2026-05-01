@@ -10,6 +10,8 @@ import h5py
 import numpy as np
 import xarray as xr
 
+__all__ = ["HDF5Reference", "SimulationStore", "hash_dataarray_payload"]
+
 
 def _json_default(value: Any) -> Any:
     if isinstance(value, (np.integer, np.floating, np.bool_)):

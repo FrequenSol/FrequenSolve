@@ -221,8 +221,7 @@ class ModelBase(ExtraFieldsMixin):
         if class_name in class_registry:
             model_class = class_registry[class_name]
             return model_class.from_fs(data)
-        else:
-            raise ValueError(f"Unknown model class: {class_name}")
+        raise ValueError(f"Unknown model class: {class_name}")
 
     def add_subdomain(self, subdomain: ModelSubdomain) -> None:
         """Adds a subdomain to the model.

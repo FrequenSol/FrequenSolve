@@ -782,7 +782,17 @@ class Property:
 
     @staticmethod
     def _segy_reader(file: Path, **kwargs) -> xr.DataArray:
-        import segyio
+        try:
+            import segyio
+        except ModuleNotFoundError as exc:
+            from frequensolve._optional import optional_dependency_error
+
+            raise optional_dependency_error(
+                "SEG-Y property reader",
+                extra="seismic-io",
+                dependencies=("segyio",),
+                error=exc,
+            ) from exc
 
         with segyio.open(file, mode="r", strict=False) as sgy:
             scale = kwargs.get("scale", 1.0)

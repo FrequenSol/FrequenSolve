@@ -16,8 +16,18 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-import boto3
-from botocore.exceptions import ClientError
+from frequensolve._optional import optional_dependency_error
+
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ModuleNotFoundError as exc:
+    raise optional_dependency_error(
+        "AWS Batch worker",
+        extra="cloud",
+        dependencies=("boto3", "botocore"),
+        error=exc,
+    ) from exc
 
 # Configure logging
 logging.basicConfig(

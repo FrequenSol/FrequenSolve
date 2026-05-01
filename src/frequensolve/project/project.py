@@ -12,7 +12,11 @@ from frequensolve.project.migrate_version import Version
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
 from frequensolve.util.encoders import CustomJSONEncoder
 from frequensolve.util.named_list import NamedList
-from frequensolve.util.setup_logger import configure_logging, disable_jupyter_logging
+from frequensolve.util.setup_logger import (
+    configure_logging,
+    disable_jupyter_logging,
+    normalize_log_level,
+)
 
 __all__ = ["Project", "BaseProjectComponent"]
 
@@ -40,6 +44,7 @@ class Project:
     log_level: Union[int, str] = logging.INFO
     log_file: Optional[Union[str, Path]] = None
     log_to_console: bool = False
+    dependency_log_level: Optional[Union[int, str]] = logging.WARNING
     jupyter_logging: bool = True
     load_if_exists: bool = False
     auto_migrate: bool = False
@@ -53,6 +58,7 @@ class Project:
         log_level = self.log_level
         log_file = self.log_file
         log_to_console = self.log_to_console
+        dependency_log_level = self.dependency_log_level
         jupyter_logging = self.jupyter_logging
         if self.load_if_exists:
             project_file = self._project_file(self.path, self.name)
@@ -62,6 +68,7 @@ class Project:
                 self.log_level = log_level
                 self.log_file = log_file
                 self.log_to_console = log_to_console
+                self.dependency_log_level = dependency_log_level
                 self.jupyter_logging = jupyter_logging
                 self._configure_logging()
                 return
@@ -80,6 +87,7 @@ class Project:
             level=self.log_level,
             log_file=self.log_file,
             console=self.log_to_console,
+            dependency_level=self.dependency_log_level,
         )
         if not self.jupyter_logging:
             disable_jupyter_logging()
@@ -156,6 +164,13 @@ class Project:
             pretty_name=pretty_name,
             path=dest,
             version=version,
+            log_level=kwargs.get("log_level", old.log_level),
+            log_file=kwargs.get("log_file", old.log_file),
+            log_to_console=kwargs.get("log_to_console", old.log_to_console),
+            dependency_log_level=kwargs.get(
+                "dependency_log_level", old.dependency_log_level
+            ),
+            jupyter_logging=kwargs.get("jupyter_logging", old.jupyter_logging),
             simulations=old.simulations,
             extras=old.extras,
         )
@@ -242,6 +257,7 @@ class Project:
             version = Version.from_string(data.get("version"))
             pretty_name = data.get("pretty_name")
             sim_files = data.get("simulations", [])
+            logging_config = data.get("logging", {})
             if name is None or version is None:
                 raise ValueError("Project JSON must include 'name' and 'version'.")
 
@@ -250,6 +266,13 @@ class Project:
                 pretty_name=pretty_name,
                 path=path,
                 version=version,
+                log_level=logging_config.get("level", logging.INFO),
+                log_file=logging_config.get("file"),
+                log_to_console=logging_config.get("console", False),
+                dependency_log_level=logging_config.get(
+                    "dependency_level", logging.WARNING
+                ),
+                jupyter_logging=logging_config.get("jupyter", True),
                 load_if_exists=False,
                 auto_migrate=auto_migrate,
             )
@@ -282,6 +305,9 @@ class Project:
             **({"pretty_name": self.pretty_name} if self.pretty_name else {}),
             "version": str(self.version),
         }
+        logging_payload = self._logging_payload()
+        if logging_payload:
+            payload["logging"] = logging_payload
         sims = []
         for sim in self.simulations:
             sim_file = sim.save(**json_kwargs)
@@ -297,6 +323,22 @@ class Project:
             json.dump(payload, f, cls=CustomJSONEncoder, indent=indent, **json_kwargs)
         tmp_file.replace(file)
         return file
+
+    def _logging_payload(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if normalize_log_level(self.log_level) != logging.INFO:
+            payload["level"] = self.log_level
+        if self.log_file is not None:
+            payload["file"] = str(self.log_file)
+        if self.log_to_console:
+            payload["console"] = True
+        if self.dependency_log_level is None:
+            payload["dependency_level"] = None
+        elif normalize_log_level(self.dependency_log_level) != logging.WARNING:
+            payload["dependency_level"] = self.dependency_log_level
+        if not self.jupyter_logging:
+            payload["jupyter"] = False
+        return payload
 
     def as_json(self, **kwargs) -> str:
         return json.dumps(self.to_fs(), cls=CustomJSONEncoder, **kwargs)

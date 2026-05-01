@@ -14,13 +14,17 @@ from frequensolve.mesh.mesh_manager import DistanceGrading, MeshManager, Surface
 from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import Property, prop
 from frequensolve.seismic.acquisition import Acquisition
-from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
+from frequensolve.seismic.receivers import (
+    CoordsFromFile,
+    ReceiverComponent,
+    ReceiverNode,
+)
 from frequensolve.seismic.sparse_survey import SparseSurvey
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.artifacts import TraceManifest
+from frequensolve.simulation.artifacts import OutputArtifact, TraceManifest
 from frequensolve.simulation.jobs import FrequencyDomainJob
-from frequensolve.simulation.output_manager import (
-    OutputManager,
+from frequensolve.simulation.outputs import (
+    JobOutputs,
     ParaviewOutput,
     TraceOutput,
     WavefieldOutput,
@@ -423,14 +427,188 @@ def test_output_paths_must_be_relative_to_result_directory():
         WavefieldOutput(path="/tmp/wavefields")
 
 
-def test_output_manager_add_and_disable_traces():
-    outputs = OutputManager()
+def test_job_outputs_adds_outputs_and_always_exports_traces():
+    outputs = JobOutputs()
 
-    outputs.disable_traces().add(ParaviewOutput(name="pv", fields=["pressure"]))
+    outputs += ParaviewOutput(name="pv", fields=["pressure"])
     payload = outputs.to_fs()
 
-    assert "traces" not in payload
+    assert payload["traces"]["path"] == "traces"
     assert payload["ParaView"][0]["name"] == "pv"
+
+
+def test_job_add_output_exports_outputs_from_job_json(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job += [ParaviewOutput(name="pv", fields=["pressure"])]
+    payload = job.to_fs()
+
+    assert "Outputs" not in sim.to_fs()
+    assert payload["Outputs"]["traces"]["path"] == "traces"
+    assert payload["Outputs"]["ParaView"][0]["name"] == "pv"
+
+
+def test_paraview_output_requires_single_frequency_job(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    job = FrequencyDomainJob(
+        name="freq",
+        simulation=sim,
+        f_list=[10.0, 20.0],
+        outputs=ParaviewOutput(name="pv", fields=["pressure"]),
+    )
+
+    with pytest.raises(ValueError, match="single-frequency"):
+        job.to_fs()
+
+
+def test_paraview_surface_output_exports_solver_contract():
+    output = ParaviewOutput.surface(
+        name="free_surface",
+        surfaces="top",
+        fields=["pressure"],
+        properties=["Vp"],
+        format="xdmf",
+        execute_on="final",
+        coordinates="global",
+        order=3,
+        upscale=2,
+        show_pml=False,
+    )
+
+    payload = output.to_fs()
+
+    assert payload["execute_on"] == "final"
+    assert payload["writer"] == {"format": "xdmf", "encoding": "hdf5"}
+    assert "source" not in payload
+    assert payload["coordinates"] == {"system": "global"}
+    assert payload["target"] == {
+        "kind": "surface",
+        "mesh": {"order": 3, "upscale": 2, "show_pml": False},
+        "selection": [{"kind": "model_surface", "name": "top"}],
+    }
+    assert payload["fields"] == ["pressure"]
+    assert payload["properties"] == ["Vp"]
+
+
+def test_paraview_defaults_to_vtu_appended_binary():
+    output = ParaviewOutput(name="pv", fields=["pressure"])
+    payload = output.to_fs()
+
+    assert output.format == "vtu"
+    assert payload["writer"] == {"format": "vtu", "encoding": "appended"}
+    assert "target" not in payload
+    assert "source" not in payload
+
+    with pytest.raises(ValueError, match="format"):
+        ParaviewOutput(name="pv", fields=["pressure"], format="vtk")
+
+
+def test_paraview_parts_are_compact_and_validated():
+    output = ParaviewOutput(
+        name="real_pressure",
+        fields=["pressure"],
+        properties=["vp"],
+        parts="real",
+    )
+
+    payload = output.to_fs()
+
+    assert "fields" not in payload
+    assert "properties" not in payload
+    assert payload["items"] == [
+        {"kind": "field", "field": "pressure", "parts": ["real"]},
+        {"kind": "property", "property": "vp"},
+    ]
+
+    with pytest.raises(ValueError, match="parts"):
+        ParaviewOutput(fields=["pressure"], parts="magnitude")
+
+
+def test_paraview_grid_and_plane_selection_serialize_with_units():
+    grid = {
+        "system": "global",
+        "axes": [
+            {"name": "x", "value": [0.0, 1.0], "units": "km"},
+            {"name": "z", "value": [0.0, 0.5], "units": "km"},
+        ],
+    }
+    output = ParaviewOutput.surface(
+        name="depth_slice",
+        plane={"axis": "z", "value": 0.5 * u.km, "tolerance": 10.0 * u.m},
+        fields=["pressure"],
+    )
+
+    payload = output.to_fs()
+
+    assert "source" not in payload
+    assert payload["writer"] == {"format": "vtu", "encoding": "appended"}
+    assert payload["target"]["selection"] == [
+        {
+            "kind": "plane",
+            "system": "global",
+            "axis": "z",
+            "value": {"value": 0.5, "units": "km"},
+            "tolerance": {"value": 10.0, "units": "m"},
+        }
+    ]
+
+    grid_output = ParaviewOutput.grid(
+        grid,
+        fields=["pressure"],
+    )
+
+    grid_payload = grid_output.to_fs()
+    assert grid_payload["target"] == {"kind": "grid", "grid": grid}
+    assert "source" not in grid_payload
+    assert grid_payload["writer"] == {"format": "vtu", "encoding": "appended"}
+
+
+def test_paraview_from_fs_preserves_new_blocks_and_extra():
+    data = {
+        "_type": "ParaviewOutput",
+        "name": "surface",
+        "path": "pv",
+        "target": {
+            "kind": "surface",
+            "selection": [{"kind": "boundary", "labels": ["free"]}],
+        },
+        "writer": {"format": "xdmf", "distribution": "root"},
+        "source": {"kind": "internal_future_source"},
+        "items": [{"field": "pressure"}],
+        "advanced_solver_flag": True,
+    }
+
+    output = ParaviewOutput.from_fs(data)
+    data["target"]["kind"] = "volume"
+    payload = output.to_fs()
+
+    assert payload["target"]["kind"] == "surface"
+    assert payload["target"]["selection"] == [{"kind": "boundary", "labels": ["free"]}]
+    assert payload["writer"] == {
+        "format": "xdmf",
+        "encoding": "hdf5",
+        "distribution": "root",
+    }
+    assert payload["source"] == {"kind": "internal_future_source"}
+    assert payload["items"] == [{"field": "pressure"}]
+    assert "fields" not in payload
+    assert payload["advanced_solver_flag"] is True
 
 
 def test_extra_fields_are_preserved_but_cannot_collide():
@@ -769,6 +947,41 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
         assert "inputs/acquisition/receivers/surface/coordinates" in h5
 
 
+def test_receiver_coordinate_file_exports_project_relative_locator(tmp_path):
+    old_file = tmp_path.parent / "old_project" / "simulations" / "simple" / "simple.h5"
+    current_file = tmp_path / "simulations" / "simple" / "simple.h5"
+    current_file.parent.mkdir(parents=True)
+    current_file.touch()
+
+    coords = CoordsFromFile(
+        file=old_file,
+        format="HDF5",
+        dset="inputs/acquisition/receivers/surface/coordinates",
+    )
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    sim_file = sim.save()
+    payload = json.loads(sim_file.read_text())
+
+    assert (
+        payload["Acquisition"]["receiver_groups"][0]["coordinates"]["file"]
+        == "simulations/simple/simple.h5:inputs/acquisition/receivers/surface/coordinates"
+    )
+
+
 def test_trace_output_exports_only_traces_key(tmp_path):
     sim = SeismicSimulation(
         name="simple",
@@ -776,14 +989,15 @@ def test_trace_output_exports_only_traces_key(tmp_path):
         dimension=2,
         project_path=tmp_path,
     )
-    sim.outputs = OutputManager()
-    sim.outputs += TraceOutput()
     sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
 
-    payload = sim.to_fs()
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    payload = job.to_fs()
 
     assert payload["Outputs"]["traces"]["path"] == "traces"
     assert "receivers" not in payload["Outputs"]
+    assert "Outputs" not in sim.to_fs()
 
 
 def test_job_trace_files_use_new_names(tmp_path):
@@ -793,7 +1007,6 @@ def test_job_trace_files_use_new_names(tmp_path):
         dimension=2,
         project_path=tmp_path,
     )
-    sim.outputs = OutputManager()
     sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
     sim.save()
 
@@ -815,7 +1028,6 @@ def test_trace_dataset_resolves_legacy_receiver_files(tmp_path):
         dimension=2,
         project_path=tmp_path,
     )
-    sim.outputs = OutputManager()
     sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
     sim.save()
 
@@ -846,6 +1058,30 @@ def test_trace_dataset_rejects_empty_manifest(tmp_path):
         TraceDataset.from_manifest(manifest)
 
 
+def test_trace_dataset_from_manifest_preserves_output_artifacts(tmp_path):
+    trace_file = tmp_path / "results" / "traces" / "traces_1.h5"
+    trace_file.parent.mkdir(parents=True)
+    trace_file.touch()
+    artifact = OutputArtifact(
+        path=tmp_path / "results" / "wavefields" / "pressure_1.vtu",
+        kind="paraview",
+    )
+    manifest = TraceManifest(
+        files=[trace_file],
+        frequencies={1: 10.0},
+        groups=["surface"],
+        simulation=tmp_path / "simulation.json",
+        result_path=tmp_path / "results",
+        output_path=tmp_path / "results" / "traces",
+        project_path=tmp_path,
+        artifacts=[artifact],
+    )
+
+    traces = TraceDataset.from_manifest(manifest)
+
+    assert traces.manifest.artifacts == [artifact]
+
+
 def test_job_run_fingerprint_requires_matching_outputs_and_changes_with_simulation(
     tmp_path,
 ):
@@ -855,7 +1091,6 @@ def test_job_run_fingerprint_requires_matching_outputs_and_changes_with_simulati
         dimension=2,
         project_path=tmp_path,
     )
-    sim.outputs = OutputManager()
     sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
     sim.save()
 
@@ -866,6 +1101,12 @@ def test_job_run_fingerprint_requires_matching_outputs_and_changes_with_simulati
     trace_file = tmp_path / "jobs/simple/freq/results/traces/traces_1.h5"
     trace_file.parent.mkdir(parents=True)
     trace_file.touch()
+    job.write_run_state(status="completed")
+    assert job.is_run_current()
+
+    job += WavefieldOutput(name="pressure", fields=["pressure"])
+    assert not job.is_run_current()
+    job.save()
     job.write_run_state(status="completed")
     assert job.is_run_current()
 
@@ -886,7 +1127,6 @@ def test_job_run_current_accepts_sauce_run_manifest_hashes(tmp_path):
         dimension=2,
         project_path=tmp_path,
     )
-    sim.outputs = OutputManager()
     sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
     sim.save()
 
@@ -926,7 +1166,6 @@ def test_trace_dataset_combines_jobs_by_frequency_and_deduplicates_overlap(tmp_p
         dimension=2,
         project_path=tmp_path,
     )
-    sim.outputs = OutputManager()
     sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
     sim.save()
 
@@ -1010,6 +1249,53 @@ def test_trace_store_uses_dataset_backed_survey_trace_tables(tmp_path):
     assert fd.coords["receiver"].values.tolist() == [101, 102]
     assert type(fd).__name__ == "DataArray"
     assert (tmp_path / "results" / "_fs_run" / "cache" / "traces_vds.h5").exists()
+
+
+def test_trace_store_normalizes_dense_trace_axis_order(tmp_path):
+    trace_files = []
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    for idx, freq in enumerate([10.0, 20.0], start=1):
+        file = tmp_path / f"traces_{idx}.h5"
+        trace_files.append(str(file))
+        with h5py.File(file, "w") as h5:
+            h5.create_dataset("frequency", data=freq)
+            dset = h5.create_dataset(
+                "surface",
+                data=np.zeros((1, 1, 3, 2), dtype=np.float32),
+            )
+            dset.attrs["dims"] = ["receiver", "component", "shot"]
+            dset.attrs["layout_kind"] = ["dense_trace_v1"]
+            trace_group = h5.require_group("/survey/receiver_groups/surface/traces")
+            trace_group.create_dataset(
+                "receiver_id",
+                data=np.array([101, 102, 103], dtype=np.int32),
+            )
+            trace_group.create_dataset(
+                "source_id",
+                data=np.array([7, 7, 7], dtype=np.int32),
+            )
+            trace_group.create_dataset(
+                "component_name",
+                data=np.array(["p", "p", "p"], dtype=string_dtype),
+            )
+
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=[Path(file) for file in trace_files],
+            frequencies={1: 10.0, 2: 20.0},
+            groups=["surface"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=tmp_path / "results" / "traces",
+            project_path=tmp_path,
+        )
+    )
+
+    fd = traces.fd("surface", "p", source=7)
+
+    assert fd.dims == ("frequency", "receiver")
+    assert fd.shape == (2, 3)
+    assert fd.coords["receiver"].values.tolist() == [101, 102, 103]
 
 
 def test_sparse_survey_authoring_exports_sauce_contract():

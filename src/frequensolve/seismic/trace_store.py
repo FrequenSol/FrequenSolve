@@ -20,6 +20,8 @@ from frequensolve.util.fft import get_fft_backend
 
 __all__: list[str] = []
 
+TRACE_VDS_SCHEMA = "frequensolve-trace-vds-2"
+
 
 def process_string(raw):
     if isinstance(raw, (bytes, bytearray)):
@@ -58,6 +60,18 @@ def _unique_preserve_order(values):
         seen.add(key)
         out.append(key)
     return np.asarray(out)
+
+
+def _attr_strings(value) -> list[str]:
+    return [str(item) for item in _decode_h5_strings(np.asarray(value)).ravel()]
+
+
+def _trace_axis_dims(dset) -> list[str]:
+    dims = _decode_dim_list(dset.attrs["dims"])
+    layout_kind = _attr_strings(dset.attrs.get("layout_kind", []))
+    if "dense_trace_v1" in layout_kind:
+        return list(reversed(dims))
+    return dims
 
 
 def _as_file_list(files: Iterable[Union[str, Path]]) -> List[Union[str, Path]]:
@@ -338,7 +352,10 @@ class TraceStore:
             return False
         try:
             with h5py.File(path, "r") as h5:
-                return h5.attrs.get("source_signature") == signature
+                return (
+                    h5.attrs.get("schema") == TRACE_VDS_SCHEMA
+                    and h5.attrs.get("source_signature") == signature
+                )
         except OSError:
             return False
 
@@ -386,7 +403,7 @@ class TraceStore:
             new_file.unlink()
 
         with h5py.File(new_file, "w") as nf:
-            nf.attrs["schema"] = "frequensolve-trace-vds-1"
+            nf.attrs["schema"] = TRACE_VDS_SCHEMA
             nf.attrs["source_signature"] = signature
             nf.create_dataset("frequency", data=np.asarray(freqs, dtype=float))
             string_dtype = h5py.string_dtype(encoding="utf-8")
@@ -411,13 +428,13 @@ class TraceStore:
                         )
                     dset_shape = f[group].shape
                     dset_dtype = f[group].dtype
-                    dims = _decode_dim_list(f[group].attrs["dims"])
+                    dims = _trace_axis_dims(f[group])
                     coords = {}
-                    for dim in dims:
+                    for axis, dim in enumerate(dims):
                         if dim in f[group].attrs:
                             coord = f[group].attrs[dim]
                         else:
-                            coord = np.arange(1, dset_shape[dims[::-1].index(dim)] + 1)
+                            coord = np.arange(1, dset_shape[axis] + 1)
                         coords[dim] = coord
 
                 # Create virtual layout for data
@@ -446,7 +463,17 @@ class TraceStore:
         return self.consolidate()
 
     def read_h5(self, group: str) -> DataArray:
-        import dask.array as da
+        try:
+            import dask.array as da
+        except ModuleNotFoundError as exc:
+            from frequensolve._optional import optional_dependency_error
+
+            raise optional_dependency_error(
+                "TraceDataset lazy HDF5 reading",
+                extra="parallel",
+                dependencies=("dask",),
+                error=exc,
+            ) from exc
 
         self._ensure_consolidated()
         h5 = h5py.File(self._consolidated, "r")

@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 import numpy as np
 import xarray as xr
 
+from frequensolve._optional import optional_dependency_error
 from frequensolve.model.property import canonical_property_name
 
 __all__ = ["plot_layered_model"]
@@ -32,10 +33,12 @@ def _plot_layered_model_3d(model: Any, property: str, resolution: List[int], **k
 
         if pv.OFF_SCREEN:
             pv.set_jupyter_backend("static")
-    except ImportError as exc:
-        raise ImportError(
-            "PyVista is required for 3D plotting. Install with "
-            "`pip install pyvista[jupyter]`."
+    except ModuleNotFoundError as exc:
+        raise optional_dependency_error(
+            "3D layered-model plotting",
+            extra="visual",
+            dependencies=("pyvista",),
+            error=exc,
         ) from exc
 
     if len(resolution) == 2:
@@ -43,14 +46,19 @@ def _plot_layered_model_3d(model: Any, property: str, resolution: List[int], **k
 
     property_key = canonical_property_name(property)
     samples = model.sample_uniform(resolution)[property_key]
+    units = kwargs.pop("units", samples.attrs.get("units"))
+    samples = model.convert_property_units(samples, property_key, units)
     x = samples.coords["x"].values
     y = samples.coords["y"].values
     z = samples.coords["z"].values
 
-    vmin, vmax = model.extreme_values(property)
+    vmin, vmax = model.extreme_values(property_key, units=units)
     vmin = kwargs.pop("vmin", vmin)
     vmax = kwargs.pop("vmax", vmax)
     cmap = kwargs.pop("cmap", "viridis")
+    label = kwargs.pop("label", property)
+    if units:
+        label = f"{label} [{units}]"
 
     mx, my, mz = np.meshgrid(x, y, z, indexing="ij")
     grid = pv.StructuredGrid(mx, my, mz)
@@ -66,7 +74,7 @@ def _plot_layered_model_3d(model: Any, property: str, resolution: List[int], **k
         title_font_size=14,
         label_font_size=12,
         fmt="%.2f",
-        title=kwargs.get("label", property),
+        title=label,
         color="black",
     )
 
@@ -119,12 +127,22 @@ def _plot_layered_model_3d(model: Any, property: str, resolution: List[int], **k
 
 
 def _plot_layered_model_2d(model: Any, property: str, resolution: List[int], **kwargs):
-    import matplotlib.pyplot as plt
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise optional_dependency_error(
+            "2D layered-model plotting",
+            extra="visual",
+            dependencies=("matplotlib",),
+            error=exc,
+        ) from exc
 
     property_key = canonical_property_name(property)
     samples = model.sample_uniform(resolution)[property_key]
 
-    units = kwargs.pop("units", "km/s")
+    units = kwargs.pop("units", samples.attrs.get("units"))
+    samples = model.convert_property_units(samples, property_key, units)
+    units = samples.attrs.get("units")
     label = kwargs.pop("label", property)
     origin = kwargs.pop("origin", "upper")
     aspect = kwargs.pop("aspect", None)
@@ -159,7 +177,7 @@ def _plot_layered_model_2d(model: Any, property: str, resolution: List[int], **k
 
     _annotate_samples(samples, units, label, axes_names, axes_units)
 
-    vmin, vmax = model.extreme_values(property)
+    vmin, vmax = model.extreme_values(property_key, units=units)
     vmin = kwargs.pop("vmin", vmin)
     vmax = kwargs.pop("vmax", vmax)
 
