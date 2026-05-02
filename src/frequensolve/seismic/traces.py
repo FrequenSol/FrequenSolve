@@ -90,11 +90,17 @@ class TraceDataset:
         manifest: TraceManifest,
         upscale: int = 1,
     ) -> "TraceDataset":
-        files = [TraceManifest.resolve_trace_file(file) for file in manifest.files]
+        packed_file = manifest.packed_file
+        if packed_file is not None:
+            files = [packed_file]
+            frequencies = manifest.packed_frequencies or dict(manifest.frequencies)
+        else:
+            files = [TraceManifest.resolve_trace_file(file) for file in manifest.files]
+            frequencies = dict(manifest.frequencies)
         return cls(
             manifest=TraceManifest(
                 files=files,
-                frequencies=dict(manifest.frequencies),
+                frequencies=frequencies,
                 groups=list(manifest.groups),
                 simulation=manifest.simulation,
                 result_path=manifest.result_path,
@@ -122,10 +128,14 @@ class TraceDataset:
         path = Path(source)
         if not path.exists():
             raise FileNotFoundError(f"Trace file not found: {path}")
+        frequencies = TraceStore._read_trace_frequencies(path)
+        groups = TraceStore.discover_trace_groups(path)
         manifest = TraceManifest(
             files=[TraceManifest.resolve_trace_file(path)],
-            frequencies={1: TraceStore._read_trace_frequency(path)},
-            groups=[],
+            frequencies={
+                index: frequency for index, frequency in enumerate(frequencies, start=1)
+            },
+            groups=groups,
             simulation=path,
             result_path=path.parent,
             output_path=path.parent,
@@ -216,13 +226,11 @@ class TraceDataset:
     def consolidate(
         self,
         cache_dir: Optional[Path] = None,
-        force: bool = False,
     ) -> Path:
         """Build or refresh the trace VDS cache and return its path."""
 
         return self.store.consolidate(
             cache_dir=cache_dir or self._default_cache_dir(),
-            force=force,
         )
 
     def times(self, upscale: Optional[int] = None) -> np.ndarray:

@@ -40,6 +40,7 @@ If you're new to FrequenSolve, we recommend starting with:
    :caption: Backend Contracts
 
    sauce_api_updates
+   sauce_trace_output_compaction
 
 .. toctree::
    :maxdepth: 2

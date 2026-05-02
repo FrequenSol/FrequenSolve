@@ -80,8 +80,8 @@ properties. Expression nodes currently used by the SDK are ``property``,
 ``value``, ``op``, and ``args``. Required operations are ``add``, ``subtract``,
 ``multiply``, ``divide``, and ``power``.
 
-Sparse Surveys
---------------
+Sparse Survey Contract
+----------------------
 
 The acquisition contract now supports sparse survey tables for many-to-many
 source/receiver selections. Sauce should treat survey tables as authoritative
@@ -105,25 +105,26 @@ rename receiver-output folders and files from ``receivers`` to ``traces`` when
 writing new outputs. Legacy readers may remain internal while existing data is
 migrated.
 
-Sauce may continue writing one trace HDF5 file per frequency/task, because
-frequency tasks are run in parallel processes and HDF5 should not be shared by
-independent writers. The Python SDK models this as one typed
-``TraceManifest`` pointing at many physical files:
+Sauce may continue writing one temporary trace HDF5 shard per frequency/task
+while tasks are running, because frequency tasks are run in parallel processes
+and HDF5 should not be shared by independent writers. After all tasks finish,
+Sauce should run a cleanup/finalization step that packs completed frequency
+outputs into one consolidated trace HDF5 file by default:
 
 .. code-block:: text
 
    results/
      traces/
-       traces_1.h5
-       traces_2.h5
-       traces_3.h5
+       traces.h5
+       manifest.json
+       shards/
      _fs_run/
        run_manifest.json
        outputs.json
        timings.json
 
-Each per-frequency trace HDF5 file should be self-contained enough to be read
-independently:
+``traces/traces.h5`` is the normal public trace product. It should be
+self-contained and should store:
 
 * store receiver ids as datasets, not long HDF5 attributes;
 * store source ids as datasets;
@@ -133,13 +134,22 @@ independently:
 * include enough frequency/task metadata to combine adjacent frequency-band jobs
   without task-number conflicts.
 
+Before launching independent frequency tasks, the preliminary meshing/sizing
+job should output receiver/source/component metadata for the finalizer. The
+frequency tasks can then write frequency-specific arrays and minimal task
+metadata. If an opt-in separate-storage mode such as ``store_separate=True`` is
+used, each per-frequency file should be self-contained because no packed
+metadata authority may exist. See :doc:`sauce_trace_output_compaction` for the
+trace-finalization contract.
+
 Combined trace datasets should identify each frequency by physical frequency
 value and source job metadata, not only by task number.
 
-When possible, ``outputs.json`` should list every produced trace file with
-``kind: "hdf5"``, a stable ``relative_path``, and the trace schema version. The
-SDK can then use Sauce's output manifest as the authoritative artifact list
-instead of guessing file names.
+``outputs.json`` should list the packed trace file and trace manifest with
+stable relative paths and schema versions. In separate-storage mode, it should
+list the shard manifest or every produced shard. The SDK can then use Sauce's
+output manifest as the authoritative artifact list instead of guessing file
+names.
 
 Rerun Fingerprints
 ------------------

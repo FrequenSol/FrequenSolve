@@ -325,6 +325,35 @@ def _vtu_scalar_label(
     return base
 
 
+def _source_indexed_vtu_part_fields(
+    mesh,
+    field: str,
+    association: str,
+    part: str,
+) -> list[str]:
+    key = _vtu_field_key(field)
+    matches = []
+    for name in _vtu_field_names(mesh, association):
+        if _vtu_field_key(name) != key:
+            continue
+        if _resolved_vtu_part(name, "") == part:
+            matches.append(name)
+    return matches
+
+
+def _ambiguous_source_indexed_field_error(
+    field: str,
+    part: str,
+    matches: list[str],
+) -> KeyError:
+    bases = sorted({_strip_vtu_part_suffix(name) for name in matches})
+    return KeyError(
+        f"VTU field '{field}' is ambiguous for part='{part}'. Matching fields: "
+        f"{', '.join(matches)}. Specify one source-indexed field base instead, "
+        f"for example '{bases[0]}'."
+    )
+
+
 def _resolve_vtu_scalar(
     mesh,
     field: str,
@@ -354,6 +383,17 @@ def _resolve_vtu_scalar(
             break
         except KeyError:
             continue
+    if data is None or resolved_field is None:
+        matches = _source_indexed_vtu_part_fields(mesh, field, association, part)
+        if len(matches) == 1:
+            resolved_field = matches[0]
+            data, resolved_association = _select_vtu_data(
+                mesh,
+                resolved_field,
+                association,
+            )
+        elif len(matches) > 1:
+            raise _ambiguous_source_indexed_field_error(field, part, matches)
     if data is None or resolved_field is None:
         if part == "abs":
             data, resolved_association = _paired_abs_vtu_data(mesh, field, association)
@@ -522,6 +562,8 @@ def plot_vtu(
     vmin: float | None = None,
     vmax: float | None = None,
     show_edges: bool = False,
+    edge_color: str = "black",
+    edge_width: float = 1.0,
     scalar_bar: bool | Mapping[str, Any] = True,
     background: str = "white",
     view: str | None = "x_depth",
@@ -548,6 +590,14 @@ def plot_vtu(
     units:
         Optional unit label, or a mapping from raw/base field name to unit label.
         If omitted, FrequenSolve uses unit metadata from the VTU header.
+    show_edges:
+        If true, overlay edges from ``extract_all_edges()`` on the scalar plot.
+        This is useful for inspecting higher-order quad/hex topology without
+        relying on VTK/PyVista's rendered surface edges.
+    edge_color:
+        Color used when ``show_edges=True``.
+    edge_width:
+        Line width used when ``show_edges=True``.
     view:
         Camera view. The default ``"x_depth"`` orients +x to the right and
         +y/depth downward for 2D x-depth solver outputs.
@@ -562,6 +612,11 @@ def plot_vtu(
     source_mesh = _as_vtu_mesh(vtu)
     mesh = source_mesh.copy(deep=True)
     _attach_vtu_metadata(mesh, _vtu_metadata(source_mesh))
+
+    if plotter is None:
+        plotter = pv.Plotter(window_size=window_size)
+    plotter.set_background(background)
+
     fields = _vtu_field_names(mesh, association)
     if not fields:
         raise ValueError("VTU file does not contain point or cell data arrays")
@@ -584,9 +639,6 @@ def plot_vtu(
             float(np.nanmax(scalar_values)) if vmax is None else float(vmax),
         )
 
-    if plotter is None:
-        plotter = pv.Plotter(window_size=window_size)
-    plotter.set_background(background)
     scalar_bar_args = add_mesh_kwargs.pop("scalar_bar_args", None)
     if isinstance(scalar_bar, Mapping):
         scalar_bar_args = {**scalar_bar, **(scalar_bar_args or {})}
@@ -601,7 +653,6 @@ def plot_vtu(
         "scalars": scalar_name,
         "cmap": cmap,
         "clim": clim,
-        "show_edges": show_edges,
         "show_scalar_bar": show_scalar_bar,
         **add_mesh_kwargs,
     }
@@ -610,6 +661,15 @@ def plot_vtu(
 
     plotter.add_mesh(display_mesh, **mesh_kwargs)
     _set_vtu_view(plotter, view)
+
+    if show_edges:
+        edge_mesh = display_mesh.extract_all_edges()
+        mesh_kwargs = {
+            "color": edge_color,
+            "line_width": edge_width,
+            **add_mesh_kwargs,
+        }
+        plotter.add_mesh(edge_mesh, **mesh_kwargs)
 
     if screenshot is not None:
         plotter.screenshot(str(screenshot))

@@ -83,6 +83,15 @@ wait
 $executable -j $input_file --smooth
 {% endif %}
 
+{% if pack_job %}
+echo "$executable -nthreads $n_threads -j $input_file --pack"
+$executable -nthreads $n_threads -j $input_file --pack >> $dir_out/pack.log 2>&1 || {
+   rc=$?
+   echo "Packing step failed with exit code $rc"
+   exit $rc
+}
+{% endif %}
+
 # skip_slots=(1)
 # allowed=()
 # for ((s=0; s<n_workers; s++)); do

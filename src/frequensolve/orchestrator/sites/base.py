@@ -140,6 +140,7 @@ class RunResult:
         *,
         kind: Optional[str] = None,
         suffix: Optional[Union[str, tuple[str, ...]]] = None,
+        base: Optional[Union[str, Path]] = None,
         existing: bool = False,
     ) -> list[Path]:
         """Return output files reported by the completed run."""
@@ -147,7 +148,19 @@ class RunResult:
         metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
         if metadata is None:
             return []
-        return metadata.output_files(kind=kind, suffix=suffix, existing=existing)
+        return metadata.output_files(
+            kind=kind,
+            suffix=suffix,
+            base=base,
+            existing=existing,
+        )
+
+    def logs(self, **kwargs):
+        if self.site is not None:
+            return self.site.fetch_logs(self.job, **kwargs)
+        if hasattr(self.job, "_stdout_path"):
+            return self.job._stdout_path
+        return None
 
 
 @dataclass
@@ -326,7 +339,7 @@ class RunHandle:
         return self.site.fetch_traces(self.job, upscale=upscale)
 
     def logs(self, **kwargs):
-        if hasattr(self.site, "fetch_logs"):
+        if self.site is not None:
             return self.site.fetch_logs(self.job, **kwargs)
         if hasattr(self.job, "_stdout_path"):
             return self.job._stdout_path
@@ -370,6 +383,149 @@ class BaseSite:
         if sync_project and project is not None and hasattr(self, "sync"):
             self.sync(project)
         return job
+
+    @staticmethod
+    def _as_jobs(job: Any) -> tuple[list[Any], bool]:
+        if isinstance(job, (list, tuple)):
+            return list(job), False
+        return [job], True
+
+    @staticmethod
+    def _frequency_task(job: Any, frequency: Any) -> int:
+        try:
+            target = complex(frequency)
+        except (TypeError, ValueError):
+            target = complex(float(frequency))
+
+        for index, value in enumerate(getattr(job, "f_list", []), start=1):
+            try:
+                candidate = complex(value)
+            except (TypeError, ValueError):
+                continue
+            if abs(candidate - target) <= 1e-9 * max(1.0, abs(target)):
+                return index
+        raise ValueError(f"Frequency {frequency!r} is not part of job {job.name!r}")
+
+    @staticmethod
+    def _task_log_candidates(log_dir: Union[str, Path], task: int) -> list[Path]:
+        log_dir = Path(log_dir)
+        return [
+            log_dir / f"task_{task}.log",
+            log_dir / f"task_{task}.txt",
+            log_dir / f"task_{task}.out",
+        ]
+
+    @classmethod
+    def _select_log_path(
+        cls,
+        job: Any,
+        log_dir: Union[str, Path],
+        *,
+        task: Optional[int] = None,
+        frequency: Optional[Any] = None,
+    ) -> Path:
+        if task is not None and frequency is not None:
+            raise ValueError("Pass either `task` or `frequency`, not both")
+        if frequency is not None:
+            task = cls._frequency_task(job, frequency)
+        log_dir = Path(log_dir)
+        if task is None:
+            return log_dir
+        if task < 1:
+            raise ValueError("Log task numbers are one-based and must be >= 1")
+        for path in cls._task_log_candidates(log_dir, int(task)):
+            if path.exists():
+                return path
+        candidates = ", ".join(
+            str(path) for path in cls._task_log_candidates(log_dir, int(task))
+        )
+        raise FileNotFoundError(
+            f"No log file found for task {task}; checked {candidates}"
+        )
+
+    @staticmethod
+    def _latest_task_log_path(log_dir: Union[str, Path]) -> Optional[Path]:
+        log_path = Path(log_dir)
+        if not log_path.is_dir():
+            return None
+        best_index = -1
+        best_path = None
+        for pattern in ("task_*.log", "task_*.txt", "task_*.out"):
+            for file in log_path.glob(pattern):
+                try:
+                    index = int(file.stem.rsplit("_", 1)[-1])
+                except (ValueError, IndexError):
+                    continue
+                if index > best_index:
+                    best_index = index
+                    best_path = file
+        return best_path
+
+    @staticmethod
+    def _print_file_with_header(path: Union[str, Path], header: str) -> None:
+        path = Path(path)
+        try:
+            text = path.read_text(errors="replace")
+        except OSError as exc:
+            print(f"--- {header} (could not read: {exc}) ---")
+            return
+        print(f"\n{'=' * 60}\n{header}\n{path}\n{'=' * 60}\n{text}\n")
+
+    def _show_logs(
+        self,
+        selection: Path,
+        *,
+        job_name: Optional[str] = None,
+        label: str = "log",
+    ) -> None:
+        if selection.is_file():
+            self._print_file_with_header(selection, f"[{job_name or 'job'}] {label}")
+            return
+        latest = self._latest_task_log_path(selection)
+        if latest is not None:
+            self._print_file_with_header(
+                latest,
+                f"[{job_name or 'job'}] latest task log",
+            )
+
+    def fetch_logs(
+        self,
+        job: Any,
+        *,
+        local_dir: Optional[Union[str, Path]] = None,
+        task: Optional[int] = None,
+        frequency: Optional[Any] = None,
+        show: bool = False,
+        **_: Any,
+    ) -> Union[Path, Dict[str, Path]]:
+        """Return local logs for one job or a mapping for multiple jobs.
+
+        ``task`` is one-based. ``frequency`` selects the matching frequency in
+        ``job.f_list`` and returns that task's log file.
+        """
+
+        jobs, single = self._as_jobs(job)
+        requested = Path(local_dir) if local_dir is not None else None
+        out: Dict[str, Path] = {}
+        for item in jobs:
+            if requested is None:
+                log_dir = Path(getattr(item, "_stdout_path"))
+            elif single:
+                log_dir = requested
+            else:
+                log_dir = requested / item.name
+            selected = self._select_log_path(
+                item,
+                log_dir,
+                task=task,
+                frequency=frequency,
+            )
+            if show:
+                self._show_logs(selected, job_name=getattr(item, "name", None))
+            out[item.name] = selected
+        if single:
+            return out[jobs[0].name]
+        return out
 
     def submit(self, job, **kwargs) -> RunHandle:
         """Submit a job and return an awaitable run handle."""

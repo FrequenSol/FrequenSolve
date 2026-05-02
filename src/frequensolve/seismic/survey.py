@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping as ABCMapping
+from collections.abc import Sequence as ABCSequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Union
@@ -26,6 +28,24 @@ _RELATION_DTYPE = np.dtype(
         ("relation_row", np.int64),
     ]
 )
+
+_TRACE_DTYPE = np.dtype(
+    [
+        ("trace_id", np.int64),
+        ("source_id", np.int64),
+        ("receiver_id", np.int64),
+        ("recv_pos_id", np.int64),
+        ("component_id", np.int64),
+        ("component", np.int64),
+        ("channel_number", np.int64),
+        ("field_record", np.int64),
+        ("active", np.bool_),
+        ("weight", np.float64),
+    ]
+)
+
+_TRACE_SCHEMA = "fs_seismic_trace_store_v1"
+_TRACE_SPECIAL_DATASETS = {"frequency", "laplace", "task_id"}
 
 
 def _coords_array(values: Any, name: str) -> np.ndarray:
@@ -97,6 +117,10 @@ def _as_ids(values: Optional[Union[int, Sequence[int], np.ndarray]]) -> Optional
     return {int(value) for value in values}
 
 
+def _unique_sorted(values: Iterable[Any]) -> list[int]:
+    return sorted({int(value) for value in values})
+
+
 def _reject_frame_kwargs(kwargs: Mapping[str, Any]) -> None:
     deprecated = {"frame", "source_frame", "receiver_frame"} & set(kwargs)
     if deprecated:
@@ -112,6 +136,106 @@ def _coordinate_value_or_array(
     if units is None and system is None:
         return values
     return CoordinateValue(values, units=units, system=system)
+
+
+def _decode_h5_strings(values: Any) -> np.ndarray:
+    values = np.asarray(values)
+    if values.dtype.kind in {"S", "O"}:
+        return np.asarray(
+            [
+                item.decode("utf-8", "ignore") if isinstance(item, bytes) else str(item)
+                for item in values.ravel()
+            ],
+            dtype=object,
+        ).reshape(values.shape)
+    return values
+
+
+def _h5_string_list(values: Any) -> list[str]:
+    array = _decode_h5_strings(values)
+    return [str(item) for item in np.asarray(array).ravel()]
+
+
+def _h5_first_string(values: Any, default: Optional[str] = None) -> Optional[str]:
+    strings = _h5_string_list(values)
+    if not strings:
+        return default
+    text = strings[0]
+    return text if text else default
+
+
+def _h5_dataset_strings(group: Any, name: str, size: int, prefix: str) -> np.ndarray:
+    if name not in group:
+        return _string_array(None, size, prefix)
+    values = _h5_string_list(group[name][()])
+    return _string_array(values, size, prefix)
+
+
+def _h5_dataset_ints(group: Any, name: str, default: np.ndarray) -> np.ndarray:
+    if name not in group:
+        return np.asarray(default, dtype=np.int64)
+    return np.asarray(group[name][()], dtype=np.int64)
+
+
+def _h5_dataset_float_array(group: Any, name: str, default: np.ndarray) -> np.ndarray:
+    if name not in group:
+        return np.asarray(default, dtype=float)
+    return np.asarray(group[name][()], dtype=float)
+
+
+def _h5_attr_strings(obj: Any, name: str) -> list[str]:
+    if name not in obj.attrs:
+        return []
+    return _h5_string_list(obj.attrs[name])
+
+
+def _h5_attr_ints(obj: Any, name: str) -> Optional[np.ndarray]:
+    if name not in obj.attrs:
+        return None
+    try:
+        return np.asarray(obj.attrs[name], dtype=np.int64)
+    except (TypeError, ValueError):
+        return None
+
+
+def _catalog_indices(ids: np.ndarray, wanted: Iterable[int], n_rows: int) -> list[int]:
+    id_to_index = (
+        {int(value): index for index, value in enumerate(ids)}
+        if len(ids) == n_rows
+        else {}
+    )
+    indices = []
+    for value in wanted:
+        value = int(value)
+        if value in id_to_index:
+            indices.append(id_to_index[value])
+            continue
+        fallback = value - 1
+        if 0 <= fallback < n_rows:
+            indices.append(fallback)
+    return indices
+
+
+def _h5_dataset_string_values(group: Any, name: str) -> list[str]:
+    if name not in group:
+        return []
+    return _h5_string_list(group[name][()])
+
+
+def _clean_h5_path(path: str) -> str:
+    return str(path).strip().lstrip("/")
+
+
+def _group_spec_matches(spec: Mapping[str, Any], group: Optional[str]) -> bool:
+    if group is None:
+        return True
+    group = str(group).strip().lstrip("/")
+    names = {
+        str(spec.get("group_name", "")).strip().lstrip("/"),
+        str(spec.get("dataset", "")).strip().lstrip("/"),
+        str(spec.get("dataset_path", "")).strip().lstrip("/"),
+    }
+    return group in names
 
 
 @dataclass
@@ -139,6 +263,7 @@ class Survey:
     receiver_units: Optional[Any] = None
     source_system: Optional[str] = None
     receiver_system: Optional[str] = None
+    trace_tables: Dict[str, np.ndarray] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.sources, CoordinateValue):
@@ -190,6 +315,10 @@ class Survey:
                 self.receiver_names, len(self.receivers), "receiver"
             )
         self.relations = np.asarray(self.relations, dtype=_RELATION_DTYPE)
+        self.trace_tables = {
+            str(name): np.asarray(table, dtype=_TRACE_DTYPE)
+            for name, table in self.trace_tables.items()
+        }
 
     @classmethod
     def dense(
@@ -351,6 +480,882 @@ class Survey:
             source_system=source_system if source_system is not None else system,
             receiver_system=receiver_system if receiver_system is not None else system,
         )
+
+    @classmethod
+    def load(
+        cls,
+        source: Any,
+        receiver_file: Optional[Union[str, Path]] = None,
+        relation_file: Optional[Union[str, Path]] = None,
+        *,
+        group: Optional[str] = None,
+        name: str = "survey",
+        dimension: int = 2,
+        units: Optional[Any] = None,
+        system: Optional[str] = None,
+        source_units: Optional[Any] = None,
+        receiver_units: Optional[Any] = None,
+        source_system: Optional[str] = None,
+        receiver_system: Optional[str] = None,
+    ) -> "Survey":
+        """Load a survey from an authored object, SPS files, traces, or run result.
+
+        ``source`` may be an existing ``Survey``, a trace HDF5 file, a result
+        directory, a ``TraceDataset``/``TraceManifest``, a completed run result,
+        or an SPS triplet supplied either as ``(sps, spr, spx)`` or as the first
+        three positional arguments.
+        """
+
+        if isinstance(source, Survey):
+            return source
+
+        if receiver_file is not None or relation_file is not None:
+            if receiver_file is None or relation_file is None:
+                raise TypeError(
+                    "SPS loading requires source, receiver, and relation files"
+                )
+            return cls.from_sps(
+                source,
+                receiver_file,
+                relation_file,
+                name=name,
+                dimension=dimension,
+                units=units,
+                system=system,
+                source_units=source_units,
+                receiver_units=receiver_units,
+                source_system=source_system,
+                receiver_system=receiver_system,
+            )
+
+        if isinstance(source, ABCMapping):
+            if {"source_file", "receiver_file", "relation_file"} <= set(source):
+                return cls.from_sps(
+                    source["source_file"],
+                    source["receiver_file"],
+                    source["relation_file"],
+                    name=name,
+                    dimension=dimension,
+                    units=units,
+                    system=system,
+                    source_units=source_units,
+                    receiver_units=receiver_units,
+                    source_system=source_system,
+                    receiver_system=receiver_system,
+                )
+            raise TypeError("Survey.load mapping input must describe SPS files")
+
+        if (
+            isinstance(source, ABCSequence)
+            and not isinstance(source, (str, bytes, Path))
+            and len(source) == 3
+        ):
+            return cls.from_sps(
+                source[0],
+                source[1],
+                source[2],
+                name=name,
+                dimension=dimension,
+                units=units,
+                system=system,
+                source_units=source_units,
+                receiver_units=receiver_units,
+                source_system=source_system,
+                receiver_system=receiver_system,
+            )
+
+        if isinstance(source, (str, Path)):
+            path = Path(source)
+            if path.is_dir():
+                from frequensolve.simulation.artifacts import RunMetadata
+
+                return cls.from_result(
+                    type("_SurveyRun", (), {"run_metadata": RunMetadata.read(path)})(),
+                    group=group,
+                    name=name,
+                )
+            if cls._is_trace_store(path) or path.suffix.lower() in {
+                ".h5",
+                ".hdf5",
+                ".hdf",
+            }:
+                return cls.from_trace_file(path, group=group, name=name)
+            raise ValueError(f"Cannot infer survey format from path: {path}")
+
+        if any(hasattr(source, attr) for attr in ("paths", "files", "manifest")):
+            return cls.from_trace_dataset(source, group=group, name=name)
+
+        if any(
+            hasattr(source, attr)
+            for attr in ("run_metadata", "trace_manifest", "output_files", "job")
+        ):
+            return cls.from_result(source, group=group, name=name)
+
+        raise TypeError(f"Cannot load Survey from {type(source).__name__}")
+
+    @classmethod
+    def from_result(
+        cls,
+        result: Any,
+        *,
+        group: Optional[str] = None,
+        name: str = "survey",
+    ) -> "Survey":
+        """Load the resolved solver survey from a completed run result."""
+
+        return cls.from_trace_file(
+            cls._trace_file_from_result(result),
+            group=group,
+            name=name,
+        )
+
+    @classmethod
+    def from_trace_dataset(
+        cls,
+        traces: Any,
+        *,
+        group: Optional[str] = None,
+        name: str = "survey",
+    ) -> "Survey":
+        """Load the resolved survey from a ``TraceDataset`` or manifest."""
+
+        files = getattr(traces, "paths", None)
+        if files is None:
+            files = getattr(traces, "files", None)
+        if files is None and hasattr(traces, "manifest"):
+            files = getattr(traces.manifest, "files", None)
+        if files is None:
+            raise TypeError("from_trace_dataset requires trace files or a manifest")
+        for file in files:
+            path = Path(file)
+            if path.exists() and cls._is_trace_store(path):
+                return cls.from_trace_file(path, group=group, name=name)
+        if hasattr(traces, "consolidate"):
+            path = Path(traces.consolidate())
+            if path.exists() and cls._is_trace_store(path):
+                return cls.from_trace_file(path, group=group, name=name)
+        raise FileNotFoundError("No trace HDF5 file with survey metadata was found")
+
+    @classmethod
+    def from_trace_file(
+        cls,
+        file: Union[str, Path],
+        *,
+        group: Optional[str] = None,
+        name: str = "survey",
+    ) -> "Survey":
+        """Load a resolved survey from a Sauce ``fs_seismic_trace_store_v1`` HDF5 file."""
+
+        try:
+            import h5py
+        except ModuleNotFoundError as exc:
+            from frequensolve._optional import optional_dependency_error
+
+            raise optional_dependency_error(
+                "Survey trace-store loading",
+                extra="parallel",
+                dependencies=("h5py",),
+                error=exc,
+            ) from exc
+
+        path = Path(file)
+        with h5py.File(path, "r") as h5:
+            if "survey" not in h5:
+                raise ValueError(f"Trace file has no /survey group: {path}")
+            survey_group = h5["survey"]
+            schema = _h5_first_string(survey_group["schema_version"][()])
+            if schema != _TRACE_SCHEMA:
+                raise ValueError(
+                    f"Unsupported survey schema {schema!r}; expected {_TRACE_SCHEMA!r}"
+                )
+
+            source_ids, source_names, sources, source_units, source_system = (
+                cls._read_solver_point_catalog(
+                    survey_group,
+                    "sources",
+                    id_name="source_id",
+                    name_name="source_name",
+                    name_prefix="source",
+                )
+            )
+            source_field_records = cls._read_solver_source_field_records(survey_group)
+            group_specs = cls._read_solver_group_specs(h5, group=group)
+            if not group_specs:
+                raise ValueError(f"No survey receiver groups found in {path}")
+            (
+                receiver_ids,
+                receiver_names,
+                receivers,
+                receiver_units,
+                receiver_system,
+                receiver_id_maps,
+            ) = cls._read_solver_receiver_catalogs(h5, group_specs)
+            component_ids = cls._read_solver_component_ids(survey_group)
+            trace_tables = cls._read_solver_trace_tables(
+                h5,
+                group_specs=group_specs,
+                receiver_id_maps=receiver_id_maps,
+                source_ids=source_ids,
+                source_field_records=source_field_records,
+                component_ids=component_ids,
+            )
+            if not trace_tables:
+                raise ValueError(f"No survey trace tables found in {path}")
+
+            used_sources = _unique_sorted(
+                row["source_id"]
+                for table in trace_tables.values()
+                for row in table
+                if int(row["source_id"]) > 0
+            )
+            used_receivers = _unique_sorted(
+                row["receiver_id"]
+                for table in trace_tables.values()
+                for row in table
+                if int(row["receiver_id"]) > 0
+            )
+
+            source_idx = _catalog_indices(source_ids, used_sources, len(sources))
+            receiver_idx = _catalog_indices(
+                receiver_ids, used_receivers, len(receivers)
+            )
+            if not source_idx or not receiver_idx:
+                raise ValueError("Survey catalogs do not cover the resolved trace IDs")
+
+            relations = cls._relations_from_trace_tables(trace_tables)
+
+        return cls(
+            name=name,
+            kind="SolverTraceStore",
+            sources=sources[source_idx],
+            receivers=receivers[receiver_idx],
+            source_ids=(
+                source_ids[source_idx]
+                if len(source_ids) == len(sources)
+                else np.asarray(used_sources, dtype=np.int64)
+            ),
+            receiver_ids=(
+                receiver_ids[receiver_idx]
+                if len(receiver_ids) == len(receivers)
+                else np.asarray(used_receivers, dtype=np.int64)
+            ),
+            source_names=(
+                source_names[source_idx]
+                if len(source_names) == len(sources)
+                else _string_array(None, len(source_idx), "source")
+            ),
+            receiver_names=(
+                receiver_names[receiver_idx]
+                if len(receiver_names) == len(receivers)
+                else _string_array(None, len(receiver_idx), "receiver")
+            ),
+            relations=relations,
+            source_units=source_units,
+            receiver_units=receiver_units,
+            source_system=source_system,
+            receiver_system=receiver_system,
+            trace_tables=trace_tables,
+        )
+
+    @classmethod
+    def from_solver_output(
+        cls,
+        file: Union[str, Path],
+        *,
+        group: Optional[str] = None,
+        name: str = "survey",
+    ) -> "Survey":
+        """Load a resolved survey from a solver trace-store output file."""
+
+        return cls.from_trace_file(file, group=group, name=name)
+
+    @staticmethod
+    def _trace_file_from_result(result: Any) -> Path:
+        metadata = getattr(result, "run_metadata", None)
+        if metadata is None and getattr(result, "job", None) is not None:
+            metadata = getattr(result.job, "run_metadata", None)
+        if metadata is not None:
+            for artifact in getattr(metadata, "artifacts", []):
+                if artifact.schema == _TRACE_SCHEMA and Path(artifact.path).exists():
+                    return Path(artifact.path)
+
+        manifest = getattr(result, "trace_manifest", None)
+        if manifest is None and getattr(result, "job", None) is not None:
+            manifest = getattr(result.job, "trace_manifest", None)
+        if manifest is not None:
+            for file in getattr(manifest, "files", []):
+                path = Path(file)
+                if path.exists() and Survey._is_trace_store(path):
+                    return path
+
+        if hasattr(result, "output_files"):
+            for file in result.output_files(kind="hdf5", existing=True):
+                path = Path(file)
+                if Survey._is_trace_store(path):
+                    return path
+
+        raise FileNotFoundError("No fs_seismic_trace_store_v1 HDF5 output was found")
+
+    @staticmethod
+    def _is_trace_store(path: Union[str, Path]) -> bool:
+        try:
+            import h5py
+        except ModuleNotFoundError:
+            return False
+
+        try:
+            with h5py.File(path, "r") as h5:
+                if "survey/schema_version" not in h5:
+                    return False
+                return (
+                    _h5_first_string(h5["survey/schema_version"][()]) == _TRACE_SCHEMA
+                )
+        except OSError:
+            return False
+
+    @staticmethod
+    def _read_solver_point_catalog(
+        survey_group: Any,
+        catalog_name: str,
+        *,
+        id_name: str,
+        name_name: str,
+        name_prefix: str,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, Optional[str], Optional[str]]:
+        if catalog_name not in survey_group:
+            raise ValueError(f"Trace-store survey is missing /survey/{catalog_name}")
+        catalog = survey_group[catalog_name]
+        if "coordinates" not in catalog:
+            raise ValueError(f"/survey/{catalog_name} is missing coordinates")
+        coordinates = np.asarray(catalog["coordinates"][()], dtype=float)
+        if coordinates.ndim != 2 or coordinates.shape[1] not in (2, 3):
+            raise ValueError(f"/survey/{catalog_name}/coordinates must be (n, 2|3)")
+        size = coordinates.shape[0]
+        ids = _h5_dataset_ints(catalog, id_name, np.arange(1, size + 1))
+        names = _h5_dataset_strings(catalog, name_name, len(ids), name_prefix)
+        coord_dset = catalog["coordinates"]
+        units = _h5_first_string(coord_dset.attrs.get("units", []))
+        system = _h5_first_string(coord_dset.attrs.get("coordinate_system", []))
+        return ids, names, coordinates, units, system
+
+    @staticmethod
+    def _read_solver_source_field_records(survey_group: Any) -> Dict[int, int]:
+        if "sources" not in survey_group:
+            return {}
+        sources = survey_group["sources"]
+        if "source_id" not in sources or "field_record" not in sources:
+            return {}
+        source_ids = np.asarray(sources["source_id"][()], dtype=np.int64)
+        field_records = np.asarray(sources["field_record"][()], dtype=np.int64)
+        return {
+            int(source_id): int(field_record)
+            for source_id, field_record in zip(source_ids, field_records)
+        }
+
+    @staticmethod
+    def _read_solver_group_specs(
+        h5: Any,
+        *,
+        group: Optional[str],
+    ) -> list[Dict[str, Any]]:
+        specs: list[Dict[str, Any]] = []
+        survey_group = h5["survey"]
+        receiver_groups = survey_group.get("receiver_groups")
+        catalog = None
+        if receiver_groups is not None:
+            catalog = receiver_groups.get("_catalog")
+
+        if catalog is not None:
+            group_names = _h5_dataset_string_values(catalog, "group_name")
+            dataset_paths = _h5_dataset_string_values(catalog, "dataset_path")
+            layout_kinds = _h5_dataset_string_values(catalog, "layout_kind")
+            n_group = max(len(group_names), len(dataset_paths), len(layout_kinds))
+            for index in range(n_group):
+                group_name = (
+                    group_names[index]
+                    if index < len(group_names) and group_names[index]
+                    else f"group_{index + 1}"
+                )
+                dataset_path = (
+                    dataset_paths[index]
+                    if index < len(dataset_paths) and dataset_paths[index]
+                    else f"/{group_name}"
+                )
+                dataset = _clean_h5_path(dataset_path)
+                layout_kind = (
+                    layout_kinds[index]
+                    if index < len(layout_kinds) and layout_kinds[index]
+                    else ""
+                )
+                spec = {
+                    "group_name": group_name,
+                    "dataset_path": dataset_path,
+                    "dataset": dataset,
+                    "layout_kind": layout_kind,
+                }
+                if _group_spec_matches(spec, group):
+                    specs.append(spec)
+            return specs
+
+        if "survey/traces" in h5 or "survey/trace_nodes" in h5:
+            spec = {
+                "group_name": "traces",
+                "dataset_path": "/survey/traces",
+                "dataset": "traces",
+                "layout_kind": "sparse_trace_v1",
+                "flat": True,
+            }
+            if _group_spec_matches(spec, group):
+                specs.append(spec)
+
+        if receiver_groups is not None:
+            for group_name, item in receiver_groups.items():
+                if group_name == "_catalog":
+                    continue
+                if "traces" not in item:
+                    continue
+                spec = {
+                    "group_name": group_name,
+                    "dataset_path": f"/{group_name}",
+                    "dataset": group_name,
+                    "layout_kind": "sparse_trace_v1",
+                }
+                if _group_spec_matches(spec, group):
+                    specs.append(spec)
+
+        for dataset, item in h5.items():
+            if dataset in _TRACE_SPECIAL_DATASETS or dataset == "survey":
+                continue
+            if not hasattr(item, "shape"):
+                continue
+            layout_kind = set(_h5_attr_strings(item, "layout_kind"))
+            if "dense_trace_v1" not in layout_kind:
+                continue
+            spec = {
+                "group_name": dataset,
+                "dataset_path": f"/{dataset}",
+                "dataset": dataset,
+                "layout_kind": "dense_trace_v1",
+            }
+            if _group_spec_matches(spec, group) and not any(
+                existing["group_name"] == dataset for existing in specs
+            ):
+                specs.append(spec)
+
+        return specs
+
+    @classmethod
+    def _read_solver_receiver_catalogs(
+        cls,
+        h5: Any,
+        group_specs: Sequence[Mapping[str, Any]],
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        Optional[str],
+        Optional[str],
+        Dict[str, Dict[int, int]],
+    ]:
+        all_ids = []
+        all_names = []
+        all_coordinates = []
+        id_maps: Dict[str, Dict[int, int]] = {}
+        units = None
+        system = None
+        seen_ids = set()
+        next_id = 1
+        force_unique = len(group_specs) > 1
+
+        for spec in group_specs:
+            catalog_name = cls._receiver_catalog_name(h5, spec)
+            ids, names, coordinates, catalog_units, catalog_system = (
+                cls._read_solver_point_catalog(
+                    h5["survey"],
+                    catalog_name,
+                    id_name="receiver_id",
+                    name_name="receiver_name",
+                    name_prefix="receiver",
+                )
+            )
+            local_ids = [int(value) for value in ids]
+            needs_remap = force_unique or any(value in seen_ids for value in local_ids)
+            if needs_remap:
+                mapped_ids = np.arange(
+                    next_id, next_id + len(local_ids), dtype=np.int64
+                )
+            else:
+                mapped_ids = np.asarray(local_ids, dtype=np.int64)
+
+            if len(mapped_ids):
+                next_id = max(next_id, int(mapped_ids.max()) + 1)
+            seen_ids.update(int(value) for value in mapped_ids)
+
+            group_key = str(spec["group_name"])
+            dataset_key = str(spec["dataset"])
+            mapping = {
+                int(local_id): int(mapped_id)
+                for local_id, mapped_id in zip(local_ids, mapped_ids)
+            }
+            id_maps[group_key] = mapping
+            id_maps[dataset_key] = mapping
+
+            all_ids.extend(int(value) for value in mapped_ids)
+            all_names.extend(str(value) for value in names)
+            all_coordinates.append(coordinates)
+            if units is None:
+                units = catalog_units
+            if system is None:
+                system = catalog_system
+
+        if not all_coordinates:
+            raise ValueError("Trace-store survey has no receiver coordinates")
+        return (
+            np.asarray(all_ids, dtype=np.int64),
+            np.asarray(all_names, dtype=object),
+            np.vstack(all_coordinates),
+            units,
+            system,
+            id_maps,
+        )
+
+    @staticmethod
+    def _receiver_catalog_name(h5: Any, spec: Mapping[str, Any]) -> str:
+        dataset = str(spec["dataset"])
+        group_name = str(spec["group_name"])
+        for candidate in (
+            f"receiver_groups/{dataset}/receivers",
+            f"receiver_groups/{group_name}/receivers",
+            "receivers",
+        ):
+            path = f"survey/{candidate}"
+            if path in h5 and "coordinates" in h5[path]:
+                return candidate
+        raise ValueError(
+            f"Trace-store survey has no receiver coordinate catalog for {group_name!r}"
+        )
+
+    @staticmethod
+    def _read_solver_component_ids(survey_group: Any) -> np.ndarray:
+        if "components" not in survey_group:
+            return np.arange(1, 2, dtype=np.int64)
+        components = survey_group["components"]
+        if "component_id" in components:
+            return np.asarray(components["component_id"][()], dtype=np.int64)
+        if "component" in components:
+            return np.asarray(components["component"][()], dtype=np.int64)
+        return np.arange(1, 2, dtype=np.int64)
+
+    @classmethod
+    def _read_solver_trace_tables(
+        cls,
+        h5: Any,
+        *,
+        group_specs: Sequence[Mapping[str, Any]],
+        receiver_id_maps: Mapping[str, Mapping[int, int]],
+        source_ids: np.ndarray,
+        source_field_records: Mapping[int, int],
+        component_ids: np.ndarray,
+    ) -> Dict[str, np.ndarray]:
+        tables: Dict[str, np.ndarray] = {}
+        for spec in group_specs:
+            group_name = str(spec["group_name"])
+            dataset = str(spec["dataset"])
+            receiver_map = dict(receiver_id_maps.get(group_name) or {})
+            layout_kind = str(spec.get("layout_kind", ""))
+            component_id_map = cls._read_solver_component_id_map(h5, spec)
+            if bool(spec.get("flat")):
+                if "survey/trace_nodes" in h5 and cls._is_aligned_sparse_layout(h5):
+                    table = cls._read_solver_aligned_sparse_trace_table(
+                        h5,
+                        receiver_id_map=receiver_map,
+                        source_field_records=source_field_records,
+                    )
+                    tables[group_name] = table
+                    continue
+                trace_path = "survey/traces"
+            else:
+                trace_path = f"survey/receiver_groups/{dataset}/traces"
+                if trace_path not in h5 and group_name != dataset:
+                    trace_path = f"survey/receiver_groups/{group_name}/traces"
+            if "sparse_trace_v1" in layout_kind or trace_path in h5:
+                if trace_path not in h5:
+                    continue
+                table = cls._read_solver_sparse_trace_table(
+                    h5[trace_path],
+                    component_id_map=component_id_map,
+                    source_field_records=source_field_records,
+                )
+                if receiver_map:
+                    table["receiver_id"] = [
+                        receiver_map.get(int(value), int(value))
+                        for value in table["receiver_id"]
+                    ]
+                tables[group_name] = table
+                continue
+
+            dset_name = dataset if dataset in h5 else group_name
+            if dset_name not in h5:
+                continue
+            dset = h5[dset_name]
+            if not hasattr(dset, "shape"):
+                continue
+            dset_layout_kind = set(_h5_attr_strings(dset, "layout_kind"))
+            if "dense_trace_v1" not in dset_layout_kind:
+                continue
+            table = cls._dense_trace_table_from_dataset(
+                dset,
+                source_ids=source_ids,
+                source_field_records=source_field_records,
+                receiver_id_map=receiver_map,
+                component_ids=cls._read_solver_group_component_ids(
+                    h5,
+                    spec,
+                    fallback=component_ids,
+                ),
+            )
+            tables[group_name] = table
+        return tables
+
+    @staticmethod
+    def _read_solver_group_component_ids(
+        h5: Any,
+        spec: Mapping[str, Any],
+        *,
+        fallback: np.ndarray,
+    ) -> np.ndarray:
+        dataset = str(spec["dataset"])
+        group_name = str(spec["group_name"])
+        for candidate in (
+            f"survey/receiver_groups/{dataset}/components",
+            f"survey/receiver_groups/{group_name}/components",
+            "survey/components",
+        ):
+            if candidate not in h5:
+                continue
+            components = h5[candidate]
+            if "component_id" in components:
+                return np.asarray(components["component_id"][()], dtype=np.int64)
+            if "component" in components:
+                return np.asarray(components["component"][()], dtype=np.int64)
+        return np.asarray(fallback, dtype=np.int64)
+
+    @staticmethod
+    def _read_solver_component_id_map(
+        h5: Any,
+        spec: Mapping[str, Any],
+    ) -> Dict[int, int]:
+        dataset = str(spec["dataset"])
+        group_name = str(spec["group_name"])
+        for candidate in (
+            f"survey/receiver_groups/{dataset}/components",
+            f"survey/receiver_groups/{group_name}/components",
+            "survey/components",
+        ):
+            if candidate not in h5:
+                continue
+            components = h5[candidate]
+            if "component" not in components:
+                continue
+            component = np.asarray(components["component"][()], dtype=np.int64)
+            if "component_id" in components:
+                component_id = np.asarray(
+                    components["component_id"][()], dtype=np.int64
+                )
+            else:
+                component_id = component
+            return {
+                int(out): int(identifier)
+                for out, identifier in zip(component, component_id)
+            }
+        return {}
+
+    @staticmethod
+    def _is_aligned_sparse_layout(h5: Any) -> bool:
+        if "survey/traces/layout_encoding" not in h5:
+            return False
+        encoding = set(_h5_string_list(h5["survey/traces/layout_encoding"][()]))
+        return "aligned_components_v1" in encoding
+
+    @classmethod
+    def _read_solver_aligned_sparse_trace_table(
+        cls,
+        h5: Any,
+        *,
+        receiver_id_map: Mapping[int, int],
+        source_field_records: Mapping[int, int],
+    ) -> np.ndarray:
+        nodes = h5["survey/trace_nodes"]
+        components = h5["survey/components"]
+        source = np.asarray(nodes["source_id"][()], dtype=np.int64)
+        receiver = np.asarray(nodes["receiver_id"][()], dtype=np.int64)
+        weight = _h5_dataset_float_array(
+            nodes, "weight", np.ones(len(source), dtype=float)
+        )
+        component_id = np.asarray(components["component_id"][()], dtype=np.int64)
+        component = _h5_dataset_ints(components, "component", component_id)
+
+        n = len(source) * len(component_id)
+        table = np.zeros(n, dtype=_TRACE_DTYPE)
+        row = 0
+        for inode, source_id in enumerate(source):
+            receiver_id = receiver_id_map.get(
+                int(receiver[inode]), int(receiver[inode])
+            )
+            node_weight = float(weight[inode])
+            for ic, comp_id in enumerate(component_id):
+                out_component = int(component[ic])
+                table[row]["trace_id"] = row + 1
+                table[row]["source_id"] = int(source_id)
+                table[row]["receiver_id"] = receiver_id
+                table[row]["recv_pos_id"] = receiver_id
+                table[row]["component_id"] = int(comp_id)
+                table[row]["component"] = out_component
+                table[row]["channel_number"] = row + 1
+                table[row]["field_record"] = int(
+                    source_field_records.get(int(source_id), int(source_id))
+                )
+                table[row]["active"] = node_weight != 0.0
+                table[row]["weight"] = node_weight
+                row += 1
+        return table
+
+    @staticmethod
+    def _read_solver_sparse_trace_table(
+        trace_group: Any,
+        *,
+        component_id_map: Mapping[int, int],
+        source_field_records: Mapping[int, int],
+    ) -> np.ndarray:
+        if "source_id" not in trace_group or "receiver_id" not in trace_group:
+            raise ValueError(
+                "Sparse survey trace table needs source_id and receiver_id"
+            )
+        source = np.asarray(trace_group["source_id"][()], dtype=np.int64)
+        receiver = np.asarray(trace_group["receiver_id"][()], dtype=np.int64)
+        n = len(source)
+        if len(receiver) != n:
+            raise ValueError("Sparse survey trace table columns have different lengths")
+        table = np.zeros(n, dtype=_TRACE_DTYPE)
+        table["trace_id"] = _h5_dataset_ints(
+            trace_group, "trace_id", np.arange(1, n + 1)
+        )
+        table["source_id"] = source
+        table["receiver_id"] = receiver
+        table["recv_pos_id"] = _h5_dataset_ints(trace_group, "recv_pos_id", receiver)
+        component = _h5_dataset_ints(
+            trace_group,
+            "component",
+            _h5_dataset_ints(trace_group, "component_id", np.ones(n, dtype=np.int64)),
+        )
+        table["component"] = component
+        table["component_id"] = _h5_dataset_ints(
+            trace_group,
+            "component_id",
+            np.asarray(
+                [component_id_map.get(int(value), int(value)) for value in component],
+                dtype=np.int64,
+            ),
+        )
+        table["channel_number"] = _h5_dataset_ints(
+            trace_group, "channel_number", table["trace_id"]
+        )
+        table["field_record"] = np.asarray(
+            [
+                source_field_records.get(int(source_id), int(source_id))
+                for source_id in table["source_id"]
+            ],
+            dtype=np.int64,
+        )
+        if "field_record" in trace_group:
+            table["field_record"] = _h5_dataset_ints(
+                trace_group, "field_record", table["field_record"]
+            )
+        weight = _h5_dataset_float_array(trace_group, "weight", np.ones(n, dtype=float))
+        table["weight"] = weight
+        if "active" in trace_group:
+            table["active"] = _h5_dataset_ints(
+                trace_group, "active", np.ones(n, dtype=np.int64)
+            ).astype(bool)
+            if "weight" not in trace_group:
+                table["weight"] = table["active"].astype(float)
+        else:
+            table["active"] = weight != 0.0
+        return table
+
+    @staticmethod
+    def _dense_trace_table_from_dataset(
+        dset: Any,
+        *,
+        source_ids: np.ndarray,
+        source_field_records: Mapping[int, int],
+        receiver_id_map: Mapping[int, int],
+        component_ids: np.ndarray,
+    ) -> np.ndarray:
+        sources = _h5_attr_ints(dset, "shot")
+        if sources is None:
+            sources = np.asarray(source_ids, dtype=np.int64)
+        local_receivers = _h5_attr_ints(dset, "receiver")
+        if local_receivers is None:
+            local_receivers = np.asarray(list(receiver_id_map), dtype=np.int64)
+        receivers = np.asarray(
+            [
+                receiver_id_map.get(int(receiver), int(receiver))
+                for receiver in local_receivers
+            ],
+            dtype=np.int64,
+        )
+        components = _h5_attr_ints(dset, "component")
+        if components is None:
+            components = np.asarray(component_ids, dtype=np.int64)
+
+        n = len(sources) * len(receivers) * len(components)
+        table = np.zeros(n, dtype=_TRACE_DTYPE)
+        row = 0
+        for source in sources:
+            for receiver in receivers:
+                for component in components:
+                    table[row]["trace_id"] = row + 1
+                    table[row]["source_id"] = int(source)
+                    table[row]["receiver_id"] = int(receiver)
+                    table[row]["recv_pos_id"] = int(receiver)
+                    table[row]["component_id"] = int(component)
+                    table[row]["component"] = int(component)
+                    table[row]["channel_number"] = row + 1
+                    table[row]["field_record"] = int(
+                        source_field_records.get(int(source), int(source))
+                    )
+                    table[row]["active"] = True
+                    table[row]["weight"] = 1.0
+                    row += 1
+        return table
+
+    @staticmethod
+    def _relations_from_trace_tables(
+        trace_tables: Mapping[str, np.ndarray],
+    ) -> np.ndarray:
+        rows = []
+        seen = set()
+        relation_row = 0
+        for table in trace_tables.values():
+            for trace in table:
+                if not bool(trace["active"]):
+                    continue
+                key = (int(trace["source_id"]), int(trace["receiver_id"]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                relation_row += 1
+                rows.append(
+                    (
+                        key[0],
+                        key[1],
+                        int(trace["field_record"]),
+                        int(trace["channel_number"]),
+                        relation_row,
+                    )
+                )
+        return np.asarray(rows, dtype=_RELATION_DTYPE)
 
     @staticmethod
     def _read_sps_points(

@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import warnings
 from pathlib import Path
 
 import h5py
@@ -1082,6 +1083,38 @@ def test_trace_dataset_from_manifest_preserves_output_artifacts(tmp_path):
     assert traces.manifest.artifacts == [artifact]
 
 
+def test_trace_manifest_accepts_solver_packed_trace_product(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    packed.touch()
+    (trace_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-trace-manifest-1",
+                "packed": {
+                    "format": "hdf5",
+                    "schema": "fs-traces-packed-1",
+                    "relative_path": "traces/traces.h5",
+                },
+            }
+        )
+    )
+    manifest = TraceManifest(
+        files=[trace_dir / "traces_1.h5", trace_dir / "traces_2.h5"],
+        frequencies={1: 10.0, 2: 20.0},
+        groups=["surface"],
+        simulation=tmp_path / "simulation.json",
+        result_path=tmp_path / "results",
+        output_path=trace_dir,
+        project_path=tmp_path,
+    )
+
+    assert manifest.packed_file == packed
+    assert manifest.existing_files == [packed]
+    assert manifest.complete
+
+
 def test_job_run_fingerprint_requires_matching_outputs_and_changes_with_simulation(
     tmp_path,
 ):
@@ -1157,6 +1190,94 @@ def test_job_run_current_accepts_sauce_run_manifest_hashes(tmp_path):
     sim._file.write_text(json.dumps(payload))
 
     assert not job.is_run_current()
+
+
+def test_job_run_current_accepts_current_sauce_run_manifest_schema(tmp_path):
+    def sha256(path):
+        return f"sha256:{hashlib.sha256(Path(path).read_bytes()).hexdigest()}"
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+    trace_file = tmp_path / "jobs/simple/freq/results/traces/traces_1.h5"
+    trace_file.parent.mkdir(parents=True)
+    trace_file.touch()
+
+    run_dir = job._result_path / "_fs_run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-run-manifest-1",
+                "exit_status": {"code": 0, "status": "success"},
+                "inputs": {
+                    "job_file": {"hash": sha256(job._file), "path": str(job._file)},
+                    "simulation_file": {
+                        "hash": sha256(sim._file),
+                        "path": str(sim._file),
+                    },
+                },
+            }
+        )
+    )
+
+    assert job.is_run_current()
+
+
+def test_job_run_current_accepts_solver_packed_trace_product(tmp_path):
+    def sha256(path):
+        return f"sha256:{hashlib.sha256(Path(path).read_bytes()).hexdigest()}"
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
+    job.save()
+
+    trace_dir = tmp_path / "jobs/simple/freq/results/traces"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "traces.h5").touch()
+    (trace_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-trace-manifest-1",
+                "packed": {
+                    "format": "hdf5",
+                    "schema": "fs-traces-packed-1",
+                    "relative_path": "traces/traces.h5",
+                },
+            }
+        )
+    )
+    run_dir = job._result_path / "_fs_run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-run-manifest-1",
+                "exit_status": "success",
+                "job_file_sha256": sha256(job._file),
+                "simulation_file_sha256": sha256(sim._file),
+            }
+        )
+    )
+
+    assert job.trace_outputs_exist()
+    assert job.is_run_current()
 
 
 def test_trace_dataset_combines_jobs_by_frequency_and_deduplicates_overlap(tmp_path):
@@ -1249,6 +1370,256 @@ def test_trace_store_uses_dataset_backed_survey_trace_tables(tmp_path):
     assert fd.coords["receiver"].values.tolist() == [101, 102]
     assert type(fd).__name__ == "DataArray"
     assert (tmp_path / "results" / "_fs_run" / "cache" / "traces_vds.h5").exists()
+
+
+def test_trace_store_uses_first_task_metadata_for_compact_later_tasks(tmp_path):
+    trace_files = []
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    for idx, freq in enumerate([10.0, 20.0, 30.0], start=1):
+        file = tmp_path / f"traces_{idx}.h5"
+        trace_files.append(file)
+        with h5py.File(file, "w") as h5:
+            h5.create_dataset("frequency", data=freq)
+            dset = h5.create_dataset(
+                "surface",
+                data=np.full((2, 2, 1, 2), idx, dtype=np.float32),
+            )
+
+            if idx == 1:
+                dset.attrs["dims"] = ["receiver", "component", "shot"]
+                trace_group = h5.require_group("/survey/receiver_groups/surface/traces")
+                trace_group.create_dataset(
+                    "receiver_id",
+                    data=np.array([101, 102, 101, 102], dtype=np.int32),
+                )
+                trace_group.create_dataset(
+                    "source_id",
+                    data=np.array([7, 7, 7, 7], dtype=np.int32),
+                )
+                trace_group.create_dataset(
+                    "component_name",
+                    data=np.array(["p", "vx", "p", "vx"], dtype=string_dtype),
+                )
+                h5.require_group("/survey/receivers").create_dataset(
+                    "coordinates",
+                    data=np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64),
+                )
+
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=trace_files,
+            frequencies={1: 10.0, 2: 20.0, 3: 30.0},
+            groups=["surface"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=tmp_path / "results" / "traces",
+            project_path=tmp_path,
+        )
+    )
+    traces.consolidate()
+
+    assert traces.groups == ["surface"]
+    assert traces.receivers("surface").tolist() == [101, 102]
+    assert traces.sources("surface").tolist() == [7]
+    assert traces.components("surface").tolist() == ["p", "vx"]
+    assert traces.survey_tables()["receivers"]["coordinates"] == [
+        [0.0, 0.0],
+        [1.0, 0.0],
+    ]
+
+    fd = traces.fd("surface", "p", source=7)
+    assert fd.dims == ("frequency", "receiver")
+    assert fd.coords["frequency"].values.tolist() == [10.0, 20.0, 30.0]
+    assert fd.coords["receiver"].values.tolist() == [101, 102]
+    assert fd.values.real.tolist() == [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]
+
+    with h5py.File(trace_files[1], "r") as h5:
+        assert "survey" not in h5
+        assert "dims" not in h5["surface"].attrs
+
+
+def test_trace_store_uses_solver_packed_trace_file_without_vds_warnings(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    trace_files = [trace_dir / f"traces_{idx}.h5" for idx in range(1, 4)]
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    (trace_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-trace-manifest-1",
+                "packed": {
+                    "format": "hdf5",
+                    "schema": "fs-traces-packed-1",
+                    "relative_path": "traces/traces.h5",
+                },
+                "frequencies": [
+                    {"task_id": 1, "frequency": 10.0, "status": "packed"},
+                    {"task_id": 2, "frequency": 20.0, "status": "packed"},
+                    {"task_id": 3, "frequency": 30.0, "status": "packed"},
+                ],
+            }
+        )
+    )
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=np.array([10.0, 20.0, 30.0]))
+        h5.create_dataset("laplace", data=np.zeros(3))
+        h5.create_dataset("task_id", data=np.array([1, 2, 3], dtype=np.int32))
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        dset = h5.create_dataset(
+            "surface",
+            data=np.array(
+                [
+                    [[[[1.0, 0.0], [2.0, 0.0]]]],
+                    [[[[3.0, 0.0], [4.0, 0.0]]]],
+                    [[[[5.0, 0.0], [6.0, 0.0]]]],
+                ],
+                dtype=np.float32,
+            ),
+        )
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.array([101, 102], dtype=np.int32)
+        dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=trace_files,
+            frequencies={1: 10.0, 2: 20.0, 3: 30.0},
+            groups=["surface"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=trace_dir,
+            project_path=tmp_path,
+        )
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        consolidated = traces.consolidate()
+
+    assert consolidated == packed
+    assert not any(
+        "Trace file is missing" in str(warning.message) for warning in caught
+    )
+    assert not (tmp_path / "results" / "_fs_run" / "cache" / "traces_vds.h5").exists()
+    assert traces.groups == ["surface"]
+    assert traces.frequencies("surface").tolist() == [10.0, 20.0, 30.0]
+    assert traces.receivers("surface").tolist() == [101, 102]
+    assert traces.sources("surface").tolist() == [7]
+    assert traces.components("surface").tolist() == ["p"]
+
+    fd = traces.fd("surface", "p", source=7)
+    assert fd.dims == ("frequency", "receiver")
+    assert fd.coords["frequency"].values.tolist() == [10.0, 20.0, 30.0]
+    assert fd.coords["receiver"].values.tolist() == [101, 102]
+    assert fd.values.real.tolist() == [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+
+
+def test_trace_store_omits_missing_later_trace_files_and_refreshes(tmp_path):
+    trace_files = []
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    for idx, freq in enumerate([10.0, 20.0, 30.0], start=1):
+        file = tmp_path / f"traces_{idx}.h5"
+        trace_files.append(file)
+        if idx == 2:
+            continue
+        with h5py.File(file, "w") as h5:
+            h5.create_dataset("frequency", data=freq)
+            dset = h5.create_dataset(
+                "surface",
+                data=np.full((1, 1, 1, 2), idx, dtype=np.float32),
+            )
+            if idx == 1:
+                dset.attrs["dims"] = ["receiver", "component", "shot"]
+                trace_group = h5.require_group("/survey/receiver_groups/surface/traces")
+                trace_group.create_dataset(
+                    "receiver_id",
+                    data=np.array([101], dtype=np.int32),
+                )
+                trace_group.create_dataset(
+                    "source_id",
+                    data=np.array([7], dtype=np.int32),
+                )
+                trace_group.create_dataset(
+                    "component_name",
+                    data=np.array(["p"], dtype=string_dtype),
+                )
+
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=trace_files,
+            frequencies={1: 10.0, 2: 20.0, 3: 30.0},
+            groups=["surface"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=tmp_path / "results" / "traces",
+            project_path=tmp_path,
+        )
+    )
+
+    with pytest.warns(RuntimeWarning, match="Trace file is missing"):
+        traces.consolidate()
+    assert traces.frequencies("surface").tolist() == [10.0, 30.0]
+
+    with h5py.File(trace_files[1], "w") as h5:
+        h5.create_dataset("frequency", data=20.0)
+        h5.create_dataset(
+            "surface",
+            data=np.full((1, 1, 1, 2), 2, dtype=np.float32),
+        )
+
+    traces.consolidate()
+    assert traces.frequencies("surface").tolist() == [10.0, 20.0, 30.0]
+
+
+def test_trace_store_can_consolidate_when_first_trace_file_is_missing(tmp_path):
+    trace_files = [tmp_path / f"traces_{idx}.h5" for idx in range(1, 4)]
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    for idx, file in enumerate(trace_files[1:], start=2):
+        with h5py.File(file, "w") as h5:
+            h5.create_dataset("frequency", data=10.0 * idx)
+            dset = h5.create_dataset(
+                "surface",
+                data=np.full((1, 1, 1, 2), idx, dtype=np.float32),
+            )
+            if idx == 2:
+                dset.attrs["dims"] = ["receiver", "component", "shot"]
+                trace_group = h5.require_group("/survey/receiver_groups/surface/traces")
+                trace_group.create_dataset(
+                    "receiver_id",
+                    data=np.array([101], dtype=np.int32),
+                )
+                trace_group.create_dataset(
+                    "source_id",
+                    data=np.array([7], dtype=np.int32),
+                )
+                trace_group.create_dataset(
+                    "component_name",
+                    data=np.array(["p"], dtype=string_dtype),
+                )
+
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=trace_files,
+            frequencies={1: 10.0, 2: 20.0, 3: 30.0},
+            groups=["surface"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=tmp_path / "results" / "traces",
+            project_path=tmp_path,
+        )
+    )
+
+    with pytest.warns(RuntimeWarning, match="Trace file is missing"):
+        traces.consolidate()
+
+    assert traces.frequencies("surface").tolist() == [20.0, 30.0]
+    assert traces.receivers("surface").tolist() == [101]
 
 
 def test_trace_store_normalizes_dense_trace_axis_order(tmp_path):

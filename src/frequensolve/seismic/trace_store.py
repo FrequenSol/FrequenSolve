@@ -3,8 +3,6 @@
 ``TraceStore`` backs the public ``TraceDataset`` facade.
 """
 
-import hashlib
-import json
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,15 +18,7 @@ from frequensolve.util.fft import get_fft_backend
 
 __all__: list[str] = []
 
-TRACE_VDS_SCHEMA = "frequensolve-trace-vds-2"
-
-
-def process_string(raw):
-    if isinstance(raw, (bytes, bytearray)):
-        s = raw.decode("utf-8", "ignore").rstrip()
-    else:
-        s = raw.tobytes().decode("utf-8", "ignore").rstrip()
-    return s
+_ROOT_TRACE_METADATA_DATASETS = {"frequency", "laplace", "task_id"}
 
 
 def _decode_h5_strings(values):
@@ -72,6 +62,17 @@ def _trace_axis_dims(dset) -> list[str]:
     if "dense_trace_v1" in layout_kind:
         return list(reversed(dims))
     return dims
+
+
+def _trace_data_dims(dset) -> list[str]:
+    dims = _decode_dim_list(dset.attrs["dims"])
+    has_frequency = bool(dims) and dims[-1] == "frequency"
+    if has_frequency:
+        dims = dims[:-1]
+    layout_kind = _attr_strings(dset.attrs.get("layout_kind", []))
+    if "dense_trace_v1" in layout_kind:
+        dims = list(reversed(dims))
+    return ["frequency", *dims]
 
 
 def _as_file_list(files: Iterable[Union[str, Path]]) -> List[Union[str, Path]]:
@@ -193,24 +194,24 @@ class TraceStore:
     def groups(self) -> list[str]:
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
-            return [
-                name
-                for name, item in f.items()
-                if isinstance(item, h5py.Dataset)
-                and name not in {"frequency", "laplace", "source_file"}
-            ]
+            return self._h5_trace_groups(f, self.metadata.get("groups"))
 
     def dims(self, group) -> list[str]:
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
-            return _decode_dim_list(f[group].attrs["dims"])
+            return [
+                "source" if dim == "shot" else dim for dim in _trace_data_dims(f[group])
+            ]
 
     def components(self, group) -> list[str]:
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
-            path = f"survey/receiver_groups/{group}/traces/component_name"
-            if path in f:
-                return _unique_preserve_order(_decode_h5_strings(f[path][()]))
+            for path in (
+                f"survey/receiver_groups/{group}/traces/component_name",
+                f"survey/receiver_groups/{group}/components/component_name",
+            ):
+                if path in f:
+                    return _unique_preserve_order(_decode_h5_strings(f[path][()]))
             if "component" in f[group].attrs:
                 return _decode_h5_strings(f[group].attrs["component"])
             return np.arange(1, f[group].shape[-2] + 1)
@@ -242,9 +243,12 @@ class TraceStore:
     def receivers(self, group) -> list[str]:
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
-            path = f"survey/receiver_groups/{group}/traces/receiver_id"
-            if path in f:
-                return _unique_preserve_order(f[path][()])
+            for path in (
+                f"survey/receiver_groups/{group}/traces/receiver_id",
+                f"survey/receiver_groups/{group}/receivers/receiver_id",
+            ):
+                if path in f:
+                    return _unique_preserve_order(f[path][()])
             if "receiver" in f[group].attrs:
                 return f[group].attrs["receiver"]
             dims = np.asarray(_decode_dim_list(f[group].attrs["dims"])[::-1])
@@ -253,7 +257,7 @@ class TraceStore:
 
     def survey_tables(self) -> Dict[str, Any]:
         if self._consolidated is None:
-            self.consolidate_h5()
+            self.consolidate()
 
         def read_group(group):
             out = {}
@@ -307,7 +311,7 @@ class TraceStore:
         return self.summary
 
     def _ensure_consolidated(self) -> None:
-        if self._consolidated is None:
+        if self._consolidated is None or not Path(self._consolidated).exists():
             self.consolidate()
 
     @staticmethod
@@ -323,144 +327,139 @@ class TraceStore:
 
     @staticmethod
     def _read_trace_frequency(file: Path) -> float:
+        return TraceStore._read_trace_frequencies(file)[0]
+
+    @staticmethod
+    def _read_trace_frequencies(file: Path) -> list[float]:
         with h5py.File(file, "r") as h5:
             if "frequency" not in h5:
                 raise KeyError(f"'frequency' dataset not found in {file}")
-            return float(h5["frequency"][()])
+            values = np.asarray(h5["frequency"][()]).ravel()
+            if values.size == 0:
+                raise ValueError(f"'frequency' dataset is empty in {file}")
+            return [float(value) for value in values]
 
     @staticmethod
-    def _source_signature(records: List[Path], freqs: List[float]) -> str:
-        payload = []
-        for record, freq in zip(records, freqs):
-            stat = record.stat()
-            payload.append(
-                {
-                    "path": str(record.resolve()),
-                    "size": stat.st_size,
-                    "mtime_ns": stat.st_mtime_ns,
-                    "frequency": float(freq),
-                }
-            )
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
-        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+    def _h5_trace_groups(h5, configured: Optional[Iterable[str]] = None) -> list[str]:
+        configured_groups = [str(group) for group in configured or []]
+        if configured_groups:
+            return [
+                name
+                for name in configured_groups
+                if name in h5 and isinstance(h5[name], h5py.Dataset)
+            ]
+        return [
+            name
+            for name, item in h5.items()
+            if isinstance(item, h5py.Dataset)
+            and name not in _ROOT_TRACE_METADATA_DATASETS
+            and "dims" in item.attrs
+        ]
 
     @staticmethod
-    def _cached_vds_is_current(path: Path, signature: str) -> bool:
-        if not path.exists():
-            return False
+    def discover_trace_groups(
+        file: Union[str, Path],
+        configured: Optional[Iterable[str]] = None,
+    ) -> list[str]:
+        with h5py.File(file, "r") as h5:
+            return TraceStore._h5_trace_groups(h5, configured)
+
+    @staticmethod
+    def _is_packed_trace_file(path: Path) -> bool:
         try:
             with h5py.File(path, "r") as h5:
-                return (
-                    h5.attrs.get("schema") == TRACE_VDS_SCHEMA
-                    and h5.attrs.get("source_signature") == signature
+                if "frequency" not in h5:
+                    return False
+                frequency = np.asarray(h5["frequency"][()])
+                if frequency.ndim == 0:
+                    return False
+                groups = TraceStore._h5_trace_groups(h5)
+                return any(
+                    _decode_dim_list(h5[group].attrs["dims"])[-1] == "frequency"
+                    for group in groups
                 )
         except OSError:
             return False
 
-    def consolidate(
-        self,
-        cache_dir: Optional[Union[str, Path]] = None,
-        force: bool = False,
-    ) -> Path:
-        """
-        Creates a virtual HDF5 dataset that combines datasets from each frequency file
-        along a new dimension. This allows efficient access to the full dataset without
-        loading all data into memory.
-        """
+    def consolidate(self, cache_dir: Optional[Union[str, Path]] = None) -> Path:
+        """Create a virtual HDF5 file with frequency as the leading axis."""
 
-        valid_records = []
-        freqs = []
-        for record in [Path(file) for file in self.files]:
-            if not record.exists():
+        records = [Path(file) for file in self.files]
+        if not records:
+            raise FileNotFoundError("No trace files were provided")
+
+        if (
+            len(records) == 1
+            and records[0].exists()
+            and self._is_packed_trace_file(records[0])
+        ):
+            self.close()
+            self._consolidated = records[0]
+            return self._consolidated
+
+        available = []
+        for record in records:
+            if record.exists():
+                available.append(record)
+            else:
                 warnings.warn(
-                    f"Trace file does not exist and will be skipped: {record}"
-                )
-                continue
-            try:
-                freqs.append(self._read_trace_frequency(record))
-                valid_records.append(record)
-            except Exception as exc:
-                warnings.warn(
-                    f"Trace file could not be read and will be skipped: {record}: {exc}"
+                    f"Trace file is missing and will be omitted from the VDS: {record}",
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
 
-        if not valid_records:
-            raise FileNotFoundError("No readable trace files were found")
+        if not available:
+            raise FileNotFoundError("No trace files exist")
 
+        metadata_record = records[0] if records[0].exists() else available[0]
+        freqs = [self._read_trace_frequency(record) for record in available]
         cache_dir = Path(cache_dir) if cache_dir is not None else self._cache_dir
         if cache_dir is not None:
             cache_dir.mkdir(parents=True, exist_ok=True)
-        new_file = self._consolidated_path(valid_records[0], cache_dir=cache_dir)
-        signature = self._source_signature(valid_records, freqs)
-        if not force and self._cached_vds_is_current(new_file, signature):
-            self._consolidated = Path(new_file)
-            return self._consolidated
+        new_file = self._consolidated_path(metadata_record, cache_dir=cache_dir)
 
         self.close()
         if new_file.exists():
             new_file.unlink()
 
-        with h5py.File(new_file, "w") as nf:
-            nf.attrs["schema"] = TRACE_VDS_SCHEMA
-            nf.attrs["source_signature"] = signature
+        with h5py.File(metadata_record, "r") as first, h5py.File(new_file, "w") as nf:
             nf.create_dataset("frequency", data=np.asarray(freqs, dtype=float))
-            string_dtype = h5py.string_dtype(encoding="utf-8")
-            nf.create_dataset(
-                "source_file",
-                data=np.asarray(
-                    [str(file) for file in valid_records], dtype=string_dtype
-                ),
-            )
-
-            for file in valid_records:
-                with h5py.File(file, "r") as f:
-                    if "survey" in f:
-                        f.copy("survey", nf)
-                        break
+            if "survey" in first:
+                first.copy("survey", nf)
 
             for group in self.metadata["groups"]:
-                with h5py.File(valid_records[0], "r") as f:
-                    if group not in f:
-                        raise KeyError(
-                            f"Group '{group}' not found in HDF5 {valid_records[0]}"
-                        )
-                    dset_shape = f[group].shape
-                    dset_dtype = f[group].dtype
-                    dims = _trace_axis_dims(f[group])
-                    coords = {}
-                    for axis, dim in enumerate(dims):
-                        if dim in f[group].attrs:
-                            coord = f[group].attrs[dim]
-                        else:
-                            coord = np.arange(1, dset_shape[axis] + 1)
-                        coords[dim] = coord
+                if group not in first:
+                    raise KeyError(
+                        f"Group '{group}' not found in HDF5 {metadata_record}"
+                    )
 
-                # Create virtual layout for data
+                source = first[group]
+                source_shape = source.shape
                 layout = h5py.VirtualLayout(
-                    shape=(len(valid_records),) + dset_shape, dtype=dset_dtype
+                    shape=(len(available),) + source_shape,
+                    dtype=source.dtype,
                 )
-                for i, file in enumerate(valid_records):
-                    vsource = h5py.VirtualSource(str(file), group, shape=dset_shape)
-                    layout[i] = vsource
+                for index, record in enumerate(available):
+                    layout[index] = h5py.VirtualSource(
+                        str(record), group, shape=source_shape
+                    )
                 nf.create_virtual_dataset(group, layout)
 
-                dims.append("frequency")
-                coords["frequency"] = freqs
-
                 dset = nf[group]
+                dims = [*_trace_axis_dims(source), "frequency"]
                 dset.attrs["dims"] = dims
-                for dim, coord in coords.items():
+                for axis, dim in enumerate(dims[:-1]):
+                    coord = (
+                        source.attrs[dim]
+                        if dim in source.attrs
+                        else np.arange(1, source_shape[axis] + 1)
+                    )
                     if len(coord) < 10000:
                         dset.attrs[dim] = coord
+                dset.attrs["frequency"] = freqs
+
         self._consolidated = Path(new_file)
         return self._consolidated
-
-    def consolidate_h5(self):
-        """Compatibility alias for ``consolidate``."""
-
-        return self.consolidate()
 
     def read_h5(self, group: str) -> DataArray:
         try:
@@ -479,10 +478,7 @@ class TraceStore:
         h5 = h5py.File(self._consolidated, "r")
         self._open_files.append(h5)
         dset = h5[group]
-        raw_dims = _decode_dim_list(dset.attrs["dims"])
-        if raw_dims and raw_dims[-1] == "frequency":
-            raw_dims = raw_dims[:-1]
-        dims = ["frequency"] + list(raw_dims)
+        dims = _trace_data_dims(dset)
         if len(dset.shape) == len(dims) + 1:
             dims.append("complex")
         dims = ["source" if dim == "shot" else dim for dim in dims]
@@ -496,21 +492,33 @@ class TraceStore:
                 )
                 continue
             attr_dim = "shot" if dim == "source" and "shot" in dset.attrs else dim
-            survey_path = None
+            survey_paths = []
             if dim == "receiver":
-                survey_path = f"survey/receiver_groups/{group}/traces/receiver_id"
+                survey_paths = [
+                    f"survey/receiver_groups/{group}/traces/receiver_id",
+                    f"survey/receiver_groups/{group}/receivers/receiver_id",
+                ]
             elif dim == "source":
-                survey_path = f"survey/receiver_groups/{group}/traces/source_id"
+                survey_paths = [
+                    f"survey/receiver_groups/{group}/traces/source_id",
+                    "survey/sources/source_id",
+                ]
             elif dim == "component":
-                survey_path = f"survey/receiver_groups/{group}/traces/component_name"
+                survey_paths = [
+                    f"survey/receiver_groups/{group}/traces/component_name",
+                    f"survey/receiver_groups/{group}/components/component_name",
+                ]
 
-            if survey_path is not None and survey_path in h5:
+            survey_path = next((path for path in survey_paths if path in h5), None)
+            if survey_path is not None:
                 values = _unique_preserve_order(_decode_h5_strings(h5[survey_path][()]))
                 coords[dim] = (
                     values
                     if len(values) == dset.shape[axis]
                     else np.arange(1, dset.shape[axis] + 1)
                 )
+            elif dim == "frequency" and "frequency" in h5:
+                coords[dim] = h5["frequency"][()]
             elif attr_dim in dset.attrs:
                 coords[dim] = dset.attrs[attr_dim]
             else:

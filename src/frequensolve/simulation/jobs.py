@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shutil
 from abc import ABC
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -225,6 +226,57 @@ class SimulationJob(ABC):
     def fingerprint(self) -> str:
         return self._hash_payload(self.fingerprint_payload())
 
+    @staticmethod
+    def _canonical_frequency_value(value: Any) -> Any:
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, complex):
+            return {
+                "real": float(f"{float(value.real):.12g}"),
+                "imag": float(f"{float(value.imag):.12g}"),
+            }
+        return float(f"{float(value):.12g}")
+
+    @staticmethod
+    def _real_frequency_value(value: Any) -> float:
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, complex):
+            return float(value.real)
+        return float(value)
+
+    def task_fingerprint_payload(self, task: int) -> Dict[str, Any]:
+        """Return the rerun fingerprint payload for one frequency task.
+
+        ``task`` is one-based to match the solver task IDs and trace filenames.
+        Unlike the whole-job fingerprint, this intentionally excludes the full
+        frequency list.  Changing ``f_max`` or ``df`` should only invalidate
+        frequencies whose own value changed.
+        """
+
+        if task < 1 or task > self.n_tasks:
+            raise IndexError(f"Task {task} is outside 1..{self.n_tasks}")
+        job_data = self.to_fs()
+        if self.simulation._file is None:
+            raise ValueError("Simulation must be saved before fingerprinting a task")
+        simulation_hash = self._hash_json_file(self.simulation._file)
+        return {
+            "schema": "frequensolve-job-task-fingerprint-1",
+            "job": {
+                "_type": job_data["_type"],
+                "workflow": job_data["workflow"],
+                "Outputs": job_data["Outputs"],
+            },
+            "simulation": {
+                "path": str(Path(self.simulation._file).resolve()),
+                "hash": simulation_hash,
+            },
+            "frequency": self._canonical_frequency_value(self.f_list[task - 1]),
+        }
+
+    def task_fingerprint(self, task: int) -> str:
+        return self._hash_payload(self.task_fingerprint_payload(task))
+
     @property
     def run_state_file(self) -> Path:
         return self._result_path / "_fs_python_run.json"
@@ -245,8 +297,81 @@ class SimulationJob(ABC):
         return path.exists() or cls._legacy_trace_file(path).exists()
 
     def trace_outputs_exist(self) -> bool:
-        files = self.expected_trace_files()
-        return bool(files) and all(self._trace_file_exists(path) for path in files)
+        return self.trace_manifest.complete
+
+    def _packed_trace_has_current_task(
+        self,
+        task: int,
+        *,
+        manifest: Optional[TraceManifest] = None,
+    ) -> bool:
+        manifest = self.trace_manifest if manifest is None else manifest
+        if manifest.packed_file is None:
+            return False
+        if task < 1 or task > self.n_tasks:
+            return False
+        packed_frequencies = manifest.packed_frequencies
+        if not packed_frequencies:
+            return True
+        if task not in packed_frequencies:
+            return False
+        return np.isclose(
+            packed_frequencies[task],
+            self._real_frequency_value(self.f_list[task - 1]),
+            rtol=0.0,
+            atol=1.0e-9,
+        )
+
+    def invalidate_trace_cache(self) -> None:
+        """Remove derived trace VDS files so the next read reflects current HDF5."""
+
+        candidates = [
+            self._result_path / "_fs_run" / "cache",
+            self.trace_outputs.path,
+        ]
+        for directory in candidates:
+            if not directory.exists():
+                continue
+            for path in directory.glob("*_vds.h5"):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _stored_trace_path(self, path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(self.project_path))
+        except Exception:
+            return str(path)
+
+    def _resolve_stored_trace_path(self, value: Any) -> Optional[Path]:
+        if value is None:
+            return None
+        path = Path(str(value))
+        if not path.is_absolute():
+            path = self.project_path / path
+        path = self._legacy_trace_file(path) if not path.exists() else path
+        return path
+
+    def _task_record_by_task(
+        self, records: Iterable[Mapping[str, Any]]
+    ) -> Dict[int, Mapping[str, Any]]:
+        out = {}
+        for record in records:
+            task = self._task_number_from_record(record)
+            if task is not None:
+                out[task] = record
+        return out
+
+    def _state_task_records(
+        self, state: Optional[Mapping[str, Any]] = None
+    ) -> List[Mapping[str, Any]]:
+        state = self.run_state() if state is None else state
+        records = []
+        if isinstance(state, Mapping):
+            records.extend(self._as_records(state.get("tasks")))
+            records.extend(self._as_records(state.get("task_results")))
+        return records
 
     @staticmethod
     def _as_records(value: Any) -> List[Mapping[str, Any]]:
@@ -300,7 +425,16 @@ class SimulationJob(ABC):
         if value is None:
             return None
         status = str(value).strip().lower().replace(" ", "_")
-        if status in {"success", "succeeded", "complete", "completed", "done"}:
+        if status in {
+            "success",
+            "succeeded",
+            "complete",
+            "completed",
+            "done",
+            "current",
+            "reused",
+            "skipped",
+        }:
             return "succeeded"
         if status in {"failed", "failure", "error", "timeout", "cancelled", "killed"}:
             return "failed"
@@ -336,6 +470,76 @@ class SimulationJob(ABC):
                 continue
         return None
 
+    @staticmethod
+    def _numeric_record_value(
+        record: Mapping[str, Any], keys: Iterable[str]
+    ) -> Optional[float]:
+        for key in keys:
+            if key not in record:
+                continue
+            value = record[key]
+            if isinstance(value, Mapping):
+                value = value.get("value") or value.get("count")
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @classmethod
+    def _record_core_count(cls, record: Mapping[str, Any]) -> Optional[float]:
+        cores = cls._numeric_record_value(
+            record,
+            (
+                "core_count",
+                "cores",
+                "n_cores",
+                "num_cores",
+                "cpu_count",
+                "cpus",
+                "ncpus",
+            ),
+        )
+        if cores is not None and cores > 0:
+            return cores
+
+        ranks = cls._numeric_record_value(
+            record,
+            (
+                "n_ranks",
+                "ranks",
+                "mpi_ranks",
+                "num_ranks",
+                "nprocs",
+                "procs",
+                "processes",
+            ),
+        )
+        threads = cls._numeric_record_value(
+            record,
+            (
+                "threads_per_rank",
+                "omp_threads",
+                "threads",
+                "n_threads",
+                "num_threads",
+            ),
+        )
+        if ranks is not None and threads is not None:
+            return max(1.0, ranks * threads)
+        if threads is not None:
+            return max(1.0, threads)
+        return None
+
+    def _default_core_count(self) -> Optional[float]:
+        metadata = self.run_metadata
+        for source in (metadata.manifest, metadata.timings):
+            if isinstance(source, Mapping):
+                cores = self._record_core_count(source)
+                if cores is not None:
+                    return cores
+        return None
+
     def _task_records(self) -> List[Mapping[str, Any]]:
         metadata = self.run_metadata
         state = self.run_state()
@@ -344,6 +548,7 @@ class SimulationJob(ABC):
             if not isinstance(source, Mapping):
                 continue
             records.extend(self._as_records(source.get("tasks")))
+            records.extend(self._as_records(source.get("task_results")))
             records.extend(self._as_records(source.get("task_timings")))
             records.extend(self._as_records(source.get("frequencies")))
             records.extend(self._as_records(source.get("errors")))
@@ -363,17 +568,33 @@ class SimulationJob(ABC):
         """
 
         manifest = self.trace_manifest
+        state = self.run_state()
         rows: Dict[int, Dict[str, Any]] = {}
+        packed_file = manifest.packed_file
         ordered_files = list(manifest.files)
         for task, file in enumerate(ordered_files, start=1):
             trace_file = file if file.exists() else self._legacy_trace_file(file)
-            trace_exists = trace_file.exists()
+            packed_task_exists = self._packed_trace_has_current_task(
+                task,
+                manifest=manifest,
+            )
+            trace_exists = trace_file.exists() or packed_task_exists
+            current = self.is_task_current(task, state=state)
             rows[task] = {
                 "task": task,
                 "frequency": manifest.frequencies.get(task),
-                "status": "succeeded" if trace_exists else "not_run",
-                "trace_file": trace_file if trace_exists else file,
+                "status": "succeeded" if current else "not_run",
+                "trace_file": (
+                    trace_file
+                    if trace_file.exists()
+                    else (
+                        packed_file
+                        if packed_task_exists and packed_file is not None
+                        else file
+                    )
+                ),
                 "trace_exists": trace_exists,
+                "current": current,
                 "duration_seconds": None,
                 "metadata": {},
             }
@@ -390,7 +611,7 @@ class SimulationJob(ABC):
             status = self._normalized_task_status(record.get("status"))
             if status == "failed":
                 row["status"] = "failed"
-            elif status == "succeeded" and row["status"] != "failed":
+            elif status == "succeeded" and row["current"] and row["status"] != "failed":
                 row["status"] = "succeeded"
 
         return [rows[task] for task in sorted(rows)]
@@ -435,16 +656,29 @@ class SimulationJob(ABC):
     def task_timings(self) -> List[Dict[str, Any]]:
         """Return frequency rows that include per-task runtime in seconds."""
 
+        rows = self.frequency_status()
+        default_cores = self._default_core_count()
         timings = []
-        for row in self.frequency_status():
+        for row in rows:
             duration = row.get("duration_seconds")
             if duration is None:
                 continue
+            core_count = self._record_core_count(row.get("metadata", {}))
+            if core_count is None:
+                core_count = default_cores
+            duration = float(duration)
+            core_hours = (
+                duration * float(core_count) / 3600.0
+                if core_count is not None
+                else None
+            )
             timings.append(
                 {
                     "task": row["task"],
                     "frequency": row["frequency"],
                     "duration_seconds": duration,
+                    "core_count": core_count,
+                    "core_hours": core_hours,
                     "status": row["status"],
                     "trace_file": row["trace_file"],
                 }
@@ -455,11 +689,21 @@ class SimulationJob(ABC):
         self,
         ax: Optional[Any] = None,
         *,
+        x: str = "frequency",
+        style: str = "auto",
+        unit: str = "seconds",
+        cores: Optional[float] = None,
+        max_xticks: int = 8,
         show: bool = False,
         title: Optional[str] = None,
         **bar_kwargs: Any,
     ) -> Any:
-        """Plot per-frequency task runtimes and return the matplotlib axes."""
+        """Plot per-frequency task runtimes and return the matplotlib axes.
+
+        ``unit`` may be ``"seconds"``, ``"hours"``, or ``"core-hours"``. For
+        large frequency sweeps the default style switches from bars to lines so
+        the axis stays readable.
+        """
 
         timings = self.task_timings()
         if not timings:
@@ -482,17 +726,99 @@ class SimulationJob(ABC):
         if ax is None:
             _, ax = plt.subplots()
 
-        colors = {"succeeded": "#2e7d32", "failed": "#c62828", "not_run": "#757575"}
-        tasks = [row["task"] for row in timings]
-        values = [row["duration_seconds"] for row in timings]
-        bar_kwargs.setdefault(
-            "color", [colors.get(row["status"], "#546e7a") for row in timings]
+        from matplotlib.ticker import MaxNLocator
+
+        def frequency_x(value: Any) -> Optional[float]:
+            if isinstance(value, Mapping) and "real" in value:
+                return float(value["real"])
+            try:
+                return float(np.real(value))
+            except (TypeError, ValueError):
+                return None
+
+        status_colors = {
+            "succeeded": "#2e7d32",
+            "failed": "#c62828",
+            "not_run": "#757575",
+        }
+
+        if x not in {"frequency", "task"}:
+            raise ValueError("x must be 'frequency' or 'task'")
+        x_values = [frequency_x(row["frequency"]) for row in timings]
+        use_frequency_axis = x == "frequency" and all(
+            value is not None for value in x_values
         )
-        ax.bar(tasks, values, **bar_kwargs)
-        ax.set_xlabel("Frequency task")
-        ax.set_ylabel("Runtime (s)")
+        if use_frequency_axis:
+            plot_rows = sorted(
+                zip(x_values, timings),
+                key=lambda item: float(item[0]),
+            )
+            xs = np.asarray([float(value) for value, _row in plot_rows])
+            rows = [row for _value, row in plot_rows]
+            ax.set_xlabel("Frequency (Hz)")
+            integer_axis = False
+        else:
+            rows = list(timings)
+            xs = np.asarray([row["task"] for row in rows], dtype=float)
+            ax.set_xlabel("Frequency task")
+            integer_axis = True
+
+        normalized_unit = unit.strip().lower().replace("_", "-")
+        if normalized_unit in {"s", "sec", "secs", "second", "seconds"}:
+            values = np.asarray([float(row["duration_seconds"]) for row in rows])
+            ylabel = "Runtime (s)"
+        elif normalized_unit in {"h", "hr", "hrs", "hour", "hours"}:
+            values = np.asarray(
+                [float(row["duration_seconds"]) / 3600.0 for row in rows]
+            )
+            ylabel = "Runtime (hours)"
+        elif normalized_unit in {"core-hour", "core-hours", "core hour", "core hours"}:
+            plot_values = []
+            for row in rows:
+                core_count = cores if cores is not None else row.get("core_count")
+                if core_count is None:
+                    raise ValueError(
+                        "Core-hour plotting requires per-task core metadata or "
+                        "a `cores=` override."
+                    )
+                plot_values.append(
+                    float(row["duration_seconds"]) * float(core_count) / 3600.0
+                )
+            values = np.asarray(plot_values)
+            ylabel = "Runtime (core-hours)"
+        else:
+            raise ValueError("unit must be 'seconds', 'hours', or 'core-hours'")
+
+        if style == "auto":
+            plot_style = "bar" if len(rows) <= 80 else "line"
+        elif style in {"bar", "line"}:
+            plot_style = style
+        else:
+            raise ValueError("style must be 'auto', 'bar', or 'line'")
+
+        if plot_style == "bar":
+            width = 0.8
+            if use_frequency_axis and len(xs) > 1:
+                diffs = np.diff(np.unique(xs))
+                diffs = diffs[diffs > 0.0]
+                if len(diffs):
+                    width = 0.8 * float(np.min(diffs))
+
+            bar_kwargs.setdefault(
+                "color",
+                [status_colors.get(row["status"], "#546e7a") for row in rows],
+            )
+            ax.bar(xs, values, width=width, **bar_kwargs)
+        else:
+            marker = "o" if len(rows) <= 50 else None
+            ax.plot(xs, values, marker=marker, linewidth=1.8, color="#2e7d32")
+
+        ax.set_ylabel(ylabel)
         ax.set_title(title or f"{self.name} task timings")
-        ax.set_xticks(tasks)
+        ax.xaxis.set_major_locator(
+            MaxNLocator(nbins=max(2, int(max_xticks)), integer=integer_axis)
+        )
+        ax.grid(axis="y", alpha=0.25)
         if show:
             plt.show()
         return ax
@@ -505,13 +831,201 @@ class SimulationJob(ABC):
         except json.JSONDecodeError:
             return {}
 
+    def is_task_current(
+        self,
+        task: int,
+        *,
+        state: Optional[Mapping[str, Any]] = None,
+    ) -> bool:
+        files = self.expected_trace_files()
+        if task < 1 or task > len(files):
+            return False
+        expected = files[task - 1]
+        state = self.run_state() if state is None else state
+        expected_fingerprint = self.task_fingerprint(task)
+        full_run_matches = state.get("fingerprint") == self.fingerprint() and state.get(
+            "status"
+        ) in {"completed", "skipped"}
+        expected_exists = self._trace_file_exists(expected)
+        packed_task_exists = self._packed_trace_has_current_task(task)
+        if not expected_exists:
+            if not packed_task_exists or not full_run_matches:
+                return False
+        records = self._state_task_records(state)
+        for record in records:
+            if self._task_number_from_record(record) != task:
+                continue
+            record_fingerprint = record.get("fingerprint")
+            if (
+                record_fingerprint is not None
+                and record_fingerprint != expected_fingerprint
+            ):
+                continue
+            if record_fingerprint is None and not full_run_matches:
+                continue
+            status = self._normalized_task_status(record.get("status"))
+            if status != "succeeded":
+                continue
+            stored_path = self._resolve_stored_trace_path(
+                record.get("path") or record.get("trace_file")
+            )
+            if stored_path is None:
+                return True
+            return self._trace_file_exists(stored_path) or (
+                packed_task_exists and full_run_matches
+            )
+        return packed_task_exists and full_run_matches
+
+    def current_tasks(self) -> List[int]:
+        """Return one-based frequency tasks that are current for this job."""
+
+        state = self.run_state()
+        return [
+            task
+            for task in range(1, self.n_tasks + 1)
+            if self.is_task_current(task, state=state)
+        ]
+
+    def _reuse_task_outputs_from_state(
+        self, state: Mapping[str, Any]
+    ) -> List[Dict[str, Any]]:
+        records = self._state_task_records(state)
+        source_by_fingerprint: Dict[str, Path] = {}
+        for record in records:
+            if self._normalized_task_status(record.get("status")) != "succeeded":
+                continue
+            fingerprint = record.get("fingerprint")
+            source = self._resolve_stored_trace_path(
+                record.get("path") or record.get("trace_file")
+            )
+            if source is not None and source == self.trace_manifest.packed_file:
+                continue
+            if fingerprint and source is not None and self._trace_file_exists(source):
+                source_by_fingerprint.setdefault(fingerprint, source)
+
+        copies = []
+        for task, target in enumerate(self.expected_trace_files(), start=1):
+            if self.is_task_current(task, state=state):
+                continue
+            source = source_by_fingerprint.get(self.task_fingerprint(task))
+            if source is None:
+                continue
+            target = Path(target)
+            if source.resolve() == target.resolve():
+                continue
+            copies.append((task, source, target))
+
+        if not copies:
+            return []
+
+        stage_dir = self._result_path / "_fs_run" / "reuse"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        staged = []
+        try:
+            for task, source, _target in copies:
+                stage = stage_dir / f"task_{task}{source.suffix}"
+                shutil.copy2(source, stage)
+                staged.append((task, stage, _target))
+
+            reused = []
+            for task, stage, target in staged:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(stage, target)
+                reused.append(
+                    {
+                        "task": task,
+                        "status": "reused",
+                        "duration_seconds": 0.0,
+                        "fingerprint": self.task_fingerprint(task),
+                        "path": self._stored_trace_path(target),
+                    }
+                )
+            return reused
+        finally:
+            for _task, stage, _target in staged:
+                try:
+                    stage.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _remove_trace_outputs_for_tasks(self, tasks: Iterable[int]) -> bool:
+        removed = False
+        files = self.expected_trace_files()
+        for task in tasks:
+            if task < 1 or task > len(files):
+                continue
+            for path in {files[task - 1], self._legacy_trace_file(files[task - 1])}:
+                try:
+                    path.unlink()
+                    removed = True
+                except FileNotFoundError:
+                    pass
+        return removed
+
+    def task_run_plan(self, *, reuse: bool = False) -> Dict[str, Any]:
+        """Plan which zero-based solver task indices still need to run.
+
+        When ``reuse`` is true, matching trace files from an earlier frequency
+        layout are copied into their current task-numbered locations and the
+        run state is updated to record those reused tasks.
+        """
+
+        state = self.run_state()
+        current_records = []
+        manifest = self.trace_manifest
+        packed_file = manifest.packed_file
+        for task, path in enumerate(self.expected_trace_files(), start=1):
+            if not self.is_task_current(task, state=state):
+                continue
+            existing = path if path.exists() else self._legacy_trace_file(path)
+            if existing.exists():
+                file_path = existing
+            elif (
+                self._packed_trace_has_current_task(task, manifest=manifest)
+                and packed_file is not None
+            ):
+                file_path = packed_file
+            else:
+                file_path = path
+            current_records.append(
+                {
+                    "task": task,
+                    "status": "current",
+                    "duration_seconds": 0.0,
+                    "fingerprint": self.task_fingerprint(task),
+                    "path": self._stored_trace_path(file_path),
+                }
+            )
+        reused = self._reuse_task_outputs_from_state(state) if reuse and state else []
+        if reused:
+            self.write_run_state(status="partial", tasks=[*current_records, *reused])
+            state = self.run_state()
+        reused_tasks = {self._task_number_from_record(record) for record in reused}
+        pending = []
+        current = []
+        for task in range(1, self.n_tasks + 1):
+            if self.is_task_current(task, state=state) or task in reused_tasks:
+                current.append(task)
+            else:
+                pending.append(task - 1)
+        removed_stale_outputs = self._remove_trace_outputs_for_tasks(
+            index + 1 for index in pending
+        )
+        if reused or removed_stale_outputs:
+            self.invalidate_trace_cache()
+        return {
+            "pending_indices": pending,
+            "current_tasks": current,
+            "reused_tasks": reused,
+        }
+
     def is_run_current(self) -> bool:
         if not self.trace_outputs_exist():
             return False
 
         metadata = self.run_metadata
         if metadata.manifest:
-            if metadata.manifest.get("exit_status") != "success":
+            if not metadata.successful:
                 return False
             if metadata.job_file_hash and self._file is not None:
                 if metadata.job_file_hash != self._sha256_file(self._file):
@@ -526,6 +1040,8 @@ class SimulationJob(ABC):
         state = self.run_state()
         if not state:
             return False
+        if len(self.current_tasks()) == self.n_tasks:
+            return True
         if state.get("fingerprint") != self.fingerprint():
             return False
         if state.get("status") not in {"completed", "skipped"}:
@@ -534,15 +1050,68 @@ class SimulationJob(ABC):
 
     def write_run_state(self, status: str = "completed", **extra) -> Path:
         self._result_path.mkdir(parents=True, exist_ok=True)
+        extra = dict(extra)
+        task_results = self._as_records(extra.pop("tasks", None))
+        result_by_task = self._task_record_by_task(task_results)
+        previous_state = self.run_state()
+        previous_by_task = self._task_record_by_task(
+            self._state_task_records(previous_state)
+        )
+        bootstrap_existing_outputs = not task_results and status in {
+            "completed",
+            "skipped",
+        }
+
         files = []
-        for path in self.expected_trace_files():
+        task_rows = []
+        manifest = self.trace_manifest
+        packed_file = manifest.packed_file
+        for task, path in enumerate(self.expected_trace_files(), start=1):
             existing = path if path.exists() else self._legacy_trace_file(path)
-            file_path = existing if existing.exists() else path
-            try:
-                stored_path = str(file_path.resolve().relative_to(self.project_path))
-            except Exception:
-                stored_path = str(file_path)
-            files.append({"path": stored_path, "exists": file_path.exists()})
+            packed_task_exists = self._packed_trace_has_current_task(
+                task,
+                manifest=manifest,
+            )
+            if existing.exists():
+                file_path = existing
+            elif packed_task_exists and packed_file is not None:
+                file_path = packed_file
+            else:
+                file_path = path
+            stored_path = self._stored_trace_path(file_path)
+            exists = file_path.exists()
+            files.append({"path": stored_path, "exists": exists})
+
+            result = dict(result_by_task.get(task, {}))
+            task_status = self._normalized_task_status(result.get("status"))
+            previously_current = self.is_task_current(task, state=previous_state)
+            if not result and previously_current:
+                result = dict(previous_by_task.get(task, {}))
+            if task_status is None and previously_current:
+                task_status = "current"
+            elif task_status is None and exists and bootstrap_existing_outputs:
+                task_status = "succeeded"
+            if task_status is None:
+                task_status = "not_run"
+
+            duration = self._record_duration_seconds(result)
+            row = {
+                "task": task,
+                "frequency": self._canonical_frequency_value(self.f_list[task - 1]),
+                "status": task_status,
+                "fingerprint": self.task_fingerprint(task),
+                "path": stored_path,
+                "exists": exists,
+            }
+            if duration is not None:
+                row["duration_seconds"] = duration
+            core_count = self._record_core_count(result)
+            if core_count is not None:
+                row["core_count"] = core_count
+            for key in ("n_ranks", "ranks", "threads_per_rank", "n_threads", "threads"):
+                if key in result:
+                    row[key] = result[key]
+            task_rows.append(row)
 
         payload = {
             "schema": "frequensolve-python-run-1",
@@ -550,8 +1119,11 @@ class SimulationJob(ABC):
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "fingerprint": self.fingerprint(),
             "fingerprint_payload": self.fingerprint_payload(),
+            "tasks": task_rows,
             "outputs": {"traces": files},
         }
+        if task_results:
+            payload["task_results"] = task_results
         payload.update(extra)
         self._write_json_file(self.run_state_file, payload)
         return self.run_state_file

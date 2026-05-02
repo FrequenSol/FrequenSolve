@@ -731,9 +731,11 @@ class SlurmSite(BaseSite):
                     "No active compute allocation is attached; use mode='batch' "
                     "or allow mode='auto' to submit a batch job."
                 )
+            pack = bool(extra_kwargs.pop("pack", True))
             future = self._submit_attached(
                 job,
                 procs_per_task=run_config.procs_per_task or 2,
+                **({"pack": pack} if not pack else {}),
             )
             self._emit(f"Submitted {job.name} to active {self.site_name} allocation")
             handle = RunHandle(
@@ -839,7 +841,9 @@ class SlurmSite(BaseSite):
         self._emit_status(status)
         return run._make_result(status)
 
-    def _submit_attached(self, job: SimulationJob, procs_per_task: int = 2) -> Future:
+    def _submit_attached(
+        self, job: SimulationJob, procs_per_task: int = 2, *, pack: bool = True
+    ) -> Future:
         """Submit a job into an already attached compute allocation."""
 
         loop = self._get_or_create_event_loop()
@@ -847,7 +851,7 @@ class SlurmSite(BaseSite):
         if self._compute_client is None:
             self._attach_compute_client()
 
-        remote_script, remote_job = self._transfer_job(job)
+        remote_script, remote_job = self._transfer_job(job, pack=pack)
         ntasks_per_item = max(procs_per_task, self.pool.nproc // job.n_tasks)
 
         if self._compute_client.is_proxy():
@@ -1154,7 +1158,10 @@ class SlurmSite(BaseSite):
     def fetch_logs(
         self,
         job: Union[SimulationJob, List[SimulationJob]],
+        *,
         local_dir: Optional[Union[str, Path]] = None,
+        task: Optional[int] = None,
+        frequency: Optional[Union[float, complex]] = None,
         include_batch: bool = False,
         show: bool = False,
     ) -> Union[Path, dict]:
@@ -1168,32 +1175,43 @@ class SlurmSite(BaseSite):
             job: A SimulationJob or list of SimulationJobs whose logs to fetch.
             local_dir: Optional local directory to write logs into. If None,
                 logs are written to job._local_path / "logs" for each job.
+            task: Optional one-based frequency task number. When provided,
+                returns that task's log file instead of the log directory.
+            frequency: Optional physical frequency. When provided, selects the
+                matching frequency task and returns that task's log file.
             include_batch: If True, also fetch SLURM batch logs from
                 run_path/jobs/batch/ (requires job._job_id and run_path).
-            print: If True, print log contents after fetching. When
+            show: If True, print log contents after fetching. When
                 include_batch is True, prints in order: batch .o file, batch
-                .e file, then the last (highest index) task log file. Otherwise
-                prints only the last task log file.
+                .e file, then the selected or latest task log file. Otherwise
+                prints only the selected or latest task log file.
 
         Returns:
-            If a single job: Path to the local log directory. If a list of jobs:
-            dict mapping job name to Path of that job's local log directory.
+            If a single job: Path to the local log directory or selected log
+            file. If a list of jobs: dict mapping job name to Path.
         """
         jobs, single = _as_list(job, SimulationJob)
         requested_local_dir = Path(local_dir) if local_dir is not None else None
         result = {}
 
         for j in jobs:
-            log_dir = (
-                requested_local_dir
-                if requested_local_dir is not None
-                else j._local_path / "logs"
-            )
+            if requested_local_dir is None:
+                log_dir = j._local_path / "logs"
+            elif single:
+                log_dir = requested_local_dir
+            else:
+                log_dir = requested_local_dir / j.name
             remote_log_dir = j._remote_path(self.work_dir) / "logs"
             try:
                 self._emit(f"Fetching logs from {remote_log_dir} to {log_dir}")
                 self.get(remote_log_dir, log_dir)
-                result[j.name] = log_dir
+                selected_log = self._select_log_path(
+                    j,
+                    log_dir,
+                    task=task,
+                    frequency=frequency,
+                )
+                result[j.name] = selected_log
 
                 if include_batch and getattr(j, "_job_id", None):
                     batch_remote = self.work_dir / "jobs" / "batch"
@@ -1219,12 +1237,13 @@ class SlurmSite(BaseSite):
                     )
 
                 if show:
-                    self._print_fetched_logs(
-                        job_name=j.name,
-                        log_dir=log_dir,
-                        include_batch=include_batch,
-                        job_id=getattr(j, "_job_id", None),
-                    )
+                    if include_batch:
+                        self._print_batch_logs(
+                            job_name=j.name,
+                            log_dir=log_dir,
+                            job_id=getattr(j, "_job_id", None),
+                        )
+                    self._show_logs(selected_log, job_name=j.name)
             except Exception as e:
                 logger.exception("Error fetching logs for job %s: %s", j.name, e)
                 raise
@@ -1405,7 +1424,7 @@ class SlurmSite(BaseSite):
 
         return remote_script, remote_job
 
-    def _transfer_job(self, job: SimulationJob):
+    def _transfer_job(self, job: SimulationJob, *, pack: bool = True):
         """Submit a simulation job to the remote site.
 
         Args:
@@ -1418,7 +1437,7 @@ class SlurmSite(BaseSite):
         local_job, remote_job = job.save_for_remote(
             self.__class__.__name__, self.work_dir
         )
-        script = self._sweep_script(job)
+        script = self._sweep_script(job, pack=pack)
 
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(local_job), Path(remote_job))
@@ -1442,6 +1461,9 @@ class SlurmSite(BaseSite):
 
         n_tasks = job.n_tasks
         dir_out = str(job._remote_path(self.work_dir) / "logs")
+        pack_job = kwargs.pop("pack", None)
+        if pack_job is None:
+            pack_job = kwargs.pop("pack_job", True)
         return self._render_template(
             "sweep/sweep_SLURM.sh",
             batch_job=False,
@@ -1452,6 +1474,7 @@ class SlurmSite(BaseSite):
             dir_out=dir_out,
             executable=self.executable,
             imaging_job=isinstance(job, ImagingJob),
+            pack_job=bool(pack_job),
             fs_dir=str(Path(self.executable).parent),
             **kwargs,
         )
@@ -1496,6 +1519,7 @@ class SlurmSite(BaseSite):
         tail_threshold = int(kwargs.pop("tail_threshold", 8))
         boost_max_factor = float(kwargs.pop("boost_max_factor", 8.0))
         sizing_json = kwargs.pop("sizing_json", None)
+        pack_job = bool(kwargs.pop("pack", True))
         proc_memory = (config.memory_per_node / procs_per_node) / 1024.0
         duration = config.validate_request(n_nodes, n_nodes * procs_per_node, duration)
 
@@ -1519,6 +1543,7 @@ class SlurmSite(BaseSite):
             queue=queue,
             account=account,
             imaging_job=imaging_job,
+            pack_job=pack_job,
             mpi=self.mpi_cmd,
             executable=self.executable,
             fs_dir=str(Path(self.executable).parent),
@@ -1571,32 +1596,21 @@ class SlurmSite(BaseSite):
             **({"notify_email": notify_email} if notify_email is not None else {}),
         )
 
-    def _print_fetched_logs(
+    def _print_batch_logs(
         self,
         job_name: str,
         log_dir: Path,
-        include_batch: bool,
         job_id: Optional[str],
     ) -> None:
-        """Print batch logs (if requested) and the latest task log file.
-
-        Order when include_batch: batch .o, batch .e, then highest-index task log.
-        """
+        """Print SLURM batch stdout/stderr logs if they were fetched."""
         log_path = Path(log_dir)
 
-        if include_batch and job_id:
+        if job_id:
             batch_dir = log_path.parent / "batch"
             for suffix, label in ((".o", "batch stdout"), (".e", "batch stderr")):
                 f = batch_dir / f"job_{job_id}{suffix}"
                 if f.exists():
                     self._print_file_with_header(str(f), f"[{job_name}] {label}")
-
-        last_task = self._latest_task_log_path(log_path)
-        if last_task is not None:
-            self._print_file_with_header(
-                str(last_task),
-                f"[{job_name}] task log (highest index)",
-            )
 
     @staticmethod
     def _latest_task_log_path(log_dir: Union[str, Path]) -> Optional[Path]:
@@ -1606,7 +1620,7 @@ class SlurmSite(BaseSite):
             return None
         best_index = -1
         best_path = None
-        for pattern in ("task_*.txt", "task_*.out"):
+        for pattern in ("task_*.log", "task_*.txt", "task_*.out"):
             for f in log_path.glob(pattern):
                 try:
                     n = int(f.stem.rsplit("_", 1)[-1])

@@ -405,6 +405,11 @@ echo "Running imaging step..."
 "$executable" -j "$job_file" --smooth
 {% endif %}
 
+{% if pack_job %}
+echo "Running packing step..."
+"$executable" -nthreads "$n_threads" -j "$job_file" --pack >> "$dir_out/pack.log" 2>&1
+{% endif %}
+
 end_time=$(date +%s)
 total_seconds=$((end_time - start_time))
 hours=$((total_seconds / 3600))

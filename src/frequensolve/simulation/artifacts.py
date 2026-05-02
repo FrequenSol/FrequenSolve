@@ -37,6 +37,71 @@ def _relative_to(path: Path, base: Optional[Path]) -> str:
         return str(path)
 
 
+def _normalize_base(base: Optional[Union[str, Path]]) -> Optional[str]:
+    if base is None:
+        return None
+    normalized = Path(base).stem if isinstance(base, Path) else Path(str(base)).stem
+    normalized = normalized.strip()
+    return normalized or None
+
+
+def _path_matches_base(path: Path, base: Optional[str]) -> bool:
+    if base is None:
+        return True
+    stem = path.stem
+    if stem == base:
+        return True
+    suffix = stem.removeprefix(f"{base}_")
+    return suffix != stem and len(suffix) == 5 and suffix.isdigit()
+
+
+def _normalize_kind(kind: Optional[str]) -> Optional[str]:
+    if kind is None:
+        return None
+    normalized = str(kind).strip().lower()
+    return normalized or None
+
+
+def _kind_suffixes(kind: Optional[str]) -> tuple[str, ...]:
+    normalized = _normalize_kind(kind)
+    if normalized is None:
+        return ()
+    if normalized == "vtk":
+        return (".vtk", ".vtu", ".vtr", ".vtp", ".vts")
+    if normalized in {
+        "vtu",
+        "vtr",
+        "vtp",
+        "vts",
+        "vtk",
+        "h5",
+        "hdf5",
+        "json",
+        "xmf",
+        "xmdf",
+    }:
+        suffix = ".h5" if normalized == "hdf5" else f".{normalized}"
+        return (suffix,)
+    return ()
+
+
+def _path_matches_kind(path: Path, kind: Optional[str]) -> bool:
+    normalized = _normalize_kind(kind)
+    if normalized is None:
+        return True
+    suffix = path.suffix.lower()
+    return suffix in _kind_suffixes(normalized)
+
+
+def _artifact_matches_kind(artifact: "OutputArtifact", kind: Optional[str]) -> bool:
+    normalized = _normalize_kind(kind)
+    if normalized is None:
+        return True
+    if artifact.kind is not None and str(artifact.kind).strip().lower() == normalized:
+        return True
+    return _path_matches_kind(artifact.path, normalized)
+
+
 @dataclass(frozen=True)
 class OutputArtifact:
     """One file produced by a solver run."""
@@ -119,18 +184,35 @@ class RunMetadata:
     @property
     def successful(self) -> bool:
         if self.manifest:
-            return self.manifest.get("exit_status") == "success"
+            status = self.manifest.get("exit_status")
+            if isinstance(status, Mapping):
+                status = status.get("status")
+            return status == "success"
         if self.state:
             return self.state.get("status") in {"completed", "skipped"}
         return False
 
     @property
     def job_file_hash(self) -> Optional[str]:
-        return self.manifest.get("job_file_sha256")
+        if "job_file_sha256" in self.manifest:
+            return self.manifest.get("job_file_sha256")
+        inputs = self.manifest.get("inputs", {})
+        if isinstance(inputs, Mapping):
+            job_file = inputs.get("job_file", {})
+            if isinstance(job_file, Mapping):
+                return job_file.get("hash")
+        return None
 
     @property
     def simulation_file_hash(self) -> Optional[str]:
-        return self.manifest.get("simulation_file_sha256")
+        if "simulation_file_sha256" in self.manifest:
+            return self.manifest.get("simulation_file_sha256")
+        inputs = self.manifest.get("inputs", {})
+        if isinstance(inputs, Mapping):
+            simulation_file = inputs.get("simulation_file", {})
+            if isinstance(simulation_file, Mapping):
+                return simulation_file.get("hash")
+        return None
 
     @property
     def artifacts(self) -> List[OutputArtifact]:
@@ -146,9 +228,10 @@ class RunMetadata:
         *,
         kind: Optional[str] = None,
         suffix: Optional[Union[str, Sequence[str]]] = None,
+        base: Optional[Union[str, Path]] = None,
         existing: bool = False,
     ) -> List[Path]:
-        """Return output file paths filtered by kind and suffix."""
+        """Return output file paths filtered by kind, suffix, and output base."""
 
         suffixes: Optional[tuple[str, ...]]
         if suffix is None:
@@ -157,18 +240,67 @@ class RunMetadata:
             suffixes = (suffix,)
         else:
             suffixes = tuple(suffix)
+        normalized_base = _normalize_base(base)
 
         files = []
         for artifact in self.artifacts:
             path = artifact.path
-            if kind is not None and artifact.kind != kind:
+            if not _artifact_matches_kind(artifact, kind):
                 continue
             if suffixes is not None and not path.name.endswith(suffixes):
+                continue
+            if not _path_matches_base(path, normalized_base):
                 continue
             if existing and not path.exists():
                 continue
             files.append(path)
-        return files
+        files.extend(
+            self._discover_output_files(
+                kind=kind,
+                suffixes=suffixes,
+                base=normalized_base,
+            )
+        )
+        deduped = []
+        seen = set()
+        for path in files:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(path)
+        return deduped
+
+    def _discover_output_files(
+        self,
+        *,
+        kind: Optional[str],
+        suffixes: Optional[tuple[str, ...]],
+        base: Optional[str],
+    ) -> List[Path]:
+        if self.result_path is None or not self.result_path.exists():
+            return []
+
+        scan_suffixes = suffixes or _kind_suffixes(kind)
+        if not scan_suffixes:
+            return []
+
+        files = []
+        for suffix in scan_suffixes:
+            files.extend(self.result_path.rglob(f"*{suffix}"))
+
+        return [
+            path
+            for path in sorted(set(files))
+            if path.is_file()
+            and "_fs_run" not in path.relative_to(self.result_path).parts
+            and _artifact_matches_kind(
+                OutputArtifact(path=path, kind=path.suffix.lstrip(".")),
+                kind,
+            )
+            and (suffixes is None or path.name.endswith(suffixes))
+            and _path_matches_base(path, base)
+        ]
 
 
 @dataclass(frozen=True)
@@ -329,8 +461,64 @@ class TraceManifest:
         files = outputs.get("files", []) if outputs else []
         return [OutputArtifact.from_fs(file, result_path=result_path) for file in files]
 
+    @staticmethod
+    def _packed_manifest(
+        result_path: Path,
+        output_path: Path,
+    ) -> Optional[tuple[Path, Dict[int, float]]]:
+        manifest_file = output_path / "manifest.json"
+        if not manifest_file.exists():
+            return None
+        try:
+            data = json.loads(manifest_file.read_text())
+        except json.JSONDecodeError:
+            return None
+
+        packed = data.get("packed", {}) if isinstance(data, Mapping) else {}
+        if not isinstance(packed, Mapping):
+            return None
+        raw_path = packed.get("path") or packed.get("relative_path")
+        if not raw_path:
+            return None
+
+        path = _as_path(raw_path)
+        if not path.is_absolute():
+            path = result_path / path
+
+        frequencies: Dict[int, float] = {}
+        rows = data.get("frequencies", [])
+        if isinstance(rows, list):
+            sortable = [
+                (index, row)
+                for index, row in enumerate(rows, start=1)
+                if isinstance(row, Mapping) and "frequency" in row
+            ]
+            sortable.sort(key=lambda item: int(item[1].get("task_id", item[0])))
+            frequencies = {
+                index: _real_frequency(row["frequency"])
+                for index, (_original_index, row) in enumerate(sortable, start=1)
+            }
+        return path, frequencies
+
+    @property
+    def packed_file(self) -> Optional[Path]:
+        """Packed trace file named by the solver trace manifest, if it exists."""
+
+        packed = self._packed_manifest(self.result_path, self.output_path)
+        if packed is None or not packed[0].exists():
+            return None
+        return packed[0]
+
+    @property
+    def packed_frequencies(self) -> Dict[int, float]:
+        packed = self._packed_manifest(self.result_path, self.output_path)
+        return {} if packed is None else packed[1]
+
     @property
     def existing_files(self) -> List[Path]:
+        packed_file = self.packed_file
+        if packed_file is not None:
+            return [packed_file]
         return [
             self.resolve_trace_file(file)
             for file in self.files
@@ -339,6 +527,8 @@ class TraceManifest:
 
     @property
     def complete(self) -> bool:
+        if self.packed_file is not None:
+            return True
         return bool(self.files) and all(
             self.resolve_trace_file(file).exists() for file in self.files
         )

@@ -895,6 +895,54 @@ class AWSSite(BaseSite):
         traces = self.fetch_traces(job)
         return traces
 
+    def fetch_logs(
+        self,
+        job: Union[SimulationJob, List[SimulationJob]],
+        *,
+        local_dir: Optional[Union[str, Path]] = None,
+        task: Optional[int] = None,
+        frequency: Optional[Union[float, complex]] = None,
+        show: bool = False,
+    ) -> Union[Path, Dict[str, Path]]:
+        """Fetch AWS task logs and optionally return one task log file.
+
+        ``task`` is one-based. ``frequency`` selects the matching frequency in
+        ``job.f_list``. Without either selector, the local log directory is
+        returned.
+        """
+
+        jobs, single = self._as_jobs(job)
+        requested_local_dir = Path(local_dir) if local_dir is not None else None
+        result: Dict[str, Path] = {}
+
+        for item in jobs:
+            project_name = item.simulation._remote_path.parts[0]
+            remote_logs_path = (
+                f"s3://{self.config.s3_bucket}/"
+                f"{project_name}/jobs/{item.simulation.name}/{item.name}/logs"
+            )
+            if requested_local_dir is None:
+                log_dir = item._stdout_path
+            elif single:
+                log_dir = requested_local_dir
+            else:
+                log_dir = requested_local_dir / item.name
+
+            self.get(remote_logs_path, log_dir)
+            selected = self._select_log_path(
+                item,
+                log_dir,
+                task=task,
+                frequency=frequency,
+            )
+            if show:
+                self._show_logs(selected, job_name=item.name)
+            result[item.name] = selected
+
+        if single:
+            return result[jobs[0].name]
+        return result
+
     def test_api_connectivity(self) -> bool:
         """Test connectivity to the FrequenSol API endpoint.
 

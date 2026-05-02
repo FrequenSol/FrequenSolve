@@ -140,6 +140,30 @@ def _write_sample_vtu(tmp_path):
     return path
 
 
+def _write_source_indexed_pressure_vtu(tmp_path):
+    pv = pytest.importorskip("pyvista")
+    points = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    cells = np.array([4, 0, 1, 2, 3])
+    cell_types = np.array([pv.CellType.TETRA], dtype=np.uint8)
+    mesh = pv.UnstructuredGrid(cells, cell_types, points)
+    mesh.point_data["pressure_1_re"] = np.array([0.0, 1.0, 0.5, -0.25])
+    mesh.point_data["pressure_1_im"] = np.array([0.0, 0.25, 0.5, 1.0])
+    mesh.point_data["pressure_1_abs"] = np.hypot(
+        mesh.point_data["pressure_1_re"],
+        mesh.point_data["pressure_1_im"],
+    )
+    path = tmp_path / "source_indexed_pressure.vtu"
+    mesh.save(path, binary=False)
+    return path
+
+
 def test_vtu_helpers_read_fields_and_plot(tmp_path):
     path = _write_sample_vtu(tmp_path)
 
@@ -157,6 +181,25 @@ def test_vtu_helpers_read_fields_and_plot(tmp_path):
     assert "pressure_imag" in fields
     assert "Pressure (Magnitude) [Pa]" in plotted_mesh.point_data
     assert plotter is not None
+    plotter.close()
+
+
+def test_vtu_base_field_alias_accepts_unique_source_indexed_pressure(tmp_path):
+    path = _write_source_indexed_pressure_vtu(tmp_path)
+
+    plotter, plotted_mesh = plot_vtu(
+        path,
+        "pressure",
+        part="re",
+        show=False,
+        return_mesh=True,
+    )
+
+    assert "Pressure (Real)" in plotted_mesh.point_data
+    np.testing.assert_allclose(
+        plotted_mesh.point_data["Pressure (Real)"],
+        plotted_mesh.point_data["pressure_1_re"],
+    )
     plotter.close()
 
 
