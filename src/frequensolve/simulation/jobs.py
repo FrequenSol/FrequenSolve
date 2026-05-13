@@ -167,7 +167,7 @@ class SimulationJob(ABC):
         self.validate_outputs()
         f_list = self._encoded_frequencies()
         payload = {
-            "schema": "frequensolve-job-1",
+            "schema": "fs-job-1",
             "_type": self.__class__.__name__,
             "name": self.name,
             "project_path": str(self._project_path()),
@@ -562,7 +562,7 @@ class SimulationJob(ABC):
     def frequency_status(self) -> List[Dict[str, Any]]:
         """Return per-frequency run status rows for this job.
 
-        Status is inferred from expected trace files plus any Python/Sauce run
+        Status is inferred from expected trace files plus any Python/solver run
         metadata available beside the results. Task numbers are one-based to
         match solver task IDs and trace filenames.
         """

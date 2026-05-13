@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Iterable, List
 
-FIELD_ALIASES = {}
+FIELD_ALIASES = {
+    "fluid_velocity": "fluid_flux",
+}
 
 FIELD_PASSTHROUGH = {"all", "primary", "secondary"}
 

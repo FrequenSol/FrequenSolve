@@ -123,8 +123,8 @@ class ParaviewOutput(Output):
 
     The public API intentionally exposes the common cases only: solution fields
     and material properties on the volume, selected surfaces, or a sampling
-    grid. Advanced Sauce fields can still be passed through ``extra`` or loaded
-    from existing solver JSON.
+    grid. Advanced fast solver fields can still be passed through ``extra`` or
+    loaded from existing solver JSON.
     """
 
     name: str = "ParaView"
@@ -275,7 +275,9 @@ class ParaviewOutput(Output):
             payload["coordinates"] = {"system": self.coordinates}
 
         target_payload = self._target_payload(ctx)
-        if target_payload is not None and target_payload != {"kind": "volume"}:
+        if target_payload is not None and (
+            target_payload != {"kind": "volume"} or self.target is not None
+        ):
             payload["target"] = target_payload
 
         if self.parts is not None:

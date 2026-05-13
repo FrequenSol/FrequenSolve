@@ -6,7 +6,9 @@
 FrequenSolve Documentation
 ==========================
 
-Welcome to FrequenSolve's documentation. FrequenSolve is a high-performance finite element solver for seismic wave propagation, supporting both time-domain and frequency-domain simulations.
+Welcome to FrequenSolve's documentation. FrequenSolve is the Python SDK for
+authoring, validating, launching, and reading finite-element wave simulations.
+Solver execution requires a separately licensed fast solver.
 
 Key Features
 ------------
@@ -39,8 +41,8 @@ If you're new to FrequenSolve, we recommend starting with:
    :maxdepth: 1
    :caption: Backend Contracts
 
-   sauce_api_updates
-   sauce_trace_output_compaction
+   fast_solver_api_updates
+   fast_solver_trace_output_compaction
 
 .. toctree::
    :maxdepth: 2

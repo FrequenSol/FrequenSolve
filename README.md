@@ -44,7 +44,7 @@ sim.model.subdomains.append(layer)
 sim.save("sim.json")
 ```
 
-The SDK exports JSON/HDF5 contracts consumed by Sauce/FrequenSolve solver builds. Solver execution requires a licensed solver binary or an enabled FrequenSol execution backend.
+The SDK exports JSON/HDF5 contracts consumed by fast solver builds. Solver execution requires a licensed solver binary or an enabled FrequenSol execution backend.
 
 ## Development
 
@@ -89,8 +89,8 @@ cd docs
 make html
 ```
 
-Backend contract updates required from Sauce are tracked in `docs/source/sauce_api_updates.rst`.
+Fast solver contract updates are tracked in `docs/source/fast_solver_api_updates.rst`.
 
 ## License And Support
 
-FrequenSolve Python is commercial software owned by FrequenSol, LLC. See `LICENSE` for the repository license notice. For licensing, support, and solver access, contact support@frequensol.com.
+FrequenSolve Python SDK is open source under the MIT license. The fast solver is licensed separately; for solver access and support, contact support@frequensol.com.

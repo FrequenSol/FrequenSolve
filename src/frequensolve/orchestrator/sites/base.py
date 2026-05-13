@@ -21,6 +21,21 @@ SUCCESS_STATES = {
     "skipped",
 }
 
+STATUS_COLORS = {
+    "pending": "\033[38;5;27m",
+    "running": "\033[38;5;28m",
+    "complete": "\033[38;5;40m",
+    "completed": "\033[38;5;40m",
+    "timeout": "\033[38;5;202m",
+    "failed": "\033[38;5;160m",
+    "cancelled": "\033[38;5;160m",
+    "canceled": "\033[38;5;160m",
+    "skipped": "\033[38;5;244m",
+    "unknown": "\033[38;5;244m",
+}
+STATUS_PREFIX_COLOR = "\033[38;5;244m"
+STATUS_RESET = "\033[0m"
+
 __all__ = [
     "BaseSite",
     "JobStatus",
@@ -201,6 +216,8 @@ class RunHandle:
         )
         handle._last_status = status
         handle._result = handle._make_result(status)
+        if hasattr(site, "_emit_status"):
+            site._emit_status(status)
         return handle
 
     def __await__(self):
@@ -240,7 +257,7 @@ class RunHandle:
         while True:
             status = self.status()
             if status.state != last_state and hasattr(self.site, "_emit_status"):
-                self.site._emit_status(status)
+                self.site._emit_status(status, force=True)
                 last_state = status.state
             if status.is_complete:
                 self._result = self._make_result(status)
@@ -275,7 +292,7 @@ class RunHandle:
         while True:
             status = await asyncio.to_thread(self.status)
             if status.state != last_state and hasattr(self.site, "_emit_status"):
-                self.site._emit_status(status)
+                self.site._emit_status(status, force=True)
                 last_state = status.state
             if status.is_complete:
                 self._result = self._make_result(status)
@@ -353,21 +370,32 @@ class BaseSite:
     _is_notebook: bool = field(default_factory=_check_if_notebook)
     verbose: bool = False
 
-    def _emit(self, message: str, level: int = logging.INFO) -> None:
+    def _emit(
+        self,
+        message: str,
+        level: int = logging.INFO,
+        *,
+        force: bool = False,
+    ) -> None:
         """Log a site message and optionally print it for interactive users."""
 
         logging.getLogger(self.__class__.__module__).log(level, message)
-        if getattr(self, "verbose", False):
+        if force or getattr(self, "verbose", False):
             print(message)
 
-    def _emit_status(self, status: JobStatus) -> None:
+    def _emit_status(self, status: JobStatus, *, force: bool = True) -> None:
         """Emit a normalized run status update."""
 
         job = f" {status.job_id}" if status.job_id else ""
-        message = f"{self.__class__.__name__}{job}: {status.state}"
+        state = str(status.state)
+        color = STATUS_COLORS.get(state.lower(), STATUS_COLORS["unknown"])
+        message = (
+            f"{STATUS_PREFIX_COLOR}{self.__class__.__name__}{job}: "
+            f"{color}{state}{STATUS_RESET}"
+        )
         if status.message:
             message = f"{message} - {status.message}"
-        self._emit(message)
+        self._emit(message, force=force)
 
     def prepare_job(self, job, *, sync_project: bool = False):
         """Persist local job inputs before a run is submitted.

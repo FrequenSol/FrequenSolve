@@ -2,10 +2,10 @@ import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Mapping, Optional, Union
+from typing import Any, Dict, Mapping, Optional, Union
 
 from frequensolve.geometry.frame import CoordinateSystem
-from frequensolve.mesh.boundary_conditions import BoundaryConditionManager
+from frequensolve.mesh.boundary_conditions import BoundaryCondition, BoundaryConditions
 from frequensolve.mesh.mesh_generators import BaseMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.model.model import ModelBase
@@ -21,6 +21,12 @@ from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
     merge_extra,
+)
+from frequensolve.util.named_list import NamedList
+from frequensolve.util.physics import (
+    canonical_dimension,
+    model_dimension,
+    normalize_simulation_physics,
 )
 from frequensolve.util.store import SimulationStore
 
@@ -86,13 +92,13 @@ class BaseSimulation(SimulationConfig):
     Attributes:
        model (ModelBase):               Model configuration.
        mesh (MeshManager):              Mesh configuration.
-       BCs (BoundaryConditionManager):  Boundary condition configuration.
+       BCs (BoundaryConditions):        Boundary condition configuration.
        numerics (NumericsManager):      Numerics configuration.
     """
 
     model: Optional[ModelBase] = None
     mesh: Optional[MeshManager] = None
-    BCs: BoundaryConditionManager = field(default_factory=BoundaryConditionManager)
+    BCs: BoundaryConditions = field(default_factory=BoundaryConditions)
     solver: SolverConfig = field(default_factory=SolverConfig)
     discretization: Discretization = field(default_factory=Discretization)
 
@@ -171,28 +177,37 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
        name (str):                      Name of the simulation.
        model (ModelBase):               Model configuration.
        mesh (MeshManager):              Mesh configuration.
-       BCs (BoundaryConditionManager):  Boundary condition configuration.
+       BCs (BoundaryConditions):        Boundary condition configuration.
        solver (SolverConfig):           Solver configuration.
        discretization (Discretization): Discretization configuration.
        acquisition (Acquisition):       Acquisition configuration.
     """
 
     name: str
-    physics: Literal["acoustic", "elastic", "coupled", "EM"]
-    dimension: Literal[2, 3]
+    physics: str
+    dimension: int | float | str
+    axisymmetric: bool = False
     project_path: Union[str, Path] = None
     model: ModelBase = field(default_factory=ModelBase)
     mesh: MeshManager = field(default_factory=MeshManager)
-    BCs: BoundaryConditionManager = field(default_factory=BoundaryConditionManager)
+    BCs: BoundaryConditions = field(default_factory=BoundaryConditions)
     solver: SolverConfig = field(default_factory=SolverConfig)
     discretization: Discretization = field(default_factory=Discretization)
     acquisition: Acquisition = field(default_factory=Acquisition)
     units: UnitConfig = field(default_factory=UnitConfig)
     global_coordinate_system: Optional[CoordinateSystem] = None
-    coordinate_systems: List[CoordinateSystem] = field(default_factory=list)
+    coordinate_systems: NamedList = field(default_factory=NamedList)
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
+        if not isinstance(self.coordinate_systems, NamedList):
+            self.coordinate_systems = NamedList(self.coordinate_systems)
+        self.dimension = canonical_dimension(self.dimension)
+        self.physics, self.axisymmetric = normalize_simulation_physics(
+            self.physics,
+            axisymmetric=self.axisymmetric,
+            dimension=self.dimension,
+        )
         if self.project_path is None:
             raise ValueError(
                 "When initializing a simulation, you now must either call project.new_simulation() "
@@ -201,7 +216,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         else:
             self.project_path = Path(self.project_path)
         if self.model.dimension == 0:
-            self.model.dimension = self.dimension
+            self.model.dimension = model_dimension(self.dimension)
 
     @classmethod
     def from_fs(cls, data: Dict) -> "SeismicSimulation":
@@ -211,11 +226,13 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         name = data.pop("name")
         physics = data.pop("physics")
         dimension = data.pop("dimension")
+        axisymmetric = data.pop("axisymmetric", False)
         project_path = Path(data.pop("project_path"))
         sim = cls(
             name=name,
             physics=physics,
             dimension=dimension,
+            axisymmetric=axisymmetric,
             project_path=project_path,
         )
 
@@ -238,17 +255,18 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
                 data.pop("global_coordinate_system")
             )
         if "coordinate_systems" in data:
-            sim.coordinate_systems = [
+            sim.coordinate_systems = NamedList(
                 CoordinateSystem.from_fs(item)
                 for item in data.pop("coordinate_systems")
-            ]
+            )
 
         if "Model" in data:
             sim.model = ModelBase.from_fs(data.pop("Model"))
+            sim._bind_model_coordinate_systems()
         if "Mesh" in data:
             sim.mesh = MeshManager.from_fs(data.pop("Mesh"))
         if "BCs" in data:
-            sim.BCs = BoundaryConditionManager.from_fs(data.pop("BCs"))
+            sim.BCs = BoundaryConditions.from_fs(data.pop("BCs"))
         if "Solver" in data:
             sim.solver = SolverConfig.from_fs(data.pop("Solver"))
         if "Discretization" in data:
@@ -260,6 +278,16 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         sim.extra = data
         sim._set_path(project_path, Path("simulations"))
         return sim
+
+    def _bind_model_coordinate_systems(self) -> None:
+        if self.model is not None:
+            self.model._coordinate_systems = self.coordinate_systems
+
+    @property
+    def coordinate_system(self) -> NamedList:
+        """Alias for the named coordinate-system collection."""
+
+        return self.coordinate_systems
 
     def copy(self, name, **kwargs) -> "SeismicSimulation":
         file = self.save()
@@ -351,8 +379,10 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         for index, existing in enumerate(self.coordinate_systems):
             if existing.name == system.name:
                 self.coordinate_systems[index] = system
+                self._bind_model_coordinate_systems()
                 return system
         self.coordinate_systems.append(system)
+        self._bind_model_coordinate_systems()
         return system
 
     def add_surface_coordinate_system(
@@ -413,11 +443,16 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
     def __iadd__(self, other):
         if isinstance(other, ModelBase):
             self.model = other
+            self._bind_model_coordinate_systems()
         elif isinstance(other, MeshManager):
             self.mesh = other
         elif isinstance(other, BaseMeshGenerator):
             self.mesh = MeshManager(other)
-        elif isinstance(other, BoundaryConditionManager):
+        elif isinstance(other, CoordinateSystem):
+            self.add_coordinate_system(other)
+        elif isinstance(other, BoundaryCondition):
+            self.BCs.append(other)
+        elif isinstance(other, BoundaryConditions):
             self.BCs = other
         elif isinstance(other, SolverConfig):
             self.solver = other

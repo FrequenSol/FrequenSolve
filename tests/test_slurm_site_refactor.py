@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -152,6 +153,28 @@ def test_slurm_state_and_sbatch_parsing_helpers():
         _parse_sbatch_job_id("no job id")
 
 
+def test_sbatch_stderr_with_job_id_is_not_logged_as_error(monkeypatch, caplog):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+    monkeypatch.setattr(
+        site,
+        "run_login_cmd",
+        lambda cmd: (
+            None,
+            DummyStream("Submitted batch job 12345\n"),
+            DummyStream("module reload notice\n"),
+        ),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=hpc.__name__):
+        job_id = site._submit_sbatch("sbatch job.sh")
+
+    assert job_id == "12345"
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+    assert any("sbatch stderr" in record.message for record in caplog.records)
+
+
 def test_legacy_slurm_public_methods_are_removed():
     assert not hasattr(SlurmSite, "submit_SLURM")
     assert not hasattr(SlurmSite, "submit_slurm")
@@ -195,14 +218,26 @@ def test_run_handle_wait_and_await():
     assert async_result.status.state == "completed"
 
 
-def test_run_handle_verbose_status_output(capsys):
-    site = DummyBaseSite(verbose=True)
+def test_run_handle_wait_prints_status_output_by_default(capsys):
+    site = DummyBaseSite(verbose=False)
     run = site.submit(DummyJob())
 
     run.wait(timeout=1.0, poll_interval=0.0)
 
     captured = capsys.readouterr()
-    assert "DummyBaseSite: completed" in captured.out
+    assert "\033[38;5;244mDummyBaseSite: \033[38;5;40mcompleted\033[0m" in captured.out
+
+
+def test_skipped_run_handle_prints_status_by_default(capsys):
+    site = DummyBaseSite(verbose=False)
+
+    RunHandle.skipped(site, DummyJob())
+
+    captured = capsys.readouterr()
+    assert (
+        "\033[38;5;244mDummyBaseSite: \033[38;5;244mskipped\033[0m - Run is current"
+        in captured.out
+    )
 
 
 def test_run_handle_cancel_delegates_to_site():

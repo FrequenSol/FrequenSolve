@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 
-from frequensolve.seismic.trace_store import TraceStore
+from frequensolve.seismic.trace_store import TraceStore, TraceSummary
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.artifacts import TraceManifest
 from frequensolve.simulation.sampling import UniformSweepSampling
@@ -261,9 +261,20 @@ class TraceDataset:
             return self.store.frequencies(group)
         return np.sort(np.asarray(list(self.metadata["f_map"].values())))
 
+    def format_summary(self, colorize: bool = False) -> TraceSummary:
+        return self.store.format_summary(colorize=colorize)
+
     @property
-    def summary(self) -> str:
+    def summary(self) -> TraceSummary:
         return self.store.summary
+
+    def print_summary(
+        self,
+        *,
+        colorize: Optional[bool] = None,
+        file: Optional[Any] = None,
+    ) -> TraceSummary:
+        return self.store.print_summary(colorize=colorize, file=file)
 
     def open_frequency_domain(self, group: str):
         return self.store.read_h5(group)

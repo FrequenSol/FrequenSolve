@@ -3,6 +3,8 @@
 ``TraceStore`` backs the public ``TraceDataset`` facade.
 """
 
+import html
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +21,23 @@ from frequensolve.util.fft import get_fft_backend
 __all__: list[str] = []
 
 _ROOT_TRACE_METADATA_DATASETS = {"frequency", "laplace", "task_id"}
+
+
+class TraceSummary(str):
+    """Notebook-friendly string for trace summaries."""
+
+    def __new__(cls, text: str) -> "TraceSummary":
+        return super().__new__(cls, text)
+
+    def __repr__(self) -> str:
+        return str(self)
+
+    def _repr_pretty_(self, printer, cycle: bool) -> None:
+        printer.text(str(self))
+
+    def _repr_html_(self) -> str:
+        text = html.escape(str(self))
+        return f'<pre style="white-space: pre-wrap; margin: 0;">{text}</pre>'
 
 
 def _decode_h5_strings(values):
@@ -274,8 +293,7 @@ class TraceStore:
                 return {}
             return read_group(f["survey"])
 
-    @property
-    def summary(self, colorize: bool = True) -> str:
+    def format_summary(self, colorize: bool = False) -> TraceSummary:
         def _gray(text: str, light: bool = True) -> str:
             if colorize:
                 if light:
@@ -305,10 +323,28 @@ class TraceStore:
             else:
                 out += f"  {_gray('Frequency')}\t: {freq[0]:.2f} Hz\n"
             out += "\n"
-        return out
+        return TraceSummary(out)
+
+    @property
+    def summary(self) -> TraceSummary:
+        return self.format_summary()
+
+    def print_summary(
+        self,
+        *,
+        colorize: Optional[bool] = None,
+        file: Optional[Any] = None,
+    ) -> TraceSummary:
+        file = sys.stdout if file is None else file
+        if colorize is None:
+            isatty = getattr(file, "isatty", None)
+            colorize = bool(isatty()) if callable(isatty) else False
+        summary = self.format_summary(colorize=colorize)
+        print(str(summary), end="" if str(summary).endswith("\n") else "\n", file=file)
+        return summary
 
     def __str__(self) -> str:
-        return self.summary
+        return str(self.summary)
 
     def _ensure_consolidated(self) -> None:
         if self._consolidated is None or not Path(self._consolidated).exists():

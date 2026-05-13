@@ -5,11 +5,12 @@ import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Mapping, Optional, Union
 
 from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.project.migrate_version import Version
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
+from frequensolve.units import UnitConfig
 from frequensolve.util.encoders import CustomJSONEncoder
 from frequensolve.util.named_list import NamedList
 from frequensolve.util.setup_logger import (
@@ -356,22 +357,53 @@ class Project:
         }
 
     def new_simulation(
-        self, name: str, physics: str, dimension: int, **kwargs
+        self, name: str, physics: str, dimension: int | float | str, **kwargs
     ) -> BaseSimulation:
         """Create a new simulation in the project.
 
         Args:
             name (str): The name of the simulation.
             physics (str): The physics of the simulation.
-            dimension (int): The dimension of the simulation.
+            dimension (int | float | str): The simulation dimension, accepting
+                2D, 2.5D, and 3D forms.
+            units/default_units (Mapping[str, Any]): Optional simulation-level
+                default output units. Values may be Pint units or unit strings.
         """
+        extra = dict(kwargs.pop("extra", {}) or {})
+        axisymmetric = kwargs.pop("axisymmetric", False)
+        default_units = kwargs.pop("default_units", None)
+        units = kwargs.pop("units", None)
+        unit_config = kwargs.pop("unit_config", None)
+        if units is not None:
+            if isinstance(units, UnitConfig):
+                if unit_config is not None:
+                    raise ValueError("Pass only one of units and unit_config")
+                unit_config = units
+            else:
+                if default_units is not None:
+                    raise ValueError("Pass only one of units and default_units")
+                default_units = units
+        extra.update(kwargs)
         sim = SeismicSimulation(
             name=name,
             physics=physics,
             dimension=dimension,
+            axisymmetric=axisymmetric,
             project_path=self.path,
+            extra=extra,
         )
-        sim.kwargs = kwargs
+        if unit_config is not None:
+            if not isinstance(unit_config, UnitConfig):
+                raise TypeError(
+                    "unit_config must be a frequensolve.units.UnitConfig instance"
+                )
+            sim.units = unit_config
+        if default_units is not None:
+            if not isinstance(default_units, Mapping):
+                raise TypeError(
+                    "default_units must be a mapping of quantity names to units"
+                )
+            sim.units.defaults.update(default_units)
         sim._project = self
         self.simulations.append(sim)
         return sim

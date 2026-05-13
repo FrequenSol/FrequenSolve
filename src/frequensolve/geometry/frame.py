@@ -16,9 +16,11 @@ from frequensolve.units import (
 from frequensolve.util.mixins import merge_extra
 
 __all__ = [
+    "Axis",
     "CoordinateSystem",
     "CoordinateValue",
     "Direction",
+    "SurfaceCoordinateSystem",
     "coordinate_value_to_fs",
     "direction_to_fs",
 ]
@@ -111,11 +113,50 @@ class Direction:
 
 
 @dataclass
+class Axis:
+    name: str
+    direction: str
+    positive: Optional[str] = None
+    origin: Optional[Any] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_fs(cls, data: Union["Axis", Mapping[str, Any]]) -> "Axis":
+        if isinstance(data, Axis):
+            return data
+        payload = dict(data)
+        return cls(
+            name=payload.pop("name"),
+            direction=payload.pop("direction"),
+            positive=payload.pop("positive", None),
+            origin=payload.pop("origin", None),
+            extra=payload,
+        )
+
+    def to_fs(self, ctx=None) -> Dict[str, Any]:
+        payload = {
+            "name": self.name,
+            "direction": self.direction,
+        }
+        if self.positive is not None:
+            payload["positive"] = self.positive
+        if self.origin is not None:
+            payload["origin"] = (
+                dict(self.origin)
+                if isinstance(self.origin, Mapping)
+                else value_and_units_to_fs(self.origin)
+            )
+        return merge_extra(payload, self.extra, "Axis")
+
+
+@dataclass
 class CoordinateSystem:
     type: str = "cartesian"
     name: Optional[str] = None
     origin: Optional[Union[CoordinateValue, Any]] = None
     axis_alignment: Optional[Dict[str, str]] = None
+    axes: Optional[List[Axis]] = None
+    inherit_axes: Optional[bool] = None
     surface_ref: Optional[Union[str, int]] = None
     normal: Optional[str] = None
     earth_radius: Optional[Any] = None
@@ -153,34 +194,37 @@ class CoordinateSystem:
     ) -> "CoordinateSystem":
         """Coordinate system tied to a named model surface.
 
-        Positive offsets in point coordinates are measured along the surface
-        ``up`` axis. In 2D, point values are ``[x, up]``. In 3D, point values
-        are ``[x, y, up]``.
+        ``normal`` is retained for compatibility and creates a surface-relative
+        ``z`` axis when no explicit axes are supplied.
         """
-
-        if offset is not None:
-            kwargs.setdefault("ndim", 2)
-            kwargs.setdefault("fixed_axis", "up")
-            kwargs.setdefault(
-                "fixed_value", value_and_units_to_fs(offset, offset_units)
-            )
-        return cls(
+        return SurfaceCoordinateSystem(
             name=name,
-            type="surface",
-            surface_ref=surface,
+            surface=surface,
             normal=normal,
+            offset=offset,
+            offset_units=offset_units,
             **kwargs,
         )
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "CoordinateSystem":
         payload = dict(data)
+        class_name = payload.pop("_type", None)
+        if class_name == "SurfaceCoordinateSystem":
+            return SurfaceCoordinateSystem.from_fs(payload)
+        if class_name is not None:
+            raise ValueError(f"Unknown coordinate system type: {class_name}")
+        if payload.get("type") == "surface":
+            return SurfaceCoordinateSystem.from_fs(payload)
         origin = CoordinateValue.from_fs(payload.pop("origin", None))
+        axes = payload.pop("axes", None)
         return cls(
             type=payload.pop("type"),
             name=payload.pop("name", None),
             origin=origin,
             axis_alignment=payload.pop("axis_alignment", None),
+            axes=[Axis.from_fs(axis) for axis in axes] if axes is not None else None,
+            inherit_axes=payload.pop("inherit_axes", None),
             surface_ref=payload.pop("surface", None),
             normal=payload.pop("normal", payload.pop("normal_direction", None)),
             earth_radius=payload.pop("earth_radius", None),
@@ -190,7 +234,7 @@ class CoordinateSystem:
             extra=payload,
         )
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def _payload(self, ctx=None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"type": self.type}
         if self.name is not None:
             payload["name"] = self.name
@@ -198,10 +242,12 @@ class CoordinateSystem:
             payload["origin"] = coordinate_value_to_fs(self.origin)
         if self.axis_alignment is not None:
             payload["axis_alignment"] = self.axis_alignment
+        if self.axes is not None:
+            payload["axes"] = [axis.to_fs(ctx) for axis in self.axes]
+        if self.inherit_axes is not None:
+            payload["inherit_axes"] = self.inherit_axes
         if self.surface_ref is not None:
             payload["surface"] = self.surface_ref
-        if self.normal is not None:
-            payload["normal"] = self.normal
         if self.earth_radius is not None:
             payload["earth_radius"] = value_and_units_to_fs(self.earth_radius)
         if self.ndim is not None:
@@ -214,6 +260,10 @@ class CoordinateSystem:
                 if isinstance(self.fixed_value, Mapping)
                 else value_and_units_to_fs(self.fixed_value)
             )
+        return payload
+
+    def to_fs(self, ctx=None) -> Dict[str, Any]:
+        payload = self._payload(ctx)
         return merge_extra(payload, self.extra, "CoordinateSystem")
 
     def with_offset(
@@ -224,14 +274,14 @@ class CoordinateSystem:
         units: Optional[Any] = None,
         normal: Optional[str] = None,
     ) -> "CoordinateSystem":
-        """Return a copy with a fixed signed offset along the surface up axis."""
+        """Return a copy with a fixed signed offset along the surface normal axis."""
 
         payload = self.to_fs()
         payload["name"] = name
         payload.setdefault("ndim", 2)
         if normal is not None:
             payload["normal"] = normal
-        payload["fixed_axis"] = "up"
+        payload["fixed_axis"] = "z"
         payload["fixed_value"] = value_and_units_to_fs(offset, units)
         return self.from_fs(payload)
 
@@ -286,7 +336,7 @@ class CoordinateSystem:
     ) -> CoordinateValue:
         """Coordinate-aware point values in this system."""
 
-        if self.type in {"surface", "surface_relative", "topographic"}:
+        if self.type == "surface":
             return self.on_surface(values, units=units, offset=offset)
         return CoordinateValue(values, units=units, system=self.name)
 
@@ -300,9 +350,9 @@ class CoordinateSystem:
         """Point values on or offset from this surface coordinate system.
 
         ``lateral`` can be a sequence of x positions, an explicit ``(n, 2)``
-        array of ``[x, up]`` coordinates for 2D models, or an explicit
-        ``(n, 3)`` array of ``[x, y, up]`` coordinates for 3D models. Passing
-        ``offset`` appends a constant or per-point up offset to one-column
+        array of ``[x, z]`` coordinates for 2D models, or an explicit
+        ``(n, 3)`` array of ``[x, y, z]`` coordinates for 3D models. Passing
+        ``offset`` appends a constant or per-point normal offset to one-column
         2D laterals or two-column 3D laterals.
         """
 
@@ -314,6 +364,73 @@ class CoordinateSystem:
         return CoordinateValue(values, units=lateral_units, system=self.name)
 
     on = on_surface
+
+
+class SurfaceCoordinateSystem(CoordinateSystem):
+    """Coordinate system whose selected axes are re-datumed to a model surface."""
+
+    def __init__(
+        self,
+        name: str,
+        surface: Union[str, int],
+        *,
+        axes: Optional[List[Union[Axis, Mapping[str, Any]]]] = None,
+        normal: str = "up",
+        inherit_axes: bool = True,
+        offset: Optional[Any] = None,
+        offset_units: Optional[Any] = None,
+        **kwargs,
+    ) -> None:
+        if axes is None:
+            axes = [Axis("z", direction="z", positive=normal)]
+        axis_list = [Axis.from_fs(axis) for axis in axes]
+        if offset is not None:
+            kwargs.setdefault("ndim", 2)
+            kwargs.setdefault("fixed_axis", axis_list[-1].name if axis_list else "z")
+            kwargs.setdefault(
+                "fixed_value", value_and_units_to_fs(offset, offset_units)
+            )
+        super().__init__(
+            type="surface",
+            name=name,
+            surface_ref=surface,
+            axes=axis_list,
+            inherit_axes=inherit_axes,
+            normal=normal,
+            **kwargs,
+        )
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "SurfaceCoordinateSystem":
+        payload = dict(data)
+        payload.pop("_type", None)
+        payload.pop("type", None)
+        axes = payload.pop("axes", None)
+        surface = payload.pop("surface", payload.pop("surface_ref", None))
+        if surface is None:
+            raise ValueError("SurfaceCoordinateSystem requires surface")
+        normal = payload.pop("normal", payload.pop("normal_direction", "up"))
+        inherit_axes = payload.pop("inherit_axes", True)
+        return cls(
+            name=payload.pop("name"),
+            surface=surface,
+            axes=axes,
+            normal=normal,
+            inherit_axes=inherit_axes,
+            origin=CoordinateValue.from_fs(payload.pop("origin", None)),
+            axis_alignment=payload.pop("axis_alignment", None),
+            earth_radius=payload.pop("earth_radius", None),
+            ndim=payload.pop("ndim", None),
+            fixed_axis=payload.pop("fixed_axis", None),
+            fixed_value=payload.pop("fixed_value", None),
+            extra=payload,
+        )
+
+    def to_fs(self, ctx=None) -> Dict[str, Any]:
+        payload = self._payload(ctx)
+        payload.pop("type", None)
+        payload["_type"] = "SurfaceCoordinateSystem"
+        return merge_extra(payload, self.extra, "SurfaceCoordinateSystem")
 
 
 def _split_quantity(

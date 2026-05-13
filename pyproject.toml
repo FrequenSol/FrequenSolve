@@ -14,13 +14,14 @@ authors = [{ name = "FrequenSol", email = "support@frequensol.com" }]
 maintainers = [{ name = "FrequenSol", email = "support@frequensol.com" }]
 keywords = ["finite-elements", "seismic", "wave-propagation", "modeling"]
 readme = "README.md"
-license = "LicenseRef-FrequenSolve-Commercial"
+license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10,<3.13"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",

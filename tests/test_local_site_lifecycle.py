@@ -58,7 +58,7 @@ def make_run(site, job, futures, shutdown_on_completion=True):
     return run
 
 
-def test_local_wait_releases_futures_and_closes_by_default(monkeypatch):
+def test_local_wait_releases_futures_and_closes_by_default(monkeypatch, capsys):
     site, closed = make_site(monkeypatch)
     job = DummyJob()
     futures = [DummyFuture(), DummyFuture()]
@@ -75,6 +75,15 @@ def test_local_wait_releases_futures_and_closes_by_default(monkeypatch):
     assert all(future.released for future in futures)
     assert site._futures == []
     assert closed == [{"wait": True, "retire": True}]
+    captured = capsys.readouterr()
+    assert (
+        "\033[38;5;244mLocalSite local:test: \033[38;5;28mrunning\033[0m"
+        in captured.out
+    )
+    assert (
+        "\033[38;5;244mLocalSite local:test: \033[38;5;40mcompleted\033[0m"
+        in captured.out
+    )
 
 
 def test_run_task_supports_solver_pack_mode(monkeypatch, tmp_path):
@@ -87,6 +96,7 @@ def test_run_task_supports_solver_pack_mode(monkeypatch, tmp_path):
     def fake_popen(args, **kwargs):
         captured["args"] = args
         captured["kwargs"] = kwargs
+        kwargs["stdout"].write("solver output\n")
         return FakeProcess()
 
     job_file = tmp_path / "job.json"
@@ -112,6 +122,117 @@ def test_run_task_supports_solver_pack_mode(monkeypatch, tmp_path):
         str(job_file),
         "--pack",
     ]
+    assert (tmp_path / "logs" / "pack.log").read_text() == (
+        f"[INFO] {local_module.logger.name}: Executing: "
+        f"/solver -nthreads 2 -j {job_file} --pack\n"
+        "solver output\n"
+    )
+
+
+def test_submit_local_tasks_captures_mesh_log(monkeypatch, tmp_path):
+    site, _closed = make_site(monkeypatch)
+    site.executable = "/solver"
+    site.threads_per_worker = 2
+    submissions = []
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            submissions.append(
+                {
+                    "func": func,
+                    "job_file": job_file,
+                    "task_id": task_id,
+                    "args": args,
+                    "kwargs": kwargs,
+                }
+            )
+            return DummyFuture(
+                {
+                    "task_id": task_id,
+                    "status": "success",
+                    "stdout": str(
+                        tmp_path / "logs" / local_module._task_log_name(task_id)
+                    ),
+                }
+            )
+
+    class FakeJob(DummyJob):
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def save(self):
+            return self._file
+
+        def task_run_plan(self, reuse=True):
+            return {
+                "pending_indices": [0],
+                "current_tasks": [],
+                "reused_tasks": [],
+            }
+
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "mesh.log").write_text("stale mesh log")
+    site._dask_client = FakeClient()
+
+    submission = site._submit_local_tasks(FakeJob())
+
+    assert isinstance(submission, local_module.LocalTaskSubmission)
+    assert submissions[0]["task_id"] == local_module.MESH_TASK_ID
+    assert submissions[0]["kwargs"]["stdout_dir"] == str(tmp_path / "logs")
+    assert submissions[1]["task_id"] == 0
+    assert submissions[1]["kwargs"]["stdout_dir"] == str(tmp_path / "logs")
+    assert not (tmp_path / "logs" / "mesh.log").exists()
+
+
+def test_submit_local_tasks_reports_mesh_log_on_failure(monkeypatch, tmp_path):
+    site, _closed = make_site(monkeypatch)
+    site.executable = "/solver"
+    site.threads_per_worker = 2
+    mesh_log = tmp_path / "logs" / "mesh.log"
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            return DummyFuture(
+                {
+                    "task_id": task_id,
+                    "status": "error",
+                    "error": "bad mesh",
+                    "stdout": str(mesh_log),
+                }
+            )
+
+    class FakeJob(DummyJob):
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def save(self):
+            return self._file
+
+        def task_run_plan(self, reuse=True):
+            return {
+                "pending_indices": [0],
+                "current_tasks": [],
+                "reused_tasks": [],
+            }
+
+    job = FakeJob()
+    site._dask_client = FakeClient()
+
+    try:
+        site._submit_local_tasks(job)
+    except RuntimeError as exc:
+        assert "Mesh task failed: bad mesh" in str(exc)
+        assert str(mesh_log) in str(exc)
+    else:
+        raise AssertionError("Expected mesh failure")
+    assert job.states[-1][0] == "failed"
+    assert job.states[-1][1]["mesh"]["stdout"] == str(mesh_log)
 
 
 def test_local_wait_runs_pack_after_frequency_tasks(monkeypatch, tmp_path):

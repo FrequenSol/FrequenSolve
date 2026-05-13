@@ -150,7 +150,7 @@ class OutputArtifact:
 
 @dataclass(frozen=True)
 class RunMetadata:
-    """Sauce/Python run metadata collected beside a result directory."""
+    """Fast solver and Python run metadata collected beside a result directory."""
 
     manifest: Dict[str, Any] = field(default_factory=dict)
     outputs: Dict[str, Any] = field(default_factory=dict)
@@ -216,7 +216,7 @@ class RunMetadata:
 
     @property
     def artifacts(self) -> List[OutputArtifact]:
-        """Output files reported by Sauce for this run."""
+        """Output files reported by the fast solver for this run."""
 
         files = self.outputs.get("files", []) if self.outputs else []
         return [

@@ -1,8 +1,8 @@
-Sauce Backend API Updates
-=========================
+Fast Solver API Updates
+=======================
 
-This page is the implementation checklist for Sauce/FrequenSolve solver
-contracts required by the public Python SDK. The Python SDK now treats these
+This page is the implementation checklist for fast solver contracts required by
+the public Python SDK. The Python SDK now treats these
 features as first-class API concepts and keeps any legacy compatibility private.
 
 Input Layout
@@ -29,8 +29,8 @@ Scalar or vector quantities may be written as objects:
 
    {"value": [0.0, 100.0, 250.0], "units": "m", "system": "global"}
 
-Sauce should preserve the following fields wherever a coordinate-bearing value
-is accepted:
+The fast solver should preserve the following fields wherever a
+coordinate-bearing value is accepted:
 
 * ``value``: scalar, vector, or array payload.
 * ``units``: optional Pint-compatible unit string.
@@ -45,8 +45,8 @@ Material Properties
 -------------------
 
 Properties are authored as a dictionary and exported with canonical lowercase
-names such as ``vp``, ``vs``, ``rho``, ``qp``, and ``qs``. Sauce should accept
-structured property payloads in addition to scalar values.
+names such as ``vp``, ``vs``, ``rho``, ``qp``, and ``qs``. The fast solver
+should accept structured property payloads in addition to scalar values.
 
 File-backed property:
 
@@ -75,8 +75,8 @@ Expression-backed property:
      "units": "m/s"
    }
 
-Sauce should evaluate expression-backed properties after loading referenced base
-properties. Expression nodes currently used by the SDK are ``property``,
+The fast solver should evaluate expression-backed properties after loading
+referenced base properties. Expression nodes currently used by the SDK are ``property``,
 ``value``, ``op``, and ``args``. Required operations are ``add``, ``subtract``,
 ``multiply``, ``divide``, and ``power``.
 
@@ -84,8 +84,9 @@ Sparse Survey Contract
 ----------------------
 
 The acquisition contract now supports sparse survey tables for many-to-many
-source/receiver selections. Sauce should treat survey tables as authoritative
-when present instead of assuming dense source by receiver Cartesian products.
+source/receiver selections. The fast solver should treat survey tables as
+authoritative when present instead of assuming dense source by receiver
+Cartesian products.
 
 Expected HDF5 datasets:
 
@@ -100,16 +101,17 @@ Trace Storage
 
 Public SDK naming is now ``TraceDataset``. Trace reads return plain
 ``xarray.DataArray`` objects with FrequenSolve helpers available through the
-``.fs`` accessor. Sauce should
+``.fs`` accessor. The fast solver should
 rename receiver-output folders and files from ``receivers`` to ``traces`` when
 writing new outputs. Legacy readers may remain internal while existing data is
 migrated.
 
-Sauce may continue writing one temporary trace HDF5 shard per frequency/task
-while tasks are running, because frequency tasks are run in parallel processes
-and HDF5 should not be shared by independent writers. After all tasks finish,
-Sauce should run a cleanup/finalization step that packs completed frequency
-outputs into one consolidated trace HDF5 file by default:
+The fast solver may continue writing one temporary trace HDF5 shard per
+frequency/task while tasks are running, because frequency tasks are run in
+parallel processes and HDF5 should not be shared by independent writers. After
+all tasks finish, the fast solver should run a cleanup/finalization step that
+packs completed frequency outputs into one consolidated trace HDF5 file by
+default:
 
 .. code-block:: text
 
@@ -139,7 +141,7 @@ job should output receiver/source/component metadata for the finalizer. The
 frequency tasks can then write frequency-specific arrays and minimal task
 metadata. If an opt-in separate-storage mode such as ``store_separate=True`` is
 used, each per-frequency file should be self-contained because no packed
-metadata authority may exist. See :doc:`sauce_trace_output_compaction` for the
+metadata authority may exist. See :doc:`fast_solver_trace_output_compaction` for the
 trace-finalization contract.
 
 Combined trace datasets should identify each frequency by physical frequency
@@ -147,16 +149,16 @@ value and source job metadata, not only by task number.
 
 ``outputs.json`` should list the packed trace file and trace manifest with
 stable relative paths and schema versions. In separate-storage mode, it should
-list the shard manifest or every produced shard. The SDK can then use Sauce's
-output manifest as the authoritative artifact list instead of guessing file
-names.
+list the shard manifest or every produced shard. The SDK can then use the fast
+solver's output manifest as the authoritative artifact list instead of guessing
+file names.
 
 Rerun Fingerprints
 ------------------
 
-Sauce already writes useful run metadata under ``results/_fs_run``. The SDK now
-uses this directory when deciding whether a completed job is current. Required
-or strongly preferred files:
+The fast solver already writes useful run metadata under ``results/_fs_run``.
+The SDK now uses this directory when deciding whether a completed job is
+current. Required or strongly preferred files:
 
 * ``run_manifest.json`` with ``schema``, ``solver_version``, ``build_id``,
   ``job_file``, ``job_file_sha256``, ``simulation_file``,
@@ -173,25 +175,25 @@ A job can be skipped or treated as complete only when:
 * ``run_manifest.json`` reports ``exit_status: "success"``;
 * ``job_file_sha256`` matches the current job JSON;
 * ``simulation_file_sha256`` matches the current simulation JSON;
-* every required trace file from the SDK ``TraceManifest`` or Sauce
+* every required trace file from the SDK ``TraceManifest`` or fast solver
   ``outputs.json`` exists locally/remotely.
 
-Large local datasets may also carry dataset-level hashes in ``sim.h5``. Sauce
-should use those hashes to avoid rewriting unchanged input datasets and to
-diagnose stale solver outputs. The old sidecar ``data_manifest.json`` workflow
-is not part of the public contract.
+Large local datasets may also carry dataset-level hashes in ``sim.h5``. The
+fast solver should use those hashes to avoid rewriting unchanged input datasets
+and to diagnose stale solver outputs. The old sidecar ``data_manifest.json``
+workflow is not part of the public contract.
 
 ParaView Outputs
 ----------------
 
-Outputs are now owned by job JSON rather than simulation JSON. Sauce should read
-``Outputs`` from ``frequensolve-job-1`` files and write output paths relative to
-the job result directory. Trace output is always requested under
+Outputs are now owned by job JSON rather than simulation JSON. The fast solver
+should read ``Outputs`` from ``frequensolve-job-1`` files and write output paths
+relative to the job result directory. Trace output is always requested under
 ``Outputs.traces`` and new runs should write ``traces/traces_<task>.h5``.
 
 The public SDK exposes a deliberately small ParaView API and emits the richer
-Sauce contract internally. The default writer is VTK ``.vtu`` with appended
-binary data:
+fast solver contract internally. The default writer is VTK ``.vtu`` with
+appended binary data:
 
 .. code-block:: json
 
@@ -234,8 +236,8 @@ supplied through the ``writer`` argument so the SDK can keep the enforced public
 Mesh Adaptivity
 ---------------
 
-Sauce should expose the mesh adaptivity options used by ``adapt_mesh.F90`` as
-structured JSON fields. The SDK currently models:
+The fast solver should expose the mesh adaptivity options used by
+``adapt_mesh.F90`` as structured JSON fields. The SDK currently models:
 
 * distance and surface grading specifications;
 * grading fields compatible with ``grading_fields_m``;

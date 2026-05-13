@@ -644,7 +644,7 @@ class Survey:
         group: Optional[str] = None,
         name: str = "survey",
     ) -> "Survey":
-        """Load a resolved survey from a Sauce ``fs_seismic_trace_store_v1`` HDF5 file."""
+        """Load a resolved survey from a fast solver ``fs_seismic_trace_store_v1`` HDF5 file."""
 
         try:
             import h5py

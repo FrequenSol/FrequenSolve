@@ -146,7 +146,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from frequensolve.mesh import BoundaryCondition, BoundaryConditionManager
+from frequensolve.mesh import BoundaryCondition, BoundaryConditions
 from frequensolve.model.layered import LayeredModel
 from frequensolve.plotting.traces import plot_gather
 from frequensolve.project import Project
@@ -184,19 +184,19 @@ MODEL_PARAMS = {
 
 MESH_PARAMS = {
     "n": [8, 6],
-    "min_epw": 2.0,
-    "f_adapt": 15.0,
+    "elems_per_wave": 2.0,
+    "order": 4,
+    "f_low": 15.0,
+    "f_high": 30.0,
 }
 
 BOUNDARY_PARAMS = {
     "free_surface": {
-        "name": "free_surface",
-        "kind": "neumann",
+        "conditions": ["free"],
         "boundaries": ["z_min"],
     },
     "pml": {
-        "name": "pml",
-        "kind": "pml",
+        "conditions": ["pml"],
         "boundaries": ["x_min", "x_max", "z_max"],
         "pml_wavelengths": 1.2,
         "pml_exponent": 3.0,
@@ -218,7 +218,7 @@ ACQUISITION_PARAMS = {
 }
 
 SIMULATION_PARAMS = {
-    "discretization": {"order": 4},
+    "discretization": {},
     "solver": {
         "solve_on": "final",
         "max_iter": 300,
@@ -339,19 +339,18 @@ def setup_complete_simulation(simulation):
     mesh = model.hex_mesh_generator(n=MESH_PARAMS["n"])
     simulation += mesh
     simulation.mesh.set_adapt(
-        min_epw=MESH_PARAMS["min_epw"],
-        f_adapt=MESH_PARAMS["f_adapt"],
+        elems_per_wave=MESH_PARAMS["elems_per_wave"],
+        order=MESH_PARAMS["order"],
+        f_low=MESH_PARAMS["f_low"],
+        f_high=MESH_PARAMS["f_high"],
         adapt_order=True,
     )
     simulation.mesh.set_source_grading(d1=0.08, d0=0.02, mult=2.0)
     simulation.mesh.set_receiver_grading(d1=0.06, d0=0.01, mult=1.5)
     simulation.mesh.add_surface_grading("interface", d1=0.05, d0=0.0, mult=2.0)
 
-    # Add boundary conditions
-    BCs = BoundaryConditionManager(label_type="geometric")
     for bc_params in BOUNDARY_PARAMS.values():
-        BCs += BoundaryCondition(**bc_params)
-    simulation += BCs
+        simulation += BoundaryCondition(**bc_params)
 
     # Add acquisition
     acq = Acquisition()
@@ -549,7 +548,7 @@ def test_mesh_setup(simulation):
     This test verifies that:
     1. A mesh can be generated from the layered model using hex_mesh_generator
     2. The mesh can be added to the simulation
-    3. Mesh adaptation parameters can be set (min_epw, adapt_sources)
+    3. Mesh adaptation parameters can be set (elems_per_wave, adapt_sources)
     4. The mesh and its adaptation settings are properly stored in the simulation
 
     This corresponds to the "Meshing" section in ex01_simple.ipynb where
@@ -568,49 +567,48 @@ def test_mesh_setup(simulation):
     # Create mesh
     mesh = model.hex_mesh_generator(n=[4, 4])
     simulation += mesh
-    simulation.mesh.set_adapt(min_epw=1.0, adapt_sources=1)
+    simulation.mesh.set_adapt(elems_per_wave=1.0, adapt_sources=1)
 
     # Basic mesh validation
     assert simulation.mesh is not None
     assert simulation.mesh.adapt is not None
-    assert simulation.mesh.adapt.min_epw == 1.0
+    assert simulation.mesh.adapt.elems_per_wave == 1.0
 
 
 def test_boundary_conditions(simulation):
     """Test the setup of boundary conditions for the simulation.
 
     This test verifies that:
-    1. A BoundaryConditionManager can be created with geometric labeling
-    2. Free surface (Neumann) boundary conditions can be added
-    3. PML (Perfectly Matched Layer) boundary conditions can be added with parameters
-    4. The boundary conditions are properly stored and accessible
+    1. Free surface boundary conditions can be added directly to the simulation
+    2. PML (Perfectly Matched Layer) boundary conditions can be added with parameters
+    3. The boundary conditions are properly stored and accessible
 
     This corresponds to the "Boundary Conditions" section in ex01_simple.ipynb where
     boundary conditions are set up with:
-    - Free surface (Neumann) condition on the top boundary
+    - Free surface condition on the top boundary
     - PML conditions on the sides and bottom with specified parameters
     """
-    BCs = BoundaryConditionManager(label_type="geometric")
+    simulation.BCs = BoundaryConditions()
 
     # Add free surface BC
-    BCs += BoundaryCondition(name="free_surface", kind="neumann", boundaries=["z_min"])
+    simulation += BoundaryCondition(
+        conditions=["free"],
+        boundaries=["z_min"],
+    )
 
     # Add PML BC
-    BCs += BoundaryCondition(
-        name="pml",
-        kind="pml",
+    simulation += BoundaryCondition(
+        conditions=["pml"],
         boundaries=["x_min", "x_max", "z_max"],
         pml_wavelengths=1.2,
         pml_exponent=3.0,
         pml_constant=20.0,
     )
 
-    simulation += BCs
-
     # Verify BCs
-    assert len(BCs.boundary_conditions) == 2
-    assert any(bc.kind == "neumann" for bc in BCs.boundary_conditions)
-    assert any(bc.kind == "pml" for bc in BCs.boundary_conditions)
+    assert len(simulation.BCs.boundary_conditions) == 2
+    assert any(bc.conditions == ["free"] for bc in simulation.BCs.boundary_conditions)
+    assert any(bc.conditions == ["pml"] for bc in simulation.BCs.boundary_conditions)
 
 
 # -----------------------------------------------------------------------------
@@ -723,12 +721,10 @@ def test_simulation_setup(simulation):
     test_acquisition_setup(simulation)
     test_output_configuration(simulation)  # Use dedicated output test
 
-    # Add discretization with order=6 as in the notebook
-    method = Discretization(order=6)
+    # Add discretization with default method settings
+    method = Discretization()
     simulation += method
-    assert (
-        simulation.discretization.order == 6
-    ), "Discretization order should be 6 as in the notebook"
+    assert simulation.discretization.method == "DPG"
 
     # Add solver config with exact notebook parameters
     solver = SolverConfig(solve_on="final", max_iter=300, tolerance=1.0e-4)

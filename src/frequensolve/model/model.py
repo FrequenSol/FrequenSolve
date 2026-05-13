@@ -12,6 +12,7 @@ from frequensolve.model.property import Property, PropertyMap
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
 from frequensolve.util.named_list import NamedList
+from frequensolve.util.physics import model_dimension
 
 __all__ = ["ModelSubdomain", "ModelBase"]
 
@@ -155,7 +156,8 @@ class ModelBase(ExtraFieldsMixin):
 
     Attributes:
        name (str):                Name identifier for the model.
-       dimension (Literal[2, 3]): Model dimension (2D or 3D).
+       dimension (Literal[2, 3]): Model dimension (2D or 3D). A 2.5D simulation
+          still uses a 2D model and mesh.
        x_limits (List[float]):    Model extent in x-direction [xmin, xmax].
        y_limits (List[float]):    Model extent in y-direction [ymin, ymax].
        z_limits (List[float]):    Model extent in z-direction [zmin, zmax].
@@ -164,11 +166,15 @@ class ModelBase(ExtraFieldsMixin):
     """
 
     name: str = "model"
-    dimension: Literal[0, 2, 3] = 0  # 0 is used as an invalid value.
+    dimension: Union[Literal[0], int, float, str] = 0  # 0 is used as an invalid value.
     subdomains: NamedList = field(default_factory=NamedList)
     extra: Dict[str, Any] = field(default_factory=dict)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
+
+    def __post_init__(self) -> None:
+        if self.dimension != 0:
+            self.dimension = model_dimension(self.dimension)
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
 

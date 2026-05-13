@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -50,6 +51,9 @@ PACK_TASK_ID = -3
 SMOOTH_TASK_ID = -2
 MESH_TASK_ID = -1
 DASK_LOGGING_PRELOAD = "frequensolve.orchestrator.sites.dask_logging"
+
+# TODO: print this when running job
+# print("Dask dashboard:", site.dashboard_url or "not available")
 
 
 def _task_log_name(task_id: int) -> str:
@@ -115,7 +119,8 @@ def run_task(
         args += ["--mesh"]
     else:
         args += ["-i", f"{task_id + 1}"]
-    logger.info(f"Executing: {' '.join(args)}")
+    command = shlex.join(args)
+    logger.info("Executing: %s", command)
 
     if stdout_dir:
         os.makedirs(stdout_dir, exist_ok=True)
@@ -126,6 +131,9 @@ def run_task(
     try:
         stdout_path = stdout_file if stdout_file else os.devnull
         with open(stdout_path, "w") as stdout:
+            if stdout_file:
+                stdout.write(f"[INFO] {logger.name}: Executing: {command}\n")
+                stdout.flush()
             proc = subprocess.Popen(
                 args, stdout=stdout, stderr=stdout, env=env, text=True
             )
@@ -286,6 +294,7 @@ class LocalSite(BaseSite):
             if reused:
                 run.job.write_run_state(status="skipped", tasks=reused)
             status = JobStatus(state="skipped", return_code=0, job_id=run.id)
+            self._emit_status(status)
             return run._make_result(status)
 
         pbar = None
@@ -294,6 +303,7 @@ class LocalSite(BaseSite):
         all_futures = list(futures)
 
         try:
+            self._emit_status(JobStatus(state="running", job_id=run.id))
             if self._is_notebook:
                 from tqdm.notebook import tqdm
             else:
@@ -326,6 +336,7 @@ class LocalSite(BaseSite):
                     raw={"unfinished": len(not_done)},
                 )
                 run.job.write_run_state(status="timeout")
+                self._emit_status(status)
                 return run._make_result(status)
 
             task_results = [future.result() for future in futures]
@@ -347,6 +358,7 @@ class LocalSite(BaseSite):
                 run.job.write_run_state(
                     status="failed", tasks=state_tasks, errors=task_errors
                 )
+                self._emit_status(status)
                 return run._make_result(status)
 
             if isinstance(run.job, ImagingJob):
@@ -374,6 +386,7 @@ class LocalSite(BaseSite):
                     run.job.write_run_state(
                         status="failed", tasks=state_tasks, smooth=smooth_result
                     )
+                    self._emit_status(status)
                     return run._make_result(status)
 
             pack_result = None
@@ -404,6 +417,7 @@ class LocalSite(BaseSite):
                     run.job.write_run_state(
                         status="failed", tasks=state_tasks, pack=pack_result
                     )
+                    self._emit_status(status)
                     return run._make_result(status)
 
             run.job.write_run_state(
@@ -420,6 +434,7 @@ class LocalSite(BaseSite):
                     **({"pack": pack_result} if pack_result is not None else {}),
                 },
             )
+            self._emit_status(status)
             return run._make_result(status)
         except Exception as exc:
             self._cancel_futures(all_futures)
@@ -427,14 +442,14 @@ class LocalSite(BaseSite):
                 run.job.write_run_state(status="failed", error=str(exc))
             except Exception:
                 logger.debug("Could not write failed run state", exc_info=True)
-            return run._make_result(
-                JobStatus(
-                    state="failed",
-                    return_code=1,
-                    job_id=run.id,
-                    message=str(exc),
-                )
+            status = JobStatus(
+                state="failed",
+                return_code=1,
+                job_id=run.id,
+                message=str(exc),
             )
+            self._emit_status(status)
+            return run._make_result(status)
         finally:
             if pbar is not None:
                 pbar.close()
@@ -482,6 +497,11 @@ class LocalSite(BaseSite):
 
         stdout_dir = str(job._stdout_path)
         os.makedirs(stdout_dir, exist_ok=True)
+        for log_name in [_task_log_name(MESH_TASK_ID)]:
+            try:
+                os.remove(os.path.join(stdout_dir, log_name))
+            except FileNotFoundError:
+                pass
         for index in pending_indices:
             try:
                 os.remove(os.path.join(stdout_dir, f"task_{index + 1}.log"))
@@ -499,12 +519,25 @@ class LocalSite(BaseSite):
             self.env,
             n_ranks=1,
             n_threads=1,
+            stdout_dir=stdout_dir,
             resources={"CPU": 1},
         )
         try:
             mesh_result = future.result()
             if mesh_result.get("status") != "success":
-                raise RuntimeError(f"Mesh task failed: {mesh_result.get('error')}")
+                log_path = mesh_result.get("stdout")
+                message = f"Mesh task failed: {mesh_result.get('error')}"
+                if log_path:
+                    message = f"{message}. Log: {log_path}"
+                try:
+                    job.write_run_state(
+                        status="failed",
+                        mesh=mesh_result,
+                        errors=[mesh_result],
+                    )
+                except Exception:
+                    logger.debug("Could not write failed mesh run state", exc_info=True)
+                raise RuntimeError(message)
         finally:
             self._release_futures([future])
 

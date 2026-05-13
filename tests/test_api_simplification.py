@@ -9,13 +9,32 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from frequensolve.geometry.frame import CoordinateSystem, CoordinateValue, Direction
+from frequensolve.geometry.frame import (
+    Axis,
+    CoordinateSystem,
+    CoordinateValue,
+    Direction,
+    SurfaceCoordinateSystem,
+)
+from frequensolve.mesh.boundary_conditions import (
+    BoundaryCondition,
+    BoundaryConditionManager,
+    BoundaryConditions,
+)
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
-from frequensolve.mesh.mesh_manager import DistanceGrading, MeshManager, SurfaceGrading
+from frequensolve.mesh.mesh_manager import (
+    DistanceGrading,
+    MeshAdaptor,
+    MeshManager,
+    SurfaceGrading,
+)
+from frequensolve.model.layered import LayeredModel
 from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import Property, prop
+from frequensolve.project import Project
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import (
+    CoordsArray,
     CoordsFromFile,
     ReceiverComponent,
     ReceiverNode,
@@ -30,7 +49,12 @@ from frequensolve.simulation.outputs import (
     TraceOutput,
     WavefieldOutput,
 )
-from frequensolve.simulation.physics import ElasticComponents
+from frequensolve.simulation.physics import (
+    ElasticComponents,
+    EMComponents,
+    PoroelasticComponents,
+    components_for_physics,
+)
 from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.units import UnitConfig
 from frequensolve.units import ureg as u
@@ -206,11 +230,33 @@ def test_surface_coordinate_system_helpers_export_acquisition_metadata():
     surface = CoordinateSystem.surface("free_surface", surface="top", normal="up")
 
     assert surface.to_fs() == {
-        "type": "surface",
+        "_type": "SurfaceCoordinateSystem",
         "name": "free_surface",
         "surface": "top",
-        "normal": "up",
+        "axes": [{"name": "z", "direction": "z", "positive": "up"}],
+        "inherit_axes": True,
     }
+    roundtrip = CoordinateSystem.from_fs(surface.to_fs())
+    assert isinstance(roundtrip, SurfaceCoordinateSystem)
+    assert roundtrip.to_fs() == surface.to_fs()
+    with pytest.raises(ValueError, match="SimpleSurfaceCoordinateSystem"):
+        CoordinateSystem.from_fs(
+            {
+                "_type": "SimpleSurfaceCoordinateSystem",
+                "name": "legacy",
+                "surface": "top",
+            }
+        )
+    assert (
+        CoordinateSystem.surface(
+            "offset_surface",
+            surface="top",
+            normal="up",
+            offset=0.1,
+        ).to_fs()["fixed_axis"]
+        == "z"
+    )
+    assert surface.with_offset("offset_surface", 0.1).to_fs()["fixed_axis"] == "z"
     assert surface.on([0.5, 1.5], units="km").to_fs() == {
         "value": [[0.5, 0.0], [1.5, 0.0]],
         "units": "km",
@@ -301,10 +347,50 @@ def test_simulation_registers_surface_coordinate_system(tmp_path):
     assert system.name == "free_surface"
     assert payload["coordinate_systems"] == [
         {
-            "type": "surface",
+            "_type": "SurfaceCoordinateSystem",
             "name": "free_surface",
             "surface": "top",
-            "normal": "up",
+            "axes": [{"name": "z", "direction": "z", "positive": "up"}],
+            "inherit_axes": True,
+        }
+    ]
+
+
+def test_simulation_accepts_named_surface_coordinate_systems(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    system = SurfaceCoordinateSystem(
+        name="interface_relative",
+        surface="interface",
+        axes=[
+            Axis("offset", direction="x", origin=5.0 * u.km),
+            Axis("depth", direction="z", positive="down"),
+        ],
+    )
+    sim += system
+
+    assert sim.coordinate_systems["interface_relative"] is system
+    assert sim.coordinate_system["interface_relative"] is system
+    assert sim.to_fs()["coordinate_systems"] == [
+        {
+            "_type": "SurfaceCoordinateSystem",
+            "name": "interface_relative",
+            "surface": "interface",
+            "axes": [
+                {
+                    "name": "offset",
+                    "direction": "x",
+                    "origin": {"value": 5.0, "units": "km"},
+                },
+                {"name": "depth", "direction": "z", "positive": "down"},
+            ],
+            "inherit_axes": True,
         }
     ]
 
@@ -332,7 +418,13 @@ def test_simulation_model_surface_helper_uses_surface_offsets_in_points(tmp_path
     payload = sim.to_fs()
 
     assert payload["coordinate_systems"] == [
-        {"type": "surface", "name": "top", "surface": "top", "normal": "up"},
+        {
+            "_type": "SurfaceCoordinateSystem",
+            "name": "top",
+            "surface": "top",
+            "axes": [{"name": "z", "direction": "z", "positive": "up"}],
+            "inherit_axes": True,
+        },
     ]
     assert payload["Acquisition"]["source_groups"][0]["source"]["coordinates"] == {
         "value": [0.5, -0.025],
@@ -417,6 +509,144 @@ def test_elastic_velocity_is_canonical_and_displacement_is_removed():
     ]
     assert WavefieldOutput(fields=["velocity"]).fields == ["velocity"]
     assert WavefieldOutput.from_fs({"fields": ["velocity"]}).fields == ["velocity"]
+
+
+def test_new_physics_component_sets_are_available():
+    assert PoroelasticComponents.check_components(
+        ["velocity", "fluid_velocity", "pressure"]
+    ) == ["velocity", "fluid_flux", "pressure"]
+    assert EMComponents.check_components(["electric", "magnetic"]) == [
+        "electric",
+        "magnetic",
+    ]
+
+
+def test_simulation_accepts_new_physics_dimension_and_axisymmetry(tmp_path):
+    sim = SeismicSimulation(
+        name="elastic_axisym",
+        physics="elastic",
+        dimension="2D",
+        axisymmetric=True,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    payload = sim.to_fs()
+
+    assert sim.physics == "elastic_axisym"
+    assert sim.dimension == 2
+    assert sim.model.dimension == 2
+    assert payload["physics"] == "elastic_axisym"
+    assert payload["dimension"] == 2
+    assert payload["axisymmetric"] is True
+    assert payload["Model"]["dimension"] == 2
+
+
+def test_acoustic_axisymmetric_physics_normalizes_to_solver_key(tmp_path):
+    sim = SeismicSimulation(
+        name="acoustic_axisym",
+        physics="acoustic",
+        dimension=2,
+        axisymmetric=True,
+        project_path=tmp_path,
+    )
+
+    assert sim.physics == "acoustic_axisym"
+    assert sim.axisymmetric is True
+
+
+def test_explicit_axisymmetric_physics_sets_axisymmetric_flag(tmp_path):
+    sim = SeismicSimulation(
+        name="acoustic_axisym",
+        physics="acoustic_axisym",
+        dimension=2,
+        project_path=tmp_path,
+    )
+
+    assert sim.physics == "acoustic_axisym"
+    assert sim.axisymmetric is True
+    assert components_for_physics("acoustic_axisym") is not None
+
+
+def test_axisymmetric_rejects_unsupported_physics(tmp_path):
+    with pytest.raises(ValueError, match="acoustic, elastic, and coupled"):
+        SeismicSimulation(
+            name="bad",
+            physics="poro",
+            dimension=2,
+            axisymmetric=True,
+            project_path=tmp_path,
+        )
+
+
+def test_project_new_simulation_preserves_typed_and_extra_options(tmp_path):
+    project = Project(name="project", path=tmp_path)
+    sim = project.new_simulation(
+        name="em_model",
+        physics="electromagnetic",
+        dimension="3D",
+        l2_projection={"enabled": True},
+    )
+
+    assert sim.physics == "EM"
+    assert sim.dimension == 3
+    assert sim.extra["l2_projection"] == {"enabled": True}
+
+
+def test_project_new_simulation_accepts_default_units(tmp_path):
+    project = Project(name="project", path=tmp_path)
+    sim = project.new_simulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        units={
+            "length": u.km,
+            "velocity": "km/s",
+            "density": u.g / u.cm**3,
+        },
+    )
+
+    assert sim.units.to_fs()["Units"]["defaults"] == {
+        "length": "km",
+        "velocity": "km/s",
+        "density": "g/cm^3",
+    }
+
+    sim_with_explicit_name = project.new_simulation(
+        name="simple_default_units",
+        physics="acoustic",
+        dimension=2,
+        default_units={"length": "m"},
+    )
+    assert sim_with_explicit_name.units.to_fs()["Units"]["defaults"] == {"length": "m"}
+
+
+def test_axisymmetric_rejects_3d_domain(tmp_path):
+    with pytest.raises(ValueError, match="dimension=2"):
+        SeismicSimulation(
+            name="bad",
+            physics="elastic",
+            dimension=3,
+            axisymmetric=True,
+            project_path=tmp_path,
+        )
+
+
+def test_axisymmetric_rejects_25d_domain(tmp_path):
+    with pytest.raises(ValueError, match="dimension=2"):
+        SeismicSimulation(
+            name="bad",
+            physics="elastic",
+            dimension=2.5,
+            axisymmetric=True,
+            project_path=tmp_path,
+        )
+
+
+def test_layered_model_treats_25d_as_2d_model():
+    model = LayeredModel(dimension="2.5D", x_limits=[0.0, 1.0])
+
+    assert model.dimension == 2
 
 
 def test_output_paths_must_be_relative_to_result_directory():
@@ -505,6 +735,24 @@ def test_paraview_surface_output_exports_solver_contract():
     }
     assert payload["fields"] == ["pressure"]
     assert payload["properties"] == ["Vp"]
+
+
+def test_paraview_volume_constructor_exports_solver_contract():
+    output = ParaviewOutput.volume(
+        name="volume",
+        fields=["pressure"],
+        parts="real",
+        upscale=1,
+    )
+
+    payload = output.to_fs()
+
+    assert payload["target"] == {"kind": "volume"}
+    assert payload["items"] == [
+        {"kind": "field", "field": "pressure", "parts": ["real"]},
+    ]
+    assert "fields" not in payload
+    assert "properties" not in payload
 
 
 def test_paraview_defaults_to_vtu_appended_binary():
@@ -684,7 +932,7 @@ def test_simulation_export_includes_units_coordinates_and_extra_without_mutating
                 "n": [1, 1],
                 "units": "km",
             },
-            "adapt": {"min_epw": 2.0},
+            "adapt": {"elems_per_wave": 2.0},
         },
         "advanced_solver_flag": True,
     }
@@ -734,13 +982,14 @@ def test_manual_simulation_export_with_new_api(tmp_path):
     assert payload["Model"]["subdomains"][0]["properties"]["rho"]["units"] == "g/cm^3"
 
 
-def test_mesh_surface_gradings_export_to_sauce_contract():
+def test_mesh_surface_gradings_export_to_fast_solver_contract():
     mesh = MeshManager(
         HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1], units="km")
     )
     mesh.set_adapt(
-        min_epw={"x": 2.0, "z": 3.0},
-        f_adapt=10.0,
+        elems_per_wave={"x": 2.0, "z": 3.0},
+        f_low=10.0,
+        f_high=30.0,
         surface_gradings=[
             SurfaceGrading(surface="top", d0=0.0, d1=0.05, mult=2.5),
             {
@@ -757,6 +1006,9 @@ def test_mesh_surface_gradings_export_to_sauce_contract():
 
     payload = mesh.to_fs()
 
+    assert payload["adapt"]["f_low"] == 10.0
+    assert payload["adapt"]["f_high"] == 30.0
+    assert "f_adapt" not in payload["adapt"]
     assert payload["adapt"]["surface_gradings"] == [
         {
             "surface": "top",
@@ -777,12 +1029,12 @@ def test_mesh_surface_gradings_export_to_sauce_contract():
     ]
 
 
-def test_mesh_source_receiver_gradings_export_to_sauce_contract():
+def test_mesh_source_receiver_gradings_export_to_fast_solver_contract():
     mesh = MeshManager(
         HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1], units="km")
     )
     mesh.set_adapt(
-        min_epw=2.0,
+        epw=2.0,
         source_grading=DistanceGrading(d0=0.01, d1=0.08, mult=4.0),
         receiver_grading={"d0": 0.02, "d1": 0.12, "mult_max": 3.0},
     )
@@ -803,7 +1055,7 @@ def test_mesh_source_receiver_gradings_export_to_sauce_contract():
 
 def test_mesh_source_receiver_gradings_are_editable():
     mesh = MeshManager()
-    mesh.set_adapt(min_epw=2.0)
+    mesh.set_adapt(elems_per_wave=2.0)
     mesh.set_source_grading(d0=0.0, d1=25.0, mult=2.0)
     mesh.set_receiver_grading(d0=5.0, d1=40.0, mult=3.0)
     mesh.adapt.source_grading.mult = 2.5
@@ -815,10 +1067,43 @@ def test_mesh_source_receiver_gradings_are_editable():
     assert payload["rcv_grading"]["d1"] == 45.0
 
 
+def test_mesh_adapt_uses_elems_per_wave_and_accepts_epw_alias():
+    mesh = MeshManager()
+    mesh.set_adapt(epw=3.0)
+
+    assert mesh.adapt.elems_per_wave == 3.0
+    assert mesh.adapt.epw == 3.0
+    assert mesh.adapt.min_epw == 3.0
+    assert mesh.adapt.to_fs() == {"elems_per_wave": 3.0, "order": 3}
+    assert MeshAdaptor.from_fs({"epw": 4.0}).to_fs() == {
+        "elems_per_wave": 4.0,
+        "order": 3,
+    }
+    assert MeshAdaptor(elems_per_wave=2.0, f_adapt=5.0, f_high=30.0).to_fs() == {
+        "elems_per_wave": 2.0,
+        "order": 3,
+        "f_low": 5.0,
+        "f_high": 30.0,
+    }
+    assert MeshAdaptor.from_fs(
+        {"elems_per_wave": 2.0, "f_adapt": 6.0, "f_high": 20.0}
+    ).to_fs() == {
+        "elems_per_wave": 2.0,
+        "order": 3,
+        "f_low": 6.0,
+        "f_high": 20.0,
+    }
+
+    with pytest.raises(ValueError, match="Specify only one"):
+        mesh.set_adapt(elems_per_wave=2.0, epw=3.0)
+    with pytest.raises(ValueError, match="Specify only one"):
+        mesh.set_adapt(elems_per_wave=2.0, f_low=5.0, f_adapt=6.0)
+
+
 def test_mesh_surface_gradings_accept_mapping_and_are_editable():
     mesh = MeshManager()
     mesh.set_adapt(
-        min_epw=2.0,
+        elems_per_wave=2.0,
         surface_gradings={
             "fault": {"d1": 50.0, "mult": 3.0, "mode": "band"},
         },
@@ -848,6 +1133,7 @@ def test_mesh_surface_gradings_roundtrip_and_preserve_extra():
             "src_grading": {"d0": 0.01, "d1": 0.08, "mult": 4.0},
             "rcv_grading": {"d0": 0.02, "d1": 0.12, "mult": 3.0},
             "adapt_sources": 1,
+            "f_high": 25.0,
         },
         "generator": {
             "_type": "HexMeshGenerator",
@@ -862,6 +1148,9 @@ def test_mesh_surface_gradings_roundtrip_and_preserve_extra():
     payload = manager.to_fs()
 
     assert data == original
+    assert payload["adapt"]["elems_per_wave"] == 2.0
+    assert payload["adapt"]["f_high"] == 25.0
+    assert "min_epw" not in payload["adapt"]
     assert payload["adapt"]["adapt_sources"] == 1
     assert payload["adapt"]["surface_gradings"][0]["custom_solver_flag"] is True
     assert payload["adapt"]["src_grading"] == {"d0": 0.01, "d1": 0.08, "mult": 4.0}
@@ -947,6 +1236,17 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
     with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
         assert "inputs/acquisition/receivers/surface/coordinates" in h5
 
+    acq.receiver_groups[0].coordinates = CoordsArray(
+        coordinates=np.array([[x, 0.1] for x in np.linspace(0.0, 1.0, 12)])
+    )
+    updated = sim.to_fs()
+    updated_coords = updated["Acquisition"]["receiver_groups"][0]["coordinates"]
+
+    assert updated_coords["file"] == coords["file"]
+    assert updated_coords["hash"].startswith("blake3:")
+    assert updated_coords["hash"] != coords["hash"]
+    assert isinstance(acq.receiver_groups[0].coordinates, CoordsArray)
+
 
 def test_receiver_coordinate_file_exports_project_relative_locator(tmp_path):
     old_file = tmp_path.parent / "old_project" / "simulations" / "simple" / "simple.h5"
@@ -981,6 +1281,42 @@ def test_receiver_coordinate_file_exports_project_relative_locator(tmp_path):
         payload["Acquisition"]["receiver_groups"][0]["coordinates"]["file"]
         == "simulations/simple/simple.h5:inputs/acquisition/receivers/surface/coordinates"
     )
+
+
+def test_receiver_coordinate_file_hash_changes_with_hdf5_contents(tmp_path):
+    coord_file = tmp_path / "receiver_coords.h5"
+    values = np.array([[x, 0.0] for x in np.linspace(0.0, 1.0, 12)])
+    with h5py.File(coord_file, "w") as h5:
+        h5.create_dataset("coords", data=values)
+
+    coords = CoordsFromFile(file=coord_file, format="HDF5", dset="coords")
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    payload = sim.to_fs()
+    first_hash = payload["Acquisition"]["receiver_groups"][0]["coordinates"]["hash"]
+
+    with h5py.File(coord_file, "a") as h5:
+        h5["coords"][:, 1] = 0.1
+
+    updated = sim.to_fs()
+    second_hash = updated["Acquisition"]["receiver_groups"][0]["coordinates"]["hash"]
+
+    assert first_hash.startswith("blake3:")
+    assert second_hash.startswith("blake3:")
+    assert second_hash != first_hash
 
 
 def test_trace_output_exports_only_traces_key(tmp_path):
@@ -1150,7 +1486,7 @@ def test_job_run_fingerprint_requires_matching_outputs_and_changes_with_simulati
     assert not job.is_run_current()
 
 
-def test_job_run_current_accepts_sauce_run_manifest_hashes(tmp_path):
+def test_job_run_current_accepts_fast_solver_run_manifest_hashes(tmp_path):
     def sha256(path):
         return f"sha256:{hashlib.sha256(Path(path).read_bytes()).hexdigest()}"
 
@@ -1192,7 +1528,7 @@ def test_job_run_current_accepts_sauce_run_manifest_hashes(tmp_path):
     assert not job.is_run_current()
 
 
-def test_job_run_current_accepts_current_sauce_run_manifest_schema(tmp_path):
+def test_job_run_current_accepts_current_fast_solver_run_manifest_schema(tmp_path):
     def sha256(path):
         return f"sha256:{hashlib.sha256(Path(path).read_bytes()).hexdigest()}"
 
@@ -1230,6 +1566,59 @@ def test_job_run_current_accepts_current_sauce_run_manifest_schema(tmp_path):
     )
 
     assert job.is_run_current()
+
+
+def test_job_run_current_reacts_to_receiver_coordinate_updates(tmp_path):
+    def sha256(path):
+        return f"sha256:{hashlib.sha256(Path(path).read_bytes()).hexdigest()}"
+
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(
+        name="surface",
+        device=hydrophone,
+        coords=[[x, 0.0] for x in np.linspace(0.0, 1.0, 12)],
+    )
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+
+    trace_file = tmp_path / "jobs/simple/freq/results/traces/traces_1.h5"
+    trace_file.parent.mkdir(parents=True)
+    trace_file.touch()
+
+    run_dir = job._result_path / "_fs_run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-run-manifest-1",
+                "exit_status": "success",
+                "job_file_sha256": sha256(job._file),
+                "simulation_file_sha256": sha256(sim._file),
+            }
+        )
+    )
+    assert job.is_run_current()
+
+    acq.receiver_groups[0].coordinates = CoordsArray(
+        coordinates=np.array([[x, 0.1] for x in np.linspace(0.0, 1.0, 12)])
+    )
+    sim.save()
+
+    assert not job.is_run_current()
 
 
 def test_job_run_current_accepts_solver_packed_trace_product(tmp_path):
@@ -1370,6 +1759,51 @@ def test_trace_store_uses_dataset_backed_survey_trace_tables(tmp_path):
     assert fd.coords["receiver"].values.tolist() == [101, 102]
     assert type(fd).__name__ == "DataArray"
     assert (tmp_path / "results" / "_fs_run" / "cache" / "traces_vds.h5").exists()
+
+
+def test_trace_summary_is_not_ansi_escaped_in_notebook_repr(tmp_path, capsys):
+    trace_files = []
+    for idx, freq in enumerate([0.5, 1.0], start=1):
+        file = tmp_path / f"traces_{idx}.h5"
+        trace_files.append(file)
+        with h5py.File(file, "w") as h5:
+            h5.create_dataset("frequency", data=freq)
+            dset = h5.create_dataset(
+                "surface",
+                data=np.zeros((2, 2, 1, 2), dtype=np.float32),
+            )
+            dset.attrs["dims"] = ["receiver", "component", "shot"]
+            dset.attrs["receiver"] = np.array([1, 2], dtype=np.int32)
+            dset.attrs["shot"] = np.array([1], dtype=np.int32)
+            dset.attrs["component"] = np.array(["p", "v_z"], dtype="S")
+
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=trace_files,
+            frequencies={1: 0.5, 2: 1.0},
+            groups=["surface"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=tmp_path / "results" / "traces",
+            project_path=tmp_path,
+        )
+    )
+
+    summary = traces.summary
+
+    assert isinstance(summary, str)
+    assert "\x1b" not in summary
+    assert str(summary).startswith("surface\n  Receivers")
+    assert repr(summary).startswith("surface\n")
+    assert not repr(summary).startswith(("'", '"'))
+    assert "\x1b[38;5;248mReceivers\x1b[0m" in traces.format_summary(colorize=True)
+
+    returned = traces.print_summary()
+    captured = capsys.readouterr()
+
+    assert returned == summary
+    assert captured.out == str(summary)
+    assert captured.err == ""
 
 
 def test_trace_store_uses_first_task_metadata_for_compact_later_tasks(tmp_path):
@@ -1669,7 +2103,7 @@ def test_trace_store_normalizes_dense_trace_axis_order(tmp_path):
     assert fd.coords["receiver"].values.tolist() == [101, 102, 103]
 
 
-def test_sparse_survey_authoring_exports_sauce_contract():
+def test_sparse_survey_authoring_exports_fast_solver_contract():
     acq = Acquisition()
     acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
@@ -1737,7 +2171,7 @@ def test_sparse_hdf5_survey_reference_does_not_touch_server_file():
     }
 
 
-def test_sparse_survey_writes_sauce_hdf5_trace_store(tmp_path):
+def test_sparse_survey_writes_fast_solver_hdf5_trace_store(tmp_path):
     survey = SparseSurvey("marine")
     survey.add_trace(source=1, receiver=1, component=1, point=1, component_name="p")
     survey.add_eval_sample(sample_id=1, point=1, receiver_position=1)
@@ -1782,3 +2216,142 @@ def test_sparse_survey_roundtrip_does_not_mutate_input():
     assert payload["advanced_layout_flag"] is True
     assert payload["eval_samples"][0]["receiver_position_id"] == 10
     assert payload["eval_samples"][0]["recveiver_position_id"] == 10
+
+
+def test_boundary_condition_serializes_multiple_conditions_without_name():
+    bc = BoundaryCondition(
+        conditions=["free", "sealed"],
+        boundaries=["z_min"],
+    )
+
+    payload = bc.to_fs()
+
+    assert bc.kind == "free"
+    assert bc.conditions == ["free", "sealed"]
+    assert payload == {
+        "conditions": ["free", "sealed"],
+        "boundaries": ["z_min"],
+    }
+
+
+def test_boundary_condition_kind_backcompat_serializes_conditions():
+    bc = BoundaryCondition(name="free_surface", kind="neumann", boundaries=["z_min"])
+
+    payload = bc.to_fs()
+
+    assert bc.kind == "free"
+    assert bc.conditions == ["free"]
+    assert "kind" not in payload
+    assert payload["conditions"] == ["free"]
+
+
+def test_boundary_condition_from_fs_accepts_old_and_new_shapes():
+    new_bc = BoundaryCondition.from_fs(
+        {
+            "name": "top",
+            "conditions": ["free", "sealed"],
+            "boundaries": ["z_min"],
+        }
+    )
+    old_bc = BoundaryCondition.from_fs(
+        {
+            "name": "pml",
+            "kind": "pml",
+            "boundaries": ["x_min"],
+            "pml_constant": 5.0,
+        }
+    )
+
+    assert new_bc.conditions == ["free", "sealed"]
+    assert old_bc.conditions == ["pml"]
+    assert old_bc.to_fs()["pml_constant"] == 5.0
+
+
+def test_boundary_condition_accepts_pml_reflectivity_alias():
+    bc = BoundaryCondition(
+        conditions=["pml"],
+        boundaries=["x_min"],
+        pml_reflectivity=1e-2,
+    )
+    from_fs = BoundaryCondition.from_fs(
+        {
+            "conditions": ["pml"],
+            "boundaries": ["x_min"],
+            "pml_reflectivity": 1e-3,
+        }
+    )
+
+    assert bc.pml_reflection == 1e-2
+    assert bc.to_fs()["pml_reflection"] == 1e-2
+    assert "pml_reflectivity" not in bc.to_fs()
+    assert from_fs.to_fs()["pml_reflection"] == 1e-3
+    with pytest.raises(ValueError, match="pml_reflection or pml_reflectivity"):
+        BoundaryCondition(
+            conditions=["pml"],
+            boundaries=["x_min"],
+            pml_reflection=1e-3,
+            pml_reflectivity=1e-2,
+        )
+
+
+def test_boundary_conditions_collection_allows_shared_boundary_conditions():
+    conditions = BoundaryConditions()
+    conditions += BoundaryCondition(
+        name="free_surface",
+        conditions=["free"],
+        boundaries=["z_min"],
+    )
+    conditions += BoundaryCondition(
+        name="sealed_surface",
+        conditions=["sealed"],
+        boundaries=["z_min"],
+    )
+
+    assert len(conditions.boundary_conditions) == 2
+    assert [bc.boundaries for bc in conditions.boundary_conditions] == [
+        ["z_min"],
+        ["z_min"],
+    ]
+    assert conditions._boundaries == {"z_min"}
+
+
+def test_boundary_condition_manager_remains_compatibility_alias():
+    with pytest.warns(DeprecationWarning, match="BoundaryConditionManager"):
+        manager = BoundaryConditionManager("geometric")
+    manager += BoundaryCondition(kind="free", boundaries=["z_min"])
+
+    assert manager.label_type == "geometric"
+    assert manager.to_fs() == {
+        "boundary_conditions": [
+            {"conditions": ["free"], "boundaries": ["z_min"]},
+        ]
+    }
+
+
+def test_simulation_accepts_boundary_conditions_directly(tmp_path):
+    sim = SeismicSimulation(
+        name="sim",
+        physics="poroelastic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+
+    sim += BoundaryCondition(conditions=["free", "sealed"], boundaries=["z_min"])
+    sim += BoundaryCondition(conditions=["pml"], boundaries=["x_min"])
+
+    payload = {"BCs": sim.BCs.to_fs()}
+
+    assert payload["BCs"] == {
+        "boundary_conditions": [
+            {"conditions": ["free", "sealed"], "boundaries": ["z_min"]},
+            {
+                "conditions": ["pml"],
+                "boundaries": ["x_min"],
+                "pml_wavelengths": 2.0,
+                "pml_exponent": 3.0,
+                "pml_constant": 20.0,
+                "pml_reflection": 0.0001,
+                "stretch_limit": 0.25,
+            },
+        ]
+    }

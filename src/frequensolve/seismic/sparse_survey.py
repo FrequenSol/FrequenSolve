@@ -1,6 +1,6 @@
 """Sparse seismic survey authoring helpers.
 
-These classes mirror Sauce's sparse receiver layout contracts while keeping the
+These classes mirror fast solver sparse receiver layout contracts while keeping the
 Python-facing syntax compact. They intentionally do not read server-side files
 when exporting JSON.
 """
@@ -136,7 +136,7 @@ class ReceiverSampling(ExtraFieldsMixin):
 
 @dataclass(init=False)
 class SparseTrace(ExtraFieldsMixin):
-    """One output trace row in a Sauce sparse receiver layout.
+    """One output trace row in a fast solver sparse receiver layout.
 
     Parameters use 1-based ids to match the solver. ``source`` and ``receiver``
     are aliases for ``source_id`` and ``receiver_id``. ``point`` is the common
@@ -335,7 +335,7 @@ class EvalSample(ExtraFieldsMixin):
         }
         if self.receiver_position_id is not None:
             payload["receiver_position_id"] = self.receiver_position_id
-            # Sauce's current JSON reader has this misspelling; emit both until
+            # The fast solver's current JSON reader has this misspelling; emit both until
             # the backend accepts the correctly spelled field.
             payload["recveiver_position_id"] = self.receiver_position_id
         if self.x is not None:
@@ -399,9 +399,9 @@ class TraceSample(ExtraFieldsMixin):
 
 @dataclass(init=False)
 class SparseSurvey(ExtraFieldsMixin):
-    """Named Sauce sparse survey layout.
+    """Named fast solver sparse survey layout.
 
-    The default form exports inline JSON accepted by Sauce's ``Sparse`` layout
+    The default form exports inline JSON accepted by the fast solver's ``Sparse`` layout
     reader. Use ``SparseSurvey.file(...)`` for an existing HDF5 trace store or
     ``SparseSurvey.sps(...)`` for SPS source/receiver/relation files.
     """
@@ -661,7 +661,7 @@ class SparseSurvey(ExtraFieldsMixin):
         *,
         component_map: Optional[Mapping[str, int]] = None,
     ) -> Path:
-        """Write this survey as a Sauce-compatible HDF5 trace-store layout."""
+        """Write this survey as a fast solver-compatible HDF5 trace-store layout."""
 
         path = Path(file)
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -67,6 +67,25 @@ def _plain_value(value: Any) -> Any:
     return value
 
 
+def _normalize_system_alias(payload: Dict[str, Any]) -> None:
+    coordinate_system = payload.pop("coordinate_system", None)
+    if coordinate_system is None:
+        return
+    if "system" in payload and payload["system"] != coordinate_system:
+        raise ValueError("Specify only one of system or coordinate_system")
+    payload["system"] = coordinate_system
+
+
+def _resolve_system_alias(
+    system: Optional[str], coordinate_system: Optional[str]
+) -> Optional[str]:
+    if coordinate_system is not None:
+        if system is not None and system != coordinate_system:
+            raise ValueError("Specify only one of system or coordinate_system")
+        system = coordinate_system
+    return system
+
+
 class PropertyExpression:
     """Algebraic property expression serialized as a solver-friendly AST."""
 
@@ -322,6 +341,7 @@ class Property:
     ):
         if "xarr" in kwargs:
             grid = kwargs.pop("xarr")
+        system = _resolve_system_alias(system, kwargs.pop("coordinate_system", None))
 
         self.dispersion = None
         if isinstance(data, DispersionScaling):
@@ -355,7 +375,11 @@ class Property:
             payload = dict(data)
             if self.units is not None and "units" not in payload:
                 payload["units"] = self.units
-            if self.system is not None and "system" not in payload:
+            if (
+                self.system is not None
+                and "system" not in payload
+                and "coordinate_system" not in payload
+            ):
                 payload["system"] = self.system
             other = self.from_value(payload, grid=grid)
             self.__dict__.update(other.__dict__)
@@ -408,6 +432,11 @@ class Property:
             self.darr = data.copy(deep=True)
             if self.units is None and "units" in data.attrs:
                 self.units = data.attrs["units"]
+            if self.system is None:
+                self.system = data.attrs.get(
+                    "system",
+                    data.attrs.get("coordinate_system"),
+                )
         else:
             raise ValueError(f"Unknown property type: {type(data)}")
 
@@ -426,8 +455,10 @@ class Property:
         format: Optional[str] = None,
         absolute: bool = False,
         system: Optional[str] = None,
+        coordinate_system: Optional[str] = None,
         **extra,
     ) -> "Property":
+        system = _resolve_system_alias(system, coordinate_system)
         data_arg = str(path) if _is_hdf5_locator(path) else Path(path)
         prop = cls(
             data_arg,
@@ -454,8 +485,10 @@ class Property:
         *,
         units: Optional[Any] = None,
         system: Optional[str] = None,
+        coordinate_system: Optional[str] = None,
         **extra,
     ) -> "Property":
+        system = _resolve_system_alias(system, coordinate_system)
         prop = cls(0.0, units=units, system=system, **extra)
         prop.darr = None
         prop.file_path = None
@@ -473,6 +506,7 @@ class Property:
             return cls.expr(value)
         if isinstance(value, Mapping):
             payload = dict(value)
+            _normalize_system_alias(payload)
             if "expr" in payload:
                 payload.pop("depends_on", None)
                 return cls.expr(

@@ -1,4 +1,4 @@
-# Sauce Trace Finalization Contract
+# Fast Solver Trace Finalization Contract
 
 This note describes the solver-side trace-output changes expected by the
 Python SDK. The goal is to keep parallel frequency solves simple while giving
@@ -7,8 +7,9 @@ users one convenient trace product by default.
 ## Default Behavior
 
 Frequency tasks may continue writing independent HDF5 shard files while they run
-in parallel. After all tasks finish, Sauce should run a cleanup/finalization
-step that writes a packed consolidated trace file and aggregates task metadata.
+in parallel. After all tasks finish, the fast solver should run a
+cleanup/finalization step that writes a packed consolidated trace file and
+aggregates task metadata.
 
 Default final layout:
 
@@ -60,10 +61,11 @@ storage.
 
 ## Preliminary Metadata
 
-Before launching independent frequency tasks, Sauce already runs preliminary
-meshing/sizing work. That step should produce the receiver/source/component
-metadata needed by the finalizer. The frequency tasks can then write only their
-frequency-specific trace arrays and minimal task metadata.
+Before launching independent frequency tasks, the fast solver already runs
+preliminary meshing/sizing work. That step should produce the
+receiver/source/component metadata needed by the finalizer. The frequency tasks
+can then write only their frequency-specific trace arrays and minimal task
+metadata.
 
 Recommended preliminary metadata includes:
 
@@ -120,8 +122,9 @@ SDK.
 
 ## Frequency-Safe File Names
 
-If shard or finalization paths include physical frequencies, Sauce pathlib must
-not treat decimal points in names like `10.00000` as file extensions.
+If shard or finalization paths include physical frequencies, solver path
+handling must not treat decimal points in names like `10.00000` as file
+extensions.
 
 For example, all of these should be valid path stems:
 

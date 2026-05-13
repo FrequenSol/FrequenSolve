@@ -1,6 +1,6 @@
 import copy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Union
 
 from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
 
@@ -13,40 +13,49 @@ class Discretization(ExtraFieldsMixin):
 
     Args:
        method (str): The discretization method, defaults to "DPG".
-       order (Union[int, Dict[str, int]]): The discretization order, defaults to 3.
        DPG_alpha (float): The DPG stabilization parameter, defaults to 1.0.
        DPG_enrich (int): The DPG enrichment parameter, defaults to 1.
        DPG_penalty (float): The DPG penalty parameter (for enforcing constraints like continuity), defaults to 100.
     """
 
     method: str = "DPG"
-    order: Union[int, Dict[str, int]] = 3
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
         self,
         method: str = "DPG",
-        order: Union[int, Dict[str, int]] = 3,
         **kwargs,
     ):
+        if "order" in kwargs:
+            raise ValueError(
+                "'order' has moved from Discretization to mesh adaptivity; "
+                "use mesh.set_adapt(..., order=...) instead."
+            )
         self.method = method
-        self.order = order
         self._init_extra(None, **kwargs)
 
     @classmethod
     def from_fs(cls, d: Dict[str, Any]) -> "Discretization":
         d = copy.deepcopy(d)
+        if "order" in d:
+            raise ValueError(
+                "'order' has moved from Discretization to mesh adaptivity; "
+                "use Mesh.adapt.order instead."
+            )
         return cls(
             method=d.pop("method", "DPG"),
-            order=d.pop("order", 3),
             **d,
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
         payload = {
             "method": self.method,
-            "order": self.order,
         }
+        if "order" in self.extra:
+            raise ValueError(
+                "'order' has moved from Discretization to mesh adaptivity; "
+                "use mesh.set_adapt(..., order=...) instead."
+            )
         return merge_extra(payload, self.extra, "Discretization")
 
 
@@ -121,14 +130,13 @@ class SolverConfig(ExtraFieldsMixin):
        solve_on (Literal["final", "all"]): Whether to solve on the final or all time steps.
        max_iter (int): The maximum number of iterations.
        tolerance (float): The tolerance for the solver.
-       grids (Optional[int]): The number of grids to use.
+       grids (int): The number of grids to use.
     """
 
     solve_on: Literal["final", "all"] = "final"
     max_iter: int = 300
     tolerance: float = 1.0e-4
-    grids: int = 4
-    hp_switch: Optional[int] = None
+    grids: int = 3
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
@@ -136,27 +144,23 @@ class SolverConfig(ExtraFieldsMixin):
         solve_on: Literal["final", "all"] = "final",
         max_iter: int = 300,
         tolerance: float = 1.0e-4,
-        grids: int = 4,
-        hp_switch: Optional[int] = None,
+        grids: int = 3,
         **kwargs,
     ):
         self.solve_on = solve_on
         self.max_iter = max_iter
         self.tolerance = tolerance
         self.grids = grids
-        self.hp_switch = hp_switch
         self._init_extra(None, **kwargs)
 
     @classmethod
     def from_fs(cls, data: Dict) -> "SolverConfig":
         data = copy.deepcopy(data)
-        ngrids = data.pop("grids", 4)
         obj = cls(
             solve_on=data.pop("solve_on", "final"),
             max_iter=data.pop("max_iter", 300),
             tolerance=data.pop("tolerance", 1.0e-4),
-            grids=ngrids,
-            hp_switch=data.pop("hp_switch", ngrids),
+            grids=data.pop("grids", 3),
         )
         obj._init_extra(data)
         return obj
@@ -169,15 +173,13 @@ class SolverConfig(ExtraFieldsMixin):
         return self
 
     def to_fs(self, ctx=None) -> Dict:
-        hp_switch = self.hp_switch if self.hp_switch is not None else self.grids
-        dict = {
+        payload = {
             "solve_on": self.solve_on,
             "max_iter": self.max_iter,
             "tolerance": self.tolerance,
             "grids": self.grids,
-            "hp_switch": hp_switch,
         }
-        return merge_extra(dict, self.extra, "SolverConfig")
+        return merge_extra(payload, self.extra, "SolverConfig")
 
 
 @dataclass

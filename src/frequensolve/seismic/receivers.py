@@ -21,6 +21,7 @@ from frequensolve.units import unit_expression
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.fields import canonical_field
 from frequensolve.util.mixins import ExtraFieldsMixin, TypeTaggedMixin, merge_extra
+from frequensolve.util.store import hash_dataarray_payload
 
 __all__ = [
     "CoordsArray",
@@ -51,7 +52,7 @@ class ReceiverComponent:
     """
 
     name: str = "name"
-    field: Literal["pressure", "velocity", "stress", "strain"]
+    field: str
     direction: Optional[Union[List[float], Direction]] = None
     units: Optional[str] = None
     weight: Optional[Union[float, List[float], Dict]] = None
@@ -312,6 +313,7 @@ class CoordsFromFile(ReceiverCoords):
     dset: Optional[str] = None
     units: Optional[str] = None
     system: Optional[str] = None
+    hash: Optional[str] = None
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
 
@@ -322,6 +324,7 @@ class CoordsFromFile(ReceiverCoords):
         dset: Optional[str] = None,
         units: Optional[str] = None,
         system: Optional[str] = None,
+        hash: Optional[str] = None,
         **kwargs,
     ):
         if file is None and "path" in kwargs:
@@ -333,6 +336,7 @@ class CoordsFromFile(ReceiverCoords):
         self.dset = dset
         self.units = units
         self.system = system
+        self.hash = hash
 
     @classmethod
     def from_fs(cls, data: Dict) -> "CoordsFromFile":
@@ -349,6 +353,7 @@ class CoordsFromFile(ReceiverCoords):
             dset=dset,
             units=data.get("units"),
             system=data.get("system"),
+            hash=data.get("hash"),
         )
 
     def _set_path(self, proj_path: Path, rel_path: Path):
@@ -382,6 +387,46 @@ class CoordsFromFile(ReceiverCoords):
             return file.resolve().relative_to(Path(project_path).resolve())
         except Exception:
             return file
+
+    def _local_file(self, ctx=None) -> Path:
+        file = Path(self.file)
+        if file.is_absolute():
+            return file
+        project_path = getattr(ctx, "project_path", None) or self._proj_path
+        if project_path is not None:
+            return Path(project_path) / file
+        return file
+
+    def _content_hash(self, ctx=None) -> Optional[str]:
+        if self.format != "HDF5":
+            return None
+        file = self._local_file(ctx)
+        if not file.exists():
+            return None
+        dataset = self.dset or "coords"
+        try:
+            with h5py.File(file, "r") as h5:
+                if dataset not in h5:
+                    return None
+                values = np.asarray(h5[dataset][()])
+        except OSError:
+            return None
+        if values.ndim == 1:
+            values = values[:, np.newaxis]
+        if values.ndim != 2:
+            return None
+        if values.shape[1] == 2:
+            coordinate = ["x", "z"]
+        elif values.shape[1] == 3:
+            coordinate = ["x", "y", "z"]
+        else:
+            coordinate = list(range(values.shape[1]))
+        data = xr.DataArray(
+            values,
+            dims=["receiver", "coordinate"],
+            coords={"coordinate": coordinate},
+        )
+        return f"blake3:{hash_dataarray_payload(data)}"
 
     @property
     def size(self) -> int:
@@ -442,10 +487,12 @@ class CoordsFromFile(ReceiverCoords):
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
+        file_hash = self._content_hash(ctx) or self.hash
         return {
             "_type": self.__class__.__name__,
             "file": file,
             "format": self.format,
+            **({"hash": file_hash} if file_hash is not None else {}),
             **(
                 {"units": unit_expression(self.units)} if self.units is not None else {}
             ),
@@ -796,8 +843,7 @@ class ReceiverGroup(ExtraFieldsMixin):
                 dump._set_path(
                     proj_path=self._proj_path, rel_path=self._rel_path / self.name
                 )
-                self.coordinates = dump
-                coords_payload = self.coordinates.to_fs(ctx)
+                coords_payload = dump.to_fs(ctx)
             else:
                 coords_payload = coords.to_fs(ctx)
         else:

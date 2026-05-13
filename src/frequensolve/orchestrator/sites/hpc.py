@@ -469,237 +469,6 @@ class SlurmSite(BaseSite):
         logger.info("Secure connection established with host: %s", host)
         return login_client
 
-    def provision(
-        self, nodes: int, tasks: int, duration: Optional[str] = None, **kwargs
-    ) -> RunHandle:
-        """Submit an interactive SLURM allocation and return a run handle.
-
-        The returned handle completes when the allocation is running and the
-        compute client is attached.
-        """
-
-        nhost = nodes
-        nproc = tasks
-        logger.info(
-            "Provisioning SLURM job with nhost=%d, nproc=%d, duration=%s",
-            nhost,
-            nproc,
-            duration,
-        )
-        duration = duration or getattr(self.config, "max_duration", "00-02:00:00")
-        self._emit(
-            f"Submitting {self.site_name} allocation: nodes={nhost}, "
-            f"tasks={nproc}, duration={duration}"
-        )
-        duration = self.config.validate_request(nhost, nproc, duration)
-        script = self._generate_provision_script(nhost, nproc, duration, **kwargs)
-
-        with _temporary_text_file(script, suffix=".sh", prefix="slurm_") as script_path:
-            logger.debug("Temporary SLURM script created at %s", script_path)
-            remote_path = f"/tmp/{os.path.basename(script_path)}"
-            try:
-                self.put(script_path, remote_path)
-
-                self.pool.id = self._submit_sbatch(f"sbatch {remote_path}")
-                logger.debug("Job submitted successfully with job ID: %s", self.pool.id)
-                self.pool._status.status = "pending"
-                self._emit(f"Allocation submitted: {self.pool.id}")
-
-            except Exception as e:
-                logger.exception("Exception occurred during provisioning: %s", str(e))
-                self.pool._status.status = "failed"
-                self.pool._status.stderr = str(e)
-                raise
-
-        return self._allocation_handle(self.pool.id)
-
-    def attach_allocation(self, job_id: Optional[str] = None) -> RunHandle:
-        """Create a handle for an existing SLURM allocation.
-
-        If job_id is not provided, queued jobs will be listed and the user will
-        be prompted to select a job.
-        """
-        if job_id is None:
-            job_id = self._select_job()
-        self.pool.id = job_id
-        self._emit(f"Tracking existing allocation: {self.pool.id}")
-        return self._allocation_handle(str(job_id))
-
-    def _allocation_handle(self, job_id: str) -> RunHandle:
-        return RunHandle(
-            site=self,
-            job=None,
-            id=str(job_id),
-            mode="allocation",
-            poll_interval=self.config.poll_interval,
-            _status_fn=self._poll_allocation,
-            _wait_fn=self._wait_allocation,
-            _wait_async_fn=self._wait_allocation_async,
-            _cancel_fn=lambda run: self.cancel_job(str(run.id)),
-        )
-
-    def _poll_allocation(self, run: RunHandle) -> JobStatus:
-        status = self.update_status(str(run.id))
-        if status == "running":
-            return JobStatus(
-                state="completed",
-                return_code=0,
-                job_id=str(run.id),
-                message="Allocation is running",
-                raw={"scheduler_state": status},
-            )
-        return_code = (
-            1 if status in {"failed", "cancelled", "timeout", "complete"} else -1
-        )
-        return JobStatus(
-            state=status,
-            return_code=return_code,
-            job_id=str(run.id),
-            raw={"scheduler_state": status},
-        )
-
-    def _wait_allocation(
-        self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        interval = self.config.poll_interval if poll_interval is None else poll_interval
-        start = time.monotonic()
-        last_state = object()
-        while True:
-            status = self._poll_allocation(run)
-            if status.state != last_state:
-                self._emit_status(status)
-                last_state = status.state
-            if status.is_successful:
-                self._attach_compute_client()
-                return run._make_result(status)
-            if status.is_complete:
-                return run._make_result(status)
-            if timeout is not None and time.monotonic() - start > timeout:
-                return run._make_result(
-                    JobStatus(
-                        state="timeout",
-                        job_id=str(run.id),
-                        message=f"Timed out waiting for allocation after {timeout} seconds",
-                    )
-                )
-            time.sleep(interval)
-
-    async def _wait_allocation_async(
-        self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        interval = self.config.poll_interval if poll_interval is None else poll_interval
-        start = time.monotonic()
-        last_state = object()
-        while True:
-            status = await asyncio.to_thread(self._poll_allocation, run)
-            if status.state != last_state:
-                self._emit_status(status)
-                last_state = status.state
-            if status.is_successful:
-                await asyncio.to_thread(self._attach_compute_client)
-                return run._make_result(status)
-            if status.is_complete:
-                return run._make_result(status)
-            if timeout is not None and time.monotonic() - start > timeout:
-                return run._make_result(
-                    JobStatus(
-                        state="timeout",
-                        job_id=str(run.id),
-                        message=f"Timed out waiting for allocation after {timeout} seconds",
-                    )
-                )
-            await asyncio.sleep(interval)
-
-    def sync(self, project):
-        """Sync the project to the site."""
-        self._sync_project(project)
-
-    def _sync_project(self, project):
-        """Sync the project to the site."""
-        project._transfer(self)
-
-    def _sync_result(self, result):
-        """Sync a result with the site."""
-        raise NotImplementedError(
-            f"Syncing results is not implemented for {self.site_name}"
-        )
-
-    def _sync_simulation(self, simulation):
-        """Sync the simulation to the site."""
-        raise NotImplementedError(
-            f"Syncing simulations is not implemented for {self.site_name}"
-        )
-
-    def _submit_slurm_batch(
-        self,
-        job: SimulationJob,
-        config: SlurmRunConfig,
-        **kwargs,
-    ) -> str:
-        duration = config.duration or getattr(
-            self.config, "max_duration", "00-02:00:00"
-        )
-        script = self._sweep_SLURM_script(
-            n_tasks=job.n_tasks,
-            n_nodes=config.nodes,
-            stdout=str(job._remote_path(self.work_dir) / "logs"),
-            duration=duration,
-            imaging_job=isinstance(job, ImagingJob),
-            **(
-                {"procs_per_task": config.procs_per_task}
-                if config.procs_per_task is not None
-                else {}
-            ),
-            **(
-                {"procs_per_node": config.procs_per_node}
-                if config.procs_per_node is not None
-                else {}
-            ),
-            **({"queue": config.queue} if config.queue is not None else {}),
-            **({"account": config.account} if config.account is not None else {}),
-            **({"notify_on": config.notify_on} if config.notify_on is not None else {}),
-            **(
-                {"notify_email": config.notify_email}
-                if config.notify_email is not None
-                else {}
-            ),
-            **({"run_path": config.run_path} if config.run_path is not None else {}),
-            **kwargs,
-        )
-
-        run_path = config.run_path
-        if run_path is None:
-            run_path = self.work_dir
-        remote_script, remote_job = self._transfer_SLURM_job(script, job)
-
-        cmd = f"mkdir -p {run_path}/jobs/batch && "
-        cmd += "sbatch "
-        if config.slurm_args:
-            for arg in config.slurm_args:
-                cmd += f"{arg} "
-        cmd += f"{remote_script} {remote_job}"
-
-        job_id = self._submit_sbatch(cmd)
-
-        logger.info(
-            "Job %s submitted successfully to %s:%s",
-            job_id,
-            self.site_name,
-            config.queue or self.config.queue,
-        )
-        self._emit(
-            f"Submitted {job.name} to {self.site_name}:{config.queue or self.config.queue} "
-            f"as job {job_id}"
-        )
-        job._job_id = job_id
-        return job_id
-
     def submit(
         self,
         job: SimulationJob,
@@ -759,134 +528,61 @@ class SlurmSite(BaseSite):
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
         return handle
 
-    def _poll_run(self, run: RunHandle) -> JobStatus:
-        status = self.update_status(str(run.id))
-        return_code = (
-            0
-            if status == "complete"
-            else (1 if status in {"failed", "cancelled", "timeout"} else -1)
+    def provision(
+        self, nodes: int, tasks: int, duration: Optional[str] = None, **kwargs
+    ) -> RunHandle:
+        """Submit an interactive SLURM allocation and return a run handle.
+
+        The returned handle completes when the allocation is running and the
+        compute client is attached.
+        """
+
+        nhost = nodes
+        nproc = tasks
+        logger.info(
+            "Provisioning SLURM job with nhost=%d, nproc=%d, duration=%s",
+            nhost,
+            nproc,
+            duration,
         )
-        return JobStatus(
-            state=status,
-            return_code=return_code,
-            job_id=str(run.id),
-            raw={"scheduler": "slurm"},
+        duration = duration or getattr(self.config, "max_duration", "00-02:00:00")
+        self._emit(
+            f"Submitting {self.site_name} allocation: nodes={nhost}, "
+            f"tasks={nproc}, duration={duration}"
         )
+        duration = self.config.validate_request(nhost, nproc, duration)
+        script = self._generate_provision_script(nhost, nproc, duration, **kwargs)
 
-    def _poll_attached_run(self, run: RunHandle) -> JobStatus:
-        future = run.backend.get("future")
-        if future is None:
-            return JobStatus(state="unknown", job_id=run.id)
-        if future.done():
-            if future.exception() is not None:
-                return JobStatus(
-                    state="failed",
-                    return_code=1,
-                    job_id=run.id,
-                    message=str(future.exception()),
-                )
-            return JobStatus(state="completed", return_code=0, job_id=run.id)
-        return JobStatus(state="running", job_id=run.id)
+        with _temporary_text_file(script, suffix=".sh", prefix="slurm_") as script_path:
+            logger.debug("Temporary SLURM script created at %s", script_path)
+            remote_path = f"/tmp/{os.path.basename(script_path)}"
+            try:
+                self.put(script_path, remote_path)
 
-    def _wait_attached_run(
-        self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        future = run.backend.get("future")
-        if future is None:
-            status = JobStatus(state="unknown", job_id=run.id)
-            return RunResult(job=run.job, status=status, site=self)
+                self.pool.id = self._submit_sbatch(f"sbatch {remote_path}")
+                logger.debug("Job submitted successfully with job ID: %s", self.pool.id)
+                self.pool._status.status = "pending"
+                self._emit(f"Allocation submitted: {self.pool.id}")
 
-        if self._is_notebook:
-            import nest_asyncio
+            except Exception as e:
+                logger.exception("Exception occurred during provisioning: %s", str(e))
+                self.pool._status.status = "failed"
+                self.pool._status.stderr = str(e)
+                raise
 
-            nest_asyncio.apply()
+        return self._allocation_handle(self.pool.id)
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = self._get_or_create_event_loop()
-        else:
-            if loop.is_running():
-                raise RuntimeError(
-                    "Cannot call run.wait() for an attached SLURM run while an "
-                    "asyncio loop is already running; use 'await run' instead."
-                )
-        if timeout is not None:
-            loop.run_until_complete(asyncio.wait_for(future, timeout=timeout))
-        else:
-            loop.run_until_complete(future)
-        status = self._poll_attached_run(run)
-        self._emit_status(status)
-        return run._make_result(status)
+    def attach_allocation(self, job_id: Optional[str] = None) -> RunHandle:
+        """Create a handle for an existing SLURM allocation.
 
-    async def _wait_attached_run_async(
-        self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        future = run.backend.get("future")
-        if future is None:
-            status = JobStatus(state="unknown", job_id=run.id)
-            return RunResult(job=run.job, status=status, site=self)
-
-        if timeout is not None:
-            await asyncio.wait_for(future, timeout=timeout)
-        else:
-            await future
-        status = self._poll_attached_run(run)
-        self._emit_status(status)
-        return run._make_result(status)
-
-    def _submit_attached(
-        self, job: SimulationJob, procs_per_task: int = 2, *, pack: bool = True
-    ) -> Future:
-        """Submit a job into an already attached compute allocation."""
-
-        loop = self._get_or_create_event_loop()
-        future = loop.create_future()
-        if self._compute_client is None:
-            self._attach_compute_client()
-
-        remote_script, remote_job = self._transfer_job(job, pack=pack)
-        ntasks_per_item = max(procs_per_task, self.pool.nproc // job.n_tasks)
-
-        if self._compute_client.is_proxy():
-            interactive = self.compute_client.invoke_shell()
-            cmd = (
-                f"cd {self.work_dir} && "
-                f"{remote_script} {remote_job} {ntasks_per_item}\n"
-            )
-            interactive.stdin.write(cmd.encode())
-            interactive.stdin.flush()
-            monitor = self._monitor_command_output(future, job, interactive)
-        else:
-            cmd = (
-                f"cd {self.work_dir} && "
-                f"{remote_script} {remote_job} {ntasks_per_item}"
-            )
-            interactive = self.login_client.invoke_shell()
-            interactive.send(f"ssh {self.compute_host}\n")
-            time.sleep(1)
-            interactive.send(cmd)
-            monitor = self._monitor_command_output(future, job, interactive)
-
-        loop.create_task(monitor)
-        return future
-
-    @staticmethod
-    def _get_or_create_event_loop() -> asyncio.AbstractEventLoop:
-        """Return the current event loop, creating one for sync contexts if needed."""
-
-        try:
-            return asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            return loop
+        If job_id is not provided, queued jobs will be listed and the user will
+        be prompted to select a job.
+        """
+        if job_id is None:
+            job_id = self._select_job()
+        self.pool.id = job_id
+        self._emit(f"Tracking existing allocation: {self.pool.id}")
+        return self._allocation_handle(str(job_id))
 
     def run_cmd(self, client, cmd: str):
         """Run a command using exec_command, passing the captured environment if available."""
@@ -917,63 +613,6 @@ class SlurmSite(BaseSite):
         """Run a command on login node and return its stdout as a stripped string."""
         _, stdout, _ = self.run_login_cmd(cmd)
         return _read_stream(stdout)
-
-    def _template_env(self, *, keep_trailing_newline: bool = False) -> Environment:
-        """Return the Jinja environment used for remote execution scripts."""
-
-        return Environment(
-            loader=FileSystemLoader(
-                self._FS_dir / "src/frequensolve/orchestrator/templates"
-            ),
-            keep_trailing_newline=keep_trailing_newline,
-        )
-
-    def _render_template(
-        self,
-        template_name: str,
-        *,
-        keep_trailing_newline: bool = False,
-        **context,
-    ) -> str:
-        """Render a scheduler template from the FrequenSolve template directory."""
-
-        return (
-            self._template_env(keep_trailing_newline=keep_trailing_newline)
-            .get_template(template_name)
-            .render(**context)
-        )
-
-    def _attach_compute_client(self):
-        """Connect to the current pool's compute host and populate pool metadata."""
-
-        compute_client = self._connect_to_job_host(self.pool.id)
-        self._compute_client = SSHClientClass(compute_client)
-        self._set_pool_info()
-
-    def _remote_spec(self, remote_path: Union[str, Path]) -> str:
-        """Return an rsync-compatible user@host:path target."""
-
-        return f"{self.credentials.username}@{self.config.hostname}:{remote_path}"
-
-    def _run_rsync(self, source: str, target: str) -> None:
-        """Run rsync and raise a concise error on failure."""
-
-        rsync_cmd = ["rsync", "-azP", source, target]
-        logger.debug("rsync: %s", rsync_cmd)
-        result = subprocess.run(rsync_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"rsync failed: {result.stderr}")
-
-    def _submit_sbatch(self, cmd: str) -> str:
-        """Run an sbatch command and return the submitted job id."""
-
-        _, stdout, stderr = self.run_login_cmd(cmd)
-        output = _read_stream(stdout)
-        err = _read_stream(stderr)
-        if err:
-            logger.error("sbatch error: %s", err)
-        logger.debug("sbatch output: %s", output)
-        return _parse_sbatch_job_id(output)
 
     def update_status(self, job_id: Optional[str] = None):
         """Check the status of the resource request."""
@@ -1309,6 +948,373 @@ class SlurmSite(BaseSite):
     def deprovision(self, **kwargs):
         """Release HPC resources."""
         return self.cancel_job(self.pool.id)
+
+    def _poll_run(self, run: RunHandle) -> JobStatus:
+        status = self.update_status(str(run.id))
+        return_code = (
+            0
+            if status == "complete"
+            else (1 if status in {"failed", "cancelled", "timeout"} else -1)
+        )
+        return JobStatus(
+            state=status,
+            return_code=return_code,
+            job_id=str(run.id),
+            raw={"scheduler": "slurm"},
+        )
+
+    def _allocation_handle(self, job_id: str) -> RunHandle:
+        return RunHandle(
+            site=self,
+            job=None,
+            id=str(job_id),
+            mode="allocation",
+            poll_interval=self.config.poll_interval,
+            _status_fn=self._poll_allocation,
+            _wait_fn=self._wait_allocation,
+            _wait_async_fn=self._wait_allocation_async,
+            _cancel_fn=lambda run: self.cancel_job(str(run.id)),
+        )
+
+    def _poll_allocation(self, run: RunHandle) -> JobStatus:
+        status = self.update_status(str(run.id))
+        if status == "running":
+            return JobStatus(
+                state="completed",
+                return_code=0,
+                job_id=str(run.id),
+                message="Allocation is running",
+                raw={"scheduler_state": status},
+            )
+        return_code = (
+            1 if status in {"failed", "cancelled", "timeout", "complete"} else -1
+        )
+        return JobStatus(
+            state=status,
+            return_code=return_code,
+            job_id=str(run.id),
+            raw={"scheduler_state": status},
+        )
+
+    def _wait_allocation(
+        self,
+        run: RunHandle,
+        timeout: Optional[float] = None,
+        poll_interval: Optional[float] = None,
+    ) -> RunResult:
+        interval = self.config.poll_interval if poll_interval is None else poll_interval
+        start = time.monotonic()
+        last_state = object()
+        while True:
+            status = self._poll_allocation(run)
+            if status.state != last_state:
+                self._emit_status(status)
+                last_state = status.state
+            if status.is_successful:
+                self._attach_compute_client()
+                return run._make_result(status)
+            if status.is_complete:
+                return run._make_result(status)
+            if timeout is not None and time.monotonic() - start > timeout:
+                return run._make_result(
+                    JobStatus(
+                        state="timeout",
+                        job_id=str(run.id),
+                        message=f"Timed out waiting for allocation after {timeout} seconds",
+                    )
+                )
+            time.sleep(interval)
+
+    async def _wait_allocation_async(
+        self,
+        run: RunHandle,
+        timeout: Optional[float] = None,
+        poll_interval: Optional[float] = None,
+    ) -> RunResult:
+        interval = self.config.poll_interval if poll_interval is None else poll_interval
+        start = time.monotonic()
+        last_state = object()
+        while True:
+            status = await asyncio.to_thread(self._poll_allocation, run)
+            if status.state != last_state:
+                self._emit_status(status)
+                last_state = status.state
+            if status.is_successful:
+                await asyncio.to_thread(self._attach_compute_client)
+                return run._make_result(status)
+            if status.is_complete:
+                return run._make_result(status)
+            if timeout is not None and time.monotonic() - start > timeout:
+                return run._make_result(
+                    JobStatus(
+                        state="timeout",
+                        job_id=str(run.id),
+                        message=f"Timed out waiting for allocation after {timeout} seconds",
+                    )
+                )
+            await asyncio.sleep(interval)
+
+    def sync(self, project):
+        """Sync the project to the site."""
+        self._sync_project(project)
+
+    def _sync_project(self, project):
+        """Sync the project to the site."""
+        project._transfer(self)
+
+    def _sync_result(self, result):
+        """Sync a result with the site."""
+        raise NotImplementedError(
+            f"Syncing results is not implemented for {self.site_name}"
+        )
+
+    def _sync_simulation(self, simulation):
+        """Sync the simulation to the site."""
+        raise NotImplementedError(
+            f"Syncing simulations is not implemented for {self.site_name}"
+        )
+
+    def _submit_slurm_batch(
+        self,
+        job: SimulationJob,
+        config: SlurmRunConfig,
+        **kwargs,
+    ) -> str:
+        duration = config.duration or getattr(
+            self.config, "max_duration", "00-02:00:00"
+        )
+        script = self._sweep_SLURM_script(
+            n_tasks=job.n_tasks,
+            n_nodes=config.nodes,
+            stdout=str(job._remote_path(self.work_dir) / "logs"),
+            duration=duration,
+            imaging_job=isinstance(job, ImagingJob),
+            **(
+                {"procs_per_task": config.procs_per_task}
+                if config.procs_per_task is not None
+                else {}
+            ),
+            **(
+                {"procs_per_node": config.procs_per_node}
+                if config.procs_per_node is not None
+                else {}
+            ),
+            **({"queue": config.queue} if config.queue is not None else {}),
+            **({"account": config.account} if config.account is not None else {}),
+            **({"notify_on": config.notify_on} if config.notify_on is not None else {}),
+            **(
+                {"notify_email": config.notify_email}
+                if config.notify_email is not None
+                else {}
+            ),
+            **({"run_path": config.run_path} if config.run_path is not None else {}),
+            **kwargs,
+        )
+
+        run_path = config.run_path
+        if run_path is None:
+            run_path = self.work_dir
+        remote_script, remote_job = self._transfer_SLURM_job(script, job)
+
+        cmd = f"mkdir -p {run_path}/jobs/batch && "
+        cmd += "sbatch "
+        if config.slurm_args:
+            for arg in config.slurm_args:
+                cmd += f"{arg} "
+        cmd += f"{remote_script} {remote_job}"
+
+        job_id = self._submit_sbatch(cmd)
+
+        logger.info(
+            "Job %s submitted successfully to %s:%s",
+            job_id,
+            self.site_name,
+            config.queue or self.config.queue,
+        )
+        self._emit(
+            f"Submitted {job.name} to {self.site_name}:{config.queue or self.config.queue} "
+            f"as job {job_id}"
+        )
+        job._job_id = job_id
+        return job_id
+
+    def _poll_attached_run(self, run: RunHandle) -> JobStatus:
+        future = run.backend.get("future")
+        if future is None:
+            return JobStatus(state="unknown", job_id=run.id)
+        if future.done():
+            if future.exception() is not None:
+                return JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message=str(future.exception()),
+                )
+            return JobStatus(state="completed", return_code=0, job_id=run.id)
+        return JobStatus(state="running", job_id=run.id)
+
+    def _wait_attached_run(
+        self,
+        run: RunHandle,
+        timeout: Optional[float] = None,
+        poll_interval: Optional[float] = None,
+    ) -> RunResult:
+        future = run.backend.get("future")
+        if future is None:
+            status = JobStatus(state="unknown", job_id=run.id)
+            return RunResult(job=run.job, status=status, site=self)
+
+        if self._is_notebook:
+            import nest_asyncio
+
+            nest_asyncio.apply()
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = self._get_or_create_event_loop()
+        else:
+            if loop.is_running():
+                raise RuntimeError(
+                    "Cannot call run.wait() for an attached SLURM run while an "
+                    "asyncio loop is already running; use 'await run' instead."
+                )
+        if timeout is not None:
+            loop.run_until_complete(asyncio.wait_for(future, timeout=timeout))
+        else:
+            loop.run_until_complete(future)
+        status = self._poll_attached_run(run)
+        self._emit_status(status)
+        return run._make_result(status)
+
+    async def _wait_attached_run_async(
+        self,
+        run: RunHandle,
+        timeout: Optional[float] = None,
+        poll_interval: Optional[float] = None,
+    ) -> RunResult:
+        future = run.backend.get("future")
+        if future is None:
+            status = JobStatus(state="unknown", job_id=run.id)
+            return RunResult(job=run.job, status=status, site=self)
+
+        if timeout is not None:
+            await asyncio.wait_for(future, timeout=timeout)
+        else:
+            await future
+        status = self._poll_attached_run(run)
+        self._emit_status(status)
+        return run._make_result(status)
+
+    def _submit_attached(
+        self, job: SimulationJob, procs_per_task: int = 2, *, pack: bool = True
+    ) -> Future:
+        """Submit a job into an already attached compute allocation."""
+
+        loop = self._get_or_create_event_loop()
+        future = loop.create_future()
+        if self._compute_client is None:
+            self._attach_compute_client()
+
+        remote_script, remote_job = self._transfer_job(job, pack=pack)
+        ntasks_per_item = max(procs_per_task, self.pool.nproc // job.n_tasks)
+
+        if self._compute_client.is_proxy():
+            interactive = self.compute_client.invoke_shell()
+            cmd = (
+                f"cd {self.work_dir} && "
+                f"{remote_script} {remote_job} {ntasks_per_item}\n"
+            )
+            interactive.stdin.write(cmd.encode())
+            interactive.stdin.flush()
+            monitor = self._monitor_command_output(future, job, interactive)
+        else:
+            cmd = (
+                f"cd {self.work_dir} && "
+                f"{remote_script} {remote_job} {ntasks_per_item}"
+            )
+            interactive = self.login_client.invoke_shell()
+            interactive.send(f"ssh {self.compute_host}\n")
+            time.sleep(1)
+            interactive.send(cmd)
+            monitor = self._monitor_command_output(future, job, interactive)
+
+        loop.create_task(monitor)
+        return future
+
+    @staticmethod
+    def _get_or_create_event_loop() -> asyncio.AbstractEventLoop:
+        """Return the current event loop, creating one for sync contexts if needed."""
+
+        try:
+            return asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop
+
+    def _template_env(self, *, keep_trailing_newline: bool = False) -> Environment:
+        """Return the Jinja environment used for remote execution scripts."""
+
+        return Environment(
+            loader=FileSystemLoader(
+                self._FS_dir / "src/frequensolve/orchestrator/templates"
+            ),
+            keep_trailing_newline=keep_trailing_newline,
+        )
+
+    def _render_template(
+        self,
+        template_name: str,
+        *,
+        keep_trailing_newline: bool = False,
+        **context,
+    ) -> str:
+        """Render a scheduler template from the FrequenSolve template directory."""
+
+        return (
+            self._template_env(keep_trailing_newline=keep_trailing_newline)
+            .get_template(template_name)
+            .render(**context)
+        )
+
+    def _attach_compute_client(self):
+        """Connect to the current pool's compute host and populate pool metadata."""
+
+        compute_client = self._connect_to_job_host(self.pool.id)
+        self._compute_client = SSHClientClass(compute_client)
+        self._set_pool_info()
+
+    def _remote_spec(self, remote_path: Union[str, Path]) -> str:
+        """Return an rsync-compatible user@host:path target."""
+
+        return f"{self.credentials.username}@{self.config.hostname}:{remote_path}"
+
+    def _run_rsync(self, source: str, target: str) -> None:
+        """Run rsync and raise a concise error on failure."""
+
+        rsync_cmd = ["rsync", "-azP", source, target]
+        logger.debug("rsync: %s", rsync_cmd)
+        result = subprocess.run(rsync_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"rsync failed: {result.stderr}")
+
+    def _submit_sbatch(self, cmd: str) -> str:
+        """Run an sbatch command and return the submitted job id."""
+
+        _, stdout, stderr = self.run_login_cmd(cmd)
+        output = _read_stream(stdout)
+        err = _read_stream(stderr)
+        logger.debug("sbatch output: %s", output)
+        try:
+            job_id = _parse_sbatch_job_id(output)
+        except ValueError:
+            if err:
+                logger.error("sbatch error: %s", err)
+            raise
+        if err:
+            logger.debug("sbatch stderr: %s", err)
+        return job_id
 
     def _get_solver_path(self) -> str:
         """Get the solver executable path on the remote system."""
