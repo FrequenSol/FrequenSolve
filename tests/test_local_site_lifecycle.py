@@ -129,6 +129,36 @@ def test_run_task_supports_solver_pack_mode(monkeypatch, tmp_path):
     )
 
 
+def test_run_task_adds_fresh_flag(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeProcess:
+        def wait(self):
+            return 0
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        return FakeProcess()
+
+    job_file = tmp_path / "job.json"
+    job_file.write_text("{}")
+    monkeypatch.setattr(local_module.subprocess, "Popen", fake_popen)
+
+    result = run_task(str(job_file), 0, "/solver", {}, stdout_dir=None, fresh=True)
+
+    assert result["status"] == "success"
+    assert captured["args"] == [
+        "/solver",
+        "-nthreads",
+        "1",
+        "-j",
+        str(job_file),
+        "--fresh",
+        "-i",
+        "1",
+    ]
+
+
 def test_submit_local_tasks_captures_mesh_log(monkeypatch, tmp_path):
     site, _closed = make_site(monkeypatch)
     site.executable = "/solver"
@@ -166,7 +196,7 @@ def test_submit_local_tasks_captures_mesh_log(monkeypatch, tmp_path):
         def save(self):
             return self._file
 
-        def task_run_plan(self, reuse=True):
+        def task_run_plan(self, reuse=True, force=False):
             return {
                 "pending_indices": [0],
                 "current_tasks": [],
@@ -185,6 +215,72 @@ def test_submit_local_tasks_captures_mesh_log(monkeypatch, tmp_path):
     assert submissions[1]["task_id"] == 0
     assert submissions[1]["kwargs"]["stdout_dir"] == str(tmp_path / "logs")
     assert not (tmp_path / "logs" / "mesh.log").exists()
+
+
+def test_submit_local_tasks_force_run_disables_reuse_and_passes_fresh(
+    monkeypatch, tmp_path
+):
+    site, _closed = make_site(monkeypatch)
+    site.executable = "/solver"
+    site.threads_per_worker = 2
+    submissions = []
+    plan_calls = []
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            submissions.append({"task_id": task_id, "kwargs": kwargs})
+            return DummyFuture({"task_id": task_id, "status": "success"})
+
+    class FakeJob(DummyJob):
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def save(self):
+            return self._file
+
+        def task_run_plan(self, reuse=True, force=False):
+            plan_calls.append({"reuse": reuse, "force": force})
+            return {
+                "pending_indices": [0],
+                "current_tasks": [],
+                "reused_tasks": [],
+            }
+
+    site._dask_client = FakeClient()
+
+    site._submit_local_tasks(FakeJob(), force_run=True)
+
+    assert plan_calls == [{"reuse": False, "force": True}]
+    assert [item["task_id"] for item in submissions] == [local_module.MESH_TASK_ID, 0]
+    assert all(item["kwargs"]["fresh"] is True for item in submissions)
+
+
+def test_local_submit_force_run_bypasses_current_skip(monkeypatch):
+    site, _closed = make_site(monkeypatch)
+    seen = {}
+
+    class CurrentJob(DummyJob):
+        name = "current-job"
+
+        def is_run_current(self):
+            return True
+
+    def fake_submit(job, **kwargs):
+        seen["kwargs"] = kwargs
+        return local_module.LocalTaskSubmission(
+            futures=[DummyFuture()], task_plan={"pending_indices": [0]}
+        )
+
+    monkeypatch.setattr(site, "_submit_local_tasks", fake_submit)
+
+    run = site.submit(CurrentJob(), force_run=True)
+
+    assert run.mode == "local"
+    assert seen["kwargs"]["force_run"] is True
+    assert run.backend["fresh"] is True
 
 
 def test_submit_local_tasks_reports_mesh_log_on_failure(monkeypatch, tmp_path):
@@ -214,7 +310,7 @@ def test_submit_local_tasks_reports_mesh_log_on_failure(monkeypatch, tmp_path):
         def save(self):
             return self._file
 
-        def task_run_plan(self, reuse=True):
+        def task_run_plan(self, reuse=True, force=False):
             return {
                 "pending_indices": [0],
                 "current_tasks": [],

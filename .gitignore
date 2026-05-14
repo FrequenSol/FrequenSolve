@@ -164,6 +164,7 @@ tests/output/*
 
 # Solver and example run outputs
 examples/scratch/
+scratch/
 examples/fort.*
 examples/*.slurm
 examples/**/*.slurm

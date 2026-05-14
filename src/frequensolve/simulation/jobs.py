@@ -962,13 +962,37 @@ class SimulationJob(ABC):
                     pass
         return removed
 
-    def task_run_plan(self, *, reuse: bool = False) -> Dict[str, Any]:
+    def task_run_plan(
+        self, *, reuse: bool = False, force: bool = False
+    ) -> Dict[str, Any]:
         """Plan which zero-based solver task indices still need to run.
 
         When ``reuse`` is true, matching trace files from an earlier frequency
         layout are copied into their current task-numbered locations and the
         run state is updated to record those reused tasks.
         """
+
+        if force:
+            pending = list(range(self.n_tasks))
+            removed_stale_outputs = self._remove_trace_outputs_for_tasks(
+                range(1, self.n_tasks + 1)
+            )
+            manifest = self.trace_manifest
+            for path in [manifest.packed_file, manifest.output_path / "manifest.json"]:
+                if path is None:
+                    continue
+                try:
+                    path.unlink()
+                    removed_stale_outputs = True
+                except FileNotFoundError:
+                    pass
+            if removed_stale_outputs:
+                self.invalidate_trace_cache()
+            return {
+                "pending_indices": pending,
+                "current_tasks": [],
+                "reused_tasks": [],
+            }
 
         state = self.run_state()
         current_records = []

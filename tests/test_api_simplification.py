@@ -41,6 +41,7 @@ from frequensolve.seismic.receivers import (
 )
 from frequensolve.seismic.sparse_survey import SparseSurvey
 from frequensolve.seismic.traces import TraceDataset
+from frequensolve.seismic.wavelet import RickerWavelet
 from frequensolve.simulation.artifacts import OutputArtifact, TraceManifest
 from frequensolve.simulation.jobs import FrequencyDomainJob
 from frequensolve.simulation.outputs import (
@@ -50,13 +51,14 @@ from frequensolve.simulation.outputs import (
     WavefieldOutput,
 )
 from frequensolve.simulation.physics import (
+    CoupledAEPComponents,
     ElasticComponents,
     EMComponents,
     PoroelasticComponents,
     components_for_physics,
 )
 from frequensolve.simulation.simulation import SeismicSimulation
-from frequensolve.units import UnitConfig
+from frequensolve.units import Q_, UnitConfig
 from frequensolve.units import ureg as u
 
 
@@ -488,6 +490,80 @@ def test_solver_frame_key_is_not_exported_and_legacy_input_is_ignored():
         )
 
 
+def test_acquisition_accepts_quantity_source_and_receiver_coordinates():
+    acq = Acquisition()
+    geophone = ReceiverNode(name="geophone")
+    geophone.add_component(name="v_z", field="velocity", direction=[0.0, 1.0])
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        acq.add_source_group(
+            kind="vector",
+            coords=Q_([[0.5, 0.05]], "km"),
+            direction=[0.0, 1.0],
+        )
+        receiver_coords = [Q_([x, 0.0], "km") for x in np.linspace(0.1, 0.9, 41)]
+        acq.add_receiver_group(
+            name="surface",
+            device=geophone,
+            coords=receiver_coords,
+        )
+
+    assert not [
+        warning
+        for warning in caught
+        if warning.category.__name__ == "UnitStrippedWarning"
+    ]
+
+    payload = acq.to_fs()
+    assert payload["source_groups"][0]["source"]["coordinates"] == {
+        "value": [0.5, 0.05],
+        "units": "km",
+    }
+    receiver_payload = payload["receiver_groups"][0]["coordinates"]
+    assert receiver_payload["_type"] == "CoordsArray"
+    assert receiver_payload["units"] == "km"
+    assert receiver_payload["value"][0] == [0.1, 0.0]
+    assert receiver_payload["value"][-1] == [0.9, 0.0]
+
+
+def test_ricker_wavelet_defaults_pre_time_to_one_period():
+    wavelet = RickerWavelet(f=10.0)
+
+    assert wavelet.center == pytest.approx(0.1)
+    assert wavelet.pre_time == pytest.approx(0.1)
+
+    times = np.linspace(0.0, 0.5, 501)
+    signal = wavelet.evaluate(times)
+    peak_time = times[int(np.argmax(np.abs(signal)))] - wavelet.pre_time
+
+    assert peak_time == pytest.approx(0.0, abs=times[1] - times[0])
+
+
+def test_ricker_wavelet_accepts_pre_time_alias():
+    wavelet = RickerWavelet(f=20.0, pre_time=0.2)
+
+    assert wavelet.center == pytest.approx(0.2)
+    assert wavelet.pre_time == pytest.approx(0.2)
+
+    with pytest.raises(ValueError, match="center or pre_time"):
+        RickerWavelet(f=20.0, center=0.1, pre_time=0.2)
+
+
+def test_compound_source_broadcasts_single_direction_vector():
+    acq = Acquisition()
+    acq.add_compound_source(
+        kind="vector",
+        coords=[[0.45, 0.1], [0.55, 0.1]],
+        weights=[1.0, -1.0],
+        direction=[0.0, 1.0],
+    )
+
+    source = acq.source_groups[0].source
+
+    assert np.asarray(source.direction).tolist() == [[0.0, 1.0], [-0.0, -1.0]]
+
+
 def test_elastic_velocity_is_canonical_and_displacement_is_removed():
     assert ElasticComponents.primary == ["velocity", "stress"]
     assert ElasticComponents.check_components(["velocity", "stress"]) == [
@@ -515,6 +591,9 @@ def test_new_physics_component_sets_are_available():
     assert PoroelasticComponents.check_components(
         ["velocity", "fluid_velocity", "pressure"]
     ) == ["velocity", "fluid_flux", "pressure"]
+    assert CoupledAEPComponents.check_components(
+        ["pressure", "velocity", "fluid_velocity", "stress"]
+    ) == ["pressure", "velocity", "fluid_flux", "stress"]
     assert EMComponents.check_components(["electric", "magnetic"]) == [
         "electric",
         "magnetic",
@@ -566,6 +645,20 @@ def test_explicit_axisymmetric_physics_sets_axisymmetric_flag(tmp_path):
     assert sim.physics == "acoustic_axisym"
     assert sim.axisymmetric is True
     assert components_for_physics("acoustic_axisym") is not None
+
+
+def test_project_new_simulation_accepts_coupled_aep_physics(tmp_path):
+    project = Project(name="project", path=tmp_path)
+    sim = project.new_simulation(
+        name="coupled_aep",
+        physics="coupled-aep",
+        dimension=2,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    assert sim.physics == "coupled_aep"
+    assert sim.to_fs()["physics"] == "coupled_aep"
+    assert components_for_physics("coupled_aep") is CoupledAEPComponents
 
 
 def test_axisymmetric_rejects_unsupported_physics(tmp_path):
@@ -647,6 +740,20 @@ def test_layered_model_treats_25d_as_2d_model():
     model = LayeredModel(dimension="2.5D", x_limits=[0.0, 1.0])
 
     assert model.dimension == 2
+
+
+def test_layered_model_infers_non_interface_surface_from_ordering():
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="layer", properties={"vp": 1500.0, "rho": 1000.0})
+    model.add_surface(name="marker", depth=0.2)
+    model.add_surface(name="bottom", depth=0.5)
+
+    payload = model.to_fs()
+
+    assert payload["surfaces"][1]["name"] == "marker"
+    assert payload["surfaces"][1]["interface"] is False
+    assert payload["surfaces"][2]["interface"] is True
 
 
 def test_output_paths_must_be_relative_to_result_directory():
@@ -1213,7 +1320,7 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
     acq.add_receiver_group(
         name="surface",
         device=hydrophone,
-        coords=[[x, 0.0] for x in np.linspace(0.0, 1.0, 12)],
+        coords=[[x, 0.0] for x in np.linspace(0.0, 1.0, 201)],
     )
 
     sim = SeismicSimulation(
@@ -1237,7 +1344,7 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
         assert "inputs/acquisition/receivers/surface/coordinates" in h5
 
     acq.receiver_groups[0].coordinates = CoordsArray(
-        coordinates=np.array([[x, 0.1] for x in np.linspace(0.0, 1.0, 12)])
+        coordinates=np.array([[x, 0.1] for x in np.linspace(0.0, 1.0, 201)])
     )
     updated = sim.to_fs()
     updated_coords = updated["Acquisition"]["receiver_groups"][0]["coordinates"]
@@ -1246,6 +1353,24 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
     assert updated_coords["hash"].startswith("blake3:")
     assert updated_coords["hash"] != coords["hash"]
     assert isinstance(acq.receiver_groups[0].coordinates, CoordsArray)
+
+
+def test_large_receiver_coordinates_inline_without_simulation_path():
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(
+        name="surface",
+        device=hydrophone,
+        coords=[[x, 0.0] for x in np.linspace(0.0, 1.0, 201)],
+    )
+
+    coords = acq.to_fs()["receiver_groups"][0]["coordinates"]
+
+    assert coords["_type"] == "CoordsArray"
+    assert len(coords["coords"]) == 201
+    assert "file" not in coords
 
 
 def test_receiver_coordinate_file_exports_project_relative_locator(tmp_path):
@@ -2350,7 +2475,7 @@ def test_simulation_accepts_boundary_conditions_directly(tmp_path):
                 "pml_wavelengths": 2.0,
                 "pml_exponent": 3.0,
                 "pml_constant": 20.0,
-                "pml_reflection": 0.0001,
+                "pml_reflection": 0.001,
                 "stretch_limit": 0.25,
             },
         ]

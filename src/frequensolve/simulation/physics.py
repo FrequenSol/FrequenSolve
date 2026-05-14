@@ -16,6 +16,7 @@ from frequensolve.util.physics import (
 __all__ = [
     "AcousticComponents",
     "ElasticComponents",
+    "CoupledAEPComponents",
     "PoroelasticComponents",
     "EMComponents",
     "canonical_physics",
@@ -75,6 +76,11 @@ class PoroelasticComponents(ValidComponents):
     secondary = ["strain", "displacement", "fluid_displacement"]
 
 
+class CoupledAEPComponents(ValidComponents):
+    primary = ["pressure", "velocity", "fluid_flux", "stress"]
+    secondary = ["strain", "displacement", "fluid_displacement"]
+
+
 _COMPONENTS_BY_PHYSICS = {
     "acoustic": AcousticComponents,
     "acoustic_axisym": AcousticComponents,
@@ -82,6 +88,7 @@ _COMPONENTS_BY_PHYSICS = {
     "elastic_axisym": ElasticComponents,
     "elastic_axisym_torsion": ElasticComponents,
     "coupled": ElasticComponents,
+    "coupled_aep": CoupledAEPComponents,
     "coupled_axisym": ElasticComponents,
     "coupled_axisym_torsion": ElasticComponents,
     "poroelastic": PoroelasticComponents,

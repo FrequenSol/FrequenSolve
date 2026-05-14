@@ -27,7 +27,7 @@ from frequensolve.seismic.trace_geometry import (
 __all__ = [
     "plot_gather",
     "animate_gather",
-    "plot_gather_diff",
+    "diff_gathers",
     "plot_xf",
     "plot_cf",
     "plot_timelag",
@@ -160,7 +160,7 @@ def plot_gather(
     return fig, ax
 
 
-def plot_gather_diff(
+def diff_gathers(
     baseline: xr.DataArray,
     monitor: xr.DataArray,
     *,

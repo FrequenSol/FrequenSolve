@@ -107,7 +107,7 @@ def configure_logging(
     set_log_level(level)
     package_logger = logging.getLogger("frequensolve")
     package_logger.setLevel(level)
-    package_logger.propagate = False
+    package_logger.propagate = not (console or log_file is not None)
 
     formatter = logging.Formatter(DEFAULT_FORMAT)
 

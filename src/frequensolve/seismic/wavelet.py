@@ -429,13 +429,16 @@ class Wavelet:
             plt.show()
 
 
-@dataclass
 class RickerWavelet(Wavelet):
     """Ricker wavelet.
 
     Attributes:
         f (float): Central frequency of the Ricker wavelet.
-        center (float): Center time of the wavelet.
+        center (float): Pre-zero-time padding used to place the wavelet peak at
+            physical time zero. Retained for compatibility; ``pre_time`` is the
+            clearer keyword.
+        pre_time (float): Alias for ``center``. Defaults to one period,
+            ``1 / f``.
         window (Optional[Union[WindowFunction,Tuple[Literal["gaussian", "blackman"], float]]]):
             Window function to apply to the wavelet.
         causal (bool): Whether to make the wavelet causal.
@@ -443,9 +446,49 @@ class RickerWavelet(Wavelet):
             will be generated when needed.
     """
 
+    def __init__(
+        self,
+        f: Union[float, List[float]],
+        center: Optional[float] = None,
+        window: Optional[
+            Union[WindowFunction, Tuple[Literal["gaussian", "blackman"], float]]
+        ] = None,
+        causal: bool = False,
+        scale: float = 1.0,
+        pre_time: Optional[float] = None,
+    ):
+        if pre_time is not None:
+            if center is not None:
+                raise ValueError("Specify only one of center or pre_time")
+            center = pre_time
+
+        f0 = f[0] if isinstance(f, (list, tuple, np.ndarray)) else f
+        f0 = float(f0)
+        if f0 <= 0.0:
+            raise ValueError("Ricker wavelet frequency must be positive")
+        if center is None:
+            center = 1.0 / f0
+
+        super().__init__(
+            f=f0,
+            center=float(center),
+            window=window,
+            causal=causal,
+            scale=scale,
+        )
+        self.__post_init__()
+
+    @property
+    def pre_time(self) -> float:
+        """Alias for ``center`` describing the negative-time padding."""
+
+        return self.center
+
+    @pre_time.setter
+    def pre_time(self, value: float) -> None:
+        self.center = float(value)
+
     def __post_init__(self):
-        if isinstance(self.f, (list, tuple, np.ndarray)):
-            self.f = self.f[0]
         self.f_max = 3 * self.f
 
     def _generate(self, times: np.ndarray, taper: Callable[[int], np.ndarray]) -> None:

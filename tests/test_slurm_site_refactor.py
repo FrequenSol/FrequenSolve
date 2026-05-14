@@ -316,6 +316,29 @@ def test_slurm_submit_auto_uses_batch_when_not_attached(monkeypatch):
     assert seen["config"].queue == "debug"
 
 
+def test_slurm_submit_force_run_passes_fresh_to_batch(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    seen = {}
+
+    class CurrentJob(DummyJob):
+        def is_run_current(self):
+            return True
+
+    def fake_submit(job, config, **kwargs):
+        seen["fresh"] = kwargs.get("fresh")
+        return "79"
+
+    monkeypatch.setattr(site, "_submit_slurm_batch", fake_submit)
+
+    run = site.submit(CurrentJob(), force_run=True)
+
+    assert run.id == "79"
+    assert seen["fresh"] is True
+
+
 def test_slurm_submit_overrides_site_run_config(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
@@ -353,7 +376,16 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
         duration="00-00:30:00",
         procs_per_node=4,
     )
+    fresh_batch_script = site._sweep_SLURM_script(
+        n_tasks=4,
+        n_nodes=1,
+        stdout="/scratch/user/project/run/jobs/dummy/logs",
+        duration="00-00:30:00",
+        procs_per_node=4,
+        fresh=True,
+    )
     attached_script = site._sweep_script(DummyJob())
+    fresh_attached_script = site._sweep_script(DummyJob(), fresh=True)
     attached_disabled_script = site._sweep_script(DummyJob(), pack=False)
     disabled_script = site._sweep_SLURM_script(
         n_tasks=4,
@@ -364,8 +396,10 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
         pack=False,
     )
 
-    assert '--pack >> "$dir_out/pack.log" 2>&1' in batch_script
-    assert "--pack >> $dir_out/pack.log 2>&1" in attached_script
+    assert '$fresh_flag --pack >> "$dir_out/pack.log" 2>&1' in batch_script
+    assert "$fresh_flag --pack >> $dir_out/pack.log 2>&1" in attached_script
+    assert 'fresh_flag="--fresh"' in fresh_batch_script
+    assert 'fresh_flag="--fresh"' in fresh_attached_script
     assert "--pack" not in attached_disabled_script
     assert "--pack" not in disabled_script
 
@@ -391,7 +425,7 @@ def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
             return False
 
     monkeypatch.setattr(
-        site, "_submit_attached", lambda job, procs_per_task=2: DummyFuture()
+        site, "_submit_attached", lambda job, procs_per_task=2, **kwargs: DummyFuture()
     )
 
     run = site.submit(DummyJob())
@@ -411,8 +445,9 @@ def test_slurm_submit_attached_can_disable_pack(monkeypatch):
         def done(self):
             return False
 
-    def fake_submit(job, procs_per_task=2, *, pack=True):
+    def fake_submit(job, procs_per_task=2, *, pack=True, fresh=False):
         seen["pack"] = pack
+        seen["fresh"] = fresh
         return DummyFuture()
 
     monkeypatch.setattr(site, "_submit_attached", fake_submit)
@@ -420,6 +455,7 @@ def test_slurm_submit_attached_can_disable_pack(monkeypatch):
     site.submit(DummyJob(), pack=False)
 
     assert seen["pack"] is False
+    assert seen["fresh"] is False
 
 
 def test_slurm_allocation_attach_returns_awaitable_handle(monkeypatch):
@@ -496,7 +532,7 @@ def test_slurm_attached_run_is_awaitable(monkeypatch):
         future = asyncio.get_running_loop().create_future()
         future.set_result(None)
         monkeypatch.setattr(
-            site, "_submit_attached", lambda job, procs_per_task=2: future
+            site, "_submit_attached", lambda job, procs_per_task=2, **kwargs: future
         )
         run = site.submit(DummyJob())
         return await run

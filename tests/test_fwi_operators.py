@@ -1,4 +1,6 @@
+import h5py
 import numpy as np
+import pytest
 import xarray as xr
 
 from frequensolve.geometry.grids import CartesianGrid
@@ -7,7 +9,8 @@ from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
 from frequensolve.simulation.fwi import DataSpace, ModelSpace
-from frequensolve.simulation.imaging import ImagingJob
+from frequensolve.simulation.imaging import ImageDatabase, ImagingJob
+from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.simulation.simulation import SeismicSimulation
 
 
@@ -149,6 +152,81 @@ def test_legacy_imaging_images_syntax_still_serializes(tmp_path):
         {"name": "dVp", "IC": "FWI", "property": "Vp"},
         {"name": "p", "IC": "pressure"},
     ]
+
+
+def test_imaging_job_save_and_load_round_trips_project_relative_simulation(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    observed = tmp_path / "observed" / "traces"
+    observed.mkdir(parents=True)
+
+    job = sim.imaging(
+        name="rtm",
+        observed=observed,
+        frequencies=[5.0],
+        parameters=["vp", "rho"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+    )
+
+    job_file = job.save()
+    saved_text = job_file.read_text()
+    loaded = SimulationJob.load(job_file)
+
+    assert "simulations/smooth/smooth.json" in saved_text
+    assert str(tmp_path / "jobs" / "smooth") not in saved_text
+    assert isinstance(loaded, ImagingJob)
+    assert loaded.name == "rtm"
+    assert loaded.simulation.name == sim.name
+    assert loaded.images == {"FWI_Vp": "FWI:Vp", "FWI_Rho": "FWI:Rho"}
+    assert loaded.grid.shape == (2, 3)
+    loaded_group = loaded.misfit.receiver_groups[0]
+    assert loaded_group.observed == observed / "surface"
+    assert loaded_group.simulated == (
+        tmp_path / "jobs" / "smooth" / "rtm" / "results" / "traces" / "surface"
+    )
+    assert loaded.regularization == {
+        "type": "TV",
+        "lambda": 1.0,
+        "epsilon": 1.0,
+        "iterations": 5,
+    }
+
+
+def test_imaging_job_rejects_weight_frequency_length_mismatch(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    observed = tmp_path / "observed" / "traces"
+    observed.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="one value per frequency"):
+        sim.imaging(
+            name="rtm",
+            observed=observed,
+            frequencies=[5.0, 10.0],
+            parameters=["vp"],
+            grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+            weights=[1.0],
+        )
+
+
+def test_image_database_reads_string_and_byte_labels(tmp_path):
+    image_path = tmp_path / "image"
+    image_path.mkdir()
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    values = np.arange(6.0)
+
+    with h5py.File(image_path / "image.h5", "w") as h5:
+        group = h5.create_group("image/raw")
+        group.create_dataset("properties", data=np.array(["vp"], dtype=string_dtype))
+        dataset = group.create_dataset("vp", data=values)
+        dataset.attrs["x0"] = np.array([0.0, 0.0])
+        dataset.attrs["x1"] = np.array([2.0, 1.0])
+        dataset.attrs["n_grid"] = np.array([3, 2])
+        dataset.attrs["dims"] = np.array(["x", "z"], dtype=string_dtype)
+
+    db = ImageDatabase(path=image_path, parts=1, shape=(2, 3))
+    images = db.raw_images
+
+    assert images["vp"].dims == ("z", "x")
+    np.testing.assert_array_equal(images["vp"].values, values.reshape(2, 3))
 
 
 def test_fwi_jacobian_dot_test_and_taylor_test_use_hermitian_products(tmp_path):

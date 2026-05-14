@@ -74,6 +74,7 @@ def run_task(
     n_ranks: int = 1,
     n_threads: int = 1,
     stdout_dir: str = None,
+    fresh: bool = False,
 ) -> dict:
     """Run a single task and return its results.
 
@@ -84,8 +85,8 @@ def run_task(
         env: Environment variables
         n_ranks: Number of MPI ranks
         n_threads: Number of threads per rank
-        output_dir: Directory to store completed output files
-        active_dir: Directory to store active output files
+        stdout_dir: Directory to store task logs
+        fresh: Pass --fresh to the solver to disable solver-side output reuse
 
     Returns:
         Dict containing task results
@@ -111,6 +112,8 @@ def run_task(
         "-j",
         f"{job_file}",
     ]
+    if fresh:
+        args += ["--fresh"]
     if task_id == PACK_TASK_ID:
         args += ["--pack"]
     elif task_id == SMOOTH_TASK_ID:
@@ -218,13 +221,17 @@ class LocalSite(BaseSite):
         Returns:
             RunHandle for the submitted tasks
         """
-        force = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
+        force_run = bool(
+            kwargs.pop("force_run", False)
+            or kwargs.pop("force", False)
+            or kwargs.pop("rerun", False)
+        )
         pack = bool(kwargs.pop("pack", True))
         shutdown_on_completion = bool(
             kwargs.pop("shutdown_on_completion", self.shutdown_on_completion)
         )
         self.prepare_job(job)
-        if not force and job.is_run_current():
+        if not force_run and job.is_run_current():
             logger.info(
                 "Skipping job %s; fingerprint matches and expected trace outputs exist.",
                 job.name,
@@ -233,7 +240,7 @@ class LocalSite(BaseSite):
             return RunHandle.skipped(self, job)
 
         try:
-            submission = self._submit_local_tasks(job, **kwargs)
+            submission = self._submit_local_tasks(job, force_run=force_run, **kwargs)
         except Exception:
             if shutdown_on_completion:
                 self.close(wait=False, retire=False)
@@ -261,6 +268,7 @@ class LocalSite(BaseSite):
         handle.backend["futures"] = futures
         handle.backend["task_plan"] = task_plan
         handle.backend["pack_after_tasks"] = pack
+        handle.backend["fresh"] = force_run
         handle.backend["shutdown_on_completion"] = shutdown_on_completion
         return handle
 
@@ -371,6 +379,7 @@ class LocalSite(BaseSite):
                     n_ranks=1,
                     n_threads=self.threads_per_worker,
                     stdout_dir=str(run.job._stdout_path),
+                    fresh=bool(run.backend.get("fresh", False)),
                     resources={"CPU": self.threads_per_worker},
                 )
                 all_futures.append(smooth_future)
@@ -402,6 +411,7 @@ class LocalSite(BaseSite):
                     n_ranks=1,
                     n_threads=self.threads_per_worker,
                     stdout_dir=str(run.job._stdout_path),
+                    fresh=bool(run.backend.get("fresh", False)),
                     resources={"CPU": self.threads_per_worker},
                 )
                 all_futures.append(pack_future)
@@ -463,7 +473,9 @@ class LocalSite(BaseSite):
         if run.backend.get("shutdown_on_completion", self.shutdown_on_completion):
             self.close(wait=False, retire=False)
 
-    def _submit_local_tasks(self, job: SimulationJob, **kwargs) -> LocalTaskSubmission:
+    def _submit_local_tasks(
+        self, job: SimulationJob, force_run: bool = False, **kwargs
+    ) -> LocalTaskSubmission:
         """Submit job tasks to the local Dask executor.
 
         Args:
@@ -477,7 +489,7 @@ class LocalSite(BaseSite):
             raise RuntimeError("Solver executable not found, cannot submit job")
 
         job_file = job.save()
-        task_plan = job.task_run_plan(reuse=True)
+        task_plan = job.task_run_plan(reuse=not force_run, force=force_run)
         pending_indices = list(task_plan["pending_indices"])
         if not pending_indices:
             return LocalTaskSubmission(futures=[], task_plan=task_plan)
@@ -520,6 +532,7 @@ class LocalSite(BaseSite):
             n_ranks=1,
             n_threads=1,
             stdout_dir=stdout_dir,
+            fresh=force_run,
             resources={"CPU": 1},
         )
         try:
@@ -553,6 +566,7 @@ class LocalSite(BaseSite):
                     n_ranks=n_ranks,
                     n_threads=self.threads_per_worker,
                     stdout_dir=stdout_dir,
+                    fresh=force_run,
                     retries=0,
                     priority=i,
                     actor=False,

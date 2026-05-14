@@ -13,7 +13,7 @@ _CONDITION_ALIASES = {
     "neumann": "free",
 }
 _UNSET = object()
-_DEFAULT_PML_REFLECTION = 1e-2
+_DEFAULT_PML_REFLECTION = 1e-3
 
 
 def _normalize_conditions(value: ConditionInput, *, field_name: str) -> List[str]:
@@ -80,7 +80,7 @@ class BoundaryCondition:
     pml_wavelengths: float = 2.0
     pml_exponent: float = 3.0
     pml_constant: float = 20.0
-    pml_reflection: float = 1e-4
+    pml_reflection: float = 1e-3
     stretch_limit: float = 0.25
 
     def __init__(

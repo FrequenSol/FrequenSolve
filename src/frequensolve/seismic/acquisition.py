@@ -8,7 +8,11 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 
 from frequensolve.geometry.frame import CoordinateValue
-from frequensolve.seismic.receivers import ReceiverDevice, ReceiverGroup
+from frequensolve.seismic.receivers import (
+    ReceiverDevice,
+    ReceiverGroup,
+    coordinate_array_metadata,
+)
 from frequensolve.seismic.sources import CompoundSource, PointSource, SourceGroup
 from frequensolve.seismic.sparse_survey import ReceiverSampling, SparseSurvey
 from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
@@ -129,13 +133,19 @@ class Acquisition(ExtraFieldsMixin):
     ):
         if isinstance(coords, list):
             coords = np.array(coords)
-        if isinstance(weights, list):
-            weights = np.array(weights)
-        if isinstance(direction, list):
-            direction = np.array(direction)
+        weights = np.asarray(weights, dtype=float)
+        if direction is not None:
+            direction = np.asarray(direction, dtype=float)
         isrc = len(self.source_groups)
         if direction is None:
             direction = np.ones((len(coords), 1))
+        elif direction.ndim == 1:
+            direction = np.tile(direction, (len(coords), 1))
+        elif direction.ndim != 2:
+            raise ValueError("direction must be a 1D vector or one row per coordinate")
+        if len(direction) != len(coords):
+            raise ValueError("direction must have one row per coordinate")
+        direction = direction.copy()
         for i, row in enumerate(direction):
             direction[i, :] *= weights[i]
         source = CompoundSource(
@@ -326,25 +336,25 @@ class Acquisition(ExtraFieldsMixin):
 
 
 def _source_coordinate_rows(coords):
+    extra = {}
     if isinstance(coords, CoordinateValue):
-        values = np.asarray(coords.value, dtype=float)
-        if values.ndim == 1:
-            values = values.reshape(1, -1)
-        if values.ndim != 2:
-            raise ValueError("source coordinates must be a 2D array")
+        extra = copy.deepcopy(coords.extra)
+
+    values, units, system = coordinate_array_metadata(coords)
+    if values.ndim == 1:
+        values = values.reshape(1, -1)
+    if values.ndim != 2:
+        raise ValueError("source coordinates must be a 2D array")
+
+    if units is not None or system is not None:
         return [
             CoordinateValue(
                 row.tolist(),
-                units=coords.units,
-                system=coords.system,
-                extra=copy.deepcopy(coords.extra),
+                units=units,
+                system=system,
+                extra=copy.deepcopy(extra),
             )
             for row in values
         ]
 
-    if isinstance(coords, list):
-        coords = np.array(coords)
-    values = np.asarray(coords)
-    if values.ndim == 1:
-        values = values.reshape(1, -1)
     return values

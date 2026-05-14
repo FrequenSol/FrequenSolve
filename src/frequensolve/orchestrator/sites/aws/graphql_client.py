@@ -401,6 +401,7 @@ class GraphQLClient:
         vcpu: Optional[int] = None,
         memory: Optional[int] = None,
         job_name: Optional[str] = None,
+        force_run: bool = False,
     ) -> Dict[str, str]:
         """Submit a simulation job.
 
@@ -409,6 +410,7 @@ class GraphQLClient:
             vcpu: Number of vCPUs for the job (optional)
             memory: Memory in MB for the job (optional)
             job_name: Custom name for the job (optional)
+            force_run: Force a fresh solver run when the backend supports it
 
         Returns:
             Dict containing:
@@ -419,24 +421,28 @@ class GraphQLClient:
         Raises:
             RuntimeError: If job submission fails
         """
-        mutation = """
+        force_var = "$forceRun: Boolean" if force_run else ""
+        force_arg = "forceRun: $forceRun" if force_run else ""
+        mutation = f"""
             mutation SubmitJob(
                 $jobFileS3Key: String!
                 $vcpu: Int
                 $memory: Int
                 $jobName: String
-            ) {
+                {force_var}
+            ) {{
                 submitJob(
                     jobFileS3Key: $jobFileS3Key
                     vcpu: $vcpu
                     memory: $memory
                     jobName: $jobName
-                ) {
+                    {force_arg}
+                ) {{
                     simulationId
                     batchJobId
                     status
-                }
-            }
+                }}
+            }}
         """
 
         variables = {
@@ -449,6 +455,8 @@ class GraphQLClient:
             variables["memory"] = memory
         if job_name is not None:
             variables["jobName"] = job_name
+        if force_run:
+            variables["forceRun"] = True
 
         result = self.execute(mutation, variables)
 

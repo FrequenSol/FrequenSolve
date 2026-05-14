@@ -631,11 +631,15 @@ class AWSSite(BaseSite):
         Raises:
             RuntimeError: If job submission fails or stack creation fails.
         """
-        force = kwargs.pop("force", False) or kwargs.pop("rerun", False)
+        force_run = bool(
+            kwargs.pop("force_run", False)
+            or kwargs.pop("force", False)
+            or kwargs.pop("rerun", False)
+        )
         fetch = kwargs.pop("fetch", False)
         poll_interval = kwargs.pop("poll_interval", 10)
         self.prepare_job(job)
-        if not force and job.is_run_current():
+        if not force_run and job.is_run_current():
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
             return RunHandle.skipped(self, job)
@@ -692,6 +696,7 @@ class AWSSite(BaseSite):
                     vcpu=kwargs.get("vcpu"),
                     memory=kwargs.get("memory"),
                     job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
+                    force_run=force_run,
                 )
 
                 simulation_id = result["simulationId"]
@@ -722,6 +727,8 @@ class AWSSite(BaseSite):
                     api_data["vcpu"] = kwargs["vcpu"]
                 if "memory" in kwargs:
                     api_data["memory"] = kwargs["memory"]
+                if force_run:
+                    api_data["force_run"] = True
 
                 # Make API request to submit the job
                 headers = {}

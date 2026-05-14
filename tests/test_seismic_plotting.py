@@ -9,9 +9,9 @@ import xarray as xr
 from frequensolve.plotting.analysis import compute_nrms, compute_timelag
 from frequensolve.plotting.animate import animate_gather
 from frequensolve.plotting.traces import (
+    diff_gathers,
     plot_cf,
     plot_gather,
-    plot_gather_diff,
     plot_timelag,
     plot_xf,
 )
@@ -53,9 +53,9 @@ def test_plot_gather_returns_figure_and_axis():
     assert len(ax.images) == 1
 
 
-def test_plot_gather_diff_returns_three_axes():
+def test_diff_gathers_returns_three_axes():
     trace = _time_trace()
-    fig, axes = plot_gather_diff(trace, 0.8 * trace)
+    fig, axes = diff_gathers(trace, 0.8 * trace)
 
     assert len(axes) == 3
     assert all(axis.figure is fig for axis in axes)

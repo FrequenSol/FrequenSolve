@@ -432,6 +432,25 @@ def test_job_task_plan_only_runs_new_frequencies_when_range_expands(tmp_path):
     }
 
 
+def test_job_task_plan_force_runs_all_frequencies(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
+    job.save()
+    for file in job.expected_trace_files():
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(file.name)
+    job.write_run_state(status="completed")
+
+    plan = job.task_run_plan(force=True)
+
+    assert plan == {
+        "pending_indices": [0, 1],
+        "current_tasks": [],
+        "reused_tasks": [],
+    }
+    assert not any(file.exists() for file in job.expected_trace_files())
+
+
 def test_job_task_plan_skips_current_packed_trace_product(tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])

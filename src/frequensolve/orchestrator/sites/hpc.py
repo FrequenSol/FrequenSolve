@@ -474,14 +474,16 @@ class SlurmSite(BaseSite):
         job: SimulationJob,
         *,
         force: bool = False,
+        force_run: bool = False,
         mode: Literal["auto", "attached", "batch"] = "auto",
         fetch: bool = False,
         **overrides,
     ) -> RunHandle:
         """Submit job and return an awaitable run handle."""
 
+        force_run = bool(force_run or force or overrides.pop("rerun", False))
         self.prepare_job(job)
-        if not force and job.is_run_current():
+        if not force_run and job.is_run_current():
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
             return RunHandle.skipped(self, job)
@@ -504,6 +506,7 @@ class SlurmSite(BaseSite):
             future = self._submit_attached(
                 job,
                 procs_per_task=run_config.procs_per_task or 2,
+                fresh=force_run,
                 **({"pack": pack} if not pack else {}),
             )
             self._emit(f"Submitted {job.name} to active {self.site_name} allocation")
@@ -522,7 +525,9 @@ class SlurmSite(BaseSite):
             handle.backend["future"] = future
             return handle
 
-        job_id = self._submit_slurm_batch(job, run_config, **extra_kwargs)
+        job_id = self._submit_slurm_batch(
+            job, run_config, fresh=force_run, **extra_kwargs
+        )
         handle = self.handle(job, job_id=job_id, mode="batch")
         handle.poll_interval = run_config.poll_interval or self.config.poll_interval
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
@@ -1207,7 +1212,12 @@ class SlurmSite(BaseSite):
         return run._make_result(status)
 
     def _submit_attached(
-        self, job: SimulationJob, procs_per_task: int = 2, *, pack: bool = True
+        self,
+        job: SimulationJob,
+        procs_per_task: int = 2,
+        *,
+        pack: bool = True,
+        fresh: bool = False,
     ) -> Future:
         """Submit a job into an already attached compute allocation."""
 
@@ -1216,7 +1226,7 @@ class SlurmSite(BaseSite):
         if self._compute_client is None:
             self._attach_compute_client()
 
-        remote_script, remote_job = self._transfer_job(job, pack=pack)
+        remote_script, remote_job = self._transfer_job(job, pack=pack, fresh=fresh)
         ntasks_per_item = max(procs_per_task, self.pool.nproc // job.n_tasks)
 
         if self._compute_client.is_proxy():
@@ -1430,7 +1440,9 @@ class SlurmSite(BaseSite):
 
         return remote_script, remote_job
 
-    def _transfer_job(self, job: SimulationJob, *, pack: bool = True):
+    def _transfer_job(
+        self, job: SimulationJob, *, pack: bool = True, fresh: bool = False
+    ):
         """Submit a simulation job to the remote site.
 
         Args:
@@ -1443,7 +1455,7 @@ class SlurmSite(BaseSite):
         local_job, remote_job = job.save_for_remote(
             self.__class__.__name__, self.work_dir
         )
-        script = self._sweep_script(job, pack=pack)
+        script = self._sweep_script(job, pack=pack, fresh=fresh)
 
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(local_job), Path(remote_job))

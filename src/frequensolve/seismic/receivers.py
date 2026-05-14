@@ -7,7 +7,7 @@ import copy
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import h5py
 import numpy as np
@@ -17,7 +17,7 @@ from frequensolve.geometry.frame import CoordinateValue, Direction, direction_to
 from frequensolve.geometry.grids import CartesianGrid, Grid
 from frequensolve.seismic.sparse_survey import ReceiverSampling
 from frequensolve.seismic.wavelet import Wavelet
-from frequensolve.units import unit_expression
+from frequensolve.units import is_quantity, unit_expression
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.fields import canonical_field
 from frequensolve.util.mixins import ExtraFieldsMixin, TypeTaggedMixin, merge_extra
@@ -700,6 +700,62 @@ class CoordsArray(ReceiverCoords):
         )
 
 
+def _first_quantity_units(value: Any) -> Optional[Any]:
+    if is_quantity(value):
+        return value.units
+    if isinstance(value, np.ndarray):
+        if value.dtype == object:
+            for item in value.flat:
+                units = _first_quantity_units(item)
+                if units is not None:
+                    return units
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            units = _first_quantity_units(item)
+            if units is not None:
+                return units
+    return None
+
+
+def _strip_coordinate_quantities(value: Any, units: Any) -> Any:
+    if is_quantity(value):
+        return value.to(units).magnitude
+    if isinstance(value, np.ndarray):
+        if value.dtype == object:
+            values = [_strip_coordinate_quantities(item, units) for item in value.flat]
+            return np.asarray(values, dtype=float).reshape(value.shape)
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_strip_coordinate_quantities(item, units) for item in value]
+    return value
+
+
+def coordinate_array_metadata(
+    coords: Any,
+) -> Tuple[np.ndarray, Optional[Any], Optional[str]]:
+    """Return numeric coordinate values plus units/system metadata.
+
+    Pint quantities intentionally become magnitudes here, with their units
+    carried on the receiver/source coordinate object instead of being stripped
+    implicitly by NumPy.
+    """
+
+    system = None
+    explicit_units = None
+    if isinstance(coords, CoordinateValue):
+        explicit_units = coords.units
+        system = coords.system
+        coords = coords.value
+
+    quantity_units = _first_quantity_units(coords)
+    units = explicit_units if explicit_units is not None else quantity_units
+    if quantity_units is not None:
+        coords = _strip_coordinate_quantities(coords, units)
+
+    return np.asarray(coords, dtype=float), units, system
+
+
 # ----------------------------------------------------------------------
 # Receiver Groups
 # ----------------------------------------------------------------------
@@ -784,21 +840,18 @@ class ReceiverGroup(ExtraFieldsMixin):
 
     @staticmethod
     def _clean_coordinates(coords):
-        if isinstance(coords, list):
-            coords = np.array(coords)
-
         # Allow coordinates to be defined either as a ReceiverCoords object
         # various other reasonble ways:
         if isinstance(coords, CoordinateValue):
-            out = CoordsArray(
-                coordinates=np.asarray(coords.value, dtype=float),
-                units=coords.units,
-                system=coords.system,
-            )
+            values, units, system = coordinate_array_metadata(coords)
+            out = CoordsArray(coordinates=values, units=units, system=system)
         elif isinstance(coords, ReceiverCoords):
             return coords
-        elif isinstance(coords, np.ndarray) or isinstance(coords, xr.DataArray):
+        elif isinstance(coords, xr.DataArray):
             out = CoordsArray(coordinates=coords)
+        elif isinstance(coords, np.ndarray) or isinstance(coords, list):
+            values, units, system = coordinate_array_metadata(coords)
+            out = CoordsArray(coordinates=values, units=units, system=system)
         elif isinstance(coords, str) or isinstance(coords, Path):
             suffix = Path(coords).suffix.lower()
             if suffix in [".h5", ".hdf5"]:
@@ -815,7 +868,7 @@ class ReceiverGroup(ExtraFieldsMixin):
         coords = self.coordinates
         if isinstance(coords, CoordsArray):
             if (
-                coords.size > 10
+                coords.size > 200
                 and ctx is not None
                 and getattr(ctx, "store", None) is not None
             ):
@@ -838,7 +891,11 @@ class ReceiverGroup(ExtraFieldsMixin):
                     ),
                     **({"system": coords.system} if coords.system is not None else {}),
                 }
-            elif coords.size > 10:
+            elif (
+                coords.size > 200
+                and self._proj_path is not None
+                and self._rel_path is not None
+            ):
                 dump = coords.to_file(file_name="coords.h5", format="HDF5")
                 dump._set_path(
                     proj_path=self._proj_path, rel_path=self._rel_path / self.name

@@ -61,17 +61,21 @@ executable={{executable}}
 n_threads={{n_threads}}
 n_procs={{n_procs}}
 n_tasks={{n_tasks}}
+fresh_flag=""
+{% if fresh %}
+fresh_flag="--fresh"
+{% endif %}
 
 n_workers=$((n_procs / procs_per_task))
 
 start_time=$(date +%s)
 
-$mpi_exec -n $n_procs $executable $n_threads -j $input_file --init
+$mpi_exec -n $n_procs $executable $n_threads -j $input_file $fresh_flag --init
 
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
-   echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file -i $i"
-   $mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file -i $i >> $dir_out/task_${i}.log 2>&1 &
+   echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file $fresh_flag -i $i"
+   $mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file $fresh_flag -i $i >> $dir_out/task_${i}.log 2>&1 &
    if [[ $((($i - 1) % n_workers)) -eq $((n_workers - 1)) ]]; then
       wait
       echo "Group done"
@@ -80,12 +84,12 @@ done
 wait
 
 {% if imaging_job %}
-$executable -j $input_file --smooth
+$executable -j $input_file $fresh_flag --smooth
 {% endif %}
 
 {% if pack_job %}
-echo "$executable -nthreads $n_threads -j $input_file --pack"
-$executable -nthreads $n_threads -j $input_file --pack >> $dir_out/pack.log 2>&1 || {
+echo "$executable -nthreads $n_threads -j $input_file $fresh_flag --pack"
+$executable -nthreads $n_threads -j $input_file $fresh_flag --pack >> $dir_out/pack.log 2>&1 || {
    rc=$?
    echo "Packing step failed with exit code $rc"
    exit $rc
