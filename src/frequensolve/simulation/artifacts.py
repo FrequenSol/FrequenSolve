@@ -24,6 +24,22 @@ def _real_frequency(value: Union[float, complex]) -> float:
     return float(value)
 
 
+def _laplace_frequency(value: Union[float, complex]) -> float:
+    if isinstance(value, complex):
+        return float(value.imag)
+    if isinstance(value, np.generic):
+        return _laplace_frequency(value.item())
+    return 0.0
+
+
+def _laplace_value(value: Any) -> float:
+    if isinstance(value, np.generic):
+        return _laplace_value(value.item())
+    if isinstance(value, complex):
+        return float(value.imag)
+    return float(value)
+
+
 def _as_path(path: Union[str, Path]) -> Path:
     return path if isinstance(path, Path) else Path(path)
 
@@ -91,6 +107,21 @@ def _path_matches_kind(path: Path, kind: Optional[str]) -> bool:
         return True
     suffix = path.suffix.lower()
     return suffix in _kind_suffixes(normalized)
+
+
+def _path_identity_key(path: Path) -> tuple[Any, ...]:
+    """Return a stable key for deduplicating output paths.
+
+    Existing files are keyed by filesystem identity so aliases such as
+    ``ParaView`` and ``paraview`` collapse when they point at the same file.
+    Non-existing files fall back to their normalized path string.
+    """
+
+    try:
+        stat = path.stat()
+    except OSError:
+        return ("path", str(path.resolve(strict=False)))
+    return ("stat", stat.st_dev, stat.st_ino)
 
 
 def _artifact_matches_kind(artifact: "OutputArtifact", kind: Optional[str]) -> bool:
@@ -264,7 +295,7 @@ class RunMetadata:
         deduped = []
         seen = set()
         for path in files:
-            key = str(path)
+            key = _path_identity_key(path)
             if key in seen:
                 continue
             seen.add(key)
@@ -314,6 +345,7 @@ class TraceManifest:
     result_path: Path
     output_path: Path
     project_path: Optional[Path] = None
+    laplace: Dict[int, float] = field(default_factory=dict)
     components: List[str] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
     artifacts: List[OutputArtifact] = field(default_factory=list)
@@ -343,6 +375,10 @@ class TraceManifest:
             index: _real_frequency(freq)
             for index, freq in enumerate(output.frequencies, start=1)
         }
+        laplace = {
+            index: _laplace_frequency(freq)
+            for index, freq in enumerate(output.frequencies, start=1)
+        }
         files = [
             output_path / f"traces_{index}.h5"
             for index in range(1, len(frequencies) + 1)
@@ -362,6 +398,7 @@ class TraceManifest:
             result_path=result_path,
             output_path=output_path,
             project_path=local_project,
+            laplace=laplace,
             components=list(output.components),
             sources=list(output.sources),
             artifacts=artifacts,
@@ -385,25 +422,34 @@ class TraceManifest:
             if manifest.groups != groups:
                 raise ValueError("Cannot combine trace manifests with different groups")
 
-        entries: Dict[float, Path] = {}
+        entries: Dict[float, tuple[Path, float]] = {}
         duplicates = []
         for manifest in manifests:
             ordered = sorted(
                 manifest.frequencies.items(), key=lambda item: int(item[0])
             )
-            for (_, freq), file in zip(ordered, manifest.files):
+            for (task_index, freq), file in zip(ordered, manifest.files):
                 if freq in entries:
                     duplicates.append(freq)
                     if duplicate == "error":
                         raise ValueError(f"Duplicate trace frequency: {freq}")
                     if duplicate == "first":
                         continue
-                entries[freq] = file
+                laplace = float(
+                    manifest.laplace.get(
+                        task_index, manifest.laplace.get(str(task_index), 0.0)
+                    )
+                )
+                entries[freq] = (file, laplace)
 
         frequencies = {
             index: float(freq) for index, freq in enumerate(sorted(entries), start=1)
         }
-        files = [entries[freq] for freq in sorted(entries)]
+        files = [entries[freq][0] for freq in sorted(entries)]
+        laplace = {
+            index: float(entries[freq][1])
+            for index, freq in enumerate(sorted(entries), start=1)
+        }
         first = manifests[0]
         artifacts = [
             artifact for manifest in manifests for artifact in manifest.artifacts
@@ -427,6 +473,7 @@ class TraceManifest:
             result_path=first.result_path,
             output_path=first.output_path,
             project_path=first.project_path,
+            laplace=laplace,
             components=first.components,
             sources=first.sources,
             artifacts=artifacts,
@@ -465,7 +512,7 @@ class TraceManifest:
     def _packed_manifest(
         result_path: Path,
         output_path: Path,
-    ) -> Optional[tuple[Path, Dict[int, float]]]:
+    ) -> Optional[tuple[Path, Dict[int, float], Dict[int, float]]]:
         manifest_file = output_path / "manifest.json"
         if not manifest_file.exists():
             return None
@@ -486,6 +533,7 @@ class TraceManifest:
             path = result_path / path
 
         frequencies: Dict[int, float] = {}
+        laplace: Dict[int, float] = {}
         rows = data.get("frequencies", [])
         if isinstance(rows, list):
             sortable = [
@@ -498,7 +546,13 @@ class TraceManifest:
                 index: _real_frequency(row["frequency"])
                 for index, (_original_index, row) in enumerate(sortable, start=1)
             }
-        return path, frequencies
+            laplace = {
+                index: _laplace_value(
+                    row.get("laplace", _laplace_frequency(row["frequency"]))
+                )
+                for index, (_original_index, row) in enumerate(sortable, start=1)
+            }
+        return path, frequencies, laplace
 
     @property
     def packed_file(self) -> Optional[Path]:
@@ -513,6 +567,11 @@ class TraceManifest:
     def packed_frequencies(self) -> Dict[int, float]:
         packed = self._packed_manifest(self.result_path, self.output_path)
         return {} if packed is None else packed[1]
+
+    @property
+    def packed_laplace(self) -> Dict[int, float]:
+        packed = self._packed_manifest(self.result_path, self.output_path)
+        return {} if packed is None else packed[2]
 
     @property
     def existing_files(self) -> List[Path]:
@@ -542,6 +601,7 @@ class TraceManifest:
             "simulation": str(self.simulation),
             "result_path": str(self.result_path),
             "output_path": str(self.output_path),
+            "laplace": self.laplace,
             "components": self.components,
             "sources": self.sources,
             "artifacts": [

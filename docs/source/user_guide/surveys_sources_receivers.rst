@@ -15,11 +15,12 @@ Primary tutorials:
 Survey Receivers
 ----------------
 
-A receiver device owns one or more components:
+A receiver device owns one or more components. Device names are optional; the
+receiver group name is the public survey identifier.
 
 .. code-block:: python
 
-   node = fs.ReceiverNode(name="geophone")
+   node = fs.ReceiverNode()
    node.add_component(name="v_z", field="velocity", direction=[0.0, 1.0])
    node.add_component(name="p", field="pressure")
 
@@ -47,13 +48,23 @@ Supported fields depend on physics:
 DAS
 ---
 
-``ReceiverFiber`` represents a fiber-style receiver. ``L_gauge`` is the gauge
-length and ``n_gauge`` is the number of samples used in the gauge average.
-Helical fiber response adds ``radius`` and ``pitch``.
+``ReceiverFiber`` represents a fiber-style receiver. ``gauge_length`` is the
+physical DAS gauge length, ``channel_spacing`` is the spacing between reported
+channels and defaults to ``gauge_length``, and ``sample_spacing`` controls the
+integration samples used along the gauge. If ``sample_spacing`` is omitted,
+``points_per_gauge`` may be used instead. Helical fiber response adds
+``radius`` and ``pitch``. Length-like DAS fields accept plain solver-scaled
+numbers or Pint quantities with explicit units.
 
 .. code-block:: python
 
-   das = fs.ReceiverFiber(name="das", L_gauge=0.01, n_gauge=5)
+   u = fs.ureg
+
+   das = fs.ReceiverFiber(
+       gauge_length=10 * u.m,
+       channel_spacing=10 * u.m,
+       sample_spacing=2 * u.m,
+   )
    das.add_component(name="eps_tt", field="strain", direction=[1.0, 0.0])
 
 Survey Sources

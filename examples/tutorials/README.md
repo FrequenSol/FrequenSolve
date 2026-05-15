@@ -37,6 +37,8 @@ Read the collection as one story:
 4. Meshing tutorials show how geometry and acquisition guide adaptive meshes.
 5. Survey tutorials teach what the solver records and how traces are selected.
 6. Output tutorials make trace, ParaView, and imaging artifacts reusable after a run.
+7. Performance tutorials teach frequency-domain QC, source batching, timing
+   diagnostics, and scaling habits for production runs.
 
 Every notebook should answer the same reader questions: What am I modeling?
 Which object owns this decision? What file or result proves it worked? What
@@ -51,12 +53,13 @@ not hide solver-side failures behind broad exception handlers.
 
 | Folder | Focus |
 | --- | --- |
-| `01_modeling_basics` | Acoustic, elastic, poroelastic, coupled, and dimensionality basics. |
+| `01_modeling_basics` | Acoustic, elastic, poroelastic, coupled, dimensionality, Laplace/time-domain, and axisymmetric borehole basics. |
 | `02_sites` | AWS, HPC, local execution, and saved project/job loading. |
 | `03_velocity_model_building` | Units, coordinate systems, surface-relative properties, and layered model tools. |
 | `04_meshing` | Mesh generators, supplied meshes, adaptivity fields, and gradings. |
 | `05_surveys` | Receiver devices, DAS, source mechanisms, batching, and sparse surveys. |
 | `06_outputs` | Trace HDF5 access, `xarray` reads, ParaView/VTK output, imaging output, and PyVista screenshots. |
+| `07_performance` | Frequency-domain QC, time-domain timing diagnostics, source batching, receiver sampling, and imaging cost. |
 
 ## Running
 

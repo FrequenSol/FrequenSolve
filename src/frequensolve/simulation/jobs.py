@@ -1,11 +1,12 @@
 import hashlib
 import json
+import os
 import shutil
 from abc import ABC
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
 import blake3
 import numpy as np
@@ -24,6 +25,8 @@ from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
 from frequensolve.util.class_registry import class_registry, register_class
 
 __all__ = ["SimulationJob", "FrequencyDomainJob", "TimeDomainJob"]
+
+SOLVER_RESIDUAL_FAILURE_THRESHOLD = 1.0e-3
 
 
 @register_class
@@ -438,9 +441,214 @@ class SimulationJob(ABC):
             return "succeeded"
         if status in {"failed", "failure", "error", "timeout", "cancelled", "killed"}:
             return "failed"
-        if status in {"pending", "queued", "submitted", "running"}:
+        if status in {"pending", "queued", "submitted", "running", "not_run"}:
             return "not_run"
         return None
+
+    @staticmethod
+    def _rounded_solver_float(value: Any, *, digits: int = 4) -> Optional[float]:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return float(f"{numeric:.{digits}g}")
+
+    @classmethod
+    def solver_convergence_summary(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        residual_failure_threshold: float = SOLVER_RESIDUAL_FAILURE_THRESHOLD,
+    ) -> Optional[Dict[str, Any]]:
+        """Extract concise convergence information from solver run metadata."""
+
+        if not isinstance(data, Mapping):
+            return None
+        solver = data.get("solver", data)
+        if not isinstance(solver, Mapping):
+            return None
+        convergence = solver.get("convergence")
+        if not isinstance(convergence, Mapping):
+            return None
+
+        solves = []
+        for solve in cls._as_records(convergence.get("solves")):
+            residual = cls._rounded_solver_float(solve.get("residual"))
+            row = {}
+            for key in ("context", "solver", "status", "code", "grid", "tolerance"):
+                if key in solve:
+                    row[key] = solve[key]
+            if "converged" in solve:
+                row["converged"] = bool(solve.get("converged"))
+            if "iterations" in solve:
+                try:
+                    row["iterations"] = int(solve.get("iterations"))
+                except (TypeError, ValueError):
+                    pass
+            if residual is not None:
+                row["residual"] = residual
+            solves.append(row)
+
+        residuals = [
+            solve["residual"] for solve in solves if solve.get("residual") is not None
+        ]
+        iterations = [
+            solve["iterations"]
+            for solve in solves
+            if solve.get("iterations") is not None
+        ]
+        converged = convergence.get("converged")
+        if converged is None and solves:
+            converged = all(solve.get("converged", True) for solve in solves)
+        if converged is not None:
+            converged = bool(converged)
+        residual = max(residuals) if residuals else None
+        residual_failed = residual is not None and residual > float(
+            residual_failure_threshold
+        )
+        convergence_failed = converged is False
+        failed = bool(convergence_failed or residual_failed)
+        raw_status = str(convergence.get("status", "unknown"))
+        if not failed and solves and raw_status == "not_run":
+            raw_status = "converged"
+
+        summary: Dict[str, Any] = {
+            "status": "failed" if failed else raw_status,
+            "converged": converged,
+            "failed": failed,
+            "residual_failure_threshold": residual_failure_threshold,
+        }
+        for key in ("solve_count", "failure_count", "worst_code"):
+            if key in convergence:
+                summary[key] = convergence[key]
+        try:
+            solve_count = int(summary.get("solve_count", 0))
+        except (TypeError, ValueError):
+            solve_count = 0
+        if solves and solve_count <= 0:
+            summary["solve_count"] = len(solves)
+        if iterations:
+            summary["iterations"] = max(iterations)
+            summary["total_iterations"] = int(sum(iterations))
+        if residual is not None:
+            summary["residual"] = residual
+        if solves:
+            summary["solves"] = solves
+        return summary
+
+    @classmethod
+    def _record_solver_convergence(
+        cls, record: Mapping[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        solver = record.get("solver")
+        if isinstance(solver, Mapping):
+            summary = cls.solver_convergence_summary({"solver": solver})
+            if summary is not None:
+                return summary
+        manifest = record.get("run_manifest")
+        if isinstance(manifest, Mapping):
+            return cls.solver_convergence_summary(manifest)
+        if isinstance(manifest, (str, os.PathLike)):
+            try:
+                manifest_data = json.loads(Path(manifest).read_text())
+            except (OSError, json.JSONDecodeError):
+                return None
+            return cls.solver_convergence_summary(manifest_data)
+        return None
+
+    @classmethod
+    def _record_solver_failed(cls, record: Mapping[str, Any]) -> bool:
+        summary = cls._record_solver_convergence(record)
+        return bool(summary and summary.get("failed"))
+
+    @classmethod
+    def _aggregate_solver_convergence(
+        cls, task_convergences: Sequence[Mapping[str, Any]], failed_tasks: int
+    ) -> Dict[str, Any]:
+        """Aggregate task-level solver convergence for the Python run manifest."""
+
+        solve_count = 0
+        failure_count = 0
+        worst_code = 0
+        total_iterations = 0
+        residuals = []
+        any_converged_false = False
+        any_converged_value = False
+
+        for convergence in task_convergences:
+            solves = cls._as_records(convergence.get("solves"))
+            try:
+                count = int(convergence.get("solve_count", 0))
+            except (TypeError, ValueError):
+                count = 0
+            solve_count += count if count > 0 else len(solves)
+
+            try:
+                failure_count += int(convergence.get("failure_count", 0))
+            except (TypeError, ValueError):
+                pass
+
+            try:
+                worst_code = max(worst_code, int(convergence.get("worst_code", 0)))
+            except (TypeError, ValueError):
+                pass
+
+            iterations = convergence.get("total_iterations")
+            if iterations is None:
+                iterations = convergence.get("iterations")
+            try:
+                total_iterations += int(iterations)
+            except (TypeError, ValueError):
+                pass
+
+            residual = convergence.get("residual", convergence.get("final_residual"))
+            if residual is not None:
+                try:
+                    residuals.append(float(residual))
+                except (TypeError, ValueError):
+                    pass
+
+            if "converged" in convergence:
+                any_converged_value = True
+                if convergence.get("converged") is False:
+                    any_converged_false = True
+
+        failed = bool(failed_tasks or failure_count or any_converged_false)
+        if solve_count == 0 and not task_convergences:
+            status = "not_run"
+        else:
+            status = "failed" if failed else "converged"
+        residual = max(residuals) if residuals else None
+        residual_failed = (
+            residual is not None and residual > SOLVER_RESIDUAL_FAILURE_THRESHOLD
+        )
+        if residual_failed:
+            failed = True
+            status = "failed"
+        return {
+            "status": status,
+            "converged": (not failed) if any_converged_value or solve_count else None,
+            "failure_count": failure_count + int(residual_failed),
+            "solve_count": solve_count,
+            "worst_code": worst_code,
+            **({"iterations": total_iterations} if total_iterations else {}),
+            **(
+                {"residual": cls._rounded_solver_float(residual)}
+                if residual is not None
+                else {}
+            ),
+            "residual_failure_threshold": SOLVER_RESIDUAL_FAILURE_THRESHOLD,
+        }
+
+    @classmethod
+    def _task_is_complete(
+        cls, record: Mapping[str, Any], normalized_status: Optional[str]
+    ) -> bool:
+        if "complete" in record:
+            return bool(record.get("complete"))
+        if normalized_status in {"succeeded", "current", "reused", "skipped"}:
+            return True
+        return cls._normalized_task_status(record.get("status")) == "succeeded"
 
     @staticmethod
     def _record_duration_seconds(record: Mapping[str, Any]) -> Optional[float]:
@@ -609,7 +817,7 @@ class SimulationJob(ABC):
             if duration is not None:
                 row["duration_seconds"] = duration
             status = self._normalized_task_status(record.get("status"))
-            if status == "failed":
+            if status == "failed" or self._record_solver_failed(record):
                 row["status"] = "failed"
             elif status == "succeeded" and row["current"] and row["status"] != "failed":
                 row["status"] = "succeeded"
@@ -819,6 +1027,239 @@ class SimulationJob(ABC):
             MaxNLocator(nbins=max(2, int(max_xticks)), integer=integer_axis)
         )
         ax.grid(axis="y", alpha=0.25)
+        if show:
+            plt.show()
+        return ax
+
+    def phase_timings(
+        self,
+        phases: Optional[Sequence[str]] = None,
+        *,
+        include_zero: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return per-frequency solver phase timings from run metadata.
+
+        The fast solver writes phase timings in ``_fs_run/timings.json`` when
+        they are available. Rows returned by this method are keyed by task and
+        frequency, with one numeric column per phase. Missing phases are filled
+        with zero so the result is easy to tabulate or plot.
+        """
+
+        requested = [str(phase) for phase in phases] if phases is not None else None
+        rows_by_task = {row["task"]: row for row in self.frequency_status()}
+        timing_records: Dict[int, Mapping[str, Any]] = {}
+        phase_names: List[str] = []
+
+        for record in self._task_records():
+            phase_map = record.get("phases") or record.get("phase_timings")
+            if not isinstance(phase_map, Mapping):
+                continue
+            task = self._task_number_from_record(record)
+            if task is None:
+                continue
+            timing_records[task] = phase_map
+            for phase in phase_map:
+                phase = str(phase)
+                if requested is not None and phase not in requested:
+                    continue
+                if phase not in phase_names:
+                    phase_names.append(phase)
+
+        if requested is not None:
+            phase_names = requested
+
+        rows: List[Dict[str, Any]] = []
+        for task in sorted(timing_records):
+            phase_map = timing_records[task]
+            values: Dict[str, float] = {}
+            total = 0.0
+            for phase in phase_names:
+                try:
+                    seconds = float(phase_map.get(phase, 0.0))
+                except (TypeError, ValueError):
+                    seconds = 0.0
+                if seconds != 0.0 or include_zero:
+                    values[phase] = seconds
+                total += seconds
+            if not values and not include_zero:
+                continue
+            status_row = rows_by_task.get(task, {})
+            rows.append(
+                {
+                    "task": task,
+                    "frequency": status_row.get("frequency"),
+                    "status": status_row.get("status"),
+                    "total_seconds": total,
+                    **values,
+                }
+            )
+        return rows
+
+    def plot_phase_timings(
+        self,
+        ax: Optional[Any] = None,
+        *,
+        phases: Optional[Sequence[str]] = None,
+        x: str = "frequency",
+        style: str = "auto",
+        unit: str = "seconds",
+        include_zero: bool = False,
+        max_xticks: int = 8,
+        show: bool = False,
+        title: Optional[str] = None,
+        colors: Optional[Mapping[str, str]] = None,
+        **plot_kwargs: Any,
+    ) -> Any:
+        """Plot stacked per-frequency solver phase timings.
+
+        ``unit`` may be ``"seconds"`` or ``"hours"``. For long frequency
+        sweeps the default style switches from stacked bars to one line per
+        phase so the plot remains readable.
+        """
+
+        rows = self.phase_timings(phases=phases, include_zero=include_zero)
+        if not rows:
+            raise ValueError(
+                "No solver phase timings were found in run metadata for this job"
+            )
+
+        try:
+            import matplotlib.pyplot as plt
+        except ModuleNotFoundError as exc:
+            from frequensolve._optional import optional_dependency_error
+
+            raise optional_dependency_error(
+                "Job phase timing plotting",
+                extra="visual",
+                dependencies=("matplotlib",),
+                error=exc,
+            ) from exc
+
+        if ax is None:
+            _, ax = plt.subplots()
+
+        from matplotlib.ticker import MaxNLocator
+
+        def frequency_x(value: Any) -> Optional[float]:
+            if isinstance(value, Mapping) and "real" in value:
+                return float(value["real"])
+            try:
+                return float(np.real(value))
+            except (TypeError, ValueError):
+                return None
+
+        if x not in {"frequency", "task"}:
+            raise ValueError("x must be 'frequency' or 'task'")
+
+        x_values = [frequency_x(row["frequency"]) for row in rows]
+        use_frequency_axis = x == "frequency" and all(
+            value is not None for value in x_values
+        )
+        if use_frequency_axis:
+            plot_rows = sorted(zip(x_values, rows), key=lambda item: float(item[0]))
+            xs = np.asarray([float(value) for value, _row in plot_rows])
+            rows = [row for _value, row in plot_rows]
+            ax.set_xlabel("Frequency (Hz)")
+            integer_axis = False
+        else:
+            xs = np.asarray([row["task"] for row in rows], dtype=float)
+            ax.set_xlabel("Frequency task")
+            integer_axis = True
+
+        normalized_unit = unit.strip().lower().replace("_", "-")
+        if normalized_unit in {"s", "sec", "secs", "second", "seconds"}:
+            scale = 1.0
+            ylabel = "Runtime (s)"
+        elif normalized_unit in {"h", "hr", "hrs", "hour", "hours"}:
+            scale = 1.0 / 3600.0
+            ylabel = "Runtime (hours)"
+        else:
+            raise ValueError("unit must be 'seconds' or 'hours'")
+
+        phase_names = list(phases) if phases is not None else []
+        if not phase_names:
+            for row in rows:
+                for key, value in row.items():
+                    if key in {"task", "frequency", "status", "total_seconds"}:
+                        continue
+                    if not include_zero and float(value) == 0.0:
+                        continue
+                    if key not in phase_names:
+                        phase_names.append(key)
+        if not phase_names:
+            raise ValueError("No nonzero solver phases were found for plotting")
+
+        if style == "auto":
+            plot_style = "bar" if len(rows) <= 80 else "line"
+        elif style in {"bar", "line"}:
+            plot_style = style
+        else:
+            raise ValueError("style must be 'auto', 'bar', or 'line'")
+
+        default_colors = {
+            "setup": "#546e7a",
+            "mesh": "#00897b",
+            "assembly": "#3949ab",
+            "solve_forward": "#ef6c00",
+            "solve_adjoint": "#8e24aa",
+            "imaging": "#c62828",
+        }
+        palette = {**default_colors, **dict(colors or {})}
+
+        values_by_phase = {
+            phase: np.asarray([float(row.get(phase, 0.0)) * scale for row in rows])
+            for phase in phase_names
+        }
+        if not include_zero:
+            values_by_phase = {
+                phase: values
+                for phase, values in values_by_phase.items()
+                if np.any(values != 0.0)
+            }
+            phase_names = [phase for phase in phase_names if phase in values_by_phase]
+            if not phase_names:
+                raise ValueError("No nonzero solver phases were found for plotting")
+
+        if plot_style == "bar":
+            width = 0.8
+            if use_frequency_axis and len(xs) > 1:
+                diffs = np.diff(np.unique(xs))
+                diffs = diffs[diffs > 0.0]
+                if len(diffs):
+                    width = 0.8 * float(np.min(diffs))
+            bottoms = np.zeros(len(rows), dtype=float)
+            for phase in phase_names:
+                values = values_by_phase[phase]
+                ax.bar(
+                    xs,
+                    values,
+                    bottom=bottoms,
+                    width=width,
+                    label=phase.replace("_", " "),
+                    color=palette.get(phase),
+                    **plot_kwargs,
+                )
+                bottoms += values
+        else:
+            marker = "o" if len(rows) <= 50 else None
+            for phase in phase_names:
+                ax.plot(
+                    xs,
+                    values_by_phase[phase],
+                    marker=marker,
+                    linewidth=1.8,
+                    label=phase.replace("_", " "),
+                    color=palette.get(phase),
+                    **plot_kwargs,
+                )
+
+        ax.set_ylabel(ylabel)
+        ax.set_title(title or f"{self.name} solver phase timings")
+        ax.xaxis.set_major_locator(
+            MaxNLocator(nbins=max(2, int(max_xticks)), integer=integer_axis)
+        )
+        ax.grid(axis="y", alpha=0.25)
+        ax.legend()
         if show:
             plt.show()
         return ax
@@ -1117,25 +1558,73 @@ class SimulationJob(ABC):
                 task_status = "succeeded"
             if task_status is None:
                 task_status = "not_run"
+            solver_convergence = self._record_solver_convergence(result)
+            if solver_convergence is not None and solver_convergence.get("failed"):
+                task_status = "failed"
 
             duration = self._record_duration_seconds(result)
             row = {
                 "task": task,
                 "frequency": self._canonical_frequency_value(self.f_list[task - 1]),
                 "status": task_status,
+                "complete": self._task_is_complete(result, task_status),
                 "fingerprint": self.task_fingerprint(task),
                 "path": stored_path,
                 "exists": exists,
             }
+            if solver_convergence is not None:
+                row["solver"] = {"convergence": solver_convergence}
             if duration is not None:
                 row["duration_seconds"] = duration
             core_count = self._record_core_count(result)
             if core_count is not None:
                 row["core_count"] = core_count
-            for key in ("n_ranks", "ranks", "threads_per_rank", "n_threads", "threads"):
+            for key in (
+                "n_ranks",
+                "ranks",
+                "threads_per_rank",
+                "n_threads",
+                "threads",
+            ):
                 if key in result:
                     row[key] = result[key]
             task_rows.append(row)
+
+        task_summary = {
+            "total": len(task_rows),
+            "complete": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "not_run": 0,
+        }
+        solver_convergences = []
+        solver_task_summaries = []
+        for row in task_rows:
+            if row.get("complete"):
+                task_summary["complete"] += 1
+            status_key = row.get("status")
+            normalized_status = self._normalized_task_status(status_key)
+            if normalized_status == "succeeded":
+                task_summary["succeeded"] += 1
+            elif normalized_status == "failed":
+                task_summary["failed"] += 1
+            elif normalized_status == "not_run":
+                task_summary["not_run"] += 1
+            convergence = row.get("solver", {}).get("convergence")
+            if isinstance(convergence, Mapping):
+                solver_convergences.append(convergence)
+                solver_task_summaries.append(
+                    {
+                        "task": row["task"],
+                        "frequency": row["frequency"],
+                        "converged": convergence.get("converged"),
+                        "iterations": convergence.get("iterations"),
+                        "residual": convergence.get(
+                            "residual", convergence.get("final_residual")
+                        ),
+                        "status": convergence.get("status"),
+                    }
+                )
 
         payload = {
             "schema": "frequensolve-python-run-1",
@@ -1144,13 +1633,57 @@ class SimulationJob(ABC):
             "fingerprint": self.fingerprint(),
             "fingerprint_payload": self.fingerprint_payload(),
             "tasks": task_rows,
+            "task_summary": task_summary,
             "outputs": {"traces": files},
         }
+        if solver_task_summaries:
+            aggregate_convergence = self._aggregate_solver_convergence(
+                solver_convergences, task_summary["failed"]
+            )
+            payload["solver"] = {
+                "convergence": {
+                    **aggregate_convergence,
+                    "tasks": solver_task_summaries,
+                }
+            }
         if task_results:
             payload["task_results"] = task_results
         payload.update(extra)
         self._write_json_file(self.run_state_file, payload)
+        self._write_solver_run_manifest_summary(payload)
         return self.run_state_file
+
+    def _write_solver_run_manifest_summary(self, payload: Mapping[str, Any]) -> None:
+        """Mirror Python job-level task/convergence summaries into solver metadata."""
+
+        manifest_path = self._result_path / "_fs_run" / "run_manifest.json"
+        if not manifest_path.exists():
+            return
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(manifest, dict):
+            return
+
+        task_summary = payload.get("task_summary")
+        if isinstance(task_summary, Mapping):
+            manifest["task_summary"] = dict(task_summary)
+
+        solver_payload = payload.get("solver")
+        convergence = (
+            solver_payload.get("convergence")
+            if isinstance(solver_payload, Mapping)
+            else None
+        )
+        if isinstance(convergence, Mapping):
+            solver = manifest.get("solver")
+            if not isinstance(solver, dict):
+                solver = {}
+            solver["convergence"] = dict(convergence)
+            manifest["solver"] = solver
+
+        self._write_json_file(manifest_path, manifest)
 
     @staticmethod
     def _write_json_file(path: Path, payload: Dict[str, Any]) -> None:
@@ -1382,11 +1915,14 @@ class TimeDomainJob(SimulationJob):
         simulation: BaseSimulation,
         f_max: float,
         f_min: float = 0.0,
-        s_laplace: float = 0.0,
+        damping_factor: Optional[float] = None,
+        laplace: Optional[float] = None,
         df: Optional[float] = None,
         T_max: Optional[float] = None,
         outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
     ):
+        if damping_factor is not None and laplace is not None:
+            raise ValueError("Specify only one of damping_factor or laplace")
         if df is None and T_max is None:
             raise ValueError("TimeDomainJob requires either df or T_max")
         if T_max is not None:
@@ -1400,12 +1936,19 @@ class TimeDomainJob(SimulationJob):
         if f_max <= f_min:
             raise ValueError("f_max must be greater than f_min")
 
+        period = 1.0 / df
+        if damping_factor is not None:
+            if damping_factor < 1.0:
+                raise ValueError("damping_factor must be greater than or equal to 1")
+            laplace = -np.log(float(damping_factor)) / (2.0 * np.pi * period)
+
         if f_min == 0.0:
             f_min = f_min + df
         f_list = np.arange(f_min, f_max + df / 2, df)
 
-        s_laplace = -abs(s_laplace)
-        f_list = f_list + 1j * s_laplace
+        laplace = -abs(float(laplace or 0.0))
+        if laplace != 0.0:
+            f_list = f_list + 1j * laplace
 
         workflow = "forward"
         super().__init__(name, simulation, workflow, f_list, JobOutputs(outputs))
@@ -1419,8 +1962,10 @@ class TimeDomainJob(SimulationJob):
         f_min = float(np.real(f_list[0]))
         f_max = float(np.real(f_list[-1]))
         df = float(np.real(f_list[1] - f_list[0]))
-        s_laplace = float(np.imag(f_list[0]))
-        expected = np.arange(f_min, f_max + df / 2, df) + 1j * s_laplace
+        laplace = float(np.imag(f_list[0]))
+        expected = np.arange(f_min, f_max + df / 2, df)
+        if laplace != 0.0:
+            expected = expected + 1j * laplace
         if not np.allclose(f_list, expected):
             raise ValueError("Frequency list does not appear to be uniform")
 
@@ -1436,7 +1981,7 @@ class TimeDomainJob(SimulationJob):
             f_min=f_min,
             f_max=f_max,
             df=df,
-            s_laplace=s_laplace,
+            laplace=laplace,
             outputs=JobOutputs.from_fs(d.get("Outputs")),
         )
         job._job_id = d.get("job_id")

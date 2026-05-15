@@ -18,6 +18,14 @@ __all__ = [
     "plot_vtu_slice",
 ]
 
+_DEFAULT_SCALAR_BAR_ARGS = {
+    "vertical": False,
+    "position_x": 0.25,
+    "position_y": 0.05,
+    "width": 0.5,
+    "height": 0.1,
+}
+
 
 def _pyvista():
     try:
@@ -547,6 +555,24 @@ def _set_vtu_view(plotter, view: str | None) -> None:
     plotter.reset_camera()
 
 
+def _scalar_bar_args(
+    scalar_bar: bool | Mapping[str, Any],
+    scalar_bar_args: Mapping[str, Any] | None,
+    *,
+    title: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    if isinstance(scalar_bar, Mapping):
+        args = {**_DEFAULT_SCALAR_BAR_ARGS, **scalar_bar, **(scalar_bar_args or {})}
+        show_scalar_bar = True
+    else:
+        show_scalar_bar = bool(scalar_bar)
+        args = {**_DEFAULT_SCALAR_BAR_ARGS, **(scalar_bar_args or {})}
+    if not show_scalar_bar:
+        return False, None
+    args.setdefault("title", title)
+    return True, args
+
+
 def plot_vtu(
     vtu,
     field: str | None = None,
@@ -567,6 +593,7 @@ def plot_vtu(
     scalar_bar: bool | Mapping[str, Any] = True,
     background: str = "white",
     view: str | None = "x_depth",
+    zoom: float | None = None,
     window_size: tuple[int, int] | None = None,
     screenshot: str | Path | None = None,
     show: bool = True,
@@ -601,6 +628,9 @@ def plot_vtu(
     view:
         Camera view. The default ``"x_depth"`` orients +x to the right and
         +y/depth downward for 2D x-depth solver outputs.
+    zoom:
+        Optional camera zoom factor applied after the view is reset. Values
+        greater than 1 fill more of the screenshot/window.
 
     Returns
     -------
@@ -639,15 +669,11 @@ def plot_vtu(
             float(np.nanmax(scalar_values)) if vmax is None else float(vmax),
         )
 
-    scalar_bar_args = add_mesh_kwargs.pop("scalar_bar_args", None)
-    if isinstance(scalar_bar, Mapping):
-        scalar_bar_args = {**scalar_bar, **(scalar_bar_args or {})}
-        show_scalar_bar = True
-    else:
-        show_scalar_bar = bool(scalar_bar)
-    if show_scalar_bar:
-        scalar_bar_args = dict(scalar_bar_args or {})
-        scalar_bar_args.setdefault("title", scalar_name)
+    show_scalar_bar, scalar_bar_args = _scalar_bar_args(
+        scalar_bar,
+        add_mesh_kwargs.pop("scalar_bar_args", None),
+        title=scalar_name,
+    )
 
     mesh_kwargs = {
         "scalars": scalar_name,
@@ -670,6 +696,11 @@ def plot_vtu(
             **add_mesh_kwargs,
         }
         plotter.add_mesh(edge_mesh, **mesh_kwargs)
+
+    if zoom is not None:
+        if zoom <= 0:
+            raise ValueError("zoom must be positive")
+        plotter.camera.zoom(float(zoom))
 
     if screenshot is not None:
         plotter.screenshot(str(screenshot))

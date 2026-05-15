@@ -40,6 +40,14 @@ class TraceDataset:
     def metadata(self) -> Dict[str, Any]:
         f_list = np.sort(np.asarray(list(self.manifest.frequencies.values())))
         df = float(np.diff(f_list).min()) if len(f_list) > 1 else 1.0
+        laplace_map = {
+            int(index): float(
+                self.manifest.laplace.get(
+                    index, self.manifest.laplace.get(str(index), 0.0)
+                )
+            )
+            for index in self.manifest.frequencies
+        }
         return {
             "project": self.manifest.project_path,
             "simulation": self.manifest.simulation,
@@ -49,6 +57,7 @@ class TraceDataset:
             "df": df,
             "f_max": float(f_list[-1]),
             "f_map": dict(self.manifest.frequencies),
+            "laplace_map": laplace_map,
             **(
                 {
                     "duplicate_frequencies": self.manifest.run.state[
@@ -94,9 +103,11 @@ class TraceDataset:
         if packed_file is not None:
             files = [packed_file]
             frequencies = manifest.packed_frequencies or dict(manifest.frequencies)
+            laplace = manifest.packed_laplace or dict(manifest.laplace)
         else:
             files = [TraceManifest.resolve_trace_file(file) for file in manifest.files]
             frequencies = dict(manifest.frequencies)
+            laplace = dict(manifest.laplace)
         return cls(
             manifest=TraceManifest(
                 files=files,
@@ -106,6 +117,7 @@ class TraceDataset:
                 result_path=manifest.result_path,
                 output_path=manifest.output_path,
                 project_path=manifest.project_path,
+                laplace=laplace,
                 components=list(manifest.components),
                 sources=list(manifest.sources),
                 artifacts=list(manifest.artifacts),
@@ -129,12 +141,14 @@ class TraceDataset:
         if not path.exists():
             raise FileNotFoundError(f"Trace file not found: {path}")
         frequencies = TraceStore._read_trace_frequencies(path)
+        laplace = TraceStore._read_trace_laplace_values(path)
         groups = TraceStore.discover_trace_groups(path)
         manifest = TraceManifest(
             files=[TraceManifest.resolve_trace_file(path)],
             frequencies={
                 index: frequency for index, frequency in enumerate(frequencies, start=1)
             },
+            laplace={index: value for index, value in enumerate(laplace, start=1)},
             groups=groups,
             simulation=path,
             result_path=path.parent,
@@ -261,6 +275,9 @@ class TraceDataset:
             return self.store.frequencies(group)
         return np.sort(np.asarray(list(self.metadata["f_map"].values())))
 
+    def laplace(self, group: Optional[str] = None):
+        return self.store.laplace(group)
+
     def format_summary(self, colorize: bool = False) -> TraceSummary:
         return self.store.format_summary(colorize=colorize)
 
@@ -300,9 +317,31 @@ class TraceDataset:
         wavelet: Wavelet,
         upscale: int = 1,
         T_max: Optional[float] = None,
+        laplace_compensation: str = "auto",
         **kwargs,
     ):
         return self.store.read_TD(
+            group,
+            component,
+            source,
+            wavelet,
+            upscale=upscale,
+            T_max=T_max,
+            laplace_compensation=laplace_compensation,
+            **kwargs,
+        )
+
+    def laplace_domain(
+        self,
+        group: str,
+        component: str,
+        source: int,
+        wavelet: Wavelet,
+        upscale: int = 1,
+        T_max: Optional[float] = None,
+        **kwargs,
+    ):
+        return self.store.read_LD(
             group,
             component,
             source,
@@ -336,9 +375,31 @@ class TraceDataset:
         wavelet: Wavelet,
         upscale: int = 1,
         T_max: Optional[float] = None,
+        laplace_compensation: str = "auto",
         **kwargs,
     ):
         return self.time_domain(
+            group,
+            component,
+            source=source,
+            wavelet=wavelet,
+            upscale=upscale,
+            T_max=T_max,
+            laplace_compensation=laplace_compensation,
+            **kwargs,
+        )
+
+    def ld(
+        self,
+        group: str,
+        component: str,
+        source: int,
+        wavelet: Wavelet,
+        upscale: int = 1,
+        T_max: Optional[float] = None,
+        **kwargs,
+    ):
+        return self.laplace_domain(
             group,
             component,
             source=source,

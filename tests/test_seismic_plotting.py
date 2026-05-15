@@ -15,7 +15,13 @@ from frequensolve.plotting.traces import (
     plot_timelag,
     plot_xf,
 )
-from frequensolve.plotting.vtu import plot_vtu, plot_vtu_slice, read_vtu, vtu_fields
+from frequensolve.plotting.vtu import (
+    _scalar_bar_args,
+    plot_vtu,
+    plot_vtu_slice,
+    read_vtu,
+    vtu_fields,
+)
 
 
 def _time_trace(n_time=64, n_receiver=8):
@@ -269,6 +275,55 @@ def test_vtu_default_view_orients_depth_down(tmp_path):
         (0.0, 0.0, -1.0),
     )
     plotter.close()
+
+
+def test_vtu_plot_accepts_camera_zoom(tmp_path):
+    path = _write_sample_vtu(tmp_path)
+
+    plotter, _ = plot_vtu(
+        path,
+        "pressure_1",
+        part="re",
+        zoom=1.25,
+        show=False,
+        return_mesh=True,
+    )
+
+    assert plotter is not None
+    plotter.close()
+
+
+def test_vtu_plot_rejects_non_positive_camera_zoom(tmp_path):
+    path = _write_sample_vtu(tmp_path)
+
+    with pytest.raises(ValueError, match="zoom must be positive"):
+        plot_vtu(path, "pressure_1", zoom=0.0, show=False)
+
+
+def test_vtu_default_scalar_bar_is_horizontal_centered_and_wide():
+    show, args = _scalar_bar_args(True, None, title="Pressure")
+
+    assert show is True
+    assert args["title"] == "Pressure"
+    assert args["vertical"] is False
+    assert args["position_x"] == pytest.approx(0.22)
+    assert args["position_y"] == pytest.approx(0.06)
+    assert args["width"] == pytest.approx(0.56)
+    assert args["height"] == pytest.approx(0.08)
+
+
+def test_vtu_scalar_bar_options_override_defaults():
+    show, args = _scalar_bar_args(
+        {"vertical": True, "width": 0.1},
+        {"title": "Custom"},
+        title="Pressure",
+    )
+
+    assert show is True
+    assert args["title"] == "Custom"
+    assert args["vertical"] is True
+    assert args["width"] == pytest.approx(0.1)
+    assert args["position_x"] == pytest.approx(0.22)
 
 
 def test_vtu_part_aliases_accept_explicit_solver_array_names(tmp_path):

@@ -9,49 +9,33 @@ __all__ = ["BoundaryCondition", "BoundaryConditions", "BoundaryConditionManager"
 ConditionInput = Union[str, Sequence[str]]
 BoundaryLabel = Union[str, int]
 
+
 _CONDITION_ALIASES = {
     "neumann": "free",
 }
-_UNSET = object()
+
 _DEFAULT_PML_REFLECTION = 1e-3
 
 
-def _normalize_conditions(value: ConditionInput, *, field_name: str) -> List[str]:
+def _normalize_condition(condition: Any) -> str:
+    value = str(condition).strip().lower()
+    if not value:
+        raise ValueError("Boundary condition names cannot be empty")
+    return _CONDITION_ALIASES.get(value, value)
+
+
+def _normalize_conditions(value: ConditionInput) -> List[str]:
     if isinstance(value, str):
-        raw_conditions = [value]
-    else:
-        try:
-            raw_conditions = list(value)
-        except TypeError as exc:
-            raise TypeError(
-                f"{field_name} must be a string or sequence of strings"
-            ) from exc
-
-    conditions: List[str] = []
-    for item in raw_conditions:
-        condition = str(item).strip().lower()
-        if not condition:
-            raise ValueError(f"{field_name} cannot contain empty condition names")
-        condition = _CONDITION_ALIASES.get(condition, condition)
-        if condition not in conditions:
-            conditions.append(condition)
-
-    if not conditions:
-        raise ValueError(f"{field_name} must contain at least one condition")
-    return conditions
+        return [_normalize_condition(value)]
+    return [_normalize_condition(condition) for condition in value]
 
 
-def _resolve_pml_reflection(
-    pml_reflection: Any = _UNSET,
-    pml_reflectivity: Any = _UNSET,
-) -> float:
-    if pml_reflection is not _UNSET and pml_reflectivity is not _UNSET:
-        raise ValueError("Specify only one of pml_reflection or pml_reflectivity")
-    if pml_reflectivity is not _UNSET:
-        return pml_reflectivity
-    if pml_reflection is not _UNSET:
-        return pml_reflection
-    return _DEFAULT_PML_REFLECTION
+def _normalize_boundaries(
+    value: Union[BoundaryLabel, Sequence[BoundaryLabel]],
+) -> List[BoundaryLabel]:
+    if isinstance(value, (str, int)):
+        return [value]
+    return list(value)
 
 
 @dataclass
@@ -79,62 +63,31 @@ class BoundaryCondition:
 
     pml_wavelengths: float = 2.0
     pml_exponent: float = 3.0
-    pml_constant: float = 20.0
-    pml_reflection: float = 1e-3
+    pml_reflection: Optional[float] = None
+    pml_reflectivity: Optional[float] = None
+    pml_constant: Optional[float] = 20.0
     stretch_limit: float = 0.25
-
-    def __init__(
-        self,
-        name: Optional[str] = None,
-        kind: Optional[ConditionInput] = None,
-        boundaries: Optional[Sequence[BoundaryLabel]] = None,
-        conditions: Optional[ConditionInput] = None,
-        pml_wavelengths: float = 2.0,
-        pml_exponent: float = 3.0,
-        pml_constant: float = 20.0,
-        pml_reflection: Any = _UNSET,
-        stretch_limit: float = 0.25,
-        **kwargs,
-    ) -> None:
-        pml_reflectivity = kwargs.pop("pml_reflectivity", _UNSET)
-        pml_reflection = _resolve_pml_reflection(
-            pml_reflection,
-            pml_reflectivity,
-        )
-        if kwargs:
-            names = ", ".join(sorted(kwargs))
-            raise TypeError(f"Unexpected BoundaryCondition argument(s): {names}")
-
-        self.name = name
-        self.kind = kind
-        self.boundaries = list(boundaries or [])
-        self.conditions = conditions
-        self.pml_wavelengths = pml_wavelengths
-        self.pml_exponent = pml_exponent
-        self.pml_constant = pml_constant
-        self.pml_reflection = pml_reflection
-        self.stretch_limit = stretch_limit
-        self.__post_init__()
 
     def __post_init__(self) -> None:
         if self.conditions is None and self.kind is None:
             raise ValueError("BoundaryCondition requires `conditions` or `kind`")
 
-        if self.conditions is None:
-            conditions = _normalize_conditions(self.kind, field_name="kind")  # type: ignore[arg-type]
-        else:
-            conditions = _normalize_conditions(self.conditions, field_name="conditions")
-            if self.kind is not None:
-                kind_conditions = _normalize_conditions(self.kind, field_name="kind")
-                if kind_conditions != conditions:
-                    raise ValueError(
-                        "`kind` and `conditions` describe different boundary "
-                        "conditions; use only `conditions` for multi-condition BCs"
-                    )
+        if self.pml_reflection is not None and self.pml_reflectivity is not None:
+            raise ValueError("Specify only one of pml_reflection or pml_reflectivity")
+        if self.pml_reflection is None:
+            self.pml_reflection = (
+                self.pml_reflectivity
+                if self.pml_reflectivity is not None
+                else _DEFAULT_PML_REFLECTION
+            )
+        self.pml_reflectivity = None
 
-        self.conditions = conditions
-        self.kind = conditions[0]
-        self.boundaries = list(self.boundaries)
+        if self.conditions is None:
+            self.conditions = _normalize_conditions(self.kind)
+        else:
+            self.conditions = _normalize_conditions(self.conditions)
+        self.kind = self.conditions[0]
+        self.boundaries = _normalize_boundaries(self.boundaries)
 
     @classmethod
     def from_fs(cls, data: Dict) -> "BoundaryCondition":
@@ -142,23 +95,20 @@ class BoundaryCondition:
             condition_kwargs = {"conditions": data["conditions"]}
         else:
             condition_kwargs = {"kind": data["kind"]}
-        pml_reflection = _resolve_pml_reflection(
-            data.get("pml_reflection", _UNSET),
-            data.get("pml_reflectivity", _UNSET),
-        )
         return cls(
             name=data.get("name"),
             boundaries=data["boundaries"],
             pml_wavelengths=data.get("pml_wavelengths", 2.0),
             pml_exponent=data.get("pml_exponent", 3.0),
             pml_constant=data.get("pml_constant", 20.0),
-            pml_reflection=pml_reflection,
-            stretch_limit=data.get("stretch_limit", 1.0),
+            pml_reflection=data.get("pml_reflection"),
+            pml_reflectivity=data.get("pml_reflectivity"),
+            stretch_limit=data.get("stretch_limit", 0.25),
             **condition_kwargs,
         )
 
     def has_condition(self, condition: str) -> bool:
-        return condition.strip().lower() in self.conditions
+        return _normalize_condition(condition) in self.conditions
 
     def to_fs(self, ctx=None) -> Dict:
         bc_dict = {
@@ -168,7 +118,11 @@ class BoundaryCondition:
                 {
                     "pml_wavelengths": self.pml_wavelengths,
                     "pml_exponent": self.pml_exponent,
-                    "pml_constant": self.pml_constant,
+                    **(
+                        {"pml_constant": self.pml_constant}
+                        if self.pml_constant is not None
+                        else {}
+                    ),
                     "pml_reflection": self.pml_reflection,
                     "stretch_limit": self.stretch_limit,
                 }

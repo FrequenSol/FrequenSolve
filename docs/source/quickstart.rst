@@ -111,7 +111,7 @@ example, the top is pressure-free and the sides/bottom use PML absorption.
    acq = fs.Acquisition()
    acq.add_source_group(kind="scalar", coords=[[0.5, 0.025]])
 
-   hydrophone = fs.ReceiverNode(name="hydrophone")
+   hydrophone = fs.ReceiverNode()
    hydrophone.add_component(name="p", field="pressure")
 
    receiver_coords = [[x, 0.05] for x in np.linspace(0.0, 1.0, 101)]

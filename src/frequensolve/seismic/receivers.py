@@ -17,7 +17,7 @@ from frequensolve.geometry.frame import CoordinateValue, Direction, direction_to
 from frequensolve.geometry.grids import CartesianGrid, Grid
 from frequensolve.seismic.sparse_survey import ReceiverSampling
 from frequensolve.seismic.wavelet import Wavelet
-from frequensolve.units import is_quantity, unit_expression
+from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.fields import canonical_field
 from frequensolve.util.mixins import ExtraFieldsMixin, TypeTaggedMixin, merge_extra
@@ -96,12 +96,12 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
     """Defines an abstract base class for a receiver device with multiple measurements (components).
 
     Attributes:
-       name (str): String identifier for this receiver.
+       name (Optional[str]): Optional identifier for this receiver device.
        components (List[ReceiverComponent]): List of components defining measurements.
        response (Optional[Wavelet]): Wavelet response of the receiver.
     """
 
-    name: str
+    name: Optional[str] = None
     components: List[ReceiverComponent] = field(default_factory=list)
     response: Optional[Wavelet] = None
 
@@ -118,7 +118,7 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
 
     def to_fs(self, ctx=None) -> dict:
         return {
-            "name": self.name,
+            **({"name": self.name} if self.name is not None else {}),
             "components": [c.to_fs(ctx) for c in self.components],
             **(
                 {"response": (self.response.to_fs(ctx))}
@@ -138,42 +138,86 @@ class ReceiverFiber(ReceiverDevice):
     """Defines a fiber receiver device (e.g. a DAS fiber) that integrates
     response over a length.
 
-    The response is integrated over the gauge length by averaging over the
-    number of points per gauge (n_gauge).
+    The response is integrated over the gauge length using either a reusable
+    sample spacing or a requested number of points per gauge.
 
     Attributes:
-       L_gauge (float): Length of the gauge.
-       n_gauge (int): Number of points per guage
-       radius (Optional[float]): Radius of the fiber.
-       pitch (Optional[float]): Pitch of the fiber.
+       gauge_length (float or quantity): Length of the gauge.
+       channel_spacing (Optional[float or quantity]): Spacing between fiber channels.
+       sample_spacing (Optional[float or quantity]): Spacing for samples along the gauge.
+       points_per_gauge (Optional[int]): Number of samples per gauge when
+            sample_spacing is not provided.
+       radius (Optional[float or quantity]): Radius of the fiber.
+       pitch (Optional[float or quantity]): Pitch of the fiber.
     """
 
-    L_gauge: float
-    n_gauge: int
-    radius: Optional[float] = None
-    pitch: Optional[float] = None
+    gauge_length: Any = None
+    channel_spacing: Optional[Any] = None
+    sample_spacing: Optional[Any] = None
+    points_per_gauge: Optional[int] = None
+    radius: Optional[Any] = None
+    pitch: Optional[Any] = None
+
+    def __init__(
+        self,
+        *,
+        name: Optional[str] = None,
+        components: Optional[List[ReceiverComponent]] = None,
+        gauge_length: Optional[Any] = None,
+        channel_spacing: Optional[Any] = None,
+        sample_spacing: Optional[Any] = None,
+        points_per_gauge: Optional[int] = None,
+        radius: Optional[Any] = None,
+        pitch: Optional[Any] = None,
+        response: Optional[Wavelet] = None,
+    ):
+        if gauge_length is None:
+            raise ValueError("ReceiverFiber requires gauge_length.")
+        if points_per_gauge is not None:
+            points_per_gauge = int(points_per_gauge)
+            if points_per_gauge < 1:
+                raise ValueError("ReceiverFiber points_per_gauge must be positive.")
+
+        self.name = name
+        self.components = list(components) if components is not None else []
+        self.response = response
+        self.gauge_length = gauge_length
+        self.channel_spacing = (
+            channel_spacing if channel_spacing is not None else gauge_length
+        )
+        self.sample_spacing = sample_spacing
+        self.points_per_gauge = points_per_gauge
+        self.radius = radius
+        self.pitch = pitch
 
     def to_fs(self, ctx=None) -> dict:
-        return {
+        data = {
             "_type": self.__class__.__name__,
             **super().to_fs(ctx),
-            "L_gauge": self.L_gauge,
-            "n_gauge": self.n_gauge,
-            **(
-                {"pitch": self.pitch, "radius": self.radius}
-                if self.pitch is not None
-                else {}
-            ),
+            "gauge_length": value_and_units_to_fs(self.gauge_length),
         }
+        if self.channel_spacing is not None:
+            data["channel_spacing"] = value_and_units_to_fs(self.channel_spacing)
+        if self.sample_spacing is not None:
+            data["sample_spacing"] = value_and_units_to_fs(self.sample_spacing)
+        if self.points_per_gauge is not None:
+            data["points_per_gauge"] = self.points_per_gauge
+        if self.radius is not None:
+            data["radius"] = value_and_units_to_fs(self.radius)
+        if self.pitch is not None:
+            data["pitch"] = value_and_units_to_fs(self.pitch)
+        return data
 
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverFiber":
         return cls(
-            name=data["name"],
+            name=data.get("name"),
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
             response=data.get("response"),
-            L_gauge=data["L_gauge"],
-            n_gauge=data["n_gauge"],
+            gauge_length=data.get("gauge_length"),
+            channel_spacing=data.get("channel_spacing"),
+            sample_spacing=data.get("sample_spacing"),
+            points_per_gauge=data.get("points_per_gauge"),
             radius=data.get("radius"),
             pitch=data.get("pitch"),
         )
@@ -206,7 +250,7 @@ class ReceiverNodeArray(ReceiverDevice):
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverNodeArray":
         return cls(
-            name=data["name"],
+            name=data.get("name"),
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
             response=data.get("response"),
             offsets=data["offsets"],
@@ -224,7 +268,7 @@ class ReceiverNode(ReceiverDevice):
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverNode":
         return cls(
-            name=data["name"],
+            name=data.get("name"),
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
             response=data.get("response"),
         )
@@ -849,7 +893,11 @@ class ReceiverGroup(ExtraFieldsMixin):
             return coords
         elif isinstance(coords, xr.DataArray):
             out = CoordsArray(coordinates=coords)
-        elif isinstance(coords, np.ndarray) or isinstance(coords, list):
+        elif (
+            is_quantity(coords)
+            or isinstance(coords, np.ndarray)
+            or isinstance(coords, list)
+        ):
             values, units, system = coordinate_array_metadata(coords)
             out = CoordsArray(coordinates=values, units=units, system=system)
         elif isinstance(coords, str) or isinstance(coords, Path):

@@ -31,6 +31,13 @@ TraceDataset
        fs.RickerWavelet(f=15.0),
        upscale=4,
    )
+   ld = traces.ld(
+       group,
+       component,
+       source,
+       fs.RickerWavelet(f=15.0),
+       upscale=4,
+   )
 
 Trace reads return ``xarray.DataArray`` objects. Trace files are HDF5-backed and
 may be consolidated into a local cache with ``traces.consolidate()``. SEGY
@@ -43,6 +50,13 @@ signal still includes pre-zero-time samples. The clearer keyword for that
 padding is ``pre_time``; the older ``center`` keyword is retained as an alias.
 If neither is supplied, ``RickerWavelet(f=...)`` uses one period of pre-time,
 ``1 / f``.
+
+Laplace-domain time sweeps can be requested with
+``TimeDomainJob(..., damping_factor=...)`` or the lower-level
+``TimeDomainJob(..., laplace=...)`` offset. ``traces.ld(...)`` reconstructs the
+damped Laplace-domain time series directly. ``traces.td(...)`` applies the
+matching amplitude compensation automatically when Laplace metadata are present;
+pass ``laplace_compensation="off"`` to inspect the uncompensated result.
 
 ParaView Output
 ---------------

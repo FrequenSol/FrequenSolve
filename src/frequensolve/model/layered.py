@@ -46,12 +46,28 @@ def _property_units(prop: Property) -> Optional[str]:
     return None
 
 
+def _axis_units(units: Optional[Dict[str, Any]]) -> Dict[str, Optional[str]]:
+    units = dict(units or {})
+    out = {"x": None, "y": None, "z": None}
+    for key, value in units.items():
+        out[key] = unit_expression(value) if value is not None else None
+    return out
+
+
 def _convert_units(
     value: float, source_units: Optional[str], target_units: Optional[str]
 ):
     if not source_units or not target_units or source_units == target_units:
         return value
     return (value * ureg(source_units)).to(target_units).magnitude
+
+
+def _convert_surface_value(
+    value: float,
+    surface: "SimpleSurface",
+    target_units: Optional[str],
+) -> float:
+    return _convert_units(value, _property_units(surface.depth), target_units)
 
 
 def _convert_dataarray_units(
@@ -72,6 +88,14 @@ def _convert_dataarray_units(
     converted.data = (converted.data * ureg(source_units)).to(target_units).magnitude
     converted.attrs["units"] = target_units
     return converted
+
+
+def _convert_surface_depth(
+    depth: xr.DataArray,
+    surface: "SimpleSurface",
+    target_units: Optional[str],
+) -> xr.DataArray:
+    return _convert_dataarray_units(depth, _property_units(surface.depth), target_units)
 
 
 # ----------------------------------------------------------------------
@@ -264,6 +288,12 @@ class SimpleSurface:
             surf = self.depth.get(grid=grid)
         else:
             surf = self.depth.get()
+        units = kwargs.pop("units", None)
+        surf = _convert_surface_depth(
+            surf,
+            self,
+            unit_expression(units) if units is not None else None,
+        )
 
         show = True
         if len(surf.dims) == 1:
@@ -423,11 +453,29 @@ def _borehole_surface_ref(value: Any) -> Dict[str, Any]:
         return {"surface": value.name}
     if isinstance(value, str):
         return {"surface": value}
+    if isinstance(value, int):
+        return value
     if isinstance(value, Mapping):
         return copy.deepcopy(dict(value))
     raise TypeError(
-        "Borehole extent values must be surface names, SimpleSurface objects, or mappings"
+        "Borehole extent values must be surface names, one-based surface indices, "
+        "SimpleSurface objects, or mappings"
     )
+
+
+def _validate_borehole_radius_profile(radius: Property) -> None:
+    value = radius.darr
+    if value is None or radius.is_constant or radius.file_path is not None:
+        return
+    if value.ndim != 1:
+        raise ValueError("Borehole radius profiles must be one-dimensional")
+    dim = str(value.dims[0])
+    if dim not in {"z", "depth"}:
+        raise ValueError("Borehole radius profile dimension must be 'z' or 'depth'")
+    if dim not in value.coords:
+        raise ValueError(
+            "Borehole radius profiles require a coordinate for their dimension"
+        )
 
 
 def _borehole_radius_to_fs(
@@ -437,6 +485,7 @@ def _borehole_radius_to_fs(
     borehole_name: Optional[str] = None,
     part_name: Optional[str] = None,
 ) -> Any:
+    _validate_borehole_radius_profile(radius)
     if (
         ctx is not None
         and getattr(ctx, "store", None) is not None
@@ -485,17 +534,21 @@ def _borehole_radius_to_fs(
 
 @dataclass(kw_only=True)
 class BoreholePart:
-    """One radial material part of a borehole."""
+    """One concentric radial material part of a 2D borehole.
 
-    name: str
+    ``r`` is the cumulative outer radius for this part. The first part starts
+    at ``r = 0``; each following part starts at the previous part's ``r``.
+    """
+
+    name: Optional[str]
     mesh_block_id: int
     r: Property = field(default_factory=Property)
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
         self,
-        name: str,
-        mesh_block_id: int,
+        name: Optional[str] = None,
+        mesh_block_id: Optional[int] = None,
         r: Any = None,
         grid: Optional[xr.DataArray] = None,
         scale: float = 1.0,
@@ -514,9 +567,13 @@ class BoreholePart:
         if unsupported:
             names = ", ".join(sorted(unsupported))
             raise TypeError(f"BoreholePart uses r; unsupported field(s): {names}")
+        if mesh_block_id is None:
+            raise ValueError("BoreholePart requires mesh_block_id")
+        if mesh_block_id < 1:
+            raise ValueError("BoreholePart mesh_block_id must be positive")
         if r is None:
             raise ValueError("BoreholePart requires r")
-        self.name = name
+        self.name = name or f"part_{mesh_block_id}"
         self.mesh_block_id = mesh_block_id
         self.r = (
             r
@@ -529,6 +586,7 @@ class BoreholePart:
                 system=system,
             )
         )
+        _validate_borehole_radius_profile(self.r)
         self.extra = dict(extra or {})
         self.extra.update(kwargs)
 
@@ -548,8 +606,8 @@ class BoreholePart:
         if "r" not in payload:
             raise ValueError("BoreholePart requires r")
         return cls(
-            name=payload.pop("name"),
             mesh_block_id=payload.pop("mesh_block_id"),
+            name=payload.pop("name", None),
             r=payload.pop("r"),
             extra=payload,
         )
@@ -575,7 +633,7 @@ class BoreholePart:
 
 @dataclass(kw_only=True)
 class Borehole:
-    """A borehole definition for a layered model."""
+    """Vertical 2D borehole geometry for a layered model."""
 
     name: str
     axis: Dict[str, Any]
@@ -606,9 +664,17 @@ class Borehole:
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "Borehole":
         payload = copy.deepcopy(dict(data))
+        axis = payload.pop("axis", None)
+        x = payload.pop("x", None)
+        if axis is None:
+            if x is None:
+                raise ValueError("Borehole requires axis/x")
+            axis = {"x": x}
+        elif x is not None:
+            raise ValueError("Specify either borehole axis or x, not both")
         return cls(
             name=payload.pop("name"),
-            axis=payload.pop("axis"),
+            axis=axis,
             extent=payload.pop("extent"),
             parts=payload.pop("parts", []),
             extra=payload,
@@ -618,7 +684,12 @@ class Borehole:
         payload = {
             "name": self.name,
             "axis": {
-                key: value_and_units_to_fs(value) for key, value in self.axis.items()
+                key: (
+                    copy.deepcopy(dict(value))
+                    if isinstance(value, Mapping)
+                    else value_and_units_to_fs(value)
+                )
+                for key, value in self.axis.items()
             },
             "extent": {
                 "top": _borehole_surface_ref(self.extent["top"]),
@@ -627,6 +698,203 @@ class Borehole:
             "parts": [part.to_fs(ctx, borehole_name=self.name) for part in self.parts],
         }
         return merge_extra(payload, self.extra, "Borehole")
+
+    @staticmethod
+    def _length_value(value: Any, units: Optional[Any] = None) -> float:
+        target_units = unit_expression(units) if units is not None else None
+        if isinstance(value, Mapping):
+            payload = dict(value)
+            raw = payload.get("value")
+            if raw is None:
+                raise ValueError("Length mappings require a value")
+            return float(_convert_units(float(raw), payload.get("units"), target_units))
+        if hasattr(value, "to") and hasattr(value, "magnitude"):
+            if target_units is not None:
+                return float(value.to(target_units).magnitude)
+            return float(value.magnitude)
+        return float(value)
+
+    def axis_x(self, units: Optional[Any] = None) -> float:
+        """Return the borehole axis x-coordinate."""
+
+        if "x" not in self.axis:
+            raise ValueError("Borehole requires axis/x")
+        return self._length_value(self.axis["x"], units)
+
+    def radius_profile(
+        self,
+        part: BoreholePart,
+        z: Optional[Any] = None,
+        *,
+        units: Optional[Any] = None,
+        depth_units: Optional[Any] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return depth and cumulative outer-radius arrays for one part."""
+
+        radius = part.r
+        target_units = unit_expression(units) if units is not None else None
+        target_depth_units = (
+            unit_expression(depth_units) if depth_units is not None else target_units
+        )
+        if radius.darr is None or radius.is_constant or radius.file_path is not None:
+            r_value = radius.get()
+            source_units = radius.units
+            r_value = float(
+                _convert_units(
+                    float(np.asarray(r_value).item()), source_units, target_units
+                )
+            )
+            if z is None:
+                z_value = 0.0
+            else:
+                z_value = self._length_value(z, target_depth_units)
+            return np.asarray([z_value], dtype=float), np.asarray(
+                [r_value], dtype=float
+            )
+
+        _validate_borehole_radius_profile(radius)
+        values = radius.darr
+        dim = values.dims[0]
+        coord = values.coords[dim]
+        z_values = np.asarray(coord.values, dtype=float)
+        r_values = np.asarray(values.values, dtype=float)
+        if coord.attrs.get("units"):
+            z_values = _convert_units(
+                z_values,
+                coord.attrs.get("units"),
+                target_depth_units,
+            )
+        if radius.units or values.attrs.get("units"):
+            r_values = _convert_units(
+                r_values,
+                radius.units or values.attrs.get("units"),
+                target_units,
+            )
+        return z_values, r_values
+
+    def radius_at(
+        self,
+        part: BoreholePart,
+        z: Optional[Any] = None,
+        *,
+        units: Optional[Any] = None,
+        depth_units: Optional[Any] = None,
+    ) -> float:
+        """Evaluate one part's cumulative radius at a depth."""
+
+        z_values, r_values = self.radius_profile(
+            part,
+            z,
+            units=units,
+            depth_units=depth_units,
+        )
+        if len(r_values) == 1:
+            return float(r_values[0])
+        if z is None:
+            return float(r_values[len(r_values) // 2])
+        z_value = self._length_value(
+            z,
+            unit_expression(depth_units) if depth_units is not None else units,
+        )
+        return float(np.interp(z_value, z_values, r_values))
+
+    def draw(
+        self,
+        ax: Optional["Axes"] = None,
+        *,
+        z: Optional[Any] = None,
+        units: Optional[Any] = None,
+        depth_units: Optional[Any] = None,
+        subdomains: Optional[List[ModelSubdomain]] = None,
+        annotate: bool = True,
+        colors: Optional[List[str]] = None,
+        alpha: float = 0.35,
+        linewidth: float = 1.4,
+        title: Optional[str] = None,
+        show: bool = False,
+    ) -> "Axes":
+        """Draw a borehole radial profile as concentric material circles."""
+
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.patches import Circle
+        except ModuleNotFoundError as exc:
+            from frequensolve._optional import optional_dependency_error
+
+            raise optional_dependency_error(
+                "Borehole drawing",
+                extra="visual",
+                dependencies=("matplotlib",),
+                error=exc,
+            ) from exc
+
+        if ax is None:
+            _, ax = plt.subplots()
+
+        palette = colors or [
+            "#76b7b2",
+            "#f28e2b",
+            "#59a14f",
+            "#e15759",
+            "#4e79a7",
+            "#b07aa1",
+        ]
+        subdomain_names = {
+            subdomain.mesh_block_id: subdomain.name for subdomain in subdomains or []
+        }
+        radii = [
+            self.radius_at(part, z, units=units, depth_units=depth_units)
+            for part in self.parts
+        ]
+        if any(radius <= 0.0 for radius in radii):
+            raise ValueError("Borehole radii must be positive to draw a profile")
+        for radius, part, color in reversed(
+            list(
+                zip(radii, self.parts, palette * (len(self.parts) // len(palette) + 1))
+            )
+        ):
+            label = subdomain_names.get(part.mesh_block_id, part.name)
+            patch = Circle(
+                (0.0, 0.0),
+                radius,
+                facecolor=color,
+                edgecolor="black",
+                linewidth=linewidth,
+                alpha=alpha,
+                label=label,
+            )
+            ax.add_patch(patch)
+
+        if annotate:
+            for radius, part in zip(radii, self.parts):
+                label = subdomain_names.get(part.mesh_block_id, part.name)
+                ax.annotate(
+                    f"{label}\nr={radius:g}",
+                    xy=(radius, 0.0),
+                    xytext=(5, 5),
+                    textcoords="offset points",
+                    fontsize=9,
+                    ha="left",
+                    va="bottom",
+                )
+
+        outer = max(radii)
+        pad = 0.15 * outer if outer > 0.0 else 1.0
+        ax.set_xlim(-outer - pad, outer + pad)
+        ax.set_ylim(-outer - pad, outer + pad)
+        ax.set_aspect("equal", adjustable="box")
+        unit_label = f" ({unit_expression(units)})" if units is not None else ""
+        ax.set_xlabel(f"Local x radius{unit_label}")
+        ax.set_ylabel(f"Local y radius{unit_label}")
+        if title is None:
+            title = self.name
+            if z is not None:
+                title = f"{title} at z={self._length_value(z, depth_units or units):g}"
+        ax.set_title(title)
+        ax.legend(loc="upper right", bbox_to_anchor=(1.35, 1.0))
+        if show:
+            plt.show()
+        return ax
 
 
 @register_class
@@ -820,12 +1088,14 @@ class LayeredModel(ModelBase):
         parts: Optional[List[Union[BoreholePart, Mapping[str, Any]]]] = None,
         **kwargs,
     ) -> Borehole:
-        """Add a borehole and any material subdomains declared by its parts.
+        """Add a 2D vertical borehole and any declared material subdomains.
 
         ``parts`` may be ``BoreholePart`` objects or dictionaries. A part
         dictionary can also include ``physics`` and ``properties``; those fields
         create the corresponding ``ModelSubdomain`` while the borehole part
         keeps only the geometry and mesh-block fields required by the solver.
+        When a part does not include ``properties``, its ``mesh_block_id`` must
+        already reference an existing model subdomain.
         """
 
         if "extent" in kwargs:
@@ -839,6 +1109,12 @@ class LayeredModel(ModelBase):
             raise TypeError(
                 f"Unexpected LayeredModel.add_borehole arguments: {unexpected}"
             )
+        if self.dimension != 2:
+            raise ValueError(
+                "LayeredModel.add_borehole currently supports 2D models only"
+            )
+        if not parts:
+            raise ValueError("LayeredModel.add_borehole requires at least one part")
 
         if axis is not None:
             axis_payload = copy.deepcopy(dict(axis))
@@ -854,6 +1130,8 @@ class LayeredModel(ModelBase):
             raise ValueError("LayeredModel.add_borehole requires axis or x/y")
         if self.dimension == 2 and "y" in axis_payload:
             raise ValueError("2D boreholes accept x, not y")
+        if "x" not in axis_payload:
+            raise ValueError("2D boreholes require axis/x")
 
         if top is None:
             top = self.upper_surface()
@@ -883,6 +1161,20 @@ class LayeredModel(ModelBase):
                     f"Mesh block id {subdomain.mesh_block_id} is already used"
                 )
             self.add_subdomain(subdomain)
+        missing_domains = [
+            part.mesh_block_id
+            for part in borehole_parts
+            if not any(
+                subdomain.mesh_block_id == part.mesh_block_id
+                for subdomain in self.subdomains
+            )
+        ]
+        if missing_domains:
+            missing = ", ".join(str(value) for value in missing_domains)
+            raise ValueError(
+                "Borehole part mesh_block_id must reference a model subdomain; "
+                f"missing: {missing}"
+            )
 
         borehole = Borehole(
             name=name,
@@ -916,6 +1208,10 @@ class LayeredModel(ModelBase):
         system = payload.pop("system", None)
         subdomain_name = payload.pop("subdomain_name", None)
         if payload.get("mesh_block_id") is None:
+            if properties is None:
+                raise ValueError(
+                    "Borehole parts without properties must provide mesh_block_id"
+                )
             payload["mesh_block_id"] = next_block
         part = BoreholePart.from_fs(payload)
         next_block = max(next_block, part.mesh_block_id + 1)
@@ -959,14 +1255,27 @@ class LayeredModel(ModelBase):
         _, z1 = self.surfaces[-1].extrema
         return float(z0), float(z1)
 
+    def z_limits_in(self, units: Optional[Any] = None) -> Tuple[float, float]:
+        """Return model z-limits converted to the requested display units."""
+
+        if len(self.surfaces) < 2:
+            raise ValueError("LayeredModel requires at least two surfaces for z_limits")
+        target_units = unit_expression(units) if units is not None else None
+        z0, _ = self.surfaces[0].extrema
+        _, z1 = self.surfaces[-1].extrema
+        return (
+            float(_convert_surface_value(float(z0), self.surfaces[0], target_units)),
+            float(_convert_surface_value(float(z1), self.surfaces[-1], target_units)),
+        )
+
     def property_units(self, property: str) -> Optional[str]:
         """Return the first declared units for a model property."""
 
         property = canonical_property_name(property)
-        for layer in self.layers:
-            if property not in layer.properties:
+        for subdomain in self.subdomains:
+            if property not in subdomain.properties:
                 continue
-            units = _property_units(layer.properties[property])
+            units = _property_units(subdomain.properties[property])
             if units:
                 return units
         return None
@@ -998,10 +1307,10 @@ class LayeredModel(ModelBase):
         )
         vmin = 1.0e8
         vmax = -1.0e8
-        for layer in self.layers:
-            if property not in layer.properties:
+        for subdomain in self.subdomains:
+            if property not in subdomain.properties:
                 continue
-            prop = layer.properties[property]
+            prop = subdomain.properties[property]
             prop_min, prop_max = prop.extrema
             source_units = _property_units(prop)
             prop_min = float(prop_min)
@@ -1492,11 +1801,152 @@ class LayeredModel(ModelBase):
     def properties(self) -> List[str]:
         """List of properties in the model."""
         props = set()
-        for layer in self.layers:
-            props.update(layer.properties.keys())
+        for subdomain in self.subdomains:
+            props.update(subdomain.properties.keys())
         return sorted(props)
 
-    def sample_uniform(self, n: Union[np.ndarray, List[int]]) -> xr.Dataset:
+    def _subdomain_by_mesh_block_id(self) -> Dict[int, ModelSubdomain]:
+        return {subdomain.mesh_block_id: subdomain for subdomain in self.subdomains}
+
+    def _surface_from_reference(self, ref: Any) -> SimpleSurface:
+        if isinstance(ref, SimpleSurface):
+            return ref
+        if isinstance(ref, Mapping):
+            if "surface" in ref:
+                ref = ref["surface"]
+            elif "index" in ref:
+                ref = ref["index"]
+        if isinstance(ref, int):
+            return self.surfaces[ref - 1]
+        if isinstance(ref, str):
+            if ref == "top":
+                return self.surfaces[0]
+            if ref == "bottom":
+                return self.surfaces[-1]
+            if ref.startswith("surface_"):
+                try:
+                    return self.surfaces[int(ref.split("_", 1)[1]) - 1]
+                except (ValueError, IndexError):
+                    pass
+            for surface in self.surfaces:
+                if surface.name == ref:
+                    return surface
+        raise ValueError(f"Unknown borehole extent surface reference: {ref!r}")
+
+    def _surface_depth_at_x(
+        self,
+        surface: SimpleSurface,
+        x: float,
+        units: Optional[str],
+    ) -> float:
+        coords = xr.DataArray(dims=["x"], coords={"x": [x]})
+        depth = surface.depth.get(coords)
+        value = float(np.asarray(depth.values).reshape(-1)[0])
+        return float(_convert_units(value, _property_units(surface.depth), units))
+
+    @staticmethod
+    def _sample_coordinate_mesh(
+        samples: xr.DataArray,
+    ) -> Tuple[xr.DataArray, xr.DataArray]:
+        x = xr.DataArray(
+            samples.coords["x"].values,
+            dims=["x"],
+            coords={"x": samples.coords["x"]},
+        ).broadcast_like(samples)
+        z = xr.DataArray(
+            samples.coords["z"].values,
+            dims=["z"],
+            coords={"z": samples.coords["z"]},
+        ).broadcast_like(samples)
+        return x, z
+
+    def _borehole_part_masks(
+        self,
+        borehole: Borehole,
+        samples: xr.DataArray,
+    ) -> List[Tuple[BoreholePart, xr.DataArray]]:
+        if self.dimension != 2:
+            return []
+        x_units = samples.coords["x"].attrs.get("units")
+        z_units = samples.coords["z"].attrs.get("units")
+        axis_x = borehole.axis_x(x_units)
+        top_surface = self._surface_from_reference(borehole.extent["top"])
+        bottom_surface = self._surface_from_reference(borehole.extent["bottom"])
+        z_top = self._surface_depth_at_x(top_surface, axis_x, z_units)
+        z_bottom = self._surface_depth_at_x(bottom_surface, axis_x, z_units)
+        z0, z1 = sorted([z_top, z_bottom])
+
+        x, z = self._sample_coordinate_mesh(samples)
+        radial_distance = abs(x - axis_x)
+        extent_mask = (z >= z0) & (z <= z1)
+        inner = xr.zeros_like(z, dtype=float)
+        masks: List[Tuple[BoreholePart, xr.DataArray]] = []
+        for index, part in enumerate(borehole.parts):
+            z_profile, r_profile = borehole.radius_profile(
+                part,
+                units=x_units,
+                depth_units=z_units,
+            )
+            if len(r_profile) == 1:
+                outer = xr.full_like(z, float(r_profile[0]), dtype=float)
+            else:
+                outer_values = np.interp(
+                    samples.coords["z"].values,
+                    z_profile,
+                    r_profile,
+                )
+                outer = xr.DataArray(
+                    outer_values,
+                    dims=["z"],
+                    coords={"z": samples.coords["z"]},
+                ).broadcast_like(samples)
+            radial_mask = radial_distance <= outer
+            if index > 0:
+                radial_mask = radial_mask & (radial_distance > inner)
+            masks.append((part, extent_mask & radial_mask))
+            inner = outer
+        return masks
+
+    def _apply_borehole_overrides(
+        self,
+        gridded: xr.Dataset,
+        samples: xr.DataArray,
+    ) -> None:
+        if self.dimension != 2 or not self.boreholes:
+            return
+        subdomains = self._subdomain_by_mesh_block_id()
+        for borehole in self.boreholes:
+            for part, mask in self._borehole_part_masks(borehole, samples):
+                subdomain = subdomains.get(part.mesh_block_id)
+                if subdomain is None:
+                    continue
+                for name in gridded.data_vars:
+                    if name not in subdomain.properties:
+                        continue
+                    prop = subdomain.properties[name]
+                    target_units = gridded[name].attrs.get("units")
+                    source_units = _property_units(prop)
+                    if target_units is None and source_units is not None:
+                        target_units = source_units
+                        gridded[name].attrs["units"] = target_units
+                    if prop.is_constant:
+                        data = xr.full_like(samples, prop.get(), dtype=float)
+                    else:
+                        data = self._property_values_on_samples(
+                            prop, samples
+                        ).transpose(*samples.dims)
+                    data = _convert_dataarray_units(data, source_units, target_units)
+                    gridded[name].data = np.where(
+                        mask.values,
+                        data.values,
+                        gridded[name].data,
+                    )
+
+    def sample_uniform(
+        self,
+        n: Union[np.ndarray, List[int]],
+        axes_units: Optional[Dict[str, Any]] = None,
+    ) -> xr.Dataset:
         """Export model on a uniform grid."""
         n = list(n)
         expected = 2 if self.dimension == 2 else 3
@@ -1505,8 +1955,10 @@ class LayeredModel(ModelBase):
         if any(count < 2 for count in n):
             raise ValueError("All sample counts must be >= 2")
 
+        axes_units = _axis_units(axes_units)
         xl = np.linspace(self.x_limits[0], self.x_limits[1], n[0])
-        zl = np.linspace(self.z_limits[0], self.z_limits[1], n[-1])
+        z_limits = self.z_limits_in(axes_units["z"])
+        zl = np.linspace(z_limits[0], z_limits[1], n[-1])
         if self.dimension == 2:
             samples = xr.DataArray(dims=["x", "z"], coords={"z": zl, "x": xl})
         elif self.dimension == 3:
@@ -1516,6 +1968,9 @@ class LayeredModel(ModelBase):
             )
         else:
             raise ValueError("Invalid dimension")
+        for axis, units in axes_units.items():
+            if units is not None and axis in samples.coords:
+                samples.coords[axis].attrs["units"] = units
 
         gridded = xr.Dataset(coords=samples.coords)
         for name in self.properties:
@@ -1551,6 +2006,7 @@ class LayeredModel(ModelBase):
                     data.values,
                     gridded[name].data,
                 )
+        self._apply_borehole_overrides(gridded, samples)
         return gridded
 
     def smooth(self, n: ArrayLike, sigma, **kwargs):
@@ -1630,8 +2086,17 @@ class LayeredModel(ModelBase):
         else:
             coords_query = xgrid
 
-        limits["z_min"] = upper.depth.get(coords_query)
-        limits["z_max"] = lower.depth.get(coords_query)
+        z_units = samples.coords["z"].attrs.get("units")
+        limits["z_min"] = _convert_surface_depth(
+            upper.depth.get(coords_query),
+            upper,
+            z_units,
+        )
+        limits["z_max"] = _convert_surface_depth(
+            lower.depth.get(coords_query),
+            lower,
+            z_units,
+        )
 
         mask = (
             (samples.coords["z"] <= limits["z_max"])

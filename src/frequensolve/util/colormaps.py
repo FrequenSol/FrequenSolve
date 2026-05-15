@@ -2,6 +2,8 @@ import json
 
 import numpy as np
 
+__all__ = ["get_colormap", "RdYlBu", "RdYlBu_r", "BuGrOr", "BuGrOr_r"]
+
 try:
     import matplotlib.colors as mcolors
 except ModuleNotFoundError as exc:

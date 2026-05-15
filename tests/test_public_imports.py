@@ -77,6 +77,27 @@ def test_top_level_authoring_exports_are_available():
     assert fs.ureg is not None
 
 
+def test_top_level_colormap_exports_are_lazy_and_discoverable():
+    code = """
+import sys
+import frequensolve as fs
+
+if 'BuGrOr' not in fs.__all__:
+    raise SystemExit('BuGrOr missing from __all__')
+if 'BuGrOr' not in dir(fs):
+    raise SystemExit('BuGrOr missing from dir(fs)')
+if 'matplotlib' in sys.modules:
+    raise SystemExit('matplotlib loaded before colormap access')
+
+cmap = fs.BuGrOr
+if getattr(cmap, 'N', 0) <= 0:
+    raise SystemExit('invalid colormap')
+if 'matplotlib' not in sys.modules:
+    raise SystemExit('matplotlib was not loaded when colormap was resolved')
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
 def test_optional_backend_exports_are_part_of_public_sdk_surface():
     import frequensolve as fs
 

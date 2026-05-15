@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shlex
@@ -11,7 +12,7 @@ import warnings
 from dataclasses import dataclass, field
 from logging import ERROR
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 from urllib.parse import urlparse
 
 from frequensolve._optional import optional_dependency_error
@@ -64,6 +65,106 @@ def _task_log_name(task_id: int) -> str:
     if task_id == MESH_TASK_ID:
         return "mesh.log"
     return f"task_{task_id + 1}.log"
+
+
+def _job_result_path(job_file: Union[str, Path]) -> Optional[Path]:
+    try:
+        job_file = Path(job_file)
+        data = json.loads(job_file.read_text())
+    except Exception:
+        return None
+    result_path = data.get("result_path")
+    if not result_path:
+        return None
+    path = Path(str(result_path))
+    if path.is_absolute():
+        return path
+    project_path = data.get("project_path")
+    if project_path:
+        return Path(str(project_path)) / path
+    return job_file.parent / path
+
+
+def _task_run_manifest_path(job_file: Union[str, Path], task_id: int) -> Optional[Path]:
+    if task_id < 0:
+        return None
+    result_path = _job_result_path(job_file)
+    if result_path is None:
+        return None
+    return (
+        result_path
+        / "_fs_run"
+        / "tasks"
+        / f"task_{task_id + 1:06d}"
+        / "run_manifest.json"
+    )
+
+
+def _read_task_solver_convergence(
+    job_file: Union[str, Path], task_id: int
+) -> tuple[Optional[Path], Optional[Dict[str, object]]]:
+    manifest_path = _task_run_manifest_path(job_file, task_id)
+    if manifest_path is None or not manifest_path.exists():
+        return manifest_path, None
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError:
+        return manifest_path, None
+    return manifest_path, SimulationJob.solver_convergence_summary(manifest)
+
+
+def _fallback_task_summary(records: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
+    summary = {
+        "total": 0,
+        "complete": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "not_run": 0,
+    }
+    for record in records:
+        summary["total"] += 1
+        status = SimulationJob._normalized_task_status(record.get("status"))
+        if record.get("complete") or status in {"succeeded", "current", "skipped"}:
+            summary["complete"] += 1
+        if status == "succeeded":
+            summary["succeeded"] += 1
+        elif status == "failed":
+            summary["failed"] += 1
+        elif status == "not_run":
+            summary["not_run"] += 1
+    return summary
+
+
+def _job_task_summary(
+    job: SimulationJob, task_records: Iterable[Mapping[str, Any]]
+) -> Dict[str, int]:
+    if hasattr(job, "run_state"):
+        try:
+            state = job.run_state()
+        except Exception:
+            state = {}
+        summary = state.get("task_summary") if isinstance(state, Mapping) else None
+        if isinstance(summary, Mapping):
+            return {
+                key: int(summary.get(key, 0))
+                for key in ("total", "complete", "succeeded", "failed", "not_run")
+            }
+    return _fallback_task_summary(task_records)
+
+
+def _task_summary_message(summary: Mapping[str, int]) -> str:
+    parts = [
+        f"{int(summary.get('succeeded', 0))} succeeded",
+        f"{int(summary.get('failed', 0))} failed",
+        f"{int(summary.get('complete', 0))} complete",
+    ]
+    not_run = int(summary.get("not_run", 0))
+    if not_run:
+        parts.append(f"{not_run} not run")
+    total = int(summary.get("total", 0))
+    if total:
+        parts.append(f"{total} total")
+    return "tasks: " + ", ".join(parts)
 
 
 def run_task(
@@ -131,6 +232,8 @@ def run_task(
     else:
         stdout_file = None
     started = time.perf_counter()
+    manifest_path: Optional[Path] = None
+    solver_convergence: Optional[Dict[str, object]] = None
     try:
         stdout_path = stdout_file if stdout_file else os.devnull
         with open(stdout_path, "w") as stdout:
@@ -144,9 +247,17 @@ def run_task(
             if return_code != 0:
                 raise subprocess.CalledProcessError(return_code, args)
 
-        return {
+        manifest_path, solver_convergence = _read_task_solver_convergence(
+            job_file, task_id
+        )
+        solver_failed = bool(
+            solver_convergence is not None and solver_convergence.get("failed")
+        )
+
+        result = {
             "task_id": task_id,
-            "status": "success",
+            "status": "error" if solver_failed else "success",
+            "complete": True,
             "returncode": return_code,
             "duration_seconds": time.perf_counter() - started,
             "n_ranks": n_ranks,
@@ -158,10 +269,26 @@ def run_task(
                 else None
             ),
         }
+        if manifest_path is not None:
+            result["run_manifest"] = str(manifest_path)
+        if solver_convergence is not None:
+            result["solver"] = {"convergence": solver_convergence}
+        if solver_failed:
+            residual = solver_convergence.get(
+                "residual", solver_convergence.get("final_residual")
+            )
+            result["error"] = "Solver convergence failed" + (
+                f"; residual {residual}" if residual is not None else ""
+            )
+        return result
     except Exception as e:
-        return {
+        manifest_path, solver_convergence = _read_task_solver_convergence(
+            job_file, task_id
+        )
+        result = {
             "task_id": task_id,
             "status": "error",
+            "complete": False,
             "error": str(e),
             "duration_seconds": time.perf_counter() - started,
             "n_ranks": n_ranks,
@@ -173,6 +300,11 @@ def run_task(
                 else None
             ),
         }
+        if manifest_path is not None:
+            result["run_manifest"] = str(manifest_path)
+        if solver_convergence is not None:
+            result["solver"] = {"convergence": solver_convergence}
+        return result
 
 
 @dataclass
@@ -200,6 +332,9 @@ class LocalSite(BaseSite):
     _futures: List["Future"] = field(default_factory=list, init=False)
     _dashboard_port: Optional[str] = field(default=None, init=False)
     _dashboard_url: Optional[str] = field(default=None, init=False)
+    _active_n_workers: Optional[int] = field(default=None, init=False)
+    _active_threads_per_worker: Optional[int] = field(default=None, init=False)
+    _active_memory_per_worker: Optional[int] = field(default=None, init=False)
     _closed: bool = field(default=True, init=False)
 
     # ----------------- lifecycle -----------------
@@ -209,6 +344,9 @@ class LocalSite(BaseSite):
         self.executable = self._get_solver_path()
         self.env = os.environ.copy()
         self.env["FS_SOLVER_PATH"] = os.getenv("FS_SOLVER_PATH")
+        self.env["VECLIB_MAXIMUM_THREADS"] = (
+            "1"  # Fixes occational crash when linking to Accelerate framework
+        )
         self._quiet_dependency_loggers()
 
     def submit(self, job: SimulationJob, **kwargs) -> RunHandle:
@@ -355,19 +493,6 @@ class LocalSite(BaseSite):
             task_errors = [
                 result for result in task_results if result.get("status") != "success"
             ]
-            if task_errors:
-                status = JobStatus(
-                    state="failed",
-                    return_code=1,
-                    job_id=run.id,
-                    message=f"{len(task_errors)} local tasks failed",
-                    raw={"tasks": task_results},
-                )
-                run.job.write_run_state(
-                    status="failed", tasks=state_tasks, errors=task_errors
-                )
-                self._emit_status(status)
-                return run._make_result(status)
 
             if isinstance(run.job, ImagingJob):
                 smooth_future = self._dask_client.submit(
@@ -377,10 +502,10 @@ class LocalSite(BaseSite):
                     self.executable,
                     self.env,
                     n_ranks=1,
-                    n_threads=self.threads_per_worker,
+                    n_threads=self._current_threads_per_worker(),
                     stdout_dir=str(run.job._stdout_path),
                     fresh=bool(run.backend.get("fresh", False)),
-                    resources={"CPU": self.threads_per_worker},
+                    resources={"CPU": self._current_threads_per_worker()},
                 )
                 all_futures.append(smooth_future)
                 smooth_result = smooth_future.result()
@@ -409,10 +534,10 @@ class LocalSite(BaseSite):
                     self.executable,
                     self.env,
                     n_ranks=1,
-                    n_threads=self.threads_per_worker,
+                    n_threads=self._current_threads_per_worker(),
                     stdout_dir=str(run.job._stdout_path),
                     fresh=bool(run.backend.get("fresh", False)),
-                    resources={"CPU": self.threads_per_worker},
+                    resources={"CPU": self._current_threads_per_worker()},
                 )
                 all_futures.append(pack_future)
                 pack_result = pack_future.result()
@@ -433,14 +558,19 @@ class LocalSite(BaseSite):
             run.job.write_run_state(
                 status="completed",
                 tasks=state_tasks,
+                **({"errors": task_errors} if task_errors else {}),
                 **({"pack": pack_result} if pack_result is not None else {}),
             )
+            task_summary = _job_task_summary(run.job, state_tasks)
             status = JobStatus(
                 state="completed",
                 return_code=0,
                 job_id=run.id,
+                message=_task_summary_message(task_summary),
                 raw={
                     "tasks": task_results,
+                    "task_summary": task_summary,
+                    **({"errors": task_errors} if task_errors else {}),
                     **({"pack": pack_result} if pack_result is not None else {}),
                 },
             )
@@ -494,16 +624,7 @@ class LocalSite(BaseSite):
         if not pending_indices:
             return LocalTaskSubmission(futures=[], task_plan=task_plan)
 
-        if self._dask_client is None:
-            if self.n_workers is None:
-                self.n_workers = self.config.cores
-            n_workers = self.n_workers
-            if len(pending_indices) < n_workers:
-                while n_workers > len(pending_indices) and n_workers > 1:
-                    n_workers = n_workers // 2
-            self._initialize_dask(max(1, n_workers))
-        else:
-            self._prune_futures()
+        self._ensure_dask_for_tasks(len(pending_indices))
 
         n_ranks = kwargs.get("procs_per_job", 1)
 
@@ -564,14 +685,14 @@ class LocalSite(BaseSite):
                     self.executable,
                     self.env,
                     n_ranks=n_ranks,
-                    n_threads=self.threads_per_worker,
+                    n_threads=self._current_threads_per_worker(),
                     stdout_dir=stdout_dir,
                     fresh=force_run,
                     retries=0,
                     priority=i,
                     actor=False,
                     pure=True,
-                    resources={"CPU": self.threads_per_worker},
+                    resources={"CPU": self._current_threads_per_worker()},
                 )
                 futures.append(future)
             except Exception as e:
@@ -700,23 +821,12 @@ class LocalSite(BaseSite):
             return
         self._quiet_dependency_loggers()
 
-        if n_workers is None:
-            self.n_workers = self.config.cores
-        else:
-            self.n_workers = n_workers
+        n_workers, threads_per_worker, memory_per_worker = self._cluster_settings(
+            n_workers
+        )
 
-        if self.threads_per_worker is None:
-            self.threads_per_worker = self.config.cores // self.n_workers
-        if self.memory_per_worker is None:
-            if self.config.memory:
-                self.memory_per_worker = int(
-                    (0.9 * self.config.memory) / self.n_workers
-                )
-            else:
-                self.memory_per_worker = 4096
-
-        total_threads = self.n_workers * self.threads_per_worker
-        total_memory = self.n_workers * self.memory_per_worker
+        total_threads = n_workers * threads_per_worker
+        total_memory = n_workers * memory_per_worker
         if total_threads > self.config.cores:
             raise ValueError(
                 f"Total threads ({total_threads}) exceed available cores ({self.config.cores})"
@@ -729,12 +839,15 @@ class LocalSite(BaseSite):
 
         logger.info(
             "Initializing Dask with %d workers, %d threads per worker, %dMB memory per worker",
-            self.n_workers,
-            self.threads_per_worker,
-            self.memory_per_worker,
+            n_workers,
+            threads_per_worker,
+            memory_per_worker,
         )
 
         try:
+            self._active_n_workers = n_workers
+            self._active_threads_per_worker = threads_per_worker
+            self._active_memory_per_worker = memory_per_worker
             dependency_log_level = self._dependency_log_level()
             dependency_log_name = logging.getLevelName(dependency_log_level)
             worker_preload = self._with_dask_logging_preload(
@@ -752,7 +865,7 @@ class LocalSite(BaseSite):
                     "distributed": {
                         "worker": {
                             "memory": {"target": 0.6, "pause": 0.8},
-                            "threads": self.threads_per_worker,
+                            "threads": threads_per_worker,
                             "preload": worker_preload,
                         },
                         "scheduler": {
@@ -785,9 +898,9 @@ class LocalSite(BaseSite):
 
             dashboard_address = f"{self.dashboard_host}:{self.dashboard_port}"
             self._dask_cluster = LocalCluster(
-                n_workers=self.n_workers,
-                threads_per_worker=self.threads_per_worker,
-                memory_limit=f"{self.memory_per_worker}MB",
+                n_workers=n_workers,
+                threads_per_worker=threads_per_worker,
+                memory_limit=f"{memory_per_worker}MB",
                 dashboard_address=dashboard_address,
                 host=self.dashboard_host,
                 local_directory="/tmp/dask-worker-space",
@@ -797,7 +910,7 @@ class LocalSite(BaseSite):
                 preload_nanny=nanny_preload,
                 scheduler_kwargs={"preload": scheduler_preload},
                 processes=True,
-                resources={"CPU": self.threads_per_worker},
+                resources={"CPU": threads_per_worker},
             )
             self._dask_client = Client(self._dask_cluster, timeout="20s")
             self._closed = False
@@ -822,6 +935,67 @@ class LocalSite(BaseSite):
             logger.error("Failed to initialize Dask cluster: %s", str(e))
             self.close(wait=False, retire=False)
             raise
+
+    def _ensure_dask_for_tasks(self, task_count: int) -> None:
+        n_workers = self._worker_count_for_task_count(task_count)
+        if self._dask_client is not None:
+            self._prune_futures()
+            if self._active_cluster_matches(n_workers):
+                return
+            if self._futures:
+                logger.debug(
+                    "Keeping active Dask cluster while %d futures are still active",
+                    len(self._futures),
+                )
+                return
+            logger.info("Refreshing Dask cluster for %d pending tasks", task_count)
+            self.close(wait=True, retire=True)
+        self._initialize_dask(n_workers)
+
+    def _worker_count_for_task_count(self, task_count: int) -> int:
+        n_workers = self.n_workers if self.n_workers is not None else self.config.cores
+        n_workers = max(1, int(n_workers))
+        if task_count < n_workers:
+            while n_workers > task_count and n_workers > 1:
+                n_workers = n_workers // 2
+        return max(1, n_workers)
+
+    def _cluster_settings(
+        self, n_workers: Optional[int] = None
+    ) -> tuple[int, int, int]:
+        if n_workers is None:
+            n_workers = (
+                self.n_workers if self.n_workers is not None else self.config.cores
+            )
+        n_workers = max(1, int(n_workers))
+        if self.threads_per_worker is None:
+            threads_per_worker = max(1, self.config.cores // n_workers)
+        else:
+            threads_per_worker = int(self.threads_per_worker)
+        if self.memory_per_worker is None:
+            if self.config.memory:
+                memory_per_worker = int((0.9 * self.config.memory) / n_workers)
+            else:
+                memory_per_worker = 4096
+        else:
+            memory_per_worker = int(self.memory_per_worker)
+        return n_workers, threads_per_worker, memory_per_worker
+
+    def _active_cluster_matches(self, n_workers: int) -> bool:
+        expected = self._cluster_settings(n_workers)
+        active = (
+            self._active_n_workers,
+            self._active_threads_per_worker,
+            self._active_memory_per_worker,
+        )
+        return active == expected
+
+    def _current_threads_per_worker(self) -> int:
+        if self._active_threads_per_worker is not None:
+            return self._active_threads_per_worker
+        if self.threads_per_worker is not None:
+            return int(self.threads_per_worker)
+        return 1
 
     @staticmethod
     def _with_dask_logging_preload(value) -> List[str]:
@@ -877,22 +1051,9 @@ class LocalSite(BaseSite):
                 pass
             self._futures.clear()
 
-        # Politely ask workers to go away before closing cluster
-        if retire and self._dask_client is not None:
-            try:
-                # Migrate data off workers and then close them
-                self._dask_client.retire_workers(
-                    workers=None, close_workers=True, remove=True
-                )
-            except Exception:
-                # Fall back to scaling to zero
-                try:
-                    if self._dask_cluster is not None:
-                        self._dask_cluster.scale(0)
-                except Exception:
-                    pass
-
-        # Close client then cluster
+        # LocalCluster.close() already owns orderly worker/scheduler teardown.
+        # Explicit retire/remove or scale-to-zero can race with worker heartbeat
+        # callbacks and emit noisy "unregistered worker" shutdown warnings.
         try:
             if self._dask_client is not None:
                 self._dask_client.close(timeout=timeout)
@@ -903,10 +1064,6 @@ class LocalSite(BaseSite):
 
         try:
             if self._dask_cluster is not None:
-                try:
-                    self._dask_cluster.scale(0)
-                except Exception:
-                    pass
                 self._dask_cluster.close(timeout=timeout, fast=not wait)
         except Exception:
             pass
@@ -914,6 +1071,9 @@ class LocalSite(BaseSite):
             self._dask_cluster = None
             self._dashboard_port = None
             self._dashboard_url = None
+            self._active_n_workers = None
+            self._active_threads_per_worker = None
+            self._active_memory_per_worker = None
 
     def stop(self):
         self.close()

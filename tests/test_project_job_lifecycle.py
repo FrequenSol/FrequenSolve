@@ -1,4 +1,6 @@
 import json
+import math
+import os
 
 import pytest
 
@@ -136,6 +138,40 @@ def test_run_metadata_discovers_unregistered_vtu_files(tmp_path):
     ]
 
 
+def test_run_metadata_deduplicates_existing_output_file_aliases(tmp_path):
+    result_path = tmp_path / "results"
+    paraview = result_path / "ParaView"
+    lower_paraview = result_path / "paraview"
+    paraview.mkdir(parents=True)
+    canonical = paraview / "pv_00000.vtu"
+    alias = lower_paraview / "pv_00000.vtu"
+    canonical.write_text("<VTKFile></VTKFile>")
+    if not alias.exists():
+        lower_paraview.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(canonical, alias)
+        except OSError as exc:
+            pytest.skip(f"filesystem does not support hard links: {exc}")
+
+    metadata = RunMetadata(
+        outputs={
+            "files": [
+                {
+                    "relative_path": "ParaView/pv_00000.vtu",
+                    "kind": "vtk",
+                },
+                {
+                    "relative_path": "paraview/pv_00000.vtu",
+                    "kind": "vtk",
+                },
+            ]
+        },
+        result_path=result_path,
+    )
+
+    assert metadata.output_files(base="pv", suffix=".vtu", existing=True) == [canonical]
+
+
 def test_job_save_load_persists_required_simulation_inputs(tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
@@ -174,6 +210,50 @@ def test_time_domain_job_requires_valid_sampling(tmp_path):
         TimeDomainJob(name="td", simulation=sim, f_max=5.0, df=0.0)
     with pytest.raises(ValueError, match="f_max must be greater"):
         TimeDomainJob(name="td", simulation=sim, f_min=5.0, f_max=5.0, df=1.0)
+    with pytest.raises(ValueError, match="damping_factor"):
+        TimeDomainJob(
+            name="td", simulation=sim, f_max=5.0, T_max=1.0, damping_factor=0.5
+        )
+    with pytest.raises(ValueError, match="only one of damping_factor or laplace"):
+        TimeDomainJob(
+            name="td",
+            simulation=sim,
+            f_max=5.0,
+            T_max=1.0,
+            damping_factor=10.0,
+            laplace=-0.1,
+        )
+
+
+def test_time_domain_job_supports_damping_factor_and_direct_laplace(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+
+    job = TimeDomainJob(
+        name="td",
+        simulation=sim,
+        f_min=0.0,
+        f_max=1.0,
+        T_max=2.0,
+        damping_factor=10.0,
+    )
+    expected_laplace = -math.log(10.0) / (2.0 * math.pi * 2.0)
+
+    assert [freq.real for freq in job.f_list] == [0.5, 1.0]
+    assert [freq.imag for freq in job.f_list] == pytest.approx(
+        [expected_laplace, expected_laplace]
+    )
+
+    direct = TimeDomainJob(
+        name="td_direct",
+        simulation=sim,
+        f_min=0.0,
+        f_max=1.0,
+        df=0.5,
+        laplace=0.25,
+    )
+
+    assert [freq.real for freq in direct.f_list] == [0.5, 1.0]
+    assert [freq.imag for freq in direct.f_list] == pytest.approx([-0.25, -0.25])
 
 
 def test_local_submit_autosaves_job_and_simulation(monkeypatch, tmp_path):
@@ -263,6 +343,196 @@ def test_job_frequency_status_summary_and_task_timings(tmp_path, capsys):
             "trace_file": job.trace_manifest.files[1],
         },
     ]
+
+
+def test_job_run_state_summarizes_solver_convergence(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0, 3.0])
+    job.save()
+    for trace_file in job.trace_manifest.files[:2]:
+        trace_file.parent.mkdir(parents=True, exist_ok=True)
+        trace_file.touch()
+    solver_manifest = job._result_path / "_fs_run" / "run_manifest.json"
+    solver_manifest.parent.mkdir(parents=True, exist_ok=True)
+    solver_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "fs-run-manifest-1",
+                "solver": {
+                    "name": "solver",
+                    "convergence": {
+                        "converged": True,
+                        "failure_count": 0,
+                        "solve_count": 0,
+                        "status": "not_run",
+                        "worst_code": 0,
+                    },
+                },
+            }
+        )
+    )
+
+    job.write_run_state(
+        status="completed",
+        tasks=[
+            {
+                "task_id": 0,
+                "status": "success",
+                "complete": True,
+                "solver": {
+                    "convergence": {
+                        "converged": True,
+                        "status": "converged",
+                        "solve_count": 1,
+                        "failure_count": 0,
+                        "worst_code": 0,
+                        "solves": [
+                            {
+                                "context": "forward",
+                                "converged": True,
+                                "iterations": 16,
+                                "residual": 8.665320086047467e-05,
+                                "solver": "FS_MG",
+                                "status": "converged",
+                                "tolerance": 1.0e-4,
+                            }
+                        ],
+                    }
+                },
+            },
+            {
+                "task_id": 1,
+                "status": "success",
+                "complete": True,
+                "solver": {
+                    "convergence": {
+                        "converged": True,
+                        "status": "converged",
+                        "solve_count": 1,
+                        "failure_count": 0,
+                        "worst_code": 0,
+                        "solves": [
+                            {
+                                "context": "forward",
+                                "converged": True,
+                                "iterations": 24,
+                                "residual": 1.1e-3,
+                                "solver": "FS_MG",
+                                "status": "converged",
+                                "tolerance": 1.0e-4,
+                            }
+                        ],
+                    }
+                },
+            },
+        ],
+    )
+
+    payload = json.loads(job.run_state_file.read_text())
+
+    assert payload["status"] == "completed"
+    assert payload["task_summary"] == {
+        "total": 3,
+        "complete": 2,
+        "succeeded": 1,
+        "failed": 1,
+        "not_run": 1,
+    }
+    assert [row["status"] for row in payload["tasks"]] == [
+        "succeeded",
+        "failed",
+        "not_run",
+    ]
+    first = payload["tasks"][0]["solver"]["convergence"]
+    second = payload["tasks"][1]["solver"]["convergence"]
+    assert first["iterations"] == 16
+    assert first["residual"] == 8.665e-05
+    assert first["failed"] is False
+    assert second["residual"] == 0.0011
+    assert second["failed"] is True
+    convergence = payload["solver"]["convergence"]
+    assert convergence["status"] == "failed"
+    assert convergence["converged"] is False
+    assert convergence["solve_count"] == 2
+    assert convergence["failure_count"] == 1
+    assert convergence["worst_code"] == 0
+    assert convergence["iterations"] == 40
+    assert convergence["residual"] == 0.0011
+    assert convergence["tasks"] == [
+        {
+            "task": 1,
+            "frequency": 1.0,
+            "converged": True,
+            "iterations": 16,
+            "residual": 8.665e-05,
+            "status": "converged",
+        },
+        {
+            "task": 2,
+            "frequency": 2.0,
+            "converged": True,
+            "iterations": 24,
+            "residual": 0.0011,
+            "status": "failed",
+        },
+    ]
+    mirrored = json.loads(solver_manifest.read_text())
+    assert mirrored["task_summary"] == payload["task_summary"]
+    assert mirrored["solver"]["name"] == "solver"
+    assert mirrored["solver"]["convergence"] == convergence
+
+
+def test_job_run_state_reads_solver_convergence_from_manifest_path(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0])
+    job.save()
+    trace_file = job.trace_manifest.files[0]
+    trace_file.parent.mkdir(parents=True, exist_ok=True)
+    trace_file.touch()
+    task_manifest = tmp_path / "task_run_manifest.json"
+    task_manifest.write_text(
+        json.dumps(
+            {
+                "solver": {
+                    "convergence": {
+                        "converged": True,
+                        "status": "converged",
+                        "solve_count": 0,
+                        "failure_count": 0,
+                        "worst_code": 0,
+                        "solves": [
+                            {
+                                "converged": True,
+                                "iterations": 7,
+                                "residual": 9.1e-5,
+                                "status": "converged",
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+    )
+
+    job.write_run_state(
+        status="completed",
+        tasks=[
+            {
+                "task_id": 0,
+                "status": "success",
+                "complete": True,
+                "run_manifest": str(task_manifest),
+            }
+        ],
+    )
+
+    payload = json.loads(job.run_state_file.read_text())
+
+    convergence = payload["solver"]["convergence"]
+    assert convergence["status"] == "converged"
+    assert convergence["solve_count"] == 1
+    assert convergence["iterations"] == 7
+    assert convergence["residual"] == 9.1e-05
 
 
 def test_job_plot_task_timings(tmp_path):
@@ -406,6 +676,70 @@ def test_job_plot_task_timings_supports_core_hours(tmp_path):
 
     assert ax.get_ylabel() == "Runtime (core-hours)"
     assert [patch.get_height() for patch in ax.patches] == [4.0, 16.0]
+
+
+def test_job_phase_timings_and_plot(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg", force=True)
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0, 10.0])
+    job.save()
+    run_dir = job._result_path / "_fs_run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "timings.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-timings-1",
+                "tasks": [
+                    {
+                        "task": 1,
+                        "phases": {
+                            "setup": 0.2,
+                            "assembly": 1.0,
+                            "solve_forward": 2.0,
+                        },
+                    },
+                    {
+                        "task": 2,
+                        "phases": {
+                            "setup": 0.3,
+                            "assembly": 1.5,
+                            "solve_forward": 3.0,
+                        },
+                    },
+                ],
+            }
+        )
+    )
+
+    rows = job.phase_timings(phases=["setup", "assembly", "solve_forward"])
+
+    assert rows == [
+        {
+            "task": 1,
+            "frequency": 5.0,
+            "status": "not_run",
+            "total_seconds": 3.2,
+            "setup": 0.2,
+            "assembly": 1.0,
+            "solve_forward": 2.0,
+        },
+        {
+            "task": 2,
+            "frequency": 10.0,
+            "status": "not_run",
+            "total_seconds": 4.8,
+            "setup": 0.3,
+            "assembly": 1.5,
+            "solve_forward": 3.0,
+        },
+    ]
+
+    ax = job.plot_phase_timings(phases=["assembly", "solve_forward"])
+
+    assert ax.get_xlabel() == "Frequency (Hz)"
+    assert ax.get_ylabel() == "Runtime (s)"
+    assert len(ax.patches) == 4
 
 
 def test_job_task_plan_only_runs_new_frequencies_when_range_expands(tmp_path):

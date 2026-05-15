@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 from frequensolve.geometry.frame import Axis, SurfaceCoordinateSystem
 from frequensolve.mesh.mesh_generators import LayeredMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
-from frequensolve.model.layered import BoreholePart, LayeredModel
+from frequensolve.model.layered import Borehole, BoreholePart, LayeredModel
 from frequensolve.model.model import ModelSubdomain
 from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.units import ureg as u
@@ -179,6 +179,84 @@ def test_borehole_part_rejects_legacy_outer_radius():
         )
 
 
+def test_borehole_from_fs_accepts_contract_x_shorthand_and_optional_part_name():
+    borehole = Borehole.from_fs(
+        {
+            "name": "bh1",
+            "x": {"value": 0.45, "units": "km"},
+            "extent": {"top": "top", "bottom": 2},
+            "parts": [{"mesh_block_id": 20, "r": {"value": 0.035}}],
+        }
+    )
+
+    assert borehole.to_fs() == {
+        "name": "bh1",
+        "axis": {"x": {"value": 0.45, "units": "km"}},
+        "extent": {"top": {"surface": "top"}, "bottom": 2},
+        "parts": [
+            {
+                "name": "part_20",
+                "mesh_block_id": 20,
+                "r": {"value": 0.035},
+            }
+        ],
+    }
+
+
+def test_layered_model_rejects_boreholes_outside_current_2d_contract():
+    model = LayeredModel(dimension=3, x_limits=[0.0, 1.0], y_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+
+    with pytest.raises(ValueError, match="2D"):
+        model.add_borehole(
+            name="bh1",
+            x=0.45,
+            parts=[{"mesh_block_id": 20, "r": 0.035}],
+        )
+
+
+def test_layered_model_requires_borehole_part_domains():
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+
+    with pytest.raises(ValueError, match="missing: 20"):
+        model.add_borehole(
+            name="bh1",
+            x=0.45,
+            parts=[{"mesh_block_id": 20, "r": 0.035}],
+        )
+
+
+def test_layered_model_auto_assigns_borehole_part_domain_with_properties():
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+
+    model.add_borehole(
+        name="bh1",
+        x=0.45,
+        parts=[
+            {
+                "name": "fluid",
+                "r": 0.035,
+                "physics": "acoustic",
+                "properties": {"Vp": 1.48},
+            }
+        ],
+    )
+
+    payload = model.to_fs()
+
+    assert payload["subdomains"][1]["mesh_block_id"] == 2
+    assert payload["subdomains"][1]["name"] == "bh1_fluid"
+    assert payload["boreholes"][0]["parts"][0]["mesh_block_id"] == 2
+
+
 def test_borehole_part_exports_variable_radius_profile():
     radius = xr.DataArray(
         [0.035, 0.040],
@@ -196,6 +274,18 @@ def test_borehole_part_exports_variable_radius_profile():
         "coords": {"z": {"value": [0.0, 0.5], "units": "km"}},
         "units": "m",
     }
+
+
+def test_borehole_radius_profile_requires_depth_dimension():
+    radius = xr.DataArray(
+        [0.035, 0.040],
+        dims=["x"],
+        coords={"x": [0.0, 0.5]},
+        attrs={"units": "m"},
+    )
+
+    with pytest.raises(ValueError, match="'z' or 'depth'"):
+        BoreholePart(name="fluid", mesh_block_id=20, r=radius)
 
 
 def test_borehole_radius_profile_materializes_to_simulation_hdf5(tmp_path):
@@ -425,6 +515,166 @@ def test_layered_model_plot_uses_property_units():
     )
 
     assert image.colorbar.ax.get_ylabel() == "Vp [m/s]"
+    plt.close(fig)
+
+
+def test_layered_model_plot_converts_surface_units_to_axis_units():
+    import matplotlib.pyplot as plt
+
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0 * u.m)
+    model.add_layer(name="upper", properties={"Vp": 1.5})
+    model.add_surface(name="interface", depth=250.0 * u.m)
+    model.add_layer(name="lower", properties={"Vp": 2.0})
+    model.add_surface(name="bottom", depth=500.0 * u.m)
+
+    sampled = model.sample_uniform([2, 5], axes_units={"x": "km", "z": "km"})
+
+    np.testing.assert_allclose(
+        sampled.coords["z"].values, [0.0, 0.125, 0.25, 0.375, 0.5]
+    )
+    assert sampled.coords["z"].attrs["units"] == "km"
+    assert sampled["vp"].isel(x=0, z=-1).item() == 2.0
+
+    fig, ax = plt.subplots()
+    model.plot(
+        "Vp",
+        resolution=[2, 5],
+        ax=ax,
+        axes_units={"x": "km", "z": "km"},
+    )
+
+    y0, y1 = ax.get_ylim()
+    assert max(abs(y0), abs(y1)) <= 0.6
+    plt.close(fig)
+
+
+def test_layered_model_plot_draws_borehole_boundaries():
+    import matplotlib.pyplot as plt
+
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+    model.add_borehole(
+        name="bh1",
+        x=0.45,
+        parts=[
+            {
+                "name": "fluid",
+                "mesh_block_id": 20,
+                "r": 0.035,
+                "physics": "acoustic",
+                "properties": {"Vp": 1.48},
+            }
+        ],
+    )
+
+    fig, ax = plt.subplots()
+    model.plot(
+        "Vp",
+        resolution=[4, 4],
+        ax=ax,
+        surfaces=False,
+        boreholes=True,
+        add_colorbar=False,
+    )
+
+    assert len(ax.lines) >= 3
+    assert any(text.get_text() == "fluid" for text in ax.texts)
+    plt.close(fig)
+
+
+def test_layered_model_sampling_applies_borehole_material_values():
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+    model.add_borehole(
+        name="bh1",
+        x=0.45,
+        parts=[
+            {
+                "name": "fluid",
+                "mesh_block_id": 20,
+                "r": 0.06,
+                "physics": "acoustic",
+                "properties": {"Vp": 1.48},
+            }
+        ],
+    )
+
+    sampled = model.sample_uniform([11, 3])
+
+    assert sampled["vp"].sel(x=0.4, z=0.25).item() == pytest.approx(1.48)
+    assert sampled["vp"].sel(x=0.5, z=0.25).item() == pytest.approx(1.48)
+    assert sampled["vp"].sel(x=0.0, z=0.25).item() == pytest.approx(2.2)
+
+
+def test_layered_model_plot_hides_borehole_boundaries_by_default():
+    import matplotlib.pyplot as plt
+
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+    model.add_borehole(
+        name="bh1",
+        x=0.45,
+        parts=[
+            {
+                "name": "fluid",
+                "mesh_block_id": 20,
+                "r": 0.06,
+                "physics": "acoustic",
+                "properties": {"Vp": 1.48},
+            }
+        ],
+    )
+
+    fig, ax = plt.subplots()
+    model.plot("Vp", resolution=[11, 3], ax=ax, surfaces=False, add_colorbar=False)
+
+    assert len(ax.lines) == 0
+    assert ax.images[0].get_array().min() == pytest.approx(1.48)
+    plt.close(fig)
+
+
+def test_borehole_draw_plots_material_radii():
+    import matplotlib.pyplot as plt
+
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+    borehole = model.add_borehole(
+        name="bh1",
+        x=0.45,
+        parts=[
+            {
+                "name": "fluid",
+                "mesh_block_id": 20,
+                "r": 0.035,
+                "physics": "acoustic",
+                "properties": {"Vp": 1.48},
+            },
+            {
+                "name": "casing",
+                "mesh_block_id": 21,
+                "r": 0.041,
+                "physics": "elastic",
+                "properties": {"Vp": 5.9, "Vs": 3.2},
+            },
+        ],
+    )
+
+    fig, ax = plt.subplots()
+    returned = borehole.draw(ax=ax, subdomains=model.subdomains, annotate=True)
+
+    assert returned is ax
+    assert len(ax.patches) == 2
+    assert ax.get_aspect() == 1.0
+    assert any("bh1_fluid" in text.get_text() for text in ax.texts)
     plt.close(fig)
 
 

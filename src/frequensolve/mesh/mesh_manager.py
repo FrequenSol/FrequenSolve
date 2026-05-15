@@ -6,6 +6,7 @@ from pathlib import Path
 from shutil import copy2
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 
+from frequensolve.units import value_and_units_to_fs
 from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
 
 from .mesh_generators import BaseMeshGenerator
@@ -148,8 +149,8 @@ class DistanceGrading(ExtraFieldsMixin):
     def to_fs(self, ctx=None) -> Dict[str, Any]:
         mult = self.mult if self.mult is not None else self.mult_max
         payload = {
-            "d0": self.d0,
-            "d1": self.d1,
+            "d0": value_and_units_to_fs(self.d0),
+            "d1": value_and_units_to_fs(self.d1),
             **({"mult": mult} if mult is not None else {}),
         }
         return merge_extra(payload, self.extra, "DistanceGrading")
@@ -210,8 +211,8 @@ class SurfaceGrading(ExtraFieldsMixin):
         payload = {
             "surface": self.surface,
             "mode": self.mode,
-            "d0": self.d0,
-            "d1": self.d1,
+            "d0": value_and_units_to_fs(self.d0),
+            "d1": value_and_units_to_fs(self.d1),
             **({"mult": self.mult} if self.mult is not None else {}),
             **({"mult_max": self.mult_max} if self.mult_max is not None else {}),
             **({"mult_min": self.mult_min} if self.mult_min is not None else {}),

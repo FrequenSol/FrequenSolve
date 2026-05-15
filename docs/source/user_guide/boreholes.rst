@@ -1,11 +1,12 @@
 Boreholes
 =========
 
-Boreholes are authored on ``LayeredModel`` and are primarily intended for
-2D axisymmetric models. A borehole describes the geometry and mesh blocks for
-radial parts such as fluid, casing, and cement. The material properties for
-those parts are normal model subdomains, so they can use the same property,
-physics, unit, and file-backed workflows as any other material block.
+Boreholes are authored on ``LayeredModel``. Current solver support is for
+2D ``LayeredMeshGenerator`` meshes, which is the common axisymmetric borehole
+case. A borehole describes the geometry and mesh blocks for radial parts such
+as fluid, casing, and cement. The material properties for those parts are normal
+model subdomains, so they can use the same property, physics, unit, and
+file-backed workflows as any other material block.
 
 Python API
 ----------
@@ -86,10 +87,42 @@ corresponding material subdomain automatically.
        max_growth=1.5,
    )
 
-Each part gives its outer radius as ``r``. The first part starts at ``r = 0``;
-each following part starts at the previous part's ``r``. Radius is represented
-internally as a ``Property``, so it accepts the same scalar, Pint, xarray,
-file-backed, and structured property inputs used for layered surface depths.
+``LayeredModel.plot(...)`` samples borehole material subdomains into the plotted
+property image, so borehole materials appear by value instead of as separate
+guide lines. Pass ``boreholes=True`` only when you want to overlay the borehole
+axis and radial part boundaries for geometry debugging; customize that optional
+overlay with ``borehole_kwargs``:
+
+.. code-block:: python
+
+   model.plot(
+       "Vp",
+       boreholes=True,
+       borehole_kwargs={
+           "fill": True,
+           "color": "white",
+           "labels": True,
+       },
+   )
+
+For a local radial cross-section, call ``draw`` on a borehole object:
+
+.. code-block:: python
+
+   borehole = model.boreholes["bh1"]
+   borehole.draw(
+       z=0.25 * u.km,
+       units="m",
+       depth_units="km",
+       subdomains=model.subdomains,
+   )
+
+Each part gives its cumulative outer radius as ``r``. The first part starts at
+``r = 0``; each following part starts at the previous part's ``r``. Radius is
+represented internally as a ``Property``, so it accepts scalar, Pint, xarray,
+file-backed, and structured property inputs. Inline variable-radius profiles
+must be one-dimensional over ``z`` or ``depth`` so the layered generator can
+evaluate radius at cell-centroid depth.
 
 Variable Radius
 ---------------
@@ -150,7 +183,8 @@ Object API
 ----------
 
 Use ``BoreholePart`` when geometry and materials are defined separately. In
-this form, create the matching ``ModelSubdomain`` objects yourself.
+this form, create the matching ``ModelSubdomain`` objects yourself; the
+``mesh_block_id`` on each borehole part must already exist in ``subdomains``.
 
 .. code-block:: python
 

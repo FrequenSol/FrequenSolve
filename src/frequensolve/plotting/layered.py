@@ -45,7 +45,8 @@ def _plot_layered_model_3d(model: Any, property: str, resolution: List[int], **k
         resolution = [*resolution, resolution[1]]
 
     property_key = canonical_property_name(property)
-    samples = model.sample_uniform(resolution)[property_key]
+    axes_units = kwargs.pop("axes_units", {"x": "km", "y": "km", "z": "km"})
+    samples = model.sample_uniform(resolution, axes_units=axes_units)[property_key]
     units = kwargs.pop("units", samples.attrs.get("units"))
     samples = model.convert_property_units(samples, property_key, units)
     x = samples.coords["x"].values
@@ -103,7 +104,16 @@ def _plot_layered_model_3d(model: Any, property: str, resolution: List[int], **k
             try:
                 sx, sy = np.meshgrid(x, y, indexing="ij")
                 surf_coords = xr.DataArray(dims=["x", "y"], coords={"x": x, "y": y})
-                sz = surface.depth.get(surf_coords).values
+                sz = surface.depth.get(surf_coords)
+                z_units = axes_units.get("z") if axes_units else None
+                if z_units is not None:
+                    source_units = surface.depth.units or sz.attrs.get("units")
+                    if source_units is not None and source_units != z_units:
+                        from frequensolve.units import ureg
+
+                        sz = sz.copy(deep=True)
+                        sz.data = (sz.data * ureg(source_units)).to(z_units).magnitude
+                sz = sz.values
                 sgrid = pv.StructuredGrid(sx, sy, sz)
                 plotter.add_mesh(
                     sgrid,
@@ -138,7 +148,8 @@ def _plot_layered_model_2d(model: Any, property: str, resolution: List[int], **k
         ) from exc
 
     property_key = canonical_property_name(property)
-    samples = model.sample_uniform(resolution)[property_key]
+    axes_units = kwargs.pop("axes_units", {"x": "km", "z": "km"})
+    samples = model.sample_uniform(resolution, axes_units=axes_units)[property_key]
 
     units = kwargs.pop("units", samples.attrs.get("units"))
     samples = model.convert_property_units(samples, property_key, units)
@@ -147,15 +158,16 @@ def _plot_layered_model_2d(model: Any, property: str, resolution: List[int], **k
     origin = kwargs.pop("origin", "upper")
     aspect = kwargs.pop("aspect", None)
     axes_names = kwargs.pop("axes_names", {"x": "X", "z": "Depth"})
-    axes_units = kwargs.pop("axes_units", {"x": "km", "z": "km"})
     add_colorbar = kwargs.pop("add_colorbar", True)
 
     show_surfaces = kwargs.pop("surfaces", True)
+    show_boreholes = kwargs.pop("boreholes", False)
     surface_kwargs = {
         "color": kwargs.pop("linecolor", "k"),
         "linestyle": kwargs.pop("linestyle", "-"),
         "linewidth": kwargs.pop("linewidth", 1),
     }
+    borehole_kwargs = kwargs.pop("borehole_kwargs", {})
 
     acquisition = kwargs.pop("acquisition", None)
     scatter_kwargs = kwargs.pop("scatter_kwargs", {})
@@ -197,7 +209,15 @@ def _plot_layered_model_2d(model: Any, property: str, resolution: List[int], **k
         if model.y_limits is not None:
             limits["y"] = model.y_limits
         for surface in model.surfaces:
-            surface.plot(limits=limits, ax=ax, **surface_kwargs)
+            surface.plot(
+                limits=limits,
+                ax=ax,
+                units=axes_units.get("z") if axes_units else None,
+                **surface_kwargs,
+            )
+
+    if show_boreholes and getattr(model, "boreholes", None):
+        _plot_boreholes(model, ax, axes_units=axes_units, **borehole_kwargs)
 
     if acquisition is not None:
         _plot_acquisition(model, acquisition, ax, **scatter_kwargs)
@@ -216,6 +236,178 @@ def _plot_layered_model_2d(model: Any, property: str, resolution: List[int], **k
     if show:
         plt.show()
     return image
+
+
+def _length_value(value: Any, units: str | None = None) -> float:
+    if isinstance(value, dict):
+        raw = value.get("value")
+        if raw is None:
+            raise ValueError("Length mappings require a value")
+        source_units = value.get("units")
+        if units is not None and source_units is not None:
+            from frequensolve.units import ureg
+
+            return float((float(raw) * ureg(source_units)).to(units).magnitude)
+        return float(raw)
+    if hasattr(value, "to") and hasattr(value, "magnitude"):
+        return (
+            float(value.to(units).magnitude)
+            if units is not None
+            else float(value.magnitude)
+        )
+    return float(value)
+
+
+def _surface_by_ref(model: Any, ref: Any) -> Any:
+    if hasattr(ref, "depth") and hasattr(ref, "name"):
+        return ref
+    if isinstance(ref, dict):
+        if "surface" in ref:
+            ref = ref["surface"]
+        elif "index" in ref:
+            ref = ref["index"]
+    if isinstance(ref, int):
+        return model.surfaces[ref - 1]
+    if isinstance(ref, str):
+        if ref == "top":
+            return model.surfaces[0]
+        if ref == "bottom":
+            return model.surfaces[-1]
+        if ref.startswith("surface_"):
+            try:
+                return model.surfaces[int(ref.split("_", 1)[1]) - 1]
+            except (ValueError, IndexError):
+                pass
+        for surface in model.surfaces:
+            if surface.name == ref:
+                return surface
+    raise ValueError(f"Unknown borehole extent surface reference: {ref!r}")
+
+
+def _surface_depth_at_x(surface: Any, x: float, units: str | None = None) -> float:
+    coords = xr.DataArray(dims=["x"], coords={"x": [x]})
+    depth = surface.depth.get(coords)
+    value = float(np.asarray(depth.values).reshape(-1)[0])
+    source_units = surface.depth.units or depth.attrs.get("units")
+    if units is not None and source_units is not None:
+        from frequensolve.units import ureg
+
+        value = float((value * ureg(source_units)).to(units).magnitude)
+    return value
+
+
+def _plot_boreholes(
+    model: Any,
+    ax: Any,
+    *,
+    axes_units: Dict[str, str] | None = None,
+    color: str = "white",
+    axis_color: str = "black",
+    linewidth: float = 1.2,
+    linestyle: str = "--",
+    alpha: float = 0.95,
+    label: bool = True,
+    labels: bool | None = None,
+    fill: bool = False,
+    fill_alpha: float = 0.12,
+    colors: List[str] | None = None,
+) -> None:
+    if labels is not None:
+        label = labels
+    x_units = axes_units.get("x") if axes_units else None
+    z_units = axes_units.get("z") if axes_units else None
+    palette = colors or ["#76b7b2", "#f28e2b", "#59a14f", "#e15759", "#4e79a7"]
+
+    for borehole in model.boreholes:
+        try:
+            axis_x = borehole.axis_x(x_units)
+            top = _surface_by_ref(model, borehole.extent["top"])
+            bottom = _surface_by_ref(model, borehole.extent["bottom"])
+            z_top = _surface_depth_at_x(top, axis_x, z_units)
+            z_bottom = _surface_depth_at_x(bottom, axis_x, z_units)
+        except Exception:
+            continue
+
+        z0, z1 = sorted([z_top, z_bottom])
+        ax.plot(
+            [axis_x, axis_x],
+            [z0, z1],
+            color=axis_color,
+            linestyle=":",
+            linewidth=linewidth,
+            alpha=alpha,
+            label=f"{borehole.name} axis" if label else None,
+            zorder=5,
+        )
+
+        previous = None
+        for ipart, part in enumerate(borehole.parts):
+            try:
+                z_values, radii = borehole.radius_profile(
+                    part,
+                    units=x_units,
+                    depth_units=z_units,
+                )
+            except Exception:
+                continue
+            if len(radii) == 1:
+                z_plot = np.asarray([z0, z1], dtype=float)
+                radii_plot = np.full_like(z_plot, radii[0], dtype=float)
+            else:
+                inner = z_values[(z_values >= z0) & (z_values <= z1)]
+                z_plot = np.unique(np.concatenate(([z0], inner, [z1])))
+                radii_plot = np.interp(z_plot, z_values, radii)
+
+            left = axis_x - radii_plot
+            right = axis_x + radii_plot
+            color_i = palette[ipart % len(palette)]
+            for side in (left, right):
+                if np.all(side < model.x_limits[0]) or np.all(side > model.x_limits[1]):
+                    continue
+                ax.plot(
+                    side,
+                    z_plot,
+                    color=color,
+                    linestyle=linestyle,
+                    linewidth=linewidth,
+                    alpha=alpha,
+                    zorder=5,
+                )
+            if fill:
+                inner_radius = (
+                    np.zeros_like(radii_plot)
+                    if previous is None
+                    else np.interp(z_plot, previous[0], previous[1])
+                )
+                ax.fill_betweenx(
+                    z_plot,
+                    axis_x + inner_radius,
+                    right,
+                    color=color_i,
+                    alpha=fill_alpha,
+                    zorder=4,
+                )
+                ax.fill_betweenx(
+                    z_plot,
+                    left,
+                    axis_x - inner_radius,
+                    color=color_i,
+                    alpha=fill_alpha,
+                    zorder=4,
+                )
+            if label:
+                mid = len(z_plot) // 2
+                ax.text(
+                    axis_x + radii_plot[mid],
+                    z_plot[mid],
+                    part.name,
+                    color=color,
+                    fontsize=8,
+                    ha="left",
+                    va="center",
+                    zorder=6,
+                )
+            previous = (z_plot, radii_plot)
 
 
 def _annotate_samples(

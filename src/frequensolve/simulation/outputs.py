@@ -256,15 +256,14 @@ class ParaviewOutput(Output):
             "_type": self.__class__.__name__,
             "name": self.name,
             "path": self.path,
-            "fields": (
-                canonical_fields(self.fields) if self.fields is not None else ["all"]
-            ),
             "properties": self.properties,
             "sources": self.sources,
             "upscale": self.upscale,
             "show_pml": self.show_pml,
             "writer": self._writer_payload(),
         }
+        if self.fields is not None:
+            payload["fields"] = canonical_fields(self.fields)
 
         for key in ["execute_on", "order"]:
             value = getattr(self, key)
@@ -299,10 +298,12 @@ class ParaviewOutput(Output):
         return payload
 
     def _items_payload(self) -> List[Dict[str, Any]]:
-        items = [
-            {"kind": "field", "field": field, "parts": self.parts}
-            for field in canonical_fields(self.fields or ["all"])
-        ]
+        items = []
+        if self.fields is not None:
+            items.extend(
+                {"kind": "field", "field": field, "parts": self.parts}
+                for field in canonical_fields(self.fields)
+            )
         items.extend(
             {"kind": "property", "property": prop} for prop in (self.properties or [])
         )

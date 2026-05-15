@@ -37,6 +37,7 @@ from frequensolve.seismic.receivers import (
     CoordsArray,
     CoordsFromFile,
     ReceiverComponent,
+    ReceiverFiber,
     ReceiverNode,
 )
 from frequensolve.seismic.sparse_survey import SparseSurvey
@@ -527,6 +528,23 @@ def test_acquisition_accepts_quantity_source_and_receiver_coordinates():
     assert receiver_payload["value"][-1] == [0.9, 0.0]
 
 
+def test_acquisition_accepts_array_quantity_receiver_coordinates():
+    acq = Acquisition()
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+
+    receiver_coords = Q_([[x, 50.0] for x in np.linspace(0.0, 1000.0, 3)], "m")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=receiver_coords)
+
+    payload = acq.to_fs()
+    receiver_payload = payload["receiver_groups"][0]["coordinates"]
+    assert receiver_payload == {
+        "_type": "CoordsArray",
+        "value": [[0.0, 50.0], [500.0, 50.0], [1000.0, 50.0]],
+        "units": "m",
+    }
+
+
 def test_ricker_wavelet_defaults_pre_time_to_one_period():
     wavelet = RickerWavelet(f=10.0)
 
@@ -548,6 +566,106 @@ def test_ricker_wavelet_accepts_pre_time_alias():
 
     with pytest.raises(ValueError, match="center or pre_time"):
         RickerWavelet(f=20.0, center=0.1, pre_time=0.2)
+
+
+def test_receiver_fiber_exports_preferred_das_spacing_contract():
+    das = ReceiverFiber(
+        name="das",
+        gauge_length=0.01,
+        channel_spacing=0.0125,
+        sample_spacing=0.002,
+    )
+    das.add_component(name="eps_tt", field="strain", direction=[1.0, 0.0])
+
+    payload = das.to_fs()
+
+    assert payload["_type"] == "ReceiverFiber"
+    assert payload["gauge_length"] == 0.01
+    assert payload["channel_spacing"] == 0.0125
+    assert payload["sample_spacing"] == 0.002
+    assert payload["components"][0]["field"] == "strain"
+    assert "points_per_gauge" not in payload
+
+
+def test_receiver_fiber_exports_points_per_gauge_when_sample_spacing_is_omitted():
+    das = ReceiverFiber(gauge_length=0.01, points_per_gauge=5)
+
+    assert das.gauge_length == 0.01
+    assert das.channel_spacing == 0.01
+    assert das.points_per_gauge == 5
+    assert das.to_fs()["gauge_length"] == 0.01
+    assert das.to_fs()["channel_spacing"] == 0.01
+    assert das.to_fs()["points_per_gauge"] == 5
+
+    loaded = ReceiverFiber.from_fs(
+        {
+            "name": "loaded_das",
+            "components": [{"name": "eps_tt", "field": "strain"}],
+            "gauge_length": 0.02,
+            "channel_spacing": 0.03,
+            "sample_spacing": 0.004,
+            "points_per_gauge": 7,
+        }
+    )
+
+    assert loaded.gauge_length == 0.02
+    assert loaded.channel_spacing == 0.03
+    assert loaded.sample_spacing == 0.004
+    assert loaded.points_per_gauge == 7
+
+
+def test_receiver_fiber_exports_quantity_lengths_with_units():
+    das = ReceiverFiber(
+        gauge_length=10 * u.m,
+        sample_spacing=2 * u.m,
+        radius=0.5 * u.m,
+        pitch=25 * u.m,
+    )
+
+    payload = das.to_fs()
+
+    assert payload["gauge_length"] == {"value": 10, "units": "m"}
+    assert payload["channel_spacing"] == {"value": 10, "units": "m"}
+    assert payload["sample_spacing"] == {"value": 2, "units": "m"}
+    assert payload["radius"] == {"value": 0.5, "units": "m"}
+    assert payload["pitch"] == {"value": 25, "units": "m"}
+
+    explicit = ReceiverFiber(
+        gauge_length=0.01 * u.km,
+        channel_spacing=12.5 * u.m,
+        sample_spacing=2 * u.m,
+    ).to_fs()
+
+    assert explicit["gauge_length"] == {"value": 0.01, "units": "km"}
+    assert explicit["channel_spacing"] == {"value": 12.5, "units": "m"}
+
+
+def test_receiver_device_name_is_optional_and_omitted_when_absent():
+    node = ReceiverNode()
+    node.add_component(name="p", field="pressure")
+
+    node_payload = node.to_fs()
+
+    assert node.name is None
+    assert node_payload["_type"] == "ReceiverNode"
+    assert "name" not in node_payload
+    assert node_payload["components"][0]["field"] == "pressure"
+
+    das = ReceiverFiber(gauge_length=0.01, sample_spacing=0.002)
+    das.add_component(name="eps_tt", field="strain", direction=[1.0, 0.0])
+
+    das_payload = das.to_fs()
+
+    assert das.name is None
+    assert das_payload["_type"] == "ReceiverFiber"
+    assert "name" not in das_payload
+    assert das_payload["gauge_length"] == 0.01
+    assert das_payload["channel_spacing"] == 0.01
+
+    loaded = ReceiverNode.from_fs({"components": [{"name": "p", "field": "pressure"}]})
+
+    assert loaded.name is None
+    assert loaded.components[0].field == "pressure"
 
 
 def test_compound_source_broadcasts_single_direction_vector():
@@ -875,6 +993,21 @@ def test_paraview_defaults_to_vtu_appended_binary():
         ParaviewOutput(name="pv", fields=["pressure"], format="vtk")
 
 
+def test_paraview_output_omits_fields_when_not_requested():
+    payload = ParaviewOutput(name="pv", properties=["vp"]).to_fs()
+
+    assert "fields" not in payload
+    assert payload["properties"] == ["vp"]
+
+
+def test_paraview_parts_do_not_default_missing_fields_to_all():
+    payload = ParaviewOutput(name="pv", properties=["vp"], parts="real").to_fs()
+
+    assert "fields" not in payload
+    assert "properties" not in payload
+    assert payload["items"] == [{"kind": "property", "property": "vp"}]
+
+
 def test_paraview_parts_are_compact_and_validated():
     output = ParaviewOutput(
         name="real_pressure",
@@ -1158,6 +1291,48 @@ def test_mesh_source_receiver_gradings_export_to_fast_solver_contract():
         "d1": 0.12,
         "mult": 3.0,
     }
+
+
+def test_mesh_gradings_accept_pint_distance_units():
+    mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1], units="km")
+    )
+    mesh.set_adapt(
+        epw=2.0,
+        source_grading=DistanceGrading(
+            d0=10.0 * u.m,
+            d1=80.0 * u.m,
+            mult=4.0,
+        ),
+        receiver_grading={
+            "d0": 0.01 * u.km,
+            "d1": 0.06 * u.km,
+            "mult": 2.0,
+        },
+        surface_gradings=[
+            SurfaceGrading(
+                surface="interface",
+                d0=5.0 * u.m,
+                d1=25.0 * u.m,
+                mult=2.0,
+            )
+        ],
+    )
+
+    payload = mesh.to_fs()["adapt"]
+
+    assert payload["src_grading"] == {
+        "d0": {"value": 10.0, "units": "m"},
+        "d1": {"value": 80.0, "units": "m"},
+        "mult": 4.0,
+    }
+    assert payload["rcv_grading"] == {
+        "d0": {"value": 0.01, "units": "km"},
+        "d1": {"value": 0.06, "units": "km"},
+        "mult": 2.0,
+    }
+    assert payload["surface_gradings"][0]["d0"] == {"value": 5.0, "units": "m"}
+    assert payload["surface_gradings"][0]["d1"] == {"value": 25.0, "units": "m"}
 
 
 def test_mesh_source_receiver_gradings_are_editable():
@@ -2077,6 +2252,245 @@ def test_trace_store_uses_solver_packed_trace_file_without_vds_warnings(tmp_path
     assert fd.coords["frequency"].values.tolist() == [10.0, 20.0, 30.0]
     assert fd.coords["receiver"].values.tolist() == [101, 102]
     assert fd.values.real.tolist() == [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+
+
+def test_trace_dataset_td_compensates_laplace_domain_amplitudes(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    period = 1.0
+    laplace = -np.log(10.0) / (2.0 * np.pi * period)
+
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=np.array([1.0, 2.0]))
+        h5.create_dataset("laplace", data=np.array([laplace, laplace]))
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        dset = h5.create_dataset(
+            "surface",
+            data=np.array(
+                [
+                    [[[[1.0, 0.0]]]],
+                    [[[[0.25, 0.0]]]],
+                ],
+                dtype=np.float32,
+            ),
+        )
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.array([101], dtype=np.int32)
+        dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+    traces = TraceDataset.open(packed)
+    wavelet = RickerWavelet(f=0.5, pre_time=0.0)
+    laplace_time = traces.ld("surface", "p", source=7, wavelet=wavelet)
+    compensated = traces.td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=0.5, pre_time=0.0),
+    )
+
+    raw_time = np.linspace(0.0, period, laplace_time.sizes["time"] + 1)[:-1]
+    gain = np.exp(-2.0 * np.pi * laplace * raw_time)
+
+    np.testing.assert_allclose(
+        compensated.values[:, 0],
+        laplace_time.values[:, 0] * gain,
+        rtol=1.0e-6,
+        atol=1.0e-6,
+    )
+    assert traces.laplace("surface").tolist() == pytest.approx([laplace, laplace])
+    assert laplace_time.attrs["domain"] == "laplace_time"
+    assert laplace_time.attrs["laplace_compensated"] is False
+    assert compensated.attrs["domain"] == "time"
+    assert compensated.attrs["laplace_compensated"] is True
+    assert compensated.attrs["damping_factor"] == pytest.approx(10.0)
+
+
+def test_trace_store_reads_indexed_solver_packed_trace_file(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    trace_files = [trace_dir / f"traces_{idx}.h5" for idx in range(1, 4)]
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=np.array([20.0, 10.0, 30.0]))
+        h5.create_dataset("laplace", data=np.zeros(3))
+        h5.create_dataset("task_id", data=np.array([2, 1, 3], dtype=np.int32))
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["indexed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        catalog = h5.require_group("survey/receiver_groups/_catalog")
+        catalog.create_dataset(
+            "group_name", data=np.array(["surface"], dtype=string_dtype)
+        )
+        catalog.create_dataset(
+            "dataset_path", data=np.array(["/surface"], dtype=string_dtype)
+        )
+        catalog.create_dataset(
+            "layout_kind", data=np.array(["dense_trace_v1"], dtype=string_dtype)
+        )
+        trace_group = h5.require_group("survey/receiver_groups/surface/traces")
+        trace_group.create_dataset(
+            "receiver_id", data=np.array([101, 102], dtype=np.int32)
+        )
+        trace_group.create_dataset("source_id", data=np.array([7, 7], dtype=np.int32))
+        trace_group.create_dataset(
+            "component_name", data=np.array(["p", "p"], dtype=string_dtype)
+        )
+        h5.require_group("trace_index/datasets")
+        h5.create_dataset(
+            "trace_index/schema_version",
+            data=np.array(["fs-trace-index-1"], dtype=string_dtype),
+        )
+        h5.create_dataset(
+            "trace_index/layout_kind",
+            data=np.array(["indexed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        h5.create_dataset(
+            "trace_index/data_root", data=np.array(["/trace_data"], dtype=string_dtype)
+        )
+        h5.create_dataset(
+            "trace_index/dataset_number", data=np.array([1, 2, 3], dtype=np.int32)
+        )
+        h5.create_dataset("trace_index/frequency", data=np.array([20.0, 10.0, 30.0]))
+        h5.create_dataset("trace_index/laplace", data=np.zeros(3, dtype=np.float64))
+        h5.create_dataset(
+            "trace_index/task_id", data=np.array([2, 1, 3], dtype=np.int32)
+        )
+        h5.create_dataset(
+            "trace_index/shard_file",
+            data=np.array(
+                [
+                    "traces/shards/traces_2.h5",
+                    "traces/shards/traces_1.h5",
+                    "traces/shards/traces_3.h5",
+                ],
+                dtype=string_dtype,
+            ),
+        )
+        h5.create_dataset(
+            "trace_index/datasets/dataset_number",
+            data=np.array([1, 2, 3], dtype=np.int32),
+        )
+        h5.create_dataset(
+            "trace_index/datasets/source_path",
+            data=np.array(["/surface", "/surface", "/surface"], dtype=string_dtype),
+        )
+        h5.create_dataset(
+            "trace_index/datasets/packed_path",
+            data=np.array(
+                [
+                    "/trace_data/surface/000001",
+                    "/trace_data/surface/000002",
+                    "/trace_data/surface/000003",
+                ],
+                dtype=string_dtype,
+            ),
+        )
+        for number, values in {
+            "000001": [3.0, 4.0],
+            "000002": [1.0, 2.0],
+            "000003": [5.0, 6.0],
+        }.items():
+            dset = h5.create_dataset(
+                f"trace_data/surface/{number}",
+                data=np.array(
+                    [[[[values[0], 0.0], [values[1], 0.0]]]], dtype=np.float32
+                ),
+            )
+            dset.attrs["dims"] = ["receiver", "component", "shot"]
+            dset.attrs["layout_kind"] = ["dense_trace_v1"]
+            dset.attrs["receiver"] = np.array([101, 102], dtype=np.int32)
+            dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+            dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=trace_files,
+            frequencies={1: 10.0, 2: 20.0, 3: 30.0},
+            groups=["surface"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=trace_dir,
+            project_path=tmp_path,
+        )
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        consolidated = traces.consolidate()
+
+    assert consolidated == packed
+    assert not any(
+        "Trace file is missing" in str(warning.message) for warning in caught
+    )
+    assert traces.groups == ["surface"]
+    assert traces.frequencies("surface").tolist() == [10.0, 20.0, 30.0]
+    assert traces.receivers("surface").tolist() == [101, 102]
+    assert traces.sources("surface").tolist() == [7]
+    assert traces.components("surface").tolist() == ["p"]
+
+    fd = traces.fd("surface", "p", source=7)
+    assert fd.dims == ("frequency", "receiver")
+    assert fd.coords["frequency"].values.tolist() == [10.0, 20.0, 30.0]
+    assert fd.coords["receiver"].values.tolist() == [101, 102]
+    assert fd.values.real.tolist() == [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+
+
+def test_trace_store_detects_sibling_packed_trace_file_before_warning(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    shard_dir = trace_dir / "shards"
+    trace_files = [shard_dir / f"traces_{idx}.h5" for idx in range(1, 4)]
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=np.array([10.0, 20.0, 30.0]))
+        dset = h5.create_dataset(
+            "surface",
+            data=np.array(
+                [
+                    [[[[1.0, 0.0], [2.0, 0.0]]]],
+                    [[[[3.0, 0.0], [4.0, 0.0]]]],
+                    [[[[5.0, 0.0], [6.0, 0.0]]]],
+                ],
+                dtype=np.float32,
+            ),
+        )
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.array([101, 102], dtype=np.int32)
+        dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=trace_files,
+            frequencies={1: 10.0, 2: 20.0, 3: 30.0},
+            groups=["surface"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=trace_dir,
+            project_path=tmp_path,
+        )
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        consolidated = traces.consolidate()
+
+    assert consolidated == packed
+    assert not any(
+        "Trace file is missing" in str(warning.message) for warning in caught
+    )
+    assert traces.frequencies("surface").tolist() == [10.0, 20.0, 30.0]
 
 
 def test_trace_store_omits_missing_later_trace_files_and_refreshes(tmp_path):

@@ -29,6 +29,8 @@ from frequensolve.units import __all__ as _units_all
 from frequensolve.util import *  # noqa: F403
 from frequensolve.util import __all__ as _util_all
 
+_colormap_all = ["get_colormap", "RdYlBu", "RdYlBu_r", "BuGrOr", "BuGrOr_r"]
+
 __version__ = get_versions()["version"]
 
 __all__ = [
@@ -44,5 +46,18 @@ __all__ = [
         _simulation_all,
         _orchestrator_all,
         _util_all,
+        _colormap_all,
     ),
 ]
+
+
+def __getattr__(name):
+    if name in _colormap_all:
+        from frequensolve.util import colormaps
+
+        return getattr(colormaps, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted({*globals(), *__all__})

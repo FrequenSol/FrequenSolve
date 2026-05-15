@@ -20,7 +20,13 @@ from frequensolve.util.fft import get_fft_backend
 
 __all__: list[str] = []
 
-_ROOT_TRACE_METADATA_DATASETS = {"frequency", "laplace", "task_id"}
+_ROOT_TRACE_METADATA_DATASETS = {
+    "frequency",
+    "laplace",
+    "task_id",
+    "trace_data",
+    "trace_index",
+}
 
 
 class TraceSummary(str):
@@ -73,6 +79,26 @@ def _unique_preserve_order(values):
 
 def _attr_strings(value) -> list[str]:
     return [str(item) for item in _decode_h5_strings(np.asarray(value)).ravel()]
+
+
+def _dataset_strings(h5, path: str) -> list[str]:
+    if path not in h5:
+        return []
+    return [str(item) for item in _decode_h5_strings(h5[path][()]).ravel()]
+
+
+def _dataset_ints(h5, path: str) -> np.ndarray:
+    if path not in h5:
+        return np.asarray([], dtype=np.int64)
+    return np.asarray(h5[path][()]).ravel().astype(np.int64)
+
+
+def _clean_h5_path(path: str) -> str:
+    return "/" + str(path).strip("/")
+
+
+def _trace_data_tail(path: str) -> str:
+    return str(path).strip("/")
 
 
 def _trace_axis_dims(dset) -> list[str]:
@@ -218,8 +244,12 @@ class TraceStore:
     def dims(self, group) -> list[str]:
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
+            if self._is_indexed_packed_h5(f) and group not in f:
+                dset = f[self._indexed_trace_paths(f, group)[0]]
+            else:
+                dset = f[group]
             return [
-                "source" if dim == "shot" else dim for dim in _trace_data_dims(f[group])
+                "source" if dim == "shot" else dim for dim in _trace_data_dims(dset)
             ]
 
     def components(self, group) -> list[str]:
@@ -231,9 +261,14 @@ class TraceStore:
             ):
                 if path in f:
                     return _unique_preserve_order(_decode_h5_strings(f[path][()]))
-            if "component" in f[group].attrs:
-                return _decode_h5_strings(f[group].attrs["component"])
-            return np.arange(1, f[group].shape[-2] + 1)
+            dset = (
+                f[self._indexed_trace_paths(f, group)[0]]
+                if self._is_indexed_packed_h5(f) and group not in f
+                else f[group]
+            )
+            if "component" in dset.attrs:
+                return _decode_h5_strings(dset.attrs["component"])
+            return np.arange(1, dset.shape[-2] + 1)
 
     def sources(self, group) -> list[str]:
         self._ensure_consolidated()
@@ -241,9 +276,14 @@ class TraceStore:
             path = f"survey/receiver_groups/{group}/traces/source_id"
             if path in f:
                 return _unique_preserve_order(f[path][()])
-            if "shot" in f[group].attrs:
-                return f[group].attrs["shot"]
-            return np.arange(1, f[group].shape[-1] + 1)
+            dset = (
+                f[self._indexed_trace_paths(f, group)[0]]
+                if self._is_indexed_packed_h5(f) and group not in f
+                else f[group]
+            )
+            if "shot" in dset.attrs:
+                return dset.attrs["shot"]
+            return np.arange(1, dset.shape[-1] + 1)
 
     def shots(self, group) -> list[str]:
         """Compatibility alias for ``sources``."""
@@ -253,11 +293,42 @@ class TraceStore:
     def frequencies(self, group) -> list[str]:
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
+            if self._is_indexed_packed_h5(f) and group not in f:
+                values = [
+                    row["frequency"]
+                    for row in self._indexed_trace_rows(f, group)
+                    if row["frequency"] is not None
+                ]
+                if values:
+                    return np.asarray(values, dtype=float)
             if "frequency" in f:
                 return f["frequency"][()]
-            if "frequency" in f[group].attrs:
-                return f[group].attrs["frequency"]
+            dset = (
+                f[self._indexed_trace_paths(f, group)[0]]
+                if self._is_indexed_packed_h5(f) and group not in f
+                else f[group]
+            )
+            if "frequency" in dset.attrs:
+                return dset.attrs["frequency"]
             return np.array(list(self.metadata["f_map"].values()))
+
+    def laplace(self, group: Optional[str] = None) -> np.ndarray:
+        self._ensure_consolidated()
+        with h5py.File(self._consolidated, "r") as f:
+            if group is not None and self._is_indexed_packed_h5(f) and group not in f:
+                rows = self._indexed_trace_rows(f, group)
+                return np.asarray(
+                    [row.get("laplace", 0.0) for row in rows], dtype=float
+                )
+            if "laplace" in f:
+                values = np.asarray(f["laplace"][()]).ravel()
+                if values.size:
+                    return values.astype(float)
+            if group is not None:
+                frequencies = np.asarray(self.frequencies(group), dtype=float)
+            else:
+                frequencies = np.asarray(self._expected_frequencies(), dtype=float)
+            return self._metadata_laplace_values(frequencies)
 
     def receivers(self, group) -> list[str]:
         self._ensure_consolidated()
@@ -268,11 +339,16 @@ class TraceStore:
             ):
                 if path in f:
                     return _unique_preserve_order(f[path][()])
-            if "receiver" in f[group].attrs:
-                return f[group].attrs["receiver"]
-            dims = np.asarray(_decode_dim_list(f[group].attrs["dims"])[::-1])
+            dset = (
+                f[self._indexed_trace_paths(f, group)[0]]
+                if self._is_indexed_packed_h5(f) and group not in f
+                else f[group]
+            )
+            if "receiver" in dset.attrs:
+                return dset.attrs["receiver"]
+            dims = np.asarray(_decode_dim_list(dset.attrs["dims"])[::-1])
             ind = np.where(dims == "receiver")[0][0]
-            return np.arange(1, f[group].shape[ind] + 1)
+            return np.arange(1, dset.shape[ind] + 1)
 
     def survey_tables(self) -> Dict[str, Any]:
         if self._consolidated is None:
@@ -376,13 +452,178 @@ class TraceStore:
             return [float(value) for value in values]
 
     @staticmethod
+    def _read_trace_laplace_values(file: Path) -> list[float]:
+        with h5py.File(file, "r") as h5:
+            frequency_count = (
+                len(np.asarray(h5["frequency"][()]).ravel()) if "frequency" in h5 else 1
+            )
+            if "trace_index/laplace" in h5:
+                values = np.asarray(h5["trace_index/laplace"][()]).ravel()
+            elif "laplace" in h5:
+                values = np.asarray(h5["laplace"][()]).ravel()
+            else:
+                return [0.0] * frequency_count
+            if values.size == 0:
+                return [0.0] * frequency_count
+            if values.size == 1 and frequency_count > 1:
+                return [float(np.real(values[0]))] * frequency_count
+            return [float(np.real(value)) for value in values]
+
+    @staticmethod
+    def _read_trace_laplace(file: Path) -> float:
+        return TraceStore._read_trace_laplace_values(file)[0]
+
+    @staticmethod
+    def _is_indexed_packed_h5(h5) -> bool:
+        if "trace_index" not in h5 or "trace_data" not in h5:
+            return False
+        layout = _dataset_strings(h5, "trace_index/layout_kind")
+        if layout:
+            return "indexed_frequency_trace_v1" in layout
+        return "trace_index/datasets/packed_path" in h5
+
+    @staticmethod
+    def _indexed_dataset_rows(h5, source_path: Optional[str] = None) -> list[dict]:
+        if "trace_index/datasets/packed_path" not in h5:
+            return []
+        dataset_numbers = _dataset_ints(h5, "trace_index/datasets/dataset_number")
+        source_paths = _dataset_strings(h5, "trace_index/datasets/source_path")
+        packed_paths = _dataset_strings(h5, "trace_index/datasets/packed_path")
+        n_rows = min(len(dataset_numbers), len(source_paths), len(packed_paths))
+        if n_rows == 0:
+            return []
+
+        frequency_numbers = _dataset_ints(h5, "trace_index/dataset_number")
+        frequencies = (
+            np.asarray(h5["trace_index/frequency"][()]).ravel()
+            if "trace_index/frequency" in h5
+            else (
+                np.asarray(h5["frequency"][()]).ravel()
+                if "frequency" in h5
+                else np.asarray([])
+            )
+        )
+        frequency_by_number = {
+            int(number): float(np.real(freq))
+            for number, freq in zip(frequency_numbers, frequencies)
+        }
+        if not frequency_by_number and len(frequencies):
+            frequency_by_number = {
+                index: float(np.real(freq))
+                for index, freq in enumerate(frequencies, start=1)
+            }
+        laplace_values = (
+            np.asarray(h5["trace_index/laplace"][()]).ravel()
+            if "trace_index/laplace" in h5
+            else (
+                np.asarray(h5["laplace"][()]).ravel()
+                if "laplace" in h5
+                else np.zeros_like(frequencies, dtype=float)
+            )
+        )
+        if laplace_values.size == 1 and frequency_numbers.size > 1:
+            laplace_values = np.full(frequency_numbers.size, laplace_values[0])
+        laplace_by_number = {
+            int(number): float(np.real(value))
+            for number, value in zip(frequency_numbers, laplace_values)
+        }
+        if not laplace_by_number and len(laplace_values):
+            laplace_by_number = {
+                index: float(np.real(value))
+                for index, value in enumerate(laplace_values, start=1)
+            }
+
+        wanted = _clean_h5_path(source_path) if source_path is not None else None
+        rows = []
+        for index in range(n_rows):
+            source = _clean_h5_path(source_paths[index])
+            packed = _clean_h5_path(packed_paths[index])
+            number = int(dataset_numbers[index])
+            if wanted is not None and source != wanted:
+                continue
+            if packed not in h5:
+                continue
+            rows.append(
+                {
+                    "dataset_number": number,
+                    "source_path": source,
+                    "packed_path": packed,
+                    "frequency": frequency_by_number.get(number),
+                    "laplace": laplace_by_number.get(number, 0.0),
+                }
+            )
+        rows.sort(
+            key=lambda row: (
+                float("inf") if row["frequency"] is None else row["frequency"],
+                row["dataset_number"],
+            )
+        )
+        return rows
+
+    @staticmethod
+    def _indexed_source_path_for_group(h5, group: str) -> str:
+        group = str(group).strip("/")
+        catalog = "survey/receiver_groups/_catalog"
+        if catalog in h5:
+            group_names = _dataset_strings(h5, f"{catalog}/group_name")
+            dataset_paths = _dataset_strings(h5, f"{catalog}/dataset_path")
+            for group_name, dataset_path in zip(group_names, dataset_paths):
+                if group_name == group or _trace_data_tail(dataset_path) == group:
+                    return _clean_h5_path(dataset_path)
+        return _clean_h5_path(group)
+
+    @staticmethod
+    def _indexed_trace_rows(h5, group: str) -> list[dict]:
+        source_path = TraceStore._indexed_source_path_for_group(h5, group)
+        rows = TraceStore._indexed_dataset_rows(h5, source_path)
+        if not rows:
+            raise KeyError(f"Group '{group}' not found in indexed packed trace file")
+        return rows
+
+    @staticmethod
+    def _indexed_trace_paths(h5, group: str) -> list[str]:
+        return [row["packed_path"] for row in TraceStore._indexed_trace_rows(h5, group)]
+
+    @staticmethod
     def _h5_trace_groups(h5, configured: Optional[Iterable[str]] = None) -> list[str]:
         configured_groups = [str(group) for group in configured or []]
         if configured_groups:
             return [
                 name
                 for name in configured_groups
-                if name in h5 and isinstance(h5[name], h5py.Dataset)
+                if (
+                    name in h5
+                    and isinstance(h5[name], h5py.Dataset)
+                    or (
+                        TraceStore._is_indexed_packed_h5(h5)
+                        and TraceStore._indexed_dataset_rows(
+                            h5, TraceStore._indexed_source_path_for_group(h5, name)
+                        )
+                    )
+                )
+            ]
+        if TraceStore._is_indexed_packed_h5(h5):
+            catalog = "survey/receiver_groups/_catalog"
+            if catalog in h5:
+                group_names = _dataset_strings(h5, f"{catalog}/group_name")
+                dataset_paths = _dataset_strings(h5, f"{catalog}/dataset_path")
+                groups = []
+                for index, dataset_path in enumerate(dataset_paths):
+                    group = (
+                        group_names[index]
+                        if index < len(group_names) and group_names[index]
+                        else _trace_data_tail(dataset_path)
+                    )
+                    if TraceStore._indexed_dataset_rows(h5, dataset_path):
+                        groups.append(group)
+                return groups
+            source_paths = [
+                row["source_path"] for row in TraceStore._indexed_dataset_rows(h5)
+            ]
+            return [
+                _trace_data_tail(path)
+                for path in _unique_preserve_order(source_paths)
+                if not _trace_data_tail(path).startswith("k_domain/")
             ]
         return [
             name
@@ -409,6 +650,8 @@ class TraceStore:
                 frequency = np.asarray(h5["frequency"][()])
                 if frequency.ndim == 0:
                     return False
+                if TraceStore._is_indexed_packed_h5(h5):
+                    return bool(TraceStore._indexed_dataset_rows(h5))
                 groups = TraceStore._h5_trace_groups(h5)
                 return any(
                     _decode_dim_list(h5[group].attrs["dims"])[-1] == "frequency"
@@ -417,12 +660,102 @@ class TraceStore:
         except OSError:
             return False
 
+    @staticmethod
+    def _candidate_packed_trace_files(records: Iterable[Path]) -> list[Path]:
+        candidates: list[Path] = []
+        seen = set()
+        for record in records:
+            stem = record.stem
+            prefix = stem.rsplit("_", 1)[0] if "_" in stem else stem
+            for candidate in (
+                record.parent / f"{prefix}.h5",
+                record.parent / "traces.h5",
+                record.parent.parent / f"{prefix}.h5",
+                record.parent.parent / "traces.h5",
+            ):
+                key = str(candidate.resolve(strict=False))
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(candidate)
+        return candidates
+
+    def _expected_frequencies(self) -> list[float]:
+        f_map = self.metadata.get("f_map", {})
+        if not isinstance(f_map, dict):
+            return []
+        values = []
+        for value in f_map.values():
+            try:
+                values.append(float(np.real(value)))
+            except (TypeError, ValueError):
+                continue
+        return sorted(values)
+
+    def _metadata_laplace_values(self, frequencies: Iterable[float]) -> np.ndarray:
+        f_map = self.metadata.get("f_map", {})
+        laplace_map = self.metadata.get("laplace_map", {})
+        pairs = []
+        if isinstance(f_map, dict) and isinstance(laplace_map, dict):
+            for index, frequency in f_map.items():
+                try:
+                    pairs.append(
+                        (
+                            float(np.real(frequency)),
+                            float(
+                                laplace_map.get(index, laplace_map.get(str(index), 0.0))
+                            ),
+                        )
+                    )
+                except (TypeError, ValueError):
+                    continue
+        out = []
+        for frequency in frequencies:
+            value = 0.0
+            for known_frequency, known_laplace in pairs:
+                if np.isclose(float(frequency), known_frequency, rtol=0.0, atol=1.0e-9):
+                    value = known_laplace
+                    break
+            out.append(value)
+        return np.asarray(out, dtype=float)
+
+    @classmethod
+    def _packed_trace_covers_frequencies(
+        cls, path: Path, expected: Iterable[float]
+    ) -> bool:
+        if not path.exists() or not cls._is_packed_trace_file(path):
+            return False
+        expected_values = list(expected)
+        if not expected_values:
+            return True
+        try:
+            available = np.asarray(cls._read_trace_frequencies(path), dtype=float)
+        except (OSError, KeyError, ValueError):
+            return False
+        return all(
+            np.any(np.isclose(available, float(freq), rtol=0.0, atol=1.0e-9))
+            for freq in expected_values
+        )
+
+    def _packed_trace_file_for_records(self, records: Iterable[Path]) -> Optional[Path]:
+        expected = self._expected_frequencies()
+        for candidate in self._candidate_packed_trace_files(records):
+            if self._packed_trace_covers_frequencies(candidate, expected):
+                return candidate
+        return None
+
     def consolidate(self, cache_dir: Optional[Union[str, Path]] = None) -> Path:
         """Create a virtual HDF5 file with frequency as the leading axis."""
 
         records = [Path(file) for file in self.files]
         if not records:
             raise FileNotFoundError("No trace files were provided")
+
+        packed = self._packed_trace_file_for_records(records)
+        if packed is not None:
+            self.close()
+            self._consolidated = packed
+            return self._consolidated
 
         if (
             len(records) == 1
@@ -449,6 +782,13 @@ class TraceStore:
 
         metadata_record = records[0] if records[0].exists() else available[0]
         freqs = [self._read_trace_frequency(record) for record in available]
+        laplace = []
+        metadata_laplace = self._metadata_laplace_values(freqs)
+        for index, record in enumerate(available):
+            try:
+                laplace.append(self._read_trace_laplace(record))
+            except (OSError, KeyError, ValueError):
+                laplace.append(float(metadata_laplace[index]))
         cache_dir = Path(cache_dir) if cache_dir is not None else self._cache_dir
         if cache_dir is not None:
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -460,6 +800,7 @@ class TraceStore:
 
         with h5py.File(metadata_record, "r") as first, h5py.File(new_file, "w") as nf:
             nf.create_dataset("frequency", data=np.asarray(freqs, dtype=float))
+            nf.create_dataset("laplace", data=np.asarray(laplace, dtype=float))
             if "survey" in first:
                 first.copy("survey", nf)
 
@@ -513,9 +854,23 @@ class TraceStore:
         self._ensure_consolidated()
         h5 = h5py.File(self._consolidated, "r")
         self._open_files.append(h5)
-        dset = h5[group]
+        indexed_paths: list[str] = []
+        indexed_frequencies: list[float] = []
+        indexed_laplace: list[float] = []
+        if self._is_indexed_packed_h5(h5) and group not in h5:
+            indexed_rows = self._indexed_trace_rows(h5, group)
+            indexed_paths = [row["packed_path"] for row in indexed_rows]
+            indexed_frequencies = [
+                row["frequency"] for row in indexed_rows if row["frequency"] is not None
+            ]
+            indexed_laplace = [row.get("laplace", 0.0) for row in indexed_rows]
+            dset = h5[indexed_paths[0]]
+        else:
+            dset = h5[group]
         dims = _trace_data_dims(dset)
-        if len(dset.shape) == len(dims) + 1:
+        data_shape = (len(indexed_paths), *dset.shape) if indexed_paths else dset.shape
+        data_ndim = len(data_shape)
+        if data_ndim == len(dims) + 1:
             dims.append("complex")
         dims = ["source" if dim == "shot" else dim for dim in dims]
         coords = {}
@@ -523,8 +878,8 @@ class TraceStore:
             if dim == "complex":
                 coords[dim] = (
                     ["real", "imag"]
-                    if dset.shape[axis] == 2
-                    else np.arange(1, dset.shape[axis] + 1)
+                    if data_shape[axis] == 2
+                    else np.arange(1, data_shape[axis] + 1)
                 )
                 continue
             attr_dim = "shot" if dim == "source" and "shot" in dset.attrs else dim
@@ -550,21 +905,46 @@ class TraceStore:
                 values = _unique_preserve_order(_decode_h5_strings(h5[survey_path][()]))
                 coords[dim] = (
                     values
-                    if len(values) == dset.shape[axis]
-                    else np.arange(1, dset.shape[axis] + 1)
+                    if len(values) == data_shape[axis]
+                    else np.arange(1, data_shape[axis] + 1)
                 )
+            elif dim == "frequency" and indexed_frequencies:
+                coords[dim] = np.asarray(indexed_frequencies, dtype=float)
             elif dim == "frequency" and "frequency" in h5:
                 coords[dim] = h5["frequency"][()]
             elif attr_dim in dset.attrs:
                 coords[dim] = dset.attrs[attr_dim]
             else:
-                coords[dim] = np.arange(1, dset.shape[axis] + 1)
+                coords[dim] = np.arange(1, data_shape[axis] + 1)
         if "complex" in dims and "complex" not in coords:
             coords["complex"] = ["real", "imag"]
 
-        chunks = (dset.shape[0], 1, 1, *dset.shape[3:])
-        data = da.from_array(dset, chunks=chunks)
+        if indexed_paths:
+            arrays = []
+            for path in indexed_paths:
+                item = h5[path]
+                if item.shape != dset.shape:
+                    raise ValueError(
+                        "Indexed packed trace datasets for group "
+                        f"{group!r} do not have a common shape"
+                    )
+                arrays.append(da.from_array(item, chunks=item.shape))
+            data = da.stack(arrays, axis=0)
+        else:
+            chunks = (dset.shape[0], 1, 1, *dset.shape[3:])
+            data = da.from_array(dset, chunks=chunks)
         fd = DataArray(data, dims=dims, coords=coords)
+        if "frequency" in fd.dims:
+            if indexed_laplace:
+                laplace = np.asarray(indexed_laplace, dtype=float)
+            elif "laplace" in h5:
+                laplace = np.asarray(h5["laplace"][()]).ravel().astype(float)
+            else:
+                laplace = self._metadata_laplace_values(fd.coords["frequency"].values)
+            if laplace.size == 1 and fd.sizes["frequency"] > 1:
+                laplace = np.full(fd.sizes["frequency"], float(laplace[0]))
+            if laplace.size == fd.sizes["frequency"]:
+                fd = fd.assign_coords(laplace=("frequency", laplace))
         return fd
 
     def read_FD(
@@ -590,10 +970,13 @@ class TraceStore:
             wavelet.times = sampling.T_list
             dset = self.read_h5(group)
             gather = dset.sel(component=component, source=source)
+            laplace = self._uniform_laplace(gather)
 
             freqs = wavelet.frequencies
             spectrum = DataArray(
-                wavelet.spectrum, dims=["frequency"], coords={"frequency": freqs}
+                self._wavelet_spectrum(wavelet, laplace),
+                dims=["frequency"],
+                coords={"frequency": freqs},
             )
             w = spectrum.interp(
                 frequency=gather.coords["frequency"].values, kwargs={"fill_value": 0}
@@ -618,6 +1001,44 @@ class TraceStore:
             fd = fd * w
             return fd
 
+    @staticmethod
+    def _normalize_laplace_compensation(value: Union[str, bool]) -> str:
+        if isinstance(value, bool):
+            return "on" if value else "off"
+        value = str(value).lower()
+        if value not in {"auto", "on", "off"}:
+            raise ValueError("laplace_compensation must be 'auto', 'on', or 'off'")
+        return value
+
+    @staticmethod
+    def _uniform_laplace(gather: DataArray) -> float:
+        if "laplace" not in gather.coords:
+            return 0.0
+        values = np.asarray(gather.coords["laplace"].values, dtype=float).ravel()
+        if values.size == 0:
+            return 0.0
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            return 0.0
+        first = float(finite[0])
+        if not np.allclose(finite, first, rtol=0.0, atol=1.0e-12):
+            raise ValueError(
+                "Time-domain reconstruction requires a uniform Laplace offset"
+            )
+        return first
+
+    @staticmethod
+    def _wavelet_spectrum(wavelet: Wavelet, laplace: float) -> np.ndarray:
+        if np.isclose(laplace, 0.0):
+            return wavelet.spectrum
+        fft = get_fft_backend()
+        damping = np.exp(2.0 * np.pi * laplace * np.asarray(wavelet.times))
+        return fft.rfft(wavelet.signal * damping).astype(np.complex64)
+
+    @staticmethod
+    def _damping_factor(laplace: float, period: float) -> float:
+        return float(np.exp(-2.0 * np.pi * laplace * period))
+
     def read_TD(
         self,
         group: str,
@@ -626,8 +1047,10 @@ class TraceStore:
         wavelet: Wavelet,
         upscale: int = 1,
         T_max: Optional[float] = None,
+        laplace_compensation: Union[str, bool] = "auto",
         **kwargs,
     ) -> DataArray:
+        compensation_mode = self._normalize_laplace_compensation(laplace_compensation)
         sampling = UniformSweepSampling(
             f_min=0.0,
             f_max=self.metadata["f_max"],
@@ -635,6 +1058,7 @@ class TraceStore:
             upscale=upscale,
         )
         fd = self.read_FD(group, component, source, wavelet, **kwargs)
+        laplace = self._uniform_laplace(fd)
         wavelet.times = sampling.T_list
 
         fd = fd.interp(frequency=sampling.F_list, kwargs={"fill_value": 0})
@@ -649,6 +1073,12 @@ class TraceStore:
                 coords[d] = sampling.T_list[:-1] - wavelet.center
 
         td = DataArray(data=td, dims=dims, coords=coords)
+        compensated = compensation_mode == "on" or (
+            compensation_mode == "auto" and not np.isclose(laplace, 0.0)
+        )
+        if compensated:
+            gain = np.exp(-2.0 * np.pi * laplace * sampling.T_list[:-1])
+            td = td * DataArray(gain, dims=["time"], coords={"time": td.coords["time"]})
         if T_max is not None:
             td = td.sel(time=slice(None, T_max))
 
@@ -658,6 +1088,10 @@ class TraceStore:
         td.attrs["project_path"] = str(self.metadata["project"])
         td.attrs["simulation"] = str(self.metadata["simulation"])
         td.attrs["long_name"] = f"{component}"
+        td.attrs["domain"] = "time"
+        td.attrs["laplace"] = laplace
+        td.attrs["laplace_compensated"] = compensated
+        td.attrs["damping_factor"] = self._damping_factor(laplace, sampling.T)
         for d in td.dims:
             td.coords[d].attrs["long_name"] = d.title()
             if d == "time":
@@ -666,6 +1100,30 @@ class TraceStore:
             elif d == "frequency":
                 td.coords[d].attrs["units"] = "Hz"
                 td.coords[d].attrs["description"] = "Frequency"
+        return td
+
+    def read_LD(
+        self,
+        group: str,
+        component: str,
+        source: int,
+        wavelet: Wavelet,
+        upscale: int = 1,
+        T_max: Optional[float] = None,
+        **kwargs,
+    ) -> DataArray:
+        td = self.read_TD(
+            group,
+            component,
+            source,
+            wavelet,
+            upscale=upscale,
+            T_max=T_max,
+            laplace_compensation="off",
+            **kwargs,
+        )
+        td.attrs["domain"] = "laplace_time"
+        td.attrs["laplace_compensated"] = False
         return td
 
     def CosineWindow(self, t0: float, tf: float, taper: float) -> DataArray:

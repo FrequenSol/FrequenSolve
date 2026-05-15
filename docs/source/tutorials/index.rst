@@ -58,6 +58,9 @@ Read the sections in order when learning the package for the first time:
    * - Outputs
      - Trace stores, ``xarray`` reads, SEG-Y export, ParaView/VTK products, and imaging outputs.
      - Results need to be reusable after the solver run completes.
+   * - Performance
+     - Frequency-domain QC, time-domain sweep timing, source batching, receiver sampling, and imaging cost.
+     - Production runs need measurable diagnostics before they get expensive.
 
 Modeling Basics
 ---------------
@@ -84,6 +87,12 @@ Modeling Basics
    * - 2.5D, 3D, Axisymmetric
      - Acoustic model dimensionality and cylindrical axisymmetric setup.
      - :download:`05_acoustic_25d_3d_axisymmetric.ipynb <../../../examples/tutorials/01_modeling_basics/05_acoustic_25d_3d_axisymmetric.ipynb>`
+   * - Laplace And Time-Domain
+     - Laplace-domain damping, compensated time-domain reads, and wrap-around control.
+     - :download:`06_laplace_time_domain.ipynb <../../../examples/tutorials/01_modeling_basics/06_laplace_time_domain.ipynb>`
+   * - Axisymmetric Borehole
+     - Coupled 2D axisymmetric borehole model with fluid, casing, cement, formation, radial-depth receivers, and VTK QC.
+     - :download:`07_axisymmetric_borehole.ipynb <../../../examples/tutorials/01_modeling_basics/07_axisymmetric_borehole.ipynb>`
 
 Site Tutorials
 --------------
@@ -190,6 +199,20 @@ Output Tutorials
    * - Imaging
      - RTM imaging jobs, FWI-gradient image requests, image grids, and ``ImageDatabase`` reads.
      - :download:`03_imaging.ipynb <../../../examples/tutorials/06_outputs/03_imaging.ipynb>`
+
+Performance Tutorials
+---------------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 52 20
+
+   * - Notebook
+     - Focus
+     - File
+   * - Performance
+     - Frequency-domain QC, time-domain phase timings, source batching, receiver sampling cost, and imaging assembly reuse.
+     - :download:`01_performance.ipynb <../../../examples/tutorials/07_performance/01_performance.ipynb>`
 
 Related User Guide Pages
 ------------------------
