@@ -425,6 +425,7 @@ class GraphQLClient:
         vcpu: Optional[int] = None,
         memory: Optional[int] = None,
         job_name: Optional[str] = None,
+        send_simulation_status_email: Optional[bool] = None,
     ) -> Dict[str, str]:
         """Submit a simulation job.
 
@@ -433,6 +434,7 @@ class GraphQLClient:
             vcpu: Number of vCPUs for the job (optional)
             memory: Memory in MB for the job (optional)
             job_name: Custom name for the job (optional)
+            send_simulation_status_email: If True/False, overrides cloud communication preferences for this run only
 
         Returns:
             Dict containing:
@@ -449,12 +451,14 @@ class GraphQLClient:
                 $vcpu: Int
                 $memory: Int
                 $jobName: String
+                $sendSimulationStatusEmail: Boolean
             ) {
                 submitJob(
                     jobFileS3Key: $jobFileS3Key
                     vcpu: $vcpu
                     memory: $memory
                     jobName: $jobName
+                    sendSimulationStatusEmail: $sendSimulationStatusEmail
                 ) {
                     simulationId
                     batchJobId
@@ -463,8 +467,9 @@ class GraphQLClient:
             }
         """
 
-        variables = {
+        variables: Dict[str, Any] = {
             "jobFileS3Key": job_file_s3_key,
+            "sendSimulationStatusEmail": send_simulation_status_email,
         }
 
         if vcpu is not None:
@@ -519,13 +524,12 @@ class GraphQLClient:
 
         return status
 
-    def deploy_storage_stack(self, environment: str = "dev") -> Dict[str, Any]:
+    def deploy_storage_stack(self, environment: Optional[str] = None) -> Dict[str, Any]:
         """Deploy storage infrastructure stack.
 
         User ID is automatically extracted from the authentication context by AppSync.
-
-        Args:
-            environment: Environment name (default: "dev")
+        ``environment`` is accepted for backward compatibility and ignored; the
+        backend derives the deployment environment from its own runtime context.
 
         Returns:
             Dict containing stackId, stackName, status, outputs, error
@@ -534,8 +538,8 @@ class GraphQLClient:
             RuntimeError: If deployment fails
         """
         mutation = """
-            mutation DeployStorage($environment: String) {
-                deployStorage(environment: $environment) {
+            mutation DeployStorage {
+                deployStorage {
                     stackId
                     stackName
                     status
@@ -545,12 +549,8 @@ class GraphQLClient:
             }
         """
 
-        variables = {
-            "environment": environment,
-        }
-
-        logger.info(f"Deploying storage stack in environment {environment}...")
-        result = self.execute(mutation, variables)
+        logger.info("Deploying storage stack...")
+        result = self.execute(mutation)
 
         if "deployStorage" not in result:
             raise RuntimeError("Storage stack deployment failed: No response from API")
@@ -572,15 +572,14 @@ class GraphQLClient:
 
     def deploy_compute_stack(
         self,
-        environment: str = "dev",
+        environment: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Deploy compute infrastructure stack.
 
         User ID is automatically extracted from the authentication context by AppSync.
         Stack parameters are automatically fetched from user's compute settings in the database.
-
-        Args:
-            environment: Environment name (default: "dev")
+        ``environment`` is accepted for backward compatibility and ignored; the
+        backend derives the deployment environment from its own runtime context.
 
         Returns:
             Dict containing stackId, stackName, status, outputs, error
@@ -589,12 +588,8 @@ class GraphQLClient:
             RuntimeError: If deployment fails
         """
         mutation = """
-            mutation DeployComputeInfrastructure(
-                $environment: String
-            ) {
-                deployComputeInfrastructure(
-                    environment: $environment
-                ) {
+            mutation DeployComputeInfrastructure {
+                deployComputeInfrastructure {
                     stackId
                     stackName
                     status
@@ -604,12 +599,8 @@ class GraphQLClient:
             }
         """
 
-        variables = {
-            "environment": environment,
-        }
-
-        logger.info(f"Deploying compute stack in environment {environment}...")
-        result = self.execute(mutation, variables)
+        logger.info("Deploying compute stack...")
+        result = self.execute(mutation)
 
         if "deployComputeInfrastructure" not in result:
             raise RuntimeError("Compute stack deployment failed: No response from API")

@@ -627,12 +627,8 @@ class AWSSite(BaseSite):
                         "Storage stack not found. Creating storage infrastructure..."
                     )
                     try:
-                        environment = getattr(self.config, "environment", "dev")
-
                         # Deploy storage stack (userId extracted automatically from auth context)
-                        deploy_result = self.graphql_client.deploy_storage_stack(
-                            environment
-                        )
+                        deploy_result = self.graphql_client.deploy_storage_stack()
 
                         # Wait for stack to be ready (pass stackId so we wait for the one we just created)
                         logger.info("Waiting for storage stack to be ready...")
@@ -674,7 +670,10 @@ class AWSSite(BaseSite):
             job: The task to submit.
             vcpu: Number of vCPUs for the resource planner phase (default: 4).
             memory: Memory in MB for the resource planner phase (default: 8192).
-            **kwargs: Additional job parameters (name, description).
+            **kwargs: Additional job parameters (``name``, ``description``,
+                ``send_simulation_status_email``). When ``send_simulation_status_email`` is
+                ``True`` or ``False`` (GraphQL path only), overrides cloud communication
+                preferences for simulation status emails for this run.
 
         Returns:
             Simulation ID (for GraphQL path) or job ID (for REST API path).
@@ -690,13 +689,9 @@ class AWSSite(BaseSite):
                     "Compute stack not found. Creating compute infrastructure..."
                 )
                 try:
-                    environment = getattr(self.config, "environment", "dev")
-
                     # Deploy compute stack - backend will automatically fetch and use user's compute settings
                     # (userId extracted automatically from auth context)
-                    deploy_result = self.graphql_client.deploy_compute_stack(
-                        environment
-                    )
+                    deploy_result = self.graphql_client.deploy_compute_stack()
 
                     # Wait for stack to be ready, passing the stackId from deployment for accurate matching
                     logger.info("Waiting for compute stack to be ready...")
@@ -732,6 +727,9 @@ class AWSSite(BaseSite):
                     vcpu=vcpu,
                     memory=memory,
                     job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
+                    send_simulation_status_email=kwargs.get(
+                        "send_simulation_status_email"
+                    ),
                 )
 
                 simulation_id = result["simulationId"]
