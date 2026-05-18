@@ -20,7 +20,13 @@ class PoolStatus:
 
     @property
     def is_complete(self) -> bool:
-        return self.status in ["completed", "failed"]
+        return self.status in [
+            "complete",
+            "completed",
+            "failed",
+            "timeout",
+            "cancelled",
+        ]
 
 
 @dataclass

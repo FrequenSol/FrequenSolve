@@ -1,4 +1,3 @@
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple, Union
@@ -8,9 +7,8 @@ import numpy as np
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.jobs import SimulationJob
-from frequensolve.simulation.sampling import UniformSweepSampling
 from frequensolve.simulation.simulation import SeismicSimulation
-from frequensolve.util.class_registry import class_registry, register_class
+from frequensolve.util.class_registry import register_class
 
 __all__ = [
     "ImagingJob",
@@ -23,7 +21,7 @@ __all__ = [
 
 @dataclass(kw_only=True)
 class ImageDatabase:
-    """Raw image."""
+    """Reader for solver imaging output files."""
 
     path: Path
     parts: int
@@ -47,17 +45,27 @@ class ImageDatabase:
 
     def image_file(self, part: Optional[int] = None):
         if part is None:
-            return self.path / f"image.h5"
+            return self.path / "image.h5"
         else:
             return self.path / f"image_{part}.h5"
 
     @property
     def raw_images(self):
+        """Images from the solver ``image/raw`` group."""
+
         return self.read_images("raw")
 
     @property
     def smoothed_images(self):
+        """Images from the solver ``image/phi`` group."""
+
         return self.read_images("phi")
+
+    @staticmethod
+    def _decode_label(value):
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return str(value)
 
     def read_images(self, group):
         import h5py
@@ -67,13 +75,13 @@ class ImageDatabase:
         file = self.image_file()
         with h5py.File(file, "r") as f:
             h5group = f["image"][group]
-            properties = [p.decode("utf-8") for p in h5group["properties"]]
+            properties = [self._decode_label(p) for p in h5group["properties"]]
             for prop in properties:
                 attrs = h5group[prop].attrs
-                x0 = attrs.get("x0", None)[::-1]
-                x1 = attrs.get("x1", None)[::-1]
-                n = attrs.get("n_grid", None)[::-1]
-                dims = attrs.get("dims", None)[::-1]
+                x0 = np.asarray(attrs["x0"])[::-1]
+                x1 = np.asarray(attrs["x1"])[::-1]
+                n = np.asarray(attrs["n_grid"], dtype=int)[::-1]
+                dims = [self._decode_label(dim) for dim in attrs["dims"][::-1]]
                 coords = {}
                 for i, dim in enumerate(dims):
                     coords[dim] = np.linspace(x0[i], x1[i], n[i])
@@ -95,10 +103,16 @@ class MisfitGroup:
     simulated: Union[str, Path] = ""
 
     def __post_init__(self):
-        self.observed = Path(self.observed) / f"receivers"
-        self.simulated = Path(self.simulated) / f"receivers"
+        self.observed = self._with_group(self.observed)
+        self.simulated = self._with_group(self.simulated)
 
-    def __dict__(self) -> Dict:
+    def _with_group(self, path: Union[str, Path]) -> Path:
+        path = Path(path)
+        if self.name and path.name != self.name:
+            return path / self.name
+        return path
+
+    def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
         return {
             "name": self.name,
             "observed": self.observed,
@@ -106,7 +120,7 @@ class MisfitGroup:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "MisfitGroup":
+    def from_fs(cls, data: Dict) -> "MisfitGroup":
         return cls(
             name=data["name"],
             observed=data["observed"],
@@ -123,18 +137,18 @@ class Misfit:
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
         return {
             "norm": self.norm,
-            "receiver_groups": [group.__dict__() for group in self.receiver_groups],
+            "receiver_groups": [group.to_fs(ctx) for group in self.receiver_groups],
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "Misfit":
+    def from_fs(cls, data: Dict) -> "Misfit":
         return cls(
             norm=data["norm"],
             receiver_groups=[
-                MisfitGroup.from_dict(group) for group in data["receiver_groups"]
+                MisfitGroup.from_fs(group) for group in data["receiver_groups"]
             ],
         )
 
@@ -161,8 +175,9 @@ class ImagingJob(SimulationJob):
         simulation: SeismicSimulation,
         data_path: Union[str, Path],
         f_list: List[float],
-        resolution: List[int],
-        images: dict = field(default_factory=dict),
+        resolution: Optional[List[int]] = None,
+        grid: Optional[CartesianGrid] = None,
+        images: Optional[dict] = None,
         weights: Optional[List[float]] = None,
         wavelet: Optional[Wavelet] = None,
         misfit_norm: Literal["L2"] = "L2",
@@ -172,25 +187,19 @@ class ImagingJob(SimulationJob):
         regularization: Optional[dict] = None,
         save_path: Optional[Union[str, Path]] = None,
         reassemble_adjoint: bool = False,
-        overwrite: bool = True,
-        max_versions: int = 5,
         **kwargs,
     ) -> None:
+        if "misfit_type" in kwargs:
+            misfit_norm = kwargs.pop("misfit_type")
         simulation.save()
         super().__init__(
             name=name,
             simulation=simulation,
             f_list=f_list,
             workflow="RTM",
-            overwrite=overwrite,
-            max_versions=max_versions,
         )
 
-        # This is a simple way to ensure that recevier paths are correct
-        sim_file = simulation._file
-        with open(sim_file, "r") as f:
-            sim_data = json.load(f)
-        f_sim = self._result_path / sim_data["Outputs"]["receivers"]["path"]
+        f_sim = self.trace_outputs.path
 
         self.data_path = Path(data_path)
         if not self.data_path.exists():
@@ -210,7 +219,14 @@ class ImagingJob(SimulationJob):
             self.weights = []
             for f in self.f_list:
                 idx = abs(frequencies - f).argmin()
-                self.weights.append(spectrum[idx])
+                self.weights.append(float(spectrum[idx]))
+        elif weights is not None:
+            self.weights = np.asarray(weights, dtype=float).reshape(-1).tolist()
+            if len(self.weights) != len(self.f_list):
+                raise ValueError(
+                    "Imaging weights must contain one value per frequency; "
+                    f"got {len(self.weights)} weights for {len(self.f_list)} frequencies"
+                )
         else:
             self.weights = None
 
@@ -225,11 +241,10 @@ class ImagingJob(SimulationJob):
             }
 
         self.kwargs = kwargs
-        self.images = images
+        self.images = dict(images or {})
         self.keep_forward = keep_forward
         self.keep_adjoint = keep_adjoint
         self.keep_unstacked = keep_unstacked
-        self.regularization = regularization
         self.misfit = Misfit(norm=misfit_norm)
         for receiver_group in simulation.acquisition.receiver_groups:
             self.misfit.receiver_groups.append(
@@ -240,8 +255,12 @@ class ImagingJob(SimulationJob):
                 )
             )
 
+        if grid is not None:
+            self.grid = grid
         # TODO: this will only work for a layered model right now
-        if simulation.model.dimension == 2:
+        elif simulation.model.dimension == 2:
+            if resolution is None:
+                raise ValueError("resolution is required when grid is not provided")
             x_limits = simulation.model.x_limits
             z_limits = simulation.model.z_limits
             x0 = [x_limits[0], z_limits[0]]
@@ -249,7 +268,10 @@ class ImagingJob(SimulationJob):
             assert (
                 len(resolution) == 2
             ), "For 2D models, resolution must be a length 2 array"
+            self.grid = CartesianGrid(x0=x0, x1=x1, n=resolution)
         elif simulation.model.dimension == 3:
+            if resolution is None:
+                raise ValueError("resolution is required when grid is not provided")
             x_limits = simulation.model.x_limits
             y_limits = simulation.model.y_limits
             z_limits = simulation.model.z_limits
@@ -258,10 +280,9 @@ class ImagingJob(SimulationJob):
             assert (
                 len(resolution) == 3
             ), "For 3D models, resolution must be a length 3 array"
+            self.grid = CartesianGrid(x0=x0, x1=x1, n=resolution)
         else:
             raise ValueError(f"Unknown model dimension: {simulation.model.dimension}")
-
-        self.grid = CartesianGrid(x0=x0, x1=x1, n=resolution)
         self.reassemble_adjoint = reassemble_adjoint
 
     def _remote_image_path(self, work_dir: Union[Path, str]):
@@ -274,7 +295,50 @@ class ImagingJob(SimulationJob):
     def _local_image_path(self):
         return self.save_path
 
-    def __dict__(self) -> Dict:
+    def _export_path(self, path: Union[str, Path], *, project_relative: bool = False):
+        path = Path(path)
+        if not project_relative:
+            return path
+        try:
+            return path.resolve().relative_to(self._project_path())
+        except ValueError:
+            return path
+
+    def _misfit_to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
+        payload = self.misfit.to_fs(ctx)
+        if not project_relative:
+            return payload
+        for group in payload["receiver_groups"]:
+            group["observed"] = self._export_path(
+                group["observed"], project_relative=True
+            )
+            group["simulated"] = self._export_path(
+                group["simulated"], project_relative=True
+            )
+        return payload
+
+    @staticmethod
+    def _resolve_saved_path(
+        path: Union[str, Path, None],
+        *,
+        base_path: Optional[Union[str, Path]] = None,
+        project_path: Optional[Union[str, Path]] = None,
+    ) -> Optional[Path]:
+        if path is None:
+            return None
+        path = Path(path)
+        if path.is_absolute():
+            return path
+        if project_path is not None:
+            return Path(project_path) / path
+        if base_path is not None:
+            project_root = SimulationJob._project_root_from_job_path(Path(base_path))
+            if project_root is not None:
+                return project_root / path
+            return Path(base_path).resolve() / path
+        return path
+
+    def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
         images = []
         for key, value in self.images.items():
             tmp = value.split(":")
@@ -293,10 +357,14 @@ class ImagingJob(SimulationJob):
             )
 
         imaging = {
-            "data_path": self.data_path,
-            "save_path": self.save_path,
-            "misfit": self.misfit.__dict__(),
-            "grid": self.grid.__dict__(),
+            "data_path": self._export_path(
+                self.data_path, project_relative=project_relative
+            ),
+            "save_path": self._export_path(
+                self.save_path, project_relative=project_relative
+            ),
+            "misfit": self._misfit_to_fs(ctx, project_relative=project_relative),
+            "grid": self.grid.to_fs(ctx),
             "keep_forward": self.keep_forward,
             "keep_adjoint": self.keep_adjoint,
             "keep_unstacked": self.keep_unstacked,
@@ -307,52 +375,85 @@ class ImagingJob(SimulationJob):
             **self.kwargs,
         }
         return {
-            **super().__dict__(),
-            "Imaging": imaging,
+            **super().to_fs(project_relative=project_relative),
+            "Image": imaging,
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "ImagingJob":
-        image_data = data.pop("Image")
+    def from_fs(
+        cls, data: Dict, base_path: Optional[Union[str, Path]] = None
+    ) -> "ImagingJob":
+        data = dict(data)
+        image_data = data.pop("Image", data.pop("Imaging", None))
+        if image_data is None:
+            raise KeyError("ImagingJob data must include an 'Image' section")
         grid = image_data.pop("grid", None)
-        resolution = grid.pop("n", None)
-        images = image_data.pop("images", None)
-        images = {image["name"]: image["IC"] for image in images}
+        grid_obj = CartesianGrid.from_fs(grid) if grid is not None else None
+        resolution = list(grid_obj.n) if grid_obj is not None else None
+        misfit = Misfit.from_fs(image_data.pop("misfit"))
+        images = image_data.pop("images", None) or []
+        images = {
+            image["name"]: (
+                f"FWI:{image['property']}"
+                if image.get("IC") == "FWI" and image.get("property") is not None
+                else image["IC"]
+            )
+            for image in images
+        }
+        simulation_ref = data.pop("simulation")
+        simulation_path = Path(simulation_ref)
+        if not simulation_path.is_absolute():
+            project_path = data.get("project_path")
+            if project_path is None and base_path is not None:
+                project_path = SimulationJob._project_root_from_job_path(
+                    Path(base_path)
+                )
+            if project_path is not None:
+                simulation_path = Path(project_path) / simulation_path
+
+        project_path = data.get("project_path")
+        data_path = cls._resolve_saved_path(
+            image_data.pop("data_path", None),
+            base_path=base_path,
+            project_path=project_path,
+        )
+        save_path = cls._resolve_saved_path(
+            image_data.pop("save_path", None),
+            base_path=base_path,
+            project_path=project_path,
+        )
+        for group in misfit.receiver_groups:
+            group.observed = cls._resolve_saved_path(
+                group.observed, base_path=base_path, project_path=project_path
+            )
+            group.simulated = cls._resolve_saved_path(
+                group.simulated, base_path=base_path, project_path=project_path
+            )
+
         job = cls(
             name=data.pop("name", None),
-            simulation=SeismicSimulation.load(data.pop("simulation")),
+            simulation=SeismicSimulation.load(simulation_path),
             f_list=data.pop("f_list", None),
-            data_path=image_data.pop("data_path", None),
+            data_path=data_path,
             resolution=resolution,
+            grid=grid_obj,
             images=images,
             keep_forward=image_data.pop("keep_forward", None),
             keep_adjoint=image_data.pop("keep_adjoint", None),
             keep_unstacked=image_data.pop("keep_unstacked", None),
-            save_path=image_data.pop("save_path", None),
+            save_path=save_path,
             regularization=image_data.pop("Smoothing", None),
             weights=image_data.pop("weights", None),
             reassemble_adjoint=image_data.pop("reassemble_adjoint", None),
             **image_data,
         )
-        job.misfit = Misfit.from_dict(image_data["misfit"])
+        job.misfit = misfit
         return job
 
 
 def extract_frequencies_for_job(job: ImagingJob, td):
-    import warnings
-
     import h5py
     import xarray as xr
-
-    try:
-        import pyfftw
-
-        pyfftw.interfaces.cache.enable()
-        fft = pyfftw.interfaces.numpy_fft
-        pyfftw.config.NUM_THREADS = 4
-    except:
-        warnings.warn("pyfftw not found, using numpy for FFT (slow)")
-        import numpy.fft as fft
 
     # Make frequency domain data array
     shape = list(td.shape)
@@ -398,6 +499,6 @@ def extract_frequencies_for_job(job: ImagingJob, td):
 
     # Write hdf5 files
     for i, f in enumerate(job.f_list):
-        file = job.data_path / f"receivers_{i + 1}.h5"
+        file = job.data_path / f"traces_{i + 1}.h5"
         with h5py.File(file, "w") as f:
             f[group.name] = fd.data[i].astype(np.float32)

@@ -9,22 +9,6 @@ Acquisition
    :show-inheritance:
    :noindex:
 
-Layered Model
--------------
-
-.. automodule:: frequensolve.seismic.layered_model
-   :members:
-   :show-inheritance:
-   :noindex:
-
-Plotting
---------
-
-.. automodule:: frequensolve.seismic.plotting
-   :members:
-   :show-inheritance:
-   :noindex:
-
 Receivers
 ---------
 
@@ -38,6 +22,38 @@ Sources
 -------
 
 .. automodule:: frequensolve.seismic.sources
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Signals
+-------
+
+.. automodule:: frequensolve.seismic.signals
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Surveys
+-------
+
+.. automodule:: frequensolve.seismic.survey
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Sparse Surveys
+--------------
+
+.. automodule:: frequensolve.seismic.sparse_survey
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Traces
+------
+
+.. automodule:: frequensolve.seismic.traces
    :members:
    :show-inheritance:
    :noindex:

@@ -36,6 +36,14 @@ class CapturingGraphQLClient(GraphQLClient):
                     "error": None,
                 }
             }
+        if "submitJob" in query:
+            return {
+                "submitJob": {
+                    "simulationId": "simulation-1",
+                    "batchJobId": "batch-1",
+                    "status": "PENDING",
+                }
+            }
         raise AssertionError(f"unexpected query: {query}")
 
 
@@ -71,3 +79,22 @@ def test_legacy_environment_argument_is_accepted_but_not_sent():
     assert "$environment" not in client.last_query
     assert "environment:" not in client.last_query
     assert client.last_variables in (None, {})
+
+
+def test_submit_job_can_send_status_email_override_and_force_run():
+    client = CapturingGraphQLClient()
+
+    result = client.submit_job(
+        "project/jobs/job.json",
+        send_simulation_status_email=True,
+        force_run=True,
+    )
+
+    assert result["simulationId"] == "simulation-1"
+    assert "sendSimulationStatusEmail: $sendSimulationStatusEmail" in client.last_query
+    assert "forceRun: $forceRun" in client.last_query
+    assert client.last_variables == {
+        "jobFileS3Key": "project/jobs/job.json",
+        "sendSimulationStatusEmail": True,
+        "forceRun": True,
+    }

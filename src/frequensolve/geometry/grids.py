@@ -3,15 +3,17 @@ from dataclasses import dataclass, field
 from typing import Dict, Generator, List, Optional, Tuple
 
 import numpy as np
+import xarray as xr
 
-from ..util.class_registry import *  # noqa
+from frequensolve.util.class_registry import class_registry, register_class
+from frequensolve.util.mixins import TypeTaggedMixin
 
 __all__ = ["Grid", "CartesianGrid"]
 
 
 @register_class
 @dataclass
-class Grid(ABC):
+class Grid(TypeTaggedMixin, ABC):
     """Base class for all grid types."""
 
     @abstractmethod
@@ -35,18 +37,13 @@ class Grid(ABC):
         pass
 
     @abstractmethod
-    def __dict__(self) -> Dict:
-        """Converts the grid to a dictionary representation."""
+    def to_fs(self, ctx=None) -> Dict:
+        """Convert the grid to a solver payload."""
         pass
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "Grid":
-        class_name = data["_type"]
-        if class_name in class_registry:
-            grid_class = class_registry[class_name]
-            return grid_class.from_dict(data)
-        else:
-            raise ValueError(f"Unknown grid class: {class_name}")
+    def from_fs(cls, data: Dict) -> "Grid":
+        return cls.dispatch_from_fs(data, class_registry)
 
 
 # ----------------------------------------------------------------------
@@ -73,6 +70,8 @@ class CartesianGrid(Grid):
     x1: List[float] = field(default_factory=list)
     dx: List[float] = field(default_factory=list)
     dims: List[str] = field(default_factory=list)
+    units: Optional[str] = None
+    system: Optional[str] = None
 
     def __post_init__(self):
         if len(self.x1) == 0:
@@ -158,7 +157,6 @@ class CartesianGrid(Grid):
     @classmethod
     def from_xarray(cls, xarr: "xr.DataArray") -> "CartesianGrid":
         """Converts the grid to an xarray Dataset (without variables)."""
-        from xarray import Dataset
 
         coords = xarr.coords
         dims = xarr.dims[::-1]
@@ -230,7 +228,7 @@ class CartesianGrid(Grid):
         else:
             raise ValueError("Grid must have 1, 2, or 3 dimensions")
 
-    def __dict__(self) -> Dict:
+    def to_fs(self, ctx=None) -> Dict:
         """Converts the grid to a dictionary representation.
 
         Returns:
@@ -243,10 +241,12 @@ class CartesianGrid(Grid):
             "x0": self.x0,
             "x1": self.x1,
             "dx": self.dx,
+            **({"units": self.units} if self.units is not None else {}),
+            **({"system": self.system} if self.system is not None else {}),
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "CartesianGrid":
+    def from_fs(cls, data: Dict) -> "CartesianGrid":
         """Creates a CartesianGrid instance from a dictionary.
 
         Args:
@@ -264,4 +264,12 @@ class CartesianGrid(Grid):
                 dims = ["x", "z"]
             elif len(data["n"]) == 3:
                 dims = ["x", "y", "z"]
-        return cls(n=data["n"], x0=data["x0"], x1=data["x1"], dx=data["dx"], dims=dims)
+        return cls(
+            n=data["n"],
+            x0=data["x0"],
+            x1=data["x1"],
+            dx=data.get("dx", []),
+            dims=dims,
+            units=data.get("units"),
+            system=data.get("system"),
+        )

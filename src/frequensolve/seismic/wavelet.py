@@ -1,24 +1,13 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from functools import cached_property
 from typing import Callable, List, Literal, Optional, Tuple, Union
-from warnings import warn
 
 import numpy as np
-from pylops.utils.wavelets import klauder, ormsby, ricker
-from scipy.signal import hilbert
+from scipy.signal import chirp, correlate, hilbert
 from scipy.stats import norm
 
-# Convert to time domain using FFT
-try:
-    import pyfftw
-
-    pyfftw.interfaces.cache.enable()
-    fft = pyfftw.interfaces.numpy_fft
-    pyfftw.config.NUM_THREADS = 4
-except:
-    warn("pyfftw not found, using numpy for FFT (slow)")
-    import numpy.fft as fft
+from frequensolve._optional import optional_dependency_error
+from frequensolve.util.fft import get_fft_backend
 
 __all__ = [
     "WindowFunction",
@@ -118,13 +107,67 @@ class BlackmanWindow(WindowFunction):
 
     def plot(self, times, **kwargs) -> None:
         """Plot the window function."""
-        import matplotlib.pyplot as plt
+        try:
+            import matplotlib.pyplot as plt
+        except ModuleNotFoundError as exc:
+            raise optional_dependency_error(
+                "Window plotting",
+                extra="visual",
+                dependencies=("matplotlib",),
+                error=exc,
+            ) from exc
 
         plt.plot(times, self.get(times, len(times)), **kwargs)
         plt.show()
 
 
 # TODO: make ability to define custom wavelets (including from file)
+
+
+def _zero_phase_times(times: np.ndarray) -> np.ndarray:
+    """Return FFT-ordered times with zero lag at index 0."""
+
+    n = len(times)
+    if n < 2:
+        return np.zeros(n)
+    dt = float(times[1] - times[0])
+    indices = np.arange(n, dtype=float)
+    indices[indices > n // 2] -= n
+    return indices * dt
+
+
+def _apply_taper(signal: np.ndarray, taper: Optional[Callable[[int], np.ndarray]]):
+    if taper is None:
+        return signal
+    window = np.asarray(taper(len(signal)))
+    if window.shape != signal.shape:
+        raise ValueError("Wavelet taper returned an array with the wrong shape")
+    return signal * window
+
+
+def _normalize(signal: np.ndarray) -> np.ndarray:
+    peak = float(np.nanmax(np.abs(signal))) if signal.size else 0.0
+    return signal / peak if peak > 0 else signal
+
+
+def _trapezoid_spectrum(
+    frequencies: np.ndarray,
+    corners: Union[List[float], Tuple[float, float, float, float]],
+) -> np.ndarray:
+    f1, f2, f3, f4 = [float(f) for f in corners]
+    if not (0 <= f1 < f2 <= f3 < f4):
+        raise ValueError("Ormsby frequencies must satisfy 0 <= f1 < f2 <= f3 < f4")
+
+    amplitude = np.zeros_like(frequencies, dtype=float)
+    if f2 > f1:
+        mask = (frequencies >= f1) & (frequencies < f2)
+        amplitude[mask] = (frequencies[mask] - f1) / (f2 - f1)
+    mask = (frequencies >= f2) & (frequencies <= f3)
+    amplitude[mask] = 1.0
+    if f4 > f3:
+        mask = (frequencies > f3) & (frequencies <= f4)
+        amplitude[mask] = (f4 - frequencies[mask]) / (f4 - f3)
+    return amplitude
 
 
 # ----------------------------------------------------------------------
@@ -199,6 +242,7 @@ class Wavelet:
         """
         if self._spectrum is None:
             self._evaluate_initial()
+            fft = get_fft_backend()
             self._spectrum = fft.rfft(self.signal).astype(np.complex64)
         return self._spectrum
 
@@ -213,6 +257,7 @@ class Wavelet:
             self._evaluate_initial()
             n = len(self._times) - 1
             dt = self.times[1] - self.times[0]
+            fft = get_fft_backend()
             self._frequencies = fft.rfftfreq(n, d=dt).astype(np.float32)
         return self._frequencies
 
@@ -265,6 +310,7 @@ class Wavelet:
             Causal (minimum phase) version of input signal
         """
         n = len(signal)
+        fft = get_fft_backend()
 
         # Get spectrum and add small constant for stability
         spectrum = fft.rfft(signal)
@@ -284,7 +330,15 @@ class Wavelet:
 
     def plot(self, **kwargs) -> None:
         """Plot the time-domain and spectrum of the wavelet."""
-        import matplotlib.pyplot as plt
+        try:
+            import matplotlib.pyplot as plt
+        except ModuleNotFoundError as exc:
+            raise optional_dependency_error(
+                "Wavelet plotting",
+                extra="visual",
+                dependencies=("matplotlib",),
+                error=exc,
+            ) from exc
 
         self._evaluate_initial()
 
@@ -375,13 +429,16 @@ class Wavelet:
             plt.show()
 
 
-@dataclass
 class RickerWavelet(Wavelet):
     """Ricker wavelet.
 
     Attributes:
         f (float): Central frequency of the Ricker wavelet.
-        center (float): Center time of the wavelet.
+        center (float): Pre-zero-time padding used to place the wavelet peak at
+            physical time zero. Retained for compatibility; ``pre_time`` is the
+            clearer keyword.
+        pre_time (float): Alias for ``center``. Defaults to one period,
+            ``1 / f``.
         window (Optional[Union[WindowFunction,Tuple[Literal["gaussian", "blackman"], float]]]):
             Window function to apply to the wavelet.
         causal (bool): Whether to make the wavelet causal.
@@ -389,20 +446,59 @@ class RickerWavelet(Wavelet):
             will be generated when needed.
     """
 
+    def __init__(
+        self,
+        f: Union[float, List[float]],
+        center: Optional[float] = None,
+        window: Optional[
+            Union[WindowFunction, Tuple[Literal["gaussian", "blackman"], float]]
+        ] = None,
+        causal: bool = False,
+        scale: float = 1.0,
+        pre_time: Optional[float] = None,
+    ):
+        if pre_time is not None:
+            if center is not None:
+                raise ValueError("Specify only one of center or pre_time")
+            center = pre_time
+
+        f0 = f[0] if isinstance(f, (list, tuple, np.ndarray)) else f
+        f0 = float(f0)
+        if f0 <= 0.0:
+            raise ValueError("Ricker wavelet frequency must be positive")
+        if center is None:
+            center = 1.0 / f0
+
+        super().__init__(
+            f=f0,
+            center=float(center),
+            window=window,
+            causal=causal,
+            scale=scale,
+        )
+        self.__post_init__()
+
+    @property
+    def pre_time(self) -> float:
+        """Alias for ``center`` describing the negative-time padding."""
+
+        return self.center
+
+    @pre_time.setter
+    def pre_time(self, value: float) -> None:
+        self.center = float(value)
+
     def __post_init__(self):
-        if isinstance(self.f, (list, tuple, np.ndarray)):
-            self.f = self.f[0]
         self.f_max = 3 * self.f
 
     def _generate(self, times: np.ndarray, taper: Callable[[int], np.ndarray]) -> None:
         """Generate the wavelet signal."""
 
-        # if self.causal:
-        #     signal, _, _ = ricker(times, f0=self.f, taper=taper)
-        # else:
-        signal, _, i_c = ricker(times / 2.0, f0=self.f, taper=taper)
-        signal = np.roll(signal[::2], shift=(-i_c // 2))
-        self.signal = signal * self.scale
+        tau = _zero_phase_times(times)
+        arg = (np.pi * float(self.f) * tau) ** 2
+        signal = (1.0 - 2.0 * arg) * np.exp(-arg)
+        signal = _apply_taper(signal, taper)
+        self.signal = _normalize(signal) * self.scale
 
 
 @dataclass
@@ -420,12 +516,15 @@ class OrmsbyWavelet(Wavelet):
     def _generate(self, times: np.ndarray, taper: Callable[[int], np.ndarray]) -> None:
         """Generate the wavelet signal."""
 
-        if self.causal:
-            signal, _, _ = ormsby(times, f=self.f, taper=taper)
-        else:
-            signal, _, i_c = ormsby(times / 2.0, f=self.f, taper=taper)
-            signal = np.roll(signal[::2], shift=(-i_c // 2))
-        self.signal = signal * self.scale
+        if len(times) < 2:
+            self.signal = np.zeros_like(times, dtype=float)
+            return
+        dt = float(times[1] - times[0])
+        frequencies = np.fft.rfftfreq(len(times), d=dt)
+        spectrum = _trapezoid_spectrum(frequencies, self.f)
+        signal = np.fft.irfft(spectrum.astype(np.complex128), n=len(times))
+        signal = _apply_taper(signal, taper)
+        self.signal = _normalize(signal) * self.scale
 
 
 @dataclass
@@ -442,9 +541,20 @@ class KlauderWavelet(Wavelet):
     def _generate(self, times: np.ndarray, taper: Callable[[int], np.ndarray]) -> None:
         """Generate the wavelet signal."""
 
-        # if self.causal:
-        #     signal, _, _ = klauder(times, f=self.f, taper=taper)
-        # else:
-        signal, _, i_c = klauder(times / 2.0, f=self.f, taper=taper)
-        signal = np.roll(signal[::2], shift=(-i_c // 2))
-        self.signal = signal * self.scale
+        if len(times) < 2:
+            self.signal = np.zeros_like(times, dtype=float)
+            return
+        dt = float(times[1] - times[0])
+        duration = max(float(times[-1] - times[0]), dt)
+        t = np.arange(len(times), dtype=float) * dt
+        sweep = chirp(
+            t,
+            f0=float(self.f[0]),
+            t1=duration,
+            f1=float(self.f[1]),
+            method="linear",
+        )
+        sweep = _apply_taper(sweep, taper)
+        signal = correlate(sweep, sweep, mode="same", method="auto")
+        signal = np.roll(signal, -len(signal) // 2)
+        self.signal = _normalize(signal) * self.scale

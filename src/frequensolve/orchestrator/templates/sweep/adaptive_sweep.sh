@@ -53,6 +53,10 @@ n_procs={{n_procs}}
 n_threads={{n_threads}}
 n_tasks={{n_tasks}}
 executable={{executable}}
+fresh_flag=""
+{% if fresh %}
+fresh_flag="--fresh"
+{% endif %}
 TOTAL_RANKS={{n_procs}}
 MEM_PER_RANK_GIB={{proc_memory}}
 MIN_RANKS={{min_ranks}}
@@ -68,14 +72,15 @@ FS_SIZING_JSON="FS_sizing.json"
 export FS_SIZING_JSON="$FS_SIZING_JSON"
 
 start_time=$(date +%s)
-echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads -j $job_file --init"
-$mpi_exec -n $n_procs $executable -nthreads $n_threads -j $job_file --init
-$mpi_exec -n $n_procs $executable -nthreads $n_threads -j $job_file --size
+echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads -j $job_file $fresh_flag --init"
+$mpi_exec -n $n_procs $executable -nthreads $n_threads -j $job_file $fresh_flag --init
+$mpi_exec -n $n_procs $executable -nthreads $n_threads -j $job_file $fresh_flag --size
 
 export FS_JOB_FILE="$job_file"
 export DIR_OUT="$dir_out"
 export EXE="$executable"
 export MPI_EXEC="$mpi_exec"
+export FS_FRESH_FLAG="$fresh_flag"
 export TOTAL_RANKS="$TOTAL_RANKS"
 export OMP_THREADS="$n_threads"
 export MEM_PER_RANK_GIB="$MEM_PER_RANK_GIB"
@@ -96,6 +101,7 @@ job_file      = os.environ["FS_JOB_FILE"]
 dir_out       = os.environ["DIR_OUT"]
 exe           = os.environ["EXE"]
 mpi_exec      = os.environ.get("MPI_EXEC", "ibrun")
+fresh_flag    = os.environ.get("FS_FRESH_FLAG", "").split()
 total_ranks   = int(os.environ.get("TOTAL_RANKS", "1"))
 omp_threads   = int(os.environ.get("OMP_THREADS", "1"))
 mem_per_rank  = float(os.environ["MEM_PER_RANK_GIB"])  # GiB per MPI rank from driver
@@ -238,6 +244,7 @@ def launch(task_id: int, offset: int, ranks: int):
         exe,
         "-nthreads", str(omp_threads),
         "-j", job_file,
+        *fresh_flag,
         "-i", str(task_id),
     ]
     out = open(out_path, "ab", buffering=0)
@@ -402,7 +409,12 @@ PY
 
 {% if imaging_job %}
 echo "Running imaging step..."
-"$executable" -j "$job_file" --smooth
+"$executable" -j "$job_file" $fresh_flag --smooth
+{% endif %}
+
+{% if pack_job %}
+echo "Running packing step..."
+"$executable" -nthreads "$n_threads" -j "$job_file" $fresh_flag --pack >> "$dir_out/pack.log" 2>&1
 {% endif %}
 
 end_time=$(date +%s)

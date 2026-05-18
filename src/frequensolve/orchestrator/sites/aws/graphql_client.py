@@ -10,7 +10,17 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-import requests
+from frequensolve._optional import optional_dependency_error
+
+try:
+    import requests
+except ModuleNotFoundError as exc:
+    raise optional_dependency_error(
+        "GraphQLClient",
+        extra="cloud",
+        dependencies=("requests",),
+        error=exc,
+    ) from exc
 
 from .cognito import CognitoAuth
 
@@ -426,6 +436,7 @@ class GraphQLClient:
         memory: Optional[int] = None,
         job_name: Optional[str] = None,
         send_simulation_status_email: Optional[bool] = None,
+        force_run: bool = False,
     ) -> Dict[str, str]:
         """Submit a simulation job.
 
@@ -435,6 +446,7 @@ class GraphQLClient:
             memory: Memory in MB for the job (optional)
             job_name: Custom name for the job (optional)
             send_simulation_status_email: If True/False, overrides cloud communication preferences for this run only
+            force_run: Force a fresh solver run when the backend supports it
 
         Returns:
             Dict containing:
@@ -445,26 +457,30 @@ class GraphQLClient:
         Raises:
             RuntimeError: If job submission fails
         """
-        mutation = """
+        force_var = "$forceRun: Boolean" if force_run else ""
+        force_arg = "forceRun: $forceRun" if force_run else ""
+        mutation = f"""
             mutation SubmitJob(
                 $jobFileS3Key: String!
                 $vcpu: Int
                 $memory: Int
                 $jobName: String
                 $sendSimulationStatusEmail: Boolean
-            ) {
+                {force_var}
+            ) {{
                 submitJob(
                     jobFileS3Key: $jobFileS3Key
                     vcpu: $vcpu
                     memory: $memory
                     jobName: $jobName
                     sendSimulationStatusEmail: $sendSimulationStatusEmail
-                ) {
+                    {force_arg}
+                ) {{
                     simulationId
                     batchJobId
                     status
-                }
-            }
+                }}
+            }}
         """
 
         variables: Dict[str, Any] = {
@@ -478,6 +494,8 @@ class GraphQLClient:
             variables["memory"] = memory
         if job_name is not None:
             variables["jobName"] = job_name
+        if force_run:
+            variables["forceRun"] = True
 
         result = self.execute(mutation, variables)
 

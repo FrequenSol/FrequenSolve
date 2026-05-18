@@ -1,14 +1,6 @@
 Meshes
 ======
 
-Mesh
-----
-
-.. automodule:: frequensolve.mesh.mesh
-   :members:
-   :show-inheritance:
-   :noindex:
-
 Boundary Conditions
 -------------------
 

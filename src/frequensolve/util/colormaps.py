@@ -1,7 +1,20 @@
 import json
 
-import matplotlib.colors as mcolors
 import numpy as np
+
+__all__ = ["get_colormap", "RdYlBu", "RdYlBu_r", "BuGrOr", "BuGrOr_r"]
+
+try:
+    import matplotlib.colors as mcolors
+except ModuleNotFoundError as exc:
+    from frequensolve._optional import optional_dependency_error
+
+    raise optional_dependency_error(
+        "FrequenSolve colormaps",
+        extra="visual",
+        dependencies=("matplotlib",),
+        error=exc,
+    ) from exc
 
 RdYlBu_data = """[
     {

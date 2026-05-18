@@ -67,6 +67,7 @@ db.sqlite3-journal
 
 # Sphinx documentation
 docs/_build/
+docs/build/
 docs/jupyter_execute/
 
 # PyBuilder
@@ -74,7 +75,7 @@ docs/jupyter_execute/
 target/
 
 # Jupyter Notebook
-#.ipynb_checkpoints
+*ipynb_checkpoints/
 
 # IPython
 profile_default/
@@ -172,4 +173,15 @@ terraform.rc
 tests/output/*
 !tests/output/.gitkeep
 
+# Solver and example run outputs
 examples/scratch/
+scratch/
+examples/fort.*
+examples/*.slurm
+examples/**/*.slurm
+examples/plots/
+*.out
+*.err
+*.h5.tmp
+_fs_run/
+run_logs/

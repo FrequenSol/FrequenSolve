@@ -15,8 +15,18 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
 
-import boto3
-from botocore.exceptions import ClientError
+from frequensolve._optional import optional_dependency_error
+
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ModuleNotFoundError as exc:
+    raise optional_dependency_error(
+        "CognitoAuth",
+        extra="cloud",
+        dependencies=("boto3", "botocore"),
+        error=exc,
+    ) from exc
 
 logger = logging.getLogger(__name__)
 

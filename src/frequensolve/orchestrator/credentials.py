@@ -1,13 +1,23 @@
 import getpass
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import cached_property
 
-from dotenv import load_dotenv
-from paramiko import (
-    PasswordRequiredException,
-    RSAKey,
-)
+from frequensolve._optional import optional_dependency_error
+
+try:
+    from dotenv import load_dotenv
+    from paramiko import (
+        PasswordRequiredException,
+        RSAKey,
+    )
+except ModuleNotFoundError as exc:
+    raise optional_dependency_error(
+        "HPC credentials",
+        extra="hpc",
+        dependencies=("paramiko", "python-dotenv"),
+        error=exc,
+    ) from exc
 
 __all__ = ["Credentials", "CloudCredentials"]
 
@@ -17,7 +27,7 @@ __all__ = ["Credentials", "CloudCredentials"]
 # ----------------------------------
 @dataclass
 class Credentials:
-    """Credentials for Frontera HPC."""
+    """Credentials for SSH-backed HPC sites."""
 
     user_env: str
     pw_env: str
@@ -62,7 +72,7 @@ class Credentials:
             print(
                 f"Avoid providing this each time by adding the {self.ssh_key_env} to FrequenSolve/.env"
             )
-            passphrase = getpass.getpass(f"SSH key passphrase: ")
+            passphrase = getpass.getpass("SSH key passphrase: ")
         return passphrase
 
     @property

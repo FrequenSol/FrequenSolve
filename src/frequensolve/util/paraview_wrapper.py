@@ -12,7 +12,7 @@ try:
 except ImportError:
     HAS_PARAVIEW = False
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional
 
 if HAS_PARAVIEW:
@@ -355,7 +355,7 @@ class AxesManager:
         """Called automatically after dataclass __init__ to set default titles and labels."""
         if self.titles is None:
             if self.dim == 2:
-                self.titles = [f"X ({self.units})\n", f"Depth ({self.units})     ", f""]
+                self.titles = [f"X ({self.units})\n", f"Depth ({self.units})     ", ""]
             else:
                 self.titles = [
                     f"X ({self.units})\n",
@@ -938,30 +938,30 @@ if __name__ == "__main__":
         # Show axes
         pv.show_axes()
 
-    # Hide sources & recievers
+    # Hide sources & receivers
     pv.hide_sources()
     pv.hide_receivers()
 
     # Hide axes
     pv.hide_axes()
 
-    # Plot Displacement Components
+    # Plot velocity components
     for comp in ["X", "Y"]:
         pv.show_field(
-            field="disp_1_im",
+            field="velocity_1_im",
             comp=comp,
             colorbar=False,
             colormap="RdGy",
             limits=[-5, 5],
         )
-        pv.screenshot(f"./disp_{comp}.pdf")
+        pv.screenshot(f"./velocity_{comp}.pdf")
 
-    # Plot Displacement Amplitude
+    # Plot velocity amplitude
     pv.show_field(
-        field="disp_1_abs",
+        field="velocity_1_abs",
         comp="Magnitude",
         colorbar=False,
         colormap="RdGy",
         limits=[0, 5],
     )
-    pv.screenshot(f"./disp.pdf")
+    pv.screenshot("./velocity.pdf")

@@ -1,63 +1,93 @@
 Installation
 ============
 
-FrequenSolve can be installed using Poetry, which handles dependencies and virtual environments automatically.
+FrequenSolve Python is the authoring, orchestration, and output-reading SDK.
+Installing the package lets you build projects, inspect exported solver inputs,
+load trace outputs, and configure execution sites. Running a job also requires
+access to a licensed fast solver through a local, cloud, or HPC site.
 
-Prerequisites
+Basic Install
 -------------
 
-- Python 3.8 or higher
-- Poetry (recommended) or pip
-- C++ compiler (for mesh module compilation)
-
-Using Poetry (Recommended)
---------------------------
-
-1. Clone the repository:
-
-   .. code-block:: bash
-
-      git clone https://github.com/frequensol/frequensolve.git
-      cd frequensolve
-
-2. Install with Poetry:
-
-   .. code-block:: bash
-
-      poetry install
-
-   This will create a virtual environment and install all dependencies.
-
-3. Activate the virtual environment:
-
-   .. code-block:: bash
-
-      poetry shell
-
-Using pip
----------
-
-If you prefer using pip directly:
+Install the core SDK with pip:
 
 .. code-block:: bash
 
-   pip install frequensolve
+   python -m pip install frequensolve
 
-Development Installation
-------------------------
-
-For development, install with additional dependencies:
+For local source checkouts, install from the repository root:
 
 .. code-block:: bash
 
-   poetry install --with=dev
+   python -m pip install -e .
+
+Optional Extras
+---------------
+
+Install extras for the workflows you need:
+
+.. code-block:: bash
+
+   python -m pip install "frequensolve[visual]"      # plotting, VTK/PyVista helpers
+   python -m pip install "frequensolve[parallel]"    # Dask, SSH, and SLURM helpers
+   python -m pip install "frequensolve[cloud]"       # FrequenSol cloud backend
+   python -m pip install "frequensolve[seismic-io]"  # SEG-Y/ASDF export helpers
+   python -m pip install "frequensolve[dev,docs]"    # tests and documentation builds
+
+Extras can be combined:
+
+.. code-block:: bash
+
+   python -m pip install "frequensolve[visual,cloud,seismic-io]"
+
+Solver Access
+-------------
+
+The Python package does not include the fast solver executable. To execute
+jobs, configure one of the supported sites:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 76
+
+   * - Site
+     - Requirement
+   * - ``LocalSite``
+     - A local solver binary and environment such as ``FS_SOLVER_PATH``.
+   * - ``AWSSite``
+     - FrequenSol cloud access and the ``cloud`` extra.
+   * - ``SlurmSite`` / ``Stampede3Site``
+     - SSH/SLURM access, the ``parallel`` extra, and a solver installation on the cluster.
+
+The notebooks in :doc:`tutorials/index` use strict run cells. If the selected
+site is not configured or the solver is unavailable, the cell should fail and
+point you toward the relevant job/site logs.
+
+Development Install
+-------------------
+
+For package development and documentation work:
+
+.. code-block:: bash
+
+   python -m pip install -e ".[dev,docs,visual]"
+
+Build the documentation locally with:
+
+.. code-block:: bash
+
+   python -m sphinx -b html docs/source docs/build/html
 
 Verification
 ------------
 
-To verify your installation:
+Verify that the Python package imports:
 
 .. code-block:: python
 
-   import frequensolve
-   print(frequensolve.__version__)
+   import frequensolve as fs
+
+   print(fs.__version__)
+
+Then run the :doc:`quickstart` or download the first tutorial notebook from
+:doc:`tutorials/index`.

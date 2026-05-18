@@ -161,7 +161,17 @@ class Report:
 # Utility functions
 def setup_work_directory(work_dir: Path):
     """Sets up the work directory for the report."""
-    from dotenv import load_dotenv
+    try:
+        from dotenv import load_dotenv
+    except ModuleNotFoundError as exc:
+        from frequensolve._optional import optional_dependency_error
+
+        raise optional_dependency_error(
+            "Report work-directory setup",
+            extra="hpc",
+            dependencies=("python-dotenv",),
+            error=exc,
+        ) from exc
 
     load_dotenv()
     fs_dir = os.getenv("FS_SOLVER_PATH")

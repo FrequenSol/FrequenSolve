@@ -138,18 +138,27 @@ See Also
 ex01_simple.ipynb : The example notebook that this test suite verifies
 """
 
-import logging
 import os
-import shutil
 from contextlib import redirect_stdout
 from io import StringIO
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from frequensolve import *
+from frequensolve.mesh import BoundaryCondition, BoundaryConditions
+from frequensolve.model.layered import LayeredModel
+from frequensolve.plotting.traces import plot_gather
+from frequensolve.project import Project
+from frequensolve.seismic import Acquisition, ReceiverNode
+from frequensolve.seismic.wavelet import RickerWavelet
+from frequensolve.simulation import (
+    Discretization,
+    FrequencyDomainJob,
+    ParaviewOutput,
+    SolverConfig,
+    TimeDomainJob,
+)
 
 # =============================================================================
 # Test Parameters
@@ -158,36 +167,36 @@ from frequensolve import *
 # Constants for test parameters
 # These match the values used in ex01_simple.ipynb
 MODEL_PARAMS = {
-    "x_limits": [0.0, 2.0],
+    "x_limits": [0.0, 1.0],
     "layers": [
         {
             "name": "layer_1",
             "z": 0.25,
-            "properties": {"Vp": 1.0, "Qp": 300.0, "Rho": 1.0},
+            "properties": {"vp": 1.5, "qp": 350.0, "rho": 1.0},
         },
         {
             "name": "layer_2",
-            "z": 0.5,
-            "properties": {"Vp": 2.0, "Qp": 50.0, "Rho": 1.0},
+            "z": 0.6,
+            "properties": {"vp": 2.5, "qp": 500.0, "rho": 2.2},
         },
     ],
 }
 
 MESH_PARAMS = {
-    "n": [4, 4],
-    "min_epw": 1.0,
-    "adapt_sources": 1,
+    "n": [8, 6],
+    "elems_per_wave": 2.0,
+    "order": 4,
+    "f_low": 15.0,
+    "f_high": 30.0,
 }
 
 BOUNDARY_PARAMS = {
     "free_surface": {
-        "name": "free_surface",
-        "kind": "neumann",
+        "conditions": ["free"],
         "boundaries": ["z_min"],
     },
     "pml": {
-        "name": "pml",
-        "kind": "pml",
+        "conditions": ["pml"],
         "boundaries": ["x_min", "x_max", "z_max"],
         "pml_wavelengths": 1.2,
         "pml_exponent": 3.0,
@@ -198,26 +207,28 @@ BOUNDARY_PARAMS = {
 ACQUISITION_PARAMS = {
     "source": {
         "kind": "scalar",
-        "coords": [[0.5, 0.0]],
+        "coords": [[0.5, 0.05]],
     },
     "receivers": {
         "name": "surface_hydrophones",
         "device": "hydrophone",
         "component": {"name": "p", "field": "pressure"},
-        "coords": {"x_range": [0.0, 1.0], "n": 1001},
+        "coords": {"x_range": [0.0, 1.0], "n": 201},
     },
 }
 
 SIMULATION_PARAMS = {
-    "discretization": {"order": 6},
+    "discretization": {},
     "solver": {
         "solve_on": "final",
         "max_iter": 300,
         "tolerance": 1.0e-4,
     },
     "output": {
-        "name": "simple",
+        "name": "pv",
         "fields": ["pressure"],
+        "properties": ["vp", "rho", "Subdomain"],
+        "show_pml": False,
         "upscale": 1,
     },
 }
@@ -226,7 +237,7 @@ TIME_DOMAIN_PARAMS = {
     "f_min": 1.0,
     "f_max": 18.0,
     "T_max": 4.0,
-    "wavelet": {"f0": 6.0, "offset": 5},
+    "wavelet": {"f": 10.0, "center": 0.1},
 }
 
 
@@ -310,12 +321,17 @@ def setup_complete_simulation(simulation):
     """
     # Create model
     model = LayeredModel(dimension=2, x_limits=MODEL_PARAMS["x_limits"])
-    model.add_surface(name="top", z=0.0)
-
-    for layer in MODEL_PARAMS["layers"]:
-        model.add_layer(name=layer["name"], properties=layer["properties"])
-        if layer != MODEL_PARAMS["layers"][-1]:  # Don't add surface after last layer
-            model.add_surface(name=f"{layer['name']}_interface", z=layer["z"])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(
+        name=MODEL_PARAMS["layers"][0]["name"],
+        properties=MODEL_PARAMS["layers"][0]["properties"],
+    )
+    model.add_surface(name="interface", depth=MODEL_PARAMS["layers"][0]["z"])
+    model.add_layer(
+        name=MODEL_PARAMS["layers"][1]["name"],
+        properties=MODEL_PARAMS["layers"][1]["properties"],
+    )
+    model.add_surface(name="bottom", depth=MODEL_PARAMS["layers"][1]["z"])
 
     simulation += model
 
@@ -323,14 +339,18 @@ def setup_complete_simulation(simulation):
     mesh = model.hex_mesh_generator(n=MESH_PARAMS["n"])
     simulation += mesh
     simulation.mesh.set_adapt(
-        min_epw=MESH_PARAMS["min_epw"], adapt_sources=MESH_PARAMS["adapt_sources"]
+        elems_per_wave=MESH_PARAMS["elems_per_wave"],
+        order=MESH_PARAMS["order"],
+        f_low=MESH_PARAMS["f_low"],
+        f_high=MESH_PARAMS["f_high"],
+        adapt_order=True,
     )
+    simulation.mesh.set_source_grading(d1=0.08, d0=0.02, mult=2.0)
+    simulation.mesh.set_receiver_grading(d1=0.06, d0=0.01, mult=1.5)
+    simulation.mesh.add_surface_grading("interface", d1=0.05, d0=0.0, mult=2.0)
 
-    # Add boundary conditions
-    BCs = BoundaryConditionManager(label_type="geometric")
     for bc_params in BOUNDARY_PARAMS.values():
-        BCs += BoundaryCondition(**bc_params)
-    simulation += BCs
+        simulation += BoundaryCondition(**bc_params)
 
     # Add acquisition
     acq = Acquisition()
@@ -354,7 +374,6 @@ def setup_complete_simulation(simulation):
         name=ACQUISITION_PARAMS["receivers"]["name"],
         device=hydrophone,
         coords=coords,
-        frame="reference",
     )
     simulation += acq
 
@@ -365,11 +384,6 @@ def setup_complete_simulation(simulation):
     # Add solver config
     solver = SolverConfig(**SIMULATION_PARAMS["solver"])
     simulation += solver
-
-    # Add output
-    out = OutputManager()
-    out += ParaviewOutput(**SIMULATION_PARAMS["output"])
-    simulation += out
 
 
 def run_time_domain_simulation(project, simulation):
@@ -387,11 +401,9 @@ def run_time_domain_simulation(project, simulation):
     tuple
         (trace_db, wavelet) containing the simulation results
     """
-    # Save the project to ensure simulation file exists
-    project.save()
+    from frequensolve.orchestrator.sites.local import LocalSite
 
     site = LocalSite()
-    site.sync(project)
 
     # Define and submit a time-domain simulation
     td_job = TimeDomainJob(
@@ -401,11 +413,11 @@ def run_time_domain_simulation(project, simulation):
     # Capture stdout during job submission
     stdout_capture = StringIO()
     with redirect_stdout(stdout_capture):
-        site.submit(td_job)
+        result = site.run(td_job)
 
     # Get results from the site
-    trace_db = site.fetch_traces(td_job, upscale=4)
-    wavelet = RickerWavelet(f0=6.0, times=trace_db.times(), offset=5)
+    trace_db = result.traces(upscale=4)
+    wavelet = RickerWavelet(**TIME_DOMAIN_PARAMS["wavelet"])
 
     return trace_db, wavelet
 
@@ -497,37 +509,37 @@ def test_model_setup(simulation):
     This test verifies that:
     1. A 2D layered model can be created with specified x-limits
     2. Surfaces can be added at specific z-depths (top, interface, bottom)
-    3. Layers can be added with specified material properties (Vp, Qp, Rho)
+    3. Layers can be added with specified material properties (vp, qp, rho)
     4. The model correctly stores and provides access to surfaces and layers
     5. Material properties can be accessed and have the expected values
 
     This corresponds to the "Defining a Model" section in ex01_simple.ipynb where
     a two-layer model is created with:
-    - Layer 1: Vp=1.0 km/s, Qp=300.0, Rho=1.0 g/cm³
-    - Layer 2: Vp=2.0 km/s, Qp=50.0, Rho=1.0 g/cm³
-    - Interface at z=0.25
+    - Layer 1: vp=1.0 km/s, qp=300.0, rho=1.0 g/cm³
+    - Layer 2: vp=2.0 km/s, qp=50.0, rho=1.0 g/cm³
+    - Interface at depth=0.25
     """
     # Create model
-    model = LayeredModel(dimension=2, x_limits=[0.0, 2.0])
+    model = LayeredModel(dimension=2, x_limits=MODEL_PARAMS["x_limits"])
 
     # Add surfaces and layers
-    model.add_surface(name="top", z=0.0)
-    model.add_layer(name="layer_1", properties={"Vp": 1.0, "Qp": 300.0, "Rho": 1.0})
-    model.add_surface(name="interface", z=0.25)
-    model.add_layer(name="layer_2", properties={"Vp": 2.0, "Qp": 50.0, "Rho": 1.0})
-    model.add_surface(name="bottom", z=0.5)
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="layer_1", properties={"vp": 1.0, "qp": 300.0, "rho": 1.0})
+    model.add_surface(name="interface", depth=0.25)
+    model.add_layer(name="layer_2", properties={"vp": 2.0, "qp": 50.0, "rho": 1.0})
+    model.add_surface(name="bottom", depth=0.5)
 
     simulation += model
 
     # Verify model properties
     assert len(model.surfaces) == 3  # top, interface, bottom
     assert len(model.layers) == 2  # layer_1, layer_2
-    assert float(model.layers[0].properties["Vp"].get()) == 1.0
-    assert float(model.layers[1].properties["Vp"].get()) == 2.0
-    assert float(model.layers[0].properties["Qp"].get()) == 300.0
-    assert float(model.layers[1].properties["Qp"].get()) == 50.0
-    assert float(model.layers[0].properties["Rho"].get()) == 1.0
-    assert float(model.layers[1].properties["Rho"].get()) == 1.0
+    assert float(model.layers[0].properties["vp"].get()) == 1.0
+    assert float(model.layers[1].properties["vp"].get()) == 2.0
+    assert float(model.layers[0].properties["qp"].get()) == 300.0
+    assert float(model.layers[1].properties["qp"].get()) == 50.0
+    assert float(model.layers[0].properties["rho"].get()) == 1.0
+    assert float(model.layers[1].properties["rho"].get()) == 1.0
 
 
 def test_mesh_setup(simulation):
@@ -536,7 +548,7 @@ def test_mesh_setup(simulation):
     This test verifies that:
     1. A mesh can be generated from the layered model using hex_mesh_generator
     2. The mesh can be added to the simulation
-    3. Mesh adaptation parameters can be set (min_epw, adapt_sources)
+    3. Mesh adaptation parameters can be set (elems_per_wave, adapt_sources)
     4. The mesh and its adaptation settings are properly stored in the simulation
 
     This corresponds to the "Meshing" section in ex01_simple.ipynb where
@@ -544,60 +556,59 @@ def test_mesh_setup(simulation):
     are configured for wave propagation.
     """
     # Create model first (required for mesh)
-    model = LayeredModel(dimension=2, x_limits=[0.0, 2.0])
-    model.add_surface(name="top", z=0.0)
-    model.add_layer(name="layer_1", properties={"Vp": 1.0, "Rho": 1.0})
-    model.add_surface(name="interface", z=0.25)
-    model.add_layer(name="layer_2", properties={"Vp": 2.0, "Rho": 1.0})
-    model.add_surface(name="bottom", z=0.5)
+    model = LayeredModel(dimension=2, x_limits=MODEL_PARAMS["x_limits"])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="layer_1", properties={"vp": 1.0, "rho": 1.0})
+    model.add_surface(name="interface", depth=0.25)
+    model.add_layer(name="layer_2", properties={"vp": 2.0, "rho": 1.0})
+    model.add_surface(name="bottom", depth=0.5)
     simulation += model
 
     # Create mesh
     mesh = model.hex_mesh_generator(n=[4, 4])
     simulation += mesh
-    simulation.mesh.set_adapt(min_epw=1.0, adapt_sources=1)
+    simulation.mesh.set_adapt(elems_per_wave=1.0, adapt_sources=1)
 
     # Basic mesh validation
     assert simulation.mesh is not None
     assert simulation.mesh.adapt is not None
-    assert simulation.mesh.adapt.min_epw == 1.0
+    assert simulation.mesh.adapt.elems_per_wave == 1.0
 
 
 def test_boundary_conditions(simulation):
     """Test the setup of boundary conditions for the simulation.
 
     This test verifies that:
-    1. A BoundaryConditionManager can be created with geometric labeling
-    2. Free surface (Neumann) boundary conditions can be added
-    3. PML (Perfectly Matched Layer) boundary conditions can be added with parameters
-    4. The boundary conditions are properly stored and accessible
+    1. Free surface boundary conditions can be added directly to the simulation
+    2. PML (Perfectly Matched Layer) boundary conditions can be added with parameters
+    3. The boundary conditions are properly stored and accessible
 
     This corresponds to the "Boundary Conditions" section in ex01_simple.ipynb where
     boundary conditions are set up with:
-    - Free surface (Neumann) condition on the top boundary
+    - Free surface condition on the top boundary
     - PML conditions on the sides and bottom with specified parameters
     """
-    BCs = BoundaryConditionManager(label_type="geometric")
+    simulation.BCs = BoundaryConditions()
 
     # Add free surface BC
-    BCs += BoundaryCondition(name="free_surface", kind="neumann", boundaries=["z_min"])
+    simulation += BoundaryCondition(
+        conditions=["free"],
+        boundaries=["z_min"],
+    )
 
     # Add PML BC
-    BCs += BoundaryCondition(
-        name="pml",
-        kind="pml",
+    simulation += BoundaryCondition(
+        conditions=["pml"],
         boundaries=["x_min", "x_max", "z_max"],
         pml_wavelengths=1.2,
         pml_exponent=3.0,
         pml_constant=20.0,
     )
 
-    simulation += BCs
-
     # Verify BCs
-    assert len(BCs.boundary_conditions) == 2
-    assert any(bc.kind == "neumann" for bc in BCs.boundary_conditions)
-    assert any(bc.kind == "pml" for bc in BCs.boundary_conditions)
+    assert len(simulation.BCs.boundary_conditions) == 2
+    assert any(bc.conditions == ["free"] for bc in simulation.BCs.boundary_conditions)
+    assert any(bc.conditions == ["pml"] for bc in simulation.BCs.boundary_conditions)
 
 
 # -----------------------------------------------------------------------------
@@ -618,8 +629,8 @@ def test_acquisition_setup(simulation):
 
     This corresponds to the "Defining an Acquisition" section in ex01_simple.ipynb where
     the acquisition is set up with:
-    - A scalar source at x=0.5, z=0.0
-    - 1001 hydrophones along the surface (z=0.0) from x=0.0 to x=1.0
+    - A scalar source at x=0.5, depth=0.0
+    - 1001 hydrophones along the surface (depth=0.0) from x=0.0 to x=1.0
     """
     acq = Acquisition()
 
@@ -631,9 +642,7 @@ def test_acquisition_setup(simulation):
     hydrophone.add_component(name="p", field="pressure")
 
     coords = [[x, 0.0] for x in np.linspace(0.0, 1.0, 1001)]
-    acq.add_receiver_group(
-        name="surface_hydrophones", device=hydrophone, coords=coords, frame="reference"
-    )
+    acq.add_receiver_group(name="surface_hydrophones", device=hydrophone, coords=coords)
 
     simulation += acq
 
@@ -656,32 +665,33 @@ def test_acquisition_setup(simulation):
 
 
 def test_output_configuration(simulation):
-    """Test the configuration of simulation outputs.
+    """Test the configuration of job outputs.
 
     This test verifies that:
-    1. Paraview output can be configured with specific settings
+    1. ParaView output can be configured with specific settings
     2. Output fields and upscale parameters are correctly set
-    3. The output configuration matches the example notebook
+    3. Trace output is present by default
 
-    This corresponds to the "Outputs" section in ex01_simple.ipynb where
-    Paraview output is configured with:
+    This corresponds to the single-frequency job in ex01_simple.ipynb where
+    ParaView output is configured with:
     - name="simple"
     - fields=["pressure"]
     - upscale=1
     """
-    out = OutputManager()
-    out += ParaviewOutput(name="simple", fields=["pressure"], upscale=1)
-    simulation += out
+    job = FrequencyDomainJob(
+        name="freq",
+        simulation=simulation,
+        f_list=[10.0],
+        outputs=ParaviewOutput(name="simple", fields=["pressure"], upscale=1),
+    )
 
     # Verify output configuration
-    assert len(simulation.outputs.paraview) == 1, "Should have one Paraview output"
-    pv_output = simulation.outputs.paraview[0]
+    assert len(job.outputs.paraview) == 1, "Should have one Paraview output"
+    pv_output = job.outputs.paraview[0]
     assert pv_output.name == "simple", "Output name should match notebook"
     assert pv_output.fields == ["pressure"], "Should output pressure field"
     assert pv_output.upscale == 1, "Upscale should match notebook"
-    assert (
-        simulation.outputs.write_receivers is True
-    ), "Should write receiver data by default"
+    assert job.outputs.traces is not None, "Should write traces by default"
 
 
 def test_simulation_setup(simulation):
@@ -711,12 +721,10 @@ def test_simulation_setup(simulation):
     test_acquisition_setup(simulation)
     test_output_configuration(simulation)  # Use dedicated output test
 
-    # Add discretization with order=6 as in the notebook
-    method = Discretization(order=6)
+    # Add discretization with default method settings
+    method = Discretization()
     simulation += method
-    assert (
-        simulation.discretization.order == 6
-    ), "Discretization order should be 6 as in the notebook"
+    assert simulation.discretization.method == "DPG"
 
     # Add solver config with exact notebook parameters
     solver = SolverConfig(solve_on="final", max_iter=300, tolerance=1.0e-4)
@@ -732,7 +740,6 @@ def test_simulation_setup(simulation):
     assert simulation.acquisition is not None, "Acquisition should be present"
     assert simulation.discretization is not None, "Discretization should be present"
     assert simulation.solver is not None, "Solver should be present"
-    assert simulation.outputs is not None, "Outputs should be present"
 
 
 # -----------------------------------------------------------------------------
@@ -748,7 +755,7 @@ def test_time_domain_parameters(time_domain_results):
     those specified in ex01_simple.ipynb:
     - Frequency range: {TIME_DOMAIN_PARAMS['f_min']} to {TIME_DOMAIN_PARAMS['f_max']} Hz
     - Simulation duration: {TIME_DOMAIN_PARAMS['T_max']} s
-    - Ricker wavelet: f0={TIME_DOMAIN_PARAMS['wavelet']['f0']} Hz, offset={TIME_DOMAIN_PARAMS['wavelet']['offset']} samples
+    - Ricker wavelet: f={TIME_DOMAIN_PARAMS['wavelet']['f']} Hz, center={TIME_DOMAIN_PARAMS['wavelet']['center']} s
     """
     trace_db, wavelet = time_domain_results
 
@@ -762,14 +769,15 @@ def test_time_domain_parameters(time_domain_results):
     peak_freq_idx = np.argmax(np.abs(wavelet.spectrum))
     peak_freq = wavelet.frequencies[peak_freq_idx]
     assert (
-        abs(peak_freq - TIME_DOMAIN_PARAMS["wavelet"]["f0"]) < 0.5
+        abs(peak_freq - TIME_DOMAIN_PARAMS["wavelet"]["f"]) < 0.5
     ), "Wavelet peak frequency should match notebook"
 
-    # Verify time offset
-    peak_time_idx = np.argmax(np.abs(wavelet.signal))
+    # Verify center time
+    peak_time_idx = int(np.argmax(np.abs(wavelet.signal)))
+    peak_time = float(wavelet.times[peak_time_idx])
     assert (
-        abs(peak_time_idx - TIME_DOMAIN_PARAMS["wavelet"]["offset"]) <= 1
-    ), "Wavelet offset should match notebook"
+        abs(peak_time - TIME_DOMAIN_PARAMS["wavelet"]["center"]) < 0.05
+    ), "Wavelet center time should match notebook"
 
     # Verify time sampling
     times = trace_db.times()
@@ -817,11 +825,11 @@ def test_time_domain_simulation_basic(project, simulation):
     ), "Frequency step should be 1/T_max"
 
     # Run locally
-    td_results = td_job.records
+    td_results = td_job.traces
 
     # Basic validation of results
     assert td_results is not None, "Should have simulation results"
-    assert len(td_results) > 0, "Should have at least one record"
+    assert len(td_results) > 0, "Should have at least one trace"
 
 
 # -----------------------------------------------------------------------------
@@ -829,16 +837,17 @@ def test_time_domain_simulation_basic(project, simulation):
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0)
 def test_model_plot(simulation):
     """Test basic plotting functionality without requiring the solver.
 
     This test verifies that the model visualization matches the expected reference
-    image. It generates a plot of the model geometry showing the Vp property
+    image. It generates a plot of the model geometry showing the vp property
     with equal aspect ratio.
 
     This corresponds to the model plotting in ex01_simple.ipynb where
-    model.plot("Vp", aspect="equal") is called.
+    model.plot("vp", aspect="equal") is called.
 
     Parameters
     ----------
@@ -858,12 +867,13 @@ def test_model_plot(simulation):
     #       to prevent the plot method from creating a new figure and closing it.
     #       This method needs to return the correct figure to be compared using the mpl_image_compare decorator.
     fig, ax = plt.subplots()
-    simulation.model.plot(property="Vp", aspect="equal", ax=ax)
+    simulation.model.plot(property="vp", aspect="equal", ax=ax)
 
     return fig
 
 
 @pytest.mark.integration
+@pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
 def test_time_domain_wavelet_time_plot(time_domain_results):
     """Test the time-domain wavelet plot from time domain simulation.
@@ -882,6 +892,7 @@ def test_time_domain_wavelet_time_plot(time_domain_results):
 
 
 @pytest.mark.integration
+@pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
 def test_time_domain_wavelet_freq_plot(time_domain_results):
     """Test the frequency-domain wavelet plot from time domain simulation.
@@ -900,6 +911,7 @@ def test_time_domain_wavelet_freq_plot(time_domain_results):
 
 
 @pytest.mark.integration
+@pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0)
 def test_time_domain_common_frequency_plot(time_domain_results):
     """Test the common frequency plot from time domain simulation.
@@ -908,16 +920,18 @@ def test_time_domain_common_frequency_plot(time_domain_results):
     """
     trace_db, wavelet = time_domain_results
 
-    # Get first record and create common frequency plot
-    record = next(iter(trace_db))
-    shot = record.read_FD(wavelet)
+    group = trace_db.groups[0]
+    component = trace_db.components(group)[0]
+    source = trace_db.sources(group)[0]
+    shot = trace_db.fd(group, component, source, wavelet)
     fig, ax = plt.subplots()
-    plot_cf(shot, c_min=0.4, c_max=3.0, n_c=400, ax=ax)
+    shot.real.plot(ax=ax)
 
     return fig
 
 
 @pytest.mark.integration
+@pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0)
 def test_time_domain_gather_plot(time_domain_results):
     """Test the gather plot from time domain simulation.
@@ -926,10 +940,10 @@ def test_time_domain_gather_plot(time_domain_results):
     """
     trace_db, wavelet = time_domain_results
 
-    # Get first record and create gather plot
-    record = next(iter(trace_db))
-    shot = record.read_TD(wavelet)
-    fig, ax = plt.subplots()
-    plot_gather(shot, A=100, ax=ax)
+    group = trace_db.groups[0]
+    component = trace_db.components(group)[0]
+    source = trace_db.sources(group)[0]
+    shot = trace_db.td(group, component, source, wavelet, upscale=4)
+    fig, _ = plot_gather(shot, cmap="gray")
 
     return fig

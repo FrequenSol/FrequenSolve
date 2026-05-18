@@ -1,13 +1,22 @@
 """
-SSH manager for Frontera and Stampede3 that uses a master socket to
+SSH manager for SLURM/HPC sites that uses a master socket to
 avoid re-authenticating each time a connection is made.
 """
 
 import subprocess
 import time
-from io import BytesIO
 
-from paramiko import SSHClient
+from frequensolve._optional import optional_dependency_error
+
+try:
+    from paramiko import SSHClient
+except ModuleNotFoundError as exc:
+    raise optional_dependency_error(
+        "SSH-backed HPC support",
+        extra="hpc",
+        dependencies=("paramiko",),
+        error=exc,
+    ) from exc
 
 __all__ = ["SSHProxy", "SSHClientClass"]
 

@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from frequensolve.orchestrator.sites.aws import AWSSite
 
 
+@pytest.mark.cloud
 @pytest.mark.interactive
 def test_awssite_from_domain():
     """Test creating AWSSite using only a domain."""
