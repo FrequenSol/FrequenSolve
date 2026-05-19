@@ -92,7 +92,7 @@ jobs:
           display-workflow-run-url: true
 
       - name: Download test results from Docker workflow
-        uses: dawidd6/action-download-artifact@v2
+        uses: dawidd6/action-download-artifact@v6
         with:
           github_token: ${{ steps.generate-token.outputs.token }}
           workflow: cicd-workflow.yml
