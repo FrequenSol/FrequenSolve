@@ -98,6 +98,51 @@ the normal place to request ParaView outputs:
 Execution Sites
 ---------------
 
+The standard way to select an execution backend is a user config file at
+``~/.frequensolve/site.toml``:
+
+.. code-block:: toml
+
+   [site]
+   type = "local"
+   shutdown_on_completion = true
+   verbose = true
+
+Use the same Python code for local, cloud, or HPC execution:
+
+.. code-block:: python
+
+   site = fs.Site()
+
+Set ``FREQUENSOLVE_SITE_CONFIG`` or pass ``fs.Site(config_path=...)`` when a
+test, notebook, or shared workstation should use a different config file. You
+can also keep named profiles in one file:
+
+.. code-block:: toml
+
+   default = "cloud"
+
+   [sites.local]
+   type = "local"
+   shutdown_on_completion = true
+
+   [sites.cloud]
+   type = "aws"
+   domain = "frequensolve.app"
+   interactive = true
+
+   [sites.cluster]
+   type = "slurm"
+   rel_path = "frequensolve/tutorials"
+   hostname = "login.example.edu"
+   queue = "debug"
+   account = "allocation"
+   nodes = 2
+   duration = "00:30:00"
+
+Direct constructors such as ``fs.LocalSite(...)``, ``fs.AWSSite(...)``, and
+``fs.Stampede3Site(...)`` remain available when code needs to pin a backend.
+
 All sites share the same handle/result lifecycle:
 
 .. code-block:: python

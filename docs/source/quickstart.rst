@@ -130,7 +130,7 @@ outputs are written under the project directory.
 
 .. code-block:: python
 
-   site = fs.LocalSite(shutdown_on_completion=True, verbose=True)
+   site = fs.Site()
    job = fs.TimeDomainJob(
        name="time",
        simulation=sim,
@@ -169,7 +169,7 @@ the richer interactive feature set.
 
 .. code-block:: python
 
-   site_fd = fs.LocalSite(shutdown_on_completion=True, verbose=True)
+   site_fd = fs.Site()
    pv_job = fs.FrequencyDomainJob(
        name="freq_25hz",
        simulation=sim,
