@@ -185,3 +185,6 @@ examples/plots/
 *.h5.tmp
 _fs_run/
 run_logs/
+
+# Agent worklogs (local resume artifacts)
+.codex/worklogs/
