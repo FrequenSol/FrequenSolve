@@ -18,7 +18,7 @@ Development Setup
 
    .. code-block:: bash
 
-      poetry install --with=dev
+      python -m pip install -e ".[dev,docs,visual]"
 
 Code Style
 ----------
@@ -35,7 +35,7 @@ Run the test suite:
 
 .. code-block:: bash
 
-   poetry run pytest
+   python -m pytest
 
 Pull Request Process
 --------------------

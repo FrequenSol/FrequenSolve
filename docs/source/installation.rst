@@ -9,13 +9,15 @@ access to a licensed fast solver through a local, cloud, or HPC site.
 Basic Install
 -------------
 
-Install the core SDK with pip:
+Install the core SDK from PyPI with pip:
 
 .. code-block:: bash
 
    python -m pip install frequensolve
 
-For local source checkouts, install from the repository root:
+The PyPI project must be published before this command can resolve from a fresh
+environment. Until the first release is live, install from a local source
+checkout. From the repository root:
 
 .. code-block:: bash
 
@@ -77,6 +79,24 @@ Build the documentation locally with:
 .. code-block:: bash
 
    python -m sphinx -b html docs/source docs/build/html
+
+Release And PyPI Publishing
+---------------------------
+
+Release builds use the standard PyPA toolchain:
+
+.. code-block:: bash
+
+   python -m build
+   python -m twine check dist/*
+
+The repository includes a ``Publish PyPI`` GitHub Actions workflow that publishes
+with PyPI trusted publishing on release publication or manual dispatch. Before
+the first release, a PyPI project owner must configure the trusted publisher for
+the ``FrequenSol/FrequenSolve`` repository, the ``publish-pypi.yml`` workflow,
+and the ``pypi`` environment. The workflow only publishes from tag refs,
+including manual dispatches, so create the intended release tag before
+publishing. Do not add PyPI passwords or API tokens to the repository.
 
 Verification
 ------------

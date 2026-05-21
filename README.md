@@ -70,6 +70,14 @@ python -m build
 python -m twine check dist/*
 ```
 
+PyPI publishing is handled by the `Publish PyPI` GitHub Actions workflow using
+trusted publishing. Before the first release, a PyPI project owner must create or
+approve the `frequensolve` project publisher for the
+`FrequenSol/FrequenSolve` repository, `publish-pypi.yml` workflow, and `pypi`
+environment. The workflow only publishes from tag refs, including manual
+dispatches, so create the intended release tag before publishing. No PyPI API
+token is stored in this repository.
+
 Solver, cloud, HPC, and visual tests are marked and must be selected explicitly:
 
 ```bash
