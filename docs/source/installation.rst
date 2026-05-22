@@ -46,7 +46,17 @@ Solver Access
 -------------
 
 The Python package does not include the fast solver executable. To execute
-jobs, configure one of the supported sites:
+jobs, configure ``~/.frequensolve/site.toml`` and create sites with
+``fs.Site()``:
+
+.. code-block:: toml
+
+   [site]
+   type = "aws"
+   domain = "frequensolve.app"
+   interactive = true
+
+The ``type`` can select one of the supported backends:
 
 .. list-table::
    :header-rows: 1
@@ -60,6 +70,9 @@ jobs, configure one of the supported sites:
      - FrequenSol cloud access and the ``cloud`` extra.
    * - ``SlurmSite`` / ``Stampede3Site``
      - SSH/SLURM access, the ``parallel`` extra, and a solver installation on the cluster.
+
+Direct constructors remain available for code that intentionally targets a
+specific backend.
 
 The notebooks in :doc:`tutorials/index` use strict run cells. If the selected
 site is not configured or the solver is unavailable, the cell should fail and
