@@ -46,6 +46,29 @@ sim.save("sim.json")
 
 The SDK exports JSON/HDF5 contracts consumed by fast solver builds. Solver execution requires a licensed solver binary or an enabled FrequenSol execution backend.
 
+## Sites And Tutorials
+
+Configure the standard execution site once in `~/.frequensolve/site.toml`, then create it in scripts and notebooks with `fs.Site()`. Direct constructors such as `fs.LocalSite(...)` and `fs.AWSSite(...)` remain available for advanced cases.
+
+Local execution:
+
+```toml
+[site]
+type = "local"
+rel_path = "frequensolve/tutorials"
+```
+
+Cloud execution:
+
+```toml
+[site]
+type = "aws"
+domain = "frequensolve.app"
+interactive = true
+```
+
+The tutorial notebooks live in `examples/tutorials`. The local documentation catalog is `docs/source/tutorials/index.rst`, with site-specific examples under `examples/tutorials/02_sites`.
+
 ## Development
 
 Create a local development environment from the repository root:

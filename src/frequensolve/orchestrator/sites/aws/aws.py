@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from frequensolve._optional import optional_dependency_error
+from frequensolve.orchestrator.sites.aws.cache_paths import (
+    cloud_config_cache_path,
+    legacy_config_cache_path,
+)
 
 try:
     import boto3
@@ -121,11 +125,31 @@ class AWSSiteConfig(BaseSiteConfig):
     @staticmethod
     def _get_config_cache_path(domain: str) -> Path:
         """Get path to cached configuration file for a domain."""
-        config_dir = Path.home() / ".frequensolve"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        # Sanitize domain for filename
-        safe_domain = domain.replace(":", "_").replace("/", "_")
-        return config_dir / f"config_{safe_domain}.json"
+        return cloud_config_cache_path(domain)
+
+    @staticmethod
+    def _read_cached_config(domain: str) -> Optional[dict]:
+        """Read cached domain config, migrating the legacy path when present."""
+        cache_path = AWSSiteConfig._get_config_cache_path(domain)
+        candidates = [cache_path]
+        legacy_path = legacy_config_cache_path(domain)
+        if legacy_path != cache_path:
+            candidates.append(legacy_path)
+
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            try:
+                with open(candidate, "r") as f:
+                    cached_config = json.load(f)
+                logger.info(f"Using cached configuration for {domain}")
+                logger.debug(f"Cache path: {candidate}")
+                if candidate == legacy_path:
+                    AWSSiteConfig._cache_config(domain, cached_config)
+                return cached_config
+            except (json.JSONDecodeError, IOError) as e:
+                logger.debug(f"Failed to read cached config, fetching fresh: {e}")
+        return None
 
     @staticmethod
     def _fetch_config_from_domain(domain: str, force_refresh: bool = False) -> dict:
@@ -142,16 +166,10 @@ class AWSSiteConfig(BaseSiteConfig):
             requests.RequestException: If fetch fails
         """
         # First check cache (unless force_refresh is True)
-        cache_path = AWSSiteConfig._get_config_cache_path(domain)
-        if not force_refresh and cache_path.exists():
-            try:
-                with open(cache_path, "r") as f:
-                    cached_config = json.load(f)
-                    logger.info(f"Using cached configuration for {domain}")
-                    logger.debug(f"Cache path: {cache_path}")
-                    return cached_config
-            except (json.JSONDecodeError, IOError) as e:
-                logger.debug(f"Failed to read cached config, fetching fresh: {e}")
+        if not force_refresh:
+            cached_config = AWSSiteConfig._read_cached_config(domain)
+            if cached_config is not None:
+                return cached_config
 
         # Try both HTTPS and HTTP (for local development)
         logger.info(f"Fetching configuration from {domain}...")
@@ -338,9 +356,8 @@ class AWSSite(BaseSite):
                     )
 
                     # Clear old credentials since they're for wrong User Pool
-                    if auth.credentials_path.exists():
-                        auth.credentials_path.unlink()
-                        self._emit("Cleared outdated cached AWS credentials")
+                    auth.clear_cached_tokens()
+                    self._emit("Cleared outdated cached AWS credentials")
 
                     # Continue to next iteration to try again with new config
                     continue
