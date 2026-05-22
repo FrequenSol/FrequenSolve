@@ -1,5 +1,11 @@
 # Documentation Hosting Infrastructure
 
+> Deprecated: this legacy Terraform stack no longer owns the public Python docs
+> deployment. The active publishing path is the `FrequenSol/cloud-amplify`
+> `docs-site-app` and its manual `Publish Python Docs` workflow, which publishes
+> versioned generated docs artifacts under `/python/<version>/` and
+> `/python/latest/` on the main docs domain.
+
 This directory contains the Terraform configuration for hosting the FrequenSolve Python documentation on AWS.
 
 The hosted docs can be found at https://docs.frequensol.com/python/.

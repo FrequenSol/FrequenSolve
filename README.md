@@ -120,6 +120,13 @@ cd docs
 make html
 ```
 
+Published Python API docs are owned by the `FrequenSol/cloud-amplify`
+`docs-site-app`. Use that repository's manual `Publish Python Docs` workflow to
+build from a selected FrequenSolve release ref and publish immutable artifacts
+under `/python/<version>/`, with `/python/latest/` updated after the versioned
+artifact is present. The legacy `docs/host` Terraform stack in this repository
+is deprecated and should not be used for new deployments.
+
 Fast solver contract updates are tracked in `docs/source/fast_solver_api_updates.rst`.
 
 ## License And Support
