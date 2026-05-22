@@ -155,6 +155,43 @@ verbose = true
     )
 
 
+def test_site_factory_normalizes_hpc_overrides(monkeypatch, tmp_path):
+    install_fake_hpc_module(monkeypatch)
+    config_path = tmp_path / "slurm-site.toml"
+    config_path.write_text(
+        """
+[site]
+type = "slurm"
+rel_path = "projects/demo"
+hostname = "login.example.edu"
+queue = "debug"
+account = "acct123"
+nodes = 1
+duration = "00:30:00"
+""".strip()
+    )
+    monkeypatch.setattr(sites, "SlurmSite", FakeSite)
+
+    site = sites.Site(
+        config_path=config_path,
+        nodes=3,
+        duration="01:00:00",
+        account="override-acct",
+    )
+
+    assert site.kwargs["config"] == FakeSlurmSiteConfig(
+        hostname="login.example.edu",
+        queue="debug",
+        account="override-acct",
+    )
+    assert site.kwargs["run_config"] == FakeSlurmRunConfig(
+        queue="debug",
+        nodes=3,
+        duration="01:00:00",
+        account="override-acct",
+    )
+
+
 def test_site_factory_builds_stampede_run_config(monkeypatch, tmp_path):
     install_fake_hpc_module(monkeypatch)
     config_path = tmp_path / "stampede-site.toml"

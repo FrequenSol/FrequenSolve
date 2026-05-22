@@ -87,10 +87,10 @@ def Site(
     """
 
     config = load_site_config(config_path)
-    site_config = _site_config_table(config, profile=profile)
+    site_config = dict(_site_config_table(config, profile=profile))
+    site_config.update(overrides)
     site_type = _site_type(site_config)
     kwargs = _site_kwargs(site_config, site_type)
-    kwargs.update(overrides)
     site_class = _resolve_site_class(site_type)
     return site_class(**kwargs)
 
