@@ -33,11 +33,10 @@ def test_readme_orients_users_to_site_config_and_tutorials():
 
 def test_readme_points_published_docs_to_cloud_amplify_docs_app():
     readme = (REPO_ROOT / "README.md").read_text()
-    legacy_host_readme = (REPO_ROOT / "docs/host/README.md").read_text()
 
     assert "FrequenSol/cloud-amplify" in readme
     assert "Publish Python Docs" in readme
     assert "/python/<version>/" in readme
-    assert "legacy `docs/host` Terraform stack" in readme
-    assert "Deprecated" in legacy_host_readme
-    assert "docs-site-app" in legacy_host_readme
+    assert "former `docs/host` Terraform stack" in readme
+    assert "destroyed and removed" in readme
+    assert not (REPO_ROOT / "docs/host").exists()
