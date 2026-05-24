@@ -690,8 +690,8 @@ class AWSSite(BaseSite):
     def submit(
         self,
         job: SimulationJob,
-        vcpu: int = 4,
-        memory: int = 2048 * 4,
+        vcpu: Optional[int] = None,
+        memory: Optional[int] = None,
         **kwargs,
     ) -> RunHandle:
         """Submit a simulation job.
@@ -703,8 +703,10 @@ class AWSSite(BaseSite):
 
         Args:
             job: The task to submit.
-            vcpu: Number of vCPUs for the resource planner phase (default: 4).
-            memory: Memory in MB for the resource planner phase (default: 8192).
+            vcpu: Number of vCPUs for the resource planner phase. When omitted,
+                GraphQL submissions preserve the backend default.
+            memory: Memory in MB for the resource planner phase. When omitted,
+                GraphQL submissions preserve the backend default.
             **kwargs: Additional job parameters (``name``, ``description``,
                 ``send_simulation_status_email``). When ``send_simulation_status_email`` is
                 ``True`` or ``False`` (GraphQL path only), overrides cloud communication
@@ -800,13 +802,16 @@ class AWSSite(BaseSite):
                 # Old path: Submit via REST API (backwards compatibility)
                 self._emit(f"Submitting {job.name} via AWS REST API")
 
+                rest_vcpu = 4 if vcpu is None else vcpu
+                rest_memory = 2048 * 4 if memory is None else memory
+
                 # Prepare the API request data
                 api_data = {
                     "name": kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
                     "description": kwargs.get("description", ""),
                     "job_s3_key": str(s3_job_key),
-                    "vcpu": vcpu,
-                    "memory": memory,
+                    "vcpu": rest_vcpu,
+                    "memory": rest_memory,
                 }
 
                 if force_run:
