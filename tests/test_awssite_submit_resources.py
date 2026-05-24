@@ -5,6 +5,7 @@ import pytest
 
 pytest.importorskip("boto3")
 
+from frequensolve.orchestrator.sites.aws import aws as aws_module
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
 
 
@@ -53,6 +54,16 @@ def make_graphql_site():
     return site
 
 
+def make_rest_site():
+    site = make_graphql_site()
+    site.graphql_client = None
+    site.config = SimpleNamespace(
+        api_token=None,
+        api_base_url="https://api.example.invalid",
+    )
+    return site
+
+
 def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
     site = make_graphql_site()
     job = FakeJob()
@@ -71,3 +82,59 @@ def test_graphql_submit_sends_explicit_resource_overrides():
 
     assert site.graphql_client.submit_calls[0]["vcpu"] == 8
     assert site.graphql_client.submit_calls[0]["memory"] == 16384
+
+
+def test_rest_submit_preserves_backend_resource_defaults_when_omitted(monkeypatch):
+    site = make_rest_site()
+    job = FakeJob()
+    requests = []
+
+    def fake_post(url, json, headers, timeout):
+        requests.append(
+            {
+                "url": url,
+                "json": json,
+                "headers": headers,
+                "timeout": timeout,
+            }
+        )
+        return SimpleNamespace(
+            status_code=200,
+            text="",
+            json=lambda: {"status": "success", "simulation_id": "simulation-1"},
+        )
+
+    monkeypatch.setattr(aws_module.requests, "post", fake_post)
+
+    site.submit(job)
+
+    assert "vcpu" not in requests[0]["json"]
+    assert "memory" not in requests[0]["json"]
+
+
+def test_rest_submit_sends_only_explicit_resource_overrides(monkeypatch):
+    site = make_rest_site()
+    job = FakeJob()
+    requests = []
+
+    def fake_post(url, json, headers, timeout):
+        requests.append(
+            {
+                "url": url,
+                "json": json,
+                "headers": headers,
+                "timeout": timeout,
+            }
+        )
+        return SimpleNamespace(
+            status_code=200,
+            text="",
+            json=lambda: {"status": "success", "simulation_id": "simulation-1"},
+        )
+
+    monkeypatch.setattr(aws_module.requests, "post", fake_post)
+
+    site.submit(job, vcpu=8)
+
+    assert requests[0]["json"]["vcpu"] == 8
+    assert "memory" not in requests[0]["json"]

@@ -704,9 +704,9 @@ class AWSSite(BaseSite):
         Args:
             job: The task to submit.
             vcpu: Number of vCPUs for the resource planner phase. When omitted,
-                GraphQL submissions preserve the backend default.
+                cloud submissions preserve the backend default.
             memory: Memory in MB for the resource planner phase. When omitted,
-                GraphQL submissions preserve the backend default.
+                cloud submissions preserve the backend default.
             **kwargs: Additional job parameters (``name``, ``description``,
                 ``send_simulation_status_email``). When ``send_simulation_status_email`` is
                 ``True`` or ``False`` (GraphQL path only), overrides cloud communication
@@ -802,18 +802,17 @@ class AWSSite(BaseSite):
                 # Old path: Submit via REST API (backwards compatibility)
                 self._emit(f"Submitting {job.name} via AWS REST API")
 
-                rest_vcpu = 4 if vcpu is None else vcpu
-                rest_memory = 2048 * 4 if memory is None else memory
-
                 # Prepare the API request data
                 api_data = {
                     "name": kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
                     "description": kwargs.get("description", ""),
                     "job_s3_key": str(s3_job_key),
-                    "vcpu": rest_vcpu,
-                    "memory": rest_memory,
                 }
 
+                if vcpu is not None:
+                    api_data["vcpu"] = vcpu
+                if memory is not None:
+                    api_data["memory"] = memory
                 if force_run:
                     api_data["force_run"] = True
 
