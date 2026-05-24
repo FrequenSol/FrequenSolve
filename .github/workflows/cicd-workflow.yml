@@ -80,16 +80,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          before_runs="$(mktemp)"
-          gh run list \
-            --repo "$DOWNSTREAM_REPO" \
-            --workflow "$DOWNSTREAM_WORKFLOW" \
-            --branch "$DOWNSTREAM_REF" \
-            --event workflow_dispatch \
-            --json databaseId \
-            --limit 100 \
-            --jq '.[].databaseId' > "$before_runs"
-
+          dispatch_started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           gh workflow run "$DOWNSTREAM_WORKFLOW" \
             --repo "$DOWNSTREAM_REPO" \
             --ref "$DOWNSTREAM_REF" \
@@ -100,21 +91,25 @@ jobs:
           run_id=""
           while [[ -z "$run_id" && $SECONDS -lt $deadline ]]; do
             sleep 10
-            while IFS= read -r candidate; do
-              if ! grep -qx "$candidate" "$before_runs"; then
-                run_id="$candidate"
-                break
-              fi
-            done < <(
+            mapfile -t matching_runs < <(
               gh run list \
                 --repo "$DOWNSTREAM_REPO" \
                 --workflow "$DOWNSTREAM_WORKFLOW" \
                 --branch "$DOWNSTREAM_REF" \
                 --event workflow_dispatch \
+                --created ">=$dispatch_started_at" \
                 --json databaseId \
                 --limit 20 \
                 --jq '.[].databaseId'
             )
+
+            if [[ ${#matching_runs[@]} -eq 1 ]]; then
+              run_id="${matching_runs[0]}"
+            elif [[ ${#matching_runs[@]} -gt 1 ]]; then
+              echo "Expected exactly one downstream workflow run created after $dispatch_started_at, found ${#matching_runs[@]}." >&2
+              printf 'Candidate run IDs:\n%s\n' "${matching_runs[@]}" >&2
+              exit 1
+            fi
           done
 
           if [[ -z "$run_id" ]]; then

@@ -27,6 +27,9 @@ def test_ci_workflow_runs_supported_python_matrix_on_node24_actions():
     assert "the-actions-org/workflow-dispatch" not in workflow
     assert "dawidd6/action-download-artifact" not in workflow
     assert 'gh workflow run "$DOWNSTREAM_WORKFLOW"' in workflow
+    assert "dispatch_started_at=" in workflow
+    assert '--created ">=$dispatch_started_at"' in workflow
+    assert "Expected exactly one downstream workflow run" in workflow
     assert "gh run watch" in workflow
     assert "gh run download" in workflow
     assert "actions/checkout@v6" in publish_workflow

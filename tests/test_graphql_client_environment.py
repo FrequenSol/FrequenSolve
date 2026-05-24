@@ -47,6 +47,55 @@ class CapturingGraphQLClient(GraphQLClient):
         raise AssertionError(f"unexpected query: {query}")
 
 
+class AccountAuth:
+    def get_account_id(self):
+        return "account-123"
+
+
+class StackQueryCapturingGraphQLClient(GraphQLClient):
+    def __init__(self):
+        super().__init__("https://example.invalid/graphql", auth=AccountAuth())
+        self.last_query = ""
+        self.last_variables: Optional[Dict[str, Any]] = None
+
+    def execute(
+        self, query: str, variables: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        self.last_query = query
+        self.last_variables = variables
+        return {
+            "listStacks": {
+                "items": [
+                    {
+                        "stackId": "compute-stack",
+                        "outputs": "{}",
+                        "status": "CREATE_COMPLETE",
+                        "createdAt": "2026-05-24T00:00:00Z",
+                    }
+                ]
+            }
+        }
+
+
+def test_check_compute_stack_exists_filters_by_account_id():
+    client = StackQueryCapturingGraphQLClient()
+
+    assert client._check_compute_stack_exists() is True
+
+    assert "listStacks(filter: $filter)" in client.last_query
+    assert client.last_variables == {
+        "filter": {
+            "stackType": {"eq": "compute"},
+            "accountId": {"eq": "account-123"},
+            "or": [
+                {"status": {"eq": "CREATE_COMPLETE"}},
+                {"status": {"eq": "UPDATE_COMPLETE"}},
+                {"status": {"eq": "UPDATE_ROLLBACK_COMPLETE"}},
+            ],
+        }
+    }
+
+
 def test_deploy_storage_stack_does_not_send_environment_argument():
     client = CapturingGraphQLClient()
 

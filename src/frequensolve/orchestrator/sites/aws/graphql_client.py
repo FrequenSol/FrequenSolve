@@ -242,16 +242,19 @@ class GraphQLClient:
         Returns:
             True if compute stack exists, False otherwise
         """
+        account_id = (
+            self.auth.get_account_id() if hasattr(self.auth, "get_account_id") else None
+        )
+        filter_obj = self._build_compute_stack_filter(account_id)
+        filter_obj["or"] = [
+            {"status": {"eq": "CREATE_COMPLETE"}},
+            {"status": {"eq": "UPDATE_COMPLETE"}},
+            {"status": {"eq": "UPDATE_ROLLBACK_COMPLETE"}},
+        ]
+        variables = {"filter": filter_obj}
         compute_query = """
-            query ListComputeStacks {
-                listStacks(filter: {
-                    stackType: { eq: "compute" }
-                    or: [
-                        { status: { eq: "CREATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } }
-                    ]
-                }) {
+            query ListComputeStacks($filter: ModelStackFilterInput) {
+                listStacks(filter: $filter) {
                     items {
                         stackId
                         outputs
@@ -262,7 +265,7 @@ class GraphQLClient:
             }
         """
         try:
-            result = self.execute(compute_query)
+            result = self.execute(compute_query, variables)
             return (
                 "listStacks" in result
                 and result["listStacks"]["items"]
