@@ -8,9 +8,9 @@ permissions:
 
 on:
   pull_request:
-    branches: [ "v2", "v2_sam" ]
+    branches: [ "v2" ]
   push:
-    branches: [ "v2", "v2_sam" ]
+    branches: [ "v2" ]
   workflow_dispatch:
     inputs:
       FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH:

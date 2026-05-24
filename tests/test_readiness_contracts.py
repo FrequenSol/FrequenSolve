@@ -3,11 +3,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_ci_workflow_targets_v2_release_branches():
+def test_ci_workflow_avoids_duplicate_pr_and_push_runs():
     workflow = (REPO_ROOT / ".github/workflows/cicd-workflow.yml").read_text()
 
-    assert 'pull_request:\n    branches: [ "v2", "v2_sam" ]' in workflow
-    assert 'push:\n    branches: [ "v2", "v2_sam" ]' in workflow
+    assert 'pull_request:\n    branches: [ "v2" ]' in workflow
+    assert 'push:\n    branches: [ "v2" ]' in workflow
+    assert 'branches: [ "v2", "v2_sam" ]' not in workflow
     assert "dawidd6/action-download-artifact@v6" in workflow
     assert 'branches: [ "main" ]' not in workflow
 
