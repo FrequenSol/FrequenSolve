@@ -26,12 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10"] #, "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }}
 
@@ -41,15 +41,18 @@ jobs:
         python -m pip install -e ".[dev,parallel,cloud]"
 
     - name: Run pre-commit
-      uses: pre-commit/action@v3.0.0
+      if: matrix.python-version == '3.10'
+      run: pre-commit run --show-diff-on-failure --color=always --all-files
 
     - name: Run tests with pytest
       run: make test
 
     - name: Upload coverage reports to Codecov
-      uses: codecov/codecov-action@v3
-      env:
-        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      if: matrix.python-version == '3.10'
+      uses: codecov/codecov-action@v6
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: coverage.xml
 
   integration-test:
     # This job runs all tests (including integration) in the docker image with the solver software.
@@ -59,37 +62,82 @@ jobs:
       # Generate GitHub App Token
       - name: Generate GitHub App Token
         id: generate-token
-        uses: tibdex/github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app_id: ${{ secrets.FREQUENSOLVER_BUILDER_APP_ID }}
-          private_key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.FREQUENSOLVER_BUILDER_APP_ID }}
+          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          owner: FrequenSol
+          repositories: FrequenSolveDockerImage
 
       - name: Trigger and wait for Docker Image workflow
         id: docker-workflow
-        uses: the-actions-org/workflow-dispatch@v4
-        with:
-          token: ${{ steps.generate-token.outputs.token }}
-          repo: FrequenSol/FrequenSolveDockerImage
-          workflow: cicd-workflow.yml
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH || 'main' }}
-          inputs: '{"FREQUENSOLVE_BRANCH": "${{ github.event_name == ''pull_request'' && github.head_ref || github.ref_name }}", "DISABLE_PUSH": true}'
-          wait-for-completion: true
-          wait-for-completion-timeout: 30m
-          wait-for-completion-interval: 10s
-          display-workflow-run-url: true
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          DOWNSTREAM_REPO: FrequenSol/FrequenSolveDockerImage
+          DOWNSTREAM_WORKFLOW: cicd-workflow.yml
+          DOWNSTREAM_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH || 'main' }}
+          FREQUENSOLVE_BRANCH: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          before_runs="$(mktemp)"
+          gh run list \
+            --repo "$DOWNSTREAM_REPO" \
+            --workflow "$DOWNSTREAM_WORKFLOW" \
+            --branch "$DOWNSTREAM_REF" \
+            --event workflow_dispatch \
+            --json databaseId \
+            --limit 100 \
+            --jq '.[].databaseId' > "$before_runs"
+
+          gh workflow run "$DOWNSTREAM_WORKFLOW" \
+            --repo "$DOWNSTREAM_REPO" \
+            --ref "$DOWNSTREAM_REF" \
+            -f FREQUENSOLVE_BRANCH="$FREQUENSOLVE_BRANCH" \
+            -f DISABLE_PUSH=true
+
+          deadline=$((SECONDS + 1800))
+          run_id=""
+          while [[ -z "$run_id" && $SECONDS -lt $deadline ]]; do
+            sleep 10
+            while IFS= read -r candidate; do
+              if ! grep -qx "$candidate" "$before_runs"; then
+                run_id="$candidate"
+                break
+              fi
+            done < <(
+              gh run list \
+                --repo "$DOWNSTREAM_REPO" \
+                --workflow "$DOWNSTREAM_WORKFLOW" \
+                --branch "$DOWNSTREAM_REF" \
+                --event workflow_dispatch \
+                --json databaseId \
+                --limit 20 \
+                --jq '.[].databaseId'
+            )
+          done
+
+          if [[ -z "$run_id" ]]; then
+            echo "Timed out waiting for downstream Docker image workflow to start." >&2
+            exit 1
+          fi
+
+          echo "workflow-id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "workflow-url=https://github.com/$DOWNSTREAM_REPO/actions/runs/$run_id" >> "$GITHUB_OUTPUT"
+          echo "Triggered downstream workflow: https://github.com/$DOWNSTREAM_REPO/actions/runs/$run_id"
+          gh run watch "$run_id" --repo "$DOWNSTREAM_REPO" --interval 10 --exit-status
 
       - name: Download test results from Docker workflow
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          github_token: ${{ steps.generate-token.outputs.token }}
-          workflow: cicd-workflow.yml
-          run_id: ${{ steps.docker-workflow.outputs.workflow-id }}
-          repo: FrequenSol/FrequenSolveDockerImage
-          name: test-results
-          path: tests/output
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          gh run download "${{ steps.docker-workflow.outputs.workflow-id }}" \
+            --repo FrequenSol/FrequenSolveDockerImage \
+            --name test-results \
+            --dir tests/output
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results
           path: tests/output/
@@ -99,10 +147,10 @@ jobs:
     needs: unit-test
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: "3.10"
 
@@ -117,7 +165,7 @@ jobs:
         make html
 
     - name: Upload documentation artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: documentation
         path: docs/build/html/
@@ -126,10 +174,10 @@ jobs:
     needs: unit-test
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: "3.10"
 
@@ -145,7 +193,7 @@ jobs:
       run: python -m twine check dist/*
 
     - name: Store build artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: dist
         path: dist/
