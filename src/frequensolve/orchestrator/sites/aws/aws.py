@@ -524,6 +524,7 @@ class AWSSite(BaseSite):
             self.get(s3_results_path, local_results_path)
         except Exception as e:
             logger.exception("Error downloading ParaView outputs: %s", str(e))
+            raise
 
     def _validate_config(self):
         """Validate AWS configuration."""
@@ -1193,7 +1194,39 @@ class AWSSite(BaseSite):
                 raise ValueError(f"Invalid S3 path: {s3_path_str}")
             path_parts = s3_path_str[5:].split("/", 1)  # Remove 's3://'
             bucket = path_parts[0]
-            prefix = path_parts[1].rstrip("/") + "/" if len(path_parts) > 1 else ""
+            key = path_parts[1] if len(path_parts) > 1 else ""
+
+            def _download_object(object_key: str) -> int:
+                if local_path.exists() and local_path.is_dir():
+                    local_file = local_path / Path(object_key).name
+                elif local_path.exists():
+                    local_file = local_path
+                elif local_path.suffix:
+                    local_file = local_path
+                else:
+                    local_file = local_path / Path(object_key).name
+                local_file.parent.mkdir(parents=True, exist_ok=True)
+                self.s3_client.download_file(bucket, object_key, str(local_file))
+                return 1
+
+            def _missing_object(error: ClientError) -> bool:
+                error_code = error.response.get("Error", {}).get("Code", "")
+                return error_code in ("404", "NoSuchKey", "NotFound")
+
+            if key and not s3_path_str.endswith("/"):
+                try:
+                    self.s3_client.head_object(Bucket=bucket, Key=key)
+                except ClientError as e:
+                    if not _missing_object(e):
+                        raise
+                else:
+                    downloaded = _download_object(key)
+                    logger.debug(
+                        "Transfer completed successfully (%d files)", downloaded
+                    )
+                    return
+
+            prefix = key.rstrip("/") + "/" if key else ""
 
             # Create local directory
             local_path.mkdir(parents=True, exist_ok=True)
