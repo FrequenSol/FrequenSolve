@@ -1,5 +1,7 @@
 # FrequenSolve Python SDK
 
+[![Coverage](https://codecov.io/gh/FrequenSol/FrequenSolve/branch/v2/graph/badge.svg)](https://app.codecov.io/gh/FrequenSol/FrequenSolve/tree/v2)
+
 FrequenSolve Python is the authoring and orchestration SDK for FrequenSol finite-element wave simulation software. It builds solver-ready simulation inputs, manages model and acquisition metadata, reads trace outputs, and provides optional adapters for local, SLURM, and cloud execution.
 
 The commercial solver binaries and backend services are licensed separately. This repository contains the Python SDK and lightweight mesh bindings needed to prepare inputs and inspect outputs.
@@ -83,6 +85,12 @@ Run deterministic unit tests by default:
 
 ```bash
 python -m pytest
+```
+
+Run the same non-integration coverage lane used by CI:
+
+```bash
+make test
 ```
 
 Release checks:
