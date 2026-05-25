@@ -95,3 +95,17 @@ def test_sphinx_docs_release_matches_package_version():
 
     assert conf["release"] == package_release
     assert conf["version"] == conf["_short_version"](package_release)
+
+
+def test_sphinx_docs_include_published_version_selector_assets():
+    conf = runpy.run_path(str(REPO_ROOT / "docs/source/conf.py"))
+    custom_js = (REPO_ROOT / "docs/source/_static/custom.js").read_text()
+    custom_css = (REPO_ROOT / "docs/source/_static/custom.css").read_text()
+
+    assert "custom.js" in conf["html_js_files"]
+    assert "custom.css" in conf["html_css_files"]
+    assert "/python/docs-manifest.json" in custom_js
+    assert "latestPath" in custom_js
+    assert "fs-docs-version-selector" in custom_js
+    assert "window.location.assign" in custom_js
+    assert ".fs-docs-version-selector" in custom_css

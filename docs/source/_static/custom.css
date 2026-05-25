@@ -66,6 +66,34 @@ h1, h2 {
     font-weight: bold;
 }
 
+/* Published docs version selector */
+.fs-docs-version-selector {
+    display: block;
+    max-width: 260px;
+    margin: 0.75rem auto 0;
+    padding: 0 0.85rem;
+    color: #ffffff;
+    text-align: left;
+}
+
+.fs-docs-version-selector span {
+    display: block;
+    margin-bottom: 0.25rem;
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.fs-docs-version-selector select {
+    width: 100%;
+    min-height: 34px;
+    border: 1px solid rgba(255, 255, 255, 0.38);
+    border-radius: 4px;
+    background: #ffffff;
+    color: #404040;
+    font: inherit;
+    font-size: 0.9rem;
+}
+
 /* Improve code block copy button */
 .copybutton {
     opacity: 0.3;
