@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
     - uses: actions/checkout@v6
 
@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          dispatch_actor="$(gh api user --jq .login)"
+          dispatch_actor="${{ steps.generate-token.outputs.app-slug }}[bot]"
           dispatch_started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           gh workflow run "$DOWNSTREAM_WORKFLOW" \
             --repo "$DOWNSTREAM_REPO" \

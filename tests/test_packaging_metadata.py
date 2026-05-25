@@ -25,6 +25,14 @@ def test_build_backend_requires_setuptools_with_pep_639_support():
     assert "setuptools>=77.0.3" in build_requires
 
 
+def test_python_support_metadata_covers_ci_matrix():
+    project = load_pyproject()["project"]
+
+    assert project["requires-python"] == ">=3.10,<3.15"
+    for minor in ("3.10", "3.11", "3.12", "3.13", "3.14"):
+        assert f"Programming Language :: Python :: {minor}" in project["classifiers"]
+
+
 def test_base_dependencies_exclude_optional_execution_features():
     dependencies = "\n".join(load_pyproject()["project"]["dependencies"])
 

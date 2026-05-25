@@ -16,7 +16,7 @@ def test_ci_workflow_runs_supported_python_matrix_on_node24_actions():
     workflow = (REPO_ROOT / ".github/workflows/cicd-workflow.yml").read_text()
     publish_workflow = (REPO_ROOT / ".github/workflows/publish-pypi.yml").read_text()
 
-    assert 'python-version: ["3.10", "3.11", "3.12"]' in workflow
+    assert 'python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]' in workflow
     assert "actions/checkout@v6" in workflow
     assert "actions/setup-python@v6" in workflow
     assert "codecov/codecov-action@v6" in workflow
@@ -30,7 +30,9 @@ def test_ci_workflow_runs_supported_python_matrix_on_node24_actions():
     assert "docker-image-integration-" in workflow
     assert "cancel-in-progress: false" in workflow
     assert 'gh workflow run "$DOWNSTREAM_WORKFLOW"' in workflow
-    assert "dispatch_actor=" in workflow
+    assert (
+        'dispatch_actor="${{ steps.generate-token.outputs.app-slug }}[bot]"' in workflow
+    )
     assert "dispatch_started_at=" in workflow
     assert (
         'gh api "repos/$DOWNSTREAM_REPO/actions/workflows/$DOWNSTREAM_WORKFLOW/runs"'

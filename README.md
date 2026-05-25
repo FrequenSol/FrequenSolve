@@ -8,7 +8,7 @@ The commercial solver binaries and backend services are licensed separately. Thi
 
 ## Installation
 
-FrequenSolve supports Python 3.10, 3.11, and 3.12 on macOS and Linux.
+FrequenSolve supports Python 3.10 through 3.14 on macOS and Linux.
 
 ```bash
 python -m pip install frequensolve
