@@ -26,10 +26,20 @@ def test_ci_workflow_runs_supported_python_matrix_on_node24_actions():
     assert "tibdex/github-app-token" not in workflow
     assert "the-actions-org/workflow-dispatch" not in workflow
     assert "dawidd6/action-download-artifact" not in workflow
+    assert "concurrency:" in workflow
+    assert "docker-image-integration-" in workflow
+    assert "cancel-in-progress: false" in workflow
     assert 'gh workflow run "$DOWNSTREAM_WORKFLOW"' in workflow
+    assert "dispatch_actor=" in workflow
     assert "dispatch_started_at=" in workflow
-    assert '--created ">=$dispatch_started_at"' in workflow
-    assert "Expected exactly one downstream workflow run" in workflow
+    assert (
+        'gh api "repos/$DOWNSTREAM_REPO/actions/workflows/$DOWNSTREAM_WORKFLOW/runs"'
+        in workflow
+    )
+    assert '-f actor="$dispatch_actor"' in workflow
+    assert '-f created=">=$dispatch_started_at"' in workflow
+    assert "sort_by(.created_at)[]" in workflow
+    assert "Expected exactly one downstream workflow run" not in workflow
     assert "gh run watch" in workflow
     assert "gh run download" in workflow
     assert "actions/checkout@v6" in publish_workflow

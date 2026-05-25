@@ -58,6 +58,9 @@ jobs:
     # This job runs all tests (including integration) in the docker image with the solver software.
     needs: unit-test
     runs-on: ubuntu-latest
+    concurrency:
+      group: docker-image-integration-${{ github.event_name == 'workflow_dispatch' && inputs.FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH || 'main' }}
+      cancel-in-progress: false
     steps:
       # Generate GitHub App Token
       - name: Generate GitHub App Token
@@ -80,6 +83,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          dispatch_actor="$(gh api user --jq .login)"
           dispatch_started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           gh workflow run "$DOWNSTREAM_WORKFLOW" \
             --repo "$DOWNSTREAM_REPO" \
@@ -92,23 +96,18 @@ jobs:
           while [[ -z "$run_id" && $SECONDS -lt $deadline ]]; do
             sleep 10
             mapfile -t matching_runs < <(
-              gh run list \
-                --repo "$DOWNSTREAM_REPO" \
-                --workflow "$DOWNSTREAM_WORKFLOW" \
-                --branch "$DOWNSTREAM_REF" \
-                --event workflow_dispatch \
-                --created ">=$dispatch_started_at" \
-                --json databaseId \
-                --limit 20 \
-                --jq '.[].databaseId'
+              gh api "repos/$DOWNSTREAM_REPO/actions/workflows/$DOWNSTREAM_WORKFLOW/runs" \
+                --method GET \
+                -f branch="$DOWNSTREAM_REF" \
+                -f event=workflow_dispatch \
+                -f actor="$dispatch_actor" \
+                -f created=">=$dispatch_started_at" \
+                -F per_page=20 \
+                --jq '.workflow_runs | sort_by(.created_at)[] | .id'
             )
 
-            if [[ ${#matching_runs[@]} -eq 1 ]]; then
+            if [[ ${#matching_runs[@]} -gt 0 ]]; then
               run_id="${matching_runs[0]}"
-            elif [[ ${#matching_runs[@]} -gt 1 ]]; then
-              echo "Expected exactly one downstream workflow run created after $dispatch_started_at, found ${#matching_runs[@]}." >&2
-              printf 'Candidate run IDs:\n%s\n' "${matching_runs[@]}" >&2
-              exit 1
             fi
           done
 
