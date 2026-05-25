@@ -1,6 +1,8 @@
 import datetime
-import os
+import importlib.util
+import re
 import sys
+from pathlib import Path
 
 # Configuration file for the Sphinx documentation builder.
 #
@@ -13,12 +15,33 @@ import sys
 project = "FrequenSolve"
 copyright = f"{datetime.datetime.now().year}, Jacob Badger"
 author = "Jacob Badger"
-version = "0.1"  # Major + Minor version number
-release = "0.1.1"  # Full version number
 
 # -- Path setup --------------------------------------------------------------
 # If your modules are in src/frequensolve, for example:
-sys.path.insert(0, os.path.abspath("../../src"))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = REPO_ROOT / "src"
+sys.path.insert(0, str(SRC_ROOT))
+
+
+def _package_release():
+    """Load the Versioneer release without importing the full package."""
+    version_file = SRC_ROOT / "frequensolve/_version.py"
+    spec = importlib.util.spec_from_file_location("frequensolve_version", version_file)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load FrequenSolve version from {version_file}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.get_versions()["version"]
+
+
+def _short_version(release):
+    match = re.match(r"^(\d+\.\d+)", release)
+    return match.group(1) if match else release
+
+
+release = _package_release()
+version = _short_version(release)
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration

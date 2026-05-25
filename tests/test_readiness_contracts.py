@@ -1,6 +1,17 @@
+import importlib.util
+import runpy
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_versioneer_release():
+    version_file = REPO_ROOT / "src/frequensolve/_version.py"
+    spec = importlib.util.spec_from_file_location("frequensolve_version", version_file)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module.get_versions()["version"]
 
 
 def test_ci_workflow_avoids_duplicate_pr_and_push_runs():
@@ -76,3 +87,11 @@ def test_readme_points_published_docs_to_cloud_amplify_docs_app():
     assert "former `docs/host` Terraform stack" in readme
     assert "destroyed and removed" in readme
     assert not (REPO_ROOT / "docs/host").exists()
+
+
+def test_sphinx_docs_release_matches_package_version():
+    conf = runpy.run_path(str(REPO_ROOT / "docs/source/conf.py"))
+    package_release = _load_versioneer_release()
+
+    assert conf["release"] == package_release
+    assert conf["version"] == conf["_short_version"](package_release)

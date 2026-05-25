@@ -61,3 +61,15 @@ def test_expected_extras_are_available_for_non_base_workflows():
         "seismic-io",
         "visual",
     }.issubset(extras)
+
+
+def test_versioneer_uses_v_prefixed_release_tags():
+    pyproject = load_pyproject()
+    setup_cfg = (ROOT / "setup.cfg").read_text(encoding="utf-8")
+    generated_version = (ROOT / "src/frequensolve/_version.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert pyproject["tool"]["versioneer"]["tag_prefix"] == "v"
+    assert "tag_prefix = v" in setup_cfg
+    assert 'cfg.tag_prefix = "v"' in generated_version
