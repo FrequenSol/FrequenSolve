@@ -47,7 +47,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://frequensol.com"
-Documentation = "https://frequensol.com/docs"
+Documentation = "https://docs.frequensol.com"
 Support = "https://frequensol.com/support"
 
 [project.optional-dependencies]

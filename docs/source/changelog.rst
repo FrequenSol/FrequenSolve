@@ -1,32 +1,18 @@
 Changelog
 =========
 
-All notable changes to FrequenSolve will be documented in this file.
+Notable changes to FrequenSolve should be documented here when a release is
+prepared.
 
-[0.1.1] - 2024-03-21
---------------------
+Unreleased
+----------
 
-Added in 0.1.1
-~~~~~~~~~~~~~~
-- Initial public release
-- Basic seismic modeling capabilities
-- Support for acoustic wave propagation
-- Python API documentation
+- Current development targets the ``v2``/``v2_sam`` line.
+- Public Python docs are published through the ``FrequenSol/cloud-amplify``
+  docs application instead of the removed ``docs/host`` Terraform stack.
+- CI verifies Python 3.10 through 3.14.
 
-Changed in 0.1.1
-~~~~~~~~~~~~~~~~
-- Improved mesh generation performance
-- Enhanced documentation
+0.0.1
+-----
 
-Fixed in 0.1.1
-~~~~~~~~~~~~~~
-- Various bug fixes and improvements
-
-[0.1.0] - 2024-02-15
---------------------
-
-Added in 0.1.0
-~~~~~~~~~~~~~~
-- Core functionality
-- Basic documentation
-- Initial test suite
+- Initial tagged SDK baseline.

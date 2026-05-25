@@ -98,7 +98,7 @@ html_theme_options = {
     "logo_only": False,
     "prev_next_buttons_location": "bottom",
     "style_external_links": True,
-    "style_nav_header_background": "#2980B9",
+    "style_nav_header_background": "#0a090c",
     # Theme options
     "collapse_navigation": False,
     "sticky_navigation": True,
@@ -112,7 +112,7 @@ toc_object_entries = True
 toc_object_entries_show_parents = "hide"
 
 # Sidebar logo
-html_logo = "_static/logo.png"
+html_logo = "_static/logo-transparent.png"
 html_favicon = "_static/favicon.ico"
 
 # Footer configuration

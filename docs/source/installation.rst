@@ -9,19 +9,18 @@ access to a licensed fast solver through a local, cloud, or HPC site.
 Basic Install
 -------------
 
-Install the core SDK from PyPI with pip:
-
-.. code-block:: bash
-
-   python -m pip install frequensolve
-
-The PyPI project must be published before this command can resolve from a fresh
-environment. Until the first release is live, install from a local source
-checkout. From the repository root:
+Until the first public package release is published to PyPI, install from a
+source checkout. From the repository root:
 
 .. code-block:: bash
 
    python -m pip install -e .
+
+After the package is published, install the released SDK from PyPI with pip:
+
+.. code-block:: bash
+
+   python -m pip install frequensolve
 
 Optional Extras
 ---------------
@@ -53,7 +52,7 @@ jobs, configure ``~/.frequensolve/site.toml`` and create sites with
 
    [site]
    type = "aws"
-   domain = "frequensolve.app"
+   domain = "app.frequensol.com"
    interactive = true
 
 The ``type`` can select one of the supported backends:

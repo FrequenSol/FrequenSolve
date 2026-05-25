@@ -1,5 +1,6 @@
 import importlib.util
 import runpy
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -71,11 +72,43 @@ def test_ci_workflow_does_not_deploy_legacy_docs_host():
 def test_readme_orients_users_to_site_config_and_tutorials():
     readme = (REPO_ROOT / "README.md").read_text()
 
+    assert "Until the first public package release is published to PyPI" in readme
+    assert "python -m pip install -e ." in readme
     assert "~/.frequensolve/site.toml" in readme
     assert "fs.Site()" in readme
     assert "docs/source/tutorials/index.rst" in readme
     assert "examples/tutorials" in readme
     assert "AWSSite" in readme
+
+
+def test_readme_quickstart_uses_current_project_owned_simulation_api():
+    import frequensolve as fs
+
+    readme = (REPO_ROOT / "README.md").read_text()
+    assert "project.new_simulation(" in readme
+    assert 'SeismicSimulation(name="simple_acoustic")' not in readme
+
+    u = fs.ureg
+    with tempfile.TemporaryDirectory() as tmp:
+        project = fs.Project(name="quickstart", path=Path(tmp) / "quickstart")
+        sim = project.new_simulation(
+            name="simple_acoustic",
+            physics="acoustic",
+            dimension=2,
+            units={"length": "km", "velocity": "km/s", "density": "g/cm^3"},
+        )
+        model = fs.LayeredModel(name="model", dimension=2, x_limits=[0.0, 1.0])
+        model.add_surface(name="top", depth=0.0 * u.km)
+        model.add_layer(
+            name="layer",
+            properties={"Vp": 1.5 * u.km / u.s, "Rho": 2.2 * u.g / u.cm**3},
+        )
+        model.add_surface(name="bottom", depth=0.5 * u.km)
+
+        sim += model
+        sim += model.hex_mesh_generator([8, 4])
+
+        assert project.save().exists()
 
 
 def test_readme_points_published_docs_to_cloud_amplify_docs_app():
@@ -87,6 +120,61 @@ def test_readme_points_published_docs_to_cloud_amplify_docs_app():
     assert "former `docs/host` Terraform stack" in readme
     assert "destroyed and removed" in readme
     assert not (REPO_ROOT / "docs/host").exists()
+
+
+def test_docs_and_examples_reference_canonical_frequensol_domains():
+    checked_paths = [
+        REPO_ROOT / "README.md",
+        REPO_ROOT / "pyproject.toml",
+        REPO_ROOT / "docs/source",
+        REPO_ROOT / "src/frequensolve/orchestrator/sites/aws",
+        REPO_ROOT / "tests/test_auth.py",
+        REPO_ROOT / "tests/test_s3_upload.py",
+        REPO_ROOT / "tests/test_awssite_domain.py",
+    ]
+    legacy_domains = ("frequensolve.app", "frequensol.app")
+    text_paths = []
+
+    for path in checked_paths:
+        if path.is_dir():
+            text_paths.extend(
+                candidate
+                for candidate in path.rglob("*")
+                if candidate.suffix in {".py", ".rst", ".md", ".toml", ".txt"}
+            )
+        else:
+            text_paths.append(path)
+
+    offenders = []
+    for path in sorted(text_paths):
+        text = path.read_text()
+        for legacy_domain in legacy_domains:
+            if legacy_domain in text:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: {legacy_domain}")
+
+    assert not offenders
+    assert 'domain = "app.frequensol.com"' in (REPO_ROOT / "README.md").read_text()
+    assert (
+        'Documentation = "https://docs.frequensol.com"'
+        in (REPO_ROOT / "pyproject.toml").read_text()
+    )
+
+
+def test_contributing_and_changelog_match_current_repo_workflows():
+    contributing = (REPO_ROOT / "docs/source/contributing.rst").read_text()
+    changelog = (REPO_ROOT / "docs/source/changelog.rst").read_text()
+    installation = (REPO_ROOT / "docs/source/installation.rst").read_text()
+
+    assert "Python 3.10 through 3.14" in contributing
+    assert "make test" in contributing
+    assert "make generate_reference_images" in contributing
+    assert "Publish Python Docs" in contributing
+    assert "docs/host" in contributing
+    assert "Until the first public package release is published to PyPI" in installation
+    assert "python -m pip install -e ." in installation
+    assert "0.1.1" not in changelog
+    assert "0.1.0" not in changelog
+    assert "0.0.1" in changelog
 
 
 def test_sphinx_docs_release_matches_package_version():
@@ -109,3 +197,39 @@ def test_sphinx_docs_include_published_version_selector_assets():
     assert "fs-docs-version-selector" in custom_js
     assert "window.location.assign" in custom_js
     assert ".fs-docs-version-selector" in custom_css
+
+
+def test_sphinx_docs_use_frequensol_docs_site_palette():
+    conf = runpy.run_path(str(REPO_ROOT / "docs/source/conf.py"))
+    custom_css = (REPO_ROOT / "docs/source/_static/custom.css").read_text()
+
+    assert conf["html_theme_options"]["style_nav_header_background"] == "#0a090c"
+    assert "--fs-near-black: #0a090c" in custom_css
+    assert "--fs-surface: #121212" in custom_css
+    assert "--fs-blue: #45588c" in custom_css
+    assert "--fs-gold: #e1b07e" in custom_css
+    assert "--fs-gold-soft" in custom_css
+    assert ".wy-nav-side" in custom_css
+    assert ".wy-nav-content" in custom_css
+    assert ".wy-menu-vertical li.current ul a" in custom_css
+    assert ".rst-content h1" in custom_css
+    assert ".rst-content p a" in custom_css
+    assert "color: var(--fs-blue-light);" in custom_css
+    assert ".rst-content table.docutils th" in custom_css
+    assert ".rst-content dl dt.sig" in custom_css
+    assert "overflow-wrap: anywhere;" in custom_css
+    assert "html.writer-html5 .rst-content dl.field-list" in custom_css
+    assert "box-shadow: inset 3px 0 0 var(--fs-gold);" in custom_css
+    assert "border-bottom: 1px solid var(--fs-gold-soft);" in custom_css
+    assert "border-top-color: var(--fs-gold)" in custom_css
+
+
+def test_sphinx_docs_use_transparent_frequensol_logo():
+    conf = runpy.run_path(str(REPO_ROOT / "docs/source/conf.py"))
+    logo_relpath = conf["html_logo"]
+    logo_path = REPO_ROOT / "docs/source" / logo_relpath
+    logo_bytes = logo_path.read_bytes()
+
+    assert logo_relpath == "_static/logo-transparent.png"
+    assert logo_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    assert logo_bytes[25] in {4, 6}

@@ -10,6 +10,15 @@ The commercial solver binaries and backend services are licensed separately. Thi
 
 FrequenSolve supports Python 3.10 through 3.14 on macOS and Linux.
 
+Until the first public package release is published to PyPI, install from a
+source checkout:
+
+```bash
+python -m pip install -e .
+```
+
+After the package is published, install the released SDK with:
+
 ```bash
 python -m pip install frequensolve
 ```
@@ -28,22 +37,29 @@ python -m pip install "frequensolve[dev,docs]"    # development and docs
 ## Quickstart
 
 ```python
-from frequensolve.model import ModelSubdomain
-from frequensolve.simulation import SeismicSimulation
-from frequensolve.units import ureg
+import frequensolve as fs
 
-layer = ModelSubdomain(
-    mesh_block_id=1,
+u = fs.ureg
+
+project = fs.Project(name="quickstart", path="./scratch/quickstart")
+sim = project.new_simulation(
+    name="simple_acoustic",
     physics="acoustic",
-    properties={
-        "vp": 1.5 * ureg.km / ureg.s,
-        "rho": 2.2 * ureg.g / ureg.cm**3,
-    },
+    dimension=2,
+    units={"length": "km", "velocity": "km/s", "density": "g/cm^3"},
 )
 
-sim = SeismicSimulation(name="simple_acoustic")
-sim.model.subdomains.append(layer)
-sim.save("sim.json")
+model = fs.LayeredModel(name="model", dimension=2, x_limits=[0.0, 1.0])
+model.add_surface(name="top", depth=0.0 * u.km)
+model.add_layer(
+    name="layer",
+    properties={"Vp": 1.5 * u.km / u.s, "Rho": 2.2 * u.g / u.cm**3},
+)
+model.add_surface(name="bottom", depth=0.5 * u.km)
+
+sim += model
+sim += model.hex_mesh_generator([8, 4])
+project.save()
 ```
 
 The SDK exports JSON/HDF5 contracts consumed by fast solver builds. Solver execution requires a licensed solver binary or an enabled FrequenSol execution backend.
@@ -65,7 +81,7 @@ Cloud execution:
 ```toml
 [site]
 type = "aws"
-domain = "frequensolve.app"
+domain = "app.frequensol.com"
 interactive = true
 ```
 

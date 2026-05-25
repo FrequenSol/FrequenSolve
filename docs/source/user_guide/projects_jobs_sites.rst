@@ -128,7 +128,7 @@ can also keep named profiles in one file:
 
    [sites.cloud]
    type = "aws"
-   domain = "frequensolve.app"
+   domain = "app.frequensol.com"
    interactive = true
 
    [sites.cluster]

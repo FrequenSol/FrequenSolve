@@ -47,10 +47,10 @@ class AWSSiteConfig(BaseSiteConfig):
 
     Usage:
         # Fetch config from domain
-        config = AWSSiteConfig.from_domain('frequensolve.app')
+        config = AWSSiteConfig.from_domain('app.frequensol.com')
 
         # Or use FREQUENSOL_DOMAIN environment variable
-        export FREQUENSOL_DOMAIN='frequensolve.app'
+        export FREQUENSOL_DOMAIN='app.frequensol.com'
         config = AWSSiteConfig.from_domain()
 
     Attributes:
@@ -90,7 +90,7 @@ class AWSSiteConfig(BaseSiteConfig):
         """Create configuration by fetching from a domain.
 
         Args:
-            domain: Frontend domain (e.g., 'frequensolve.app', 'localhost:5173')
+            domain: Frontend domain (e.g., 'app.frequensol.com', 'localhost:5173')
                    If not provided, will try FREQUENSOL_DOMAIN environment variable.
 
         Returns:
@@ -222,14 +222,14 @@ class AWSSite(BaseSite):
 
     Usage:
         # Just provide your domain - everything else is automatic
-        site = AWSSite(domain='frequensolve.app')
+        site = AWSSite(domain='app.frequensol.com')
 
         # Or set FREQUENSOL_DOMAIN environment variable once
-        export FREQUENSOL_DOMAIN='frequensolve.app'
+        export FREQUENSOL_DOMAIN='app.frequensol.com'
         site = AWSSite()
 
         # Provide credentials to skip interactive prompt
-        site = AWSSite(domain='frequensolve.app', email='user@example.com', password='...')
+        site = AWSSite(domain='app.frequensol.com', email='user@example.com', password='...')
 
     What happens automatically:
         1. Fetches configuration from domain (User Pool ID, API URL, etc.)
@@ -249,7 +249,7 @@ class AWSSite(BaseSite):
         """Initialize AWS site with domain-based authentication.
 
         Args:
-            domain: Frontend domain (e.g., 'frequensolve.app', 'localhost:5173').
+            domain: Frontend domain (e.g., 'app.frequensol.com', 'localhost:5173').
                    If not provided, will try FREQUENSOL_DOMAIN environment variable.
             email: User email. Required when cached tokens are unavailable unless
                 interactive is True.
@@ -1272,5 +1272,5 @@ class AWSSite(BaseSite):
 
 # if __name__ == "__main__":
 #     # Example usage
-#     config = AWSSiteConfig.from_domain('frequensolve.app')
-#     site = AWSSite(domain='frequensolve.app')
+#     config = AWSSiteConfig.from_domain('app.frequensol.com')
+#     site = AWSSite(domain='app.frequensol.com')
