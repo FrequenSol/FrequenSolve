@@ -1,6 +1,7 @@
 # FrequenSolve Python SDK
 
 [![Coverage](https://codecov.io/gh/FrequenSol/FrequenSolve/branch/v2/graph/badge.svg)](https://app.codecov.io/gh/FrequenSol/FrequenSolve/tree/v2)
+[![Python 3.10-3.14](https://img.shields.io/badge/python-3.10--3.14-blue.svg)](pyproject.toml)
 
 FrequenSolve Python is the authoring and orchestration SDK for FrequenSol finite-element wave simulation software. It builds solver-ready simulation inputs, manages model and acquisition metadata, reads trace outputs, and provides optional adapters for local, SLURM, and cloud execution.
 
@@ -66,23 +67,34 @@ The SDK exports JSON/HDF5 contracts consumed by fast solver builds. Solver execu
 
 ## Sites And Tutorials
 
-Configure the standard execution site once in `~/.frequensolve/site.toml`, then create it in scripts and notebooks with `fs.Site()`. Direct constructors such as `fs.LocalSite(...)` and `fs.AWSSite(...)` remain available for advanced cases.
+Configure the standard execution site once in `~/.frequensolve/site.toml`, then create it in scripts and notebooks with `fs.Site()`. On first use, `fs.Site()` creates a starter config at that path and raises an exception asking you to review it; rerun after accepting or editing the profiles. Direct constructors such as `fs.LocalSite(...)` and `fs.AWSSite(...)` remain available for advanced cases.
 
-Local execution:
-
-```toml
-[site]
-type = "local"
-rel_path = "frequensolve/tutorials"
-```
-
-Cloud execution:
+Starter config:
 
 ```toml
-[site]
+default = "cloud"
+
+[sites.cloud]
 type = "aws"
 domain = "app.frequensol.com"
 interactive = true
+verbose = true
+
+[sites.local]
+type = "local"
+shutdown_on_completion = true
+verbose = true
+
+[sites.hpc]
+type = "stampede3"
+rel_path = "scratch/frequensolve_tutorials"
+queue = "skx-dev"
+nodes = 1
+duration = "00:30:00"
+procs_per_node = 4
+procs_per_task = 1
+poll_interval = 10
+verbose = true
 ```
 
 The tutorial notebooks live in `examples/tutorials`. The local documentation catalog is `docs/source/tutorials/index.rst`, with site-specific examples under `examples/tutorials/02_sites`.

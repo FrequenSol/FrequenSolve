@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import runpy
 import tempfile
 from pathlib import Path
@@ -79,6 +80,31 @@ def test_readme_orients_users_to_site_config_and_tutorials():
     assert "docs/source/tutorials/index.rst" in readme
     assert "examples/tutorials" in readme
     assert "AWSSite" in readme
+
+
+def test_tutorial_notebooks_use_configured_site_factory():
+    constructor_patterns = (
+        "fs.LocalSite(",
+        "fs.AWSSite(",
+        "fs.Stampede3Site(",
+        "fs.SlurmSite(",
+        "fs.SlurmRunConfig(",
+        "fs.SlurmSiteConfig(",
+    )
+    offenders = []
+
+    for notebook_path in sorted((REPO_ROOT / "examples/tutorials").rglob("*.ipynb")):
+        notebook = json.loads(notebook_path.read_text())
+        for cell_index, cell in enumerate(notebook.get("cells", []), start=1):
+            source = "".join(cell.get("source", []))
+            for pattern in constructor_patterns:
+                if pattern in source:
+                    offenders.append(
+                        f"{notebook_path.relative_to(REPO_ROOT)} cell {cell_index}: "
+                        f"{pattern}"
+                    )
+
+    assert not offenders
 
 
 def test_readme_quickstart_uses_current_project_owned_simulation_api():

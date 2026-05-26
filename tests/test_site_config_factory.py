@@ -83,6 +83,32 @@ def test_site_factory_uses_stable_home_default_path(monkeypatch, tmp_path):
     assert sites.site_config_path() == tmp_path / ".frequensolve" / "site.toml"
 
 
+def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tmp_path):
+    monkeypatch.delenv("FREQUENSOLVE_SITE_CONFIG", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(sites, "AWSSite", FakeSite)
+
+    config_path = tmp_path / ".frequensolve" / "site.toml"
+
+    with pytest.raises(FileNotFoundError, match="Created starter FrequenSolve"):
+        sites.Site()
+
+    starter = config_path.read_text()
+    assert 'default = "cloud"' in starter
+    assert "[sites.cloud]" in starter
+    assert 'type = "aws"' in starter
+    assert "[sites.local]" in starter
+    assert "[sites.hpc]" in starter
+
+    site = sites.Site()
+
+    assert site.kwargs == {
+        "domain": "app.frequensol.com",
+        "interactive": True,
+        "verbose": True,
+    }
+
+
 def test_site_factory_reads_named_profiles_and_routes_aws_lazily(monkeypatch, tmp_path):
     config_path = tmp_path / "sites.toml"
     config_path.write_text(
@@ -232,3 +258,15 @@ def test_site_factory_reports_missing_config_path(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="FREQUENSOLVE_SITE_CONFIG"):
         sites.Site(config_path=missing_path)
+
+    assert not missing_path.exists()
+
+
+def test_site_factory_does_not_create_missing_env_config(monkeypatch, tmp_path):
+    missing_path = tmp_path / "missing-env.toml"
+    monkeypatch.setenv("FREQUENSOLVE_SITE_CONFIG", str(missing_path))
+
+    with pytest.raises(FileNotFoundError, match="No FrequenSolve site config"):
+        sites.Site()
+
+    assert not missing_path.exists()

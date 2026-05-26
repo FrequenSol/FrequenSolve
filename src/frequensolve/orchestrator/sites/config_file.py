@@ -22,6 +22,33 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
 
 SITE_CONFIG_ENV_VAR = "FREQUENSOLVE_SITE_CONFIG"
 DEFAULT_SITE_CONFIG_NAME = "site.toml"
+STARTER_SITE_CONFIG = """# FrequenSolve execution site configuration.
+# Review these profiles, keep the ones you use, then rerun your script or notebook.
+
+default = "cloud"
+
+[sites.cloud]
+type = "aws"
+domain = "app.frequensol.com"
+interactive = true
+verbose = true
+
+[sites.local]
+type = "local"
+shutdown_on_completion = true
+verbose = true
+
+[sites.hpc]
+type = "stampede3"
+rel_path = "scratch/frequensolve_tutorials"
+queue = "skx-dev"
+nodes = 1
+duration = "00:30:00"
+procs_per_node = 4
+procs_per_task = 1
+poll_interval = 10
+verbose = true
+"""
 
 _SITE_TYPES = {
     "aws": "AWSSite",
@@ -65,12 +92,33 @@ def load_site_config(
 
     config_path = site_config_path(path)
     if not config_path.exists():
+        if _should_create_starter_config(path):
+            _write_starter_site_config(config_path)
+            raise FileNotFoundError(
+                "Created starter FrequenSolve site config at "
+                f"{config_path}. Review the profiles, modify them for your "
+                "environment if needed, then rerun. The default profile is "
+                "cloud and uses app.frequensol.com."
+            )
         raise FileNotFoundError(
             "No FrequenSolve site config found at "
             f"{config_path}. Create ~/.frequensolve/{DEFAULT_SITE_CONFIG_NAME} "
             f"or set {SITE_CONFIG_ENV_VAR}."
         )
     return tomllib.loads(config_path.read_text())
+
+
+def _should_create_starter_config(path: Optional[Union[str, Path]]) -> bool:
+    return path is None and not os.getenv(SITE_CONFIG_ENV_VAR)
+
+
+def _write_starter_site_config(config_path: Path) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with config_path.open("x") as file:
+            file.write(STARTER_SITE_CONFIG)
+    except FileExistsError:  # pragma: no cover - defensive for concurrent first runs
+        return
 
 
 def Site(

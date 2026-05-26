@@ -46,14 +46,35 @@ Solver Access
 
 The Python package does not include the fast solver executable. To execute
 jobs, configure ``~/.frequensolve/site.toml`` and create sites with
-``fs.Site()``:
+``fs.Site()``. On first use, ``fs.Site()`` creates a starter config at that
+path and raises an exception asking you to review it. If the cloud defaults are
+acceptable, rerun the same cell or script; otherwise edit the profiles first.
 
 .. code-block:: toml
 
-   [site]
+   default = "cloud"
+
+   [sites.cloud]
    type = "aws"
    domain = "app.frequensol.com"
    interactive = true
+   verbose = true
+
+   [sites.local]
+   type = "local"
+   shutdown_on_completion = true
+   verbose = true
+
+   [sites.hpc]
+   type = "stampede3"
+   rel_path = "scratch/frequensolve_tutorials"
+   queue = "skx-dev"
+   nodes = 1
+   duration = "00:30:00"
+   procs_per_node = 4
+   procs_per_task = 1
+   poll_interval = 10
+   verbose = true
 
 The ``type`` can select one of the supported backends:
 

@@ -130,13 +130,34 @@ Execution Sites
 ---------------
 
 The standard way to select an execution backend is a user config file at
-``~/.frequensolve/site.toml``:
+``~/.frequensolve/site.toml``. If the default config file does not exist,
+``fs.Site()`` creates a starter config there and raises an exception asking you
+to review it before rerunning:
 
 .. code-block:: toml
 
-   [site]
+   default = "cloud"
+
+   [sites.cloud]
+   type = "aws"
+   domain = "app.frequensol.com"
+   interactive = true
+   verbose = true
+
+   [sites.local]
    type = "local"
    shutdown_on_completion = true
+   verbose = true
+
+   [sites.hpc]
+   type = "stampede3"
+   rel_path = "scratch/frequensolve_tutorials"
+   queue = "skx-dev"
+   nodes = 1
+   duration = "00:30:00"
+   procs_per_node = 4
+   procs_per_task = 1
+   poll_interval = 10
    verbose = true
 
 Use the same Python code for local, cloud, or HPC execution:
