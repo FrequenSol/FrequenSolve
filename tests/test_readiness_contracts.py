@@ -196,7 +196,11 @@ def test_sphinx_docs_include_published_version_selector_assets():
     assert "latestPath" in custom_js
     assert "fs-docs-version-selector" in custom_js
     assert "window.location.assign" in custom_js
+    assert "Looking for other docs?" in custom_js
+    assert "fs-docs-home-link" in custom_js
+    assert 'homeLink.href = "/"' in custom_js
     assert ".fs-docs-version-selector" in custom_css
+    assert ".fs-docs-home-link" in custom_css
 
 
 def test_sphinx_docs_use_frequensol_docs_site_palette():
@@ -216,6 +220,11 @@ def test_sphinx_docs_use_frequensol_docs_site_palette():
     assert ".rst-content p a" in custom_css
     assert "color: var(--fs-blue-light);" in custom_css
     assert ".rst-content table.docutils th" in custom_css
+    assert "@media screen and (min-width: 769px)" in custom_css
+    assert "overflow: visible !important;" in custom_css
+    assert "table-layout: fixed;" in custom_css
+    assert "@media screen and (max-width: 768px)" in custom_css
+    assert "-webkit-overflow-scrolling: touch;" in custom_css
     assert ".rst-content dl dt.sig" in custom_css
     assert "overflow-wrap: anywhere;" in custom_css
     assert "html.writer-html5 .rst-content dl.field-list" in custom_css

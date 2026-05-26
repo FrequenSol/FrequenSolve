@@ -1,6 +1,7 @@
 (function () {
   const MANIFEST_PATH = "/python/docs-manifest.json";
   const CONTAINER_CLASS = "fs-docs-version-selector";
+  const HOME_LINK_CLASS = "fs-docs-home-link";
 
   function isRecord(value) {
     return value !== null && typeof value === "object";
@@ -93,8 +94,35 @@
     mount.appendChild(label);
   }
 
+  function renderDocsHomeLink() {
+    if (document.querySelector(`.${HOME_LINK_CLASS}`)) {
+      return;
+    }
+
+    const mount = document.querySelector(".wy-side-nav-search") || document.querySelector(".wy-nav-side");
+
+    if (!mount) {
+      return;
+    }
+
+    const versionSelector = document.querySelector(`.${CONTAINER_CLASS}`);
+    const homeLink = document.createElement("a");
+
+    homeLink.className = HOME_LINK_CLASS;
+    homeLink.href = "/";
+    homeLink.textContent = "Looking for other docs?";
+
+    if (versionSelector && versionSelector.parentElement === mount) {
+      versionSelector.insertAdjacentElement("afterend", homeLink);
+      return;
+    }
+
+    mount.appendChild(homeLink);
+  }
+
   function loadVersionSelector() {
     if (!window.fetch) {
+      renderDocsHomeLink();
       return;
     }
 
@@ -104,8 +132,11 @@
         if (manifest) {
           renderVersionSelector(manifest);
         }
+        renderDocsHomeLink();
       })
-      .catch(() => {});
+      .catch(() => {
+        renderDocsHomeLink();
+      });
   }
 
   if (document.readyState === "loading") {

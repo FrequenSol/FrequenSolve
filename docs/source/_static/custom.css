@@ -353,6 +353,44 @@ html.writer-html5 .rst-content table.docutils tr:nth-child(even) td {
     background: var(--fs-section);
 }
 
+@media screen and (min-width: 769px) {
+    .rst-content .wy-table-responsive {
+        overflow: visible !important;
+    }
+
+    .rst-content .wy-table-responsive table.docutils,
+    .rst-content table.docutils {
+        width: 100%;
+        max-width: 100%;
+        table-layout: fixed;
+    }
+
+    .rst-content .wy-table-responsive table.docutils th,
+    .rst-content .wy-table-responsive table.docutils td,
+    .rst-content table.docutils th,
+    .rst-content table.docutils td {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: normal;
+        hyphens: auto;
+    }
+
+    .rst-content .wy-table-responsive table.docutils code,
+    .rst-content .wy-table-responsive table.docutils tt,
+    .rst-content .wy-table-responsive table.docutils .pre {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+}
+
+@media screen and (max-width: 768px) {
+    .rst-content .wy-table-responsive {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+}
+
 /* Improve heading styles */
 h1, h2, h3, h4, h5, h6 {
     font-weight: 600 !important;
@@ -417,6 +455,39 @@ h1, h2 {
 .fs-docs-version-selector select:focus {
     border-color: var(--fs-gold);
     box-shadow: 0 0 0 1px var(--fs-gold-soft);
+}
+
+.wy-side-nav-search > a.fs-docs-home-link,
+.fs-docs-home-link {
+    display: block;
+    max-width: 260px;
+    margin: 0.45rem auto 0;
+    padding: 0 0.85rem;
+    border: 0;
+    background: transparent;
+    color: var(--fs-muted-text) !important;
+    font-size: 0.78rem;
+    font-weight: 600;
+    line-height: 1.3;
+    text-align: center;
+    text-decoration: none;
+}
+
+.wy-side-nav-search > a.fs-docs-home-link:hover,
+.wy-side-nav-search > a.fs-docs-home-link:focus,
+.fs-docs-home-link:hover,
+.fs-docs-home-link:focus {
+    background: transparent;
+    color: var(--fs-gold) !important;
+    text-decoration: underline;
+    text-decoration-color: var(--fs-gold-soft);
+    text-underline-offset: 0.18rem;
+}
+
+.wy-side-nav-search > a.fs-docs-home-link:focus-visible,
+.fs-docs-home-link:focus-visible {
+    outline: 1px solid var(--fs-gold);
+    outline-offset: 2px;
 }
 
 /* Improve code block copy button */

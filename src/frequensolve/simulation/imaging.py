@@ -381,9 +381,14 @@ class ImagingJob(SimulationJob):
 
     @classmethod
     def from_fs(
-        cls, data: Dict, base_path: Optional[Union[str, Path]] = None
+        cls,
+        data: Dict,
+        base_path: Optional[Union[str, Path]] = None,
+        project_path: Optional[Union[str, Path]] = None,
     ) -> "ImagingJob":
         data = dict(data)
+        stored_project_path = data.get("project_path")
+        resolved_project_path = project_path or stored_project_path
         image_data = data.pop("Image", data.pop("Imaging", None))
         if image_data is None:
             raise KeyError("ImagingJob data must include an 'Image' section")
@@ -401,38 +406,37 @@ class ImagingJob(SimulationJob):
             for image in images
         }
         simulation_ref = data.pop("simulation")
-        simulation_path = Path(simulation_ref)
-        if not simulation_path.is_absolute():
-            project_path = data.get("project_path")
-            if project_path is None and base_path is not None:
-                project_path = SimulationJob._project_root_from_job_path(
-                    Path(base_path)
-                )
-            if project_path is not None:
-                simulation_path = Path(project_path) / simulation_path
-
-        project_path = data.get("project_path")
+        simulation = SimulationJob._load_simulation_for_job(
+            simulation_ref,
+            base_path=base_path,
+            project_path=resolved_project_path,
+            source_project=stored_project_path,
+        )
         data_path = cls._resolve_saved_path(
             image_data.pop("data_path", None),
             base_path=base_path,
-            project_path=project_path,
+            project_path=resolved_project_path,
         )
         save_path = cls._resolve_saved_path(
             image_data.pop("save_path", None),
             base_path=base_path,
-            project_path=project_path,
+            project_path=resolved_project_path,
         )
         for group in misfit.receiver_groups:
             group.observed = cls._resolve_saved_path(
-                group.observed, base_path=base_path, project_path=project_path
+                group.observed,
+                base_path=base_path,
+                project_path=resolved_project_path,
             )
             group.simulated = cls._resolve_saved_path(
-                group.simulated, base_path=base_path, project_path=project_path
+                group.simulated,
+                base_path=base_path,
+                project_path=resolved_project_path,
             )
 
         job = cls(
             name=data.pop("name", None),
-            simulation=SeismicSimulation.load(simulation_path),
+            simulation=simulation,
             f_list=data.pop("f_list", None),
             data_path=data_path,
             resolution=resolution,

@@ -1567,7 +1567,7 @@ class SlurmSite(BaseSite):
         """Get the local FrequenSolve repository path used for script templates."""
         load_dotenv()
         env_path = os.getenv(self.python_path_env)
-        path = Path(env_path) if env_path else Path(__file__).resolve().parents[4]
+        path = Path(env_path) if env_path else Path(__file__).resolve().parents[5]
         if not path.exists():
             raise FileNotFoundError(
                 f"env var {self.python_path_env}:{path} does not exist"
