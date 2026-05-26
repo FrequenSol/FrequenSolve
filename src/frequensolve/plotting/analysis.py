@@ -12,7 +12,6 @@ from frequensolve.seismic.trace_geometry import (
     require_dims,
     sampling_rate,
     select_time,
-    time_limit,
     trace_values,
 )
 
@@ -103,8 +102,8 @@ def _aligned_time_pair(
     T_max: float | None = None,
     Tf: float | None = None,
 ) -> tuple[xr.DataArray, xr.DataArray]:
-    baseline = select_time(as_trace_array(baseline), time_limit(T_max, Tf))
-    monitor = select_time(as_trace_array(monitor), time_limit(T_max, Tf))
+    baseline = select_time(as_trace_array(baseline), T_max)
+    monitor = select_time(as_trace_array(monitor), T_max)
     require_dims(baseline, "time", "receiver")
     require_dims(monitor, "time", "receiver")
     return xr.align(
@@ -179,9 +178,9 @@ def compute_nrms(
 ) -> xr.DataArray:
     """Compute normalized RMS difference around reference first arrivals."""
 
-    reference = select_time(as_trace_array(reference), time_limit(T_max, Tf))
-    baseline = select_time(as_trace_array(baseline), time_limit(T_max, Tf))
-    monitor = select_time(as_trace_array(monitor), time_limit(T_max, Tf))
+    reference = select_time(as_trace_array(reference), T_max)
+    baseline = select_time(as_trace_array(baseline), T_max)
+    monitor = select_time(as_trace_array(monitor), T_max)
     require_dims(reference, "time", "receiver")
     reference, baseline, monitor = xr.align(
         reference.transpose("time", "receiver"),

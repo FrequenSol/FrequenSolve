@@ -296,33 +296,44 @@ class TraceStore:
             if self._is_indexed_packed_h5(f) and group not in f:
                 values = [
                     row["frequency"]
-                    for row in self._indexed_trace_rows(f, group)
+                    for row in self._filter_expected_indexed_rows(
+                        self._indexed_trace_rows(f, group)
+                    )
                     if row["frequency"] is not None
                 ]
                 if values:
                     return np.asarray(values, dtype=float)
             if "frequency" in f:
-                return f["frequency"][()]
+                return self._filter_expected_frequencies(f["frequency"][()])
             dset = (
                 f[self._indexed_trace_paths(f, group)[0]]
                 if self._is_indexed_packed_h5(f) and group not in f
                 else f[group]
             )
             if "frequency" in dset.attrs:
-                return dset.attrs["frequency"]
+                return self._filter_expected_frequencies(dset.attrs["frequency"])
             return np.array(list(self.metadata["f_map"].values()))
 
     def laplace(self, group: Optional[str] = None) -> np.ndarray:
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             if group is not None and self._is_indexed_packed_h5(f) and group not in f:
-                rows = self._indexed_trace_rows(f, group)
+                rows = self._filter_expected_indexed_rows(
+                    self._indexed_trace_rows(f, group)
+                )
                 return np.asarray(
                     [row.get("laplace", 0.0) for row in rows], dtype=float
                 )
             if "laplace" in f:
                 values = np.asarray(f["laplace"][()]).ravel()
                 if values.size:
+                    if "frequency" in f:
+                        indices = self._expected_frequency_indices(f["frequency"][()])
+                        if (
+                            indices is not None
+                            and max(indices, default=-1) < values.size
+                        ):
+                            values = values[indices]
                     return values.astype(float)
             if group is not None:
                 frequencies = np.asarray(self.frequencies(group), dtype=float)
@@ -692,6 +703,65 @@ class TraceStore:
                 continue
         return sorted(values)
 
+    def _expected_frequency_indices(
+        self,
+        available: Iterable[float],
+    ) -> Optional[list[int]]:
+        expected = self._expected_frequencies()
+        if not expected:
+            return None
+        available_values = np.asarray(available, dtype=float).ravel()
+        indices: list[int] = []
+        used: set[int] = set()
+        for frequency in expected:
+            matches = np.flatnonzero(
+                np.isclose(
+                    available_values,
+                    float(frequency),
+                    rtol=0.0,
+                    atol=1.0e-9,
+                )
+            )
+            for match in matches:
+                index = int(match)
+                if index not in used:
+                    indices.append(index)
+                    used.add(index)
+                    break
+        return indices
+
+    def _filter_expected_frequencies(self, values: Iterable[float]) -> np.ndarray:
+        frequencies = np.asarray(values, dtype=float).ravel()
+        indices = self._expected_frequency_indices(frequencies)
+        if indices is None:
+            return frequencies
+        return frequencies[indices]
+
+    def _filter_expected_frequency_data(self, data: DataArray) -> DataArray:
+        if "frequency" not in data.dims or "frequency" not in data.coords:
+            return data
+        indices = self._expected_frequency_indices(data.coords["frequency"].values)
+        if indices is None:
+            return data
+        return data.isel(frequency=indices)
+
+    def _filter_expected_indexed_rows(self, rows: list[dict]) -> list[dict]:
+        indices = self._expected_frequency_indices(
+            [row["frequency"] for row in rows if row["frequency"] is not None]
+        )
+        if indices is None:
+            return rows
+        filtered = []
+        frequency_index = 0
+        wanted = set(indices)
+        for row in rows:
+            if row["frequency"] is None:
+                continue
+            if frequency_index in wanted:
+                filtered.append(row)
+            frequency_index += 1
+        return filtered
+
     def _metadata_laplace_values(self, frequencies: Iterable[float]) -> np.ndarray:
         f_map = self.metadata.get("f_map", {})
         laplace_map = self.metadata.get("laplace_map", {})
@@ -858,7 +928,14 @@ class TraceStore:
         indexed_frequencies: list[float] = []
         indexed_laplace: list[float] = []
         if self._is_indexed_packed_h5(h5) and group not in h5:
-            indexed_rows = self._indexed_trace_rows(h5, group)
+            indexed_rows = self._filter_expected_indexed_rows(
+                self._indexed_trace_rows(h5, group)
+            )
+            if not indexed_rows:
+                raise ValueError(
+                    "Packed trace file does not contain any requested "
+                    f"frequencies for group {group!r}"
+                )
             indexed_paths = [row["packed_path"] for row in indexed_rows]
             indexed_frequencies = [
                 row["frequency"] for row in indexed_rows if row["frequency"] is not None
@@ -945,6 +1022,7 @@ class TraceStore:
                 laplace = np.full(fd.sizes["frequency"], float(laplace[0]))
             if laplace.size == fd.sizes["frequency"]:
                 fd = fd.assign_coords(laplace=("frequency", laplace))
+            fd = self._filter_expected_frequency_data(fd)
         return fd
 
     def read_FD(
@@ -960,6 +1038,14 @@ class TraceStore:
             gather = dset.sel(component=component, source=source)
             fd = gather.sel(complex="real") + 1j * gather.sel(complex="imag")
             fd = fd.fillna(0)
+            fd.attrs.update(
+                self._trace_array_attrs(
+                    group,
+                    component=component,
+                    source=source,
+                    domain="frequency",
+                )
+            )
             return fd
         else:
             sampling = UniformSweepSampling(
@@ -970,36 +1056,73 @@ class TraceStore:
             wavelet.times = sampling.T_list
             dset = self.read_h5(group)
             gather = dset.sel(component=component, source=source)
-            laplace = self._uniform_laplace(gather)
-
-            freqs = wavelet.frequencies
-            spectrum = DataArray(
-                self._wavelet_spectrum(wavelet, laplace),
-                dims=["frequency"],
-                coords={"frequency": freqs},
-            )
-            w = spectrum.interp(
-                frequency=gather.coords["frequency"].values, kwargs={"fill_value": 0}
-            )
             fd = gather.sel(complex="real") + 1j * gather.sel(complex="imag")
             fd = fd.fillna(0)
-
-            if "f_taper" in kwargs:
-                alpha = kwargs["f_taper"]
-                if alpha > 0:
-                    from scipy.signal.windows import tukey
-
-                    dim = "frequency"
-                    data = tukey(2 * fd.sizes[dim], alpha=alpha)
-                    data = data[fd.sizes[dim] :]
-                    window = DataArray(
-                        data,
-                        dims=[dim],
-                        coords={dim: fd[dim]},
-                    )
-                    w *= window
-            fd = fd * w
+            fd = self._apply_wavelet_to_fd(fd, wavelet, **kwargs)
+            fd.attrs.update(
+                self._trace_array_attrs(
+                    group,
+                    component=component,
+                    source=source,
+                    domain="frequency",
+                )
+            )
             return fd
+
+    def _trace_array_attrs(
+        self,
+        group: str,
+        *,
+        component: str,
+        source: int,
+        domain: str,
+    ) -> Dict[str, Any]:
+        attrs: Dict[str, Any] = {
+            "source_group": source,
+            "receiver_group": group,
+            "project_path": str(self.metadata["project"]),
+            "simulation": str(self.metadata["simulation"]),
+            "long_name": f"{component}",
+            "domain": domain,
+        }
+        wavefield = self.metadata.get("wavefields", {}).get(group)
+        if isinstance(wavefield, dict):
+            attrs["wavefield_output"] = group
+            grid = wavefield.get("grid")
+            if grid is not None:
+                attrs["wavefield_grid"] = grid
+            if "path" in wavefield:
+                attrs["wavefield_path"] = wavefield["path"]
+        return attrs
+
+    def _apply_wavelet_to_fd(
+        self,
+        fd: DataArray,
+        wavelet: Wavelet,
+        **kwargs,
+    ) -> DataArray:
+        freqs = wavelet.frequencies
+        spectrum = DataArray(
+            wavelet.spectrum, dims=["frequency"], coords={"frequency": freqs}
+        )
+        w = spectrum.interp(
+            frequency=fd.coords["frequency"].values, kwargs={"fill_value": 0}
+        )
+        if "f_taper" in kwargs:
+            alpha = kwargs["f_taper"]
+            if alpha > 0:
+                from scipy.signal.windows import tukey
+
+                dim = "frequency"
+                data = tukey(2 * fd.sizes[dim], alpha=alpha)
+                data = data[fd.sizes[dim] :]
+                window = DataArray(
+                    data,
+                    dims=[dim],
+                    coords={dim: fd[dim]},
+                )
+                w *= window
+        return fd * w
 
     @staticmethod
     def _normalize_laplace_compensation(value: Union[str, bool]) -> str:
@@ -1026,14 +1149,6 @@ class TraceStore:
                 "Time-domain reconstruction requires a uniform Laplace offset"
             )
         return first
-
-    @staticmethod
-    def _wavelet_spectrum(wavelet: Wavelet, laplace: float) -> np.ndarray:
-        if np.isclose(laplace, 0.0):
-            return wavelet.spectrum
-        fft = get_fft_backend()
-        damping = np.exp(2.0 * np.pi * laplace * np.asarray(wavelet.times))
-        return fft.rfft(wavelet.signal * damping).astype(np.complex64)
 
     @staticmethod
     def _damping_factor(laplace: float, period: float) -> float:
@@ -1077,18 +1192,23 @@ class TraceStore:
             compensation_mode == "auto" and not np.isclose(laplace, 0.0)
         )
         if compensated:
-            gain = np.exp(-2.0 * np.pi * laplace * sampling.T_list[:-1])
-            td = td * DataArray(gain, dims=["time"], coords={"time": td.coords["time"]})
+            exp = DataArray(
+                np.exp(-2 * np.pi * laplace * td.coords["time"]),
+                dims=["time"],
+                coords={"time": td.coords["time"]},
+            )
+            td = td * exp
         if T_max is not None:
             td = td.sel(time=slice(None, T_max))
 
-        td.attrs["source_group"] = source
-        td.attrs["receiver_group"] = group
-        # NOTE: this is a temporary hack since receivers read from project path
-        td.attrs["project_path"] = str(self.metadata["project"])
-        td.attrs["simulation"] = str(self.metadata["simulation"])
-        td.attrs["long_name"] = f"{component}"
-        td.attrs["domain"] = "time"
+        td.attrs.update(
+            self._trace_array_attrs(
+                group,
+                component=component,
+                source=source,
+                domain="time",
+            )
+        )
         td.attrs["laplace"] = laplace
         td.attrs["laplace_compensated"] = compensated
         td.attrs["damping_factor"] = self._damping_factor(laplace, sampling.T)
@@ -1210,12 +1330,14 @@ class TraceStore:
         if T_max is not None:
             td = td.sel(time=slice(None, T_max))
 
-        td.attrs["source_group"] = source
-        td.attrs["receiver_group"] = group
-        # NOTE: this is a temporary hack since receivers read from project path
-        td.attrs["project_path"] = str(self.metadata["project"])
-        td.attrs["simulation"] = str(self.metadata["simulation"])
-        td.attrs["long_name"] = f"{component}"
+        td.attrs.update(
+            self._trace_array_attrs(
+                group,
+                component=component,
+                source=source,
+                domain="time",
+            )
+        )
         for d in td.dims:
             td.coords[d].attrs["long_name"] = d.title()
             if d == "time":

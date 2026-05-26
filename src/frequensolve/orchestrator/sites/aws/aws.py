@@ -22,8 +22,8 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
-from frequensolve.orchestrator.config.base import BaseSiteConfig
 from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
+from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import SimulationJob
 from frequensolve.util.setup_logger import init_logger
@@ -896,11 +896,71 @@ class AWSSite(BaseSite):
         else:
             return db_map
 
+    def fetch_wavefields(
+        self,
+        job: Union[SimulationJob, List[SimulationJob]],
+        path: Optional[Union[str, Path]] = None,
+        upscale: int = 1,
+    ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
+        """Get wavefield results from AWS storage."""
+
+        if isinstance(job, SimulationJob):
+            jobs = [job]
+        else:
+            jobs = job
+
+        if path is None:
+            path = jobs[0].project_path
+        else:
+            path = Path(path)
+
+        db_map = {}
+
+        for item in jobs:
+            try:
+                wavefield_outputs = item.wavefield_trace_outputs
+                if not wavefield_outputs.groups:
+                    raise ValueError("Job has no wavefield outputs")
+
+                project_name = item.simulation._remote_path.parts[0]
+                simulation_name = item.simulation.name
+                job_name = item.name
+                wavefield_dir_name = Path(wavefield_outputs.path).name
+
+                results_wavefields_path = (
+                    f"jobs/{simulation_name}/{job_name}/results/{wavefield_dir_name}"
+                )
+                s3_results_path = (
+                    f"s3://{self.config.s3_bucket}/{project_name}/"
+                    f"{results_wavefields_path}"
+                )
+                local_results_path = path / results_wavefields_path
+                self.get(s3_results_path, local_results_path)
+                self._emit(f"Fetched AWS wavefields from {s3_results_path}")
+
+                db_map[item.name] = item.wavefields.open(
+                    upscale=upscale,
+                    project_path=path.resolve(),
+                )
+
+            except Exception as e:
+                logger.exception("Error downloading wavefields: %s", str(e))
+                raise
+
+        if len(db_map) == 1:
+            return db_map[jobs[0].name]
+        return db_map
+
     def fetch_outputs(self, job: SimulationJob):
         """Fetch common AWS result artifacts for a completed job."""
 
         traces = self.fetch_traces(job)
-        return traces
+        wavefields = None
+        if getattr(job.outputs, "wavefields", None):
+            wavefields = self.fetch_wavefields(job)
+        if wavefields is None:
+            return traces
+        return {"traces": traces, "wavefields": wavefields}
 
     def fetch_logs(
         self,

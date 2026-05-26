@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import xarray as xr
@@ -12,6 +12,7 @@ import xarray as xr
 # direct so this helper does not depend on ``frequensolve.seismic`` package
 # exports during initialization.
 import frequensolve.seismic.trace_record as _trace_record  # noqa: F401
+from frequensolve.geometry.grids import CartesianGrid
 
 
 @dataclass(frozen=True)
@@ -109,10 +110,44 @@ def select_time(trace: xr.DataArray, t_max: float | None = None) -> xr.DataArray
     return trace.sel(time=slice(None, t_max))
 
 
-def time_limit(T_max: float | None, Tf: float | None) -> float | None:
-    """Normalize accepted final-time keyword aliases."""
+def select_frequency(
+    trace: xr.DataArray,
+    *,
+    frequency: float | None = None,
+    frequency_index: int | None = None,
+) -> xr.DataArray:
+    """Select one frequency sample from a frequency-domain trace.
 
-    return T_max if T_max is not None else Tf
+    ``frequency`` is matched to the nearest numeric frequency coordinate.
+    ``frequency_index`` is a zero-based positional index.  When neither is
+    provided, the first positive frequency sample is selected when available;
+    otherwise the first sample is selected.
+    """
+
+    require_dims(trace, "frequency")
+    if frequency is not None and frequency_index is not None:
+        raise ValueError("Specify either frequency or frequency_index, not both")
+    if frequency_index is not None:
+        return trace.isel(frequency=int(frequency_index))
+    values = coordinate_values(trace, "frequency", require_numeric=True)
+    if frequency is None:
+        positive = np.flatnonzero(values > 0.0)
+        index = int(positive[0]) if positive.size else 0
+        return trace.isel(frequency=index)
+
+    index = int(np.nanargmin(np.abs(values - float(frequency))))
+    return trace.isel(frequency=index)
+
+
+def _selected_frequency_value(trace: xr.DataArray) -> float | None:
+    """Return a scalar selected frequency coordinate when present."""
+
+    if "frequency" not in trace.coords:
+        return None
+    values = np.asarray(trace.coords["frequency"].data, dtype=float).ravel()
+    if values.size == 0:
+        return None
+    return float(values[0])
 
 
 def sampling_rate(trace: xr.DataArray) -> float:
@@ -193,7 +228,7 @@ def receiver_grid_shape(
     trace: xr.DataArray,
     grid_shape: tuple[int, int] | None = None,
 ) -> tuple[int, int]:
-    """Infer a 2D receiver grid shape for animation."""
+    """Infer the display array shape for a 2D receiver grid."""
 
     require_dims(trace, "receiver")
     if grid_shape is not None:
@@ -203,11 +238,15 @@ def receiver_grid_shape(
         return shape
 
     try:
-        shape = tuple(int(n) for n in trace.fs.receiver_group.grid.n)
-    except Exception:
-        shape = ()
-    if len(shape) >= 2 and int(np.prod(shape[:2])) == trace.sizes["receiver"]:
-        return shape[:2]
+        return _receiver_grid_display_shape(trace)
+    except ValueError:
+        pass
+
+    grid = receiver_grid(trace)
+    if grid is not None:
+        shape = tuple(int(n) for n in grid.n)
+        if len(shape) >= 2 and int(np.prod(shape[:2])) == trace.sizes["receiver"]:
+            return shape[1], shape[0]
 
     n_receiver = trace.sizes["receiver"]
     root = int(round(np.sqrt(n_receiver)))
@@ -217,3 +256,157 @@ def receiver_grid_shape(
     raise ValueError(
         "grid_shape is required unless receiver coordinates describe a 2D grid"
     )
+
+
+def receiver_grid(trace: xr.DataArray):
+    """Return the ``CartesianGrid`` backing a trace receiver group, if present."""
+
+    for key in ("wavefield_grid", "receiver_grid", "grid"):
+        payload = trace.attrs.get(key)
+        if isinstance(payload, CartesianGrid):
+            return payload
+        if isinstance(payload, Mapping):
+            if "dims" in payload and "coords" in payload:
+                try:
+                    return _cartesian_grid_from_xarray_payload(payload)
+                except Exception:
+                    continue
+            try:
+                return CartesianGrid.from_fs(dict(payload))
+            except Exception:
+                pass
+
+    try:
+        return trace.fs.receiver_group.grid
+    except Exception:
+        return None
+
+
+def _wavefield_grid_payload(trace: xr.DataArray) -> Mapping[str, Any] | None:
+    for key in ("wavefield_grid", "receiver_grid", "grid"):
+        payload = trace.attrs.get(key)
+        if isinstance(payload, Mapping) and "dims" in payload and "coords" in payload:
+            return payload
+    return None
+
+
+def _coord_payload_values(payload: Mapping[str, Any], dim: str) -> np.ndarray:
+    coord = payload.get("coords", {}).get(dim)
+    if coord is None:
+        raise ValueError(f"wavefield grid is missing coordinate {dim!r}")
+    if isinstance(coord, Mapping):
+        if "data" in coord:
+            coord = coord["data"]
+        elif "values" in coord:
+            coord = coord["values"]
+        elif "value" in coord:
+            coord = coord["value"]
+        else:
+            raise ValueError(f"wavefield grid coordinate {dim!r} requires data")
+    values = np.asarray(coord, dtype=float).ravel()
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError(f"wavefield grid coordinate {dim!r} must be 1D")
+    return values
+
+
+def _coord_payload_units(payload: Mapping[str, Any], dim: str) -> str:
+    coord = payload.get("coords", {}).get(dim)
+    if isinstance(coord, Mapping) and coord.get("units"):
+        return str(coord["units"])
+    if payload.get("units"):
+        return str(payload["units"])
+    return ""
+
+
+def _coords_uniform(values: np.ndarray) -> bool:
+    if values.size < 3:
+        return True
+    diffs = np.diff(values)
+    return bool(np.allclose(diffs, diffs[0]))
+
+
+def _cartesian_grid_from_xarray_payload(payload: Mapping[str, Any]) -> CartesianGrid:
+    dims = list(payload["dims"])
+    coords = {dim: _coord_payload_values(payload, dim) for dim in dims}
+    xarr = xr.DataArray(dims=dims, coords=coords)
+    grid = CartesianGrid.from_xarray(xarr)
+    if payload.get("units"):
+        grid.units = str(payload["units"])
+    if payload.get("system"):
+        grid.system = str(payload["system"])
+    return grid
+
+
+def wavefield_grid_display(
+    trace: xr.DataArray,
+    *,
+    L_scale: float = 1.0,
+) -> dict[str, Any] | None:
+    payload = _wavefield_grid_payload(trace)
+    if payload is not None:
+        dims = list(payload["dims"])
+        if len(dims) < 2:
+            return None
+        y_dim, x_dim = dims[0], dims[1]
+        x = _coord_payload_values(payload, x_dim) * L_scale
+        y = _coord_payload_values(payload, y_dim) * L_scale
+        x_units = _coord_payload_units(payload, x_dim)
+        y_units = _coord_payload_units(payload, y_dim)
+        return {
+            "extent": [float(x[0]), float(x[-1]), float(y[-1]), float(y[0])],
+            "xlabel": f"{x_dim.upper()}{f' [{x_units}]' if x_units else ''}",
+            "ylabel": f"{y_dim.upper()}{f' [{y_units}]' if y_units else ''}",
+            "x": x,
+            "y": y,
+            "uniform": _coords_uniform(x) and _coords_uniform(y),
+        }
+
+    grid = receiver_grid(trace)
+    if grid is None or len(grid.n) < 2:
+        return None
+    units = f" [{grid.units}]" if grid.units else ""
+    dims = list(grid.dims) if len(grid.dims) >= 2 else ["x", "z"]
+    return {
+        "extent": [
+            float(grid.x0[0]) * L_scale,
+            float(grid.x1[0]) * L_scale,
+            float(grid.x1[1]) * L_scale,
+            float(grid.x0[1]) * L_scale,
+        ],
+        "xlabel": f"{dims[0].upper()}{units}",
+        "ylabel": f"{dims[1].upper()}{units}",
+        "uniform": True,
+    }
+
+
+def _receiver_grid_display_shape(
+    trace: xr.DataArray,
+    *,
+    caller: str = "trace",
+) -> tuple[int, int]:
+    """Return display shape for a grid-backed wavefield array."""
+
+    require_dims(trace, "receiver")
+    payload = _wavefield_grid_payload(trace)
+    if payload is not None:
+        dims = list(payload["dims"])
+        if len(dims) != 2:
+            raise ValueError(f"{caller} requires a 2D wavefield grid")
+        shape = tuple(_coord_payload_values(payload, dim).size for dim in dims)
+        if int(np.prod(shape)) != trace.sizes["receiver"]:
+            raise ValueError(
+                f"{caller} receiver grid does not match receiver count "
+                f"({shape} vs {trace.sizes['receiver']})"
+            )
+        return shape
+
+    grid = receiver_grid(trace)
+    if grid is None or len(grid.n) < 2:
+        raise ValueError(f"{caller} requires wavefield grid metadata")
+    shape = tuple(int(n) for n in grid.n)
+    if int(np.prod(shape[:2])) != trace.sizes["receiver"]:
+        raise ValueError(
+            f"{caller} receiver grid does not match receiver count "
+            f"({shape[:2]} vs {trace.sizes['receiver']})"
+        )
+    return shape[1], shape[0]

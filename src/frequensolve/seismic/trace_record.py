@@ -14,8 +14,9 @@ import numpy as np
 from xarray import DataArray, register_dataarray_accessor
 
 from frequensolve._optional import optional_dependency_error
-from frequensolve.seismic.receivers import ReceiverGroup
+from frequensolve.seismic.receivers import ReceiverGroup, coordinate_array_metadata
 from frequensolve.seismic.sources import SourceGroup
+from frequensolve.units import unit_expression
 
 TraceRecord = DataArray
 
@@ -50,6 +51,54 @@ def _receiver_group(trace: DataArray) -> ReceiverGroup:
                 Path(trace.attrs["project_path"]) / file
             )
     return ReceiverGroup.from_fs(receiver_group)
+
+
+def _segy_output_unit(units_out: str, ureg) -> tuple[int, Any]:
+    units_out = units_out.lower()
+    if units_out not in {"m", "ft"}:
+        raise ValueError("units_out must be 'm' or 'ft'")
+    if units_out == "m":
+        return 1, ureg.meter
+    return 2, ureg.foot
+
+
+def _coordinate_scale(units: Any, default_units: str, output_unit: Any, ureg) -> float:
+    input_units = unit_expression(units) if units is not None else default_units
+    return float(ureg(input_units).to(output_unit).magnitude)
+
+
+def _coordinates_in_output_units(
+    values: Any,
+    *,
+    units: Any = None,
+    default_units: str,
+    output_unit: Any,
+    ureg,
+) -> np.ndarray:
+    scale = _coordinate_scale(units, default_units, output_unit, ureg)
+    return np.asarray(values, dtype=float) * scale
+
+
+def _source_coordinates_in_output_units(
+    source: Any,
+    *,
+    default_units: str,
+    output_unit: Any,
+    ureg,
+) -> np.ndarray:
+    values, units, _ = coordinate_array_metadata(source.coordinates)
+    values = _coordinates_in_output_units(
+        values,
+        units=units,
+        default_units=default_units,
+        output_unit=output_unit,
+        ureg=ureg,
+    )
+    if values.ndim == 0:
+        raise ValueError("source coordinates must contain at least one coordinate")
+    if values.ndim == 1:
+        return values
+    return values.reshape(-1, values.shape[-1])[0]
 
 
 @register_dataarray_accessor("fs")
@@ -102,16 +151,20 @@ class TraceAccessor:
         source = self.source_group.source
 
         ureg = pint.UnitRegistry()
-        if units_out not in {"m", "ft"}:
-            raise ValueError("units_out must be 'm' or 'ft'")
-        iunit = ureg(units_in)
-        if units_out.lower() == "m":
-            coordinate_units = 1
-            ounit = ureg.meter
-        else:
-            coordinate_units = 2
-            ounit = ureg.foot
-        scale = iunit.to(ounit).magnitude
+        coordinate_units, output_unit = _segy_output_unit(units_out, ureg)
+        receiver_coords = _coordinates_in_output_units(
+            receiver_group.coordinates.get(),
+            units=getattr(receiver_group.coordinates, "units", None),
+            default_units=units_in,
+            output_unit=output_unit,
+            ureg=ureg,
+        )
+        source_coords = _source_coordinates_in_output_units(
+            source,
+            default_units=units_in,
+            output_unit=output_unit,
+            ureg=ureg,
+        )
 
         n_traces = receiver_group.size
         t0 = td.coords["time"].values[0]
@@ -120,8 +173,8 @@ class TraceAccessor:
         time_samples = td.coords["time"].values
 
         now = datetime.datetime.now()
-        source_x = int(source.coordinates[0] * scale)
-        source_elev = -int(source.coordinates[-1] * scale)
+        source_x = int(source_coords[0])
+        source_elev = -int(source_coords[-1])
 
         spec = segyio.spec()
         spec.format = 5
@@ -135,8 +188,8 @@ class TraceAccessor:
             f.bin[segyio.BinField.Interval] = sample_interval
 
             for itrace in range(n_traces):
-                recv_x = int(receiver_group.coordinates[itrace, 0] * scale)
-                recv_elev = -int(receiver_group.coordinates[itrace, -1] * scale)
+                recv_x = int(receiver_coords[itrace, 0])
+                recv_elev = -int(receiver_coords[itrace, -1])
                 f.header[itrace].update(
                     {
                         segyio.TraceField.TRACE_SEQUENCE_LINE: itrace + 1,
@@ -166,13 +219,15 @@ class TraceAccessor:
 
         if preview:
             with segyio.open(str(file), mode="r", strict=False) as sgy:
-                return {
-                    "file": file,
-                    "size_kb": Path(file).stat().st_size / 1024,
-                    "tracecount": sgy.tracecount,
-                    "samples": sgy.samples,
-                    "sample_interval_us": sgy.bin[segyio.BinField.Interval],
-                }
+                print(
+                    {
+                        "file": file,
+                        "size_kb": Path(file).stat().st_size / 1024,
+                        "tracecount": sgy.tracecount,
+                        "samples": sgy.samples,
+                        "sample_interval_us": sgy.bin[segyio.BinField.Interval],
+                    }
+                )
         return file
 
 

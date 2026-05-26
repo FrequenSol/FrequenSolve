@@ -1,27 +1,42 @@
 """Python structures defining boundary conditions"""
 
-import warnings
+import copy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
-__all__ = ["BoundaryCondition", "BoundaryConditions", "BoundaryConditionManager"]
+from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
+from frequensolve.util.named_list import NamedList
+
+__all__ = ["BoundaryCondition", "BoundaryConditions"]
 
 ConditionInput = Union[str, Sequence[str]]
 BoundaryLabel = Union[str, int]
 
-
-_CONDITION_ALIASES = {
-    "neumann": "free",
-}
-
 _DEFAULT_PML_REFLECTION = 1e-3
+_REMOVED_BOUNDARY_CONDITION_FIELDS = {"kind"}
+
+
+def _reject_removed_fields(payload: Mapping[str, Any], owner: str) -> None:
+    removed = sorted(_REMOVED_BOUNDARY_CONDITION_FIELDS.intersection(payload))
+    if removed:
+        names = ", ".join(removed)
+        raise TypeError(f"{owner} no longer accepts removed field(s): {names}")
+
+
+def _resolve_pml_reflection(
+    pml_reflection: Optional[float],
+    pml_reflectivity: Optional[float],
+) -> Optional[float]:
+    if pml_reflection is not None and pml_reflectivity is not None:
+        raise ValueError("Specify only one of pml_reflection or pml_reflectivity")
+    return pml_reflection if pml_reflection is not None else pml_reflectivity
 
 
 def _normalize_condition(condition: Any) -> str:
     value = str(condition).strip().lower()
     if not value:
         raise ValueError("Boundary condition names cannot be empty")
-    return _CONDITION_ALIASES.get(value, value)
+    return value
 
 
 def _normalize_conditions(value: ConditionInput) -> List[str]:
@@ -38,14 +53,13 @@ def _normalize_boundaries(
     return list(value)
 
 
-@dataclass
-class BoundaryCondition:
+@dataclass(init=False)
+class BoundaryCondition(ExtraFieldsMixin):
     """Defines one or more boundary conditions applied to a boundary set.
 
     Attributes:
        name (str): BC name
        conditions (List[str]): BC conditions applied to this boundary set
-       kind (str): Compatibility alias for a single condition
        boundaries (List[str]): List of boundaries where BC should be applied
        pml_wavelengths (float): PML width in wavelengths
        pml_exponent (float): PML complex stretching exponent
@@ -57,54 +71,74 @@ class BoundaryCondition:
     """
 
     name: Optional[str] = None
-    kind: Optional[ConditionInput] = None
     boundaries: List[BoundaryLabel] = field(default_factory=list)
     conditions: Optional[ConditionInput] = None
 
     pml_wavelengths: float = 2.0
     pml_exponent: float = 3.0
     pml_reflection: Optional[float] = None
-    pml_reflectivity: Optional[float] = None
     pml_constant: Optional[float] = 20.0
     stretch_limit: float = 0.25
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        boundaries: Optional[Union[BoundaryLabel, Sequence[BoundaryLabel]]] = None,
+        conditions: ConditionInput = None,
+        pml_wavelengths: float = 2.0,
+        pml_exponent: float = 3.0,
+        pml_reflection: Optional[float] = None,
+        pml_reflectivity: Optional[float] = None,
+        pml_constant: Optional[float] = 20.0,
+        stretch_limit: float = 0.25,
+        extra: Optional[Mapping[str, Any]] = None,
+        **kwargs,
+    ) -> None:
+        _reject_removed_fields(kwargs, "BoundaryCondition")
+        extra_payload = copy.deepcopy(dict(extra or {}))
+        _reject_removed_fields(extra_payload, "BoundaryCondition")
+        if "pml_reflectivity" in extra_payload:
+            pml_reflectivity = _resolve_pml_reflection(
+                pml_reflectivity,
+                extra_payload.pop("pml_reflectivity"),
+            )
+        self.name = name
+        self.boundaries = [] if boundaries is None else boundaries
+        self.conditions = conditions
+        self.pml_wavelengths = pml_wavelengths
+        self.pml_exponent = pml_exponent
+        self.pml_reflection = _resolve_pml_reflection(pml_reflection, pml_reflectivity)
+        self.pml_constant = pml_constant
+        self.stretch_limit = stretch_limit
+        self._init_extra(extra_payload, **kwargs)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
-        if self.conditions is None and self.kind is None:
-            raise ValueError("BoundaryCondition requires `conditions` or `kind`")
-
-        if self.pml_reflection is not None and self.pml_reflectivity is not None:
-            raise ValueError("Specify only one of pml_reflection or pml_reflectivity")
-        if self.pml_reflection is None:
-            self.pml_reflection = (
-                self.pml_reflectivity
-                if self.pml_reflectivity is not None
-                else _DEFAULT_PML_REFLECTION
-            )
-        self.pml_reflectivity = None
-
         if self.conditions is None:
-            self.conditions = _normalize_conditions(self.kind)
-        else:
-            self.conditions = _normalize_conditions(self.conditions)
-        self.kind = self.conditions[0]
+            raise ValueError("BoundaryCondition requires `conditions`")
+        if self.pml_reflection is None:
+            self.pml_reflection = _DEFAULT_PML_REFLECTION
+
+        self.conditions = _normalize_conditions(self.conditions)
         self.boundaries = _normalize_boundaries(self.boundaries)
 
     @classmethod
     def from_fs(cls, data: Dict) -> "BoundaryCondition":
-        if "conditions" in data:
-            condition_kwargs = {"conditions": data["conditions"]}
-        else:
-            condition_kwargs = {"kind": data["kind"]}
+        data = copy.deepcopy(data)
+        data.pop("_type", None)
+        _reject_removed_fields(data, "BoundaryCondition")
         return cls(
-            name=data.get("name"),
-            boundaries=data["boundaries"],
-            pml_wavelengths=data.get("pml_wavelengths", 2.0),
-            pml_exponent=data.get("pml_exponent", 3.0),
-            pml_constant=data.get("pml_constant", 20.0),
-            pml_reflection=data.get("pml_reflection"),
-            pml_reflectivity=data.get("pml_reflectivity"),
-            stretch_limit=data.get("stretch_limit", 0.25),
-            **condition_kwargs,
+            name=data.pop("name", None),
+            boundaries=data.pop("boundaries"),
+            conditions=data.pop("conditions"),
+            pml_wavelengths=data.pop("pml_wavelengths", 2.0),
+            pml_exponent=data.pop("pml_exponent", 3.0),
+            pml_constant=data.pop("pml_constant", 20.0),
+            pml_reflection=data.pop("pml_reflection", None),
+            pml_reflectivity=data.pop("pml_reflectivity", None),
+            stretch_limit=data.pop("stretch_limit", 0.25),
+            extra=data,
         )
 
     def has_condition(self, condition: str) -> bool:
@@ -132,115 +166,74 @@ class BoundaryCondition:
         }
         if self.name:
             bc_dict["name"] = self.name
-        return bc_dict
+        return merge_extra(bc_dict, self.extra, "BoundaryCondition")
 
 
-@dataclass
-class BoundaryConditions:
-    """Collection of boundary conditions attached to a simulation.
-
-    Attributes:
-       boundary_conditions (List[BoundaryCondition]): List of boundary conditions
-    """
-
-    boundary_conditions: List[BoundaryCondition] = field(default_factory=list)
-    label_type: Optional[Literal["geometric", "labeled"]] = None
-    _boundaries: set[BoundaryLabel] = field(default_factory=set)
-
-    def __post_init__(self) -> None:
-        self._boundaries.update(
-            boundary for bc in self.boundary_conditions for boundary in bc.boundaries
-        )
-
-    def __bool__(self) -> bool:
-        return bool(self.boundary_conditions)
-
-    def append(self, bc: BoundaryCondition) -> None:
-        self.add_BC(bc)
-
-    def add_BC(self, bc: BoundaryCondition) -> None:
-        """Adds a boundary condition to the collection.
-
-        Args:
-           bc (BoundaryCondition): The boundary condition to add
-
-        Notes:
-           - A BC can be applied to multiple boundaries. A boundary can now carry
-             multiple conditions by using ``conditions=[...]`` on the BC.
-        """
-        self._boundaries.update(bc.boundaries)
-        self.boundary_conditions.append(bc)
-
-    def __iadd__(self, bc: BoundaryCondition) -> "BoundaryConditions":
-        """Overrides += operator to invoke add_BC"""
-        self.add_BC(bc)
-        return self
-
-    def verify(self, mesh: Any) -> None:
-        """Verifies that the boundary conditions are valid, and that each boundary has a BC assigned to it"""
-        if self.label_type == "geometric":
-            if mesh.dimension == 2:
-                labels = ["x_min", "x_max", "z_min", "z_max"]
-            else:
-                labels = ["x_min", "x_max", "y_min", "y_max", "z_min", "z_max"]
-            for boundary in labels:
-                if boundary not in self._boundaries:
-                    raise ValueError(f"Boundary {boundary} is not assigned a BC")
-        else:
-            if mesh.boundaries is None:
-                raise ValueError(
-                    "Mesh boundaries are not labeled, and label_type is 'labeled'"
-                )
-
-            # TODO: check that all boundary elements are assigned a boundary label
-
-            for boundary in mesh.boundaries:
-                if boundary not in self._boundaries:
-                    raise ValueError(f"Boundary {boundary} is not assigned a BC")
-
-    @classmethod
-    def from_fs(cls, data: Dict | List[Dict]) -> "BoundaryConditions":
-        if isinstance(data, list):
-            return cls(
-                boundary_conditions=[
-                    BoundaryCondition.from_fs(bc_data) for bc_data in data
-                ]
-            )
-        return cls(
-            label_type=data.get("label_type"),
-            boundary_conditions=[
-                BoundaryCondition.from_fs(bc_data)
-                for bc_data in data.get("boundary_conditions", [])
-            ],
-        )
-
-    def to_fs(self, ctx=None) -> Dict:
-        return {
-            "boundary_conditions": [bc.to_fs(ctx) for bc in self.boundary_conditions],
-        }
-
-
-class BoundaryConditionManager(BoundaryConditions):
-    """Deprecated compatibility alias for BoundaryConditions.
-
-    New code should add BoundaryCondition objects directly to a simulation.
-    """
+class BoundaryConditions(NamedList):
+    """Named list of boundary conditions attached to a simulation."""
 
     def __init__(
         self,
-        label_type: Optional[Literal["geometric", "labeled"]] = "geometric",
-        boundary_conditions: Optional[List[BoundaryCondition]] = None,
-        _boundaries: Optional[set[BoundaryLabel]] = None,
+        conditions: Optional[
+            Iterable[Union[BoundaryCondition, Mapping[str, Any]]]
+        ] = None,
     ) -> None:
-        warnings.warn(
-            "BoundaryConditionManager is deprecated; add BoundaryCondition objects "
-            "directly to a simulation or use BoundaryConditions.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        super().__init__(
-            boundary_conditions=list(boundary_conditions or []),
-            label_type=label_type,
-        )
-        if _boundaries is not None:
-            self._boundaries.update(_boundaries)
+        super().__init__()
+        self._boundaries: set[BoundaryLabel] = set()
+        for condition in conditions or []:
+            self.append(condition)
+
+    @staticmethod
+    def _coerce_bc(
+        bc: Union[BoundaryCondition, Mapping[str, Any]],
+    ) -> BoundaryCondition:
+        if isinstance(bc, Mapping):
+            bc = BoundaryCondition.from_fs(bc)
+        if not isinstance(bc, BoundaryCondition):
+            raise TypeError(f"Expected BoundaryCondition, got {type(bc).__name__}")
+        return bc
+
+    def _rebuild_boundaries(self) -> None:
+        self._boundaries = {boundary for bc in self for boundary in bc.boundaries}
+
+    def __bool__(self) -> bool:
+        return len(self) > 0
+
+    def append(self, bc: Union[BoundaryCondition, Mapping[str, Any]]) -> None:
+        bc = self._coerce_bc(bc)
+        self._boundaries.update(bc.boundaries)
+        super().append(bc)
+
+    def __setitem__(
+        self,
+        key: Union[str, int],
+        value: Union[BoundaryCondition, Mapping[str, Any]],
+    ) -> None:
+        super().__setitem__(key, self._coerce_bc(value))
+        self._rebuild_boundaries()
+
+    def __iadd__(
+        self, bc: Union[BoundaryCondition, Mapping[str, Any]]
+    ) -> "BoundaryConditions":
+        """Append a boundary condition and return the collection."""
+        self.append(bc)
+        return self
+
+    def verify(self, mesh: Any) -> None:
+        """Verify that labeled mesh boundaries have boundary conditions."""
+        boundaries = getattr(mesh, "boundaries", None)
+        if boundaries is None:
+            return
+        for boundary in boundaries:
+            if boundary not in self._boundaries:
+                raise ValueError(f"Boundary {boundary} is not assigned a BC")
+
+    @classmethod
+    def from_fs(cls, data: List[Dict]) -> "BoundaryConditions":
+        data = copy.deepcopy(data)
+        if not isinstance(data, list):
+            raise TypeError("BCs must be a list of boundary condition payloads")
+        return cls(BoundaryCondition.from_fs(bc_data) for bc_data in data)
+
+    def to_fs(self, ctx=None) -> List[Dict]:
+        return [bc.to_fs(ctx) for bc in self]

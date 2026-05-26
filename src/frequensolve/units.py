@@ -87,6 +87,10 @@ def is_quantity(value: Any) -> bool:
 
 
 def _plain_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _plain_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_value(item) for item in value]
     if isinstance(value, np.ndarray):
         return value.tolist()
     if isinstance(value, (np.integer, np.floating, np.bool_)):
@@ -110,15 +114,29 @@ def value_and_units_to_fs(value: Any, units: Optional[Any] = None) -> Any:
     if is_quantity(value):
         return quantity_to_fs(value)
 
+    if isinstance(value, Mapping):
+        payload = _plain_value(value)
+        if units is not None and "units" not in payload:
+            payload["units"] = unit_expression(units)
+        return payload
+
     detected_units = units
     if detected_units is None and hasattr(value, "attrs"):
         detected_units = value.attrs.get("units")
 
-    plain = value.values if hasattr(value, "values") else value
+    plain = value.values if _has_dataarray_values(value) else value
     plain = _plain_value(plain)
     if detected_units:
         return {"value": plain, "units": unit_expression(detected_units)}
     return plain
+
+
+def _has_dataarray_values(value: Any) -> bool:
+    try:
+        import xarray as xr
+    except ImportError:
+        return False
+    return isinstance(value, xr.DataArray)
 
 
 @dataclass

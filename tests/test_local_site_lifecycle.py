@@ -3,10 +3,13 @@ import json
 import logging
 from types import SimpleNamespace
 
-from frequensolve.orchestrator.sites import local as local_module
-from frequensolve.orchestrator.sites.base import RunHandle
-from frequensolve.orchestrator.sites.dask_logging import configure_dependency_logging
+from frequensolve.orchestrator.progress import status_table_html
+from frequensolve.orchestrator.sites.base import JobStatus, RunHandle
 from frequensolve.orchestrator.sites.local import LocalSite, run_task
+from frequensolve.orchestrator.sites.local import site as local_module
+from frequensolve.orchestrator.sites.local.dask_logging import (
+    configure_dependency_logging,
+)
 
 
 class DummyFuture:
@@ -38,9 +41,18 @@ class DummyJob:
 
     def __init__(self):
         self.states = []
+        self.removed_packed = False
+        self.trace_outputs_ok = True
 
     def write_run_state(self, status="completed", **extra):
         self.states.append((status, extra))
+
+    def remove_packed_trace_products(self):
+        self.removed_packed = True
+        return True
+
+    def trace_outputs_exist(self):
+        return self.trace_outputs_ok
 
 
 def make_site(monkeypatch):
@@ -57,6 +69,59 @@ def make_run(site, job, futures, shutdown_on_completion=True):
     run.backend["shutdown_on_completion"] = shutdown_on_completion
     site._futures.extend(futures)
     return run
+
+
+def test_local_task_status_counts_submitted_futures_as_running():
+    assert local_module._local_task_status(["pending", "lost", "finished"]) == {
+        "successful": 1,
+        "failed": 0,
+        "running": 2,
+        "pending": 0,
+        "total": 3,
+    }
+
+
+def test_local_poll_reports_dask_pending_futures_as_running(monkeypatch):
+    site, _closed = make_site(monkeypatch)
+    job = DummyJob()
+    futures = [DummyFuture(), DummyFuture()]
+    for future in futures:
+        future.status = "pending"
+    run = make_run(site, job, futures, shutdown_on_completion=False)
+
+    status = site._poll_local_run(run)
+    panel = status_table_html([run], {0: status})
+
+    assert status.state == "running"
+    assert status.message == (
+        "tasks: 0 successful, 0 failed, 2 running, 0 pending, 2 total"
+    )
+    assert status.raw["task_status"] == {
+        "successful": 0,
+        "failed": 0,
+        "running": 2,
+        "pending": 0,
+        "total": 2,
+    }
+    assert "running" in panel
+    assert "pending" not in panel
+
+
+def test_local_poll_reports_finished_futures_without_failed_count(monkeypatch):
+    site, _closed = make_site(monkeypatch)
+    job = DummyJob()
+    run = make_run(site, job, [DummyFuture(), DummyFuture()])
+
+    status = site._poll_local_run(run)
+
+    assert status.state == "completed"
+    assert status.raw["task_status"] == {
+        "successful": 2,
+        "failed": 0,
+        "running": 0,
+        "pending": 0,
+        "total": 2,
+    }
 
 
 def test_local_wait_releases_futures_and_closes_by_default(monkeypatch, capsys):
@@ -77,15 +142,36 @@ def test_local_wait_releases_futures_and_closes_by_default(monkeypatch, capsys):
     assert site._futures == []
     assert closed == [{"wait": True, "retire": True}]
     captured = capsys.readouterr()
-    assert (
-        "\033[38;5;244mLocalSite local:test: \033[38;5;28mrunning\033[0m"
-        in captured.out
+    assert captured.out == ""
+
+
+def test_wait_all_uses_custom_wait_finalizer(monkeypatch):
+    site, _ = make_site(monkeypatch)
+    job = DummyJob()
+    calls = []
+
+    def wait_fn(run, timeout=None, poll_interval=None):
+        calls.append((timeout, poll_interval))
+        return run._make_result(
+            JobStatus(state="completed", return_code=0, job_id=run.id)
+        )
+
+    run = RunHandle(
+        site=site,
+        job=job,
+        id="local:custom",
+        _status_fn=lambda run: JobStatus(
+            state="completed",
+            return_code=0,
+            job_id=run.id,
+        ),
+        _wait_fn=wait_fn,
     )
-    assert (
-        "\033[38;5;244mLocalSite local:test: \033[38;5;40mcompleted\033[0m"
-        in captured.out
-    )
-    assert "tasks: 2 succeeded, 0 failed, 2 complete, 2 total" in captured.out
+
+    [result] = site.wait_all([run], poll_interval=0.0)
+
+    assert result.successful
+    assert calls == [(0, 0)]
 
 
 def test_run_task_supports_solver_pack_mode(monkeypatch, tmp_path):
@@ -554,9 +640,53 @@ def test_local_wait_runs_pack_after_frequency_tasks(monkeypatch, tmp_path):
     assert submissions[-1]["func"] is run_task
     assert submissions[-1]["task_id"] == local_module.PACK_TASK_ID
     assert submissions[-1]["kwargs"]["stdout_dir"] == str(job._stdout_path)
+    assert job.removed_packed
     assert job.states[-1][0] == "completed"
     assert job.states[-1][1]["pack"]["task_id"] == local_module.PACK_TASK_ID
     assert closed == [{"wait": True, "retire": True}]
+
+
+def test_local_watch_runs_pack_before_yielding_completed_status(monkeypatch, tmp_path):
+    site, _closed = make_site(monkeypatch)
+    site.threads_per_worker = 2
+    submissions = []
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            submissions.append({"func": func, "task_id": task_id, "kwargs": kwargs})
+            return DummyFuture({"task_id": task_id, "status": "success"})
+
+    site._dask_client = FakeClient()
+    job = DummyJob()
+    job._file = tmp_path / "job.json"
+    job._stdout_path = tmp_path / "logs"
+    futures = [DummyFuture({"task_id": 0, "status": "success"})]
+    run = RunHandle(
+        site=site,
+        job=job,
+        id="local:test",
+        poll_interval=0.0,
+        _status_fn=site._poll_local_run,
+        _wait_fn=site._wait_local_run,
+        _finalize_fn=site._finalize_local_run,
+    )
+    run.backend["futures"] = futures
+    run.backend["pack_after_tasks"] = True
+    run.backend["shutdown_on_completion"] = False
+    site._futures.extend(futures)
+
+    monkeypatch.setattr(
+        local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
+    )
+
+    statuses = list(run.watch(timeout=1.0, poll_interval=0.0))
+
+    assert [status.state for status in statuses] == ["completed"]
+    assert submissions[-1]["func"] is run_task
+    assert submissions[-1]["task_id"] == local_module.PACK_TASK_ID
+    assert job.removed_packed
+    assert statuses[-1].raw["pack"]["task_id"] == local_module.PACK_TASK_ID
+    assert job.states[-1][0] == "completed"
 
 
 def test_local_wait_reports_failed_frequency_tasks_without_failing_run(
@@ -600,7 +730,9 @@ def test_local_wait_reports_failed_frequency_tasks_without_failing_run(
     assert closed == [{"wait": True, "retire": True}]
 
 
-def test_local_wait_marks_pack_failure_as_run_failure(monkeypatch, tmp_path):
+def test_local_wait_keeps_successful_solve_completed_when_pack_fails(
+    monkeypatch, tmp_path
+):
     site, _closed = make_site(monkeypatch)
     site.threads_per_worker = 2
 
@@ -610,6 +742,37 @@ def test_local_wait_marks_pack_failure_as_run_failure(monkeypatch, tmp_path):
 
     site._dask_client = FakeClient()
     job = DummyJob()
+    job._file = tmp_path / "job.json"
+    job._stdout_path = tmp_path / "logs"
+    futures = [DummyFuture({"task_id": 0, "status": "success"})]
+    run = make_run(site, job, futures)
+    run.backend["pack_after_tasks"] = True
+
+    monkeypatch.setattr(
+        local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
+    )
+
+    result = site._wait_local_run(run)
+
+    assert result.status.state == "completed"
+    assert "packing failed" in result.status.message
+    assert job.states[-1][0] == "completed"
+    assert job.states[-1][1]["pack_error"]["task_id"] == local_module.PACK_TASK_ID
+
+
+def test_local_wait_marks_pack_failure_as_run_failure_when_outputs_are_missing(
+    monkeypatch, tmp_path
+):
+    site, _closed = make_site(monkeypatch)
+    site.threads_per_worker = 2
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            return DummyFuture({"task_id": task_id, "status": "error"})
+
+    site._dask_client = FakeClient()
+    job = DummyJob()
+    job.trace_outputs_ok = False
     job._file = tmp_path / "job.json"
     job._stdout_path = tmp_path / "logs"
     futures = [DummyFuture({"task_id": 0, "status": "success"})]

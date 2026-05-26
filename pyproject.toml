@@ -21,7 +21,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
@@ -118,7 +117,7 @@ where = ["src"]
 include = ["frequensolve*"]
 
 [tool.setuptools.package-data]
-"frequensolve.orchestrator" = ["templates/**/*.sh"]
+"frequensolve.orchestrator.sites.hpc" = ["templates/**/*.sh"]
 
 [tool.versioneer]
 VCS = "git"

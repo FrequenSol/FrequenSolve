@@ -1,3 +1,5 @@
+"""Simulation authoring containers and solver-contract serialization."""
+
 import copy
 import json
 from dataclasses import dataclass, field
@@ -36,64 +38,14 @@ __all__ = [
 ]
 
 
-class _SimulationSurface:
-    """Simulation-bound model surface coordinate helper."""
-
-    def __init__(
-        self, simulation: "SeismicSimulation", system: CoordinateSystem
-    ) -> None:
-        self._simulation = simulation
-        self._system = system
-
-    @property
-    def coordinate_system(self) -> CoordinateSystem:
-        return self._system
-
-    def points(
-        self,
-        values: Any,
-        *,
-        units: Optional[Any] = None,
-        offset: Optional[Any] = None,
-    ):
-        return self._system.points(values, units=units, offset=offset)
-
-    on = points
-
-    def above(
-        self,
-        values: Any,
-        distance: Optional[Any] = None,
-        *,
-        units: Optional[Any] = None,
-    ):
-        return self._system.above(values, distance=distance, units=units)
-
-    def below(
-        self,
-        values: Any,
-        distance: Optional[Any] = None,
-        *,
-        units: Optional[Any] = None,
-    ):
-        return self._system.below(values, distance=distance, units=units)
-
-
-def _model_surface_name(surface: Union[str, int]) -> str:
-    if isinstance(surface, int):
-        return f"surface_{surface}"
-    return str(surface)
-
-
 @register_class
 class BaseSimulation(SimulationConfig):
-    """Container for simulation configuration.
+    """Shared simulation container behavior.
 
-    Attributes:
-       model (ModelBase):               Model configuration.
-       mesh (MeshManager):              Mesh configuration.
-       BCs (BoundaryConditions):        Boundary condition configuration.
-       numerics (NumericsManager):      Numerics configuration.
+    ``BaseSimulation`` provides type-dispatched loading and the common
+    solver-facing payload for model, mesh, boundary conditions, solver settings,
+    and discretization. Concrete user-facing simulations should normally use
+    :class:`SeismicSimulation`.
     """
 
     model: Optional[ModelBase] = None
@@ -103,6 +55,8 @@ class BaseSimulation(SimulationConfig):
     discretization: Discretization = field(default_factory=Discretization)
 
     def __post_init__(self):
+        """Normalize member objects supplied as mappings or generators."""
+
         from frequensolve.util.printing import print_note
 
         if isinstance(self.mesh, BaseMeshGenerator):
@@ -112,10 +66,18 @@ class BaseSimulation(SimulationConfig):
                 "We've specified a default MeshManager for you but for fine grained control you'll want to specify\n"
                 "your own."
             )
-            self.mesh = MeshManager(self.mesh)
+        self.model = _coerce_model(self.model)
+        self.mesh = _coerce_mesh(self.mesh)
+        self.BCs = _coerce_boundary_conditions(self.BCs)
+        if isinstance(self.solver, Mapping):
+            self.solver = SolverConfig.from_fs(self.solver)
+        if isinstance(self.discretization, Mapping):
+            self.discretization = Discretization.from_fs(self.discretization)
 
     @classmethod
     def from_fs(cls, data: Dict) -> "BaseSimulation":
+        """Dispatch a solver simulation payload to its registered Python class."""
+
         class_name = data["_type"]
         if class_name in class_registry:
             simulation_class = class_registry[class_name]
@@ -124,7 +86,8 @@ class BaseSimulation(SimulationConfig):
 
     @classmethod
     def load(cls, path: Union[str, Path], **kwargs) -> "SeismicSimulation":
-        """Load seismic simulation from JSON file."""
+        """Load a simulation JSON file and dispatch by its ``_type`` field."""
+
         path = Path(path).resolve()
         with open(path, "r") as f:
             data = json.load(f)
@@ -138,6 +101,8 @@ class BaseSimulation(SimulationConfig):
             raise Exception(f"Unknown simulation class: {class_name}")
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
+        """Serialize common simulation blocks to the FrequenSolve JSON contract."""
+
         from frequensolve.util.printing import print_note
 
         if isinstance(self.mesh, BaseMeshGenerator):
@@ -171,22 +136,22 @@ class BaseSimulation(SimulationConfig):
 @register_class
 @dataclass(kw_only=True)
 class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
-    """Container for seismic simulation configuration.
+    """Authoring container for a seismic simulation.
 
-    Attributes:
-       name (str):                      Name of the simulation.
-       model (ModelBase):               Model configuration.
-       mesh (MeshManager):              Mesh configuration.
-       BCs (BoundaryConditions):        Boundary condition configuration.
-       solver (SolverConfig):           Solver configuration.
-       discretization (Discretization): Discretization configuration.
-       acquisition (Acquisition):       Acquisition configuration.
+    A seismic simulation owns the model, mesh, flat named boundary-condition
+    list, solver/discretization settings, acquisition geometry, units, and
+    coordinate systems that are exported to the solver JSON contract. Member
+    fields may be supplied either as Python objects or as solver-style mappings;
+    construction normalizes them to the current Python classes.
+
+    Boundary conditions are stored in ``BCs`` as a flat
+    :class:`BoundaryConditions` list. Named boundary conditions can be accessed
+    directly, e.g. ``simulation.BCs["free_surface"]``.
     """
 
     name: str
     physics: str
     dimension: int | float | str
-    axisymmetric: bool = False
     project_path: Union[str, Path] = None
     model: ModelBase = field(default_factory=ModelBase)
     mesh: MeshManager = field(default_factory=MeshManager)
@@ -199,13 +164,31 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
     coordinate_systems: NamedList = field(default_factory=NamedList)
     extra: Dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
-        if not isinstance(self.coordinate_systems, NamedList):
-            self.coordinate_systems = NamedList(self.coordinate_systems)
+    def __post_init__(self, axisymmetric: bool):
+        """Normalize inputs and derive canonical physics/dimension metadata."""
+
+        self.model = _coerce_model(self.model)
+        self.mesh = _coerce_mesh(self.mesh)
+        self.BCs = _coerce_boundary_conditions(self.BCs)
+        if isinstance(self.solver, Mapping):
+            self.solver = SolverConfig.from_fs(self.solver)
+        if isinstance(self.discretization, Mapping):
+            self.discretization = Discretization.from_fs(self.discretization)
+        if isinstance(self.acquisition, Mapping):
+            self.acquisition = Acquisition.from_fs(self.acquisition)
+        if isinstance(self.units, Mapping):
+            self.units = UnitConfig.from_fs(self.units)
+        if isinstance(self.global_coordinate_system, Mapping):
+            self.global_coordinate_system = CoordinateSystem.from_fs(
+                self.global_coordinate_system
+            )
+        self.coordinate_systems = _coerce_named_coordinate_systems(
+            self.coordinate_systems
+        )
         self.dimension = canonical_dimension(self.dimension)
-        self.physics, self.axisymmetric = normalize_simulation_physics(
+        self.physics, self._axisymmetric = normalize_simulation_physics(
             self.physics,
-            axisymmetric=self.axisymmetric,
+            axisymmetric=axisymmetric,
             dimension=self.dimension,
         )
         if self.project_path is None:
@@ -220,6 +203,8 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "SeismicSimulation":
+        """Build a seismic simulation from an ``fs-simulation-1`` payload."""
+
         data = copy.deepcopy(data)
         data.pop("schema", None)
         data.pop("_type", None)
@@ -280,16 +265,20 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return sim
 
     def _bind_model_coordinate_systems(self) -> None:
+        """Expose this simulation's coordinate systems to coordinate-aware models."""
+
         if self.model is not None:
             self.model._coordinate_systems = self.coordinate_systems
 
     @property
     def coordinate_system(self) -> NamedList:
-        """Alias for the named coordinate-system collection."""
+        """Alias for ``coordinate_systems`` for concise notebook use."""
 
         return self.coordinate_systems
 
     def copy(self, name, **kwargs) -> "SeismicSimulation":
+        """Persist, reload, and rename this simulation with optional overrides."""
+
         file = self.save()
         sim_copy = self.__class__.load(file)
         sim_copy.name = name
@@ -298,10 +287,16 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             setattr(sim_copy, key, value)
 
         # Load coords as array so they can be saved where they need to be
-        for i, grp in enumerate(sim_copy.acquisition.receiver_groups):
+        for grp in sim_copy.acquisition.receiver_groups:
             if grp.coordinates.__class__.__name__ == "CoordsFromFile":
-                coords = grp.coordinates.get()
-                grp.coordinates = CoordsArray(coordinates=coords)
+                coord_ref = grp.coordinates
+                coords = coord_ref.get()
+                units = coord_ref.units or sim_copy.units.defaults.get("length")
+                grp.coordinates = CoordsArray(
+                    coordinates=coords,
+                    units=units,
+                    system=coord_ref.system,
+                )
 
         # Change file path
         sim_copy._file = file.parent.parent / name / name
@@ -317,7 +312,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         site=None,
         **kwargs,
     ):
-        """Create an elastic FWI problem bound to this simulation.
+        """Create an FWI problem bound to this simulation.
 
         The returned object exposes PyLops-compatible Jacobian and adjoint
         operators. The adjoint is the inverse-problem transpose, not a true
@@ -366,7 +361,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
     def add_coordinate_system(
         self, system: Union[CoordinateSystem, Mapping[str, Any]]
     ) -> CoordinateSystem:
-        """Add or replace a named coordinate system on this simulation."""
+        """Add a coordinate system, replacing an existing one with the same name."""
 
         if isinstance(system, Mapping):
             system = CoordinateSystem.from_fs(system)
@@ -414,7 +409,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         name: Optional[str] = None,
         normal: str = "up",
         **kwargs,
-    ) -> _SimulationSurface:
+    ) -> "_SimulationSurface":
         """Return a registered model-surface helper for surface-relative points."""
 
         system = self.add_surface_coordinate_system(
@@ -426,7 +421,11 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return _SimulationSurface(self, system)
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
+        """Serialize the complete seismic simulation to solver JSON."""
+
         ctx = ctx or self.export_context()
+        if getattr(ctx, "default_length_units", None) is None:
+            ctx.default_length_units = self.units.defaults.get("length")
         payload = super().to_fs(ctx)
         payload["schema"] = "fs-simulation-1"
         payload["_type"] = self.__class__.__name__
@@ -441,6 +440,8 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return merge_extra(payload, self.extra, "Simulation")
 
     def __iadd__(self, other):
+        """Add or replace simulation member objects with ``simulation += obj``."""
+
         if isinstance(other, ModelBase):
             self.model = other
             self._bind_model_coordinate_systems()
@@ -465,6 +466,8 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return self
 
     def export_context(self) -> ExportContext:
+        """Return the project-relative export context and backing HDF5 store."""
+
         proj_path = self._proj_path or Path(self.project_path)
         rel_path = self._rel_path or Path("simulations") / self.name
         store = SimulationStore(
@@ -474,12 +477,14 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return ExportContext(proj_path, rel_path, store=store)
 
     def as_json(self, **kwargs) -> str:
-        """Convert simulation to JSON string."""
+        """Return the solver JSON payload as a formatted string."""
+
         indent = kwargs.get("indent", 3)
         return json.dumps(self.to_fs(), cls=CustomJSONEncoder, indent=indent, **kwargs)
 
     def save(self, **json_kwargs) -> Path:
-        """Save seismic simulation to JSON file."""
+        """Write the simulation JSON file under this simulation's project path."""
+
         self._set_path(self.project_path, Path("simulations"))
 
         file = self.project_path / "simulations" / f"{self.name}" / f"{self.name}"
@@ -497,7 +502,8 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return file
 
     def check(self) -> bool:
-        """Check the simulation is defined correctly."""
+        """Placeholder validation hook for simulation completeness checks."""
+
         return True
 
     @quantize
@@ -507,6 +513,8 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         pass
 
     def _set_path(self, proj_path: Path, rel_path: Path):
+        """Set project-relative paths on the simulation and owned file-backed members."""
+
         self._proj_path = proj_path
         self._rel_path = rel_path / self.name
         if self.acquisition:
@@ -525,16 +533,107 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return self._proj_path.name / self._rel_path
 
 
-# TODO: loop over source groups
-# TODO: also generate jobs for particular source groups and frequencies
-# def _generate_jobs(self,
-#                    f_list: List[float]) -> List[BaseJob]:
-#    jobs = []
-#    for f in f_list:
-#       mem = self._estimate_memory(f)
-#       jobs.append(BaseJob(self, f, required_memory = mem))
-#    return jobs
+class _SimulationSurface:
+    """Model-surface coordinate helper bound to one simulation."""
 
-# def get_material_mesh(self, f_max: float) -> MaterialMesh:
-#    """Get the mesh the material model is defined on given the maximum frequency."""
-#    pass
+    def __init__(
+        self, simulation: "SeismicSimulation", system: CoordinateSystem
+    ) -> None:
+        self._simulation = simulation
+        self._system = system
+
+    @property
+    def coordinate_system(self) -> CoordinateSystem:
+        """Registered coordinate system used by this helper."""
+
+        return self._system
+
+    def points(
+        self,
+        values: Any,
+        *,
+        units: Optional[Any] = None,
+        offset: Optional[Any] = None,
+    ):
+        """Return points on this model surface."""
+
+        return self._system.points(values, units=units, offset=offset)
+
+    on = points
+
+    def above(
+        self,
+        values: Any,
+        distance: Optional[Any] = None,
+        *,
+        units: Optional[Any] = None,
+    ):
+        """Return points offset above this model surface."""
+
+        return self._system.above(values, distance=distance, units=units)
+
+    def below(
+        self,
+        values: Any,
+        distance: Optional[Any] = None,
+        *,
+        units: Optional[Any] = None,
+    ):
+        """Return points offset below this model surface."""
+
+        return self._system.below(values, distance=distance, units=units)
+
+
+def _model_surface_name(surface: Union[str, int]) -> str:
+    if isinstance(surface, int):
+        return f"surface_{surface}"
+    return str(surface)
+
+
+def _coerce_model(model: Optional[Union[ModelBase, Mapping[str, Any]]]) -> ModelBase:
+    if model is None:
+        return ModelBase()
+    if isinstance(model, Mapping):
+        return ModelBase.from_fs(model)
+    if not isinstance(model, ModelBase):
+        raise TypeError(f"Expected ModelBase or mapping, got {type(model).__name__}")
+    return model
+
+
+def _coerce_mesh(
+    mesh: Optional[Union[MeshManager, BaseMeshGenerator, Mapping[str, Any]]],
+) -> MeshManager:
+    if mesh is None:
+        return MeshManager()
+    if isinstance(mesh, MeshManager):
+        return mesh
+    if isinstance(mesh, BaseMeshGenerator):
+        return MeshManager(mesh)
+    if isinstance(mesh, Mapping):
+        return MeshManager.from_fs(mesh)
+    raise TypeError(
+        f"Expected MeshManager, mesh generator, or mapping, got {type(mesh).__name__}"
+    )
+
+
+def _coerce_boundary_conditions(bcs: Any) -> BoundaryConditions:
+    if bcs is None:
+        return BoundaryConditions()
+    if isinstance(bcs, BoundaryConditions):
+        return bcs
+    if isinstance(bcs, BoundaryCondition):
+        return BoundaryConditions([bcs])
+    if isinstance(bcs, Mapping):
+        raise TypeError("BCs must be a list of boundary condition payloads")
+    return BoundaryConditions(bcs)
+
+
+def _coerce_named_coordinate_systems(systems: Any) -> NamedList:
+    if systems is None:
+        return NamedList()
+    if isinstance(systems, Mapping):
+        systems = [systems]
+    return NamedList(
+        CoordinateSystem.from_fs(system) if isinstance(system, Mapping) else system
+        for system in systems
+    )

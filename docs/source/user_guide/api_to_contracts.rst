@@ -38,7 +38,7 @@ The core workflow is intentionally repetitive across tutorials:
      - ``Mesh`` and ``Mesh/adapt``
      - Generator bounds/counts, ``elems_per_wave``, ``order``, frequency bounds, ``hmin``/``hmax``.
    * - ``BoundaryCondition``
-     - ``BCs/boundary_conditions``
+     - ``BCs``
      - ``conditions``, ``boundaries``, and PML settings.
    * - ``Acquisition``
      - ``fs-acquisition-1``

@@ -1,7 +1,11 @@
 import json
 import math
 import os
+import shutil
+from pathlib import Path
 
+import h5py
+import numpy as np
 import pytest
 
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
@@ -9,6 +13,7 @@ from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.orchestrator.sites.base import JobStatus, RunResult
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project.project import Project
+from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.artifacts import RunMetadata
 from frequensolve.simulation.jobs import (
     FrequencyDomainJob,
@@ -35,6 +40,160 @@ def test_project_save_load_uses_relative_simulation_paths(tmp_path):
     assert loaded.path == project.path
     assert loaded.simulations["simple"].name == sim.name
     assert loaded.simulations["simple"]._project is loaded
+
+
+def test_loaded_copied_job_uses_explicit_project_override(tmp_path):
+    original = Project(name="project", path=tmp_path / "original")
+    sim = original.new_simulation(name="simple", physics="acoustic", dimension=2)
+    mesh_file = original.path / "simulations" / "simple" / "mesh.gmp"
+    mesh_file.parent.mkdir(parents=True, exist_ok=True)
+    mesh_file.write_text("mesh")
+    sim.mesh = MeshManager(file=mesh_file, format="Gmsh")
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+
+    copied_root = tmp_path / "copied"
+    shutil.copytree(original.path, copied_root)
+    copied_job_file = copied_root / "jobs" / "simple" / "freq" / "freq.json"
+    copied_sim_file = copied_root / "simulations" / "simple" / "simple.json"
+
+    job_payload = json.loads(copied_job_file.read_text())
+    job_payload["project_path"] = str(original.path)
+    job_payload["simulation"] = str(
+        original.path / "simulations" / "simple" / "simple.json"
+    )
+    copied_job_file.write_text(json.dumps(job_payload))
+
+    sim_payload = json.loads(copied_sim_file.read_text())
+    sim_payload["project_path"] = str(original.path)
+    copied_sim_file.write_text(json.dumps(sim_payload))
+
+    loaded = SimulationJob.load(copied_job_file, project_path=copied_root)
+    assert loaded.project_path == copied_root.resolve()
+    assert loaded.simulation._file == copied_sim_file.resolve()
+
+    loaded.save()
+    job_payload = json.loads(copied_job_file.read_text())
+    sim_payload = json.loads(copied_sim_file.read_text())
+
+    assert job_payload["project_path"] == str(copied_root.resolve())
+    assert job_payload["simulation"] == "simulations/simple/simple.json"
+    assert sim_payload["project_path"] == str(copied_root.resolve())
+    assert str(original.path) not in json.dumps(job_payload)
+    assert str(original.path) not in json.dumps(sim_payload)
+
+    staged_job, remote_job = loaded.save_for_remote("Dummy", Path("/scratch/run"))
+    staged_sim, remote_sim = loaded.save_simulation_for_remote(
+        "Dummy", Path("/scratch/run")
+    )
+    staged_job_payload = json.loads(Path(staged_job).read_text())
+    staged_sim_payload = json.loads(Path(staged_sim).read_text())
+
+    assert remote_job == Path("/scratch/run/jobs/simple/freq/freq.json")
+    assert remote_sim == Path("/scratch/run/simulations/simple/simple.json")
+    assert staged_job_payload["project_path"] == "/scratch/run"
+    assert staged_job_payload["simulation"] == str(remote_sim)
+    assert staged_sim_payload["project_path"] == "/scratch/run"
+    assert str(original.path) not in json.dumps(staged_job_payload)
+    assert str(original.path) not in json.dumps(staged_sim_payload)
+    assert str(copied_root.resolve()) not in json.dumps(staged_job_payload)
+    assert str(copied_root.resolve()) not in json.dumps(staged_sim_payload)
+
+
+def test_remote_staging_rewrites_stale_absolute_artifact_roots(tmp_path, monkeypatch):
+    original = Project(name="project", path=tmp_path / "original")
+    sim = original.new_simulation(name="simple", physics="acoustic", dimension=2)
+    mesh_file = original.path / "simulations" / "simple" / "mesh.gmp"
+    mesh_file.parent.mkdir(parents=True, exist_ok=True)
+    mesh_file.write_text("mesh")
+    sim.mesh = MeshManager(file=mesh_file, format="Gmsh")
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+
+    copied_root = tmp_path / "copied"
+    shutil.copytree(original.path, copied_root)
+    copied_job_file = copied_root / "jobs" / "simple" / "freq" / "freq.json"
+    copied_sim_file = copied_root / "simulations" / "simple" / "simple.json"
+    loaded = SimulationJob.load(copied_job_file, project_path=copied_root)
+    loaded.save()
+
+    sim_payload = json.loads(copied_sim_file.read_text())
+    sim_payload["Mesh"]["file"] = str(mesh_file)
+    copied_sim_file.write_text(json.dumps(sim_payload))
+    monkeypatch.setattr(loaded.simulation, "save", lambda: copied_sim_file)
+    staged_sim, _ = loaded.save_simulation_for_remote("Dummy", Path("/scratch/run"))
+    staged_payload = json.loads(Path(staged_sim).read_text())
+
+    assert staged_payload["Mesh"]["file"] == "/scratch/run/simulations/simple/mesh.gmp"
+    assert str(original.path) not in json.dumps(staged_payload)
+    assert str(copied_root.resolve()) not in json.dumps(staged_payload)
+
+
+def test_remote_input_files_maps_stale_absolute_refs_to_copied_inputs(tmp_path):
+    original = Project(name="project", path=tmp_path / "original")
+    sim = original.new_simulation(name="simple", physics="acoustic", dimension=2)
+    mesh_file = original.path / "simulations" / "simple" / "mesh.gmp"
+    mesh_file.parent.mkdir(parents=True, exist_ok=True)
+    mesh_file.write_text("mesh")
+    sim.mesh = MeshManager(file=mesh_file, format="Gmsh")
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+
+    copied_root = tmp_path / "copied"
+    shutil.copytree(original.path, copied_root)
+    copied_job_file = copied_root / "jobs" / "simple" / "freq" / "freq.json"
+    copied_sim_file = copied_root / "simulations" / "simple" / "simple.json"
+    loaded = SimulationJob.load(copied_job_file, project_path=copied_root)
+    loaded.save()
+
+    sim_payload = json.loads(copied_sim_file.read_text())
+    sim_payload["Mesh"]["file"] = str(mesh_file)
+    copied_sim_file.write_text(json.dumps(sim_payload))
+    shutil.rmtree(original.path)
+
+    pairs = loaded.remote_input_files(Path("/scratch/run"))
+
+    assert (
+        copied_root.resolve() / "simulations" / "simple" / "mesh.gmp",
+        Path("/scratch/run/simulations/simple/mesh.gmp"),
+    ) in pairs
+
+
+def test_project_copy_rewrites_saved_job_and_simulation_roots(tmp_path):
+    original = Project(name="project", path=tmp_path / "original")
+    sim = original.new_simulation(name="simple", physics="acoustic", dimension=2)
+    mesh_file = original.path / "simulations" / "simple" / "mesh.gmp"
+    mesh_file.parent.mkdir(parents=True, exist_ok=True)
+    mesh_file.write_text("mesh")
+    sim.mesh = MeshManager(file=mesh_file, format="Gmsh")
+    FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0]).save()
+    original.save()
+    stale_root = tmp_path / "stale"
+    original_job_file = original.path / "jobs" / "simple" / "freq" / "freq.json"
+    original_sim_file = original.path / "simulations" / "simple" / "simple.json"
+    job_payload = json.loads(original_job_file.read_text())
+    job_payload["project_path"] = str(stale_root)
+    job_payload["simulation"] = str(stale_root / "simulations/simple/simple.json")
+    job_payload["result_path"] = str(stale_root / "jobs/simple/freq/results")
+    original_job_file.write_text(json.dumps(job_payload))
+    sim_payload = json.loads(original_sim_file.read_text())
+    sim_payload["project_path"] = str(stale_root)
+    original_sim_file.write_text(json.dumps(sim_payload))
+
+    copied = Project.copy(original.path, tmp_path / "copied")
+    copied_job_file = copied.path / "jobs" / "simple" / "freq" / "freq.json"
+    copied_sim_file = copied.path / "simulations" / "simple" / "simple.json"
+    job_payload = json.loads(copied_job_file.read_text())
+    sim_payload = json.loads(copied_sim_file.read_text())
+
+    assert job_payload["project_path"] == str(copied.path)
+    assert job_payload["simulation"] == "simulations/simple/simple.json"
+    assert job_payload["result_path"] == "jobs/simple/freq/results"
+    assert sim_payload["project_path"] == str(copied.path)
+    assert str(original.path) not in json.dumps(job_payload)
+    assert str(original.path) not in json.dumps(sim_payload)
+    assert str(stale_root) not in json.dumps(job_payload)
+    assert str(stale_root) not in json.dumps(sim_payload)
 
 
 def test_run_metadata_filters_output_files(tmp_path):
@@ -193,6 +352,107 @@ def test_job_save_load_persists_required_simulation_inputs(tmp_path):
     assert loaded._file == job_file
 
 
+def test_job_loading_accepts_job_object_and_job_directory(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = TimeDomainJob(name="time", simulation=sim, f_max=5.0, T_max=1.0)
+
+    job_file = job.save()
+    loaded_from_object = SimulationJob.load(job)
+    loaded_from_method = job.load_saved()
+    loaded_from_dir = SimulationJob.load(job_file.parent)
+
+    assert job.job_file == job_file
+    assert loaded_from_object._file == job_file
+    assert loaded_from_method._file == job_file
+    assert loaded_from_dir._file == job_file
+    assert loaded_from_object.name == "time"
+    assert loaded_from_object.simulation.name == sim.name
+
+
+def test_project_load_job_finds_saved_job_by_simulation_and_unique_name(tmp_path):
+    project, sim = _project_with_trace_simulation(tmp_path)
+    time_job = TimeDomainJob(name="time", simulation=sim, f_max=5.0, T_max=1.0)
+    freq_job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+
+    time_file = time_job.save()
+    freq_file = freq_job.save()
+
+    assert project.job_file("time") == time_file
+    assert project.job_file("freq", simulation=sim) == freq_file
+    assert project.job_file("freq", simulation="simple") == freq_file
+    assert project.load_job("time")._file == time_file
+    assert project.load_job("freq", simulation="simple")._file == freq_file
+
+
+def test_project_list_jobs_reports_result_status(tmp_path):
+    project, sim = _project_with_trace_simulation(tmp_path)
+    freq_job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+
+    job_file = freq_job.save()
+    [row] = project.list_jobs()
+
+    assert row["name"] == "freq"
+    assert row["simulation"] == "simple"
+    assert row["job_type"] == "FrequencyDomainJob"
+    assert row["workflow"] == "forward"
+    assert row["n_tasks"] == 1
+    assert row["job_file"] == str(job_file)
+    assert row["relative_job_file"] == "jobs/simple/freq/freq.json"
+    assert row["loaded"] is True
+    assert row["results_exist"] is False
+    assert row["results_current"] is False
+
+    trace_file = freq_job.expected_trace_files()[0]
+    trace_file.parent.mkdir(parents=True, exist_ok=True)
+    trace_file.touch()
+    freq_job.write_run_state(status="completed")
+
+    [row] = project.list_jobs(simulation=sim)
+    assert row["results_exist"] is True
+    assert row["trace_outputs_exist"] is True
+    assert row["results_current"] is True
+    assert row["run_status"] == "completed"
+    assert row["task_summary"]["complete"] == 1
+
+
+def test_job_traces_open_prefers_existing_packed_trace_file(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+
+    trace_dir = job._result_path / "traces"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "packed": {"path": "traces/traces.h5"},
+                "frequencies": [{"task_id": 1, "frequency": 1.0}],
+            }
+        )
+    )
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(trace_dir / "traces.h5", "w") as h5:
+        h5.create_dataset("frequency", data=np.array([1.0]))
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        dset = h5.create_dataset(
+            "surface",
+            data=np.zeros((1, 1, 1, 1, 2), dtype=np.float32),
+        )
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.array([101], dtype=np.int32)
+        dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+    traces = job.traces.open()
+
+    assert traces.files == [str(trace_dir / "traces.h5")]
+    assert traces.groups == ["surface"]
+
+
 def test_frequency_domain_job_normalizes_laplace_sign(tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
 
@@ -345,6 +605,58 @@ def test_job_frequency_status_summary_and_task_timings(tmp_path, capsys):
     ]
 
 
+def test_job_failed_tasks_reports_reasons(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0, 3.0])
+    job.save()
+
+    job.write_run_state(
+        status="completed",
+        tasks=[
+            {
+                "task_id": 0,
+                "status": "error",
+                "complete": True,
+                "error": "mesh generation failed",
+            },
+            {
+                "task_id": 1,
+                "status": "success",
+                "complete": True,
+                "solver": {
+                    "convergence": {
+                        "converged": True,
+                        "status": "converged",
+                        "solve_count": 1,
+                        "failure_count": 0,
+                        "worst_code": 0,
+                        "solves": [
+                            {
+                                "converged": True,
+                                "iterations": 24,
+                                "residual": 2.0e-3,
+                                "status": "converged",
+                            }
+                        ],
+                    }
+                },
+            },
+        ],
+    )
+
+    failures = job.failed_tasks()
+
+    assert [row["task"] for row in failures] == [1, 2]
+    assert job.list_failed_tasks() == failures
+    assert failures[0]["frequency"] == 1.0
+    assert failures[0]["reason"] == "mesh generation failed"
+    assert failures[1]["frequency"] == 2.0
+    assert failures[1]["reason"] == (
+        "Solver residual 0.002 exceeded failure threshold 0.001 after " "24 iterations."
+    )
+    assert failures[1]["solver"]["convergence"]["residual"] == 0.002
+
+
 def test_job_run_state_summarizes_solver_convergence(tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0, 3.0])
@@ -478,8 +790,123 @@ def test_job_run_state_summarizes_solver_convergence(tmp_path):
     ]
     mirrored = json.loads(solver_manifest.read_text())
     assert mirrored["task_summary"] == payload["task_summary"]
+    assert [row["status"] for row in mirrored["tasks"]] == [
+        "succeeded",
+        "failed",
+        "not_run",
+    ]
     assert mirrored["solver"]["name"] == "solver"
     assert mirrored["solver"]["convergence"] == convergence
+
+
+def test_job_collects_task_run_manifests_into_job_manifest(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
+    job.save()
+    solver_manifest = job._result_path / "_fs_run" / "run_manifest.json"
+    solver_manifest.parent.mkdir(parents=True, exist_ok=True)
+    solver_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "fs-run-manifest-1",
+                "solver": {"name": "solver"},
+            }
+        )
+    )
+    for task, residual in ((1, 8.2e-5), (2, 2.0e-3)):
+        task_manifest = job.task_run_manifest_path(task)
+        task_manifest.parent.mkdir(parents=True, exist_ok=True)
+        task_manifest.write_text(
+            json.dumps(
+                {
+                    "exit_status": {"code": 0, "status": "success"},
+                    "execution": {"mpi": {"ranks": task}, "openmp": {"threads": 8}},
+                    "solver": {
+                        "convergence": {
+                            "converged": True,
+                            "status": "converged",
+                            "solve_count": 1,
+                            "failure_count": 0,
+                            "worst_code": 0,
+                            "solves": [
+                                {
+                                    "context": "forward",
+                                    "converged": True,
+                                    "iterations": 4 + task,
+                                    "residual": residual,
+                                    "status": "converged",
+                                }
+                            ],
+                        }
+                    },
+                }
+            )
+        )
+
+    path = job.collect_task_run_manifests()
+
+    assert path == job.run_state_file
+    payload = json.loads(job.run_state_file.read_text())
+    assert payload["task_summary"] == {
+        "total": 2,
+        "complete": 2,
+        "succeeded": 1,
+        "failed": 1,
+        "not_run": 0,
+    }
+    mirrored = json.loads(solver_manifest.read_text())
+    assert mirrored["task_summary"] == payload["task_summary"]
+    assert [row["status"] for row in mirrored["tasks"]] == ["succeeded", "failed"]
+    assert mirrored["tasks"][0]["returncode"] == 0
+    assert mirrored["tasks"][1]["n_ranks"] == 2
+    assert mirrored["tasks"][1]["threads_per_rank"] == 8
+    assert mirrored["solver"]["convergence"]["status"] == "failed"
+    assert mirrored["solver"]["convergence"]["residual"] == 0.002
+
+
+def test_job_collects_skipped_task_run_manifests_as_successful(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+    solver_manifest = job._result_path / "_fs_run" / "run_manifest.json"
+    solver_manifest.parent.mkdir(parents=True, exist_ok=True)
+    solver_manifest.write_text(json.dumps({"schema": "fs-run-manifest-1"}))
+
+    task_manifest = job.task_run_manifest_path(1)
+    task_manifest.parent.mkdir(parents=True, exist_ok=True)
+    task_manifest.write_text(
+        json.dumps(
+            {
+                "exit_status": {"code": 1, "status": "failed"},
+                "execution": {"skipped": True},
+                "solver": {
+                    "convergence": {
+                        "converged": False,
+                        "status": "failed",
+                        "solve_count": 0,
+                        "failure_count": 1,
+                        "worst_code": 1,
+                    }
+                },
+            }
+        )
+    )
+
+    job.collect_task_run_manifests()
+
+    payload = json.loads(job.run_state_file.read_text())
+    assert payload["task_summary"] == {
+        "total": 1,
+        "complete": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "not_run": 0,
+    }
+    mirrored = json.loads(solver_manifest.read_text())
+    assert mirrored["task_summary"] == payload["task_summary"]
+    assert mirrored["tasks"][0]["status"] == "succeeded"
+    assert "solver" not in mirrored
+    assert job.failed_tasks() == []
 
 
 def test_job_run_state_reads_solver_convergence_from_manifest_path(tmp_path):
@@ -834,6 +1261,154 @@ def test_job_task_plan_skips_current_packed_trace_product(tmp_path):
     }
 
 
+def test_failed_frequency_prevents_local_skip_with_packed_trace(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
+    job.save()
+    trace_dir = job.trace_outputs.path
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    packed = trace_dir / "traces.h5"
+    packed.touch()
+    (trace_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-trace-manifest-1",
+                "packed": {
+                    "format": "hdf5",
+                    "schema": "fs-traces-packed-1",
+                    "relative_path": "traces/traces.h5",
+                },
+                "frequencies": [
+                    {"task_id": 1, "frequency": 1.0, "status": "packed"},
+                    {"task_id": 2, "frequency": 2.0, "status": "packed"},
+                ],
+            }
+        )
+    )
+
+    job.write_run_state(
+        status="completed",
+        tasks=[
+            {"task_id": 0, "status": "success", "duration_seconds": 1.0},
+            {"task_id": 1, "status": "error", "duration_seconds": 2.0},
+        ],
+    )
+
+    assert not job.is_run_current()
+    assert job.current_tasks() == [1]
+    assert job.task_run_plan() == {
+        "pending_indices": [1],
+        "current_tasks": [1],
+        "reused_tasks": [],
+    }
+
+
+def test_incomplete_packed_trace_product_warns_and_is_not_current(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(
+        name="freq",
+        simulation=sim,
+        f_list=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    )
+    job.save()
+    trace_dir = job.trace_outputs.path
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    packed = trace_dir / "traces.h5"
+    packed.touch()
+    (trace_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-trace-manifest-1",
+                "packed": {
+                    "format": "hdf5",
+                    "schema": "fs-traces-packed-1",
+                    "relative_path": "traces/traces.h5",
+                },
+                "frequencies": [
+                    {"task_id": 1, "frequency": 1.0, "status": "packed"},
+                    {"task_id": 2, "frequency": 2.0, "status": "packed"},
+                    {"task_id": 5, "frequency": 5.0, "status": "packed"},
+                ],
+            }
+        )
+    )
+
+    assert job.trace_manifest.packed_file == packed
+    assert job.trace_manifest.missing_packed_frequencies == {
+        3: 3.0,
+        4: 4.0,
+        6: 6.0,
+    }
+    assert not job.trace_manifest.complete
+
+    with pytest.warns(RuntimeWarning) as caught:
+        assert not job.is_run_current()
+    message = str(caught[0].message)
+    assert "missing 3 of 6 expected frequencies" in message
+    assert "tasks 3-4: 3 Hz-4 Hz" in message
+    assert "task 6: 6 Hz" in message
+    assert "traces_3.h5" not in message
+
+    with pytest.warns(RuntimeWarning, match="missing 3 of 6 expected frequencies"):
+        traces = TraceDataset.from_job(job)
+    assert traces.manifest.files == [packed]
+    assert traces.manifest.frequencies == {1: 1.0, 2: 2.0, 5: 5.0}
+
+
+def test_frequency_named_trace_shard_counts_as_current_when_pack_is_stale(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[50.0])
+    job.save()
+    trace_dir = job.trace_outputs.path
+    shard_dir = trace_dir / "shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    shard = shard_dir / "f_50.00000_hz.h5"
+    with h5py.File(shard, "w") as h5:
+        h5.create_dataset("frequency", data=50.0)
+        h5.create_dataset("laplace", data=-0.5)
+
+    packed = trace_dir / "traces.h5"
+    packed.touch()
+    (trace_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-trace-manifest-1",
+                "packed": {
+                    "format": "hdf5",
+                    "schema": "fs-traces-packed-1",
+                    "relative_path": "traces/traces.h5",
+                },
+                "frequencies": [
+                    {"task_id": 1, "frequency": 100.0, "status": "packed"},
+                ],
+            }
+        )
+    )
+
+    with pytest.warns(RuntimeWarning, match="missing 1 of 1 expected frequencies"):
+        assert job.trace_outputs_exist()
+
+    job.write_run_state(status="completed")
+    state = job.run_state()
+
+    assert state["task_summary"] == {
+        "total": 1,
+        "complete": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "not_run": 0,
+    }
+    assert state["tasks"][0]["path"].endswith("traces/shards/f_50.00000_hz.h5")
+    assert job.current_tasks() == [1]
+    assert job.frequency_summary() == {
+        "total": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "not_run": 0,
+    }
+    assert job.task_run_plan()["pending_indices"] == []
+
+
 def test_job_task_plan_reruns_packed_product_when_fingerprint_changes(tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
@@ -868,7 +1443,8 @@ def test_job_task_plan_reruns_packed_product_when_fingerprint_changes(tmp_path):
     expanded = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0, 3.0])
     expanded.save()
 
-    assert not expanded.is_run_current()
+    with pytest.warns(RuntimeWarning, match="missing 1 of 3 expected frequencies"):
+        assert not expanded.is_run_current()
     assert expanded.task_run_plan()["pending_indices"] == [0, 1, 2]
 
 

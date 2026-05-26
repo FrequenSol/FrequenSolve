@@ -205,9 +205,21 @@ def _plot_layered_model_2d(model: Any, property: str, resolution: List[int], **k
     )
 
     if show_surfaces:
-        limits = {"x": model.x_limits}
+        x_units = axes_units.get("x") if axes_units else None
+        y_units = axes_units.get("y") if axes_units else None
+        limits = {
+            "x": list(
+                model.x_limits_in(x_units)
+                if hasattr(model, "x_limits_in")
+                else model.x_limits
+            )
+        }
         if model.y_limits is not None:
-            limits["y"] = model.y_limits
+            limits["y"] = list(
+                model.y_limits_in(y_units)
+                if hasattr(model, "y_limits_in")
+                else model.y_limits
+            )
         for surface in model.surfaces:
             surface.plot(
                 limits=limits,
@@ -321,6 +333,11 @@ def _plot_boreholes(
     for borehole in model.boreholes:
         try:
             axis_x = borehole.axis_x(x_units)
+            x_limits = (
+                model.x_limits_in(x_units)
+                if hasattr(model, "x_limits_in")
+                else model.x_limits
+            )
             top = _surface_by_ref(model, borehole.extent["top"])
             bottom = _surface_by_ref(model, borehole.extent["bottom"])
             z_top = _surface_depth_at_x(top, axis_x, z_units)
@@ -362,7 +379,7 @@ def _plot_boreholes(
             right = axis_x + radii_plot
             color_i = palette[ipart % len(palette)]
             for side in (left, right):
-                if np.all(side < model.x_limits[0]) or np.all(side > model.x_limits[1]):
+                if np.all(side < x_limits[0]) or np.all(side > x_limits[1]):
                     continue
                 ax.plot(
                     side,

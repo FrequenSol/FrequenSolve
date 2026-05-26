@@ -11,7 +11,7 @@ from numpy.typing import ArrayLike
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.dispersion import DispersionScaling
-from frequensolve.units import is_quantity, quantity_to_fs, unit_expression
+from frequensolve.units import is_quantity, quantity_to_fs, unit_expression, ureg
 from frequensolve.util.mixins import ExportContext, merge_extra
 from frequensolve.util.stochastic_fields import von_karman_stochastic_field
 
@@ -65,6 +65,46 @@ def _plain_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_plain_value(item) for item in value]
     return value
+
+
+def _coord_units(coord: xr.DataArray) -> Optional[str]:
+    units = coord.attrs.get("units")
+    return unit_expression(units) if units is not None else None
+
+
+def _convert_coord_units(
+    coord: xr.DataArray,
+    target_units: Optional[str],
+) -> xr.DataArray:
+    source_units = _coord_units(coord)
+    if source_units is None or target_units is None or source_units == target_units:
+        return coord
+    converted = (
+        (np.asarray(coord.values) * ureg(source_units)).to(target_units).magnitude
+    )
+    out = xr.DataArray(
+        converted,
+        dims=coord.dims,
+        coords=coord.coords,
+        attrs=dict(coord.attrs),
+        name=coord.name,
+    )
+    out.attrs["units"] = target_units
+    return out
+
+
+def _coords_in_data_units(
+    coords: Mapping[str, xr.DataArray],
+    data_coords: Mapping[str, xr.DataArray],
+    dims: Optional[Sequence[str]] = None,
+) -> Dict[str, xr.DataArray]:
+    dims = list(dims if dims is not None else data_coords.keys())
+    out = {}
+    for dim in dims:
+        coord = coords[dim]
+        target_units = _coord_units(data_coords[dim]) if dim in data_coords else None
+        out[dim] = _convert_coord_units(coord, target_units)
+    return out
 
 
 def _normalize_system_alias(payload: Dict[str, Any]) -> None:
@@ -611,7 +651,11 @@ class Property:
                     data=np.full(shape, self.darr.values), dims=dims, coords=coords
                 )
             elif _dims_compatible(self.darr.dims, coords):
-                coords2 = {dim: coords[dim] for dim in self.darr.dims}
+                coords2 = _coords_in_data_units(
+                    coords,
+                    self.darr.coords,
+                    self.darr.dims,
+                )
                 out = self.darr.interp(coords=coords2, method="linear")
                 if np.isnan(out.values).any():
                     nearest_interp = self.darr.interp(

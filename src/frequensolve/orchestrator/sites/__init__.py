@@ -51,14 +51,14 @@ SlurmSiteConfig = optional_class(
 )
 Stampede3Site = optional_class(
     "Stampede3Site",
-    "frequensolve.orchestrator.sites.stampede3.Stampede3Site",
+    "frequensolve.orchestrator.sites.hpc.Stampede3Site",
     extra="hpc",
     dependencies=("paramiko", "python-dotenv"),
     module=__name__,
 )
 TACCLoginCredentials = optional_class(
     "TACCLoginCredentials",
-    "frequensolve.orchestrator.sites.stampede3.TACCLoginCredentials",
+    "frequensolve.orchestrator.sites.hpc.TACCLoginCredentials",
     extra="hpc",
     dependencies=("paramiko", "python-dotenv"),
     module=__name__,

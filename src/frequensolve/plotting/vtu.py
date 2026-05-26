@@ -20,10 +20,10 @@ __all__ = [
 
 _DEFAULT_SCALAR_BAR_ARGS = {
     "vertical": False,
-    "position_x": 0.25,
-    "position_y": 0.05,
-    "width": 0.5,
-    "height": 0.1,
+    "position_x": 0.22,
+    "position_y": 0.06,
+    "width": 0.56,
+    "height": 0.08,
 }
 
 
@@ -68,7 +68,7 @@ def _attach_vtu_metadata(mesh, metadata: Mapping[str, Any] | None):
     return mesh
 
 
-def _read_vtu_metadata(path: str | Path) -> dict[str, dict[str, dict[str, str]]]:
+def _read_vtu_metadata(path: str | Path) -> dict[str, dict[str, dict[str, Any]]]:
     path = Path(path)
     try:
         raw = path.read_bytes()
@@ -82,7 +82,7 @@ def _read_vtu_metadata(path: str | Path) -> dict[str, dict[str, dict[str, str]]]
     except ET.ParseError:
         return {"point": {}, "cell": {}}
 
-    metadata: dict[str, dict[str, dict[str, str]]] = {"point": {}, "cell": {}}
+    metadata: dict[str, dict[str, dict[str, Any]]] = {"point": {}, "cell": {}}
     for association, tag in (("point", "PointData"), ("cell", "CellData")):
         for array in root.findall(f".//{tag}/DataArray"):
             name = array.attrib.get("Name")
@@ -94,7 +94,7 @@ def _read_vtu_metadata(path: str | Path) -> dict[str, dict[str, dict[str, str]]]
     return metadata
 
 
-def _vtu_array_metadata_from_attrs(attrs: Mapping[str, str]) -> dict[str, str]:
+def _vtu_array_metadata_from_attrs(attrs: Mapping[str, str]) -> dict[str, Any]:
     display_name = _vtu_attr(
         attrs,
         "fs_display_name",
@@ -111,12 +111,33 @@ def _vtu_array_metadata_from_attrs(attrs: Mapping[str, str]) -> dict[str, str]:
         "unit",
         "unit_label",
     )
+    components = _vtu_attr(
+        attrs,
+        "fs_components",
+        "fs_component_names",
+        "component_names",
+        "components",
+    )
     metadata = {}
     if display_name:
         metadata["display_name"] = _format_vtu_display_name(display_name)
     if units:
         metadata["units"] = units
+    component_names = _parse_component_names(components)
+    if component_names:
+        metadata["components"] = component_names
     return metadata
+
+
+def _parse_component_names(value: str | None) -> list[str]:
+    if not value:
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    for sep in (",", ";", "|"):
+        text = text.replace(sep, " ")
+    return [part.strip() for part in text.split() if part.strip()]
 
 
 def _vtu_attr(attrs: Mapping[str, str], *names: str) -> str | None:
@@ -139,11 +160,11 @@ def _format_vtu_display_name(name: str) -> str:
     return name[:1].upper() + name[1:]
 
 
-def _vtu_metadata(mesh) -> Mapping[str, Mapping[str, Mapping[str, str]]]:
+def _vtu_metadata(mesh) -> Mapping[str, Mapping[str, Mapping[str, Any]]]:
     return getattr(mesh, "_frequensolve_vtu_metadata", {}) or {}
 
 
-def _vtu_array_metadata(mesh, association: str, field: str) -> Mapping[str, str]:
+def _vtu_array_metadata(mesh, association: str, field: str) -> Mapping[str, Any]:
     metadata = _vtu_metadata(mesh)
     if association == "auto":
         return (
@@ -208,20 +229,102 @@ def _select_vtu_data(mesh, field: str, association: str):
     return data, association
 
 
-def _component_index(component: str | int, width: int) -> int:
+def _normalize_component_name(component: str) -> str:
+    return (
+        str(component)
+        .strip()
+        .lower()
+        .replace("_", "")
+        .replace("-", "")
+        .replace(" ", "")
+    )
+
+
+def _component_index(
+    component: str | int,
+    width: int,
+    names: Sequence[str] | None = None,
+) -> int:
     if isinstance(component, str):
-        axes = {"x": 0, "y": 1, "z": 2}
-        try:
-            index = axes[component.lower()]
-        except KeyError:
-            raise ValueError(
-                "component must be an integer or one of 'x', 'y', 'z'"
-            ) from None
+        key = _normalize_component_name(component)
+        if key.isdigit():
+            index = int(key)
+        else:
+            metadata_names = list(names or [])
+            metadata_lookup = {
+                _normalize_component_name(name): i
+                for i, name in enumerate(metadata_names[:width])
+            }
+            if key in metadata_lookup:
+                index = metadata_lookup[key]
+            else:
+                index = _fallback_component_index(key, width)
     else:
         index = int(component)
     if index < 0 or index >= width:
         raise ValueError(f"component index {index} is outside field width {width}")
     return index
+
+
+def _fallback_component_index(component: str, width: int) -> int:
+    names = _fallback_component_names(width)
+    if component in names:
+        return names[component]
+    accepted = sorted(names)
+    raise ValueError(
+        "component must be an integer or one of the supported component names "
+        f"for field width {width}: {', '.join(accepted)}"
+    )
+
+
+def _fallback_component_names(width: int) -> dict[str, int]:
+    aliases: dict[str, int] = {}
+    if width == 2:
+        aliases.update({"x": 0, "r": 0, "y": 1, "z": 1, "theta": 1, "t": 1})
+    elif width >= 3:
+        aliases.update({"x": 0, "r": 0, "y": 1, "theta": 1, "t": 1, "z": 2})
+
+    if width == 3:
+        aliases.update({"xx": 0, "rr": 0, "zz": 1, "xz": 2, "zx": 2, "rz": 2, "zr": 2})
+    elif width == 4:
+        aliases.update(
+            {
+                "rr": 0,
+                "xx": 0,
+                "zz": 1,
+                "rz": 2,
+                "zr": 2,
+                "xz": 2,
+                "zx": 2,
+                "tt": 3,
+                "thetatheta": 3,
+                "yy": 3,
+            }
+        )
+    elif width == 6:
+        aliases.update(
+            {
+                "xx": 0,
+                "rr": 0,
+                "zz": 1,
+                "xz": 2,
+                "zx": 2,
+                "rz": 2,
+                "zr": 2,
+                "xy": 3,
+                "yx": 3,
+                "rtheta": 3,
+                "thetar": 3,
+                "yy": 4,
+                "tt": 4,
+                "thetatheta": 4,
+                "yz": 5,
+                "zy": 5,
+                "ztheta": 5,
+                "thetaz": 5,
+            }
+        )
+    return aliases
 
 
 def _validate_vtu_part(part: str) -> str:
@@ -270,6 +373,21 @@ def _strip_vtu_index(field: str) -> str:
     if sep and tail.isdigit():
         return head
     return field
+
+
+def _vtu_source_index(field: str) -> int | None:
+    base = _strip_vtu_part_suffix(field)
+    _, sep, tail = base.rpartition("_")
+    if sep and tail.isdigit():
+        return int(tail)
+    return None
+
+
+def _source_indexed_vtu_base(field: str, source: int | str | None) -> str:
+    if source is None:
+        return field
+    base = _strip_vtu_index(_strip_vtu_part_suffix(field))
+    return f"{base}_{int(source)}"
 
 
 def _vtu_field_key(field: str) -> str:
@@ -333,16 +451,39 @@ def _vtu_scalar_label(
     return base
 
 
+def _select_vtu_component(
+    values: np.ndarray,
+    *,
+    component: str | int | None,
+    metadata: Mapping[str, Any] | None,
+) -> np.ndarray:
+    values = np.asarray(values)
+    if component is not None:
+        if values.ndim != 2:
+            raise ValueError("component can only be used with vector/tensor VTU fields")
+        names = None if metadata is None else metadata.get("components")
+        values = values[:, _component_index(component, values.shape[1], names)]
+    elif values.ndim == 2 and values.shape[1] == 1:
+        values = values[:, 0]
+    elif values.ndim > 1:
+        raise ValueError("component is required for vector/tensor VTU fields")
+    return values
+
+
 def _source_indexed_vtu_part_fields(
     mesh,
     field: str,
     association: str,
     part: str,
+    source: int | str | None = None,
 ) -> list[str]:
     key = _vtu_field_key(field)
+    source_index = None if source is None else int(source)
     matches = []
     for name in _vtu_field_names(mesh, association):
         if _vtu_field_key(name) != key:
+            continue
+        if source_index is not None and _vtu_source_index(name) != source_index:
             continue
         if _resolved_vtu_part(name, "") == part:
             matches.append(name)
@@ -369,17 +510,19 @@ def _resolve_vtu_scalar(
     association: str,
     component: str | int | None,
     part: str,
+    source: int | str | None,
     label: str | None,
     units: Any,
 ) -> tuple[str, str]:
     part = _validate_vtu_part(part)
-    candidate_fields = [field]
+    lookup_field = _source_indexed_vtu_base(field, source)
+    candidate_fields = [lookup_field]
     if part == "real":
-        candidate_fields.extend([f"{field}_real", f"{field}_re"])
+        candidate_fields.extend([f"{lookup_field}_real", f"{lookup_field}_re"])
     elif part == "imag":
-        candidate_fields.extend([f"{field}_imag", f"{field}_im"])
+        candidate_fields.extend([f"{lookup_field}_imag", f"{lookup_field}_im"])
     elif part == "abs":
-        candidate_fields.extend([f"{field}_abs", f"{field}_mag"])
+        candidate_fields.extend([f"{lookup_field}_abs", f"{lookup_field}_mag"])
 
     data = None
     resolved_association = association
@@ -392,7 +535,13 @@ def _resolve_vtu_scalar(
         except KeyError:
             continue
     if data is None or resolved_field is None:
-        matches = _source_indexed_vtu_part_fields(mesh, field, association, part)
+        matches = _source_indexed_vtu_part_fields(
+            mesh,
+            field,
+            association,
+            part,
+            source=source,
+        )
         if len(matches) == 1:
             resolved_field = matches[0]
             data, resolved_association = _select_vtu_data(
@@ -404,16 +553,29 @@ def _resolve_vtu_scalar(
             raise _ambiguous_source_indexed_field_error(field, part, matches)
     if data is None or resolved_field is None:
         if part == "abs":
-            data, resolved_association = _paired_abs_vtu_data(mesh, field, association)
-            resolved_field = f"{field}_abs"
+            data, resolved_association = _paired_abs_vtu_data(
+                mesh,
+                lookup_field,
+                association,
+            )
+            resolved_field = f"{lookup_field}_abs"
             values = data
-            metadata = _vtu_array_metadata(mesh, resolved_association, resolved_field)
+            metadata = _vtu_array_metadata(
+                mesh,
+                resolved_association,
+                resolved_field,
+            ) or _paired_vtu_metadata(mesh, lookup_field, resolved_association)
             effective_label = label or metadata.get("display_name")
             effective_units = (
                 units
                 if units is not None
                 else metadata.get("units")
-                or _paired_vtu_units(mesh, field, resolved_association)
+                or _paired_vtu_units(mesh, lookup_field, resolved_association)
+            )
+            values = _select_vtu_component(
+                values,
+                component=component,
+                metadata=metadata,
             )
             scalar_name = _vtu_scalar_label(
                 field,
@@ -425,23 +587,15 @@ def _resolve_vtu_scalar(
             )
             _vtu_data(mesh, resolved_association)[scalar_name] = np.asarray(values)
             return scalar_name, resolved_association
-        _select_vtu_data(mesh, field, association)
+        _select_vtu_data(mesh, lookup_field, association)
 
     values = np.asarray(data[resolved_field])
-    if component is not None:
-        if values.ndim != 2:
-            raise ValueError("component can only be used with vector/tensor VTU fields")
-        values = values[:, _component_index(component, values.shape[1])]
-    elif values.ndim == 2 and values.shape[1] == 1:
-        values = values[:, 0]
-    elif values.ndim > 1:
-        raise ValueError("component is required for vector/tensor VTU fields")
 
     metadata = _vtu_array_metadata(mesh, resolved_association, resolved_field)
     effective_label = label or metadata.get("display_name")
     effective_units = units if units is not None else metadata.get("units")
     if effective_units is None and part == "abs":
-        effective_units = _paired_vtu_units(mesh, field, resolved_association)
+        effective_units = _paired_vtu_units(mesh, lookup_field, resolved_association)
     resolved_part = _resolved_vtu_part(resolved_field, field)
     include_part = (
         resolved_part == part
@@ -453,7 +607,7 @@ def _resolve_vtu_scalar(
     elif part == "abs" and not np.iscomplexobj(values):
         try:
             values, resolved_association = _paired_abs_vtu_data(
-                mesh, field, association
+                mesh, lookup_field, association
             )
             include_part = not _vtu_label_has_part(effective_label, part)
         except KeyError:
@@ -464,6 +618,11 @@ def _resolve_vtu_scalar(
         include_part = np.iscomplexobj(
             np.asarray(data[resolved_field])
         ) and not _vtu_label_has_part(effective_label, part)
+    values = _select_vtu_component(
+        values,
+        component=component,
+        metadata=metadata,
+    )
 
     scalar_name = _vtu_scalar_label(
         field,
@@ -528,6 +687,23 @@ def _paired_vtu_units(mesh, field: str, association: str) -> str | None:
     return None
 
 
+def _paired_vtu_metadata(mesh, field: str, association: str) -> Mapping[str, Any]:
+    for suffix in ("_real", "_re", "_imag", "_im"):
+        name = f"{field}{suffix}"
+        try:
+            _, resolved_association = _select_vtu_data(mesh, name, association)
+        except KeyError:
+            continue
+        metadata = _vtu_array_metadata(mesh, resolved_association, name)
+        if metadata:
+            return {
+                key: value
+                for key, value in metadata.items()
+                if key in {"components", "units"}
+            }
+    return {}
+
+
 def _apply_vtu_slice(mesh, slice_: str | Mapping[str, Any] | bool | None):
     if slice_ is None or slice_ is False:
         return mesh
@@ -545,7 +721,7 @@ def _set_vtu_view(plotter, view: str | None) -> None:
         return
     normalized = view.lower()
     if normalized in {"x_depth", "x-depth", "depth", "xy_depth"}:
-        plotter.view_vector((0, 0, 1), viewup=(0, -1, 0), render=False)
+        plotter.view_vector((0, 0, -1), viewup=(0, -1, 0), render=False)
     elif normalized == "xy":
         plotter.view_xy(render=False)
     elif normalized in {"xy_negative", "-xy"}:
@@ -579,6 +755,7 @@ def plot_vtu(
     *,
     component: str | int | None = None,
     part: str = "real",
+    source: int | str | None = None,
     association: str = "auto",
     label: str | None = None,
     units: str | Mapping[str, str] | None = None,
@@ -609,9 +786,18 @@ def plot_vtu(
         Path to a ``.vtu`` file or a PyVista dataset.
     field:
         VTU data array to plot. If omitted, the first available field is used.
+    component:
+        Optional component for vector/tensor fields. Integers use zero-based
+        component indices. String names use VTU component metadata when present
+        and otherwise support FrequenSolve vector/tensor names such as ``"x"``,
+        ``"z"``, ``"xx"``, ``"xz"``, ``"rr"``, ``"rz"``, and ``"tt"``.
     part:
         One of ``"real"``, ``"imag"``, or ``"abs"``. The solver suffix aliases
         ``"re"``, ``"im"``, and ``"mag"`` are accepted.
+    source:
+        Optional one-based source number for solver outputs named like
+        ``strain_1_im`` or ``pressure_2_re``. When supplied,
+        ``field="strain", source=1, part="im"`` resolves to ``strain_1_im``.
     label:
         Optional display name for the field. Part and units are appended.
     units:
@@ -643,10 +829,6 @@ def plot_vtu(
     mesh = source_mesh.copy(deep=True)
     _attach_vtu_metadata(mesh, _vtu_metadata(source_mesh))
 
-    if plotter is None:
-        plotter = pv.Plotter(window_size=window_size)
-    plotter.set_background(background)
-
     fields = _vtu_field_names(mesh, association)
     if not fields:
         raise ValueError("VTU file does not contain point or cell data arrays")
@@ -657,6 +839,7 @@ def plot_vtu(
         association=association,
         component=component,
         part=part,
+        source=source,
         label=label,
         units=units,
     )
@@ -685,6 +868,9 @@ def plot_vtu(
     if show_scalar_bar:
         mesh_kwargs["scalar_bar_args"] = scalar_bar_args
 
+    if plotter is None:
+        plotter = pv.Plotter(window_size=window_size, notebook=True)
+    plotter.set_background(background)
     plotter.add_mesh(display_mesh, **mesh_kwargs)
     _set_vtu_view(plotter, view)
 
@@ -708,7 +894,9 @@ def plot_vtu(
         plotter.show()
     if return_mesh:
         return plotter, display_mesh
-    return plotter
+    else:
+        plotter.close()
+    return
 
 
 def plot_vtu_slice(

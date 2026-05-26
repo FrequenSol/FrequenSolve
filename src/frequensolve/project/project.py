@@ -176,9 +176,73 @@ class Project:
             extras=old.extras,
         )
         new.save()
+        cls._rewrite_copied_input_files(
+            dest,
+            source_project=src_root,
+            target_project=dest,
+        )
         del new, old
 
         return Project.load(dest / f"{name}.json")
+
+    @classmethod
+    def _rewrite_copied_input_files(
+        cls,
+        project_dir: Path,
+        *,
+        source_project: Path,
+        target_project: Path,
+    ) -> None:
+        """Rewrite copied simulation/job JSON files to the new project root."""
+
+        from frequensolve.simulation.jobs import JobLayout
+
+        patterns = ("simulations/*/*.json", "jobs/*/*/*.json")
+        for input_file in (
+            path for pattern in patterns for path in sorted(project_dir.glob(pattern))
+        ):
+            try:
+                payload = json.loads(input_file.read_text())
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Failed to load copied JSON {input_file}: {exc}")
+            if not isinstance(payload, dict):
+                continue
+            if "simulation" in payload and "name" in payload:
+                layout = JobLayout.from_payload(payload, job_file=input_file)
+                target_layout = layout.with_project(target_project)
+                payload = cls._map_project_paths(
+                    payload,
+                    source_project=layout.project,
+                    target_project=target_project,
+                )
+                payload["project_path"] = str(target_project)
+                try:
+                    payload["simulation"] = str(
+                        target_layout.simulation_file.relative_to(target_project)
+                    )
+                    payload["result_path"] = str(
+                        target_layout.result_dir.relative_to(target_project)
+                    )
+                except ValueError:
+                    payload["simulation"] = str(target_layout.simulation_file)
+                    payload["result_path"] = str(target_layout.result_dir)
+                tmp_file = input_file.with_name(f".{input_file.name}.tmp")
+                tmp_file.write_text(
+                    json.dumps(payload, cls=CustomJSONEncoder, indent=3)
+                )
+                tmp_file.replace(input_file)
+                continue
+
+            payload_project = Path(payload.get("project_path", source_project))
+            payload = cls._map_project_paths(
+                payload,
+                source_project=payload_project,
+                target_project=target_project,
+            )
+            payload["project_path"] = str(target_project)
+            tmp_file = input_file.with_name(f".{input_file.name}.tmp")
+            tmp_file.write_text(json.dumps(payload, cls=CustomJSONEncoder, indent=3))
+            tmp_file.replace(input_file)
 
     def _transfer(self, site: BaseSite):
         """Transfer project files to remote site with path substitution."""
@@ -213,17 +277,21 @@ class Project:
                         with open(sim._file, "r") as f:
                             sim_data = json.load(f)
 
-                        if "project_path" in sim_data:
-                            rel_path = Path(sim._file).relative_to(self.path)
-                            temp_file = temp_dir / rel_path
-                            sim_data["project_path"] = str(remote)
-                            with open(temp_file, "w") as f:
-                                json.dump(
-                                    sim_data,
-                                    f,
-                                    cls=CustomJSONEncoder,
-                                    indent=3,
-                                )
+                        rel_path = Path(sim._file).relative_to(self.path)
+                        temp_file = temp_dir / rel_path
+                        sim_data = self._map_project_paths(
+                            sim_data,
+                            source_project=Path(self.path),
+                            target_project=remote,
+                        )
+                        sim_data["project_path"] = str(remote)
+                        with open(temp_file, "w") as f:
+                            json.dump(
+                                sim_data,
+                                f,
+                                cls=CustomJSONEncoder,
+                                indent=3,
+                            )
 
                 for sim in self.simulations:
                     if sim.mesh.file is not None:
@@ -233,6 +301,45 @@ class Project:
                         shutil.copy2(mesh_file, dest)
 
                 site.put(temp_dir, remote)
+
+    @staticmethod
+    def _map_project_paths(
+        value: Any,
+        *,
+        source_project: Path,
+        target_project: Path,
+    ) -> Any:
+        """Replace absolute local project paths in a JSON-like payload."""
+
+        if isinstance(value, Mapping):
+            return {
+                key: Project._map_project_paths(
+                    item,
+                    source_project=source_project,
+                    target_project=target_project,
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                Project._map_project_paths(
+                    item,
+                    source_project=source_project,
+                    target_project=target_project,
+                )
+                for item in value
+            ]
+        if isinstance(value, Path):
+            return Project._map_project_paths(
+                str(value),
+                source_project=source_project,
+                target_project=target_project,
+            )
+        if isinstance(value, str):
+            source = str(source_project)
+            if source and source in value:
+                return value.replace(source, str(target_project))
+        return value
 
     @classmethod
     def load(cls, file: Union[str, Path], auto_migrate: bool = False) -> "Project":
@@ -324,6 +431,222 @@ class Project:
             json.dump(payload, f, cls=CustomJSONEncoder, indent=indent, **json_kwargs)
         tmp_file.replace(file)
         return file
+
+    def _job_files(
+        self,
+        *,
+        simulation: Optional[Union[str, BaseSimulation]] = None,
+    ) -> list[Path]:
+        """Return saved job JSON files in the project jobs tree."""
+
+        root = self.path / "jobs"
+        if not root.exists():
+            return []
+
+        if simulation is None:
+            search_root = root
+            pattern = "*/*/*.json"
+        else:
+            sim_name = (
+                simulation.name
+                if isinstance(simulation, BaseSimulation)
+                else str(simulation)
+            )
+            search_root = root / sim_name
+            pattern = "*/*.json"
+        if not search_root.exists():
+            return []
+        return sorted(
+            path.resolve() for path in search_root.glob(pattern) if path.is_file()
+        )
+
+    @staticmethod
+    def _job_results_exist(job) -> bool:
+        """Return whether a job result directory contains any persisted output."""
+
+        result_path = Path(job._result_path)
+        if not result_path.exists():
+            return False
+
+        try:
+            if job.trace_outputs_exist():
+                return True
+        except Exception:
+            pass
+
+        metadata = job.run_metadata
+        if any(
+            (
+                metadata.manifest,
+                metadata.outputs,
+                metadata.timings,
+                metadata.error,
+                metadata.state,
+            )
+        ):
+            return True
+
+        try:
+            return any(path.is_file() for path in result_path.rglob("*"))
+        except OSError:
+            return False
+
+    def _job_status_row(self, job_file: Path) -> Dict[str, Any]:
+        """Load a saved job and return a compact project listing row."""
+
+        from frequensolve.simulation.jobs import SimulationJob
+
+        rel_file: Union[str, Path]
+        try:
+            rel_file = job_file.relative_to(self.path)
+        except ValueError:
+            rel_file = job_file
+
+        parts = rel_file.parts if isinstance(rel_file, Path) else Path(rel_file).parts
+        fallback_simulation = (
+            parts[1] if len(parts) >= 4 and parts[0] == "jobs" else None
+        )
+        fallback_name = job_file.stem
+        base = {
+            "name": fallback_name,
+            "simulation": fallback_simulation,
+            "job_file": str(job_file),
+            "relative_job_file": str(rel_file),
+            "loaded": False,
+            "results_exist": False,
+            "results_current": False,
+        }
+
+        try:
+            job = SimulationJob.load(job_file, project_path=self.path)
+        except Exception as exc:
+            base["load_error"] = str(exc)
+            return base
+
+        metadata = job.run_metadata
+        state = job.run_state()
+        results_exist = self._job_results_exist(job)
+        try:
+            traces_exist = job.trace_outputs_exist()
+        except Exception:
+            traces_exist = False
+        try:
+            results_current = job.is_run_current()
+        except Exception:
+            results_current = False
+
+        run_status = None
+        if isinstance(state, Mapping):
+            run_status = state.get("status")
+        if run_status is None and isinstance(metadata.manifest, Mapping):
+            exit_status = metadata.manifest.get("exit_status")
+            if isinstance(exit_status, Mapping):
+                run_status = exit_status.get("status")
+            elif exit_status is not None:
+                run_status = exit_status
+
+        task_summary = {}
+        if isinstance(state, Mapping) and isinstance(
+            state.get("task_summary"), Mapping
+        ):
+            task_summary = dict(state["task_summary"])
+        elif isinstance(metadata.manifest, Mapping) and isinstance(
+            metadata.manifest.get("task_summary"), Mapping
+        ):
+            task_summary = dict(metadata.manifest["task_summary"])
+
+        return {
+            **base,
+            "name": job.name,
+            "simulation": job.simulation.name,
+            "job_type": job.__class__.__name__,
+            "workflow": job.workflow,
+            "n_tasks": job.n_tasks,
+            "result_path": str(job._result_path),
+            "loaded": True,
+            "results_exist": results_exist,
+            "trace_outputs_exist": traces_exist,
+            "results_current": results_current,
+            "run_status": run_status or ("current" if results_current else "not_run"),
+            "successful": metadata.successful,
+            "task_summary": task_summary,
+        }
+
+    def list_jobs(
+        self,
+        *,
+        simulation: Optional[Union[str, BaseSimulation]] = None,
+    ) -> list[Dict[str, Any]]:
+        """List saved project jobs and their persisted result status.
+
+        The returned rows are dictionaries with the saved job path, linked
+        simulation, workflow, result path, and two high-level checks:
+        ``results_exist`` reports whether the result directory contains
+        outputs or run metadata, and ``results_current`` reports whether the
+        saved result still matches the current job/simulation definitions.
+        """
+
+        return [
+            self._job_status_row(job_file)
+            for job_file in self._job_files(simulation=simulation)
+        ]
+
+    def job_file(
+        self,
+        name: str,
+        *,
+        simulation: Optional[Union[str, BaseSimulation]] = None,
+    ) -> Path:
+        """Return the saved job JSON path for a project job.
+
+        Jobs are stored under ``jobs/<simulation>/<job>/<job>.json``.  When
+        ``simulation`` is omitted, the job name must be unique across the
+        project jobs tree.
+        """
+
+        job_name = str(name)
+        if simulation is not None:
+            sim_name = (
+                simulation.name
+                if isinstance(simulation, BaseSimulation)
+                else str(simulation)
+            )
+            path = self.path / "jobs" / sim_name / job_name / f"{job_name}.json"
+            if not path.exists():
+                raise FileNotFoundError(f"Job JSON file not found: {path}")
+            return path.resolve()
+
+        root = self.path / "jobs"
+        candidates = sorted(root.glob(f"*/{job_name}/{job_name}.json"))
+        if not candidates:
+            raise FileNotFoundError(
+                f"No job named {job_name!r} found under {root}; pass simulation=..."
+            )
+        if len(candidates) > 1:
+            names = ", ".join(str(path.relative_to(self.path)) for path in candidates)
+            raise ValueError(
+                f"Multiple jobs named {job_name!r} found; pass simulation=... "
+                f"to choose one: {names}"
+            )
+        return candidates[0].resolve()
+
+    def load_job(
+        self,
+        name: Union[str, Path],
+        *,
+        simulation: Optional[Union[str, BaseSimulation]] = None,
+    ):
+        """Load a saved job from this project without submitting it."""
+
+        from frequensolve.simulation.jobs import SimulationJob
+
+        path = Path(name).expanduser()
+        if path.suffix == ".json" or path.exists():
+            return SimulationJob.load(path, project_path=self.path)
+        return SimulationJob.load(
+            self.job_file(str(name), simulation=simulation),
+            project_path=self.path,
+        )
 
     def _logging_payload(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
@@ -427,6 +750,7 @@ class Project:
         rel_path = Path("./simulations")
         for sim in self.simulations:
             sim._project = self
+            sim.project_path = proj_path
             sim._set_path(proj_path, rel_path)
 
     def __repr__(self) -> str:

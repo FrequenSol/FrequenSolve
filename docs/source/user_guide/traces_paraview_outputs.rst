@@ -46,9 +46,8 @@ extra is installed.
 
 Wavelets are applied when time-domain traces are reconstructed. For
 ``RickerWavelet``, the peak is placed at physical time zero while the generated
-signal still includes pre-zero-time samples. The clearer keyword for that
-padding is ``pre_time``; the older ``center`` keyword is retained as an alias.
-If neither is supplied, ``RickerWavelet(f=...)`` uses one period of pre-time,
+signal still includes pre-zero-time samples. If ``center`` is not supplied,
+``RickerWavelet(f=...)`` uses one period of center padding,
 ``1 / f``.
 
 Laplace-domain time sweeps can be requested with

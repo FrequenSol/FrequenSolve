@@ -70,6 +70,37 @@ Use saved job loading for rerun notebooks and analysis notebooks:
    loaded_job = fs.SimulationJob.load(job_file)
    result = site.submit(loaded_job).wait()
 
+For project-owned jobs, you usually do not need to spell out the full path:
+
+.. code-block:: python
+
+   project.list_jobs()
+
+   loaded_job = project.load_job(
+       "time_axisymmetric_borehole",
+       simulation="axisymmetric_borehole",
+   )
+   traces = loaded_job.traces.open(upscale=4)
+
+``project.list_jobs()`` scans the saved ``jobs/<simulation>/<job>/`` tree and
+returns one row per job. The most useful columns for notebook workflows are
+``results_exist`` and ``results_current``. ``results_exist`` reports whether
+the result directory contains traces, solver metadata, or other persisted
+outputs. ``results_current`` reports whether those results still match the
+saved job and simulation definitions, using the job fingerprint and saved file
+hashes when available. Pass ``simulation="name"`` to limit the listing to one
+simulation.
+
+If you already recreated the same job object in Python and it has been saved or
+run before, the object knows its project path:
+
+.. code-block:: python
+
+   saved_job = fs.SimulationJob.load(time_job)
+   # equivalent:
+   saved_job = time_job.load_saved()
+   traces = saved_job.traces.open(upscale=4)
+
 This keeps execution reproducible: the job JSON records the linked simulation,
 frequency list, output requests, and result path that a site will stage.
 

@@ -31,7 +31,6 @@ except ModuleNotFoundError as exc:
 
 from numpy.typing import ArrayLike
 
-from frequensolve.orchestrator.config.local import LocalSiteConfig
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
@@ -39,19 +38,22 @@ from frequensolve.orchestrator.sites.base import (
     RunResult,
     _wait_for_path,
 )
-from frequensolve.orchestrator.sites.dask_logging import configure_dependency_logging
+from frequensolve.orchestrator.sites.local.config import LocalSiteConfig
+from frequensolve.orchestrator.sites.local.dask_logging import (
+    configure_dependency_logging,
+)
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.imaging import ImageDatabase, ImagingJob
 from frequensolve.simulation.jobs import SimulationJob
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["LocalSite"]
+__all__ = ["LocalSite", "run_task"]
 
 PACK_TASK_ID = -3
 SMOOTH_TASK_ID = -2
 MESH_TASK_ID = -1
-DASK_LOGGING_PRELOAD = "frequensolve.orchestrator.sites.dask_logging"
+DASK_LOGGING_PRELOAD = "frequensolve.orchestrator.sites.local.dask_logging"
 
 # TODO: print this when running job
 # print("Dask dashboard:", site.dashboard_url or "not available")
@@ -165,6 +167,73 @@ def _task_summary_message(summary: Mapping[str, int]) -> str:
     if total:
         parts.append(f"{total} total")
     return "tasks: " + ", ".join(parts)
+
+
+def _local_task_state(status: Any) -> str:
+    status = str(status).strip().lower().replace(" ", "_")
+    if status in {
+        "finished",
+        "success",
+        "successful",
+        "succeeded",
+        "complete",
+        "completed",
+        "done",
+        "current",
+        "reused",
+        "skipped",
+    }:
+        return "successful"
+    if status in {
+        "error",
+        "failed",
+        "failure",
+        "cancelled",
+        "canceled",
+        "killed",
+        "timeout",
+    }:
+        return "failed"
+    if status in {"not_run", "not-run", "created"}:
+        return "pending"
+    return "running"
+
+
+def _local_task_status(statuses: Iterable[Any]) -> Dict[str, int]:
+    states = [_local_task_state(status) for status in statuses]
+    total = len(states)
+    failed = sum(state == "failed" for state in states)
+    successful = sum(state == "successful" for state in states)
+    running = sum(state == "running" for state in states)
+    pending = sum(state == "pending" for state in states)
+    return {
+        "successful": successful,
+        "failed": failed,
+        "running": running,
+        "pending": pending,
+        "total": total,
+    }
+
+
+def _local_task_status_message(status: Mapping[str, int]) -> str:
+    return (
+        "tasks: "
+        f"{int(status.get('successful', 0))} successful, "
+        f"{int(status.get('failed', 0))} failed, "
+        f"{int(status.get('running', 0))} running, "
+        f"{int(status.get('pending', 0))} pending, "
+        f"{int(status.get('total', 0))} total"
+    )
+
+
+def _summary_task_status(summary: Mapping[str, int]) -> Dict[str, int]:
+    return {
+        "successful": int(summary.get("succeeded", 0)),
+        "failed": int(summary.get("failed", 0)),
+        "running": 0,
+        "pending": int(summary.get("not_run", 0)),
+        "total": int(summary.get("total", 0)),
+    }
 
 
 def run_task(
@@ -401,6 +470,8 @@ class LocalSite(BaseSite):
             poll_interval=0.5,
             _status_fn=self._poll_local_run,
             _wait_fn=self._wait_local_run,
+            _finalize_fn=self._finalize_local_run,
+            _timeout_fn=self._timeout_local_run,
             _cancel_fn=self._cancel_local_run,
         )
         handle.backend["futures"] = futures
@@ -415,18 +486,45 @@ class LocalSite(BaseSite):
         if not futures:
             return JobStatus(state="skipped", return_code=0, job_id=run.id)
         statuses = [getattr(future, "status", "unknown") for future in futures]
-        if any(status == "error" for status in statuses):
+        states = [_local_task_state(status) for status in statuses]
+        task_status = _local_task_status(statuses)
+        terminal = {"successful", "failed"}
+        if all(state in terminal for state in states) and any(
+            state == "failed" for state in states
+        ):
             return JobStatus(
-                state="failed", return_code=1, job_id=run.id, raw={"statuses": statuses}
+                state="failed",
+                return_code=1,
+                job_id=run.id,
+                message=_local_task_status_message(task_status),
+                raw={
+                    "statuses": statuses,
+                    "task_states": states,
+                    "task_status": task_status,
+                },
             )
-        if all(status == "finished" for status in statuses):
+        if all(state == "successful" for state in states):
             return JobStatus(
                 state="completed",
                 return_code=0,
                 job_id=run.id,
-                raw={"statuses": statuses},
+                message=_local_task_status_message(task_status),
+                raw={
+                    "statuses": statuses,
+                    "task_states": states,
+                    "task_status": task_status,
+                },
             )
-        return JobStatus(state="running", job_id=run.id, raw={"statuses": statuses})
+        return JobStatus(
+            state="running",
+            job_id=run.id,
+            message=_local_task_status_message(task_status),
+            raw={
+                "statuses": statuses,
+                "task_states": states,
+                "task_status": task_status,
+            },
+        )
 
     def _wait_local_run(
         self,
@@ -443,33 +541,11 @@ class LocalSite(BaseSite):
             self._emit_status(status)
             return run._make_result(status)
 
-        pbar = None
         smooth_future = None
         pack_future = None
         all_futures = list(futures)
 
         try:
-            self._emit_status(JobStatus(state="running", job_id=run.id))
-            if self._is_notebook:
-                from tqdm.notebook import tqdm
-            else:
-                from tqdm import tqdm
-
-            pbar = tqdm(
-                total=len(futures),
-                desc=f"Running: {run.job.name}",
-                bar_format=(
-                    "{desc} {n_fmt}/{total_fmt} |{bar}| Elapsed time: {elapsed}s"
-                ),
-                colour="#4ec9b0",
-            )
-
-            def update_progress(future):
-                pbar.update(1)
-
-            for future in futures:
-                future.add_done_callback(update_progress)
-
             wait_result = wait(futures, timeout=timeout)
             not_done = list(getattr(wait_result, "not_done", []))
             if not_done:
@@ -482,7 +558,6 @@ class LocalSite(BaseSite):
                     raw={"unfinished": len(not_done)},
                 )
                 run.job.write_run_state(status="timeout")
-                self._emit_status(status)
                 return run._make_result(status)
 
             task_results = [future.result() for future in futures]
@@ -520,13 +595,14 @@ class LocalSite(BaseSite):
                     run.job.write_run_state(
                         status="failed", tasks=state_tasks, smooth=smooth_result
                     )
-                    self._emit_status(status)
                     return run._make_result(status)
 
             pack_result = None
             if run.backend.get("pack_after_tasks", False):
                 if self._dask_client is None:
                     raise RuntimeError("Cannot run solver packing task without Dask")
+                if hasattr(run.job, "remove_packed_trace_products"):
+                    run.job.remove_packed_trace_products()
                 pack_future = self._dask_client.submit(
                     run_task,
                     run.job._file,
@@ -542,6 +618,42 @@ class LocalSite(BaseSite):
                 all_futures.append(pack_future)
                 pack_result = pack_future.result()
                 if pack_result.get("status") != "success":
+                    outputs_exist = False
+                    if hasattr(run.job, "trace_outputs_exist"):
+                        try:
+                            outputs_exist = bool(run.job.trace_outputs_exist())
+                        except Exception:
+                            outputs_exist = False
+                    if outputs_exist and not task_errors:
+                        run.job.write_run_state(
+                            status="completed",
+                            tasks=state_tasks,
+                            pack=pack_result,
+                            pack_error=pack_result,
+                        )
+                        task_summary = _job_task_summary(run.job, state_tasks)
+                        message = _task_summary_message(task_summary)
+                        pack_error = pack_result.get("error") or pack_result.get(
+                            "stderr"
+                        )
+                        if pack_error:
+                            message = f"{message}; packing failed: {pack_error}"
+                        else:
+                            message = f"{message}; packing failed"
+                        status = JobStatus(
+                            state="completed",
+                            return_code=0,
+                            job_id=run.id,
+                            message=message,
+                            raw={
+                                "tasks": task_results,
+                                "task_summary": task_summary,
+                                "task_status": _summary_task_status(task_summary),
+                                "pack": pack_result,
+                                "pack_error": pack_result,
+                            },
+                        )
+                        return run._make_result(status)
                     status = JobStatus(
                         state="failed",
                         return_code=1,
@@ -552,7 +664,6 @@ class LocalSite(BaseSite):
                     run.job.write_run_state(
                         status="failed", tasks=state_tasks, pack=pack_result
                     )
-                    self._emit_status(status)
                     return run._make_result(status)
 
             run.job.write_run_state(
@@ -570,11 +681,11 @@ class LocalSite(BaseSite):
                 raw={
                     "tasks": task_results,
                     "task_summary": task_summary,
+                    "task_status": _summary_task_status(task_summary),
                     **({"errors": task_errors} if task_errors else {}),
                     **({"pack": pack_result} if pack_result is not None else {}),
                 },
             )
-            self._emit_status(status)
             return run._make_result(status)
         except Exception as exc:
             self._cancel_futures(all_futures)
@@ -588,14 +699,26 @@ class LocalSite(BaseSite):
                 job_id=run.id,
                 message=str(exc),
             )
-            self._emit_status(status)
             return run._make_result(status)
         finally:
-            if pbar is not None:
-                pbar.close()
             self._release_futures(all_futures)
             if run.backend.get("shutdown_on_completion", self.shutdown_on_completion):
                 self.close(wait=True, retire=True)
+
+    def _finalize_local_run(self, run: RunHandle, status: JobStatus) -> RunResult:
+        return self._wait_local_run(run, timeout=0, poll_interval=0)
+
+    def _timeout_local_run(self, run: RunHandle, status: JobStatus) -> RunResult:
+        futures = run.backend.get("futures", [])
+        self._cancel_futures(futures)
+        try:
+            run.job.write_run_state(status="timeout", error=status.message)
+        except Exception:
+            logger.debug("Could not write timed-out run state", exc_info=True)
+        self._release_futures(futures)
+        if run.backend.get("shutdown_on_completion", self.shutdown_on_completion):
+            self.close(wait=False, retire=False)
+        return run._make_result(status)
 
     def _cancel_local_run(self, run: RunHandle) -> None:
         self._cancel_futures(run.backend.get("futures", []))
@@ -721,6 +844,23 @@ class LocalSite(BaseSite):
                 db = TraceDataset.from_job(j, upscale, project_path=project_path)
                 db_map[j.name] = db
             return db_map
+
+    def fetch_wavefields(
+        self,
+        job: Union[SimulationJob, List[SimulationJob]],
+        upscale: int = 1,
+        path: Optional[Union[str, Path]] = None,
+    ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
+        project_path = Path(path).resolve() if path is not None else None
+        if isinstance(job, SimulationJob):
+            return job.wavefields.open(upscale=upscale, project_path=project_path)
+        db_map = {}
+        for j in job:
+            db_map[j.name] = j.wavefields.open(
+                upscale=upscale,
+                project_path=project_path,
+            )
+        return db_map
 
     def fetch_image(
         self,

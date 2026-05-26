@@ -78,31 +78,33 @@ class BlackmanWindow(WindowFunction):
 
     T: float
 
-    def get(self, times, n_dummy: int) -> np.ndarray:
-        """Generate a normalized Blackman taper of length n, embedded at center of n points.
+    def get(self, times, n: int) -> np.ndarray:
+        """Generate a zero-phase Blackman taper matching the signal length.
 
         Returns:
             np.ndarray: Taper array in [0,1].
         """
-        nt = len(times)
-        if nt % 2 == 0:
-            n = 2 * (nt - 2) + 1
-        else:
-            n = 2 * (nt - 1) + 1
-        dt = (times[-1] - times[0]) / (n - 1)
-        N = int(self.T / dt) + 1
+        n = int(n)
+        if n <= 0:
+            return np.zeros(0)
+        if self.T <= 0:
+            return np.zeros(n)
 
+        zero_phase = _zero_phase_times(times)
+        if len(zero_phase) != n:
+            zero_phase = _zero_phase_times(np.asarray(times)[:n])
+
+        half_width = 0.5 * self.T
         vals = np.zeros(n)
-        i1 = n // 2 - N // 2
-        i2 = i1 + N
-        i1 = max(0, i1)
-        i2 = min(n, i2)
-
-        vals[i1:i2] = 1.0 - (
-            0.42
-            + 0.5 * np.cos(2 * np.pi * np.linspace(0, 1, N))
-            + 0.08 * np.cos(4 * np.pi * np.linspace(0, 1, N))
-        )
+        mask = np.abs(zero_phase) <= half_width
+        if np.any(mask):
+            u = (zero_phase[mask] + half_width) / self.T
+            vals[mask] = 1.0 - (
+                0.42 + 0.5 * np.cos(2 * np.pi * u) + 0.08 * np.cos(4 * np.pi * u)
+            )
+            peak = np.max(vals)
+            if peak > 0:
+                vals /= peak
         return vals
 
     def plot(self, times, **kwargs) -> None:
@@ -116,12 +118,8 @@ class BlackmanWindow(WindowFunction):
                 dependencies=("matplotlib",),
                 error=exc,
             ) from exc
-
         plt.plot(times, self.get(times, len(times)), **kwargs)
         plt.show()
-
-
-# TODO: make ability to define custom wavelets (including from file)
 
 
 def _zero_phase_times(times: np.ndarray) -> np.ndarray:
@@ -173,7 +171,7 @@ def _trapezoid_spectrum(
 # ----------------------------------------------------------------------
 # Wavelet
 # ----------------------------------------------------------------------
-@dataclass
+@dataclass(init=False)
 class Wavelet:
     """Data container for wavelets in time and frequency domains.
 
@@ -183,15 +181,51 @@ class Wavelet:
     """
 
     f: Union[float, List[float]]
-    center: float = 0.0
     window: Optional[Tuple[Literal["gaussian", "blackman"], float]] = None
-    causal: bool = False
     f_max: float = field(init=False)
-    scale: float = 1.0
+    _center: float = field(default=0.0, init=False, repr=False)
+    _causal: bool = field(default=False, init=False, repr=False)
+    _scale: float = field(default=1.0, init=False, repr=False)
     _times: np.ndarray = field(default=None, init=False)
     _signal: np.ndarray = field(default=None, init=False)
     _frequencies: np.ndarray = field(default=None, init=False)
     _spectrum: np.ndarray = field(default=None, init=False)
+
+    def __init__(
+        self,
+        f: Union[float, List[float]],
+        center: float = 0.0,
+        window: Optional[Tuple[Literal["gaussian", "blackman"], float]] = None,
+        causal: bool = False,
+        scale: float = 1.0,
+    ):
+        self.f = f
+        self._center = float(center)
+        self.window = window
+        self._causal = bool(causal)
+        self._scale = float(scale)
+        self._times = None
+        self._signal = None
+        self._frequencies = None
+        self._spectrum = None
+
+    @property
+    def center(self) -> float:
+        """Wavelet center time. Use ``recenter`` to update cached samples."""
+
+        return self._center
+
+    @property
+    def causal(self) -> bool:
+        """Whether this wavelet is generated in causal form."""
+
+        return self._causal
+
+    @property
+    def scale(self) -> float:
+        """Amplitude scale applied during wavelet generation."""
+
+        return self._scale
 
     @property
     def times(self) -> np.ndarray:
@@ -205,25 +239,41 @@ class Wavelet:
             times: The new time samples.
         """
 
-        if self._times is None:
-            self._times = times
-        else:
-            if np.array_equal(times, self._times):
-                return
-            else:
-                self._times = times
-                self._spectrum = None
-                self._frequencies = None
+        times = np.asarray(times)
+        if self._times is not None and np.array_equal(times, self._times):
+            return
+        self._generate_for_times(times, invalidate_frequencies=True)
 
+    def _generate_for_times(
+        self, times: np.ndarray, *, invalidate_frequencies: bool
+    ) -> None:
+        self._times = np.asarray(times)
+        self._spectrum = None
+        if invalidate_frequencies:
+            self._frequencies = None
         taper = Wavelet._get_window_callable(self._times, self.window)
         offset = (
-            0 if self.causal else np.searchsorted(self._times, self.center, side="left")
+            0
+            if self._causal
+            else np.searchsorted(self._times, self._center, side="left")
         )
         self._generate(self._times, taper)
 
         # if self.causal:
         #     self._signal = Wavelet._make_causal(self.signal)
         self._signal = np.roll(self._signal, shift=offset)
+
+    def recenter(self, center: float, times: Optional[np.ndarray] = None) -> np.ndarray:
+        """Set the center time and regenerate cached time/frequency samples."""
+
+        self._center = float(center)
+        if times is not None:
+            self._generate_for_times(np.asarray(times), invalidate_frequencies=True)
+        elif self._times is not None:
+            self._generate_for_times(self._times, invalidate_frequencies=False)
+        else:
+            self._evaluate_initial()
+        return self.signal
 
     @property
     def signal(self) -> np.ndarray:
@@ -368,7 +418,6 @@ class Wavelet:
 
         # Plot time-domain
         plt.figure(figsize=figsize)
-        # plt.title("Signal")
         times = self.times
         signal = self.signal
         if signal.shape != times.shape:
@@ -391,7 +440,6 @@ class Wavelet:
         plt.figure(figsize=figsize)
         if y_scale == "dB":
             normalized_spectrum = np.abs(self.spectrum) / np.max(np.abs(self.spectrum))
-            # plt.title("Spectrum")
             plt.plot(
                 self.frequencies[:nF], 20 * np.log10(normalized_spectrum[:nF]), **kwargs
             )
@@ -406,16 +454,6 @@ class Wavelet:
             plt.xlabel("Frequency [Hz]")
             plt.ylabel("Amplitude")
             plt.grid(True, alpha=0.3)
-
-        # # Set major x ticks
-        # major_xticks = plt.xticks()[0]
-        # if len(major_xticks) > 1:
-        #     tick_spacing = major_xticks[1] - major_xticks[0]
-        #     minor_xticks = np.arange(major_xticks[0], major_xticks[-1] + tick_spacing/2, tick_spacing/2)
-        #     plt.xticks(minor_xticks[::2])
-        #     plt.xticks(minor_xticks, minor=True)
-        # else:
-        #     plt.xticks(minor=True)
 
         plt.grid(True, which="minor", linestyle=":", alpha=0.3)
         if save_freq:
@@ -434,11 +472,8 @@ class RickerWavelet(Wavelet):
 
     Attributes:
         f (float): Central frequency of the Ricker wavelet.
-        center (float): Pre-zero-time padding used to place the wavelet peak at
-            physical time zero. Retained for compatibility; ``pre_time`` is the
-            clearer keyword.
-        pre_time (float): Alias for ``center``. Defaults to one period,
-            ``1 / f``.
+        center (float): Time shift used to place the wavelet peak in sampled
+            traces. Defaults to one period, ``1 / f``.
         window (Optional[Union[WindowFunction,Tuple[Literal["gaussian", "blackman"], float]]]):
             Window function to apply to the wavelet.
         causal (bool): Whether to make the wavelet causal.
@@ -455,13 +490,7 @@ class RickerWavelet(Wavelet):
         ] = None,
         causal: bool = False,
         scale: float = 1.0,
-        pre_time: Optional[float] = None,
     ):
-        if pre_time is not None:
-            if center is not None:
-                raise ValueError("Specify only one of center or pre_time")
-            center = pre_time
-
         f0 = f[0] if isinstance(f, (list, tuple, np.ndarray)) else f
         f0 = float(f0)
         if f0 <= 0.0:
@@ -477,16 +506,6 @@ class RickerWavelet(Wavelet):
             scale=scale,
         )
         self.__post_init__()
-
-    @property
-    def pre_time(self) -> float:
-        """Alias for ``center`` describing the negative-time padding."""
-
-        return self.center
-
-    @pre_time.setter
-    def pre_time(self, value: float) -> None:
-        self.center = float(value)
 
     def __post_init__(self):
         self.f_max = 3 * self.f
@@ -504,6 +523,25 @@ class RickerWavelet(Wavelet):
 @dataclass
 class OrmsbyWavelet(Wavelet):
     """Ormsby wavelet"""
+
+    def __init__(
+        self,
+        f: Union[List[float], Tuple[float, float, float, float]],
+        center: float = 0.0,
+        window: Optional[
+            Union[WindowFunction, Tuple[Literal["gaussian", "blackman"], float]]
+        ] = None,
+        causal: bool = False,
+        scale: float = 1.0,
+    ):
+        super().__init__(
+            f=f,
+            center=center,
+            window=window,
+            causal=causal,
+            scale=scale,
+        )
+        self.__post_init__()
 
     def __post_init__(self):
         """Post-initialization hook."""
@@ -530,6 +568,25 @@ class OrmsbyWavelet(Wavelet):
 @dataclass
 class KlauderWavelet(Wavelet):
     """Klauder wavelet"""
+
+    def __init__(
+        self,
+        f: Union[List[float], Tuple[float, float]],
+        center: float = 0.0,
+        window: Optional[
+            Union[WindowFunction, Tuple[Literal["gaussian", "blackman"], float]]
+        ] = None,
+        causal: bool = False,
+        scale: float = 1.0,
+    ):
+        super().__init__(
+            f=f,
+            center=center,
+            window=window,
+            causal=causal,
+            scale=scale,
+        )
+        self.__post_init__()
 
     def __post_init__(self):
         """Post-initialization hook."""

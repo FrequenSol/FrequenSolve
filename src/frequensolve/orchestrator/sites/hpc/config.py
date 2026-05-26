@@ -1,7 +1,7 @@
 import os
 from dataclasses import dataclass, field
 
-from frequensolve.orchestrator.config.base import BaseSiteConfig
+from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.util.printing import print_warn
 
 __all__ = [

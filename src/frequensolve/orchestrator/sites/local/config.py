@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from frequensolve.orchestrator.config.base import BaseSiteConfig
+from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.util.system_info import SystemInfo
 
 __all__ = ["LocalSiteConfig"]

@@ -36,7 +36,6 @@ class Acquisition(ExtraFieldsMixin):
     source_groups: NamedList = field(default_factory=NamedList)
     receiver_groups: NamedList = field(default_factory=NamedList)
     surveys: NamedList = field(default_factory=NamedList)
-    max_batch: Optional[int] = None
     extra: Dict = field(default_factory=dict)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
@@ -57,7 +56,6 @@ class Acquisition(ExtraFieldsMixin):
             surveys=NamedList(
                 [SparseSurvey.from_fs(survey) for survey in data.pop("surveys", [])]
             ),
-            max_batch=data.pop("max_batch", None),
             extra=data,
         )
 
@@ -81,7 +79,6 @@ class Acquisition(ExtraFieldsMixin):
         survey_component_maps = self._survey_component_maps()
 
         payload = {
-            **({"max_batch": self.max_batch} if self.max_batch is not None else {}),
             "source_groups": [group.to_fs(ctx) for group in self.source_groups],
             "receiver_groups": [group.to_fs(ctx) for group in self.receiver_groups],
         }
@@ -131,8 +128,7 @@ class Acquisition(ExtraFieldsMixin):
         direction: Optional[np.ndarray] = None,
         domain: Optional[int] = None,
     ):
-        if isinstance(coords, list):
-            coords = np.array(coords)
+        coords = np.asarray(coords, dtype=np.float64)
         weights = np.asarray(weights, dtype=float)
         if direction is not None:
             direction = np.asarray(direction, dtype=float)
@@ -181,15 +177,15 @@ class Acquisition(ExtraFieldsMixin):
                 "add_receiver_group frame is no longer supported; receiver coordinates are physical"
             )
 
-        self.receiver_groups.append(
-            ReceiverGroup(
-                name=name,
-                device=device,
-                coordinates=coords,
-                domain=domain,
-                **kwargs,
-            )
+        group = ReceiverGroup(
+            name=name,
+            device=device,
+            coordinates=coords,
+            domain=domain,
+            **kwargs,
         )
+        self.receiver_groups.append(group)
+        return group
 
     def add_survey(self, survey: SparseSurvey) -> SparseSurvey:
         """Add or replace a named sparse survey layout."""

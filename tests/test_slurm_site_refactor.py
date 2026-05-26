@@ -1,11 +1,15 @@
 import asyncio
+import json
 import logging
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from frequensolve.mesh.mesh_generators import HexMeshGenerator
+from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.orchestrator.pool import PoolStatus
-from frequensolve.orchestrator.sites import hpc
+from frequensolve.orchestrator.progress import status_table_html, wait_all
 from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.hpc import (
     SlurmLoginCredentials,
@@ -15,11 +19,15 @@ from frequensolve.orchestrator.sites.hpc import (
     _normalize_slurm_state,
     _parse_sbatch_job_id,
 )
-from frequensolve.orchestrator.sites.stampede3 import (
+from frequensolve.orchestrator.sites.hpc import site as hpc
+from frequensolve.orchestrator.sites.hpc.stampede3 import (
     Stampede3Config,
     Stampede3Site,
     TACCLoginCredentials,
 )
+from frequensolve.project.project import Project
+from frequensolve.simulation.jobs import FrequencyDomainJob
+from frequensolve.simulation.outputs import WavefieldOutput
 
 
 class DummyStream:
@@ -218,6 +226,43 @@ def test_run_handle_wait_and_await():
     assert async_result.status.state == "completed"
 
 
+def test_run_handle_watch_finalizes_terminal_status():
+    site = DummyBaseSite()
+    job = DummyJob()
+    states = iter(["running", "completed"])
+    finalized = []
+
+    def poll(run):
+        return JobStatus(state=next(states), return_code=0, job_id="watch")
+
+    def finalize(run, status):
+        finalized.append(status.state)
+        return run._make_result(
+            JobStatus(
+                state="completed",
+                return_code=0,
+                job_id=status.job_id,
+                message="packed",
+            )
+        )
+
+    run = RunHandle(
+        site=site,
+        job=job,
+        id="watch",
+        poll_interval=0.0,
+        _status_fn=poll,
+        _finalize_fn=finalize,
+    )
+
+    statuses = list(run.watch(timeout=1.0, poll_interval=0.0))
+
+    assert [status.state for status in statuses] == ["running", "completed"]
+    assert finalized == ["completed"]
+    assert statuses[-1].message == "packed"
+    assert run.wait().status.message == "packed"
+
+
 def test_run_handle_wait_prints_status_output_by_default(capsys):
     site = DummyBaseSite(verbose=False)
     run = site.submit(DummyJob())
@@ -362,6 +407,683 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
     assert seen["config"].duration == "00-00:45:00"
 
 
+def test_job_save_for_remote_writes_remote_absolute_result_path(tmp_path):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    remote_project = Path("/scratch/user/project/run")
+
+    local_job, remote_job = job.save_for_remote("Dummy", remote_project)
+    payload = json.loads(Path(local_job).read_text())
+    local_payload = json.loads(job.job_file.read_text())
+
+    assert remote_job == remote_project / "jobs" / "simple" / "freq" / "freq.json"
+    assert local_job != job.job_file
+    assert local_payload["project_path"] == str(project.path)
+    assert payload["project_path"] == str(remote_project)
+    assert payload["simulation"] == str(
+        remote_project / "simulations" / "simple" / "simple.json"
+    )
+    assert payload["result_path"] == str(
+        remote_project / "jobs" / "simple" / "freq" / "results"
+    )
+    assert str(tmp_path) not in json.dumps(payload)
+
+
+def test_project_transfer_keeps_mesh_paths_remote_safe(tmp_path):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="axisym", physics="acoustic", dimension=2)
+    mesh_file = project.path / "simulations" / "axisym" / "mesh.gmp"
+    mesh_file.parent.mkdir(parents=True, exist_ok=True)
+    mesh_file.write_text("mesh")
+    sim.mesh = MeshManager(file=mesh_file, format="Gmsh")
+    remote = Path("/scratch/user/copied_project")
+    captured = {}
+
+    class CaptureSite:
+        work_dir = remote
+
+        def put(self, local, target):
+            local = Path(local)
+            if local.is_dir():
+                sim_json = local / "simulations" / "axisym" / "axisym.json"
+                captured["simulation"] = json.loads(sim_json.read_text())
+                captured["mesh_exists"] = (
+                    local / "simulations" / "axisym" / "mesh.gmp"
+                ).exists()
+
+    sim_payload = json.loads(sim.save().read_text())
+
+    assert sim_payload["Mesh"]["file"] == "simulations/axisym/mesh.gmp"
+
+    project._transfer(CaptureSite())
+
+    assert captured["mesh_exists"] is True
+    assert captured["simulation"]["project_path"] == str(remote)
+    assert captured["simulation"]["Mesh"]["file"] == "simulations/axisym/mesh.gmp"
+    assert str(tmp_path) not in json.dumps(captured["simulation"])
+
+
+def test_slurm_job_transfer_overwrites_remote_simulation_and_mesh(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="axisym", physics="acoustic", dimension=2)
+    mesh_file = project.path / "simulations" / "axisym" / "mesh.gmp"
+    mesh_file.parent.mkdir(parents=True, exist_ok=True)
+    mesh_file.write_text("mesh")
+    sim.mesh = MeshManager(file=mesh_file, format="Gmsh")
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    puts = []
+    captured = {}
+
+    def fake_put(local, remote):
+        local = Path(local)
+        remote = Path(remote)
+        puts.append((local, remote))
+        if remote == site.work_dir / "simulations" / "axisym" / "axisym.json":
+            captured["simulation"] = json.loads(local.read_text())
+
+    monkeypatch.setattr(site, "put", fake_put)
+    monkeypatch.setattr(site, "run_login", lambda cmd: "")
+
+    site._transfer_SLURM_job("script", job)
+
+    remote_paths = {remote for _local, remote in puts}
+    assert site.work_dir / "simulations" / "axisym" / "axisym.json" in remote_paths
+    assert site.work_dir / "simulations" / "axisym" / "mesh.gmp" in remote_paths
+    assert site.work_dir / "jobs" / "axisym" / "freq" / "freq.json" in remote_paths
+    assert captured["simulation"]["project_path"] == str(site.work_dir)
+    assert captured["simulation"]["Mesh"]["file"] == "simulations/axisym/mesh.gmp"
+    assert str(tmp_path) not in json.dumps(captured["simulation"])
+
+
+def test_slurm_batch_maps_local_project_run_path_to_remote(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    seen = {}
+
+    def fake_script(**kwargs):
+        seen["script_kwargs"] = kwargs
+        return "script"
+
+    monkeypatch.setattr(site, "_sweep_SLURM_script", fake_script)
+    monkeypatch.setattr(
+        site,
+        "_transfer_SLURM_job",
+        lambda script, job: (
+            Path("/scratch/user/project/run/sweep.slurm"),
+            Path("job"),
+        ),
+    )
+
+    def fake_submit_sbatch(cmd):
+        seen["cmd"] = cmd
+        return "88"
+
+    monkeypatch.setattr(site, "_submit_sbatch", fake_submit_sbatch)
+    monkeypatch.setattr(
+        site, "_store_remote_run_records", lambda job, record=None: None
+    )
+
+    site._submit_slurm_batch(
+        job,
+        SlurmRunConfig(queue="debug", run_path=project.path),
+    )
+
+    assert seen["script_kwargs"]["run_path"] == site.work_dir
+    assert seen["cmd"].startswith(f"mkdir -p {site.work_dir}/jobs/batch")
+    record = job.latest_run(site="Dummy")
+    assert record is not None
+    assert record.scheduler_id == "88"
+    assert record.job_file == site.work_dir / "jobs" / "simple" / "freq" / "freq.json"
+
+
+def test_slurm_submit_ignores_local_current_without_remote_record(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    monkeypatch.setattr(job, "is_run_current", lambda: True)
+    monkeypatch.setattr(site, "_sync_project", lambda project: None)
+    monkeypatch.setattr(site, "_submit_slurm_batch", lambda job, config, **kwargs: "99")
+
+    run = site.submit(job)
+
+    assert run.id == "99"
+
+
+def test_slurm_submit_reattaches_matching_inflight_run(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+    job.record_site_run(
+        site="Dummy",
+        work_dir=site.work_dir,
+        scheduler_id="77",
+        status="running",
+    )
+
+    monkeypatch.setattr(site, "update_status", lambda job_id: "running")
+    monkeypatch.setattr(site, "_read_scheduler_status", lambda run: None)
+    monkeypatch.setattr(
+        site,
+        "_sync_project",
+        lambda project: (_ for _ in ()).throw(AssertionError("synced project")),
+    )
+    monkeypatch.setattr(
+        site,
+        "_submit_slurm_batch",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("reran job")),
+    )
+
+    run = site.submit(job)
+
+    assert run.id == "77"
+    assert run.mode == "batch"
+    assert run.backend["reattached"] is True
+    assert run.status().state == "running"
+    assert job.latest_run(site="Dummy").status == "running"
+
+
+def test_slurm_submit_reattach_compares_numpy_payload_values(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0, 20.0])
+    job.save()
+    record = job.record_site_run(
+        site="Dummy",
+        work_dir=site.work_dir,
+        scheduler_id="77",
+        status="running",
+    )
+    payload = dict(record.fingerprint_payload)
+    payload["job"] = dict(payload["job"])
+    payload["job"]["f_list"] = np.asarray(payload["job"]["f_list"])
+    job.write_run_record(record.with_updates(fingerprint_payload=payload))
+
+    monkeypatch.setattr(site, "update_status", lambda job_id: "running")
+    monkeypatch.setattr(site, "_read_scheduler_status", lambda run: None)
+    monkeypatch.setattr(
+        site,
+        "_sync_project",
+        lambda project: (_ for _ in ()).throw(AssertionError("synced project")),
+    )
+    monkeypatch.setattr(
+        site,
+        "_submit_slurm_batch",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("reran job")),
+    )
+
+    run = site.submit(job)
+
+    assert run.id == "77"
+    assert run.backend["reattached"] is True
+
+
+def test_slurm_submit_does_not_reattach_mismatched_inflight_run(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+    job.record_site_run(
+        site="Dummy",
+        work_dir=site.work_dir,
+        scheduler_id="77",
+        status="running",
+    )
+    job.f_list = [20.0]
+    seen = {"update_status": 0}
+
+    def fake_update_status(job_id):
+        seen["update_status"] += 1
+        return "running"
+
+    monkeypatch.setattr(site, "update_status", fake_update_status)
+    monkeypatch.setattr(site, "_sync_project", lambda project: None)
+    monkeypatch.setattr(site, "_submit_slurm_batch", lambda *args, **kwargs: "88")
+
+    run = site.submit(job)
+
+    assert run.id == "88"
+    assert run.backend.get("reattached") is None
+    assert seen["update_status"] == 0
+
+
+def test_slurm_submit_does_not_reattach_mismatched_simulation_hash(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+    record = job.record_site_run(
+        site="Dummy",
+        work_dir=site.work_dir,
+        scheduler_id="77",
+        status="running",
+    )
+    payload = dict(record.fingerprint_payload)
+    payload["simulation"] = {"hash": "sha256:not-the-current-simulation"}
+    job.write_run_record(record.with_updates(fingerprint_payload=payload))
+    seen = {"update_status": 0}
+
+    def fake_update_status(job_id):
+        seen["update_status"] += 1
+        return "running"
+
+    monkeypatch.setattr(site, "update_status", fake_update_status)
+    monkeypatch.setattr(site, "_sync_project", lambda project: None)
+    monkeypatch.setattr(site, "_submit_slurm_batch", lambda *args, **kwargs: "88")
+
+    run = site.submit(job)
+
+    assert run.id == "88"
+    assert run.backend.get("reattached") is None
+    assert seen["update_status"] == 0
+
+
+def test_slurm_submit_skips_when_recorded_remote_run_is_current(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+    job.record_site_run(
+        site="Dummy",
+        work_dir=site.work_dir,
+        scheduler_id="77",
+        status="complete",
+    )
+    seen = {}
+
+    def fake_run_login(cmd):
+        if "find " in cmd:
+            return "/scratch/user/project/run/jobs/simple/freq/logs/task_1.log"
+        return json.dumps(
+            {"task_summary": {"total": 1, "complete": 1, "succeeded": 1, "failed": 0}}
+        )
+
+    monkeypatch.setattr(site, "run_login", fake_run_login)
+    monkeypatch.setattr(
+        site,
+        "_submit_slurm_batch",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("reran job")),
+    )
+    monkeypatch.setattr(
+        job,
+        "write_run_state",
+        lambda status="completed", **extra: seen.setdefault("status", status),
+    )
+
+    run = site.submit(job)
+
+    assert run.mode == "skipped"
+    assert seen["status"] == "skipped"
+
+
+def test_slurm_submit_does_not_skip_submitted_record(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+    job.record_site_run(site="Dummy", work_dir=site.work_dir, scheduler_id="77")
+
+    monkeypatch.setattr(site, "run_login", lambda cmd: "")
+    monkeypatch.setattr(site, "_sync_project", lambda project: None)
+    monkeypatch.setattr(site, "_submit_slurm_batch", lambda *args, **kwargs: "88")
+
+    run = site.submit(job)
+
+    assert run.id == "88"
+    assert run.mode == "batch"
+
+
+def test_slurm_submit_does_not_skip_manifest_without_task_summary(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+    job.record_site_run(
+        site="Dummy",
+        work_dir=site.work_dir,
+        scheduler_id="77",
+        status="complete",
+    )
+
+    def fake_run_login(cmd):
+        if "find " in cmd:
+            return "/scratch/user/project/run/jobs/simple/freq/logs/task_1.log"
+        return json.dumps({"exit_status": {"code": 0, "status": "success"}})
+
+    monkeypatch.setattr(site, "run_login", fake_run_login)
+    monkeypatch.setattr(site, "_sync_project", lambda project: None)
+    monkeypatch.setattr(site, "_submit_slurm_batch", lambda *args, **kwargs: "88")
+
+    run = site.submit(job)
+
+    assert run.id == "88"
+    assert run.mode == "batch"
+
+
+def test_slurm_submit_does_not_skip_without_remote_logs(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+    job.record_site_run(
+        site="Dummy",
+        work_dir=site.work_dir,
+        scheduler_id="77",
+        status="complete",
+    )
+
+    def fake_run_login(cmd):
+        if "find " in cmd:
+            return ""
+        return json.dumps(
+            {"task_summary": {"total": 1, "complete": 1, "succeeded": 1, "failed": 0}}
+        )
+
+    monkeypatch.setattr(site, "run_login", fake_run_login)
+    monkeypatch.setattr(site, "_sync_project", lambda project: None)
+    monkeypatch.setattr(site, "_submit_slurm_batch", lambda *args, **kwargs: "88")
+
+    run = site.submit(job)
+
+    assert run.id == "88"
+    assert run.mode == "batch"
+
+
+def test_slurm_wait_all_polls_batch_runs_with_combined_status(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job_a = FrequencyDomainJob(name="freq_a", simulation=sim, f_list=[10.0])
+    job_b = FrequencyDomainJob(name="freq_b", simulation=sim, f_list=[20.0])
+    run_a = site.handle(job_a, job_id="101", mode="batch")
+    run_b = site.handle(job_b, job_id="102", mode="batch")
+    calls = {}
+
+    def fake_update_status(job_id):
+        calls[job_id] = calls.get(job_id, 0) + 1
+        return "running" if calls[job_id] == 1 else "complete"
+
+    monkeypatch.setattr(site, "update_status", fake_update_status)
+    monkeypatch.setattr(
+        site,
+        "_read_scheduler_status",
+        lambda run: {
+            "successful": 1 if calls.get(str(run.id), 0) > 1 else 0,
+            "failed": 0,
+            "running": 0 if calls.get(str(run.id), 0) > 1 else 1,
+            "pending": 0,
+            "total": 1,
+        },
+    )
+    results = site.wait([run_a, run_b], poll_interval=0.0, timeout=1.0)
+
+    assert [result.job.name for result in results] == ["freq_a", "freq_b"]
+    assert [result.status.state for result in results] == ["complete", "complete"]
+    captured = capsys.readouterr()
+    assert "Dummy freq_a [101]: running" in captured.out
+    assert "Dummy freq_b [102]: running" in captured.out
+    assert "Dummy freq_a [101]: complete" in captured.out
+    assert "Dummy freq_b [102]: complete" in captured.out
+
+
+def test_wait_all_status_html_uses_count_columns():
+    site = DummyBaseSite()
+    job = DummyJob()
+    job.name = "freq_a"
+    run = RunHandle(site=site, job=job, id="101")
+    status = JobStatus(
+        state="running",
+        job_id="101",
+        raw={
+            "task_status": {
+                "successful": 2,
+                "failed": 1,
+                "running": 3,
+                "pending": 4,
+                "total": 10,
+            }
+        },
+    )
+
+    panel = status_table_html([run], {0: status})
+
+    assert "background:#ffffff" in panel
+    assert "Progress" not in panel
+    for heading in (
+        "Site",
+        "Job",
+        "Job ID",
+        "State",
+        "Succeeded",
+        "Failed",
+        "Running",
+        "Pending",
+        "Total",
+    ):
+        assert heading in panel
+    for value in ("2", "1", "3", "4", "10"):
+        assert f">{value}</td>" in panel
+    assert "border-left:1px solid #d0d7de" in panel
+    assert "background:#052e16" not in panel
+
+
+def test_global_wait_all_accepts_runs_from_multiple_sites(capsys):
+    site_a = DummyBaseSite()
+    site_b = DummyBaseSite()
+    site_a.site_name = "local"
+    site_b.site_name = "stampede"
+    job_a = DummyJob()
+    job_b = DummyJob()
+    job_a.name = "debug"
+    job_b.name = "production"
+    run_a = RunHandle(
+        site=site_a,
+        job=job_a,
+        id="local:debug",
+        poll_interval=0.0,
+        _status_fn=lambda run: JobStatus(
+            state="completed", return_code=0, job_id=run.id
+        ),
+    )
+    run_b = RunHandle(
+        site=site_b,
+        job=job_b,
+        id="123",
+        poll_interval=0.0,
+        _status_fn=lambda run: JobStatus(
+            state="completed", return_code=0, job_id=run.id
+        ),
+    )
+
+    results = wait_all([run_a, run_b], poll_interval=0.0)
+
+    assert [result.job.name for result in results] == ["debug", "production"]
+    captured = capsys.readouterr()
+    assert "local debug [local:debug]: completed" in captured.out
+    assert "stampede production [123]: completed" in captured.out
+
+
+def test_slurm_fetch_logs_also_fetches_run_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    calls = []
+    collected = []
+
+    def fake_get(remote, local, overwrite=False):
+        calls.append((Path(remote), Path(local)))
+        Path(local).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(site, "get", fake_get)
+    monkeypatch.setattr(
+        job, "collect_task_run_manifests", lambda: collected.append(True)
+    )
+
+    assert site.fetch_logs(job) == job._local_path / "logs"
+    assert (
+        site.work_dir / "jobs" / "simple" / "freq" / "results" / "_fs_run",
+        job._result_path / "_fs_run",
+    ) in calls
+    assert (
+        site.work_dir / "jobs" / "simple" / "freq" / "logs",
+        job._local_path / "logs",
+    ) in calls
+    assert collected == [True]
+
+
+def test_slurm_fetch_wavefields_downloads_wavefield_output(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job += WavefieldOutput(
+        name="pressure_wavefield",
+        field="pressure",
+        dims=("z", "r"),
+        coords={"z": [0.0, 1.0], "r": [0.0, 1.0]},
+    )
+    job.save()
+    calls = []
+    opened = {}
+
+    def fake_get(remote, local, overwrite=False):
+        calls.append((Path(remote), Path(local)))
+        Path(local).mkdir(parents=True, exist_ok=True)
+
+    def fake_from_manifest(cls, manifest, upscale=1):
+        opened["groups"] = manifest.groups
+        opened["output_path"] = manifest.output_path
+        opened["upscale"] = upscale
+        return "wavefield-db"
+
+    monkeypatch.setattr(site, "get", fake_get)
+    monkeypatch.setattr(
+        hpc.TraceDataset,
+        "from_manifest",
+        classmethod(fake_from_manifest),
+    )
+
+    assert site.fetch_wavefields(job, upscale=4) == "wavefield-db"
+    assert calls == [
+        (
+            site.work_dir / "jobs" / "simple" / "freq" / "results" / "wavefields",
+            job._local_path / "results" / "wavefields",
+        )
+    ]
+    assert opened == {
+        "groups": ["pressure_wavefield"],
+        "output_path": job._result_path / "wavefields",
+        "upscale": 4,
+    }
+
+
+def test_slurm_batch_poll_reads_scheduler_status(monkeypatch, capsys):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+
+    monkeypatch.setattr(site, "update_status", lambda job_id: "running")
+    monkeypatch.setattr(
+        site,
+        "run_login",
+        lambda cmd: (
+            '{"state":"running","total":8,"successful":2,'
+            '"failed":1,"running":3,"pending":2,"complete":3}'
+        ),
+    )
+
+    run = RunHandle(site=site, job=DummyJob(), id="77", mode="batch")
+    status = site._poll_run(run)
+
+    captured = capsys.readouterr()
+    assert status.state == "running"
+    assert status.raw["task_status"]["successful"] == 2
+    assert status.message == (
+        "tasks: 2 successful, 1 failed, 3 running, 2 pending, 8 total"
+    )
+    assert captured.out == ""
+
+
 def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
@@ -397,6 +1119,10 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     )
 
     assert '$fresh_flag --pack >> "$dir_out/pack.log" 2>&1' in batch_script
+    assert "scheduler_status.json" in batch_script
+    assert "FS_SCHEDULER_STATUS" in batch_script
+    assert '"successful"' in batch_script
+    assert '"pending"' in batch_script
     assert "$fresh_flag --pack >> $dir_out/pack.log 2>&1" in attached_script
     assert 'fresh_flag="--fresh"' in fresh_batch_script
     assert 'fresh_flag="--fresh"' in fresh_attached_script

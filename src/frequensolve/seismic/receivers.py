@@ -421,6 +421,7 @@ class CoordsFromFile(ReceiverCoords):
         self.file = file
         self._proj_path = proj_path
         self._rel_path = rel_path
+        self._fill_metadata_from_file()
 
     def _relative_file(self, ctx=None) -> Path:
         project_path = getattr(ctx, "project_path", None) or self._proj_path
@@ -440,6 +441,35 @@ class CoordsFromFile(ReceiverCoords):
         if project_path is not None:
             return Path(project_path) / file
         return file
+
+    def _hdf5_metadata(self, ctx=None) -> Tuple[Optional[str], Optional[str]]:
+        if self.format != "HDF5":
+            return None, None
+        file = self._local_file(ctx)
+        dataset = self.dset or "coords"
+        if not file.exists():
+            return None, None
+        try:
+            with h5py.File(file, "r") as h5:
+                if dataset not in h5:
+                    return None, None
+                attrs = h5[dataset].attrs
+                units = _h5_attr_string(attrs.get("units"))
+                system = _h5_attr_string(
+                    attrs.get("system", attrs.get("coordinate_system"))
+                )
+                return units, system
+        except OSError:
+            return None, None
+
+    def _fill_metadata_from_file(self, ctx=None) -> None:
+        if self.units is not None and self.system is not None:
+            return
+        units, system = self._hdf5_metadata(ctx)
+        if self.units is None:
+            self.units = units
+        if self.system is None:
+            self.system = system
 
     def _content_hash(self, ctx=None) -> Optional[str]:
         if self.format != "HDF5":
@@ -470,7 +500,15 @@ class CoordsFromFile(ReceiverCoords):
             dims=["receiver", "coordinate"],
             coords={"coordinate": coordinate},
         )
-        return f"blake3:{hash_dataarray_payload(data)}"
+        attrs = {}
+        file_units, file_system = self._hdf5_metadata(ctx)
+        units = self.units or file_units or getattr(ctx, "default_length_units", None)
+        system = self.system or file_system
+        if units is not None:
+            attrs["units"] = unit_expression(units)
+        if system is not None:
+            attrs["system"] = system
+        return f"blake3:{hash_dataarray_payload(data, attrs=attrs)}"
 
     @property
     def size(self) -> int:
@@ -522,6 +560,9 @@ class CoordsFromFile(ReceiverCoords):
 
     def to_fs(self, ctx=None) -> Dict:
         rel_path = self._relative_file(ctx)
+        default_units = getattr(ctx, "default_length_units", None)
+        units = self.units if self.units is not None else default_units
+        system = self.system
 
         if self.format == "HDF5":
             if self.dset is None:
@@ -537,10 +578,8 @@ class CoordsFromFile(ReceiverCoords):
             "file": file,
             "format": self.format,
             **({"hash": file_hash} if file_hash is not None else {}),
-            **(
-                {"units": unit_expression(self.units)} if self.units is not None else {}
-            ),
-            **({"system": self.system} if self.system is not None else {}),
+            **({"units": unit_expression(units)} if units is not None else {}),
+            **({"system": system} if system is not None else {}),
         }
 
 
@@ -652,7 +691,15 @@ class CoordsArray(ReceiverCoords):
     system: Optional[str] = None
 
     def __post_init__(self):
+        if isinstance(self.coordinates, xr.DataArray):
+            if self.units is None:
+                self.units = self.coordinates.attrs.get("units")
+            if self.system is None:
+                self.system = self.coordinates.attrs.get("system")
+            self.coordinates = self.coordinates.astype(np.float64, copy=False)
+
         if isinstance(self.coordinates, np.ndarray):
+            self.coordinates = np.asarray(self.coordinates, dtype=np.float64)
             if self.coordinates.ndim != 2:
                 raise ValueError(
                     "Coordinates array must be 2D with shape (n_receivers, <simulation dimension>)"
@@ -685,9 +732,9 @@ class CoordsArray(ReceiverCoords):
 
     def get(self, indices: Optional[Union[int, slice]] = None) -> np.ndarray:
         if indices is None:
-            return self.coordinates.values
+            return np.asarray(self.coordinates.values, dtype=np.float64)
         else:
-            return self.coordinates[indices].values
+            return np.asarray(self.coordinates[indices].values, dtype=np.float64)
 
     def to_file(
         self, file_name: Union[str, Path], format: Optional[Literal["HDF5"]] = None
@@ -712,6 +759,10 @@ class CoordsArray(ReceiverCoords):
                 dset = f.create_dataset(
                     "coords", data=(self.coordinates.values).astype(np.float64)
                 )
+                if self.units is not None:
+                    dset.attrs["units"] = unit_expression(self.units)
+                if self.system is not None:
+                    dset.attrs["system"] = self.system
         else:
             raise NotImplementedError(f"Format {format} not implemented")
 
@@ -724,7 +775,7 @@ class CoordsArray(ReceiverCoords):
         )
 
     def to_fs(self, ctx=None) -> Dict:
-        values = self.coordinates.values.tolist()
+        values = np.asarray(self.coordinates.values, dtype=np.float64).tolist()
         payload = {"_type": self.__class__.__name__}
         if self.units is not None or self.system is not None:
             payload["value"] = values
@@ -738,7 +789,7 @@ class CoordsArray(ReceiverCoords):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "CoordsArray":
-        coords = np.array(data.get("coords", data.get("value")))
+        coords = np.array(data.get("coords", data.get("value")), dtype=np.float64)
         return cls(
             coordinates=coords, units=data.get("units"), system=data.get("system")
         )
@@ -760,6 +811,23 @@ def _first_quantity_units(value: Any) -> Optional[Any]:
             if units is not None:
                 return units
     return None
+
+
+def _h5_attr_string(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode()
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return None
+        value = value.reshape(-1)[0]
+        return _h5_attr_string(value)
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        return _h5_attr_string(value[0])
+    return str(value)
 
 
 def _strip_coordinate_quantities(value: Any, units: Any) -> Any:
@@ -797,7 +865,7 @@ def coordinate_array_metadata(
     if quantity_units is not None:
         coords = _strip_coordinate_quantities(coords, units)
 
-    return np.asarray(coords, dtype=float), units, system
+    return np.asarray(coords, dtype=np.float64), units, system
 
 
 # ----------------------------------------------------------------------
@@ -829,6 +897,14 @@ class ReceiverGroup(ExtraFieldsMixin):
     @property
     def size(self):
         return self.coordinates.size
+
+    @property
+    def grid(self) -> Optional[CartesianGrid]:
+        """Return the receiver grid when this group uses ``CoordsGrid``."""
+
+        if isinstance(self.coordinates, CoordsGrid):
+            return self.coordinates.grid
+        return None
 
     # TODO: option to correct signature for device response
     # TODO: method to define receivers
@@ -915,6 +991,10 @@ class ReceiverGroup(ExtraFieldsMixin):
     def to_fs(self, ctx=None) -> Dict:
         coords = self.coordinates
         if isinstance(coords, CoordsArray):
+            default_units = getattr(ctx, "default_length_units", None)
+            coordinate_units = (
+                coords.units if coords.units is not None else default_units
+            )
             if (
                 coords.size > 200
                 and ctx is not None
@@ -922,19 +1002,24 @@ class ReceiverGroup(ExtraFieldsMixin):
             ):
                 dataset = f"inputs/acquisition/receivers/{self.name}/coordinates"
                 attrs = {"fs_kind": "receiver_coordinates"}
-                if coords.units is not None:
-                    attrs["units"] = unit_expression(coords.units)
+                if coordinate_units is not None:
+                    attrs["units"] = unit_expression(coordinate_units)
                 if coords.system is not None:
                     attrs["system"] = coords.system
-                ref = ctx.store.put_dataarray(dataset, coords.coordinates, attrs=attrs)
+                ref = ctx.store.put_dataarray(
+                    dataset,
+                    coords.coordinates,
+                    attrs=attrs,
+                    dtype=np.float64,
+                )
                 coords_payload = {
                     "_type": "CoordsFromFile",
                     "file": ref.locator(),
                     "format": "HDF5",
                     "hash": f"blake3:{ref.hash}",
                     **(
-                        {"units": unit_expression(coords.units)}
-                        if coords.units is not None
+                        {"units": unit_expression(coordinate_units)}
+                        if coordinate_units is not None
                         else {}
                     ),
                     **({"system": coords.system} if coords.system is not None else {}),
@@ -948,9 +1033,15 @@ class ReceiverGroup(ExtraFieldsMixin):
                 dump._set_path(
                     proj_path=self._proj_path, rel_path=self._rel_path / self.name
                 )
+                if dump.units is None:
+                    dump.units = coordinate_units
                 coords_payload = dump.to_fs(ctx)
             else:
                 coords_payload = coords.to_fs(ctx)
+                if coordinate_units is not None and "units" not in coords_payload:
+                    if "coords" in coords_payload:
+                        coords_payload["value"] = coords_payload.pop("coords")
+                    coords_payload["units"] = unit_expression(coordinate_units)
         else:
             coords_payload = self.coordinates.to_fs(ctx)
 

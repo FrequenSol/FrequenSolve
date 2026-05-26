@@ -96,7 +96,7 @@ example, the top is pressure-free and the sides/bottom use PML absorption.
 
    sim += model.hex_mesh_generator([8, 4])
    sim.mesh.set_adapt(elems_per_wave=2.0, order=4, f_low=5.0, f_high=30.0)
-   sim.mesh.set_source_grading(d1=0.08, d0=0.02, mult=2.0)
+   sim.mesh.set_source_grading(d1=0.08, d0=0.02, factor=2.0)
 
    sim += fs.BoundaryCondition(
        conditions=["free"],
