@@ -23,12 +23,14 @@ class ExportContext:
         project_path: Optional[Path] = None,
         rel_path: Optional[Path] = None,
         store: Optional[Any] = None,
+        default_length_units: Optional[Any] = None,
     ):
         self.project_path = (
             Path(project_path).resolve() if project_path is not None else None
         )
         self.rel_path = Path(rel_path) if rel_path is not None else Path()
         self.store = store
+        self.default_length_units = default_length_units
 
     @property
     def path(self) -> Optional[Path]:
@@ -38,7 +40,10 @@ class ExportContext:
 
     def child(self, rel_path: Path) -> "ExportContext":
         return ExportContext(
-            self.project_path, self.rel_path / rel_path, store=self.store
+            self.project_path,
+            self.rel_path / rel_path,
+            store=self.store,
+            default_length_units=self.default_length_units,
         )
 
     def relative_to_project(self, path: Path) -> Path:

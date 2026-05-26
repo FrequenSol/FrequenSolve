@@ -150,6 +150,11 @@ class RunResult:
 
         return TraceDataset.from_job(self.job, upscale=upscale)
 
+    def wavefields(self, upscale: int = 1):
+        if self.site is not None:
+            return self.site.fetch_wavefields(self.job, upscale=upscale)
+        return self.job.wavefields.open(upscale=upscale)
+
     def output_files(
         self,
         *,
@@ -195,6 +200,9 @@ class RunHandle:
     _wait_async_fn: Optional[
         Callable[["RunHandle", Optional[float], Optional[float]], Awaitable[RunResult]]
     ] = None
+    _finalize_fn: Optional[Callable[["RunHandle", JobStatus], RunResult]] = None
+    _timeout_fn: Optional[Callable[["RunHandle", JobStatus], RunResult]] = None
+    _generic_wait: bool = True
     _cancel_fn: Optional[Callable[["RunHandle"], None]] = None
     _fetch_fn: Optional[Callable[["RunHandle"], Any]] = None
     _result: Optional[RunResult] = None
@@ -240,6 +248,26 @@ class RunHandle:
             self._last_status = self._status_fn(self)
         return self._last_status
 
+    def _complete_from_status(self, status: JobStatus) -> RunResult:
+        if self._result is not None:
+            return self._result
+        if self._finalize_fn is not None:
+            self._result = self._finalize_fn(self, status)
+        elif (finalize := self._run_record_finalizer()) is not None:
+            finalize(self, status)
+            self._result = self._make_result(status)
+        elif self._wait_fn is not None:
+            self._result = self._wait_fn(self, 0, 0)
+        else:
+            self._result = self._make_result(status)
+        return self._result
+
+    def _run_record_finalizer(self):
+        if self.mode != "batch":
+            return None
+        finalize = getattr(self.site, "_finalize_run_record", None)
+        return finalize if callable(finalize) else None
+
     def wait(
         self,
         timeout: Optional[float] = None,
@@ -247,31 +275,13 @@ class RunHandle:
     ) -> RunResult:
         if self._result is not None:
             return self._result
-        if self._wait_fn is not None:
+        if not self._generic_wait and self._wait_fn is not None:
             self._result = self._wait_fn(self, timeout, poll_interval)
             return self._result
+        from frequensolve.orchestrator.progress import wait
 
-        interval = self.poll_interval if poll_interval is None else poll_interval
-        start = time.monotonic()
-        last_state = object()
-        while True:
-            status = self.status()
-            if status.state != last_state and hasattr(self.site, "_emit_status"):
-                self.site._emit_status(status, force=True)
-                last_state = status.state
-            if status.is_complete:
-                self._result = self._make_result(status)
-                return self._result
-            if timeout is not None and time.monotonic() - start > timeout:
-                timeout_status = JobStatus(
-                    state="timeout",
-                    job_id=self.id,
-                    message=f"Timed out waiting for run after {timeout} seconds",
-                )
-                self._last_status = timeout_status
-                self._result = self._make_result(timeout_status)
-                return self._result
-            time.sleep(interval)
+        self._result = wait(self, timeout=timeout, poll_interval=poll_interval)
+        return self._result
 
     async def wait_async(
         self,
@@ -280,33 +290,10 @@ class RunHandle:
     ) -> RunResult:
         if self._result is not None:
             return self._result
-        if self._wait_async_fn is not None:
+        if not self._generic_wait and self._wait_async_fn is not None:
             self._result = await self._wait_async_fn(self, timeout, poll_interval)
             return self._result
-        if self._wait_fn is not None:
-            return await asyncio.to_thread(self.wait, timeout, poll_interval)
-
-        interval = self.poll_interval if poll_interval is None else poll_interval
-        start = time.monotonic()
-        last_state = object()
-        while True:
-            status = await asyncio.to_thread(self.status)
-            if status.state != last_state and hasattr(self.site, "_emit_status"):
-                self.site._emit_status(status, force=True)
-                last_state = status.state
-            if status.is_complete:
-                self._result = self._make_result(status)
-                return self._result
-            if timeout is not None and time.monotonic() - start > timeout:
-                timeout_status = JobStatus(
-                    state="timeout",
-                    job_id=self.id,
-                    message=f"Timed out waiting for run after {timeout} seconds",
-                )
-                self._last_status = timeout_status
-                self._result = self._make_result(timeout_status)
-                return self._result
-            await asyncio.sleep(interval)
+        return await asyncio.to_thread(self.wait, timeout, poll_interval)
 
     def watch(
         self,
@@ -318,11 +305,12 @@ class RunHandle:
         last_state = object()
         while True:
             status = self.status()
+            if status.is_complete:
+                status = self._complete_from_status(status).status
             if status.state != last_state:
                 yield status
                 last_state = status.state
             if status.is_complete:
-                self._result = self._make_result(status)
                 return
             if timeout is not None and time.monotonic() - start > timeout:
                 timeout_status = JobStatus(
@@ -354,6 +342,10 @@ class RunHandle:
     def traces(self, upscale: int = 1):
         self.fetch()
         return self.site.fetch_traces(self.job, upscale=upscale)
+
+    def wavefields(self, upscale: int = 1):
+        self.fetch()
+        return self.site.fetch_wavefields(self.job, upscale=upscale)
 
     def logs(self, **kwargs):
         if self.site is not None:
@@ -516,6 +508,31 @@ class BaseSite:
                 f"[{job_name or 'job'}] latest task log",
             )
 
+    def fetch_wavefields(
+        self,
+        job: Any,
+        *,
+        upscale: int = 1,
+        path: Optional[Union[str, Path]] = None,
+        project_path: Optional[Union[str, Path]] = None,
+        **_: Any,
+    ) -> Any:
+        """Return local wavefield outputs for one job or a mapping for many jobs."""
+
+        jobs, single = self._as_jobs(job)
+        mapped_project = project_path if project_path is not None else path
+        mapped_project = Path(mapped_project).resolve() if mapped_project else None
+        out = {
+            item.name: item.wavefields.open(
+                upscale=upscale,
+                project_path=mapped_project,
+            )
+            for item in jobs
+        }
+        if single:
+            return out[jobs[0].name]
+        return out
+
     def fetch_logs(
         self,
         job: Any,
@@ -569,6 +586,42 @@ class BaseSite:
     ) -> RunResult:
         """Submit a job and block until completion."""
         return self.submit(job, **submit_kwargs).wait(timeout, poll_interval)
+
+    def wait(
+        self,
+        runs: Iterable[RunHandle],
+        *,
+        timeout: Optional[float] = None,
+        poll_interval: Optional[float] = None,
+        fetch: bool = False,
+    ) -> list[RunResult]:
+        """Wait for multiple run handles while rendering one combined status."""
+
+        return self.wait_all(
+            runs,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            fetch=fetch,
+        )
+
+    def wait_all(
+        self,
+        runs: Iterable[RunHandle],
+        *,
+        timeout: Optional[float] = None,
+        poll_interval: Optional[float] = None,
+        fetch: bool = False,
+    ) -> list[RunResult]:
+        """Wait for many submitted runs and return results in input order."""
+
+        from frequensolve.orchestrator.progress import wait_all
+
+        return wait_all(
+            runs,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            fetch=fetch,
+        )
 
     def handle(
         self, job, job_id: Optional[str] = None, mode: str = "attached"

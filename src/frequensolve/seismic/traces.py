@@ -58,6 +58,7 @@ class TraceDataset:
             "f_max": float(f_list[-1]),
             "f_map": dict(self.manifest.frequencies),
             "laplace_map": laplace_map,
+            "wavefields": dict(self.manifest.wavefields),
             **(
                 {
                     "duplicate_frequencies": self.manifest.run.state[
@@ -101,13 +102,73 @@ class TraceDataset:
     ) -> "TraceDataset":
         packed_file = manifest.packed_file
         if packed_file is not None:
+            packed_incomplete = not manifest.packed_complete
             files = [packed_file]
-            frequencies = manifest.packed_frequencies or dict(manifest.frequencies)
-            laplace = manifest.packed_laplace or dict(manifest.laplace)
+            frequencies = dict(manifest.frequencies)
+            laplace = dict(manifest.laplace)
+            packed_frequencies = manifest.packed_frequencies
+            if packed_frequencies:
+                shard_files, shard_frequencies, shard_laplace = (
+                    cls._matching_frequency_trace_files(
+                        manifest,
+                        frequencies,
+                        laplace,
+                    )
+                )
+                if shard_frequencies and set(map(int, shard_frequencies)) == set(
+                    map(int, frequencies)
+                ):
+                    files = shard_files
+                    frequencies = shard_frequencies
+                    laplace = shard_laplace
+                    if packed_incomplete:
+                        warnings.warn(
+                            f"{manifest.packed_incomplete_message()}; using "
+                            "matching per-frequency trace files instead.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                else:
+                    if packed_incomplete:
+                        warnings.warn(
+                            manifest.packed_incomplete_message(),
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                    missing = {int(key) for key in manifest.missing_packed_frequencies}
+                    frequencies = {
+                        key: frequency
+                        for key, frequency in frequencies.items()
+                        if int(key) not in missing
+                    }
+                    laplace = {
+                        key: laplace.get(key, laplace.get(str(key), 0.0))
+                        for key in frequencies
+                    }
+                    if manifest.frequencies and not frequencies:
+                        raise ValueError(
+                            f"Packed trace product {packed_file} contains no "
+                            "frequencies requested by this job. "
+                            f"{manifest.packed_incomplete_message()}"
+                        )
         else:
             files = [TraceManifest.resolve_trace_file(file) for file in manifest.files]
             frequencies = dict(manifest.frequencies)
             laplace = dict(manifest.laplace)
+            shard_files, shard_frequencies, shard_laplace = (
+                cls._matching_frequency_trace_files(
+                    manifest,
+                    frequencies,
+                    laplace,
+                )
+            )
+            if shard_frequencies and set(map(int, shard_frequencies)) == set(
+                map(int, frequencies)
+            ):
+                files = shard_files
+                frequencies = shard_frequencies
+                laplace = shard_laplace
+        cls._raise_if_wavefield_artifacts_missing(manifest, files, frequencies)
         return cls(
             manifest=TraceManifest(
                 files=files,
@@ -120,10 +181,123 @@ class TraceDataset:
                 laplace=laplace,
                 components=list(manifest.components),
                 sources=list(manifest.sources),
+                wavefields=dict(manifest.wavefields),
                 artifacts=list(manifest.artifacts),
                 run=manifest.run,
             ),
             upscale=upscale,
+        )
+
+    @staticmethod
+    def _frequency_key_for_value(
+        frequencies: Dict[int, float],
+        value: float,
+    ) -> Optional[int]:
+        for key, frequency in frequencies.items():
+            if np.isclose(float(value), float(frequency), rtol=0.0, atol=1.0e-9):
+                return int(key)
+        return None
+
+    @staticmethod
+    def _candidate_frequency_trace_files(manifest: TraceManifest) -> List[Path]:
+        candidates = [TraceManifest.resolve_trace_file(file) for file in manifest.files]
+        shard_dir = manifest.output_path / "shards"
+        if shard_dir.exists():
+            candidates.extend(sorted(shard_dir.glob("*.h5")))
+        candidates.extend(sorted(manifest.output_path.glob("f_*_hz.h5")))
+
+        out = []
+        seen = set()
+        for path in candidates:
+            key = str(Path(path).resolve(strict=False))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(Path(path))
+        return out
+
+    @classmethod
+    def _matching_frequency_trace_files(
+        cls,
+        manifest: TraceManifest,
+        frequencies: Dict[int, float],
+        laplace: Dict[int, float],
+    ) -> tuple[List[Path], Dict[int, float], Dict[int, float]]:
+        files_by_key: Dict[int, Path] = {}
+        laplace_by_key: Dict[int, float] = {}
+        for path in cls._candidate_frequency_trace_files(manifest):
+            if not path.exists():
+                continue
+            try:
+                if TraceStore._is_packed_trace_file(path):
+                    continue
+                values = TraceStore._read_trace_frequencies(path)
+            except (OSError, KeyError, ValueError):
+                continue
+            if len(values) != 1:
+                continue
+            key = cls._frequency_key_for_value(frequencies, values[0])
+            if key is None or key in files_by_key:
+                continue
+            files_by_key[key] = path
+            try:
+                laplace_values = TraceStore._read_trace_laplace_values(path)
+            except (OSError, KeyError, ValueError):
+                laplace_values = []
+            if laplace_values:
+                laplace_by_key[key] = float(laplace_values[0])
+
+        ordered_keys = [int(key) for key in frequencies if int(key) in files_by_key]
+        files = [files_by_key[key] for key in ordered_keys]
+        matched_frequencies = {key: frequencies[key] for key in ordered_keys}
+        matched_laplace = {
+            key: laplace_by_key.get(key, laplace.get(key, laplace.get(str(key), 0.0)))
+            for key in ordered_keys
+        }
+        return files, matched_frequencies, matched_laplace
+
+    @staticmethod
+    def _has_existing_trace_artifact(
+        files: Iterable[Path],
+        frequencies: Dict[int, float],
+    ) -> bool:
+        records = [Path(file) for file in files]
+        if any(record.exists() for record in records):
+            return True
+
+        expected = []
+        for value in frequencies.values():
+            try:
+                expected.append(float(np.real(value)))
+            except (TypeError, ValueError):
+                continue
+        return any(
+            TraceStore._packed_trace_covers_frequencies(candidate, expected)
+            for candidate in TraceStore._candidate_packed_trace_files(records)
+        )
+
+    @staticmethod
+    def _raise_if_wavefield_artifacts_missing(
+        manifest: TraceManifest,
+        files: Iterable[Path],
+        frequencies: Dict[int, float],
+    ) -> None:
+        if not manifest.wavefields:
+            return
+        files = list(files)
+        if TraceDataset._has_existing_trace_artifact(files, frequencies):
+            return
+
+        groups = ", ".join(repr(group) for group in manifest.groups)
+        groups = groups or "requested wavefields"
+        packed_hint = manifest.output_path / "traces.h5"
+        shard_hint = manifest.output_path / "traces_*.h5"
+        raise FileNotFoundError(
+            f"No wavefield trace files were found for {groups} in "
+            f"{manifest.output_path}. Expected a packed wavefield file such as "
+            f"{packed_hint} or per-frequency files matching {shard_hint}. "
+            "Rerun the job after enabling solver wavefield output, or fetch the "
+            "wavefield output directory if it was produced remotely."
         )
 
     @classmethod

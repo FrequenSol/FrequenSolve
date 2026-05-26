@@ -6,34 +6,27 @@ default paths by subclassing :class:`SlurmSite`.
 """
 
 import asyncio
-import glob
+import json
 import logging
 import os
+import shlex
 import signal
 import socket
-import stat
 import subprocess
-import tarfile
-import tempfile
-import threading
 import time
 from asyncio import Future
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
+from datetime import datetime, timezone
 from pathlib import Path
 from select import select
-from typing import Any, Dict, List, Literal, Optional, Type, Union
+from typing import Any, Dict, List, Literal, Mapping, Optional, Type, Union
 
 from frequensolve._optional import optional_dependency_error
 
 try:
     from dotenv import load_dotenv
-    from paramiko import (
-        AuthenticationException,
-        AutoAddPolicy,
-        SSHClient,
-        Transport,
-    )
+    from paramiko import SSHClient
 except ModuleNotFoundError as exc:
     raise optional_dependency_error(
         "SlurmSite",
@@ -44,7 +37,6 @@ except ModuleNotFoundError as exc:
 
 from jinja2 import Environment, FileSystemLoader
 
-from frequensolve.orchestrator.config.base import BaseSiteConfig
 from frequensolve.orchestrator.credentials import Credentials
 from frequensolve.orchestrator.pool import PoolInfo
 from frequensolve.orchestrator.sites.base import (
@@ -53,26 +45,30 @@ from frequensolve.orchestrator.sites.base import (
     RunHandle,
     RunResult,
     _check_if_notebook,
-    _wait_for_path,
 )
-from frequensolve.orchestrator.sites.slurm_helpers import as_list as _as_list
-from frequensolve.orchestrator.sites.slurm_helpers import (
+from frequensolve.orchestrator.sites.config import BaseSiteConfig
+from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import as_list as _as_list
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     hms_to_seconds as _hms_to_seconds,
 )
-from frequensolve.orchestrator.sites.slurm_helpers import (
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     normalize_slurm_state as _normalize_slurm_state,
 )
-from frequensolve.orchestrator.sites.slurm_helpers import (
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     parse_sbatch_job_id as _parse_sbatch_job_id,
 )
-from frequensolve.orchestrator.sites.slurm_helpers import read_stream as _read_stream
-from frequensolve.orchestrator.sites.slurm_helpers import (
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
+    read_stream as _read_stream,
+)
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     seconds_to_hms as _seconds_to_hms,
 )
-from frequensolve.orchestrator.sites.slurm_helpers import (
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     temporary_text_file as _temporary_text_file,
 )
-from frequensolve.orchestrator.ssh import SSHClientClass, SSHProxy
+from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
+from frequensolve.orchestrator.ssh import SSHClientClass
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.imaging import ImageDatabase, ImagingJob
 from frequensolve.simulation.jobs import SimulationJob
@@ -261,6 +257,8 @@ class SlurmSite(BaseSite):
         self.transfer_method = transfer_method
         self.run_config = run_config or SlurmRunConfig(queue=queue)
         self._rel_proj_path = Path(rel_path)
+        self._authenticator = SlurmAuthenticator(self)
+        self._transfer = SlurmTransferManager(self)
 
         self._login_client = SSHClientClass(self.authenticate())
         logger.info("SSH client authenticated successfully")
@@ -322,7 +320,7 @@ class SlurmSite(BaseSite):
     @property
     def pool_host(self) -> str:
         """Get the resource pool host node."""
-        return self._get_job_host(self.pool.id)
+        return self._authenticator.get_job_host(self.pool.id)
 
     @property
     def work_dir(self) -> Path:
@@ -353,121 +351,9 @@ class SlurmSite(BaseSite):
             self._login_client = None
 
     def authenticate(self, host: Optional[str] = None):
-        """Connect to the login node using Paramiko or an existing SSH control socket."""
+        """Connect to the login node."""
 
-        if threading.current_thread() != threading.main_thread():
-            raise RuntimeError("Authentication must be called from the main thread")
-        host = host or getattr(self.config, "hostname", None) or self.default_host
-        if not host:
-            raise ValueError("No login host configured for SLURM site")
-
-        logger.info("Starting authentication with host: %s", host)
-
-        # Check for existing control sockets
-        control_dir = os.path.expanduser("~/.ssh/control")
-        if os.path.exists(control_dir):
-            # Look for control sockets
-            for control_path in glob.glob(f"{control_dir}/*"):
-                try:
-                    result = subprocess.run(
-                        [
-                            "ssh",
-                            "-q",
-                            "-o",
-                            "StrictHostKeyChecking=no",
-                            "-o",
-                            f"ControlPath={control_path}",
-                            f"{self.credentials.username}@{host}",
-                            "echo 'Connection test'",
-                        ],
-                        capture_output=True,
-                        text=True,
-                    )
-
-                    if result.returncode == 0:
-                        logger.debug(f"Found working control socket at {control_path}")
-
-                        # Create proxy client with the username from credentials
-                        proxy_client = SSHProxy(
-                            control_path=control_path,
-                            username=self.credentials.username,
-                            host=host,
-                        )
-                        logger.info("Secure connection established with host: %s", host)
-                        return proxy_client
-
-                except Exception as e:
-                    logger.debug(
-                        f"Failed to use control socket {control_path}: {str(e)}"
-                    )
-                    continue
-        return self._interactive_authentication(host)
-
-    def _interactive_authentication(self, host: str):
-        """Normal authentication flow when control socket is not available."""
-        login_client = SSHClient()
-        login_client.set_missing_host_key_policy(AutoAddPolicy())
-
-        # Create a direct socket connection to SSH service.
-        sock = socket.create_connection((host, 22))
-        transport = Transport(sock)
-        transport.start_client()
-
-        authenticated = False
-        try:
-            from paramiko.agent import Agent
-
-            logger.debug("Attempting agent-based authentication.")
-            agent = Agent()
-            agent_keys = agent.get_keys()
-            for key in agent_keys:
-                try:
-                    transport.auth_publickey(self.credentials.username, key)
-                    if transport.is_authenticated():
-                        authenticated = True
-                        break
-                except Exception as err:
-                    logger.debug("Agent key authentication failed: %s", str(err))
-                    continue
-        except Exception as err:
-            logger.debug("Agent-based authentication exception: %s", str(err))
-
-        if not authenticated:
-            logger.debug("Attempting keyboard-interactive authentication.")
-
-            def handler(title, instructions, prompt_list):
-                responses = []
-                for prompt, echo in prompt_list:
-                    if "Password" in prompt:
-                        responses.append(self.credentials.password)
-                    elif "Token" in prompt or "2FA" in prompt or "Code" in prompt:
-                        responses.append(self.credentials.duo_code)
-                    else:
-                        responses.append("")
-                return responses
-
-            try:
-                transport.auth_interactive(self.credentials.username, handler)
-                authenticated = transport.is_authenticated()
-                if authenticated:
-                    logger.debug("Keyboard-interactive authentication successful.")
-                else:
-                    logger.debug("Keyboard-interactive authentication failed.")
-            except Exception as err:
-                logger.debug(
-                    "Keyboard-interactive authentication exception: %s", str(err)
-                )
-
-        if not transport.is_authenticated():
-            logger.error(
-                "Authentication failed for user: %s", self.credentials.username
-            )
-            raise AuthenticationException("Authentication failed.")
-
-        transport.set_keepalive(120)
-        login_client._transport = transport
-        logger.info("Secure connection established with host: %s", host)
-        return login_client
+        return self._authenticator.authenticate(host)
 
     def submit(
         self,
@@ -483,16 +369,29 @@ class SlurmSite(BaseSite):
 
         force_run = bool(force_run or force or overrides.pop("rerun", False))
         self.prepare_job(job)
-        if not force_run and job.is_run_current():
-            job.write_run_state(status="skipped")
-            self._emit(f"Skipping {job.name}; run is current")
-            return RunHandle.skipped(self, job)
-
         if mode not in {"auto", "attached", "batch"}:
             raise ValueError("mode must be 'auto', 'attached', or 'batch'")
 
-        self.prepare_job(job, sync_project=True)
         run_config, extra_kwargs = self.run_config.resolved(self.config, **overrides)
+
+        if not force_run:
+            handle = self._reattach_inflight_run(
+                job,
+                poll_interval=run_config.poll_interval,
+                fetch=fetch,
+            )
+            if handle is not None:
+                return handle
+
+            if self.is_run_current(job):
+                job.write_run_state(status="skipped")
+                self._emit(f"Skipping {job.name}; run is current")
+                handle = RunHandle.skipped(self, job)
+                if fetch:
+                    self.fetch_outputs(job)
+                return handle
+
+        self.prepare_job(job, sync_project=True)
 
         active_allocation = self.provisioned if mode in {"auto", "attached"} else False
         use_attached = mode == "attached" or (mode == "auto" and active_allocation)
@@ -510,6 +409,7 @@ class SlurmSite(BaseSite):
                 **({"pack": pack} if not pack else {}),
             )
             self._emit(f"Submitted {job.name} to active {self.site_name} allocation")
+            self._record_site_run(job, status="running")
             handle = RunHandle(
                 site=self,
                 job=job,
@@ -519,6 +419,7 @@ class SlurmSite(BaseSite):
                 _status_fn=self._poll_attached_run,
                 _wait_fn=self._wait_attached_run,
                 _wait_async_fn=self._wait_attached_run_async,
+                _generic_wait=False,
                 _cancel_fn=lambda run: self.cancel_job(str(run.id)),
                 _fetch_fn=(lambda run: self.fetch_outputs(run.job)) if fetch else None,
             )
@@ -532,6 +433,13 @@ class SlurmSite(BaseSite):
         handle.poll_interval = run_config.poll_interval or self.config.poll_interval
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
         return handle
+
+    def handle(
+        self, job, job_id: Optional[str] = None, mode: str = "attached"
+    ) -> RunHandle:
+        """Create a run handle and attach SLURM-specific wait behavior."""
+
+        return super().handle(job, job_id=job_id, mode=mode)
 
     def provision(
         self, nodes: int, tasks: int, duration: Optional[str] = None, **kwargs
@@ -619,6 +527,22 @@ class SlurmSite(BaseSite):
         _, stdout, _ = self.run_login_cmd(cmd)
         return _read_stream(stdout)
 
+    def is_run_current(self, job: SimulationJob) -> bool:
+        """Return True when this site has current successful results for a job."""
+
+        if not isinstance(job, SimulationJob):
+            return bool(job.is_run_current())
+        record = job.latest_run(site=self.site_name)
+        if record is None:
+            return False
+        try:
+            if record.fingerprint != job.fingerprint():
+                return False
+        except Exception as exc:
+            logger.debug("Could not fingerprint job %s: %s", job.name, exc)
+            return False
+        return self._remote_run_successful(record)
+
     def update_status(self, job_id: Optional[str] = None):
         """Check the status of the resource request."""
 
@@ -656,44 +580,9 @@ class SlurmSite(BaseSite):
         return status
 
     def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
-        """
-        Transfer files from a local path to a remote path.
+        """Transfer files from a local path to a remote path."""
 
-        Args:
-            local_path: Local path to transfer from
-            remote_path: Remote path to transfer to
-        """
-        logger.debug("Transferring %s to %s", local_path, remote_path)
-        if not _wait_for_path(local_path):
-            logger.error("Local path %s does not exist", local_path)
-            raise FileNotFoundError(f"Local path {local_path} does not exist")
-
-        local_path = Path(local_path)
-        remote_path = Path(remote_path)
-
-        try:
-            # Create parent directory on remote
-            parent_path = str(remote_path.parent)
-            self.run_login(f"mkdir -p {parent_path}")
-
-            if self.transfer_method == "sftp":
-                sftp = self.login_client.open_sftp()
-                try:
-                    if local_path.is_dir():
-                        self._put_dir(sftp, local_path, remote_path)
-                    else:
-                        sftp.put(str(local_path), str(remote_path))
-                finally:
-                    sftp.close()
-            else:
-                source = f"{local_path}/" if local_path.is_dir() else str(local_path)
-                self._run_rsync(source, self._remote_spec(remote_path))
-
-            logger.debug("Transfer completed successfully")
-
-        except Exception as e:
-            logger.exception("Error during file transfer: %s", str(e))
-            raise
+        return self._transfer.put(local_path, remote_path)
 
     def fetch_traces(
         self,
@@ -713,7 +602,7 @@ class SlurmSite(BaseSite):
         for j in jobs:
             try:
                 trace_dir_name = Path(j.trace_outputs.path).name
-                remote_dir = j._remote_path(self.work_dir) / "results" / trace_dir_name
+                remote_dir = self._remote_result_dir(j) / trace_dir_name
                 local_dir = j._local_path / "results" / trace_dir_name
                 local_dir.mkdir(parents=True, exist_ok=True)
                 self.get(remote_dir, local_dir)
@@ -730,25 +619,80 @@ class SlurmSite(BaseSite):
         else:
             return db_map
 
+    def fetch_wavefields(
+        self,
+        job: Union[SimulationJob, List[SimulationJob]],
+        upscale: int = 1,
+    ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
+        """Get wavefield trace results from the remote site."""
+
+        jobs, single = _as_list(job, SimulationJob)
+        db_map = {}
+
+        for j in jobs:
+            try:
+                wavefield_outputs = j.wavefield_trace_outputs
+                if not wavefield_outputs.groups:
+                    raise ValueError("Job has no wavefield outputs")
+                wavefield_dir_name = Path(wavefield_outputs.path).name
+                remote_dir = self._remote_result_dir(j) / wavefield_dir_name
+                local_dir = j._local_path / "results" / wavefield_dir_name
+                local_dir.mkdir(parents=True, exist_ok=True)
+                self.get(remote_dir, local_dir)
+
+                db_map[j.name] = j.wavefields.open(upscale=upscale)
+
+            except Exception as e:
+                logger.exception("Error downloading wavefields: %s", str(e))
+                raise
+
+        if single:
+            return db_map[jobs[0].name]
+        return db_map
+
     def fetch_outputs(self, job: SimulationJob):
         """Fetch common result metadata and trace outputs for a completed job."""
 
-        remote_results = job._remote_path(self.work_dir) / "results"
         local_results = job._local_path / "results"
         local_results.mkdir(parents=True, exist_ok=True)
 
-        for name in ("_fs_run", "logs"):
-            try:
-                self.get(remote_results / name, local_results / name)
-            except Exception as exc:
-                logger.debug("Could not fetch %s for job %s: %s", name, job.name, exc)
+        self.fetch_run_metadata(job)
+        try:
+            self.get(
+                self._remote_logs_dir(job),
+                job._local_path / "logs",
+            )
+        except Exception as exc:
+            logger.debug("Could not fetch logs for job %s: %s", job.name, exc)
 
         try:
             self.fetch_traces(job)
         except Exception as exc:
             logger.debug("Could not fetch traces for job %s: %s", job.name, exc)
 
+        if getattr(job.outputs, "wavefields", None):
+            try:
+                self.fetch_wavefields(job)
+            except Exception as exc:
+                logger.debug(
+                    "Could not fetch wavefields for job %s: %s",
+                    job.name,
+                    exc,
+                )
+
         return local_results
+
+    def fetch_run_metadata(self, job: SimulationJob) -> Optional[Path]:
+        """Fetch ``_fs_run`` metadata and aggregate task manifests locally."""
+
+        remote_run_dir = self._remote_result_dir(job) / "_fs_run"
+        local_run_dir = job._result_path / "_fs_run"
+        try:
+            self.get(remote_run_dir, local_run_dir)
+        except Exception as exc:
+            logger.debug("Could not fetch _fs_run for job %s: %s", job.name, exc)
+            return None
+        return job.collect_task_run_manifests()
 
     def fetch_paraview(self, job: SimulationJob):
         """Get Paraview files from the remote site.
@@ -758,7 +702,7 @@ class SlurmSite(BaseSite):
         """
 
         try:
-            remote_dir = job._remote_path(self.work_dir) / "results" / "ParaView/"
+            remote_dir = self._remote_result_dir(job) / "ParaView/"
             local_dir = job._local_path / "results" / "ParaView/"
             self._emit(f"Fetching ParaView outputs from {remote_dir} to {local_dir}")
             self.get(remote_dir, local_dir)
@@ -845,7 +789,21 @@ class SlurmSite(BaseSite):
                 log_dir = requested_local_dir
             else:
                 log_dir = requested_local_dir / j.name
-            remote_log_dir = j._remote_path(self.work_dir) / "logs"
+            remote_run_dir = self._remote_result_dir(j) / "_fs_run"
+            try:
+                local_run_dir = j._result_path / "_fs_run"
+                self._emit(
+                    f"Fetching run metadata from {remote_run_dir} to {local_run_dir}"
+                )
+                self.fetch_run_metadata(j)
+            except Exception as e:
+                logger.debug(
+                    "Could not aggregate _fs_run metadata for job %s from %s: %s",
+                    j.name,
+                    remote_run_dir,
+                    e,
+                )
+            remote_log_dir = self._remote_logs_dir(j)
             try:
                 self._emit(f"Fetching logs from {remote_log_dir} to {log_dir}")
                 self.get(remote_log_dir, log_dir)
@@ -901,43 +859,9 @@ class SlurmSite(BaseSite):
         local_path: Union[str, Path],
         overwrite: bool = False,
     ):
-        """Transfer files from a remote path to a local path.
+        """Transfer files from a remote path to a local path."""
 
-        Args:
-            remote_path: Remote path to transfer to
-            local_path: Local path to transfer from
-            overwrite: Overwrite existing files
-        """
-        logger.debug("Attempting to transfer from %s to %s", remote_path, local_path)
-
-        local_path = Path(local_path)
-        remote_path = Path(remote_path)
-
-        try:
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            if self.transfer_method == "sftp":
-                logger.debug("Transferring %s to %s (SFTP)", remote_path, local_path)
-                sftp = self.login_client.open_sftp()
-                try:
-                    if self._sftp_is_dir(sftp, remote_path):
-                        self._get_dir(sftp, remote_path, local_path)
-                    else:
-                        sftp.get(str(remote_path), str(local_path))
-                finally:
-                    sftp.close()
-            else:
-                if remote_path.suffix == "":
-                    remote_str = f"{remote_path}/"
-                else:
-                    remote_str = str(remote_path)
-                local_str = f"{local_path}/" if local_path.is_dir() else str(local_path)
-                self._run_rsync(self._remote_spec(remote_str), local_str)
-
-            logger.debug("Transfer completed successfully")
-
-        except Exception as e:
-            logger.exception("Error during file transfer: %s", str(e))
-            raise
+        return self._transfer.get(remote_path, local_path, overwrite=overwrite)
 
     def cancel_job(self, job_id: Optional[str] = None) -> bool:
         """Cancel a job."""
@@ -954,18 +878,331 @@ class SlurmSite(BaseSite):
         """Release HPC resources."""
         return self.cancel_job(self.pool.id)
 
+    def sync(self, project):
+        """Sync the project to the site."""
+        self._sync_project(project)
+
+    def config_for_queue(self, queue: str):
+        """Return the site configuration for a queue/partition name."""
+        if self.config_cls is not None:
+            return self.config_cls(queue)
+        return self.config
+
+    def _reattach_inflight_run(
+        self,
+        job: SimulationJob,
+        *,
+        poll_interval: Optional[float] = None,
+        fetch: bool = False,
+    ) -> Optional[RunHandle]:
+        """Return a handle for a matching active scheduler job, if one exists."""
+
+        record_status = self._matching_inflight_run_record(job)
+        if record_status is None:
+            return None
+        record, scheduler_status = record_status
+        job._job_id = record.scheduler_id
+        updated = record.with_updates(
+            status=scheduler_status,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        job.write_run_record(updated)
+        self._emit(
+            f"Reattached {job.name} to running {self.site_name} job "
+            f"{record.scheduler_id}"
+        )
+        handle = self.handle(job, job_id=record.scheduler_id, mode="batch")
+        handle.poll_interval = poll_interval or self.config.poll_interval
+        handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
+        handle.backend["reattached"] = True
+        return handle
+
+    def _matching_inflight_run_record(self, job: SimulationJob):
+        if not isinstance(job, SimulationJob):
+            return None
+        try:
+            current_payload = job.fingerprint_payload()
+            current_fingerprint = job._hash_payload(current_payload)
+        except Exception as exc:
+            logger.debug("Could not fingerprint job %s: %s", job.name, exc)
+            return None
+
+        records = [
+            record
+            for record in job.run_records()
+            if record.site == self.site_name and record.scheduler_id is not None
+        ]
+        records = sorted(
+            records,
+            key=lambda record: record.updated_at or record.submitted_at or "",
+            reverse=True,
+        )
+        for record in records:
+            if not self._run_record_matches_fingerprint(
+                record,
+                fingerprint=current_fingerprint,
+                fingerprint_payload=current_payload,
+            ):
+                continue
+            scheduler_status = self.update_status(record.scheduler_id)
+            if scheduler_status in {"pending", "running"}:
+                return record, scheduler_status
+        return None
+
+    @staticmethod
+    def _run_record_matches_fingerprint(
+        record,
+        *,
+        fingerprint: str,
+        fingerprint_payload: Dict[str, Any],
+    ) -> bool:
+        if record.fingerprint != fingerprint:
+            return False
+        record_payload = record.fingerprint_payload or {}
+        if not record_payload:
+            return True
+        return SlurmSite._fingerprint_section_matches(
+            record_payload, fingerprint_payload, "simulation"
+        ) and SlurmSite._fingerprint_section_matches(
+            record_payload, fingerprint_payload, "job"
+        )
+
+    @staticmethod
+    def _fingerprint_section_matches(
+        record_payload: Dict[str, Any],
+        fingerprint_payload: Dict[str, Any],
+        section: str,
+    ) -> bool:
+        if section not in record_payload or section not in fingerprint_payload:
+            return False
+        return SimulationJob._hash_payload(
+            record_payload[section]
+        ) == SimulationJob._hash_payload(fingerprint_payload[section])
+
+    def _remote_run_successful(self, record) -> bool:
+        if not self._record_status_successful(record.status):
+            return False
+
+        manifest = self._read_remote_json(
+            record.result_dir / "_fs_run" / "run_manifest.json"
+        )
+        if not isinstance(manifest, dict):
+            return False
+
+        task_summary = manifest.get("task_summary")
+        if not isinstance(task_summary, dict):
+            return False
+        try:
+            failed = int(task_summary.get("failed") or 0)
+            complete = int(task_summary.get("complete") or 0)
+            total = int(task_summary.get("total") or 0)
+        except (TypeError, ValueError):
+            return False
+        expected_total = self._record_expected_task_count(record)
+        if expected_total is not None and total != expected_total:
+            return False
+        if failed != 0 or total <= 0 or complete != total:
+            return False
+        succeeded = task_summary.get("succeeded", task_summary.get("successful"))
+        if succeeded is not None:
+            try:
+                if int(succeeded) != total:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return self._remote_path_has_files(record.logs_dir)
+
+    @staticmethod
+    def _record_status_successful(status: Optional[str]) -> bool:
+        return str(status or "").lower() in {
+            "complete",
+            "completed",
+            "success",
+            "successful",
+            "succeeded",
+        }
+
+    @staticmethod
+    def _record_expected_task_count(record) -> Optional[int]:
+        payload = record.fingerprint_payload or {}
+        job_payload = payload.get("job") if isinstance(payload, Mapping) else None
+        if not isinstance(job_payload, Mapping):
+            return None
+        frequencies = job_payload.get("f_list")
+        if frequencies is None:
+            return None
+        try:
+            return len(frequencies)
+        except TypeError:
+            return None
+
+    def _remote_path_has_files(self, path: Union[str, Path]) -> bool:
+        quoted = shlex.quote(str(path))
+        try:
+            text = self.run_login(
+                f"find {quoted} -type f -print -quit 2>/dev/null || true"
+            ).strip()
+        except Exception as exc:
+            logger.debug("Could not inspect remote path %s: %s", path, exc)
+            return False
+        return bool(text)
+
+    def _read_remote_json(self, path: Union[str, Path]) -> Optional[Dict[str, Any]]:
+        quoted = shlex.quote(str(path))
+        try:
+            text = self.run_login(f"test -f {quoted} && cat {quoted} || true").strip()
+        except Exception as exc:
+            logger.debug("Could not read remote JSON %s: %s", path, exc)
+            return None
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.debug("Could not parse remote JSON %s: %s", path, exc)
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _record_site_run(
+        self,
+        job: SimulationJob,
+        *,
+        scheduler_id: Optional[str] = None,
+        status: str = "submitted",
+    ):
+        if not isinstance(job, SimulationJob):
+            return None
+        record = job.record_site_run(
+            site=self.site_name,
+            work_dir=self.work_dir,
+            scheduler_id=scheduler_id,
+            status=status,
+            site_module=self.__class__.__module__,
+            site_class=self.__class__.__name__,
+            rel_path=self._rel_proj_path,
+        )
+        self._store_remote_run_records(job, record)
+        return record
+
+    def _store_remote_run_records(self, job: SimulationJob, record=None) -> None:
+        record = record or job.latest_run(site=self.site_name)
+        if record is None:
+            return
+        try:
+            self.put(job.run_records_file, record.result_dir / "_fs_run" / "runs.json")
+        except Exception as exc:
+            logger.debug(
+                "Could not write remote run record for job %s: %s",
+                job.name,
+                exc,
+            )
+
+    def _finalize_run_record(self, run: RunHandle, status: JobStatus) -> None:
+        job = getattr(run, "job", None)
+        if not isinstance(job, SimulationJob):
+            return
+        record = job.latest_run(site=self.site_name)
+        if record is None:
+            return
+        updated = record.with_updates(
+            status=status.state,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        job.write_run_record(updated)
+        self._store_remote_run_records(job, updated)
+
+    def _remote_job_dir(self, job: SimulationJob) -> Path:
+        record = (
+            job.latest_run(site=self.site_name)
+            if isinstance(job, SimulationJob)
+            else None
+        )
+        return record.job_dir if record is not None else job._remote_path(self.work_dir)
+
+    def _remote_result_dir(self, job: SimulationJob) -> Path:
+        record = (
+            job.latest_run(site=self.site_name)
+            if isinstance(job, SimulationJob)
+            else None
+        )
+        if record is not None:
+            return record.result_dir
+        return job._remote_path(self.work_dir) / "results"
+
+    def _remote_logs_dir(self, job: SimulationJob) -> Path:
+        record = (
+            job.latest_run(site=self.site_name)
+            if isinstance(job, SimulationJob)
+            else None
+        )
+        if record is not None:
+            return record.logs_dir
+        return job._remote_path(self.work_dir) / "logs"
+
     def _poll_run(self, run: RunHandle) -> JobStatus:
         status = self.update_status(str(run.id))
+        scheduler_status = self._read_scheduler_status(run)
         return_code = (
             0
             if status == "complete"
             else (1 if status in {"failed", "cancelled", "timeout"} else -1)
         )
-        return JobStatus(
+        message = ""
+        raw: Dict[str, Any] = {"scheduler": "slurm"}
+        if scheduler_status is not None:
+            raw["task_status"] = scheduler_status
+            message = self._format_scheduler_status(scheduler_status)
+        job_status = JobStatus(
             state=status,
             return_code=return_code,
             job_id=str(run.id),
-            raw={"scheduler": "slurm"},
+            message=message,
+            raw=raw,
+        )
+        return job_status
+
+    def _scheduler_status_path(self, job: SimulationJob) -> Path:
+        """Return the remote scheduler progress file for a batch simulation job."""
+
+        return self._remote_logs_dir(job) / "scheduler_status.json"
+
+    def _read_scheduler_status(self, run: RunHandle) -> Optional[Dict[str, Any]]:
+        """Read the remote adaptive scheduler status payload if it exists."""
+
+        job = getattr(run, "job", None)
+        if job is None:
+            return None
+        status_path = self._scheduler_status_path(job)
+        cmd = f"test -f {shlex.quote(str(status_path))} && cat {shlex.quote(str(status_path))}"
+        try:
+            text = self.run_login(cmd).strip()
+        except Exception as exc:
+            logger.debug("Could not read scheduler status %s: %s", status_path, exc)
+            return None
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.debug("Could not parse scheduler status %s: %s", status_path, exc)
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _format_scheduler_status(payload: Dict[str, Any]) -> str:
+        """Format task counts from an adaptive scheduler status payload."""
+
+        total = int(payload.get("total") or 0)
+        successful = int(payload.get("successful") or payload.get("succeeded") or 0)
+        failed = int(payload.get("failed") or 0)
+        running = int(payload.get("running") or 0)
+        pending = int(
+            payload.get("pending") or max(0, total - successful - failed - running)
+        )
+        return (
+            "tasks: "
+            f"{successful} successful, {failed} failed, {running} running, "
+            f"{pending} pending, {total} total"
         )
 
     def _allocation_handle(self, job_id: str) -> RunHandle:
@@ -978,6 +1215,7 @@ class SlurmSite(BaseSite):
             _status_fn=self._poll_allocation,
             _wait_fn=self._wait_allocation,
             _wait_async_fn=self._wait_allocation_async,
+            _finalize_fn=self._finalize_allocation,
             _cancel_fn=lambda run: self.cancel_job(str(run.id)),
         )
 
@@ -1000,6 +1238,11 @@ class SlurmSite(BaseSite):
             job_id=str(run.id),
             raw={"scheduler_state": status},
         )
+
+    def _finalize_allocation(self, run: RunHandle, status: JobStatus) -> RunResult:
+        if status.is_successful:
+            self._attach_compute_client()
+        return run._make_result(status)
 
     def _wait_allocation(
         self,
@@ -1059,10 +1302,6 @@ class SlurmSite(BaseSite):
                 )
             await asyncio.sleep(interval)
 
-    def sync(self, project):
-        """Sync the project to the site."""
-        self._sync_project(project)
-
     def _sync_project(self, project):
         """Sync the project to the site."""
         project._transfer(self)
@@ -1088,6 +1327,7 @@ class SlurmSite(BaseSite):
         duration = config.duration or getattr(
             self.config, "max_duration", "00-02:00:00"
         )
+        run_path = self._remote_run_path(config.run_path, job=job)
         script = self._sweep_SLURM_script(
             n_tasks=job.n_tasks,
             n_nodes=config.nodes,
@@ -1112,13 +1352,10 @@ class SlurmSite(BaseSite):
                 if config.notify_email is not None
                 else {}
             ),
-            **({"run_path": config.run_path} if config.run_path is not None else {}),
+            run_path=run_path,
             **kwargs,
         )
 
-        run_path = config.run_path
-        if run_path is None:
-            run_path = self.work_dir
         remote_script, remote_job = self._transfer_SLURM_job(script, job)
 
         cmd = f"mkdir -p {run_path}/jobs/batch && "
@@ -1141,6 +1378,7 @@ class SlurmSite(BaseSite):
             f"as job {job_id}"
         )
         job._job_id = job_id
+        self._record_site_run(job, scheduler_id=job_id, status="submitted")
         return job_id
 
     def _poll_attached_run(self, run: RunHandle) -> JobStatus:
@@ -1268,7 +1506,7 @@ class SlurmSite(BaseSite):
 
         return Environment(
             loader=FileSystemLoader(
-                self._FS_dir / "src/frequensolve/orchestrator/templates"
+                self._FS_dir / "src/frequensolve/orchestrator/sites/hpc/templates"
             ),
             keep_trailing_newline=keep_trailing_newline,
         )
@@ -1291,23 +1529,9 @@ class SlurmSite(BaseSite):
     def _attach_compute_client(self):
         """Connect to the current pool's compute host and populate pool metadata."""
 
-        compute_client = self._connect_to_job_host(self.pool.id)
+        compute_client = self._authenticator.connect_to_job_host(self.pool.id)
         self._compute_client = SSHClientClass(compute_client)
         self._set_pool_info()
-
-    def _remote_spec(self, remote_path: Union[str, Path]) -> str:
-        """Return an rsync-compatible user@host:path target."""
-
-        return f"{self.credentials.username}@{self.config.hostname}:{remote_path}"
-
-    def _run_rsync(self, source: str, target: str) -> None:
-        """Run rsync and raise a concise error on failure."""
-
-        rsync_cmd = ["rsync", "-azP", source, target]
-        logger.debug("rsync: %s", rsync_cmd)
-        result = subprocess.run(rsync_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"rsync failed: {result.stderr}")
 
     def _submit_sbatch(self, cmd: str) -> str:
         """Run an sbatch command and return the submitted job id."""
@@ -1434,11 +1658,34 @@ class SlurmSite(BaseSite):
             self.__class__.__name__, self.work_dir
         )
 
+        self._transfer_remote_simulation_inputs(job)
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(local_job), Path(remote_job))
         self.run_login(f"chmod 700 {remote_script}")
 
         return remote_script, remote_job
+
+    def _remote_run_path(
+        self,
+        run_path: Optional[Union[str, Path]],
+        *,
+        job: Optional[SimulationJob] = None,
+    ) -> Path:
+        """Return the remote directory where SLURM scripts should run."""
+
+        if run_path is None:
+            return self.work_dir
+
+        path = Path(run_path)
+        if job is None:
+            return path
+
+        try:
+            local_project = Path(job.project_path).resolve()
+            relative = path.expanduser().resolve().relative_to(local_project)
+        except Exception:
+            return path
+        return self.work_dir / relative
 
     def _transfer_job(
         self, job: SimulationJob, *, pack: bool = True, fresh: bool = False
@@ -1457,6 +1704,7 @@ class SlurmSite(BaseSite):
         )
         script = self._sweep_script(job, pack=pack, fresh=fresh)
 
+        self._transfer_remote_simulation_inputs(job)
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(local_job), Path(remote_job))
 
@@ -1468,6 +1716,19 @@ class SlurmSite(BaseSite):
         self.run_login(f"chmod 700 {remote_script}")
 
         return remote_script, remote_job
+
+    def _transfer_remote_simulation_inputs(self, job: SimulationJob) -> None:
+        """Transfer the simulation JSON and direct file inputs for a staged job."""
+
+        local_sim, remote_sim = job.save_simulation_for_remote(
+            self.__class__.__name__, self.work_dir
+        )
+        logger.debug("Transferring simulation file to remote path: %s", remote_sim)
+        self.put(Path(local_sim), Path(remote_sim))
+
+        for local_file, remote_file in job.remote_input_files(self.work_dir):
+            logger.debug("Transferring input file to remote path: %s", remote_file)
+            self.put(Path(local_file), Path(remote_file))
 
     def _is_running(self, job_id: int):
         """Check if a job is running."""
@@ -1572,12 +1833,6 @@ class SlurmSite(BaseSite):
             **kwargs,
         )
 
-    def config_for_queue(self, queue: str):
-        """Return the site configuration for a queue/partition name."""
-        if self.config_cls is not None:
-            return self.config_cls(queue)
-        return self.config
-
     def _generate_provision_script(
         self,
         n_nodes: int,
@@ -1659,65 +1914,6 @@ class SlurmSite(BaseSite):
             return
         print(f"\n{'='*60}\n{header}\n{path}\n{'='*60}\n{text}\n")
 
-    def _get_job_host(self, job_id: int) -> str:
-        """Get the job host."""
-        # Check if job is running
-        status = self.run_login(f"squeue -j {job_id} -h -o %t").strip()
-        if status != "R":
-            raise RuntimeError(f"Job {job_id} is not running")
-
-        # Get the hostname of the compute node
-        hostname = self.run_login(f"squeue -j {job_id} -h -o %B").strip()
-        if not hostname:
-            raise RuntimeError(f"Could not get hostname for job {job_id}")
-
-        return hostname
-
-    def _connect_to_job_host(self, job_id: int):
-        """Connect to the job host.
-
-        Args:
-            job_id (int): The SLURM job ID.
-
-        Returns:
-            Union[SSHClient, SSHProxy]: A client connected to the job host.
-        """
-        job_host = self._get_job_host(job_id)
-        logger.debug(f"Got compute node hostname: {job_host}")
-
-        # If using a proxy, just create a new proxy for the compute node
-        if self._login_client.is_proxy():
-            logger.debug("Using proxy connection to connect to compute node")
-            control_path, username = self._login_client.get_proxy_details()
-            if not control_path or not username:
-                raise RuntimeError("Missing proxy details")
-            return SSHProxy(control_path, username, self.login_client.host, job_host)
-        else:
-            # Otherwise use paramiko SSH tunneling
-            logger.debug("Using SSH tunneling to connect to compute node")
-            transport = self._login_client.get_transport()
-            if not transport:
-                raise RuntimeError("No transport available for SSH tunneling")
-
-            channel = transport.open_channel("direct-tcpip", (job_host, 22), ("", 0))
-            job_client = SSHClient()
-            job_client.set_missing_host_key_policy(AutoAddPolicy())
-
-            try:
-                job_client.connect(
-                    job_host,
-                    username=self.credentials.username,
-                    sock=channel,
-                    allow_agent=True,
-                    look_for_keys=False,
-                )
-                logger.info("Connected to job host: %s", job_host)
-                return job_client
-            except Exception as e:
-                logger.error(f"Failed to connect to job host: {str(e)}")
-                channel.close()
-                raise
-
     def _get_work_dir(self, rel_proj_path: Union[str, Path]) -> Path:
         """Gets the remote work directory path."""
         work_dir = os.getenv(self.work_dir_env)
@@ -1741,69 +1937,6 @@ class SlurmSite(BaseSite):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("localhost", 0))
             return s.getsockname()[1]
-
-    def _put_dir(self, sftp, local_dir: Path, remote_dir: Path):
-        """Transfer directory via SFTP.
-
-        Args:
-            sftp: The SFTP client.
-            local_dir: The local directory to transfer.
-            remote_dir: The remote directory to transfer to.
-        """
-
-        # Create temporary tar file
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz") as tmp:
-            with tarfile.open(tmp.name, "w:gz") as tar:
-                tar.add(local_dir, arcname=local_dir.name)
-
-            remote_tar = str(remote_dir.parent / f"{remote_dir.name}.tar.gz")
-            sftp.put(tmp.name, remote_tar)
-
-            _, _, stderr = self.run_login_cmd(
-                f"cd {remote_dir.parent} && "
-                f"tar xzf {remote_dir.name}.tar.gz && "
-                f"rm {remote_dir.name}.tar.gz"
-            )
-
-            err = stderr.read().decode().strip()
-            if err:
-                logger.error("Error extracting directory on remote: %s", err)
-                raise RuntimeError(f"Failed to extract directory on remote: {err}")
-
-    def _get_dir(self, sftp, remote_dir: Path, local_dir: Path):
-        """Transfer directory via SFTP.
-
-        Args:
-            sftp: The SFTP client.
-            remote_dir: The remote directory to transfer.
-            local_dir: The local directory to transfer to.
-        """
-        remote_tar = str(remote_dir.parent / f"{remote_dir.name}.tar.gz")
-        _, _, stderr = self.run_login_cmd(
-            f"cd {remote_dir.parent} && tar czf {remote_dir.name}.tar.gz {remote_dir.name}"
-        )
-
-        err = stderr.read().decode().strip()
-        if err:
-            raise RuntimeError(f"Failed to create tar payload on remote: {err}")
-
-        local_tar = str(local_dir.parent / f"{local_dir.name}.tar.gz")
-        sftp.get(remote_tar, local_tar)
-
-        with tarfile.open(local_tar, "r:gz") as tar:
-            tar.extractall(path=local_dir.parent)
-
-        os.remove(local_tar)
-        self.run_login(f"rm {remote_tar}")
-
-    @staticmethod
-    def _sftp_is_dir(sftp, remote_path: Union[str, Path]) -> bool:
-        """Return True if a remote SFTP path is a directory."""
-
-        try:
-            return stat.S_ISDIR(sftp.stat(str(remote_path)).st_mode)
-        except OSError:
-            return False
 
     async def _monitor_command_output(self, future, job, interactive=None):
         """Monitor command output and update future accordingly."""

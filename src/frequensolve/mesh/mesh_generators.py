@@ -158,6 +158,8 @@ class HexMeshGenerator(BaseMeshGenerator):
     n: Optional[List[int]] = None
     units: Optional[str] = None
     system: Optional[str] = None
+    clip_to_envelope: Optional[bool] = None
+    triangulate_strips: Optional[bool] = None
     horizontal_spacing: Optional[Union[HorizontalSpacing, Dict[str, Any]]] = None
 
     def to_fs(self, ctx=None) -> Dict:
@@ -181,6 +183,16 @@ class HexMeshGenerator(BaseMeshGenerator):
             "u_bound": u_bound,
             **({"units": self.units} if self.units is not None else {}),
             **({"system": self.system} if self.system is not None else {}),
+            **(
+                {"clip_to_envelope": self.clip_to_envelope}
+                if self.clip_to_envelope is not None
+                else {}
+            ),
+            **(
+                {"triangulate_strips": self.triangulate_strips}
+                if self.triangulate_strips is not None
+                else {}
+            ),
             **(
                 {"horizontal_spacing": horizontal_spacing.to_fs(ctx)}
                 if horizontal_spacing is not None
@@ -222,6 +234,8 @@ class HexMeshGenerator(BaseMeshGenerator):
             u_bound=data["u_bound"],
             units=data.get("units"),
             system=data.get("system"),
+            clip_to_envelope=data.get("clip_to_envelope"),
+            triangulate_strips=data.get("triangulate_strips"),
             horizontal_spacing=(
                 HorizontalSpacing.from_fs(data["horizontal_spacing"])
                 if "horizontal_spacing" in data
@@ -247,6 +261,8 @@ class LayeredMeshGenerator(HexMeshGenerator):
             u_bound=data["u_bound"],
             units=data.get("units"),
             system=data.get("system"),
+            clip_to_envelope=data.get("clip_to_envelope"),
+            triangulate_strips=data.get("triangulate_strips"),
             horizontal_spacing=(
                 HorizontalSpacing.from_fs(data["horizontal_spacing"])
                 if "horizontal_spacing" in data
@@ -277,6 +293,8 @@ class TetMeshGenerator(HexMeshGenerator):
             u_bound=data["u_bound"],
             units=data.get("units"),
             system=data.get("system"),
+            clip_to_envelope=data.get("clip_to_envelope"),
+            triangulate_strips=data.get("triangulate_strips"),
             horizontal_spacing=(
                 HorizontalSpacing.from_fs(data["horizontal_spacing"])
                 if "horizontal_spacing" in data

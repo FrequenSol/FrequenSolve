@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional, Union
 
-from frequensolve.orchestrator.config.stampede3 import Stampede3Config
 from frequensolve.orchestrator.credentials import Credentials
 from frequensolve.orchestrator.pool import PoolInfo
-from frequensolve.orchestrator.sites.hpc import SlurmRunConfig, SlurmSite
+from frequensolve.orchestrator.sites.hpc.config import Stampede3Config
+from frequensolve.orchestrator.sites.hpc.site import SlurmRunConfig, SlurmSite
 from frequensolve.orchestrator.ssh import SSHClientClass
 
 __all__ = ["TACCLoginCredentials", "Stampede3Site"]

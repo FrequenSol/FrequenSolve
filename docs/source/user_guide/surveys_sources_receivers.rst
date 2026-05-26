@@ -72,12 +72,12 @@ Survey Sources
 
 Point source kinds include ``scalar``, ``vector``, ``moment``, ``monopole``,
 and ``dipole``. ``CompoundSource`` combines multiple points and weights into
-one source group. Batching multiple sources is usually more efficient than
-running many independent jobs:
+one source group. When a simulation has multiple compatible sources, the solver
+chooses efficient internal source batches automatically:
 
 .. code-block:: python
 
-   acq = fs.Acquisition(max_batch=4)
+   acq = fs.Acquisition()
    acq.add_source_group(
        kind="scalar",
        coords=[[0.25, 0.05], [0.5, 0.05], [0.75, 0.05]],
@@ -98,7 +98,7 @@ Sparse surveys select a subset or define rules such as offset windows:
        metric="horizontal",
    )
 
-   acq = fs.Acquisition(max_batch=3)
+   acq = fs.Acquisition()
    acq.add_source_group(kind="scalar", coords=sources)
    acq.add_sparse_receiver_group(
        "near_offsets",

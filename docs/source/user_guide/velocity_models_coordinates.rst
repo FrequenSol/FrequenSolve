@@ -118,9 +118,71 @@ separate surface flag that makes it an interface.
    * - Borehole or local feature
      - Adds geometry and optional subdomains that meshing and output requests
        can reference.
+   * - Fracture
+     - Defines a curve that the mesh generator opens into an explicit gap, or
+       can later use as the support for a reduced fracture model.
    * - Uniform sampled view
      - ``model.sample_uniform(...)`` creates an ``xarray.Dataset`` for QC,
        plotting, and export.
+
+Fractures
+---------
+
+Fractures are specialized model surfaces. They participate in the same ordered
+layered workflow as ``SimpleSurface``: place a fracture after a layer to close
+that layer, or place it between two surfaces when you want the fracture geometry
+without changing the material interval. The mesh generator opens the fracture
+around its center ``depth`` using the one-dimensional ``gap`` aperture curve.
+Use an ``xarray.DataArray`` when the aperture varies along the fracture:
+
+.. code-block:: python
+
+   x = np.asarray([0.0, 0.5, 1.0])
+   gap = xr.DataArray(
+       [0.0, 0.01, 0.0],
+       dims=["x"],
+       coords={"x": x},
+   )
+
+   model.add_fracture(
+       name="frac",
+       depth=0.5,
+       gap=gap,
+       physics="acoustic",
+       properties={"vp": 1.5, "rho": 1.0},
+   )
+
+When ``properties`` are provided, the SDK assigns or uses the fracture
+``mesh_block_id`` and creates the matching ``ModelSubdomain``. Material
+properties stay in ``subdomains``; the fracture entry in ``surfaces`` carries
+the geometry and the mesh-block reference:
+
+.. code-block:: json
+
+   {
+     "_type": "Fracture",
+     "name": "frac",
+     "interface": true,
+     "depth": {"value": 0.5},
+     "gap": {
+       "dims": ["x"],
+       "coords": {"x": {"data": [0.0, 0.5, 1.0]}},
+       "data": [0.0, 0.01, 0.0]
+     },
+     "mesh_block_id": 2
+   }
+
+This keeps fracture geometry in the ordered surface list while letting the
+solver expand the opened interval internally.
+
+Attach units to the ``depth`` quantity, the gap values, or the gap coordinate
+when the model is not unitless:
+
+.. code-block:: python
+
+   gap.attrs["units"] = "m"
+   gap.coords["x"].attrs["units"] = "m"
+   model.add_fracture("frac", depth=500.0 * fs.ureg.m, gap=gap)
 
 Inspect Before Running
 ----------------------

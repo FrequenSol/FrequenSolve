@@ -43,10 +43,14 @@ def _hash_update_json(hasher, value: Any) -> None:
 
 
 def hash_dataarray_payload(
-    data: xr.DataArray, attrs: Optional[Mapping[str, Any]] = None
+    data: xr.DataArray,
+    attrs: Optional[Mapping[str, Any]] = None,
+    dtype: Optional[Any] = None,
 ) -> str:
     """Hash data and metadata that affect the solver-facing meaning of an array."""
     values = np.ascontiguousarray(data.values)
+    if dtype is not None:
+        values = values.astype(dtype, copy=False)
     hasher = blake3.blake3()
     _hash_update_json(hasher, {"dtype": str(values.dtype), "shape": values.shape})
     hasher.update(memoryview(values).cast("B"))
@@ -114,13 +118,19 @@ class SimulationStore:
         *,
         attrs: Optional[Mapping[str, Any]] = None,
         compression: Optional[str] = None,
+        dtype: Optional[Any] = np.float32,
     ) -> HDF5Reference:
         dataset = dataset.strip("/")
         attrs = dict(attrs or {})
-        digest = hash_dataarray_payload(data, attrs=attrs)
+        hash_dtype = dtype
+        if dtype is not None and np.dtype(dtype) == np.dtype(np.float32):
+            hash_dtype = None
+        digest = hash_dataarray_payload(data, attrs=attrs, dtype=hash_dtype)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        values = np.ascontiguousarray(data.values).astype(np.float32, copy=False)
+        values = np.ascontiguousarray(data.values)
+        if dtype is not None:
+            values = values.astype(dtype, copy=False)
         with h5py.File(self.path, "a") as h5:
             if dataset in h5:
                 dset = h5[dataset]

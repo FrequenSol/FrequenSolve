@@ -41,6 +41,7 @@ cd {{run_path}}
 dir_out={{dir_out}}
 rm -rf "$dir_out"
 mkdir -p "$dir_out"
+scheduler_status="$dir_out/scheduler_status.json"
 
 ml intel/25.1 phdf5 petsc/3.23 fftw3
 module list
@@ -57,6 +58,34 @@ fresh_flag=""
 {% if fresh %}
 fresh_flag="--fresh"
 {% endif %}
+cat > "$scheduler_status" <<EOF
+{"state":"pending","total":$n_tasks,"successful":0,"failed":0,"running":0,"pending":$n_tasks,"complete":0}
+EOF
+
+mark_scheduler_failed() {
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        python3 - "$scheduler_status" "$n_tasks" <<'PY' || true
+import json, os, sys, time
+
+status_file = sys.argv[1]
+n_tasks = int(sys.argv[2])
+try:
+    with open(status_file, "r") as f:
+        payload = json.load(f)
+except Exception:
+    payload = {"total": n_tasks, "successful": 0, "failed": 0, "running": 0, "pending": n_tasks, "complete": 0}
+payload["state"] = "failed"
+payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+tmp = f"{status_file}.tmp"
+with open(tmp, "w") as f:
+    json.dump(payload, f, separators=(",", ":"))
+    f.write("\n")
+os.replace(tmp, status_file)
+PY
+    fi
+}
+trap mark_scheduler_failed EXIT
 TOTAL_RANKS={{n_procs}}
 MEM_PER_RANK_GIB={{proc_memory}}
 MIN_RANKS={{min_ranks}}
@@ -81,6 +110,7 @@ export DIR_OUT="$dir_out"
 export EXE="$executable"
 export MPI_EXEC="$mpi_exec"
 export FS_FRESH_FLAG="$fresh_flag"
+export FS_SCHEDULER_STATUS="$scheduler_status"
 export TOTAL_RANKS="$TOTAL_RANKS"
 export OMP_THREADS="$n_threads"
 export MEM_PER_RANK_GIB="$MEM_PER_RANK_GIB"
@@ -102,6 +132,7 @@ dir_out       = os.environ["DIR_OUT"]
 exe           = os.environ["EXE"]
 mpi_exec      = os.environ.get("MPI_EXEC", "ibrun")
 fresh_flag    = os.environ.get("FS_FRESH_FLAG", "").split()
+status_file   = os.environ.get("FS_SCHEDULER_STATUS")
 total_ranks   = int(os.environ.get("TOTAL_RANKS", "1"))
 omp_threads   = int(os.environ.get("OMP_THREADS", "1"))
 mem_per_rank  = float(os.environ["MEM_PER_RANK_GIB"])  # GiB per MPI rank from driver
@@ -175,6 +206,33 @@ def load_task_mems():
         mems.append(parse_mem_to_gib(t["memory"]))
     return mems
 
+def write_status(state: str, *, running_tasks=None, successful_tasks=None, failed_tasks=None):
+    if not status_file:
+        return
+    running_tasks = list(running_tasks or [])
+    successful_tasks = list(successful_tasks or [])
+    failed_tasks = list(failed_tasks or [])
+    complete = len(successful_tasks) + len(failed_tasks)
+    pending = max(0, n_tasks - complete - len(running_tasks))
+    payload = {
+        "state": state,
+        "total": n_tasks,
+        "successful": len(successful_tasks),
+        "failed": len(failed_tasks),
+        "running": len(running_tasks),
+        "pending": pending,
+        "complete": complete,
+        "running_tasks": running_tasks,
+        "successful_tasks": successful_tasks,
+        "failed_tasks": failed_tasks,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    tmp = f"{status_file}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f, separators=(",", ":"))
+        f.write("\n")
+    os.replace(tmp, status_file)
+
 def total_free_ranks(intervals):
     return sum(length for _, length in intervals)
 
@@ -230,9 +288,12 @@ queue = deque(order)
 
 # running entries: (proc, offset, ranks, task_id, mem_gib)
 running = []
+successful_tasks = []
+failed_tasks = []
 
 # Track actual free slot intervals in hostfile slot space
 free_intervals = [(0, total_ranks)]
+write_status("running", running_tasks=[], successful_tasks=[], failed_tasks=[])
 
 def launch(task_id: int, offset: int, ranks: int):
     out_path = os.path.join(dir_out, f"task_{task_id}.log")
@@ -263,6 +324,12 @@ def launch(task_id: int, offset: int, ranks: int):
         flush=True,
     )
     time.sleep(float(os.environ.get("LAUNCH_DELAY_SEC", "0.25")))
+    write_status(
+        "running",
+        running_tasks=[entry[3] for entry in running],
+        successful_tasks=successful_tasks,
+        failed_tasks=failed_tasks,
+    )
 
 # --------------------------
 # Scheduling loop
@@ -393,6 +460,10 @@ while queue or running:
                 still.append((p, offset, ranks, tid, m, out))
             else:
                 out.close()
+                if rc == 0:
+                    successful_tasks.append(tid)
+                else:
+                    failed_tasks.append(tid)
                 free_intervals = free_interval(free_intervals, offset, ranks)
                 print(
                     f"[scheduler] finish task={tid} rc={rc} "
@@ -401,9 +472,27 @@ while queue or running:
                     flush=True,
                 )
         running = still
+        write_status(
+            "running" if queue or running else ("failed" if failed_tasks else "complete"),
+            running_tasks=[entry[3] for entry in running],
+            successful_tasks=successful_tasks,
+            failed_tasks=failed_tasks,
+        )
     elif not launched_any:
+        write_status(
+            "running",
+            running_tasks=[entry[3] for entry in running],
+            successful_tasks=successful_tasks,
+            failed_tasks=failed_tasks,
+        )
         time.sleep(1)
 
+write_status(
+    "failed" if failed_tasks else "complete",
+    running_tasks=[],
+    successful_tasks=successful_tasks,
+    failed_tasks=failed_tasks,
+)
 print("[scheduler] all tasks done", flush=True)
 PY
 

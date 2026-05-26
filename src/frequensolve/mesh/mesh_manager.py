@@ -43,6 +43,7 @@ class MeshParallelism:
 
 
 _GRADE_MODES = {"none", "inside", "outside", "band", "abs_band"}
+GradingValue = Union[float, Mapping[str, float]]
 
 
 def _pop_alias(
@@ -125,33 +126,67 @@ def _normalize_grade_mode(mode: str) -> str:
     return mode
 
 
+def _validate_grading_power(power: GradingValue) -> GradingValue:
+    if isinstance(power, Mapping):
+        out = {}
+        for axis, value in power.items():
+            value = float(value)
+            if value <= 0.0:
+                raise ValueError("Grading power must be positive")
+            out[str(axis)] = value
+        return out
+
+    power = float(power)
+    if power <= 0.0:
+        raise ValueError("Grading power must be positive")
+    return power
+
+
+def _normalize_optional_grading_value(
+    value: Optional[GradingValue],
+) -> Optional[GradingValue]:
+    if isinstance(value, Mapping):
+        return {str(axis): float(axis_value) for axis, axis_value in value.items()}
+    return value
+
+
+def _is_default_grading_power(power: GradingValue) -> bool:
+    if isinstance(power, Mapping):
+        return all(float(value) == 1.0 for value in power.values())
+    return float(power) == 1.0
+
+
 @dataclass
 class DistanceGrading(ExtraFieldsMixin):
     """Distance-based source/receiver mesh grading.
 
-    This maps to the fast solver's ``kd_grade_t`` JSON contract. ``d0`` is the distance
-    where the full multiplier is applied and ``d1`` is the distance where the
-    multiplier returns to one.
+    This maps to the fast solver's ``kd_grade_t`` JSON contract. ``d0`` is the
+    distance where the full factor is applied and ``d1`` is the distance where
+    the factor returns to one. ``power`` curves the transition between those
+    distances; ``1`` is linear. ``factor`` and ``power`` may be scalars or
+    dictionaries keyed by the global coordinate-system axis names.
     """
 
     d1: float
-    mult: Optional[float] = None
+    factor: Optional[GradingValue] = None
+    power: GradingValue = 1.0
     d0: float = 0.0
-    mult_max: Optional[float] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        if self.mult is not None and self.mult_max is not None:
-            raise ValueError(
-                "Use either 'mult' or 'mult_max' for DistanceGrading, not both"
-            )
+        self.factor = _normalize_optional_grading_value(self.factor)
+        self.power = _validate_grading_power(self.power)
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
-        mult = self.mult if self.mult is not None else self.mult_max
         payload = {
             "d0": value_and_units_to_fs(self.d0),
             "d1": value_and_units_to_fs(self.d1),
-            **({"mult": mult} if mult is not None else {}),
+            **({"factor": self.factor} if self.factor is not None else {}),
+            **(
+                {"power": self.power}
+                if not _is_default_grading_power(self.power)
+                else {}
+            ),
         }
         return merge_extra(payload, self.extra, "DistanceGrading")
 
@@ -161,8 +196,8 @@ class DistanceGrading(ExtraFieldsMixin):
         return cls(
             d0=payload.pop("d0", 0.0),
             d1=payload.pop("d1"),
-            mult=payload.pop("mult", None),
-            mult_max=payload.pop("mult_max", None),
+            factor=payload.pop("factor", None),
+            power=payload.pop("power", 1.0),
             extra=payload,
         )
 
@@ -183,29 +218,33 @@ def _coerce_distance_grading(
 class SurfaceGrading(ExtraFieldsMixin):
     """Geometric mesh grading around a named implicit surface.
 
-    The exported JSON follows the fast solver's ``grading_fields_m`` contract. ``d0`` is
-    the inner distance where the strongest multiplier is applied and ``d1`` is
-    the outer distance where the multiplier returns to ``mult_min``.
+    The exported JSON follows the fast solver's ``grading_fields_m`` contract.
+    ``d0`` is the inner distance where the strongest factor is applied and
+    ``d1`` is the outer distance where the factor returns to ``factor_min``.
+    ``power`` curves the transition between those distances; ``1`` is linear.
+    ``factor``, ``factor_max``, ``factor_min``, and ``power`` may be scalars or
+    dictionaries keyed by the global coordinate-system axis names.
     """
 
     surface: str
     d1: float
-    mult: Optional[float] = None
+    factor: Optional[GradingValue] = None
+    power: GradingValue = 1.0
     d0: float = 0.0
     mode: str = "abs_band"
-    mult_max: Optional[float] = None
-    mult_min: Optional[float] = None
+    factor_max: Optional[GradingValue] = None
+    factor_min: Optional[GradingValue] = None
     phi_scale: Optional[float] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         self.mode = _normalize_grade_mode(self.mode)
+        self.factor = _normalize_optional_grading_value(self.factor)
+        self.factor_max = _normalize_optional_grading_value(self.factor_max)
+        self.factor_min = _normalize_optional_grading_value(self.factor_min)
+        self.power = _validate_grading_power(self.power)
         if not self.surface:
             raise ValueError("SurfaceGrading requires a non-empty surface name")
-        if self.mult is not None and self.mult_max is not None:
-            raise ValueError(
-                "Use either 'mult' or 'mult_max' for SurfaceGrading, not both"
-            )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
         payload = {
@@ -213,9 +252,14 @@ class SurfaceGrading(ExtraFieldsMixin):
             "mode": self.mode,
             "d0": value_and_units_to_fs(self.d0),
             "d1": value_and_units_to_fs(self.d1),
-            **({"mult": self.mult} if self.mult is not None else {}),
-            **({"mult_max": self.mult_max} if self.mult_max is not None else {}),
-            **({"mult_min": self.mult_min} if self.mult_min is not None else {}),
+            **({"factor": self.factor} if self.factor is not None else {}),
+            **({"factor_max": self.factor_max} if self.factor_max is not None else {}),
+            **({"factor_min": self.factor_min} if self.factor_min is not None else {}),
+            **(
+                {"power": self.power}
+                if not _is_default_grading_power(self.power)
+                else {}
+            ),
             **({"phi_scale": self.phi_scale} if self.phi_scale is not None else {}),
         }
         return merge_extra(payload, self.extra, "SurfaceGrading")
@@ -228,9 +272,10 @@ class SurfaceGrading(ExtraFieldsMixin):
             mode=payload.pop("mode", "abs_band"),
             d0=payload.pop("d0", 0.0),
             d1=payload.pop("d1"),
-            mult=payload.pop("mult", None),
-            mult_max=payload.pop("mult_max", None),
-            mult_min=payload.pop("mult_min", None),
+            factor=payload.pop("factor", None),
+            power=payload.pop("power", 1.0),
+            factor_max=payload.pop("factor_max", None),
+            factor_min=payload.pop("factor_min", None),
             phi_scale=payload.pop("phi_scale", None),
             extra=payload,
         )
@@ -431,28 +476,43 @@ class MeshAdaptor(ExtraFieldsMixin):
     def set_source_grading(
         self,
         d1: float,
-        mult: Optional[float] = None,
+        factor: Optional[GradingValue] = None,
+        power: GradingValue = 1.0,
         d0: float = 0.0,
         **kwargs,
     ) -> DistanceGrading:
-        self.source_grading = DistanceGrading(d1=d1, mult=mult, d0=d0, **kwargs)
+        self.source_grading = DistanceGrading(
+            d1=d1,
+            factor=factor,
+            power=power,
+            d0=d0,
+            **kwargs,
+        )
         return self.source_grading
 
     def set_receiver_grading(
         self,
         d1: float,
-        mult: Optional[float] = None,
+        factor: Optional[GradingValue] = None,
+        power: GradingValue = 1.0,
         d0: float = 0.0,
         **kwargs,
     ) -> DistanceGrading:
-        self.receiver_grading = DistanceGrading(d1=d1, mult=mult, d0=d0, **kwargs)
+        self.receiver_grading = DistanceGrading(
+            d1=d1,
+            factor=factor,
+            power=power,
+            d0=d0,
+            **kwargs,
+        )
         return self.receiver_grading
 
     def add_surface_grading(
         self,
         surface: str,
         d1: float,
-        mult: Optional[float] = None,
+        factor: Optional[GradingValue] = None,
+        power: GradingValue = 1.0,
         d0: float = 0.0,
         mode: str = "abs_band",
         **kwargs,
@@ -460,7 +520,8 @@ class MeshAdaptor(ExtraFieldsMixin):
         grading = SurfaceGrading(
             surface=surface,
             d1=d1,
-            mult=mult,
+            factor=factor,
+            power=power,
             d0=d0,
             mode=mode,
             **kwargs,
@@ -549,30 +610,45 @@ class MeshManager:
     def set_source_grading(
         self,
         d1: float,
-        mult: Optional[float] = None,
+        factor: Optional[GradingValue] = None,
+        power: GradingValue = 1.0,
         d0: float = 0.0,
         **kwargs,
     ) -> DistanceGrading:
         if self.adapt is None:
             self.set_adapt(elems_per_wave=2.0, adapt_sources=1)
-        return self.adapt.set_source_grading(d1=d1, mult=mult, d0=d0, **kwargs)
+        return self.adapt.set_source_grading(
+            d1=d1,
+            factor=factor,
+            power=power,
+            d0=d0,
+            **kwargs,
+        )
 
     def set_receiver_grading(
         self,
         d1: float,
-        mult: Optional[float] = None,
+        factor: Optional[GradingValue] = None,
+        power: GradingValue = 1.0,
         d0: float = 0.0,
         **kwargs,
     ) -> DistanceGrading:
         if self.adapt is None:
             self.set_adapt(elems_per_wave=2.0, adapt_sources=1)
-        return self.adapt.set_receiver_grading(d1=d1, mult=mult, d0=d0, **kwargs)
+        return self.adapt.set_receiver_grading(
+            d1=d1,
+            factor=factor,
+            power=power,
+            d0=d0,
+            **kwargs,
+        )
 
     def add_surface_grading(
         self,
         surface: str,
         d1: float,
-        mult: Optional[float] = None,
+        factor: Optional[GradingValue] = None,
+        power: GradingValue = 1.0,
         d0: float = 0.0,
         mode: str = "abs_band",
         **kwargs,
@@ -582,7 +658,8 @@ class MeshManager:
         return self.adapt.add_surface_grading(
             surface=surface,
             d1=d1,
-            mult=mult,
+            factor=factor,
+            power=power,
             d0=d0,
             mode=mode,
             **kwargs,
@@ -671,16 +748,23 @@ class MeshManager:
                 "if a mesh or mesh generator has not been provided, "
                 "'file' and 'format' must be provided"
             )
-            # Copy mesh file to project directory if not already there
             mesh_file = Path(self.file)
-            if not mesh_file.is_relative_to(self._proj_path):
+            if mesh_file.is_absolute():
+                source = mesh_file
+            else:
+                project_source = self._proj_path / mesh_file
+                source = project_source if project_source.exists() else mesh_file
+
+            if source.is_absolute() and source.is_relative_to(self._proj_path):
+                stored_file = source.relative_to(self._proj_path)
+            else:
                 dest = (self._path / mesh_file.name).resolve()
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                copy2(mesh_file, dest)
-                self.file = dest
-                mesh_dict["file"] = self.file.relative_to(self._proj_path)
-            else:
-                mesh_dict["file"] = self.file
+                copy2(source, dest)
+                stored_file = dest.relative_to(self._proj_path)
+
+            self.file = stored_file
+            mesh_dict["file"] = stored_file
 
             mesh_dict["format"] = self.format
 

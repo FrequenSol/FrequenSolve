@@ -1,8 +1,12 @@
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from frequensolve.util.physics import canonical_dimension, normalize_simulation_physics
+from frequensolve.util.physics import (
+    canonical_dimension,
+    canonical_physics,
+    normalize_simulation_physics,
+)
 
 __all__ = ["SimulationConfig"]
 
@@ -21,18 +25,48 @@ class SimulationConfig:
     name: str
     physics: str
     dimension: int | float | str
-    axisymmetric: bool = False
+    axisymmetric: InitVar[bool] = False
+    _axisymmetric: bool = field(default=False, init=False, repr=False)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
     _file: Optional[Path] = None
 
-    def __post_init__(self) -> None:
+    _AXISYMMETRIC_BASE_PHYSICS = {
+        "acoustic_axisym": "acoustic",
+        "elastic_axisym": "elastic",
+        "coupled_axisym": "coupled",
+    }
+
+    def __post_init__(self, axisymmetric: bool) -> None:
         self.dimension = canonical_dimension(self.dimension)
-        self.physics, self.axisymmetric = normalize_simulation_physics(
+        self.physics, self._axisymmetric = normalize_simulation_physics(
             self.physics,
-            axisymmetric=self.axisymmetric,
+            axisymmetric=axisymmetric,
             dimension=self.dimension,
         )
+
+    def _set_axisymmetric(self, axisymmetric: bool) -> None:
+        axisymmetric = bool(axisymmetric)
+        if axisymmetric:
+            self.physics, self._axisymmetric = normalize_simulation_physics(
+                self.physics,
+                axisymmetric=True,
+                dimension=self.dimension,
+            )
+            return
+
+        canonical = canonical_physics(self.physics)
+        if canonical in self._AXISYMMETRIC_BASE_PHYSICS:
+            self.physics = self._AXISYMMETRIC_BASE_PHYSICS[canonical]
+            self._axisymmetric = False
+            return
+        if canonical.endswith("_axisym_torsion"):
+            raise ValueError(
+                f"Cannot disable axisymmetric mode for {canonical!r}; "
+                "choose a non-axisymmetric physics formulation explicitly."
+            )
+        self.physics = canonical
+        self._axisymmetric = False
 
     def to_fs(self, ctx=None) -> Dict:
         project_path = self._proj_path
@@ -62,3 +96,14 @@ class SimulationConfig:
     @property
     def _path(self) -> Path:
         return self._proj_path / self._rel_path
+
+
+def _get_axisymmetric(self: SimulationConfig) -> bool:
+    return self._axisymmetric
+
+
+def _set_axisymmetric(self: SimulationConfig, value: bool) -> None:
+    self._set_axisymmetric(value)
+
+
+SimulationConfig.axisymmetric = property(_get_axisymmetric, _set_axisymmetric)

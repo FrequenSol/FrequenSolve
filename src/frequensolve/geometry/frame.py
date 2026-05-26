@@ -46,7 +46,7 @@ class CoordinateValue:
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
-        payload = value_and_units_to_fs(self.value, self.units)
+        payload = _coordinate_value_and_units_to_fs(self.value, self.units)
         if not isinstance(payload, dict):
             payload = {"value": payload}
         if self.system is not None:
@@ -442,6 +442,56 @@ def _split_quantity(
     return value, units
 
 
+def _coordinate_plain_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _coordinate_plain_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_coordinate_plain_value(item) for item in value]
+    if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(
+        value, (bool, np.bool_)
+    ):
+        return float(value)
+    if hasattr(value, "values") and not isinstance(value, (str, bytes)):
+        value = value.values
+    if isinstance(value, np.ndarray):
+        if value.dtype.kind in {"f", "i", "u"}:
+            return value.astype(np.float64, copy=False).tolist()
+        if value.dtype.kind == "O":
+            return [_coordinate_plain_value(item) for item in value.tolist()]
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        try:
+            array = np.asarray(value)
+            if array.dtype.kind in {"f", "i", "u"}:
+                return array.astype(np.float64, copy=False).tolist()
+        except (TypeError, ValueError):
+            pass
+        return value.tolist()
+    return value
+
+
+def _coordinate_value_and_units_to_fs(value: Any, units: Optional[Any] = None) -> Any:
+    if is_quantity(value):
+        target_units = units or value.units
+        return {
+            "value": _coordinate_plain_value(value.to(target_units).magnitude),
+            "units": unit_expression(target_units),
+        }
+    if isinstance(value, Mapping):
+        payload = _coordinate_plain_value(value)
+        if units is not None and "units" not in payload:
+            payload["units"] = unit_expression(units)
+        return payload
+
+    detected_units = units
+    if detected_units is None and hasattr(value, "attrs"):
+        detected_units = value.attrs.get("units")
+
+    plain = _coordinate_plain_value(value)
+    if detected_units:
+        return {"value": plain, "units": unit_expression(detected_units)}
+    return plain
+
+
 def _surface_coordinate_values(lateral: Any, offset: Optional[Any] = None) -> Any:
     values = np.asarray(lateral, dtype=float)
     if values.ndim == 0:
@@ -475,8 +525,8 @@ def coordinate_value_to_fs(value: Any) -> Any:
     if isinstance(value, CoordinateValue):
         return value.to_fs()
     if is_quantity(value):
-        return quantity_to_fs(value)
-    return value
+        return _coordinate_value_and_units_to_fs(value)
+    return _coordinate_plain_value(value)
 
 
 def direction_to_fs(value: Any) -> Any:

@@ -11,8 +11,10 @@ import xarray as xr
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.plotting.analysis import compute_timelag, phase_velocity_transform
-from frequensolve.plotting.animate import animate_gather
+from frequensolve.plotting.animate import animate_gather, animate_wavefield
 from frequensolve.seismic.trace_geometry import (
+    _receiver_grid_display_shape,
+    _selected_frequency_value,
     as_trace_array,
     coordinate_label,
     coordinate_values,
@@ -20,15 +22,18 @@ from frequensolve.seismic.trace_geometry import (
     receiver_axis,
     require_dims,
     select_time,
-    time_limit,
+    to_numpy,
     trace_values,
+    wavefield_grid_display,
 )
 
 __all__ = [
     "plot_gather",
     "animate_gather",
+    "animate_wavefield",
     "diff_gathers",
     "plot_xf",
+    "plot_wavefield",
     "plot_cf",
     "plot_timelag",
 ]
@@ -48,9 +53,12 @@ def _pyplot():
     return plt
 
 
-def _amplitude_limit(values: np.ndarray, limit: float | None) -> float:
+def _amplitude_limit(values: np.ndarray, limit: Any | None) -> float:
     if limit is not None:
-        return float(limit)
+        scalar = to_numpy(limit.data if isinstance(limit, xr.DataArray) else limit)
+        if scalar.size != 1:
+            raise ValueError("A must be a scalar")
+        return float(scalar.reshape(-1)[0])
     finite = np.asarray(values)[np.isfinite(values)]
     if finite.size == 0:
         return 1.0
@@ -70,13 +78,34 @@ def _image_extent(x: np.ndarray, y: np.ndarray) -> list[float]:
     return [float(x[0]), float(x[-1]), float(y[-1]), float(y[0])]
 
 
+def _image_extent_for_origin(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    origin: str,
+) -> list[float]:
+    if origin == "upper":
+        return _image_extent(x, y)
+    return [float(x[0]), float(x[-1]), float(y[0]), float(y[-1])]
+
+
+def _grid_display(trace: xr.DataArray):
+    return wavefield_grid_display(trace)
+
+
 def _prepare_time_gather(
     trace: xr.DataArray,
     *,
     T_max: float | None = None,
     Tf: float | None = None,
 ) -> xr.DataArray:
-    trace = select_time(as_trace_array(trace), time_limit(T_max, Tf))
+    trace = as_trace_array(trace, caller="plot_gather")
+    if "time" not in trace.dims and "frequency" in trace.dims:
+        raise ValueError(
+            "plot_gather expects time-domain traces. Use traces.td(...) before "
+            "plot_gather, or use plot_xf(...) for frequency-domain traces."
+        )
+    trace = select_time(trace, T_max)
     require_dims(trace, "time", "receiver")
     trace = trace.transpose("time", "receiver")
     time = coordinate_values(trace, "time", require_numeric=True)
@@ -93,9 +122,123 @@ def _prepare_frequency_gather(trace: xr.DataArray) -> xr.DataArray:
     return trace
 
 
+def _prepare_frequency_wavefield(
+    trace: xr.DataArray,
+) -> tuple[xr.DataArray, float | None]:
+    if not isinstance(trace, xr.DataArray):
+        raise TypeError("plot_wavefield expects an xarray.DataArray")
+    require_dims(trace, "receiver")
+    if "frequency" in trace.dims:
+        if trace.sizes["frequency"] != 1:
+            raise ValueError(
+                "plot_wavefield expects frequency-domain wavefields to contain "
+                "exactly one frequency"
+            )
+        trace = trace.isel(frequency=0)
+    frequency_value = _selected_frequency_value(trace)
+    trace = as_trace_array(trace, caller="plot_wavefield")
+    require_dims(trace, "receiver")
+    if trace.dims != ("receiver",):
+        remaining = ", ".join(repr(dim) for dim in trace.dims if dim != "receiver")
+        raise ValueError(
+            "plot_wavefield expects one selected wavefield component/source; "
+            f"remaining dimension(s): {remaining}"
+        )
+    return trace.transpose("receiver"), frequency_value
+
+
+def _frequency_wavefield_grid(
+    trace: xr.DataArray,
+) -> tuple[np.ndarray, dict[str, Any] | None]:
+    shape = _receiver_grid_display_shape(trace, caller="plot_wavefield")
+    values = trace_values(trace, complex_=True).reshape(*shape)
+    return values, _grid_display(trace)
+
+
+def _complex_mode_values(
+    values_complex: np.ndarray,
+    *,
+    mode: str,
+) -> tuple[np.ndarray, bool]:
+    if mode == "real":
+        return values_complex.real, True
+    if mode == "imag":
+        return values_complex.imag, True
+    if mode == "abs":
+        return np.abs(values_complex), False
+    raise ValueError("mode must be 'real', 'imag', or 'abs'")
+
+
 def _apply_font_size(fontsize: float | None) -> None:
     if fontsize is not None:
         _pyplot().rcParams.update({"font.size": fontsize})
+
+
+def _figure_axis(
+    ax,
+    *,
+    figsize: tuple[float, float],
+    fontsize: float | None,
+):
+    plt = _pyplot()
+    _apply_font_size(fontsize)
+    if ax is None:
+        return plt.subplots(figsize=figsize)
+    return ax.figure, ax
+
+
+def _image_clim(
+    values: np.ndarray,
+    limit: Any | None,
+    *,
+    symmetric: bool,
+) -> tuple[float, float]:
+    amplitude = _amplitude_limit(values, limit)
+    return (-amplitude if symmetric else 0.0, amplitude)
+
+
+def _imshow(
+    ax,
+    values: np.ndarray,
+    *,
+    x: np.ndarray,
+    y: np.ndarray,
+    origin: str,
+    cmap: str,
+    vmin: float | None,
+    vmax: float | None,
+    aspect: str | float,
+    interpolation: str,
+    **imshow_kwargs: Any,
+):
+    return ax.imshow(
+        values,
+        origin=origin,
+        cmap=cmap,
+        extent=_image_extent_for_origin(x, y, origin=origin),
+        vmin=vmin,
+        vmax=vmax,
+        aspect=aspect,
+        interpolation=interpolation,
+        **imshow_kwargs,
+    )
+
+
+def _decorate_image(
+    fig,
+    ax,
+    image,
+    *,
+    title: str | None = None,
+    grid: bool = False,
+    colorbar: bool = False,
+) -> None:
+    if title is not None:
+        ax.set_title(title)
+    if colorbar:
+        fig.colorbar(image, ax=ax)
+    if grid:
+        ax.grid(True)
 
 
 def plot_gather(
@@ -109,13 +252,13 @@ def plot_gather(
     fontsize: float | None = 12,
     Tf: float | None = None,
     T_max: float | None = None,
-    L_scale: float = 1.0,
     T_scale: float = 1.0,
     aspect: str | float = "auto",
     interpolation: str = "bilinear",
     title: str | None = None,
     save: str | Path | None = None,
     show: bool = False,
+    grid: bool = False,
     colorbar: bool = False,
     **imshow_kwargs: Any,
 ):
@@ -127,34 +270,27 @@ def plot_gather(
 
     trace = _prepare_time_gather(trace, T_max=T_max, Tf=Tf)
     values = trace_values(trace)
-    x_axis = receiver_axis(trace, units=units, scale=L_scale)
+    x_axis = receiver_axis(trace, units=units)
     time = coordinate_values(trace, "time", scale=T_scale, require_numeric=True)
-    limit = _amplitude_limit(values, A)
+    vmin, vmax = _image_clim(values, A, symmetric=True)
 
-    plt = _pyplot()
-    _apply_font_size(fontsize)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
-
-    image = ax.imshow(
+    fig, ax = _figure_axis(ax, figsize=figsize, fontsize=fontsize)
+    image = _imshow(
+        ax,
         values,
         origin="upper",
         cmap=cmap,
-        extent=_image_extent(x_axis.values, time),
-        vmin=-limit,
-        vmax=limit,
+        x=x_axis.values,
+        y=time,
+        vmin=vmin,
+        vmax=vmax,
         aspect=aspect,
         interpolation=interpolation,
         **imshow_kwargs,
     )
     ax.set_xlabel(x_axis.label)
     ax.set_ylabel(coordinate_label(trace, "time", "Time"))
-    if title is not None:
-        ax.set_title(title)
-    if colorbar:
-        fig.colorbar(image, ax=ax)
+    _decorate_image(fig, ax, image, title=title, grid=grid, colorbar=colorbar)
 
     _finalize_figure(fig, save=save, show=show)
     return fig, ax
@@ -172,14 +308,17 @@ def diff_gathers(
     fontsize: float | None = 12,
     Tf: float | None = None,
     T_max: float | None = None,
-    L_scale: float = 1.0,
     T_scale: float = 1.0,
     aspect: str | float = "auto",
+    interpolation: str = "bilinear",
     amplify_diff: float = 1.0,
     titles: Sequence[str] = ("Baseline", "Monitor", "Difference"),
+    title: str | None = None,
     stack: str = "horizontal",
     save: str | Path | None = None,
     show: bool = False,
+    grid: bool = False,
+    colorbar: bool = False,
     **imshow_kwargs: Any,
 ):
     """Plot baseline, monitor, and difference gathers."""
@@ -190,8 +329,8 @@ def diff_gathers(
 
     data = [trace_values(baseline), trace_values(monitor)]
     data.append(amplify_diff * (data[1] - data[0]))
-    limit = _amplitude_limit(np.stack(data), A)
-    x_axis = receiver_axis(baseline, units=units, scale=L_scale)
+    vmin, vmax = _image_clim(np.stack(data), A, symmetric=True)
+    x_axis = receiver_axis(baseline, units=units)
     time = coordinate_values(baseline, "time", scale=T_scale, require_numeric=True)
 
     plt = _pyplot()
@@ -210,19 +349,31 @@ def diff_gathers(
         fig = axes[0].figure
 
     for axis, values, panel_title in zip(axes, data, titles):
-        axis.imshow(
+        image = _imshow(
+            axis,
             values,
             origin="upper",
             cmap=cmap,
-            extent=_image_extent(x_axis.values, time),
-            vmin=-limit,
-            vmax=limit,
+            x=x_axis.values,
+            y=time,
+            vmin=vmin,
+            vmax=vmax,
             aspect=aspect,
+            interpolation=interpolation,
             **imshow_kwargs,
         )
-        axis.set_title(panel_title)
+        _decorate_image(
+            fig,
+            axis,
+            image,
+            title=panel_title,
+            grid=grid,
+            colorbar=colorbar,
+        )
         axis.set_xlabel(x_axis.label)
     axes[0].set_ylabel(coordinate_label(baseline, "time", "Time"))
+    if title is not None:
+        fig.suptitle(title)
 
     _finalize_figure(fig, save=save, show=show)
     return fig, axes
@@ -238,8 +389,12 @@ def plot_xf(
     figsize: tuple[float, float] = (5, 5),
     fontsize: float | None = 12,
     mode: str = "real",
+    aspect: str | float = "auto",
+    interpolation: str = "bilinear",
+    title: str | None = None,
     save: str | Path | None = None,
     show: bool = False,
+    grid: bool = False,
     colorbar: bool = False,
     **imshow_kwargs: Any,
 ):
@@ -247,48 +402,124 @@ def plot_xf(
 
     trace = _prepare_frequency_gather(trace)
     values_complex = trace_values(trace, complex_=True)
-    if mode == "real":
-        values = values_complex.real
-        symmetric = True
-    elif mode == "imag":
-        values = values_complex.imag
-        symmetric = True
-    elif mode == "abs":
-        values = np.abs(values_complex)
-        symmetric = False
-    else:
-        raise ValueError("mode must be 'real', 'imag', or 'abs'")
+    values, symmetric = _complex_mode_values(values_complex, mode=mode)
 
     x_axis = receiver_axis(trace, units=units)
     frequency = coordinate_values(trace, "frequency", require_numeric=True)
-    limit = _amplitude_limit(values, A)
+    vmin, vmax = _image_clim(values, A, symmetric=symmetric)
 
-    plt = _pyplot()
-    _apply_font_size(fontsize)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
-
-    image = ax.imshow(
+    fig, ax = _figure_axis(ax, figsize=figsize, fontsize=fontsize)
+    image = _imshow(
+        ax,
         values,
         origin="lower",
         cmap=cmap,
-        extent=[
-            float(x_axis.values[0]),
-            float(x_axis.values[-1]),
-            float(frequency[0]),
-            float(frequency[-1]),
-        ],
-        vmin=-limit if symmetric else 0,
-        vmax=limit,
-        aspect="auto",
+        x=x_axis.values,
+        y=frequency,
+        vmin=vmin,
+        vmax=vmax,
+        aspect=aspect,
+        interpolation=interpolation,
         **imshow_kwargs,
     )
     ax.set_xlabel(x_axis.label)
     ax.set_ylabel(coordinate_label(trace, "frequency", "Frequency"))
-    if colorbar:
-        fig.colorbar(image, ax=ax)
+    _decorate_image(fig, ax, image, title=title, grid=grid, colorbar=colorbar)
+
+    _finalize_figure(fig, save=save, show=show)
+    return fig, ax
+
+
+def plot_wavefield(
+    trace: xr.DataArray,
+    *,
+    ax=None,
+    A: float | None = None,
+    cmap: str = "RdBu_r",
+    figsize: tuple[float, float] = (5, 5),
+    fontsize: float | None = 12,
+    mode: str = "real",
+    show_axes: bool | None = None,
+    aspect: str | float = "auto",
+    interpolation: str = "nearest",
+    title: str | None = None,
+    save: str | Path | None = None,
+    show: bool = False,
+    colorbar: bool = False,
+    **imshow_kwargs: Any,
+):
+    """Plot one grid-backed frequency-domain wavefield.
+
+    ``trace`` must contain one selected component/source and either exactly one
+    ``frequency`` sample or a scalar ``frequency`` coordinate. The receiver
+    grid is read from the wavefield output metadata.
+    """
+
+    unsupported = {"frequency", "frequency_index", "grid_shape"}.intersection(
+        imshow_kwargs
+    )
+    if unsupported:
+        names = ", ".join(sorted(unsupported))
+        raise TypeError(
+            f"plot_wavefield does not accept {names}. Select one frequency "
+            "before plotting and use the receiver grid from the output metadata."
+        )
+    trace, frequency_value = _prepare_frequency_wavefield(trace)
+    values_complex, display = _frequency_wavefield_grid(trace)
+    values, symmetric = _complex_mode_values(values_complex, mode=mode)
+    limit = _amplitude_limit(values, A)
+
+    fig, ax = _figure_axis(ax, figsize=figsize, fontsize=fontsize)
+
+    if display is not None and not display.get("uniform", True):
+        mesh_kwargs = {
+            key: value
+            for key, value in imshow_kwargs.items()
+            if key not in {"origin", "interpolation"}
+        }
+        image = ax.pcolormesh(
+            display["x"],
+            display["y"],
+            values,
+            cmap=cmap,
+            vmin=-limit if symmetric else 0,
+            vmax=limit,
+            shading="auto",
+            **mesh_kwargs,
+        )
+        ax.invert_yaxis()
+        ax.set_aspect(aspect)
+    else:
+        image = ax.imshow(
+            values,
+            origin="upper",
+            cmap=cmap,
+            vmin=-limit if symmetric else 0,
+            vmax=limit,
+            extent=None if display is None else display["extent"],
+            aspect=aspect,
+            interpolation=interpolation,
+            **imshow_kwargs,
+        )
+    if show_axes is None:
+        show_axes = display is not None
+    if show_axes and display is not None:
+        ax.set_xlabel(display["xlabel"])
+        ax.set_ylabel(display["ylabel"])
+    elif not show_axes:
+        ax.set_axis_off()
+    default_title = (
+        None
+        if frequency_value is None
+        else f"{mode} wavefield at {frequency_value:g} Hz"
+    )
+    _decorate_image(
+        fig,
+        ax,
+        image,
+        title=title if title is not None else default_title,
+        colorbar=colorbar,
+    )
 
     _finalize_figure(fig, save=save, show=show)
     return fig, ax
@@ -307,8 +538,12 @@ def plot_cf(
     c_max: float = 6.0,
     n_c: int = 500,
     smooth: float | None = None,
+    aspect: str | float = "auto",
+    interpolation: str = "bilinear",
+    title: str | None = None,
     save: str | Path | None = None,
     show: bool = False,
+    grid: bool = False,
     colorbar: bool = False,
     **imshow_kwargs: Any,
 ):
@@ -327,32 +562,23 @@ def plot_cf(
     velocity = coordinate_values(transform, "phase_velocity", require_numeric=True)
     vmax = None if A is None else float(A) * _amplitude_limit(values, None)
 
-    plt = _pyplot()
-    _apply_font_size(fontsize)
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
-
-    image = ax.imshow(
+    fig, ax = _figure_axis(ax, figsize=figsize, fontsize=fontsize)
+    image = _imshow(
+        ax,
         values.T,
         origin="lower",
         cmap=cmap,
         vmin=0,
         vmax=vmax,
-        extent=[
-            float(frequency[0]),
-            float(frequency[-1]),
-            float(velocity[0]),
-            float(velocity[-1]),
-        ],
-        aspect="auto",
+        x=frequency,
+        y=velocity,
+        aspect=aspect,
+        interpolation=interpolation,
         **imshow_kwargs,
     )
     ax.set_xlabel(coordinate_label(transform, "frequency", "Frequency"))
     ax.set_ylabel(coordinate_label(transform, "phase_velocity", "Phase velocity"))
-    if colorbar:
-        fig.colorbar(image, ax=ax)
+    _decorate_image(fig, ax, image, title=title, grid=grid, colorbar=colorbar)
 
     _finalize_figure(fig, save=save, show=show)
     return fig, ax

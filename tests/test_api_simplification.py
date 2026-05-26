@@ -18,7 +18,6 @@ from frequensolve.geometry.frame import (
 )
 from frequensolve.mesh.boundary_conditions import (
     BoundaryCondition,
-    BoundaryConditionManager,
     BoundaryConditions,
 )
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
@@ -47,9 +46,17 @@ from frequensolve.simulation.artifacts import OutputArtifact, TraceManifest
 from frequensolve.simulation.jobs import FrequencyDomainJob
 from frequensolve.simulation.outputs import (
     JobOutputs,
+    OutputUnits,
+    ParaViewOutput,
     ParaviewOutput,
     TraceOutput,
     WavefieldOutput,
+    field,
+    info,
+    output_property,
+    outputs,
+    paraview,
+    wavefield,
 )
 from frequensolve.simulation.physics import (
     CoupledAEPComponents,
@@ -528,6 +535,43 @@ def test_acquisition_accepts_quantity_source_and_receiver_coordinates():
     assert receiver_payload["value"][-1] == [0.9, 0.0]
 
 
+def test_source_and_receiver_coordinate_arrays_are_float64():
+    acq = Acquisition()
+    geophone = ReceiverNode(name="geophone")
+    geophone.add_component(name="v_z", field="velocity", direction=[0.0, 1.0])
+
+    acq.add_compound_source(
+        kind="scalar",
+        coords=np.asarray([[0.125, 0.0], [0.875, 0.0]], dtype=np.float32),
+        weights=np.ones(2),
+    )
+    acq.add_receiver_group(
+        name="surface",
+        device=geophone,
+        coords=np.asarray([[0.1, 0.0], [0.9, 0.0]], dtype=np.float32),
+    )
+
+    assert acq.source_groups[0].source.coordinates.dtype == np.dtype("float64")
+    assert acq.receiver_groups[0].coordinates.coordinates.dtype == np.dtype("float64")
+
+
+def test_unit_payload_mappings_roundtrip_without_method_values():
+    receiver = ReceiverFiber.from_fs(
+        {
+            "_type": "ReceiverFiber",
+            "components": [{"name": "eps", "field": "strain"}],
+            "gauge_length": {"value": np.array(10.0), "units": "m"},
+            "channel_spacing": {"value": [5.0, 10.0], "units": "m"},
+        }
+    )
+
+    payload = receiver.to_fs()
+
+    assert payload["gauge_length"] == {"value": 10.0, "units": "m"}
+    assert payload["channel_spacing"] == {"value": [5.0, 10.0], "units": "m"}
+    json.dumps(payload)
+
+
 def test_acquisition_accepts_array_quantity_receiver_coordinates():
     acq = Acquisition()
     hydrophone = ReceiverNode(name="hydrophone")
@@ -545,27 +589,72 @@ def test_acquisition_accepts_array_quantity_receiver_coordinates():
     }
 
 
-def test_ricker_wavelet_defaults_pre_time_to_one_period():
+def test_ricker_wavelet_defaults_center_to_one_period():
     wavelet = RickerWavelet(f=10.0)
 
     assert wavelet.center == pytest.approx(0.1)
-    assert wavelet.pre_time == pytest.approx(0.1)
 
     times = np.linspace(0.0, 0.5, 501)
     signal = wavelet.evaluate(times)
-    peak_time = times[int(np.argmax(np.abs(signal)))] - wavelet.pre_time
+    peak_time = times[int(np.argmax(np.abs(signal)))] - wavelet.center
 
     assert peak_time == pytest.approx(0.0, abs=times[1] - times[0])
 
 
-def test_ricker_wavelet_accepts_pre_time_alias():
-    wavelet = RickerWavelet(f=20.0, pre_time=0.2)
+def test_ricker_wavelet_accepts_center():
+    wavelet = RickerWavelet(f=20.0, center=0.2)
 
     assert wavelet.center == pytest.approx(0.2)
-    assert wavelet.pre_time == pytest.approx(0.2)
 
-    with pytest.raises(ValueError, match="center or pre_time"):
-        RickerWavelet(f=20.0, center=0.1, pre_time=0.2)
+
+def test_ricker_wavelet_blackman_window_matches_signal_sampling():
+    wavelet = RickerWavelet(f=80.0, window=("blackman", 0.2))
+    times = np.linspace(0.0, 0.4, 1601)
+    signal = wavelet.evaluate(times)
+
+    assert signal.shape == times.shape
+    assert len(wavelet.spectrum) == len(wavelet.frequencies)
+    assert np.isfinite(wavelet.spectrum).all()
+
+    peak = int(np.argmax(np.abs(signal)))
+    assert times[peak] - wavelet.center == pytest.approx(0.0, abs=times[1] - times[0])
+
+
+def test_ricker_wavelet_recenter_refreshes_signal_and_spectrum():
+    wavelet = RickerWavelet(f=10.0, center=0.0)
+    times = np.linspace(0.0, 1.0, 1001)
+    signal_zero = wavelet.evaluate(times).copy()
+    spectrum_zero = wavelet.spectrum.copy()
+
+    with pytest.raises(AttributeError):
+        wavelet.center = 0.1
+    with pytest.raises(AttributeError):
+        wavelet.causal = True
+    with pytest.raises(AttributeError):
+        wavelet.scale = 2.0
+    signal_centered = wavelet.recenter(0.1)
+
+    assert signal_centered is wavelet.signal
+    assert wavelet.center == pytest.approx(0.1)
+    assert wavelet.causal is False
+    assert wavelet.scale == pytest.approx(1.0)
+    assert int(np.argmax(np.abs(wavelet.signal))) == 100
+    assert not np.array_equal(wavelet.signal, signal_zero)
+    assert not np.array_equal(wavelet.spectrum, spectrum_zero)
+
+
+def test_ricker_wavelet_zero_center_remains_bandlimited():
+    f0 = 40.0
+    center = 0.0
+    times = np.linspace(0.0, 1.0, 1001)
+    wavelet = RickerWavelet(f=f0, center=center)
+    signal = wavelet.evaluate(times)
+
+    assert int(np.argmax(np.abs(signal))) == 0
+
+    spectrum = np.abs(wavelet.spectrum)
+    high_frequency_level = np.mean(spectrum[-20:]) / np.max(spectrum)
+    assert high_frequency_level < 1.0e-6
 
 
 def test_receiver_fiber_exports_preferred_das_spacing_contract():
@@ -682,6 +771,85 @@ def test_compound_source_broadcasts_single_direction_vector():
     assert np.asarray(source.direction).tolist() == [[0.0, 1.0], [-0.0, -1.0]]
 
 
+def test_wavefield_output_uses_grid_contract():
+    output = WavefieldOutput(
+        name="movie",
+        field="pressure",
+        dims=("z", "r"),
+        coords={
+            "z": [0.0, 0.1, 0.25, 0.5],
+            "r": [0.0, 0.2, 0.5],
+        },
+        units="km",
+    )
+
+    payload = output.to_fs()
+    assert output.name == "movie"
+    assert output.fields == ["pressure"]
+    assert output.grid["dims"] == ["z", "r"]
+    assert payload["_type"] == "WavefieldOutput"
+    assert payload["field"] == "pressure"
+    assert "fields" not in payload
+    assert payload["grid"]["_type"] == "XArrayGrid"
+    assert payload["grid"]["dims"] == ["z", "r"]
+    assert payload["grid"]["coords"]["z"]["data"] == [0.0, 0.1, 0.25, 0.5]
+    assert payload["grid"]["coords"]["r"]["data"] == [0.0, 0.2, 0.5]
+    assert payload["grid"]["units"] == "km"
+
+
+def test_wavefield_output_accepts_grid_object_and_sources():
+    grid = xr.DataArray(
+        np.empty((3, 2)),
+        dims=("z", "r"),
+        coords={"z": [0.0, 0.25, 1.0], "r": [0.0, 0.4]},
+    )
+    grid.coords["z"].attrs["units"] = "m"
+    grid.coords["r"].attrs["units"] = "m"
+
+    output = WavefieldOutput(
+        "elastic_movie",
+        grid=grid,
+        fields=["velocity", "stress"],
+        sources=[2],
+    )
+    payload = output.to_fs()
+
+    assert output.grid["dims"] == ["z", "r"]
+    assert output.fields == ["velocity", "stress"]
+    assert payload["sources"] == [2]
+    assert payload["fields"] == ["velocity", "stress"]
+    assert payload["grid"]["_type"] == "XArrayGrid"
+    assert payload["grid"]["coords"]["z"]["data"] == [0.0, 0.25, 1.0]
+    assert payload["grid"]["coords"]["r"]["data"] == [0.0, 0.4]
+    assert payload["grid"]["coords"]["z"]["units"] == "m"
+
+
+def test_wavefield_output_accepts_receiver_device_components():
+    grid = xr.DataArray(
+        np.empty((2, 2)),
+        dims=("z", "r"),
+        coords={"z": [0.0, 1.0], "r": [0.0, 1.0]},
+    )
+    device = ReceiverNode(name="elastic_wavefield")
+    device.add_component(name="vz", field="velocity", direction=[0.0, 1.0])
+    device.add_component(name="szz", field="stress")
+
+    output = WavefieldOutput("elastic_movie", grid=grid, device=device, sources=[1])
+    payload = output.to_fs()
+    loaded = WavefieldOutput.from_fs(payload)
+
+    assert output.fields == ["velocity", "stress"]
+    assert output.component_names == ["vz", "szz"]
+    assert "fields" not in payload
+    assert payload["device"]["_type"] == "ReceiverNode"
+    assert payload["device"]["components"][0]["name"] == "vz"
+    assert payload["device"]["components"][0]["field"] == "velocity"
+    assert loaded.fields == ["velocity", "stress"]
+    assert loaded.component_names == ["vz", "szz"]
+    with pytest.raises(ValueError, match="either device or field/fields"):
+        WavefieldOutput("bad", grid=grid, device=device, field="pressure")
+
+
 def test_elastic_velocity_is_canonical_and_displacement_is_removed():
     assert ElasticComponents.primary == ["velocity", "stress"]
     assert ElasticComponents.check_components(["velocity", "stress"]) == [
@@ -701,8 +869,20 @@ def test_elastic_velocity_is_canonical_and_displacement_is_removed():
         "velocity",
         "stress",
     ]
-    assert WavefieldOutput(fields=["velocity"]).fields == ["velocity"]
-    assert WavefieldOutput.from_fs({"fields": ["velocity"]}).fields == ["velocity"]
+    wavefield_grid = xr.DataArray(
+        np.empty((2, 2)),
+        dims=("z", "r"),
+        coords={"z": [0.0, 1.0], "r": [0.0, 1.0]},
+    )
+    assert WavefieldOutput(fields=["velocity"], grid=wavefield_grid).fields == [
+        "velocity"
+    ]
+    grid_payload = WavefieldOutput(fields=["velocity"], grid=wavefield_grid).to_fs()[
+        "grid"
+    ]
+    assert WavefieldOutput.from_fs(
+        {"fields": ["velocity"], "grid": grid_payload}
+    ).fields == ["velocity"]
 
 
 def test_new_physics_component_sets_are_available():
@@ -750,6 +930,34 @@ def test_acoustic_axisymmetric_physics_normalizes_to_solver_key(tmp_path):
 
     assert sim.physics == "acoustic_axisym"
     assert sim.axisymmetric is True
+
+
+def test_axisymmetric_assignment_updates_solver_physics(tmp_path):
+    sim = SeismicSimulation(
+        name="acoustic",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+
+    assert "axisymmetric" not in sim.__dict__
+    assert sim.physics == "acoustic"
+    assert sim.axisymmetric is False
+
+    sim.axisymmetric = True
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    assert sim.physics == "acoustic_axisym"
+    assert sim.axisymmetric is True
+    assert sim.to_fs()["physics"] == "acoustic_axisym"
+    assert sim.to_fs()["axisymmetric"] is True
+
+    sim.axisymmetric = False
+
+    assert sim.physics == "acoustic"
+    assert sim.axisymmetric is False
+    assert sim.to_fs()["physics"] == "acoustic"
+    assert "axisymmetric" not in sim.to_fs()
 
 
 def test_explicit_axisymmetric_physics_sets_axisymmetric_flag(tmp_path):
@@ -893,6 +1101,104 @@ def test_job_outputs_adds_outputs_and_always_exports_traces():
     assert payload["ParaView"][0]["name"] == "pv"
 
 
+def test_output_config_helper_exports_units_paraview_and_wavefields():
+    grid = xr.DataArray(
+        np.zeros((2, 2)),
+        dims=("z", "r"),
+        coords={"z": [0.0, 1.0], "r": [0.0, 2.0]},
+        attrs={"units": "m"},
+    )
+
+    config = outputs(
+        units=OutputUnits(
+            geometry="ft",
+            pressure="psi",
+            fields={"acoustic:pressure": "psi"},
+            properties={"Vp": "ft/s"},
+        ),
+        traces="trace_products",
+        paraview=paraview.surface(
+            "quicklook",
+            shell=True,
+            items=[
+                field("pressure", output_name="p", units="psi", parts="magnitude"),
+                output_property("Vp", units="ft/s"),
+                info("Domain"),
+            ],
+        ),
+        wavefields=wavefield("pressure", grid=grid),
+    )
+
+    payload = config.to_fs()
+
+    assert payload["Units"] == {
+        "geometry": "ft",
+        "dimensions": {"pressure": "psi"},
+        "fields": {"acoustic:pressure": "psi"},
+        "properties": {"Vp": "ft/s"},
+    }
+    assert payload["traces"]["path"] == "trace_products"
+    assert payload["ParaView"][0]["name"] == "quicklook"
+    assert payload["ParaView"][0]["target"]["selection"] == [{"kind": "shell"}]
+    assert payload["ParaView"][0]["items"] == [
+        {
+            "kind": "field",
+            "field": "pressure",
+            "name": "p",
+            "units": "psi",
+            "parts": ["abs"],
+        },
+        {"kind": "property", "property": "Vp", "units": "ft/s"},
+        {"kind": "info", "info": "Domain"},
+    ]
+    assert payload["wavefields"][0]["name"] == "pressure_wavefield"
+    assert payload["wavefields"][0]["field"] == "pressure"
+    assert "fields" not in payload["wavefields"][0]
+
+
+def test_paraview_factory_supports_alias_and_structured_items():
+    output = paraview.volume(
+        "volume",
+        items=[
+            paraview.field("velocity", basis=["x", "z"], units="m/s"),
+            paraview.prop("Rho", units="g/cc"),
+        ],
+        format="xmf",
+    )
+
+    payload = output.to_fs()
+
+    assert isinstance(output, ParaViewOutput)
+    assert payload["writer"] == {"format": "xdmf", "encoding": "hdf5"}
+    assert payload["target"] == {"kind": "volume"}
+    assert payload["items"][0]["basis"] == {
+        "type": "coordinate_basis",
+        "system": "global",
+        "components": ["x", "z"],
+    }
+    assert payload["items"][1] == {
+        "kind": "property",
+        "property": "Rho",
+        "units": "g/cc",
+    }
+
+
+def test_outputs_units_accepts_shorthand_mapping():
+    payload = outputs(
+        units={
+            "geometry": "ft",
+            "pressure": "psi",
+            "properties": {"Vp": "ft/s"},
+        },
+    ).to_fs()
+
+    assert payload["Units"] == {
+        "geometry": "ft",
+        "dimensions": {"pressure": "psi"},
+        "properties": {"Vp": "ft/s"},
+    }
+
+
 def test_job_add_output_exports_outputs_from_job_json(tmp_path):
     sim = SeismicSimulation(
         name="simple",
@@ -910,6 +1216,32 @@ def test_job_add_output_exports_outputs_from_job_json(tmp_path):
     assert "Outputs" not in sim.to_fs()
     assert payload["Outputs"]["traces"]["path"] == "traces"
     assert payload["Outputs"]["ParaView"][0]["name"] == "pv"
+
+
+def test_job_output_convenience_methods_export_contract(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.output_units(geometry="ft", pressure="psi")
+    job.traces(path="trace_products")
+    job.paraview("quicklook", fields="pressure")
+
+    payload = job.to_fs()["Outputs"]
+
+    assert payload["Units"] == {
+        "geometry": "ft",
+        "dimensions": {"pressure": "psi"},
+    }
+    assert payload["traces"]["path"] == "trace_products"
+    assert payload["ParaView"][0]["name"] == "quicklook"
+    assert payload["ParaView"][0]["fields"] == ["pressure"]
 
 
 def test_paraview_output_requires_single_frequency_job(tmp_path):
@@ -1025,8 +1357,10 @@ def test_paraview_parts_are_compact_and_validated():
         {"kind": "property", "property": "vp"},
     ]
 
+    assert ParaviewOutput(fields=["pressure"], parts="magnitude").parts == ["abs"]
+
     with pytest.raises(ValueError, match="parts"):
-        ParaviewOutput(fields=["pressure"], parts="magnitude")
+        ParaviewOutput(fields=["pressure"], parts="phase")
 
 
 def test_paraview_grid_and_plane_selection_serialize_with_units():
@@ -1095,7 +1429,7 @@ def test_paraview_from_fs_preserves_new_blocks_and_extra():
         "distribution": "root",
     }
     assert payload["source"] == {"kind": "internal_future_source"}
-    assert payload["items"] == [{"field": "pressure"}]
+    assert payload["items"] == [{"kind": "field", "field": "pressure"}]
     assert "fields" not in payload
     assert payload["advanced_solver_flag"] is True
 
@@ -1231,14 +1565,21 @@ def test_mesh_surface_gradings_export_to_fast_solver_contract():
         f_low=10.0,
         f_high=30.0,
         surface_gradings=[
-            SurfaceGrading(surface="top", d0=0.0, d1=0.05, mult=2.5),
+            SurfaceGrading(
+                surface="top",
+                d0=0.0,
+                d1=0.05,
+                factor=2.5,
+                power=2.0,
+            ),
             {
                 "surface": "interface",
                 "mode": "inside",
                 "d0": 0.02,
                 "d1": 0.1,
-                "mult_max": 4.0,
-                "mult_min": 1.25,
+                "factor_max": 4.0,
+                "factor_min": 1.25,
+                "power": 0.5,
                 "phi_scale": -1.0,
             },
         ],
@@ -1255,15 +1596,17 @@ def test_mesh_surface_gradings_export_to_fast_solver_contract():
             "mode": "abs_band",
             "d0": 0.0,
             "d1": 0.05,
-            "mult": 2.5,
+            "factor": 2.5,
+            "power": 2.0,
         },
         {
             "surface": "interface",
             "mode": "inside",
             "d0": 0.02,
             "d1": 0.1,
-            "mult_max": 4.0,
-            "mult_min": 1.25,
+            "factor_max": 4.0,
+            "factor_min": 1.25,
+            "power": 0.5,
             "phi_scale": -1.0,
         },
     ]
@@ -1275,8 +1618,13 @@ def test_mesh_source_receiver_gradings_export_to_fast_solver_contract():
     )
     mesh.set_adapt(
         epw=2.0,
-        source_grading=DistanceGrading(d0=0.01, d1=0.08, mult=4.0),
-        receiver_grading={"d0": 0.02, "d1": 0.12, "mult_max": 3.0},
+        source_grading=DistanceGrading(
+            d0=0.01,
+            d1=0.08,
+            factor=4.0,
+            power=2.0,
+        ),
+        receiver_grading={"d0": 0.02, "d1": 0.12, "factor": 3.0, "power": 0.5},
     )
 
     payload = mesh.to_fs()
@@ -1284,12 +1632,14 @@ def test_mesh_source_receiver_gradings_export_to_fast_solver_contract():
     assert payload["adapt"]["src_grading"] == {
         "d0": 0.01,
         "d1": 0.08,
-        "mult": 4.0,
+        "factor": 4.0,
+        "power": 2.0,
     }
     assert payload["adapt"]["rcv_grading"] == {
         "d0": 0.02,
         "d1": 0.12,
-        "mult": 3.0,
+        "factor": 3.0,
+        "power": 0.5,
     }
 
 
@@ -1302,19 +1652,19 @@ def test_mesh_gradings_accept_pint_distance_units():
         source_grading=DistanceGrading(
             d0=10.0 * u.m,
             d1=80.0 * u.m,
-            mult=4.0,
+            factor=4.0,
         ),
         receiver_grading={
             "d0": 0.01 * u.km,
             "d1": 0.06 * u.km,
-            "mult": 2.0,
+            "factor": 2.0,
         },
         surface_gradings=[
             SurfaceGrading(
                 surface="interface",
                 d0=5.0 * u.m,
                 d1=25.0 * u.m,
-                mult=2.0,
+                factor=2.0,
             )
         ],
     )
@@ -1324,28 +1674,125 @@ def test_mesh_gradings_accept_pint_distance_units():
     assert payload["src_grading"] == {
         "d0": {"value": 10.0, "units": "m"},
         "d1": {"value": 80.0, "units": "m"},
-        "mult": 4.0,
+        "factor": 4.0,
     }
     assert payload["rcv_grading"] == {
         "d0": {"value": 0.01, "units": "km"},
         "d1": {"value": 0.06, "units": "km"},
-        "mult": 2.0,
+        "factor": 2.0,
     }
     assert payload["surface_gradings"][0]["d0"] == {"value": 5.0, "units": "m"}
     assert payload["surface_gradings"][0]["d1"] == {"value": 25.0, "units": "m"}
 
 
+def test_mesh_gradings_default_to_linear_power_and_require_positive_power():
+    assert DistanceGrading(d0=0.0, d1=1.0, factor=2.0).power == 1.0
+    assert SurfaceGrading(surface="interface", d0=0.0, d1=1.0, factor=2.0).power == 1.0
+    assert "power" not in DistanceGrading(d0=0.0, d1=1.0, factor=2.0).to_fs()
+    assert (
+        "power"
+        not in SurfaceGrading(surface="interface", d0=0.0, d1=1.0, factor=2.0).to_fs()
+    )
+
+    with pytest.raises(ValueError, match="power"):
+        DistanceGrading(d0=0.0, d1=1.0, factor=2.0, power=0.0)
+    with pytest.raises(ValueError, match="power"):
+        SurfaceGrading(surface="interface", d0=0.0, d1=1.0, factor=2.0, power=-1.0)
+    with pytest.raises(ValueError, match="power"):
+        DistanceGrading(
+            d0=0.0,
+            d1=1.0,
+            factor={"offset": 2.0, "depth": 1.5},
+            power={"offset": 1.0, "depth": 0.0},
+        )
+
+
+def test_mesh_gradings_accept_axis_mapped_factor_and_power():
+    mesh = MeshManager()
+    mesh.set_adapt(
+        elems_per_wave={"offset": 2.0, "depth": 3.0},
+        order={"offset": 4, "depth": 3},
+        source_grading=DistanceGrading(
+            d0=0.01,
+            d1=0.08,
+            factor={"offset": 4.0, "depth": 2.0},
+            power={"offset": 2.0, "depth": 1.5},
+        ),
+        receiver_grading={
+            "d0": 0.02,
+            "d1": 0.12,
+            "factor": {"offset": 3.0, "depth": 1.5},
+            "power": {"offset": 1.25, "depth": 2.0},
+        },
+        surface_gradings=[
+            {
+                "surface": "interface",
+                "d1": 0.05,
+                "factor_max": {"offset": 4.0, "depth": 2.0},
+                "factor_min": {"offset": 1.0, "depth": 1.0},
+                "power": {"offset": 2.0, "depth": 1.2},
+            }
+        ],
+    )
+    mesh.set_source_grading(
+        d0=0.0,
+        d1=25.0,
+        factor={"offset": 2.0, "depth": 1.5},
+        power={"offset": 1.0, "depth": 2.0},
+    )
+    mesh.add_surface_grading(
+        "free_surface",
+        d1=10.0,
+        factor={"offset": 2.0, "depth": 1.25},
+        power={"offset": 1.5, "depth": 2.0},
+    )
+
+    payload = mesh.adapt.to_fs()
+
+    assert payload["elems_per_wave"] == {"offset": 2.0, "depth": 3.0}
+    assert payload["order"] == {"offset": 4, "depth": 3}
+    assert payload["src_grading"] == {
+        "d0": 0.0,
+        "d1": 25.0,
+        "factor": {"offset": 2.0, "depth": 1.5},
+        "power": {"offset": 1.0, "depth": 2.0},
+    }
+    assert payload["rcv_grading"] == {
+        "d0": 0.02,
+        "d1": 0.12,
+        "factor": {"offset": 3.0, "depth": 1.5},
+        "power": {"offset": 1.25, "depth": 2.0},
+    }
+    assert payload["surface_gradings"][0] == {
+        "surface": "interface",
+        "mode": "abs_band",
+        "d0": 0.0,
+        "d1": 0.05,
+        "factor_max": {"offset": 4.0, "depth": 2.0},
+        "factor_min": {"offset": 1.0, "depth": 1.0},
+        "power": {"offset": 2.0, "depth": 1.2},
+    }
+    assert payload["surface_gradings"][1] == {
+        "surface": "free_surface",
+        "mode": "abs_band",
+        "d0": 0.0,
+        "d1": 10.0,
+        "factor": {"offset": 2.0, "depth": 1.25},
+        "power": {"offset": 1.5, "depth": 2.0},
+    }
+
+
 def test_mesh_source_receiver_gradings_are_editable():
     mesh = MeshManager()
     mesh.set_adapt(elems_per_wave=2.0)
-    mesh.set_source_grading(d0=0.0, d1=25.0, mult=2.0)
-    mesh.set_receiver_grading(d0=5.0, d1=40.0, mult=3.0)
-    mesh.adapt.source_grading.mult = 2.5
+    mesh.set_source_grading(d0=0.0, d1=25.0, factor=2.0)
+    mesh.set_receiver_grading(d0=5.0, d1=40.0, factor=3.0)
+    mesh.adapt.source_grading.factor = 2.5
     mesh.adapt.receiver_grading.d1 = 45.0
 
     payload = mesh.adapt.to_fs()
 
-    assert payload["src_grading"]["mult"] == 2.5
+    assert payload["src_grading"]["factor"] == 2.5
     assert payload["rcv_grading"]["d1"] == 45.0
 
 
@@ -1387,16 +1834,16 @@ def test_mesh_surface_gradings_accept_mapping_and_are_editable():
     mesh.set_adapt(
         elems_per_wave=2.0,
         surface_gradings={
-            "fault": {"d1": 50.0, "mult": 3.0, "mode": "band"},
+            "fault": {"d1": 50.0, "factor": 3.0, "mode": "band"},
         },
     )
-    mesh.add_surface_grading("free_surface", d1=10.0, mult=2.0)
-    mesh.adapt.surface_gradings[0].mult = 4.0
+    mesh.add_surface_grading("free_surface", d1=10.0, factor=2.0)
+    mesh.adapt.surface_gradings[0].factor = 4.0
 
     payload = mesh.adapt.to_fs()
 
     assert payload["surface_gradings"][0]["surface"] == "fault"
-    assert payload["surface_gradings"][0]["mult"] == 4.0
+    assert payload["surface_gradings"][0]["factor"] == 4.0
     assert payload["surface_gradings"][1]["surface"] == "free_surface"
 
 
@@ -1408,12 +1855,12 @@ def test_mesh_surface_gradings_roundtrip_and_preserve_extra():
                 {
                     "surface": "interface",
                     "d1": 0.15,
-                    "mult": 2.0,
+                    "factor": 2.0,
                     "custom_solver_flag": True,
                 }
             ],
-            "src_grading": {"d0": 0.01, "d1": 0.08, "mult": 4.0},
-            "rcv_grading": {"d0": 0.02, "d1": 0.12, "mult": 3.0},
+            "src_grading": {"d0": 0.01, "d1": 0.08, "factor": 4.0},
+            "rcv_grading": {"d0": 0.02, "d1": 0.12, "factor": 3.0},
             "adapt_sources": 1,
             "f_high": 25.0,
         },
@@ -1435,8 +1882,8 @@ def test_mesh_surface_gradings_roundtrip_and_preserve_extra():
     assert "min_epw" not in payload["adapt"]
     assert payload["adapt"]["adapt_sources"] == 1
     assert payload["adapt"]["surface_gradings"][0]["custom_solver_flag"] is True
-    assert payload["adapt"]["src_grading"] == {"d0": 0.01, "d1": 0.08, "mult": 4.0}
-    assert payload["adapt"]["rcv_grading"] == {"d0": 0.02, "d1": 0.12, "mult": 3.0}
+    assert payload["adapt"]["src_grading"] == {"d0": 0.01, "d1": 0.08, "factor": 4.0}
+    assert payload["adapt"]["rcv_grading"] == {"d0": 0.02, "d1": 0.12, "factor": 3.0}
 
 
 def test_array_properties_materialize_to_simulation_hdf5_with_hash(tmp_path):
@@ -1517,6 +1964,8 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
     assert coords["hash"].startswith("blake3:")
     with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
         assert "inputs/acquisition/receivers/surface/coordinates" in h5
+        dset = h5["inputs/acquisition/receivers/surface/coordinates"]
+        assert dset.dtype == np.dtype("float64")
 
     acq.receiver_groups[0].coordinates = CoordsArray(
         coordinates=np.array([[x, 0.1] for x in np.linspace(0.0, 1.0, 201)])
@@ -1528,6 +1977,82 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
     assert updated_coords["hash"].startswith("blake3:")
     assert updated_coords["hash"] != coords["hash"]
     assert isinstance(acq.receiver_groups[0].coordinates, CoordsArray)
+
+
+def test_large_xarray_receiver_coordinates_preserve_units_when_materialized(tmp_path):
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=CoordinateValue([0.5, 0.0], units="m"))
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    receiver_coords = xr.DataArray(
+        np.array([[0.1, z] for z in np.linspace(0.0, 200.0, 201)]),
+        dims=("receiver", "coordinate"),
+        coords={"coordinate": ["x", "z"]},
+        attrs={"units": "m", "system": "global"},
+    )
+    acq.add_receiver_group(
+        name="surface",
+        device=hydrophone,
+        coords=receiver_coords,
+    )
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+        units=UnitConfig(defaults={"length": "km"}),
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0, 0], u_bound=[0.04, 0.2], units="km", n=[1, 1])
+    )
+
+    payload = sim.to_fs()
+    coords = payload["Acquisition"]["receiver_groups"][0]["coordinates"]
+
+    assert coords["_type"] == "CoordsFromFile"
+    assert coords["units"] == "m"
+    assert coords["system"] == "global"
+    with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
+        dset = h5["inputs/acquisition/receivers/surface/coordinates"]
+        assert dset.attrs["units"] == "m"
+        assert dset.attrs["system"] == "global"
+
+
+def test_large_receiver_coordinates_use_default_length_units_when_materialized(
+    tmp_path,
+):
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(
+        name="surface",
+        device=hydrophone,
+        coords=np.array([[0.1, z] for z in np.linspace(0.0, 0.2, 201)]),
+    )
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+        units=UnitConfig(defaults={"length": "km"}),
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0, 0], u_bound=[0.04, 0.2], units="km", n=[1, 1])
+    )
+
+    payload = sim.to_fs()
+    coords = payload["Acquisition"]["receiver_groups"][0]["coordinates"]
+
+    assert coords["_type"] == "CoordsFromFile"
+    assert coords["units"] == "km"
+    with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
+        dset = h5["inputs/acquisition/receivers/surface/coordinates"]
+        assert dset.attrs["units"] == "km"
 
 
 def test_large_receiver_coordinates_inline_without_simulation_path():
@@ -1619,6 +2144,39 @@ def test_receiver_coordinate_file_hash_changes_with_hdf5_contents(tmp_path):
     assert second_hash != first_hash
 
 
+def test_remote_input_files_include_simulation_hdf5_store(tmp_path):
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(
+        name="surface",
+        device=hydrophone,
+        coords=np.array([[0.1, z] for z in np.linspace(0.0, 0.2, 201)]),
+    )
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+        units=UnitConfig(defaults={"length": "km"}),
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0, 0], u_bound=[0.04, 0.2], units="km", n=[1, 1])
+    )
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+
+    files = job.remote_input_files(Path("/remote/project"))
+
+    assert (
+        tmp_path / "simulations/simple/simple.h5",
+        Path("/remote/project/simulations/simple/simple.h5"),
+    ) in files
+
+
 def test_trace_output_exports_only_traces_key(tmp_path):
     sim = SeismicSimulation(
         name="simple",
@@ -1656,6 +2214,146 @@ def test_job_trace_files_use_new_names(tmp_path):
         str(tmp_path / "jobs/simple/freq/results/traces/traces_2.h5"),
     ]
     assert job.traces.manifest == job.trace_manifest
+
+
+def test_job_wavefields_use_output_requests_not_trace_receiver_groups(tmp_path):
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(
+        name="surface",
+        device=hydrophone,
+        coords=[[0.0, 0.0], [1.0, 0.0]],
+    )
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
+    wavefield_grid = xr.DataArray(
+        np.empty((2, 2)),
+        dims=("z", "r"),
+        coords={"z": [0.0, 1.0], "r": [0.0, 1.0]},
+    )
+    job += WavefieldOutput(
+        name="pressure_wavefield",
+        field="pressure",
+        grid=wavefield_grid,
+    )
+    job.save()
+
+    assert job.trace_outputs.groups == ["surface"]
+    assert job.trace_manifest.groups == ["surface"]
+    assert job.traces.manifest.groups == ["surface"]
+    assert job.wavefield_trace_outputs.groups == ["pressure_wavefield"]
+    assert job.wavefield_manifest.groups == ["pressure_wavefield"]
+    assert job.wavefields.manifest.groups == ["pressure_wavefield"]
+    assert job.wavefield_manifest.output_path == (
+        tmp_path / "jobs/simple/freq/results/wavefields"
+    )
+    wavefield_payload = job.wavefield_outputs["pressure_wavefield"]["grid"]
+    assert wavefield_payload["_type"] == "XArrayGrid"
+    assert wavefield_payload["dims"] == ["z", "r"]
+    assert wavefield_payload["coords"]["z"]["data"] == [0.0, 1.0]
+    assert wavefield_payload["coords"]["r"]["data"] == [0.0, 1.0]
+    assert job.wavefield_outputs["pressure_wavefield"]["fields"] == ["pressure"]
+    assert job.wavefield_outputs["pressure_wavefield"]["component_names"] == [
+        "pressure"
+    ]
+    assert job.wavefield_outputs["pressure_wavefield"]["components"] == [
+        "pressure_wavefield:pressure"
+    ]
+    payload = job.to_fs()
+    assert payload["Outputs"]["wavefields"][0]["name"] == "pressure_wavefield"
+    assert "pressure_wavefield" not in {
+        group["name"] for group in sim.to_fs()["Acquisition"]["receiver_groups"]
+    }
+
+
+def test_job_wavefields_open_with_unsaved_simulation_file(tmp_path):
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job += WavefieldOutput(
+        name="pressure_wavefield",
+        field="pressure",
+        dims=("z", "r"),
+        coords={"z": [0.0, 1.0], "r": [0.0, 1.0, 2.0]},
+    )
+
+    output_path = job.wavefield_trace_outputs.path
+    output_path.mkdir(parents=True)
+    values = np.arange(6, dtype=np.float32)
+    with h5py.File(output_path / "traces_1.h5", "w") as h5:
+        h5.create_dataset("frequency", data=10.0)
+        dset = h5.create_dataset(
+            "pressure_wavefield",
+            data=np.stack([values, np.zeros_like(values)], axis=-1).reshape(6, 1, 1, 2),
+        )
+        dset.attrs["dims"] = ["receiver", "component", "shot"]
+        dset.attrs["component"] = ["pressure"]
+        dset.attrs["shot"] = [1]
+
+    wavefields = job.wavefields.open()
+    fd = wavefields.fd("pressure_wavefield", "pressure", source=1)
+
+    assert wavefields.manifest.simulation == (
+        tmp_path / "simulations" / "simple" / "simple.json"
+    )
+    np.testing.assert_allclose(fd.values[0], values)
+
+
+def test_job_wavefield_outputs_export_device_component_metadata(tmp_path):
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    sim = SeismicSimulation(
+        name="simple",
+        physics="elastic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    device = ReceiverNode(name="elastic_device")
+    device.add_component(name="vz", field="velocity", direction=[0.0, 1.0])
+    device.add_component(name="szz", field="stress")
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job += WavefieldOutput(
+        name="elastic_wavefield",
+        device=device,
+        dims=("z", "r"),
+        coords={"z": [0.0, 1.0], "r": [0.0, 1.0]},
+    )
+
+    metadata = job.wavefield_outputs["elastic_wavefield"]
+    manifest_metadata = job.wavefield_trace_outputs.wavefields["elastic_wavefield"]
+
+    assert metadata["fields"] == ["velocity", "stress"]
+    assert metadata["component_names"] == ["vz", "szz"]
+    assert metadata["components"] == ["elastic_wavefield:vz", "elastic_wavefield:szz"]
+    assert metadata["component_specs"][0]["direction"] == [0.0, 1.0]
+    assert metadata["device"]["components"][1]["name"] == "szz"
+    assert manifest_metadata["component_names"] == ["vz", "szz"]
 
 
 def test_trace_dataset_resolves_legacy_receiver_files(tmp_path):
@@ -1719,6 +2417,41 @@ def test_trace_dataset_from_manifest_preserves_output_artifacts(tmp_path):
     assert traces.manifest.artifacts == [artifact]
 
 
+def test_wavefield_dataset_missing_artifacts_fails_without_shard_warnings(tmp_path):
+    output_path = tmp_path / "results" / "wavefields"
+    manifest = TraceManifest(
+        files=[output_path / "traces_1.h5", output_path / "traces_2.h5"],
+        frequencies={1: 10.0, 2: 20.0},
+        groups=["pressure_wavefield"],
+        simulation=tmp_path / "simulation.json",
+        result_path=tmp_path / "results",
+        output_path=output_path,
+        project_path=tmp_path,
+        wavefields={
+            "pressure_wavefield": {
+                "grid": {
+                    "_type": "XArrayGrid",
+                    "dims": ["z", "r"],
+                    "coords": {
+                        "z": {"data": [0.0, 1.0]},
+                        "r": {"data": [0.0, 1.0]},
+                    },
+                },
+                "fields": ["pressure"],
+            }
+        },
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(FileNotFoundError, match="No wavefield trace files"):
+            TraceDataset.from_manifest(manifest)
+
+    assert not any(
+        "Trace file is missing" in str(warning.message) for warning in caught
+    )
+
+
 def test_trace_manifest_accepts_solver_packed_trace_product(tmp_path):
     trace_dir = tmp_path / "results" / "traces"
     trace_dir.mkdir(parents=True)
@@ -1751,6 +2484,159 @@ def test_trace_manifest_accepts_solver_packed_trace_product(tmp_path):
     assert manifest.complete
 
 
+def test_trace_dataset_matches_packed_frequency_values_when_task_ids_shift(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    packed.touch()
+    (trace_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-trace-manifest-1",
+                "packed": {
+                    "format": "hdf5",
+                    "schema": "fs-traces-packed-1",
+                    "relative_path": "traces/traces.h5",
+                },
+                "frequencies": [
+                    {"task_id": 10, "frequency": 10.0, "status": "packed"},
+                    {"task_id": 20, "frequency": 20.0, "status": "packed"},
+                    {"task_id": 30, "frequency": 30.0, "status": "packed"},
+                ],
+            }
+        )
+    )
+    manifest = TraceManifest(
+        files=[trace_dir / "traces_1.h5", trace_dir / "traces_2.h5"],
+        frequencies={1: 10.0, 2: 20.0},
+        groups=["surface"],
+        simulation=tmp_path / "simulation.json",
+        result_path=tmp_path / "results",
+        output_path=trace_dir,
+        project_path=tmp_path,
+    )
+
+    assert manifest.missing_packed_frequencies == {}
+    assert manifest.complete
+
+    traces = TraceDataset.from_manifest(manifest)
+
+    assert traces.manifest.files == [packed]
+    assert traces.manifest.frequencies == {1: 10.0, 2: 20.0}
+
+
+def test_trace_dataset_uses_matching_shard_when_packed_manifest_is_stale(tmp_path):
+    trace_dir = tmp_path / "results" / "wavefields"
+    shard_dir = trace_dir / "shards"
+    shard_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    packed.touch()
+    shard = shard_dir / "f_50.00000_hz.h5"
+    with h5py.File(shard, "w") as h5:
+        h5.create_dataset("frequency", data=50.0)
+        h5.create_dataset("laplace", data=-0.5)
+        dset = h5.create_dataset("wavefields_f", data=np.zeros((1, 1, 1, 2)))
+        dset.attrs["dims"] = ["receiver", "component", "source"]
+    (trace_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-trace-manifest-1",
+                "packed": {
+                    "format": "hdf5",
+                    "schema": "fs-traces-packed-1",
+                    "relative_path": "wavefields/traces.h5",
+                },
+                "frequencies": [
+                    {"task_id": 1, "frequency": 100.0, "status": "packed"},
+                ],
+            }
+        )
+    )
+    manifest = TraceManifest(
+        files=[trace_dir / "traces_1.h5"],
+        frequencies={1: 50.0},
+        groups=["wavefields_f"],
+        simulation=tmp_path / "simulation.json",
+        result_path=tmp_path / "results",
+        output_path=trace_dir,
+        project_path=tmp_path,
+        laplace={1: -0.5},
+        wavefields={"wavefields_f": {"fields": ["pressure"]}},
+    )
+
+    with pytest.warns(RuntimeWarning, match="missing 1 of 1 expected frequencies"):
+        traces = TraceDataset.from_manifest(manifest)
+
+    assert traces.manifest.files == [shard]
+    assert traces.manifest.frequencies == {1: 50.0}
+    assert traces.manifest.laplace == {1: -0.5}
+
+
+def test_trace_dataset_uses_matching_shard_without_packed_manifest(tmp_path):
+    trace_dir = tmp_path / "results" / "wavefields"
+    shard_dir = trace_dir / "shards"
+    shard_dir.mkdir(parents=True)
+    shard = shard_dir / "f_50.00000_hz.h5"
+    with h5py.File(shard, "w") as h5:
+        h5.create_dataset("frequency", data=50.0)
+        h5.create_dataset("laplace", data=-0.5)
+        dset = h5.create_dataset("wavefields_f", data=np.zeros((1, 1, 1, 2)))
+        dset.attrs["dims"] = ["receiver", "component", "source"]
+    manifest = TraceManifest(
+        files=[trace_dir / "traces_1.h5"],
+        frequencies={1: 50.0},
+        groups=["wavefields_f"],
+        simulation=tmp_path / "simulation.json",
+        result_path=tmp_path / "results",
+        output_path=trace_dir,
+        project_path=tmp_path,
+        laplace={1: -0.5},
+        wavefields={"wavefields_f": {"fields": ["pressure"]}},
+    )
+
+    traces = TraceDataset.from_manifest(manifest)
+
+    assert traces.manifest.files == [shard]
+    assert traces.manifest.frequencies == {1: 50.0}
+    assert traces.manifest.laplace == {1: -0.5}
+
+
+def test_trace_dataset_reports_packed_product_with_no_requested_frequencies(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    packed.touch()
+    (trace_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-trace-manifest-1",
+                "packed": {
+                    "format": "hdf5",
+                    "schema": "fs-traces-packed-1",
+                    "relative_path": "traces/traces.h5",
+                },
+                "frequencies": [
+                    {"task_id": 1, "frequency": 1.0, "status": "packed"},
+                    {"task_id": 2, "frequency": 2.0, "status": "packed"},
+                ],
+            }
+        )
+    )
+    manifest = TraceManifest(
+        files=[trace_dir / "traces_1.h5", trace_dir / "traces_2.h5"],
+        frequencies={1: 10.0, 2: 20.0},
+        groups=["surface"],
+        simulation=tmp_path / "simulation.json",
+        result_path=tmp_path / "results",
+        output_path=trace_dir,
+        project_path=tmp_path,
+    )
+
+    with pytest.warns(RuntimeWarning, match="missing 2 of 2 expected frequencies"):
+        with pytest.raises(ValueError, match="contains no frequencies requested"):
+            TraceDataset.from_manifest(manifest)
+
+
 def test_job_run_fingerprint_requires_matching_outputs_and_changes_with_simulation(
     tmp_path,
 ):
@@ -1773,7 +2659,12 @@ def test_job_run_fingerprint_requires_matching_outputs_and_changes_with_simulati
     job.write_run_state(status="completed")
     assert job.is_run_current()
 
-    job += WavefieldOutput(name="pressure", fields=["pressure"])
+    job += WavefieldOutput(
+        name="pressure",
+        fields=["pressure"],
+        dims=("z", "r"),
+        coords={"z": [0.0, 1.0], "r": [0.0, 1.0]},
+    )
     assert not job.is_run_current()
     job.save()
     job.write_run_state(status="completed")
@@ -2191,14 +3082,15 @@ def test_trace_store_uses_solver_packed_trace_file_without_vds_warnings(tmp_path
                     {"task_id": 1, "frequency": 10.0, "status": "packed"},
                     {"task_id": 2, "frequency": 20.0, "status": "packed"},
                     {"task_id": 3, "frequency": 30.0, "status": "packed"},
+                    {"task_id": 4, "frequency": 40.0, "status": "packed"},
                 ],
             }
         )
     )
     with h5py.File(packed, "w") as h5:
-        h5.create_dataset("frequency", data=np.array([10.0, 20.0, 30.0]))
-        h5.create_dataset("laplace", data=np.zeros(3))
-        h5.create_dataset("task_id", data=np.array([1, 2, 3], dtype=np.int32))
+        h5.create_dataset("frequency", data=np.array([10.0, 20.0, 30.0, 40.0]))
+        h5.create_dataset("laplace", data=np.zeros(4))
+        h5.create_dataset("task_id", data=np.array([1, 2, 3, 4], dtype=np.int32))
         h5.create_dataset(
             "survey/packed_layout_kind",
             data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
@@ -2210,6 +3102,7 @@ def test_trace_store_uses_solver_packed_trace_file_without_vds_warnings(tmp_path
                     [[[[1.0, 0.0], [2.0, 0.0]]]],
                     [[[[3.0, 0.0], [4.0, 0.0]]]],
                     [[[[5.0, 0.0], [6.0, 0.0]]]],
+                    [[[[7.0, 0.0], [8.0, 0.0]]]],
                 ],
                 dtype=np.float32,
             ),
@@ -2242,7 +3135,9 @@ def test_trace_store_uses_solver_packed_trace_file_without_vds_warnings(tmp_path
     )
     assert not (tmp_path / "results" / "_fs_run" / "cache" / "traces_vds.h5").exists()
     assert traces.groups == ["surface"]
+    assert traces.manifest.frequencies == {1: 10.0, 2: 20.0, 3: 30.0}
     assert traces.frequencies("surface").tolist() == [10.0, 20.0, 30.0]
+    assert traces.laplace("surface").tolist() == [0.0, 0.0, 0.0]
     assert traces.receivers("surface").tolist() == [101, 102]
     assert traces.sources("surface").tolist() == [7]
     assert traces.components("surface").tolist() == ["p"]
@@ -2286,13 +3181,13 @@ def test_trace_dataset_td_compensates_laplace_domain_amplitudes(tmp_path):
         dset.attrs["shot"] = np.array([7], dtype=np.int32)
 
     traces = TraceDataset.open(packed)
-    wavelet = RickerWavelet(f=0.5, pre_time=0.0)
+    wavelet = RickerWavelet(f=0.5, center=0.0)
     laplace_time = traces.ld("surface", "p", source=7, wavelet=wavelet)
     compensated = traces.td(
         "surface",
         "p",
         source=7,
-        wavelet=RickerWavelet(f=0.5, pre_time=0.0),
+        wavelet=RickerWavelet(f=0.5, center=0.0),
     )
 
     raw_time = np.linspace(0.0, period, laplace_time.sizes["time"] + 1)[:-1]
@@ -2312,6 +3207,190 @@ def test_trace_dataset_td_compensates_laplace_domain_amplitudes(tmp_path):
     assert compensated.attrs["damping_factor"] == pytest.approx(10.0)
 
 
+def test_trace_dataset_fd_uses_ordinary_wavelet_spectrum_for_laplace_data(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    frequencies = np.arange(0.0, 202.0, 2.0)
+    laplace = np.full(frequencies.size, -0.25)
+    data = np.zeros((frequencies.size, 1, 1, 1, 2), dtype=np.float32)
+    data[..., 0] = 1.0
+
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=frequencies)
+        h5.create_dataset("laplace", data=laplace)
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        dset = h5.create_dataset("surface", data=data)
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.array([101], dtype=np.int32)
+        dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+    traces = TraceDataset.open(packed)
+    wavelet = RickerWavelet(f=60.0, center=0.0)
+    fd = traces.fd("surface", "p", source=7, wavelet=wavelet)
+
+    base_wavelet = RickerWavelet(f=60.0, center=0.0)
+    base_wavelet.times = traces.times(upscale=1)
+    expected = xr.DataArray(
+        base_wavelet.spectrum,
+        dims=["frequency"],
+        coords={"frequency": base_wavelet.frequencies},
+    ).interp(frequency=frequencies, kwargs={"fill_value": 0})
+
+    np.testing.assert_allclose(
+        fd.values[:, 0],
+        expected.values,
+        rtol=2.0e-5,
+        atol=2.0e-5,
+    )
+
+
+def test_trace_dataset_td_spectrum_is_wavelet_limited_before_interpolation(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    frequencies = np.arange(0.0, 126.0, 1.0)
+    data = np.zeros((frequencies.size, 1, 1, 1, 2), dtype=np.float32)
+    data[..., 0] = 1.0
+
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=frequencies)
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        dset = h5.create_dataset("surface", data=data)
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.array([101], dtype=np.int32)
+        dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+    traces = TraceDataset.open(packed)
+    wavelet = RickerWavelet(f=10.0, center=0.0373)
+    td = traces.td("surface", "p", source=7, wavelet=wavelet, upscale=4)
+
+    base_wavelet = RickerWavelet(f=10.0, center=0.0373)
+    base_wavelet.times = traces.times(upscale=1)
+    coarse_spectrum = xr.DataArray(
+        base_wavelet.spectrum,
+        dims=["frequency"],
+        coords={"frequency": base_wavelet.frequencies},
+    )
+    expected_spectrum = coarse_spectrum.interp(
+        frequency=wavelet.frequencies,
+        kwargs={"fill_value": 0},
+    ).values
+    expected = np.fft.irfft(expected_spectrum)
+    np.testing.assert_allclose(
+        td.values[:, 0],
+        expected,
+        rtol=2.0e-5,
+        atol=2.0e-5,
+    )
+    actual_spectrum = np.fft.rfft(td.values[:, 0])
+    np.testing.assert_allclose(
+        actual_spectrum,
+        expected_spectrum,
+        rtol=2.0e-5,
+        atol=2.0e-5,
+    )
+
+
+def test_trace_dataset_td_center_zero_does_not_inject_broadband_stripes(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    frequencies = np.arange(0.0, 501.0, 1.0)
+    data = np.zeros((frequencies.size, 1, 1, 1, 2), dtype=np.float32)
+    data[..., 0] = 1.0
+
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=frequencies)
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        dset = h5.create_dataset("surface", data=data)
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.array([101], dtype=np.int32)
+        dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+    traces = TraceDataset.open(packed)
+    td = traces.td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=40.0, center=0.0),
+    )
+    spectrum = np.abs(np.fft.rfft(td.values[:, 0]))
+    high_frequency_level = np.mean(spectrum[-20:]) / np.max(spectrum)
+
+    assert high_frequency_level < 1.0e-2
+
+
+def test_trace_dataset_td_applies_wavelet_before_interpolating_oscillatory_response(
+    tmp_path,
+):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    frequencies = np.arange(0.0, 127.0, 1.0)
+    delay = 0.173
+    response = np.exp(-2.0j * np.pi * frequencies * delay)
+    data = np.zeros((frequencies.size, 1, 1, 1, 2), dtype=np.float32)
+    data[:, 0, 0, 0, 0] = response.real
+    data[:, 0, 0, 0, 1] = response.imag
+
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=frequencies)
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        dset = h5.create_dataset("surface", data=data)
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.array([101], dtype=np.int32)
+        dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+    traces = TraceDataset.open(packed)
+    wavelet = RickerWavelet(f=40.0, center=0.0)
+    td = traces.td("surface", "p", source=7, wavelet=wavelet, upscale=4)
+
+    base_wavelet = RickerWavelet(f=40.0, center=0.0)
+    base_wavelet.times = traces.times(upscale=1)
+    coarse_response = xr.DataArray(
+        response * base_wavelet.spectrum,
+        dims=["frequency"],
+        coords={"frequency": frequencies},
+    )
+    expected_spectrum = coarse_response.interp(
+        frequency=wavelet.frequencies,
+        kwargs={"fill_value": 0},
+    ).values
+
+    actual_spectrum = np.fft.rfft(td.values[:, 0])
+    np.testing.assert_allclose(
+        actual_spectrum,
+        expected_spectrum,
+        rtol=2.0e-5,
+        atol=2.0e-5,
+    )
+
+
 def test_trace_store_reads_indexed_solver_packed_trace_file(tmp_path):
     trace_dir = tmp_path / "results" / "traces"
     trace_dir.mkdir(parents=True)
@@ -2319,9 +3398,9 @@ def test_trace_store_reads_indexed_solver_packed_trace_file(tmp_path):
     packed = trace_dir / "traces.h5"
     string_dtype = h5py.string_dtype(encoding="utf-8")
     with h5py.File(packed, "w") as h5:
-        h5.create_dataset("frequency", data=np.array([20.0, 10.0, 30.0]))
-        h5.create_dataset("laplace", data=np.zeros(3))
-        h5.create_dataset("task_id", data=np.array([2, 1, 3], dtype=np.int32))
+        h5.create_dataset("frequency", data=np.array([20.0, 10.0, 30.0, 40.0]))
+        h5.create_dataset("laplace", data=np.zeros(4))
+        h5.create_dataset("task_id", data=np.array([2, 1, 3, 4], dtype=np.int32))
         h5.create_dataset(
             "survey/packed_layout_kind",
             data=np.array(["indexed_frequency_trace_v1"], dtype=string_dtype),
@@ -2357,12 +3436,14 @@ def test_trace_store_reads_indexed_solver_packed_trace_file(tmp_path):
             "trace_index/data_root", data=np.array(["/trace_data"], dtype=string_dtype)
         )
         h5.create_dataset(
-            "trace_index/dataset_number", data=np.array([1, 2, 3], dtype=np.int32)
+            "trace_index/dataset_number", data=np.array([1, 2, 3, 4], dtype=np.int32)
         )
-        h5.create_dataset("trace_index/frequency", data=np.array([20.0, 10.0, 30.0]))
-        h5.create_dataset("trace_index/laplace", data=np.zeros(3, dtype=np.float64))
         h5.create_dataset(
-            "trace_index/task_id", data=np.array([2, 1, 3], dtype=np.int32)
+            "trace_index/frequency", data=np.array([20.0, 10.0, 30.0, 40.0])
+        )
+        h5.create_dataset("trace_index/laplace", data=np.zeros(4, dtype=np.float64))
+        h5.create_dataset(
+            "trace_index/task_id", data=np.array([2, 1, 3, 4], dtype=np.int32)
         )
         h5.create_dataset(
             "trace_index/shard_file",
@@ -2371,17 +3452,21 @@ def test_trace_store_reads_indexed_solver_packed_trace_file(tmp_path):
                     "traces/shards/traces_2.h5",
                     "traces/shards/traces_1.h5",
                     "traces/shards/traces_3.h5",
+                    "traces/shards/traces_4.h5",
                 ],
                 dtype=string_dtype,
             ),
         )
         h5.create_dataset(
             "trace_index/datasets/dataset_number",
-            data=np.array([1, 2, 3], dtype=np.int32),
+            data=np.array([1, 2, 3, 4], dtype=np.int32),
         )
         h5.create_dataset(
             "trace_index/datasets/source_path",
-            data=np.array(["/surface", "/surface", "/surface"], dtype=string_dtype),
+            data=np.array(
+                ["/surface", "/surface", "/surface", "/surface"],
+                dtype=string_dtype,
+            ),
         )
         h5.create_dataset(
             "trace_index/datasets/packed_path",
@@ -2390,6 +3475,7 @@ def test_trace_store_reads_indexed_solver_packed_trace_file(tmp_path):
                     "/trace_data/surface/000001",
                     "/trace_data/surface/000002",
                     "/trace_data/surface/000003",
+                    "/trace_data/surface/000004",
                 ],
                 dtype=string_dtype,
             ),
@@ -2398,6 +3484,7 @@ def test_trace_store_reads_indexed_solver_packed_trace_file(tmp_path):
             "000001": [3.0, 4.0],
             "000002": [1.0, 2.0],
             "000003": [5.0, 6.0],
+            "000004": [7.0, 8.0],
         }.items():
             dset = h5.create_dataset(
                 f"trace_data/surface/{number}",
@@ -2765,7 +3852,6 @@ def test_boundary_condition_serializes_multiple_conditions_without_name():
 
     payload = bc.to_fs()
 
-    assert bc.kind == "free"
     assert bc.conditions == ["free", "sealed"]
     assert payload == {
         "conditions": ["free", "sealed"],
@@ -2773,40 +3859,28 @@ def test_boundary_condition_serializes_multiple_conditions_without_name():
     }
 
 
-def test_boundary_condition_kind_backcompat_serializes_conditions():
-    bc = BoundaryCondition(name="free_surface", kind="neumann", boundaries=["z_min"])
-
-    payload = bc.to_fs()
-
-    assert bc.kind == "free"
-    assert bc.conditions == ["free"]
-    assert "kind" not in payload
-    assert payload["conditions"] == ["free"]
-
-
-def test_boundary_condition_from_fs_accepts_old_and_new_shapes():
-    new_bc = BoundaryCondition.from_fs(
+def test_boundary_condition_from_fs_uses_current_shape_and_preserves_extra():
+    bc = BoundaryCondition.from_fs(
         {
             "name": "top",
             "conditions": ["free", "sealed"],
             "boundaries": ["z_min"],
-        }
-    )
-    old_bc = BoundaryCondition.from_fs(
-        {
-            "name": "pml",
-            "kind": "pml",
-            "boundaries": ["x_min"],
-            "pml_constant": 5.0,
+            "solver_bc_flag": True,
         }
     )
 
-    assert new_bc.conditions == ["free", "sealed"]
-    assert old_bc.conditions == ["pml"]
-    assert old_bc.to_fs()["pml_constant"] == 5.0
+    assert bc.conditions == ["free", "sealed"]
+    assert bc.to_fs()["solver_bc_flag"] is True
 
 
-def test_boundary_condition_accepts_pml_reflectivity_alias():
+def test_boundary_condition_rejects_kind_alias():
+    with pytest.raises(TypeError, match="kind"):
+        BoundaryCondition(kind="free", boundaries=["z_min"])
+    with pytest.raises(TypeError, match="kind"):
+        BoundaryCondition.from_fs({"kind": "free", "boundaries": ["z_min"]})
+
+
+def test_boundary_condition_normalizes_pml_reflectivity_to_pml_reflection():
     bc = BoundaryCondition(
         conditions=["pml"],
         boundaries=["x_min"],
@@ -2846,25 +3920,34 @@ def test_boundary_conditions_collection_allows_shared_boundary_conditions():
         boundaries=["z_min"],
     )
 
-    assert len(conditions.boundary_conditions) == 2
-    assert [bc.boundaries for bc in conditions.boundary_conditions] == [
+    assert len(conditions) == 2
+    assert conditions["free_surface"].conditions == ["free"]
+    assert [bc.boundaries for bc in conditions] == [
         ["z_min"],
         ["z_min"],
     ]
     assert conditions._boundaries == {"z_min"}
 
 
-def test_boundary_condition_manager_remains_compatibility_alias():
-    with pytest.warns(DeprecationWarning, match="BoundaryConditionManager"):
-        manager = BoundaryConditionManager("geometric")
-    manager += BoundaryCondition(kind="free", boundaries=["z_min"])
-
-    assert manager.label_type == "geometric"
-    assert manager.to_fs() == {
-        "boundary_conditions": [
-            {"conditions": ["free"], "boundaries": ["z_min"]},
+def test_boundary_conditions_from_fs_uses_flat_named_list():
+    conditions = BoundaryConditions.from_fs(
+        [
+            {
+                "name": "top",
+                "conditions": ["free"],
+                "boundaries": [101],
+            }
         ]
-    }
+    )
+
+    payload = conditions.to_fs()
+
+    assert conditions["top"].boundaries == [101]
+    assert payload == [
+        {"conditions": ["free"], "boundaries": [101], "name": "top"},
+    ]
+    with pytest.raises(TypeError, match="BCs must be a list"):
+        BoundaryConditions.from_fs({"boundary_conditions": []})
 
 
 def test_simulation_accepts_boundary_conditions_directly(tmp_path):
@@ -2873,24 +3956,37 @@ def test_simulation_accepts_boundary_conditions_directly(tmp_path):
         physics="poroelastic",
         dimension=2,
         project_path=tmp_path,
+        mesh=MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1])),
+        BCs=[
+            {
+                "name": "a_bc",
+                "conditions": ["free", "sealed"],
+                "boundaries": ["z_min"],
+            }
+        ],
     )
 
-    sim += BoundaryCondition(conditions=["free", "sealed"], boundaries=["z_min"])
-    sim += BoundaryCondition(conditions=["pml"], boundaries=["x_min"])
+    sim += BoundaryCondition(name="pml_xmin", conditions=["pml"], boundaries=["x_min"])
 
-    payload = {"BCs": sim.BCs.to_fs()}
+    payload = sim.to_fs()
 
-    assert payload["BCs"] == {
-        "boundary_conditions": [
-            {"conditions": ["free", "sealed"], "boundaries": ["z_min"]},
-            {
-                "conditions": ["pml"],
-                "boundaries": ["x_min"],
-                "pml_wavelengths": 2.0,
-                "pml_exponent": 3.0,
-                "pml_constant": 20.0,
-                "pml_reflection": 0.001,
-                "stretch_limit": 0.25,
-            },
-        ]
-    }
+    assert sim.BCs["a_bc"].conditions == ["free", "sealed"]
+    assert "__dict__" not in SeismicSimulation.__dict__
+    assert "__dict__" not in Acquisition.__dict__
+    assert payload["BCs"] == [
+        {
+            "conditions": ["free", "sealed"],
+            "boundaries": ["z_min"],
+            "name": "a_bc",
+        },
+        {
+            "conditions": ["pml"],
+            "boundaries": ["x_min"],
+            "pml_wavelengths": 2.0,
+            "pml_exponent": 3.0,
+            "pml_constant": 20.0,
+            "pml_reflection": 0.001,
+            "stretch_limit": 0.25,
+            "name": "pml_xmin",
+        },
+    ]

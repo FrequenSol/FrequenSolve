@@ -3,10 +3,17 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Type, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Type, Union
+
+import numpy as np
+import xarray as xr
 
 from frequensolve.geometry.grids import CartesianGrid
-from frequensolve.units import value_and_units_to_fs
+from frequensolve.seismic.receivers import (
+    ReceiverComponent,
+    ReceiverDevice,
+)
+from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
 from frequensolve.util.fields import canonical_fields
 from frequensolve.util.mixins import (
     ExtraFieldsMixin,
@@ -17,11 +24,41 @@ from frequensolve.util.mixins import (
 
 __all__ = [
     "Output",
+    "OutputUnits",
     "JobOutputs",
+    "ParaViewOutput",
+    "ParaViewItem",
     "ParaviewOutput",
     "TraceOutput",
     "WavefieldOutput",
+    "field",
+    "info",
+    "output_property",
+    "outputs",
+    "paraview",
+    "wavefield",
 ]
+
+_OUTPUT_DIMENSIONS = {
+    "length",
+    "time",
+    "mass",
+    "frequency",
+    "velocity",
+    "density",
+    "pressure",
+    "stress",
+    "strain",
+    "force",
+    "moment",
+    "attenuation",
+    "wavenumber",
+    "conductivity",
+    "permittivity",
+    "permeability",
+    "efield",
+    "bfield",
+}
 
 
 def _relative_output_path(path: Union[str, Path], field: str = "path") -> str:
@@ -58,12 +95,36 @@ def _choice(value: Optional[str], choices: set[str], field: str) -> Optional[str
 def _normalize_parts(parts: Optional[Union[str, Iterable[str]]]) -> Optional[List[str]]:
     if parts is None:
         return None
-    values = [str(part).lower() for part in _as_list(parts)]
-    invalid = [part for part in values if part not in ParaviewOutput._PARTS]
+    aliases = {
+        "re": "real",
+        "real": "real",
+        "im": "imag",
+        "imag": "imag",
+        "imaginary": "imag",
+        "abs": "abs",
+        "mag": "abs",
+        "magnitude": "abs",
+    }
+    raw_values = [str(part).lower() for part in _as_list(parts)]
+    invalid = [part for part in raw_values if part not in aliases]
     if invalid:
-        allowed = ", ".join(sorted(ParaviewOutput._PARTS))
+        allowed = ", ".join(sorted(aliases))
         raise ValueError(f"ParaviewOutput.parts must use only: {allowed}")
-    return values
+    return [aliases[part] for part in raw_values]
+
+
+def _as_output_sequence(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, (Output, Mapping)):
+        return [value]
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+        return list(value)
+    return [value]
+
+
+def _canonical_field_list(fields: Iterable[str]) -> List[str]:
+    return canonical_fields(_as_list(fields))
 
 
 @dataclass(kw_only=True)
@@ -89,6 +150,7 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
     def from_fs(cls, data: Dict) -> "Output":
         output_types: Dict[str, Type[Output]] = {
             "TraceOutput": TraceOutput,
+            "ParaViewOutput": ParaviewOutput,
             "ParaviewOutput": ParaviewOutput,
             "WavefieldOutput": WavefieldOutput,
         }
@@ -118,6 +180,202 @@ class TraceOutput(Output):
 
 
 @dataclass(kw_only=True)
+class OutputUnits(ExtraFieldsMixin):
+    """Default units for solver-produced output products."""
+
+    geometry: Optional[str] = None
+    dimensions: Dict[str, str] = field(default_factory=dict)
+    fields: Dict[str, str] = field(default_factory=dict)
+    properties: Dict[str, str] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        geometry: Optional[str] = None,
+        *,
+        dimensions: Optional[Mapping[str, str]] = None,
+        defaults: Optional[Mapping[str, str]] = None,
+        fields: Optional[Mapping[str, str]] = None,
+        properties: Optional[Mapping[str, str]] = None,
+        extra: Optional[Mapping[str, Any]] = None,
+        **dimension_defaults,
+    ):
+        self.geometry = unit_expression(geometry) if geometry is not None else None
+        merged_dimensions: Dict[str, str] = {}
+        for source in (defaults, dimensions, dimension_defaults):
+            for key, value in dict(source or {}).items():
+                if value is not None:
+                    merged_dimensions[str(key)] = unit_expression(value)
+        self.dimensions = merged_dimensions
+        self.fields = {
+            str(key): unit_expression(value)
+            for key, value in dict(fields or {}).items()
+            if value is not None
+        }
+        self.properties = {
+            str(key): unit_expression(value)
+            for key, value in dict(properties or {}).items()
+            if value is not None
+        }
+        self._init_extra(extra)
+
+    def to_fs(self, ctx=None) -> Dict[str, Any]:
+        payload = _drop_none({"geometry": self.geometry})
+        if self.dimensions:
+            payload["dimensions"] = dict(self.dimensions)
+        if self.fields:
+            payload["fields"] = dict(self.fields)
+        if self.properties:
+            payload["properties"] = dict(self.properties)
+        return merge_extra(payload, self.extra, "OutputUnits")
+
+    @classmethod
+    def from_fs(cls, data: Optional[Mapping[str, Any]]) -> "OutputUnits":
+        data = copy.deepcopy(dict(data or {}))
+        dimension_defaults = {
+            key: data.pop(key) for key in list(data) if key in _OUTPUT_DIMENSIONS
+        }
+        return cls(
+            geometry=data.pop("geometry", None),
+            dimensions=data.pop("dimensions", None),
+            defaults=data.pop("defaults", None),
+            fields=data.pop("fields", None),
+            properties=data.pop("properties", None),
+            extra=data,
+            **dimension_defaults,
+        )
+
+
+@dataclass(kw_only=True)
+class ParaViewItem(ExtraFieldsMixin):
+    """Structured ParaView output item."""
+
+    kind: str
+    value: str
+    name: Optional[str] = None
+    units: Optional[Union[str, Sequence[str]]] = None
+    parts: Optional[List[str]] = None
+    basis: Optional[Union[Sequence[str], Mapping[str, Any]]] = None
+    direction: Optional[Union[str, Mapping[str, Any]]] = None
+    source_components: Optional[List[str]] = None
+    system: str = "global"
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        kind: str,
+        value: str,
+        *,
+        name: Optional[str] = None,
+        units: Optional[Union[str, Sequence[str]]] = None,
+        parts: Optional[Union[str, Iterable[str]]] = None,
+        basis: Optional[Union[Sequence[str], Mapping[str, Any]]] = None,
+        direction: Optional[Union[str, Mapping[str, Any]]] = None,
+        components: Optional[Iterable[str]] = None,
+        system: str = "global",
+        **kwargs,
+    ):
+        normalized = str(kind).lower()
+        if normalized not in {"field", "property", "info"}:
+            raise ValueError("ParaViewItem kind must be field, property, or info")
+        self.kind = normalized
+        self.value = str(value)
+        self.name = name
+        self.units = self._units(units)
+        self.parts = _normalize_parts(parts)
+        self.basis = copy.deepcopy(basis)
+        self.direction = copy.deepcopy(direction)
+        self.source_components = (
+            [str(component) for component in components]
+            if components is not None
+            else None
+        )
+        self.system = str(system)
+        self._init_extra(None, **kwargs)
+
+    @staticmethod
+    def _units(units: Optional[Union[str, Sequence[str]]]):
+        if units is None:
+            return None
+        if isinstance(units, str):
+            return unit_expression(units)
+        return [unit_expression(unit) for unit in units]
+
+    @property
+    def _selector_key(self) -> str:
+        if self.kind == "property":
+            return "property"
+        return self.kind
+
+    def to_fs(self, ctx=None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "kind": self.kind,
+            self._selector_key: self.value,
+        }
+        if self.name is not None:
+            payload["name"] = self.name
+        if self.units is not None:
+            payload["units"] = self.units
+        if self.parts is not None and self.kind == "field":
+            payload["parts"] = self.parts
+        if self.source_components is not None:
+            payload["components"] = self.source_components
+        if self.basis is not None:
+            payload["basis"] = self._basis_payload()
+        if self.direction is not None:
+            payload["direction"] = self._direction_payload()
+        return merge_extra(payload, self.extra, "ParaViewItem")
+
+    def _basis_payload(self) -> Dict[str, Any]:
+        if isinstance(self.basis, Mapping):
+            payload = copy.deepcopy(dict(self.basis))
+            payload.setdefault("system", self.system)
+            payload.setdefault("type", "coordinate_basis")
+            return payload
+        return {
+            "type": "coordinate_basis",
+            "system": self.system,
+            "components": [str(component) for component in self.basis],
+        }
+
+    def _direction_payload(self) -> Dict[str, Any]:
+        if isinstance(self.direction, Mapping):
+            payload = copy.deepcopy(dict(self.direction))
+            payload.setdefault("system", self.system)
+            return payload
+        return {"system": self.system, "axis": str(self.direction)}
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "ParaViewItem":
+        payload = copy.deepcopy(dict(data))
+        kind = payload.pop("kind", None)
+        if kind is None:
+            if "field" in payload:
+                kind = "field"
+            elif "property" in payload:
+                kind = "property"
+            elif "info" in payload:
+                kind = "info"
+            else:
+                raise ValueError(
+                    "ParaView item must define kind, field, property, or info"
+                )
+        key = "property" if kind == "property" else kind
+        value = payload.pop(key)
+        return cls(
+            kind,
+            value,
+            name=payload.pop("name", None),
+            units=payload.pop("units", None),
+            parts=payload.pop("parts", None),
+            basis=payload.pop("basis", payload.pop("frame", None)),
+            direction=payload.pop("direction", None),
+            components=payload.pop("components", None),
+            **payload,
+        )
+
+
+@dataclass(kw_only=True)
 class ParaviewOutput(Output):
     """ParaView output request.
 
@@ -131,10 +389,12 @@ class ParaviewOutput(Output):
     path: Union[str, Path] = "ParaView"
     fields: Optional[List[str]] = None
     properties: Optional[List[str]] = None
+    items: Optional[List[Any]] = None
     sources: Optional[List[int]] = None
     upscale: int = 1
     show_pml: bool = True
     format: str = "vtu"
+    encoding: Optional[str] = None
     execute_on: Optional[str] = None
     order: Optional[int] = None
     parts: Optional[List[str]] = None
@@ -147,11 +407,12 @@ class ParaviewOutput(Output):
     coordinates: Optional[str] = None
     target_coordinates: Optional[str] = None
     writer: Optional[Mapping[str, Any]] = None
+    source: Optional[Mapping[str, Any]] = None
 
-    _FORMATS = {"vtu", "xdmf"}
+    _FORMATS = {"vtu", "xdmf", "xmf", "vtr"}
     _TARGETS = {"volume", "surface", "grid"}
     _EXECUTE_ON = {"adapt", "initial", "special", "solve", "final", "none"}
-    _PARTS = {"real", "imag", "abs"}
+    _PARTS = {"re", "real", "im", "imag", "imaginary", "abs", "mag", "magnitude"}
 
     def __init__(
         self,
@@ -159,10 +420,12 @@ class ParaviewOutput(Output):
         path: Union[str, Path] = "ParaView",
         fields: Optional[Iterable[str]] = None,
         properties: Optional[Iterable[str]] = None,
+        items: Optional[Iterable[Union[ParaViewItem, Mapping[str, Any]]]] = None,
         sources: Optional[Iterable[int]] = None,
         upscale: int = 1,
         show_pml: bool = True,
         format: str = "vtu",
+        encoding: Optional[str] = None,
         execute_on: Optional[str] = None,
         order: Optional[int] = None,
         parts: Optional[Union[str, Iterable[str]]] = None,
@@ -176,6 +439,7 @@ class ParaviewOutput(Output):
         coordinates: Optional[str] = None,
         target_coordinates: Optional[str] = None,
         writer: Optional[Mapping[str, Any]] = None,
+        source: Optional[Mapping[str, Any]] = None,
         **kwargs,
     ):
         if sources is None:
@@ -184,19 +448,39 @@ class ParaviewOutput(Output):
             raise ValueError("ParaviewOutput upscale must be >= 0")
         writer_payload = copy.deepcopy(dict(writer or {}))
         if writer_payload:
+            requested_format = str(format).lower()
+            if requested_format == "xmf":
+                requested_format = "xdmf"
             writer_format = _format_from_writer(writer_payload)
-            if format != "vtu" and writer_format != format:
+            if requested_format != "vtu" and writer_format != requested_format:
                 raise ValueError("ParaviewOutput format conflicts with writer format")
             format = writer_format
+            if (
+                encoding is not None
+                and writer_payload.get("encoding") is not None
+                and writer_payload.get("encoding") != encoding
+            ):
+                raise ValueError(
+                    "ParaviewOutput encoding conflicts with writer encoding"
+                )
+            encoding = writer_payload.get("encoding", encoding)
+        if items is not None and (
+            fields is not None or properties is not None or parts is not None
+        ):
+            raise ValueError("Pass either items or fields/properties/parts, not both")
 
         self.name = name
         self.path = _relative_output_path(path)
-        self.fields = canonical_fields(fields) if fields is not None else None
-        self.properties = list(properties) if properties is not None else None
+        self.fields = _canonical_field_list(fields) if fields is not None else None
+        self.properties = [str(prop) for prop in _as_list(properties)] or None
+        self.items = _paraview_items(items)
         self.sources = [int(source_id) for source_id in sources]
         self.upscale = int(upscale)
         self.show_pml = bool(show_pml)
         self.format = _choice(format, self._FORMATS, "ParaviewOutput.format")
+        if self.format == "xmf":
+            self.format = "xdmf"
+        self.encoding = str(encoding).lower() if encoding is not None else None
         self.execute_on = _choice(
             execute_on, self._EXECUTE_ON, "ParaviewOutput.execute_on"
         )
@@ -215,6 +499,7 @@ class ParaviewOutput(Output):
         self.coordinates = coordinates
         self.target_coordinates = target_coordinates
         self.writer = writer_payload or None
+        self.source = copy.deepcopy(dict(source)) if source is not None else None
         self._writer_extra = {
             key: value
             for key, value in writer_payload.items()
@@ -262,8 +547,11 @@ class ParaviewOutput(Output):
             "show_pml": self.show_pml,
             "writer": self._writer_payload(),
         }
+        extra = copy.deepcopy(self.extra)
         if self.fields is not None:
-            payload["fields"] = canonical_fields(self.fields)
+            payload["fields"] = _canonical_field_list(self.fields)
+        if self.source is not None:
+            payload["source"] = copy.deepcopy(self.source)
 
         for key in ["execute_on", "order"]:
             value = getattr(self, key)
@@ -279,21 +567,30 @@ class ParaviewOutput(Output):
         ):
             payload["target"] = target_payload
 
-        if self.parts is not None:
+        if self.items is not None:
+            payload["items"] = [fs_serialize(item, ctx) for item in self.items]
+            payload.pop("fields", None)
+            payload.pop("properties", None)
+        elif self.parts is not None:
             payload["items"] = self._items_payload()
             payload.pop("fields", None)
             payload.pop("properties", None)
-        elif "items" in self.extra:
+        elif "items" in extra:
+            payload["items"] = [
+                fs_serialize(item, ctx) for item in _as_list(extra.pop("items"))
+            ]
             payload.pop("fields", None)
             payload.pop("properties", None)
 
-        return merge_extra(payload, self.extra, "ParaviewOutput")
+        return merge_extra(payload, extra, "ParaviewOutput")
 
     def _writer_payload(self) -> Dict[str, Any]:
-        if self.format == "xdmf":
-            payload = {"format": "xdmf", "encoding": "hdf5"}
+        if self.format in {"xdmf", "xmf"}:
+            payload = {"format": "xdmf", "encoding": self.encoding or "hdf5"}
+        elif self.format == "vtr":
+            payload = {"format": "vtr", "encoding": self.encoding or "appended"}
         else:
-            payload = {"format": "vtu", "encoding": "appended"}
+            payload = {"format": "vtu", "encoding": self.encoding or "appended"}
         payload.update(copy.deepcopy(self._writer_extra))
         return payload
 
@@ -302,7 +599,7 @@ class ParaviewOutput(Output):
         if self.fields is not None:
             items.extend(
                 {"kind": "field", "field": field, "parts": self.parts}
-                for field in canonical_fields(self.fields)
+                for field in _canonical_field_list(self.fields)
             )
         items.extend(
             {"kind": "property", "property": prop} for prop in (self.properties or [])
@@ -392,17 +689,18 @@ class ParaviewOutput(Output):
             path=data.pop("path", "ParaView"),
             fields=data.pop("fields", None),
             properties=data.pop("properties", None),
+            items=items,
             sources=data.pop("sources", None),
             upscale=data.pop("upscale", 1),
             show_pml=data.pop("show_pml", True),
             format=_format_from_writer(writer),
+            encoding=(writer or {}).get("encoding") if writer is not None else None,
             execute_on=data.pop("execute_on", None),
             order=data.pop("order", None),
             target=target,
             coordinates=coordinates,
             writer=writer,
-            **({"source": source} if source is not None else {}),
-            **({"items": items} if items is not None else {}),
+            source=source,
             **data,
         )
 
@@ -410,47 +708,127 @@ class ParaviewOutput(Output):
 def _format_from_writer(writer: Optional[Mapping[str, Any]]) -> str:
     if not writer:
         return "vtu"
-    if writer.get("format") == "xdmf":
+    format_name = str(writer.get("format", "vtu")).lower()
+    if format_name in {"xdmf", "xmf"}:
         return "xdmf"
+    if format_name == "vtr":
+        return "vtr"
     return "vtu"
+
+
+def _paraview_items(
+    items: Optional[Iterable[Union[ParaViewItem, Mapping[str, Any]]]],
+) -> Optional[List[Union[ParaViewItem, Mapping[str, Any]]]]:
+    if items is None:
+        return None
+    return [
+        item if isinstance(item, ParaViewItem) else ParaViewItem.from_fs(item)
+        for item in _as_list(items)
+    ]
 
 
 @dataclass(kw_only=True)
 class WavefieldOutput(Output):
-    """Wavefield output request."""
+    """Grid-backed wavefield output request.
+
+    The grid is described with xarray-style dimensions and coordinates. Pass an
+    ``xarray.DataArray``/``Dataset`` directly, or pass ``dims`` and ``coords``.
+    Coordinate arrays may be nonuniform, but each coordinate must be 1D and
+    strictly monotonic.
+    """
 
     name: str = "wavefield"
     path: Union[str, Path] = "wavefields"
     fields: Optional[List[str]] = None
-    grid: Optional[CartesianGrid] = None
+    device: Optional[ReceiverDevice] = None
+    grid: Optional[Dict[str, Any]] = None
+    sources: Optional[List[int]] = None
 
     def __init__(
         self,
         name: str = "wavefield",
         path: Union[str, Path] = "wavefields",
-        fields: Optional[List[str]] = None,
-        grid: Optional[CartesianGrid] = None,
+        fields: Optional[Union[str, Iterable[str]]] = None,
+        field: Optional[str] = None,
+        device: Optional[Union[ReceiverDevice, Mapping[str, Any]]] = None,
+        grid: Optional[
+            Union[CartesianGrid, xr.DataArray, xr.Dataset, Mapping[str, Any]]
+        ] = None,
+        dims: Optional[Iterable[str]] = None,
+        coords: Optional[Union[Mapping[str, Any], Sequence[Any]]] = None,
+        units: Optional[str] = None,
+        system: Optional[str] = None,
+        sources: Optional[Iterable[int]] = None,
         **kwargs,
     ):
+        if field is not None and fields is not None:
+            raise ValueError("Pass only one of field or fields")
+        if device is not None and (field is not None or fields is not None):
+            raise ValueError("Pass either device or field/fields, not both")
         self.name = name
         self.path = _relative_output_path(path)
-        self.fields = canonical_fields(fields) if fields is not None else None
-        self.grid = grid
+        self._single_field_key = field is not None
+        self.device = _wavefield_device(device)
+        if self.device is not None:
+            self.fields = [component.field for component in self.device.components]
+        else:
+            field_value = field if field is not None else fields
+            self.fields = (
+                canonical_fields(_as_list(field_value)) if field_value else None
+            )
+        self.grid = _wavefield_grid_payload(
+            grid=grid,
+            dims=dims,
+            coords=coords,
+            units=units,
+            system=system,
+        )
+        self.sources = (
+            [int(source) for source in sources] if sources is not None else None
+        )
         self._init_extra(None, **kwargs)
 
+    @property
+    def component_names(self) -> List[str]:
+        return [component.name for component in self.components]
+
+    @property
+    def components(self) -> List[ReceiverComponent]:
+        if self.device is not None:
+            return list(self.device.components)
+        fields = self.fields if self.fields is not None else ["primary"]
+        return [
+            ReceiverComponent(name=str(field), field=str(field))
+            for field in canonical_fields(fields)
+        ]
+
+    def component_payloads(self, ctx=None) -> List[Dict[str, Any]]:
+        return [component.to_fs(ctx) for component in self.components]
+
     def to_fs(self, ctx=None) -> Dict:
-        fields = (
-            canonical_fields(self.fields) if self.fields is not None else ["primary"]
-        )
-        grid = self.grid if self.grid is not None else CartesianGrid(x0=[], x1=[], n=[])
+        if self.grid is None:
+            raise ValueError("WavefieldOutput requires a grid")
 
         payload = {
             "_type": self.__class__.__name__,
             "name": self.name,
             "path": self.path,
-            "fields": fields,
-            "grid": grid.to_fs(ctx),
+            "grid": copy.deepcopy(self.grid),
         }
+        if self.device is not None:
+            payload["device"] = self.device.to_fs(ctx)
+        else:
+            fields = (
+                canonical_fields(self.fields)
+                if self.fields is not None
+                else ["primary"]
+            )
+            if self._single_field_key and len(fields) == 1:
+                payload["field"] = fields[0]
+            else:
+                payload["fields"] = fields
+        if self.sources is not None:
+            payload["sources"] = self.sources
         return merge_extra(payload, self.extra, "WavefieldOutput")
 
     @classmethod
@@ -458,13 +836,225 @@ class WavefieldOutput(Output):
         data = copy.deepcopy(data)
         data.pop("_type", None)
         grid = data.pop("grid", None)
+        device = data.pop("device", None)
+        field = data.pop("field", None)
+        fields = data.pop("fields", None)
         return cls(
             name=data.pop("name", "wavefield"),
             path=data.pop("path", "wavefields"),
-            fields=data.pop("fields", None),
-            grid=CartesianGrid.from_fs(grid) if grid is not None else None,
+            field=field,
+            fields=None if device is not None else fields,
+            device=device,
+            grid=grid,
+            sources=data.pop("sources", None),
             **data,
         )
+
+
+def _wavefield_device(
+    device: Optional[Union[ReceiverDevice, Mapping[str, Any]]],
+) -> Optional[ReceiverDevice]:
+    if device is None:
+        return None
+    if isinstance(device, ReceiverDevice):
+        resolved = copy.deepcopy(device)
+    elif isinstance(device, Mapping):
+        payload = copy.deepcopy(dict(device))
+        if "_type" not in payload:
+            payload["_type"] = "ReceiverNode"
+        resolved = ReceiverDevice.from_fs(payload)
+    else:
+        raise TypeError("device must be a ReceiverDevice or mapping")
+    if not resolved.components:
+        raise ValueError("WavefieldOutput device requires at least one component")
+    return resolved
+
+
+def _wavefield_grid_payload(
+    *,
+    grid: Optional[Union[CartesianGrid, xr.DataArray, xr.Dataset, Mapping[str, Any]]],
+    dims: Optional[Iterable[str]],
+    coords: Optional[Union[Mapping[str, Any], Sequence[Any]]],
+    units: Optional[str],
+    system: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if grid is not None and (coords is not None or dims is not None):
+        raise ValueError("Pass either grid or xarray-style dims/coords, not both")
+    if grid is None and coords is None:
+        return None
+
+    if isinstance(grid, CartesianGrid):
+        return _xarray_grid_payload_from_dataarray(
+            grid.as_xarray(), units=units or grid.units, system=system or grid.system
+        )
+    if isinstance(grid, (xr.DataArray, xr.Dataset)):
+        return _xarray_grid_payload_from_dataarray(grid, units=units, system=system)
+    if isinstance(grid, Mapping):
+        payload = dict(grid)
+        if "dims" in payload and "coords" in payload:
+            return _normalize_xarray_grid_payload(payload, units=units, system=system)
+        if payload.get("_type") == "CartesianGrid" or {"n", "x0", "x1"} <= set(payload):
+            cart = CartesianGrid.from_fs(payload)
+            return _xarray_grid_payload_from_dataarray(
+                cart.as_xarray(),
+                units=units or cart.units,
+                system=system or cart.system,
+            )
+        raise ValueError("WavefieldOutput grid mapping requires dims/coords")
+
+    if grid is not None:
+        raise TypeError(
+            "grid must be an xarray DataArray/Dataset, CartesianGrid, or mapping"
+        )
+
+    dims_list = _xarray_grid_dims(dims=dims, coords=coords)
+    return _xarray_grid_payload_from_coords(
+        dims=dims_list,
+        coords=coords,
+        units=units,
+        system=system,
+    )
+
+
+def _xarray_grid_dims(
+    *,
+    dims: Optional[Iterable[str]],
+    coords: Optional[Union[Mapping[str, Any], Sequence[Any]]],
+) -> List[str]:
+    if dims is not None:
+        return [str(dim) for dim in dims]
+    if isinstance(coords, Mapping):
+        return [str(dim) for dim in coords]
+    raise ValueError("WavefieldOutput dims are required when coords is not a mapping")
+
+
+def _xarray_grid_payload_from_coords(
+    *,
+    dims: Sequence[str],
+    coords: Union[Mapping[str, Any], Sequence[Any]],
+    units: Optional[str],
+    system: Optional[str],
+) -> Dict[str, Any]:
+    if isinstance(coords, Mapping):
+        coord_map = {str(dim): coords[str(dim)] for dim in dims}
+    else:
+        coord_values = list(coords)
+        if len(coord_values) != len(dims):
+            raise ValueError("coords length must match dims length")
+        coord_map = dict(zip(dims, coord_values))
+
+    payload: Dict[str, Any] = {
+        "_type": "XArrayGrid",
+        "dims": list(dims),
+        "coords": {},
+    }
+    coord_units = []
+    for dim in dims:
+        coord_payload = _coord_payload(dim, coord_map[dim], units=units)
+        payload["coords"][dim] = coord_payload
+        if coord_payload.get("units"):
+            coord_units.append(coord_payload["units"])
+    if units is not None:
+        payload["units"] = unit_expression(units)
+    elif coord_units and all(unit == coord_units[0] for unit in coord_units):
+        payload["units"] = coord_units[0]
+    if system is not None:
+        payload["system"] = system
+    return payload
+
+
+def _xarray_grid_payload_from_dataarray(
+    grid: Union[xr.DataArray, xr.Dataset],
+    *,
+    units: Optional[str],
+    system: Optional[str],
+) -> Dict[str, Any]:
+    dims = list(grid.sizes)
+    coords = {
+        dim: grid.coords[dim] if dim in grid.coords else np.arange(grid.sizes[dim])
+        for dim in dims
+    }
+    resolved_units = units or grid.attrs.get("units")
+    resolved_system = (
+        system or grid.attrs.get("system") or grid.attrs.get("coordinate_system")
+    )
+    return _xarray_grid_payload_from_coords(
+        dims=dims,
+        coords=coords,
+        units=resolved_units,
+        system=resolved_system,
+    )
+
+
+def _normalize_xarray_grid_payload(
+    payload: Mapping[str, Any],
+    *,
+    units: Optional[str],
+    system: Optional[str],
+) -> Dict[str, Any]:
+    dims = [str(dim) for dim in payload["dims"]]
+    coord_payloads = dict(payload["coords"])
+    coords = {}
+    for dim in dims:
+        if dim not in coord_payloads:
+            raise ValueError(f"WavefieldOutput grid is missing coordinate {dim!r}")
+        coords[dim] = coord_payloads[dim]
+    normalized = _xarray_grid_payload_from_coords(
+        dims=dims,
+        coords=coords,
+        units=units,
+        system=system or payload.get("system"),
+    )
+    if units is None and payload.get("units") is not None:
+        default_units = unit_expression(payload["units"])
+        normalized["units"] = default_units
+        for coord_payload in normalized["coords"].values():
+            coord_payload.setdefault("units", default_units)
+    normalized["_type"] = payload.get("_type", "XArrayGrid")
+    return normalized
+
+
+def _coord_payload(dim: str, coord: Any, *, units: Optional[str]) -> Dict[str, Any]:
+    coord_units = units
+    if isinstance(coord, Mapping):
+        if coord_units is None and coord.get("units") is not None:
+            coord_units = coord["units"]
+        coord = _coord_data(coord, field=f"WavefieldOutput coordinate {dim!r}")
+    if isinstance(coord, xr.DataArray):
+        if coord_units is None:
+            coord_units = coord.attrs.get("units")
+        coord = coord.values
+    if is_quantity(coord):
+        if coord_units is None:
+            coord_units = coord.units
+        coord = coord.magnitude
+    values = np.asarray(coord, dtype=float).ravel()
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError(f"WavefieldOutput coordinate {dim!r} must be a 1D array")
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"WavefieldOutput coordinate {dim!r} must be finite")
+    if values.size > 1:
+        diffs = np.diff(values)
+        if not (np.all(diffs > 0.0) or np.all(diffs < 0.0)):
+            raise ValueError(
+                f"WavefieldOutput coordinate {dim!r} must be strictly monotonic"
+            )
+    payload = {"data": values.tolist()}
+    if coord_units is not None:
+        payload["units"] = unit_expression(coord_units)
+    return payload
+
+
+def _coord_data(coord: Any, *, field: str) -> Any:
+    if isinstance(coord, Mapping):
+        if "data" in coord:
+            return coord["data"]
+        if "values" in coord:
+            return coord["values"]
+        if "value" in coord:
+            return coord["value"]
+        raise ValueError(f"{field} requires data")
+    return coord
 
 
 @dataclass
@@ -478,6 +1068,7 @@ class JobOutputs:
     traces: TraceOutput = field(default_factory=TraceOutput)
     paraview: List[ParaviewOutput] = field(default_factory=list)
     wavefields: List[WavefieldOutput] = field(default_factory=list)
+    units: Optional[OutputUnits] = None
 
     def __init__(
         self,
@@ -486,10 +1077,16 @@ class JobOutputs:
         traces: Optional[TraceOutput] = None,
         paraview: Optional[Iterable[ParaviewOutput]] = None,
         wavefields: Optional[Iterable[WavefieldOutput]] = None,
+        units: Optional[Union[OutputUnits, Mapping[str, Any]]] = None,
     ):
         self.traces = traces or TraceOutput()
-        self.paraview = list(paraview or [])
-        self.wavefields = list(wavefields or [])
+        self.paraview = []
+        self.wavefields = []
+        self.units = _output_units(units)
+        for item in _as_output_sequence(paraview):
+            self.add(item)
+        for item in _as_output_sequence(wavefields):
+            self.add(item)
         if outputs is not None:
             self.add(outputs)
 
@@ -503,11 +1100,15 @@ class JobOutputs:
             self.traces = output.traces
             self.paraview.extend(output.paraview)
             self.wavefields.extend(output.wavefields)
+            self.units = output.units
+            return self
+        if isinstance(output, OutputUnits):
+            self.units = output
             return self
         if isinstance(output, Mapping):
             if any(
                 key in output
-                for key in ("traces", "receivers", "ParaView", "wavefields")
+                for key in ("traces", "receivers", "ParaView", "wavefields", "Units")
             ):
                 return self.add(JobOutputs.from_fs(dict(output)))
             return self.add(Output.from_fs(dict(output)))
@@ -527,6 +1128,7 @@ class JobOutputs:
 
     def to_fs(self, ctx=None) -> Dict:
         payload = {
+            "Units": self.units.to_fs(ctx) if self.units is not None else None,
             "traces": self.traces.to_fs(ctx),
             "ParaView": [pv_out.to_fs(ctx) for pv_out in self.paraview],
             "wavefields": [wf_out.to_fs(ctx) for wf_out in self.wavefields],
@@ -537,9 +1139,10 @@ class JobOutputs:
     def from_fs(cls, data: Optional[Dict]) -> "JobOutputs":
         data = copy.deepcopy(data or {})
         traces = data.get("traces") or data.get("receivers")
-        paraview = [
-            ParaviewOutput.from_fs(pv_out) for pv_out in data.get("ParaView", [])
-        ]
+        paraview_data = data.get("ParaView", [])
+        if isinstance(paraview_data, Mapping):
+            paraview_data = [paraview_data]
+        paraview = [ParaviewOutput.from_fs(pv_out) for pv_out in paraview_data]
         wavefields = [
             WavefieldOutput.from_fs(wf_out) for wf_out in data.get("wavefields", [])
         ]
@@ -547,4 +1150,207 @@ class JobOutputs:
             traces=TraceOutput.from_fs(traces) if traces is not None else TraceOutput(),
             paraview=paraview,
             wavefields=wavefields,
+            units=OutputUnits.from_fs(data["Units"]) if "Units" in data else None,
         )
+
+
+def _output_units(
+    units: Optional[Union[OutputUnits, Mapping[str, Any]]],
+) -> Optional[OutputUnits]:
+    if units is None:
+        return None
+    if isinstance(units, OutputUnits):
+        return units
+    if isinstance(units, Mapping):
+        return OutputUnits.from_fs(units)
+    raise TypeError("units must be an OutputUnits or mapping")
+
+
+def output_property(
+    name: str,
+    *,
+    output_name: Optional[str] = None,
+    units: Optional[Union[str, Sequence[str]]] = None,
+    **kwargs,
+) -> ParaViewItem:
+    """Select a material property for ParaView output."""
+
+    return ParaViewItem("property", name, name=output_name, units=units, **kwargs)
+
+
+def info(
+    name: str,
+    *,
+    output_name: Optional[str] = None,
+    units: Optional[Union[str, Sequence[str]]] = None,
+    **kwargs,
+) -> ParaViewItem:
+    """Select unitless mesh/domain metadata for ParaView output."""
+
+    return ParaViewItem("info", name, name=output_name, units=units, **kwargs)
+
+
+def field(
+    name: str,
+    *,
+    output_name: Optional[str] = None,
+    units: Optional[Union[str, Sequence[str]]] = None,
+    parts: Optional[Union[str, Iterable[str]]] = None,
+    basis: Optional[Union[Sequence[str], Mapping[str, Any]]] = None,
+    direction: Optional[Union[str, Mapping[str, Any]]] = None,
+    components: Optional[Iterable[str]] = None,
+    system: str = "global",
+    **kwargs,
+) -> ParaViewItem:
+    """Select a solution, xarray, or wavefield field for ParaView output."""
+
+    return ParaViewItem(
+        "field",
+        name,
+        name=output_name,
+        units=units,
+        parts=parts,
+        basis=basis,
+        direction=direction,
+        components=components,
+        system=system,
+        **kwargs,
+    )
+
+
+# Explicit imports from this module may use `prop`, while the top-level
+# `frequensolve.prop` remains the material-property expression helper.
+prop = output_property
+
+
+class _ParaViewFactory:
+    field = staticmethod(field)
+    prop = staticmethod(output_property)
+    property = staticmethod(output_property)
+    info = staticmethod(info)
+
+    def __call__(self, name: str = "paraview", **kwargs) -> ParaviewOutput:
+        return ParaviewOutput(name=name, **kwargs)
+
+    def volume(self, name: str = "paraview", **kwargs) -> ParaviewOutput:
+        return ParaviewOutput.volume(name=name, **kwargs)
+
+    def surface(self, name: str = "paraview", **kwargs) -> ParaviewOutput:
+        return ParaviewOutput.surface(name=name, **kwargs)
+
+    def grid(
+        self, name: str = "paraview", grid: Any = None, **kwargs
+    ) -> ParaviewOutput:
+        if grid is None:
+            raise ValueError("paraview.grid requires grid")
+        return ParaviewOutput.grid(grid, name=name, **kwargs)
+
+
+paraview = _ParaViewFactory()
+ParaViewOutput = ParaviewOutput
+
+
+def wavefield(
+    fields: Optional[Union[str, Iterable[str]]] = None,
+    *,
+    name: Optional[str] = None,
+    path: Union[str, Path] = "wavefields",
+    field: Optional[str] = None,
+    device: Optional[Union[ReceiverDevice, Mapping[str, Any]]] = None,
+    grid: Optional[
+        Union[CartesianGrid, xr.DataArray, xr.Dataset, Mapping[str, Any]]
+    ] = None,
+    dims: Optional[Iterable[str]] = None,
+    coords: Optional[Union[Mapping[str, Any], Sequence[Any]]] = None,
+    units: Optional[str] = None,
+    system: Optional[str] = None,
+    sources: Optional[Iterable[int]] = None,
+    **kwargs,
+) -> WavefieldOutput:
+    """Create a concise grid-backed wavefield output request."""
+
+    if field is not None and fields is not None:
+        raise ValueError("Pass only one of the positional field(s) or field")
+    requested = field if field is not None else fields
+    if name is None:
+        name = _wavefield_name(requested, device)
+    if isinstance(requested, str):
+        return WavefieldOutput(
+            name=name,
+            path=path,
+            field=requested,
+            device=device,
+            grid=grid,
+            dims=dims,
+            coords=coords,
+            units=units,
+            system=system,
+            sources=sources,
+            **kwargs,
+        )
+    return WavefieldOutput(
+        name=name,
+        path=path,
+        fields=requested,
+        device=device,
+        grid=grid,
+        dims=dims,
+        coords=coords,
+        units=units,
+        system=system,
+        sources=sources,
+        **kwargs,
+    )
+
+
+def _wavefield_name(
+    fields: Optional[Union[str, Iterable[str]]],
+    device: Optional[Union[ReceiverDevice, Mapping[str, Any]]],
+) -> str:
+    if isinstance(device, ReceiverDevice) and device.name:
+        return str(device.name)
+    if isinstance(device, Mapping) and device.get("name"):
+        return str(device["name"])
+    if isinstance(fields, str):
+        return f"{canonical_fields([fields])[0].split(':')[-1]}_wavefield"
+    return "wavefield"
+
+
+def outputs(
+    value: Any = None,
+    *,
+    traces: Optional[Union[str, Path, TraceOutput]] = "traces",
+    paraview: Any = None,
+    wavefields: Any = None,
+    units: Optional[Union[OutputUnits, Mapping[str, Any]]] = None,
+) -> JobOutputs:
+    """Create a complete job output configuration."""
+
+    if isinstance(value, JobOutputs):
+        config = JobOutputs(value)
+    elif value is not None:
+        config = JobOutputs(value)
+    else:
+        trace_path = "traces" if traces is None else traces
+        trace_output = (
+            trace_path
+            if isinstance(trace_path, TraceOutput)
+            else TraceOutput(trace_path)
+        )
+        config = JobOutputs(traces=trace_output, units=units)
+    if value is not None and units is not None:
+        config.units = _output_units(units)
+    if (
+        traces is not None
+        and traces != "traces"
+        and not isinstance(value, JobOutputs)
+        and value is not None
+    ):
+        config.traces = (
+            traces if isinstance(traces, TraceOutput) else TraceOutput(traces)
+        )
+    for item in _as_output_sequence(paraview):
+        config.add(item)
+    for item in _as_output_sequence(wavefields):
+        config.add(item)
+    return config

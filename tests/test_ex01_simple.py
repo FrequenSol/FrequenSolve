@@ -345,9 +345,9 @@ def setup_complete_simulation(simulation):
         f_high=MESH_PARAMS["f_high"],
         adapt_order=True,
     )
-    simulation.mesh.set_source_grading(d1=0.08, d0=0.02, mult=2.0)
-    simulation.mesh.set_receiver_grading(d1=0.06, d0=0.01, mult=1.5)
-    simulation.mesh.add_surface_grading("interface", d1=0.05, d0=0.0, mult=2.0)
+    simulation.mesh.set_source_grading(d1=0.08, d0=0.02, factor=2.0)
+    simulation.mesh.set_receiver_grading(d1=0.06, d0=0.01, factor=1.5)
+    simulation.mesh.add_surface_grading("interface", d1=0.05, d0=0.0, factor=2.0)
 
     for bc_params in BOUNDARY_PARAMS.values():
         simulation += BoundaryCondition(**bc_params)
@@ -606,9 +606,9 @@ def test_boundary_conditions(simulation):
     )
 
     # Verify BCs
-    assert len(simulation.BCs.boundary_conditions) == 2
-    assert any(bc.conditions == ["free"] for bc in simulation.BCs.boundary_conditions)
-    assert any(bc.conditions == ["pml"] for bc in simulation.BCs.boundary_conditions)
+    assert len(simulation.BCs) == 2
+    assert any(bc.conditions == ["free"] for bc in simulation.BCs)
+    assert any(bc.conditions == ["pml"] for bc in simulation.BCs)
 
 
 # -----------------------------------------------------------------------------

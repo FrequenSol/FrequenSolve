@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,7 @@ __all__ = [
     "TraceManifest",
     "TraceOutputHandle",
     "TraceOutputSpec",
+    "WavefieldOutputHandle",
 ]
 
 
@@ -38,6 +40,55 @@ def _laplace_value(value: Any) -> float:
     if isinstance(value, complex):
         return float(value.imag)
     return float(value)
+
+
+def _frequency_values_contain(
+    values: Mapping[Any, float],
+    frequency: Union[float, complex],
+) -> bool:
+    expected = _real_frequency(frequency)
+    return any(
+        np.isclose(_real_frequency(value), expected, rtol=0.0, atol=1.0e-9)
+        for value in values.values()
+    )
+
+
+def _format_frequency(value: float) -> str:
+    return f"{float(value):.6g} Hz"
+
+
+def _compact_frequency_ranges(
+    values: Mapping[int, float],
+    *,
+    max_ranges: int = 6,
+) -> str:
+    items = sorted((int(task), float(freq)) for task, freq in values.items())
+    if not items:
+        return "none"
+
+    ranges: list[list[tuple[int, float]]] = []
+    current: list[tuple[int, float]] = []
+    for task, frequency in items:
+        if current and task != current[-1][0] + 1:
+            ranges.append(current)
+            current = []
+        current.append((task, frequency))
+    if current:
+        ranges.append(current)
+
+    parts = []
+    for group in ranges[:max_ranges]:
+        first_task, first_frequency = group[0]
+        last_task, last_frequency = group[-1]
+        if first_task == last_task:
+            parts.append(f"task {first_task}: {_format_frequency(first_frequency)}")
+        else:
+            first = _format_frequency(first_frequency)
+            last = _format_frequency(last_frequency)
+            parts.append(f"tasks {first_task}-{last_task}: " f"{first}-{last}")
+    if len(ranges) > max_ranges:
+        parts.append(f"+{len(ranges) - max_ranges} more ranges")
+    return "; ".join(parts)
 
 
 def _as_path(path: Union[str, Path]) -> Path:
@@ -348,6 +399,7 @@ class TraceManifest:
     laplace: Dict[int, float] = field(default_factory=dict)
     components: List[str] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
+    wavefields: Dict[str, Any] = field(default_factory=dict)
     artifacts: List[OutputArtifact] = field(default_factory=list)
     run: RunMetadata = field(default_factory=RunMetadata)
 
@@ -356,6 +408,7 @@ class TraceManifest:
         cls,
         job,
         *,
+        output: Optional["TraceOutputSpec"] = None,
         project_path: Optional[Union[str, Path]] = None,
         resolve_legacy: bool = False,
     ) -> "TraceManifest":
@@ -366,7 +419,7 @@ class TraceManifest:
             if project_path is not None
             else source_project
         )
-        output = job.trace_outputs
+        output = job.trace_outputs if output is None else output
         result_path = cls._map_project_path(
             job._result_path, source_project, local_project
         )
@@ -387,9 +440,7 @@ class TraceManifest:
             files = [cls.resolve_trace_file(path) for path in files]
 
         artifacts = cls._read_artifacts(result_path)
-        simulation_path = cls._map_project_path(
-            sim._file, source_project, local_project
-        )
+        simulation_path = cls._simulation_path(job, sim, source_project, local_project)
         return cls(
             files=files,
             frequencies=frequencies,
@@ -401,6 +452,7 @@ class TraceManifest:
             laplace=laplace,
             components=list(output.components),
             sources=list(output.sources),
+            wavefields=copy.deepcopy(output.wavefields),
             artifacts=artifacts,
             run=RunMetadata.read(result_path),
         )
@@ -476,6 +528,7 @@ class TraceManifest:
             laplace=laplace,
             components=first.components,
             sources=first.sources,
+            wavefields=copy.deepcopy(first.wavefields),
             artifacts=artifacts,
             run=run,
         )
@@ -491,6 +544,51 @@ class TraceManifest:
             except Exception:
                 return path
         return project_path / path
+
+    @classmethod
+    def _simulation_path(
+        cls,
+        job,
+        sim,
+        source_project: Path,
+        project_path: Path,
+    ) -> Path:
+        sim_file = getattr(sim, "_file", None)
+        if sim_file is not None:
+            return cls._map_project_path(sim_file, source_project, project_path)
+
+        job_file = getattr(job, "_file", None)
+        if job_file is None:
+            try:
+                job_file = job.job_file
+            except Exception:
+                job_file = None
+        if job_file is not None:
+            job_file = _as_path(job_file)
+            if job_file.exists():
+                try:
+                    payload = json.loads(job_file.read_text())
+                except (OSError, json.JSONDecodeError):
+                    payload = {}
+                simulation_ref = payload.get("simulation")
+                if simulation_ref:
+                    simulation_path = _as_path(simulation_ref)
+                    if simulation_path.is_absolute():
+                        return cls._map_project_path(
+                            simulation_path,
+                            source_project,
+                            project_path,
+                        )
+                    mapped = project_path / simulation_path
+                    if mapped.exists():
+                        return mapped
+                    job_relative = job_file.parent / simulation_path
+                    if job_relative.exists():
+                        return job_relative
+                    return mapped
+
+        name = getattr(sim, "name", "simulation")
+        return project_path / "simulations" / str(name) / f"{name}.json"
 
     @staticmethod
     def resolve_trace_file(path: Union[str, Path]) -> Path:
@@ -542,16 +640,14 @@ class TraceManifest:
                 if isinstance(row, Mapping) and "frequency" in row
             ]
             sortable.sort(key=lambda item: int(item[1].get("task_id", item[0])))
-            frequencies = {
-                index: _real_frequency(row["frequency"])
-                for index, (_original_index, row) in enumerate(sortable, start=1)
-            }
-            laplace = {
-                index: _laplace_value(
+            frequencies = {}
+            laplace = {}
+            for original_index, row in sortable:
+                task_id = int(row.get("task_id", original_index))
+                frequencies[task_id] = _real_frequency(row["frequency"])
+                laplace[task_id] = _laplace_value(
                     row.get("laplace", _laplace_frequency(row["frequency"]))
                 )
-                for index, (_original_index, row) in enumerate(sortable, start=1)
-            }
         return path, frequencies, laplace
 
     @property
@@ -574,9 +670,41 @@ class TraceManifest:
         return {} if packed is None else packed[2]
 
     @property
+    def missing_packed_frequencies(self) -> Dict[int, float]:
+        """Expected job frequencies missing from the packed trace manifest."""
+
+        if self.packed_file is None:
+            return dict(self.frequencies)
+        packed_frequencies = self.packed_frequencies
+        if not packed_frequencies:
+            return {}
+        missing = {}
+        for key, frequency in self.frequencies.items():
+            if not _frequency_values_contain(packed_frequencies, frequency):
+                missing[int(key)] = _real_frequency(frequency)
+        return missing
+
+    @property
+    def packed_complete(self) -> bool:
+        """Whether the packed trace file covers every expected job frequency."""
+
+        if self.packed_file is None:
+            return False
+        return not self.missing_packed_frequencies
+
+    def packed_incomplete_message(self) -> str:
+        missing = self.missing_packed_frequencies
+        detail = _compact_frequency_ranges(missing)
+        packed_file = self.packed_file or self.output_path / "traces.h5"
+        return (
+            f"Packed trace product {packed_file} is missing {len(missing)} of "
+            f"{len(self.frequencies)} expected frequencies: {detail}"
+        )
+
+    @property
     def existing_files(self) -> List[Path]:
         packed_file = self.packed_file
-        if packed_file is not None:
+        if packed_file is not None and self.packed_complete:
             return [packed_file]
         return [
             self.resolve_trace_file(file)
@@ -587,7 +715,7 @@ class TraceManifest:
     @property
     def complete(self) -> bool:
         if self.packed_file is not None:
-            return True
+            return self.packed_complete
         return bool(self.files) and all(
             self.resolve_trace_file(file).exists() for file in self.files
         )
@@ -604,6 +732,7 @@ class TraceManifest:
             "laplace": self.laplace,
             "components": self.components,
             "sources": self.sources,
+            "wavefields": copy.deepcopy(self.wavefields),
             "artifacts": [
                 artifact.to_fs(self.project_path) for artifact in self.artifacts
             ],
@@ -619,6 +748,7 @@ class TraceOutputSpec:
     groups: List[str]
     components: List[str] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
+    wavefields: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -627,6 +757,12 @@ class TraceOutputHandle:
 
     job: Any
 
+    def __call__(self, path: Union[str, Path] = "traces", **kwargs) -> Any:
+        from frequensolve.simulation.outputs import TraceOutput
+
+        self.job.outputs.traces = TraceOutput(path=path, **kwargs)
+        return self.job
+
     @property
     def manifest(self) -> TraceManifest:
         return self.job.trace_manifest
@@ -634,14 +770,48 @@ class TraceOutputHandle:
     def open(self, upscale: int = 1, project_path: Optional[Union[str, Path]] = None):
         from frequensolve.seismic.traces import TraceDataset
 
-        return TraceDataset.from_manifest(
-            TraceManifest.from_job(
-                self.job,
-                project_path=project_path,
-                resolve_legacy=True,
-            ),
-            upscale=upscale,
+        manifest = TraceManifest.from_job(
+            self.job,
+            project_path=project_path,
+            resolve_legacy=True,
         )
+        return TraceDataset.from_manifest(manifest, upscale=upscale)
+
+    def to_fs(self) -> Dict[str, Any]:
+        return self.manifest.to_fs()
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_fs()[key]
+
+
+@dataclass(frozen=True)
+class WavefieldOutputHandle:
+    """Convenience handle exposed as ``job.wavefields``."""
+
+    job: Any
+
+    def __call__(self, *args, **kwargs) -> Any:
+        from frequensolve.simulation.outputs import wavefield
+
+        self.job += wavefield(*args, **kwargs)
+        return self.job
+
+    @property
+    def manifest(self) -> TraceManifest:
+        return self.job.wavefield_manifest
+
+    def open(self, upscale: int = 1, project_path: Optional[Union[str, Path]] = None):
+        from frequensolve.seismic.traces import TraceDataset
+
+        manifest = TraceManifest.from_job(
+            self.job,
+            output=self.job.wavefield_trace_outputs,
+            project_path=project_path,
+            resolve_legacy=True,
+        )
+        if not manifest.groups:
+            raise ValueError("Job has no wavefield outputs")
+        return TraceDataset.from_manifest(manifest, upscale=upscale)
 
     def to_fs(self) -> Dict[str, Any]:
         return self.manifest.to_fs()

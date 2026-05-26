@@ -73,8 +73,8 @@ Distance gradings refine around acquisition geometry:
 
 .. code-block:: python
 
-   sim.mesh.set_source_grading(d0=0.01, d1=0.08, mult=2.0)
-   sim.mesh.set_receiver_grading(d0=0.01, d1=0.05, mult=1.5)
+   sim.mesh.set_source_grading(d0=0.01, d1=0.08, factor=2.0, power=2.0)
+   sim.mesh.set_receiver_grading(d0=0.01, d1=0.05, factor=1.5)
 
 Surface gradings refine around named model surfaces:
 
@@ -84,9 +84,17 @@ Surface gradings refine around named model surfaces:
        "interface",
        d0=0.0,
        d1=0.04,
-       mult=2.0,
+       factor=2.0,
+       power=2.0,
        mode="abs_band",
    )
+
+``power`` controls the transition curve between ``d0`` and ``d1``. The default
+``power=1`` is linear; larger values keep stronger refinement closer to the
+feature before relaxing toward the background size. ``factor`` and ``power``
+may be scalars or per-axis dictionaries keyed by the active global
+coordinate-system axis names, such as ``{"offset": 2.0, "depth": 1.5}``.
+This matches the style used by ``elems_per_wave`` and ``order``.
 
 Initial meshes do not need to resolve the final wavefield. A coarse generated
 mesh plus adaptivity is the preferred starting point for most tutorials.
