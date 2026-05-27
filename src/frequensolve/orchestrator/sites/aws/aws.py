@@ -142,7 +142,7 @@ class AWSSiteConfig(BaseSiteConfig):
             try:
                 with open(candidate, "r") as f:
                     cached_config = json.load(f)
-                logger.info(f"Using cached configuration for {domain}")
+                logger.debug(f"Using cached configuration for {domain}")
                 logger.debug(f"Cache path: {candidate}")
                 if candidate == legacy_path:
                     AWSSiteConfig._cache_config(domain, cached_config)
@@ -172,7 +172,7 @@ class AWSSiteConfig(BaseSiteConfig):
                 return cached_config
 
         # Try both HTTPS and HTTP (for local development)
-        logger.info(f"Fetching configuration from {domain}...")
+        logger.debug(f"Fetching configuration from {domain}...")
         for protocol in ["https", "http"]:
             url = f"{protocol}://{domain}/api/config.json"
             try:
@@ -180,7 +180,7 @@ class AWSSiteConfig(BaseSiteConfig):
                 response = requests.get(url, timeout=10)
                 response.raise_for_status()
                 config_data = response.json()
-                logger.info(f"✓ Configuration loaded from {domain}")
+                logger.debug(f"✓ Configuration loaded from {domain}")
                 return config_data
             except requests.RequestException as e:
                 if protocol == "http":  # Last attempt failed
@@ -374,7 +374,12 @@ class AWSSite(BaseSite):
         self.cognito_auth = auth
 
         # Get AWS credentials from Identity Pool
-        credentials = auth.get_aws_credentials()
+        credentials = self._get_aws_credentials_with_relogin(
+            auth,
+            email=email,
+            password=password,
+            interactive=interactive,
+        )
         self.session = boto3.Session(
             aws_access_key_id=credentials["AccessKeyId"],
             aws_secret_access_key=credentials["SecretKey"],
@@ -413,6 +418,108 @@ class AWSSite(BaseSite):
 
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
+
+    def _get_aws_credentials_with_relogin(
+        self,
+        auth,
+        *,
+        email: Optional[str],
+        password: Optional[str],
+        interactive: bool,
+    ) -> Dict[str, str]:
+        try:
+            return auth.get_aws_credentials()
+        except ValueError as exc:
+            if not self._requires_cloud_relogin(exc):
+                raise
+
+            email, password = self._relogin_to_cloud(
+                auth,
+                email=email,
+                password=password,
+                interactive=interactive,
+                reason=str(exc),
+            )
+            try:
+                return auth.get_aws_credentials()
+            except ValueError as retry_exc:
+                credentials_path = getattr(auth, "credentials_path", "unknown")
+                raise RuntimeError(
+                    "FrequenSol cloud authentication failed after re-login. "
+                    f"Credentials cache remains at: {credentials_path}. "
+                    f"Original error: {retry_exc}"
+                ) from retry_exc
+
+    @staticmethod
+    def _requires_cloud_relogin(error: ValueError) -> bool:
+        message = str(error)
+        return any(
+            phrase in message
+            for phrase in (
+                "Please login again",
+                "No refresh token found",
+                "Refresh token expired",
+            )
+        )
+
+    def _relogin_to_cloud(
+        self,
+        auth,
+        *,
+        email: Optional[str],
+        password: Optional[str],
+        interactive: bool,
+        reason: str,
+    ) -> tuple[str, str]:
+        credentials_path = getattr(auth, "credentials_path", "unknown")
+        if not email:
+            if not interactive:
+                raise RuntimeError(
+                    self._cloud_relogin_required_message(
+                        credentials_path=credentials_path,
+                        reason=reason,
+                    )
+                )
+            email = input("FrequenSol Email: ")
+        if not password:
+            if not interactive:
+                raise RuntimeError(
+                    self._cloud_relogin_required_message(
+                        credentials_path=credentials_path,
+                        reason=reason,
+                    )
+                )
+            password = getpass.getpass("Password: ")
+
+        self._emit("Cached FrequenSol cloud login expired; authenticating again")
+        self._emit(f"Authenticating as {email}...")
+        try:
+            auth.login(email, password)
+        except ValueError as exc:
+            raise RuntimeError(
+                "Cached FrequenSol cloud credentials could not be refreshed, "
+                "and re-login did not complete. "
+                f"Credentials cache remains at: {credentials_path}. "
+                f"Login error: {exc}"
+            ) from exc
+        self._emit("AWS authentication successful")
+        return email, password
+
+    @staticmethod
+    def _cloud_relogin_required_message(
+        *, credentials_path: Union[str, Path], reason: str
+    ) -> str:
+        return (
+            "Your cached FrequenSol cloud login expired. "
+            f"Reason: {reason}\n"
+            f"Credentials cache: {credentials_path}\n"
+            "The credentials file was left unchanged and will be overwritten "
+            "after a successful login.\n\n"
+            "Re-run with interactive login enabled:\n"
+            '  fs.Site(profile="cloud", interactive=True)\n\n'
+            "Or pass credentials explicitly:\n"
+            '  fs.Site(profile="cloud", email="you@example.com", password="...")'
+        )
 
     def _refresh_s3_credentials(self) -> None:
         """Reload boto3 session and S3 client from the Identity Pool.
@@ -653,12 +760,12 @@ class AWSSite(BaseSite):
                 try:
                     storage_info = self.graphql_client.get_storage_stack_info()
                     self.config.s3_bucket = storage_info["bucketName"]
-                    logger.info(
+                    logger.debug(
                         f"Using existing storage stack: bucket={self.config.s3_bucket}"
                     )
                 except RuntimeError:
                     # Storage stack doesn't exist, create it
-                    logger.info(
+                    logger.debug(
                         "Storage stack not found. Creating storage infrastructure..."
                     )
                     try:
@@ -666,7 +773,7 @@ class AWSSite(BaseSite):
                         deploy_result = self.graphql_client.deploy_storage_stack()
 
                         # Wait for stack to be ready (pass stackId so we wait for the one we just created)
-                        logger.info("Waiting for storage stack to be ready...")
+                        logger.debug("Waiting for storage stack to be ready...")
                         expected_stack_id = deploy_result.get("stackId")
                         self.graphql_client.wait_for_stack_ready(
                             "storage", expected_stack_id=expected_stack_id

@@ -39,6 +39,7 @@ STATUS_RESET = "\033[0m"
 __all__ = [
     "BaseSite",
     "JobStatus",
+    "RunFailedError",
     "RunHandle",
     "RunResult",
     "_check_if_notebook",
@@ -143,7 +144,12 @@ class RunResult:
     def successful(self) -> bool:
         return self.status.is_successful
 
+    def raise_for_status(self) -> None:
+        if not self.successful:
+            raise RunFailedError(self)
+
     def traces(self, upscale: int = 1):
+        self.raise_for_status()
         if self.site is not None:
             return self.site.fetch_traces(self.job, upscale=upscale)
         from frequensolve.seismic.traces import TraceDataset
@@ -151,6 +157,7 @@ class RunResult:
         return TraceDataset.from_job(self.job, upscale=upscale)
 
     def wavefields(self, upscale: int = 1):
+        self.raise_for_status()
         if self.site is not None:
             return self.site.fetch_wavefields(self.job, upscale=upscale)
         return self.job.wavefields.open(upscale=upscale)
@@ -181,6 +188,29 @@ class RunResult:
         if hasattr(self.job, "_stdout_path"):
             return self.job._stdout_path
         return None
+
+
+class RunFailedError(RuntimeError):
+    """Raised when a run reaches an unsuccessful terminal status."""
+
+    def __init__(self, result: RunResult):
+        self.result = result
+        super().__init__(self._message(result))
+
+    @staticmethod
+    def _message(result: RunResult) -> str:
+        job_name = getattr(result.job, "name", "<unknown>")
+        status = result.status
+        parts = [
+            f"FrequenSolve run failed: job={job_name}",
+            f"state={status.state}",
+        ]
+        if status.job_id:
+            parts.append(f"job_id={status.job_id}")
+        if status.message:
+            parts.append(status.message)
+        parts.append("Use wait(check=False) to inspect the failed RunResult.")
+        return "; ".join(parts)
 
 
 @dataclass
@@ -272,28 +302,59 @@ class RunHandle:
         self,
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
+        *,
+        check: bool = True,
     ) -> RunResult:
+        """Block until this run is terminal.
+
+        Args:
+            timeout: Maximum wait time in seconds.
+            poll_interval: Poll interval in seconds.
+            check: Raise ``RunFailedError`` for failed, cancelled, or timed-out
+                runs. Pass ``False`` to inspect the returned ``RunResult``.
+        """
+
         if self._result is not None:
+            if check:
+                self._result.raise_for_status()
             return self._result
         if not self._generic_wait and self._wait_fn is not None:
             self._result = self._wait_fn(self, timeout, poll_interval)
+            if check:
+                self._result.raise_for_status()
             return self._result
         from frequensolve.orchestrator.progress import wait
 
-        self._result = wait(self, timeout=timeout, poll_interval=poll_interval)
+        self._result = wait(
+            self,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            check=check,
+        )
         return self._result
 
     async def wait_async(
         self,
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
+        *,
+        check: bool = True,
     ) -> RunResult:
         if self._result is not None:
+            if check:
+                self._result.raise_for_status()
             return self._result
         if not self._generic_wait and self._wait_async_fn is not None:
             self._result = await self._wait_async_fn(self, timeout, poll_interval)
+            if check:
+                self._result.raise_for_status()
             return self._result
-        return await asyncio.to_thread(self.wait, timeout, poll_interval)
+        return await asyncio.to_thread(
+            self.wait,
+            timeout,
+            poll_interval,
+            check=check,
+        )
 
     def watch(
         self,
@@ -371,8 +432,10 @@ class BaseSite:
     ) -> None:
         """Log a site message and optionally print it for interactive users."""
 
-        logging.getLogger(self.__class__.__module__).log(level, message)
-        if force or getattr(self, "verbose", False):
+        should_print = force or getattr(self, "verbose", False)
+        log_level = logging.DEBUG if should_print and level <= logging.INFO else level
+        logging.getLogger(self.__class__.__module__).log(log_level, message)
+        if should_print:
             print(message)
 
     def _emit_status(self, status: JobStatus, *, force: bool = True) -> None:
@@ -582,10 +645,15 @@ class BaseSite:
         *,
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
+        check: bool = True,
         **submit_kwargs,
     ) -> RunResult:
         """Submit a job and block until completion."""
-        return self.submit(job, **submit_kwargs).wait(timeout, poll_interval)
+        return self.submit(job, **submit_kwargs).wait(
+            timeout,
+            poll_interval,
+            check=check,
+        )
 
     def wait(
         self,
@@ -594,6 +662,7 @@ class BaseSite:
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
         fetch: bool = False,
+        check: bool = True,
     ) -> list[RunResult]:
         """Wait for multiple run handles while rendering one combined status."""
 
@@ -602,6 +671,7 @@ class BaseSite:
             timeout=timeout,
             poll_interval=poll_interval,
             fetch=fetch,
+            check=check,
         )
 
     def wait_all(
@@ -611,6 +681,7 @@ class BaseSite:
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
         fetch: bool = False,
+        check: bool = True,
     ) -> list[RunResult]:
         """Wait for many submitted runs and return results in input order."""
 
@@ -621,6 +692,7 @@ class BaseSite:
             timeout=timeout,
             poll_interval=poll_interval,
             fetch=fetch,
+            check=check,
         )
 
     def handle(

@@ -204,6 +204,10 @@ All sites share the same handle/result lifecycle:
    traces = result.traces(upscale=4)
    logs = result.logs()
 
+``run.wait()`` raises when a run finishes as failed, cancelled, or timed out.
+Use ``run.wait(check=False)`` to get the ``RunResult`` anyway and inspect
+``result.status`` or ``result.logs()`` before deciding what to do next.
+
 By default, ``site.submit(job)`` skips runs whose expected outputs are already
 current. Use ``site.submit(job, force_run=True)`` to force a new run; local and
 SLURM sites pass ``--fresh`` to the fast solver so solver-side output reuse is

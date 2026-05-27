@@ -9,6 +9,7 @@ from frequensolve._optional import optional_class
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
+    RunFailedError,
     RunHandle,
     RunResult,
 )
@@ -108,6 +109,7 @@ __all__ = [
     "GraphQLClient",
     "JobStatus",
     "LocalSite",
+    "RunFailedError",
     "RunHandle",
     "RunResult",
     "DEFAULT_SITE_CONFIG_NAME",

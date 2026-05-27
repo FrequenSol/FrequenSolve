@@ -337,7 +337,7 @@ class GraphQLClient:
             }
         """
 
-        logger.info("Fetching stack information from API...")
+        logger.debug("Fetching stack information from API...")
         logger.debug("Executing GraphQL query: listStacks (storage)")
         storage_result = self.execute(storage_query)
 
@@ -428,7 +428,7 @@ class GraphQLClient:
         logger.debug("Final merged result:")
         logger.debug(f"  {json.dumps(result_dict, indent=2)}")
 
-        logger.info(f"✓ Stack info loaded: bucket={bucket_name}")
+        logger.debug(f"✓ Stack info loaded: bucket={bucket_name}")
 
         return result_dict
 
@@ -570,7 +570,7 @@ class GraphQLClient:
             }
         """
 
-        logger.info("Deploying storage stack...")
+        logger.debug("Deploying storage stack...")
         result = self.execute(mutation)
 
         if "deployStorage" not in result:
@@ -583,7 +583,7 @@ class GraphQLClient:
                 f"Storage stack deployment failed: {deploy_result['error']}"
             )
 
-        logger.info(
+        logger.debug(
             f"✓ Storage stack deployment initiated: {deploy_result.get('stackName', 'unknown')}"
         )
         logger.debug(f"  Stack ID: {deploy_result.get('stackId')}")
@@ -620,7 +620,7 @@ class GraphQLClient:
             }
         """
 
-        logger.info("Deploying compute stack...")
+        logger.debug("Deploying compute stack...")
         result = self.execute(mutation)
 
         if "deployComputeInfrastructure" not in result:
@@ -633,7 +633,7 @@ class GraphQLClient:
                 f"Compute stack deployment failed: {deploy_result['error']}"
             )
 
-        logger.info(
+        logger.debug(
             f"✓ Compute stack deployment initiated: {deploy_result.get('stackName', 'unknown')}"
         )
         logger.debug(f"  Stack ID: {deploy_result.get('stackId')}")
@@ -666,7 +666,7 @@ class GraphQLClient:
         Raises:
             RuntimeError: If stack creation fails, times out, or enters failed state
         """
-        logger.info(
+        logger.debug(
             f"Waiting for {stack_type} stack to be ready (timeout: {timeout}s, poll interval: {poll_interval}s)..."
         )
 
@@ -796,7 +796,7 @@ class GraphQLClient:
 
                 # Log status changes
                 if status != last_status:
-                    logger.info(f"{stack_type} stack status: {status}")
+                    logger.debug(f"{stack_type} stack status: {status}")
                     last_status = status
 
                 # Before grace period expires, ignore terminal failure states that might be stale
@@ -821,7 +821,7 @@ class GraphQLClient:
 
                 # Check for terminal success states
                 if status in ["CREATE_COMPLETE", "UPDATE_COMPLETE"]:
-                    logger.info(f"✓ {stack_type} stack is ready: {status}")
+                    logger.debug(f"✓ {stack_type} stack is ready: {status}")
                     # Return stack info - for storage we need bucketName, for compute we need stackId
                     if stack_type == "storage":
                         outputs = (

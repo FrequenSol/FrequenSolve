@@ -82,7 +82,7 @@ def test_readme_orients_users_to_site_config_and_tutorials():
     assert "AWSSite" in readme
 
 
-def test_tutorial_notebooks_use_configured_site_factory():
+def test_example_notebooks_use_configured_site_factory():
     constructor_patterns = (
         "fs.LocalSite(",
         "fs.AWSSite(",
@@ -91,9 +91,19 @@ def test_tutorial_notebooks_use_configured_site_factory():
         "fs.SlurmRunConfig(",
         "fs.SlurmSiteConfig(",
     )
+    output_patterns = (
+        "LocalSite:",
+        "AWSSite:",
+        "Stampede3Site:",
+        "SlurmSite:",
+    )
     offenders = []
+    notebook_paths = [
+        REPO_ROOT / "examples/ex01_simple.ipynb",
+        *sorted((REPO_ROOT / "examples/tutorials").rglob("*.ipynb")),
+    ]
 
-    for notebook_path in sorted((REPO_ROOT / "examples/tutorials").rglob("*.ipynb")):
+    for notebook_path in notebook_paths:
         notebook = json.loads(notebook_path.read_text())
         for cell_index, cell in enumerate(notebook.get("cells", []), start=1):
             source = "".join(cell.get("source", []))
@@ -102,6 +112,13 @@ def test_tutorial_notebooks_use_configured_site_factory():
                     offenders.append(
                         f"{notebook_path.relative_to(REPO_ROOT)} cell {cell_index}: "
                         f"{pattern}"
+                    )
+            outputs = json.dumps(cell.get("outputs", []))
+            for pattern in output_patterns:
+                if pattern in outputs:
+                    offenders.append(
+                        f"{notebook_path.relative_to(REPO_ROOT)} cell {cell_index} "
+                        f"output: {pattern}"
                     )
 
     assert not offenders

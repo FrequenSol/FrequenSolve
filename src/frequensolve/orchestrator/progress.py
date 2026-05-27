@@ -23,14 +23,20 @@ def wait(
     timeout: Optional[float] = None,
     poll_interval: Optional[float] = None,
     fetch: bool = False,
+    check: bool = True,
 ) -> RunResult:
-    """Wait for one run using the generic progress monitor."""
+    """Wait for one run using the generic progress monitor.
+
+    Args:
+        check: Raise ``RunFailedError`` for unsuccessful terminal statuses.
+    """
 
     return wait_all(
         [run],
         timeout=timeout,
         poll_interval=poll_interval,
         fetch=fetch,
+        check=check,
     )[0]
 
 
@@ -40,13 +46,19 @@ def wait_all(
     timeout: Optional[float] = None,
     poll_interval: Optional[float] = None,
     fetch: bool = False,
+    check: bool = True,
 ) -> list[RunResult]:
-    """Wait for many runs, possibly from different sites, in input order."""
+    """Wait for many runs, possibly from different sites, in input order.
+
+    Args:
+        check: Raise ``RunFailedError`` for unsuccessful terminal statuses.
+    """
 
     return RunMonitor(runs).wait(
         timeout=timeout,
         poll_interval=poll_interval,
         fetch=fetch,
+        check=check,
     )
 
 
@@ -65,6 +77,7 @@ class RunMonitor:
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
         fetch: bool = False,
+        check: bool = True,
     ) -> list[RunResult]:
         handles = list(self.runs)
         if not handles:
@@ -90,7 +103,7 @@ class RunMonitor:
                 statuses[index] = status
 
                 if status.is_complete:
-                    self._complete(run, status, fetch=fetch)
+                    self._complete(run, status, fetch=fetch, check=check)
                     completed.add(index)
                     statuses[index] = run._result.status
 
@@ -117,7 +130,11 @@ class RunMonitor:
 
             time.sleep(interval)
 
-        return [run._result for run in handles]
+        results = [run._result for run in handles]
+        if check:
+            for result in results:
+                result.raise_for_status()
+        return results
 
     @staticmethod
     def _wait_interval(
@@ -136,9 +153,15 @@ class RunMonitor:
         return run.status()
 
     @staticmethod
-    def _complete(run: RunHandle, status: JobStatus, *, fetch: bool) -> None:
+    def _complete(
+        run: RunHandle,
+        status: JobStatus,
+        *,
+        fetch: bool,
+        check: bool,
+    ) -> None:
         run._complete_from_status(status)
-        if fetch:
+        if fetch and (run._result.successful or not check):
             run.fetch()
 
     @staticmethod

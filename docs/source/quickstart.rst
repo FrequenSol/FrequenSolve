@@ -125,8 +125,10 @@ Run A Time-Domain Job
 ---------------------
 
 Jobs are strict: ``site.submit(job).wait()`` raises if Python validation fails
-or if the solver reports a failure. Result paths, logs, trace files, and other
-outputs are written under the project directory.
+or if the solver reports a failure. Pass ``check=False`` to ``wait()`` when you
+want to inspect a failed, cancelled, or timed-out ``RunResult`` yourself.
+Result paths, logs, trace files, and other outputs are written under the
+project directory.
 
 .. code-block:: python
 

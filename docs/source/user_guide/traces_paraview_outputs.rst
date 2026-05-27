@@ -39,6 +39,11 @@ TraceDataset
        upscale=4,
    )
 
+``RunResult.traces()`` and ``RunResult.wavefields()`` also check the run
+status before fetching outputs. If you waited with ``check=False`` and the run
+failed, these readers raise the same run-failure error instead of failing later
+on missing output files.
+
 Trace reads return ``xarray.DataArray`` objects. Trace files are HDF5-backed and
 may be consolidated into a local cache with ``traces.consolidate()``. SEGY
 export is available through the trace-record helpers when the ``seismic-io``

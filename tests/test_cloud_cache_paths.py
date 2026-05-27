@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timedelta
 
 import pytest
@@ -99,3 +100,29 @@ def test_cognito_auth_reads_legacy_tokens_and_migrates_them(monkeypatch, tmp_pat
 
     assert auth.get_cached_tokens() == tokens
     assert cloud_credentials_path().exists()
+
+
+def test_cognito_auth_cached_token_reads_are_debug_logs(monkeypatch, tmp_path, caplog):
+    pytest.importorskip("boto3")
+
+    from frequensolve.orchestrator.sites.aws import cognito
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cognito.boto3, "client", lambda *args, **kwargs: object())
+    tokens = {"email": "user@example.com", "id_token": "token"}
+    auth = cognito.CognitoAuth(
+        user_pool_id="pool",
+        client_id="client",
+        identity_pool_id="identity",
+    )
+    auth.save_tokens(tokens)
+
+    with caplog.at_level(logging.INFO, logger=cognito.__name__):
+        assert auth.get_cached_tokens() == tokens
+
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and record.message == "Using cached credentials"
+    ]

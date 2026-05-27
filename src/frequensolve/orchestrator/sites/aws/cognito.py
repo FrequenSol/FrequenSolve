@@ -110,7 +110,7 @@ class CognitoAuth:
         Raises:
             ClientError: If authentication fails
         """
-        logger.info(f"Authenticating with Cognito as {email}...")
+        logger.debug(f"Authenticating with Cognito as {email}...")
         try:
             response = self.cognito_client.initiate_auth(
                 ClientId=self.client_id,
@@ -136,7 +136,7 @@ class CognitoAuth:
             # Save tokens to file
             self.save_tokens(tokens)
 
-            logger.info("✓ Authentication successful")
+            logger.debug("✓ Authentication successful")
 
             return tokens
 
@@ -238,7 +238,7 @@ class CognitoAuth:
         # Construct the login provider key
         provider_name = f"cognito-idp.{self.region}.amazonaws.com/{self.user_pool_id}"
 
-        logger.info("Fetching AWS credentials from Identity Pool...")
+        logger.debug("Fetching AWS credentials from Identity Pool...")
         logger.debug("Getting Identity ID...")
         logger.debug(f"  Identity Pool ID: {self.identity_pool_id}")
         logger.debug(f"  Provider: {provider_name}")
@@ -281,7 +281,7 @@ class CognitoAuth:
 
             logger.debug(f"Final credential dict keys: {list(result.keys())}")
 
-            logger.info("✓ AWS credentials obtained successfully")
+            logger.debug("✓ AWS credentials obtained successfully")
 
             return result
 
@@ -330,7 +330,7 @@ class CognitoAuth:
         try:
             with open(self.credentials_path, "r") as f:
                 tokens = json.load(f)
-            logger.info("Using cached credentials")
+            logger.debug("Using cached credentials")
             return tokens
         except (json.JSONDecodeError, IOError) as e:
             raise ValueError(f"Failed to read credentials file: {e}") from e
