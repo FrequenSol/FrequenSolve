@@ -229,6 +229,8 @@ class Wavelet:
 
     @property
     def times(self) -> np.ndarray:
+        """Return the time samples used by the cached wavelet signal."""
+
         return self._times
 
     @times.setter
@@ -264,7 +266,15 @@ class Wavelet:
         self._signal = np.roll(self._signal, shift=offset)
 
     def recenter(self, center: float, times: Optional[np.ndarray] = None) -> np.ndarray:
-        """Set the center time and regenerate cached time/frequency samples."""
+        """Set the center time and regenerate cached time/frequency samples.
+
+        Args:
+            center: New center time in seconds.
+            times: Optional replacement time samples.
+
+        Returns:
+            Regenerated time-domain signal.
+        """
 
         self._center = float(center)
         if times is not None:
@@ -277,10 +287,14 @@ class Wavelet:
 
     @property
     def signal(self) -> np.ndarray:
+        """Return the cached time-domain wavelet signal."""
+
         return self._signal
 
     @signal.setter
     def signal(self, signal: np.ndarray) -> None:
+        """Set the cached time-domain wavelet signal."""
+
         self._signal = signal
 
     @property
@@ -312,7 +326,14 @@ class Wavelet:
         return self._frequencies
 
     def evaluate(self, times: np.ndarray) -> np.ndarray:
-        """Evaluate the wavelet at given times."""
+        """Evaluate the wavelet at given times.
+
+        Args:
+            times: Time samples in seconds.
+
+        Returns:
+            Wavelet signal sampled at ``times``.
+        """
 
         # Setting times will trigger re-evaluation if needed
         self.times = times
@@ -522,7 +543,15 @@ class RickerWavelet(Wavelet):
 
 @dataclass
 class OrmsbyWavelet(Wavelet):
-    """Ormsby wavelet"""
+    """Band-limited Ormsby wavelet.
+
+    Args:
+        f: Four corner frequencies ``[f1, f2, f3, f4]``.
+        center: Center time in seconds.
+        window: Optional taper specification.
+        causal: Whether to generate a causal signal.
+        scale: Amplitude scale.
+    """
 
     def __init__(
         self,
@@ -567,7 +596,15 @@ class OrmsbyWavelet(Wavelet):
 
 @dataclass
 class KlauderWavelet(Wavelet):
-    """Klauder wavelet"""
+    """Klauder linear-sweep wavelet.
+
+    Args:
+        f: Sweep frequency range ``[f0, f1]``.
+        center: Center time in seconds.
+        window: Optional taper specification.
+        causal: Whether to generate a causal signal.
+        scale: Amplitude scale.
+    """
 
     def __init__(
         self,

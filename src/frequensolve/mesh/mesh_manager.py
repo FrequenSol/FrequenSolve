@@ -1,4 +1,4 @@
-"""Python structures defining mesh API"""
+"""Mesh manager and mesh adaptivity configuration objects."""
 
 import copy
 from dataclasses import dataclass, field
@@ -7,7 +7,12 @@ from shutil import copy2
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 
 from frequensolve.units import value_and_units_to_fs
-from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
+from frequensolve.util.mixins import (
+    ExportContext,
+    ExtraFieldsMixin,
+    merge_extra,
+    warn_deprecated_path_api,
+)
 
 from .mesh_generators import BaseMeshGenerator
 
@@ -22,11 +27,30 @@ __all__ = [
 
 @dataclass
 class MeshParallelism:
+    """Parallel mesh distribution settings.
+
+    Args:
+        distribute: Whether the solver should distribute mesh parts across MPI
+            ranks.
+        ranks_per_part: Optional number of MPI ranks assigned to each mesh
+            partition.
+        partitioner: Optional solver partitioner name.
+    """
+
     distribute: Optional[bool] = True
     ranks_per_part: Optional[int] = None
     partitioner: Optional[str] = None
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize mesh parallelism settings.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible parallelism payload.
+        """
+
         return {
             "distribute": self.distribute,
             **({"ranks_per_part": self.ranks_per_part} if self.ranks_per_part else {}),
@@ -35,6 +59,15 @@ class MeshParallelism:
 
     @classmethod
     def from_fs(cls, data: Dict) -> "MeshParallelism":
+        """Deserialize mesh parallelism settings.
+
+        Args:
+            data: Serialized parallelism mapping.
+
+        Returns:
+            ``MeshParallelism`` instance.
+        """
+
         return cls(
             distribute=data["distribute"],
             ranks_per_part=data.get("ranks_per_part"),
@@ -165,6 +198,17 @@ class DistanceGrading(ExtraFieldsMixin):
     the factor returns to one. ``power`` curves the transition between those
     distances; ``1`` is linear. ``factor`` and ``power`` may be scalars or
     dictionaries keyed by the global coordinate-system axis names.
+
+    Args:
+        d1: Outer distance where the grading factor returns to one.
+        factor: Optional grading factor, either scalar or keyed by axis.
+        power: Transition power, either scalar or keyed by axis. Values must be
+            positive.
+        d0: Inner distance where the full grading factor is applied.
+        extra: Additional solver-facing grading fields.
+
+    Raises:
+        ValueError: If ``power`` is non-positive.
     """
 
     d1: float
@@ -178,6 +222,15 @@ class DistanceGrading(ExtraFieldsMixin):
         self.power = _validate_grading_power(self.power)
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize the source/receiver grading rule.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible distance grading payload.
+        """
+
         payload = {
             "d0": value_and_units_to_fs(self.d0),
             "d1": value_and_units_to_fs(self.d1),
@@ -192,6 +245,15 @@ class DistanceGrading(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "DistanceGrading":
+        """Deserialize a distance grading rule.
+
+        Args:
+            data: Serialized distance grading mapping.
+
+        Returns:
+            ``DistanceGrading`` instance.
+        """
+
         payload = copy.deepcopy(dict(data))
         return cls(
             d0=payload.pop("d0", 0.0),
@@ -224,6 +286,24 @@ class SurfaceGrading(ExtraFieldsMixin):
     ``power`` curves the transition between those distances; ``1`` is linear.
     ``factor``, ``factor_max``, ``factor_min``, and ``power`` may be scalars or
     dictionaries keyed by the global coordinate-system axis names.
+
+    Args:
+        surface: Name of the implicit model surface to grade around.
+        d1: Outer distance where the grading returns to ``factor_min``.
+        factor: Optional legacy/simple grading factor.
+        power: Transition power, either scalar or keyed by axis. Values must be
+            positive.
+        d0: Inner distance where strongest grading is applied.
+        mode: Grading mode. Supported values are ``"none"``, ``"inside"``,
+            ``"outside"``, ``"band"``, and ``"abs_band"``.
+        factor_max: Optional maximum grading factor.
+        factor_min: Optional minimum grading factor.
+        phi_scale: Optional scaling applied to the implicit surface field.
+        extra: Additional solver-facing grading fields.
+
+    Raises:
+        ValueError: If ``surface`` is empty, ``mode`` is unsupported, or
+            ``power`` is non-positive.
     """
 
     surface: str
@@ -247,6 +327,15 @@ class SurfaceGrading(ExtraFieldsMixin):
             raise ValueError("SurfaceGrading requires a non-empty surface name")
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize the surface grading rule.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible surface grading payload.
+        """
+
         payload = {
             "surface": self.surface,
             "mode": self.mode,
@@ -266,6 +355,15 @@ class SurfaceGrading(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "SurfaceGrading":
+        """Deserialize a surface grading rule.
+
+        Args:
+            data: Serialized surface grading mapping.
+
+        Returns:
+            ``SurfaceGrading`` instance.
+        """
+
         payload = copy.deepcopy(dict(data))
         return cls(
             surface=payload.pop("surface"),
@@ -322,19 +420,33 @@ def _coerce_surface_gradings(
 
 @dataclass(init=False)
 class MeshAdaptor(ExtraFieldsMixin):
-    """Sets mesh adaptivity options
+    """Mesh adaptivity and grading options.
 
-    Attributes:
-       elems_per_wave (float | Dict[str, float]): Elements per wavelength.
-       order (int | Dict[str, int]): Element order used by mesh adaptivity.
-       adapt_sources (Optional[int]): Number of additional refinements near sources
-       adapt_receivers (Optional[int]): Number of additional refinements near receivers
-       jump_tolerance (Optional[float]): Maximum relative change in wavespeed that consitutes
-                                         a "jump" in material properties
-       jump_factor (Optional[float]): Multiplicative factor for elems_per_wave on "jump" elements
-       smooth_refs (Optional[bool]): Do additional refinements to unconstrain element DOFs
-       f_low (Optional[float]): Frequency used for low-frequency mesh adaptation
-       f_high (Optional[float]): Maximum frequency used for mesh adaptation
+    Args:
+        elems_per_wave: Target minimum elements per wavelength. May be a scalar
+            or axis-keyed mapping.
+        epw: Alias for ``elems_per_wave``.
+        min_epw: Alias for ``elems_per_wave``.
+        order: Element order used during mesh adaptivity.
+        jump_tolerance: Relative material-property jump threshold used for
+            interface refinement.
+        jump_factor: Multiplicative adaptation factor on jump elements.
+        smooth_refs: Whether to add smoothing refinements around constrained
+            degrees of freedom.
+        f_low: Low frequency used for adaptation.
+        f_high: High frequency used for adaptation.
+        f_adapt: Alias for ``f_low``.
+        adapt_order: Whether to adapt element order.
+        source_grading: Optional distance grading around sources.
+        receiver_grading: Optional distance grading around receivers.
+        surface_gradings: Optional surface grading rules.
+        extra: Additional solver-facing adaptivity fields.
+        **kwargs: Additional solver-facing adaptivity fields.
+
+    Raises:
+        TypeError: If no elements-per-wave argument is supplied.
+        ValueError: If multiple elements-per-wave aliases or low-frequency
+            aliases are supplied.
     """
 
     elems_per_wave: Union[float, Dict[str, float]]
@@ -401,29 +513,50 @@ class MeshAdaptor(ExtraFieldsMixin):
 
     @property
     def epw(self) -> Union[float, Dict[str, float]]:
+        """Alias for ``elems_per_wave``."""
+
         return self.elems_per_wave
 
     @epw.setter
     def epw(self, value: Union[float, Dict[str, float]]) -> None:
+        """Set ``elems_per_wave`` through the ``epw`` alias."""
+
         self.elems_per_wave = value
 
     @property
     def min_epw(self) -> Union[float, Dict[str, float]]:
+        """Alias for ``elems_per_wave`` used by older examples."""
+
         return self.elems_per_wave
 
     @min_epw.setter
     def min_epw(self, value: Union[float, Dict[str, float]]) -> None:
+        """Set ``elems_per_wave`` through the ``min_epw`` alias."""
+
         self.elems_per_wave = value
 
     @property
     def f_adapt(self) -> Optional[float]:
+        """Alias for the low adaptation frequency ``f_low``."""
+
         return self.f_low
 
     @f_adapt.setter
     def f_adapt(self, value: Optional[float]) -> None:
+        """Set ``f_low`` through the ``f_adapt`` alias."""
+
         self.f_low = value
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize mesh adaptivity settings for solver input.
+
+        Args:
+            ctx: Optional export context forwarded to nested grading objects.
+
+        Returns:
+            JSON-compatible adaptivity payload.
+        """
+
         payload = {
             "elems_per_wave": self.elems_per_wave,
             "order": self.order,
@@ -457,6 +590,15 @@ class MeshAdaptor(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "MeshAdaptor":
+        """Deserialize mesh adaptivity settings.
+
+        Args:
+            data: Serialized adaptivity mapping.
+
+        Returns:
+            ``MeshAdaptor`` instance.
+        """
+
         data = copy.deepcopy(data)
         return cls(
             elems_per_wave=_pop_elems_per_wave(data),
@@ -481,6 +623,19 @@ class MeshAdaptor(ExtraFieldsMixin):
         d0: float = 0.0,
         **kwargs,
     ) -> DistanceGrading:
+        """Configure distance grading around sources.
+
+        Args:
+            d1: Outer grading distance.
+            factor: Optional grading factor.
+            power: Transition power.
+            d0: Inner grading distance.
+            **kwargs: Additional solver-facing grading fields.
+
+        Returns:
+            The stored ``DistanceGrading`` instance.
+        """
+
         self.source_grading = DistanceGrading(
             d1=d1,
             factor=factor,
@@ -498,6 +653,19 @@ class MeshAdaptor(ExtraFieldsMixin):
         d0: float = 0.0,
         **kwargs,
     ) -> DistanceGrading:
+        """Configure distance grading around receivers.
+
+        Args:
+            d1: Outer grading distance.
+            factor: Optional grading factor.
+            power: Transition power.
+            d0: Inner grading distance.
+            **kwargs: Additional solver-facing grading fields.
+
+        Returns:
+            The stored ``DistanceGrading`` instance.
+        """
+
         self.receiver_grading = DistanceGrading(
             d1=d1,
             factor=factor,
@@ -517,6 +685,21 @@ class MeshAdaptor(ExtraFieldsMixin):
         mode: str = "abs_band",
         **kwargs,
     ) -> SurfaceGrading:
+        """Add a surface-based grading rule.
+
+        Args:
+            surface: Name of the implicit surface.
+            d1: Outer grading distance.
+            factor: Optional grading factor.
+            power: Transition power.
+            d0: Inner grading distance.
+            mode: Surface grading mode.
+            **kwargs: Additional solver-facing grading fields.
+
+        Returns:
+            Newly added ``SurfaceGrading`` instance.
+        """
+
         grading = SurfaceGrading(
             surface=surface,
             d1=d1,
@@ -532,12 +715,15 @@ class MeshAdaptor(ExtraFieldsMixin):
 
 @dataclass
 class MeshManager:
-    """Defines mesh type, dimension, refinement, etc.
+    """Mesh source, parallelism, and adaptivity for a simulation.
 
-    Attributes:
-       mesh_generator (Optional[BaseMeshGenerator]): The mesh generator object
-       parallel (Optional[MeshParallelism]): Mesh parallelism options
-       adapt (Optional[MeshAdaptor]): Mesh adaptivity options
+    Args:
+        mesh: Mesh generator configuration. If omitted, ``file`` and ``format``
+            must identify an existing mesh file.
+        file: Mesh file path, relative to the project when possible.
+        format: Mesh file format understood by the solver.
+        parallel: Optional mesh distribution settings.
+        adapt: Optional mesh adaptivity settings.
     """
 
     mesh: Optional[BaseMeshGenerator] = None
@@ -572,22 +758,30 @@ class MeshManager:
         ] = None,
         **kwargs,
     ) -> None:
-        """Sets mesh adaptivity options
+        """Replace mesh adaptivity settings.
 
-        Attributes:
-           elems_per_wave (float):           Elements per wavelength.
-           order (int | Dict[str, int]):      Element order used by mesh adaptivity.
-           adapt_sources (Optional[int]):    Number of additional refinements near sources
-           adapt_receivers (Optional[int]):  Number of additional refinements near receivers
-           jump_tolerance (Optional[float]): Maximum relative change in wavespeed that consitutes
-                                             a "jump" in material properties
-           jump_factor (Optional[float]):    Multiplicative factor for elems_per_wave on "jump" elements
-           smooth_refs (Optional[bool]):     Do additional refinements to unconstrain element DOFs
-           f_low (Optional[float]):           Frequency used for low-frequency mesh adaptation
-           f_high (Optional[float]):          Maximum frequency used for mesh adaptation
-           source_grading:                   Distance grading around sources
-           receiver_grading:                 Distance grading around receivers
-           surface_gradings:                 Geometry-based grading rules keyed by implicit surface
+        Args:
+            elems_per_wave: Target minimum elements per wavelength.
+            epw: Alias for ``elems_per_wave``.
+            min_epw: Alias for ``elems_per_wave``.
+            order: Element order used during mesh adaptivity.
+            jump_tolerance: Relative material-property jump threshold used for
+                interface refinement.
+            jump_factor: Multiplicative adaptation factor on jump elements.
+            smooth_refs: Whether to add smoothing refinements around constrained
+                degrees of freedom.
+            f_low: Low frequency used for adaptation.
+            f_high: High frequency used for adaptation.
+            f_adapt: Alias for ``f_low``.
+            adapt_order: Whether to adapt element order.
+            source_grading: Optional distance grading around sources.
+            receiver_grading: Optional distance grading around receivers.
+            surface_gradings: Optional surface grading rules.
+            **kwargs: Additional solver-facing adaptivity fields.
+
+        Raises:
+            TypeError: If no elements-per-wave value or alias is supplied.
+            ValueError: If conflicting aliases are supplied.
         """
         self.adapt = MeshAdaptor(
             elems_per_wave=elems_per_wave,
@@ -615,6 +809,19 @@ class MeshManager:
         d0: float = 0.0,
         **kwargs,
     ) -> DistanceGrading:
+        """Configure distance grading around sources.
+
+        Args:
+            d1: Outer grading distance.
+            factor: Optional grading factor.
+            power: Transition power.
+            d0: Inner grading distance.
+            **kwargs: Additional solver-facing grading fields.
+
+        Returns:
+            The stored ``DistanceGrading`` instance.
+        """
+
         if self.adapt is None:
             self.set_adapt(elems_per_wave=2.0, adapt_sources=1)
         return self.adapt.set_source_grading(
@@ -633,6 +840,19 @@ class MeshManager:
         d0: float = 0.0,
         **kwargs,
     ) -> DistanceGrading:
+        """Configure distance grading around receivers.
+
+        Args:
+            d1: Outer grading distance.
+            factor: Optional grading factor.
+            power: Transition power.
+            d0: Inner grading distance.
+            **kwargs: Additional solver-facing grading fields.
+
+        Returns:
+            The stored ``DistanceGrading`` instance.
+        """
+
         if self.adapt is None:
             self.set_adapt(elems_per_wave=2.0, adapt_sources=1)
         return self.adapt.set_receiver_grading(
@@ -653,6 +873,21 @@ class MeshManager:
         mode: str = "abs_band",
         **kwargs,
     ) -> SurfaceGrading:
+        """Add a surface-based grading rule to the mesh adaptor.
+
+        Args:
+            surface: Name of the implicit surface.
+            d1: Outer grading distance.
+            factor: Optional grading factor.
+            power: Transition power.
+            d0: Inner grading distance.
+            mode: Surface grading mode.
+            **kwargs: Additional solver-facing grading fields.
+
+        Returns:
+            Newly added ``SurfaceGrading`` instance.
+        """
+
         if self.adapt is None:
             self.set_adapt(elems_per_wave=2.0, adapt_sources=1)
         return self.adapt.add_surface_grading(
@@ -671,12 +906,12 @@ class MeshManager:
         ranks_per_part: Optional[int] = None,
         partitioner: Optional[str] = None,
     ) -> None:
-        """Sets mesh parallel options
+        """Set mesh parallel distribution options.
 
-        Attributes:
-           distribute (bool):               Distribute mesh
-           ranks_per_part (Optional[int]):  Number of ranks per mesh part
-           partitioner (Optional[str]):     Partitioner type
+        Args:
+            distribute: Whether the solver should distribute mesh parts.
+            ranks_per_part: Optional MPI rank count per mesh part.
+            partitioner: Optional partitioner name.
         """
         self.parallel = MeshParallelism(
             distribute=distribute,
@@ -686,6 +921,15 @@ class MeshManager:
 
     @classmethod
     def from_fs(cls, data: Dict) -> "MeshManager":
+        """Deserialize mesh configuration from solver JSON.
+
+        Args:
+            data: Serialized mesh block.
+
+        Returns:
+            ``MeshManager`` instance.
+        """
+
         data = copy.deepcopy(data)
         manager = cls()
 
@@ -731,7 +975,27 @@ class MeshManager:
         return manager
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
+        """Serialize mesh configuration for solver input.
+
+        Existing mesh files are copied into the export path when necessary so
+        the solver JSON can reference a project-relative path.
+
+        Args:
+            ctx: Optional export context containing project and output paths.
+
+        Returns:
+            JSON-compatible mesh block.
+
+        Raises:
+            AssertionError: If neither a mesh generator nor a mesh file/format
+                pair has been configured.
+        """
+
         ctx = ctx or ExportContext(self._proj_path, self._rel_path)
+        project_path = ctx.project_path or self._proj_path
+        export_path = ctx.path
+        if project_path is not None:
+            project_path = Path(project_path).expanduser().resolve()
         if self.adapt is None:
             self.set_adapt(elems_per_wave=2.0, adapt_sources=1)
 
@@ -752,16 +1016,28 @@ class MeshManager:
             if mesh_file.is_absolute():
                 source = mesh_file
             else:
-                project_source = self._proj_path / mesh_file
-                source = project_source if project_source.exists() else mesh_file
+                project_source = (
+                    project_path / mesh_file if project_path is not None else None
+                )
+                source = (
+                    project_source
+                    if project_source is not None and project_source.exists()
+                    else mesh_file
+                )
 
-            if source.is_absolute() and source.is_relative_to(self._proj_path):
-                stored_file = source.relative_to(self._proj_path)
-            else:
-                dest = (self._path / mesh_file.name).resolve()
+            if (
+                project_path is not None
+                and source.is_absolute()
+                and source.is_relative_to(project_path)
+            ):
+                stored_file = source.relative_to(project_path)
+            elif export_path is not None and project_path is not None:
+                dest = (export_path / mesh_file.name).resolve()
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 copy2(source, dest)
-                stored_file = dest.relative_to(self._proj_path)
+                stored_file = dest.relative_to(project_path)
+            else:
+                stored_file = mesh_file
 
             self.file = stored_file
             mesh_dict["file"] = stored_file
@@ -775,11 +1051,11 @@ class MeshManager:
         return mesh_dict
 
     def _set_path(self, proj_path: Path, rel_path: Path):
-        self._proj_path = proj_path
-        self._rel_path = rel_path
-        if isinstance(self.mesh, BaseMeshGenerator):
-            self.mesh._set_path(proj_path, rel_path)
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
+        self._proj_path = Path(proj_path).expanduser().resolve()
+        self._rel_path = Path(rel_path)
 
     @property
     def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         return self._proj_path / self._rel_path

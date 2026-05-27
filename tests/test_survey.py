@@ -7,7 +7,7 @@ import pytest
 from frequensolve.orchestrator.sites.base import JobStatus, RunResult
 from frequensolve.seismic import ReceiverNode, Survey
 from frequensolve.seismic.sparse_survey import SparseSurvey
-from frequensolve.simulation.artifacts import RunMetadata
+from frequensolve.simulation.jobs.artifacts import RunMetadata
 
 
 def _field(line, i1, i2, value):

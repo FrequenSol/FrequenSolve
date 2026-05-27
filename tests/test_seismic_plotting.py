@@ -25,7 +25,7 @@ from frequensolve.plotting.vtu import (
     vtu_fields,
 )
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.artifacts import TraceManifest
+from frequensolve.simulation.jobs.artifacts import TraceManifest
 
 
 def _time_trace(n_time=64, n_receiver=8):

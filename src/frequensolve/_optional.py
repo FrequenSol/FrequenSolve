@@ -21,7 +21,18 @@ def optional_dependency_error(
     error: BaseException,
     dependencies: Iterable[str] | None = None,
 ) -> ImportError:
-    """Build a clear error for an unavailable optional dependency group."""
+    """Build a clear error for an unavailable optional dependency group.
+
+    Args:
+        symbol: Public feature or symbol that requires the optional
+            dependency.
+        extra: FrequenSolve package extra that installs the dependency group.
+        error: Original import error.
+        dependencies: Optional package names to mention explicitly.
+
+    Returns:
+        ``ImportError`` with an install hint and original error context.
+    """
 
     return ImportError(
         f"{symbol} requires optional FrequenSolve dependencies that are not installed. "
@@ -70,7 +81,19 @@ def missing_optional_class(
     module: str,
     dependencies: Iterable[str] | None = None,
 ) -> Type:
-    """Return a class placeholder that raises an install hint when used."""
+    """Return a class placeholder that raises an install hint when used.
+
+    Args:
+        symbol: Public class name to expose.
+        extra: FrequenSolve package extra that installs the dependency group.
+        error: Original import error.
+        module: Module name assigned to the placeholder class.
+        dependencies: Optional package names to mention explicitly.
+
+    Returns:
+        Class object whose construction, subclassing, and attribute access
+        raise the optional-dependency ``ImportError``.
+    """
 
     class MissingOptionalDependency(metaclass=_MissingOptionalMeta):
         __doc__ = _message(symbol, extra, error, dependencies)
@@ -119,7 +142,21 @@ def optional_class(
     dependencies: Iterable[str] | None = None,
     module: str,
 ) -> Type:
-    """Return a lightweight proxy that imports an optional class on first use."""
+    """Return a lightweight proxy that imports an optional class on first use.
+
+    Args:
+        symbol: Public class name to expose.
+        import_path: Fully qualified target class path.
+        extra: FrequenSolve package extra that installs the dependency group.
+        dependencies: Optional package names to mention explicitly.
+        module: Module name assigned to the proxy class.
+
+    Returns:
+        Proxy class that imports and instantiates the target on first use.
+
+    Raises:
+        ValueError: If ``import_path`` is not a fully qualified class path.
+    """
 
     module_name, _, attribute = import_path.rpartition(".")
     if not module_name or not attribute:

@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - exercised only when PyLops is unavaila
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.property import canonical_property_name
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.imaging import ImagingJob
+from frequensolve.simulation.jobs.imaging import ImagingJob
 
 __all__ = [
     "DEFAULT_FWI_PARAMETERS",
@@ -60,19 +60,43 @@ class FWISiteProtocol(Protocol):
     def apply_fwi_jacobian(
         self, problem: "FWIProblem", model_vector: np.ndarray
     ) -> Any:
-        """Apply ``J dm`` and return data-space-compatible residual traces."""
+        """Apply ``J dm`` and return data-space-compatible residual traces.
+
+        Args:
+            problem: Bound FWI problem.
+            model_vector: Packed model-space perturbation vector.
+
+        Returns:
+            Data-space-compatible residual traces or packed vector.
+        """
         ...
 
     def apply_fwi_adjoint(
         self, problem: "FWIProblem", residual_vector: np.ndarray
     ) -> Any:
-        """Apply ``J.H r`` and return model-space-compatible gradients."""
+        """Apply ``J.H r`` and return model-space-compatible gradients.
+
+        Args:
+            problem: Bound FWI problem.
+            residual_vector: Packed data-space residual vector.
+
+        Returns:
+            Model-space-compatible gradient data or packed vector.
+        """
         ...
 
     def apply_fwi_nonlinear_forward(
         self, problem: "FWIProblem", model_vector: np.ndarray
     ) -> Any:
-        """Run ``F(m + dm)`` and return data-space-compatible traces."""
+        """Run ``F(m + dm)`` and return data-space-compatible traces.
+
+        Args:
+            problem: Bound FWI problem.
+            model_vector: Packed model-space perturbation vector.
+
+        Returns:
+            Data-space-compatible simulated traces or packed vector.
+        """
         ...
 
 
@@ -129,7 +153,7 @@ def _observed_data_path(observed: Any) -> Path:
     if path is not None:
         return path
     raise TypeError(
-        "observed must be a SimulationJob, TraceDataset, filesystem path, or path-like string"
+        "observed must be a BaseJob, TraceDataset, filesystem path, or path-like string"
     )
 
 
@@ -165,7 +189,22 @@ def normalize_grid(
     simulation: Any,
     grid: Union[CartesianGrid, xr.DataArray, Mapping[str, Any], Sequence[int]],
 ) -> CartesianGrid:
-    """Normalize user grid input to a ``CartesianGrid``."""
+    """Normalize user grid input to a ``CartesianGrid``.
+
+    Args:
+        simulation: Simulation whose model bounds are used when ``grid`` is a
+            resolution sequence.
+        grid: Cartesian grid, xarray grid, serialized grid mapping, or
+            resolution sequence.
+
+    Returns:
+        ``CartesianGrid`` suitable for FWI model-space packing.
+
+    Raises:
+        TypeError: If ``grid`` has an unsupported type.
+        ValueError: If a resolution-only grid is requested but model bounds are
+            unavailable or unsupported.
+    """
 
     if isinstance(grid, CartesianGrid):
         return grid
@@ -187,7 +226,13 @@ def normalize_grid(
 
 @dataclass(frozen=True)
 class ImageSpec:
-    """Typed imaging output specification that serializes to the legacy solver contract."""
+    """Typed imaging output specification for solver imaging contracts.
+
+    Args:
+        name: User-facing image name.
+        condition: Solver imaging condition.
+        property: Optional solver property label used by FWI images.
+    """
 
     name: str
     condition: str
@@ -195,19 +240,55 @@ class ImageSpec:
 
     @classmethod
     def fwi(cls, parameter: str, name: Optional[str] = None) -> "ImageSpec":
+        """Create an FWI image request for a physical model parameter.
+
+        Args:
+            parameter: Property name or alias, such as ``"vp"`` or ``"rho"``.
+            name: Optional image name. Defaults to ``FWI_<Property>``.
+
+        Returns:
+            Image specification using the solver's FWI imaging condition.
+        """
+
         parameter = canonical_property_name(parameter)
         label = _SOLVER_PROPERTY_LABELS.get(parameter, parameter)
         return cls(name=name or f"FWI_{label}", condition="FWI", property=label)
 
     @classmethod
     def field(cls, field: str, name: Optional[str] = None) -> "ImageSpec":
+        """Create an image request for a named solver field.
+
+        Args:
+            field: Solver field or imaging condition name.
+            name: Optional output image name. Defaults to ``field``.
+
+        Returns:
+            Image specification for the named field.
+        """
+
         return cls(name=name or str(field), condition=str(field))
 
     @classmethod
     def condition_image(cls, condition: str, name: Optional[str] = None) -> "ImageSpec":
+        """Create an image request for an explicit imaging condition.
+
+        Args:
+            condition: Solver imaging condition string.
+            name: Optional output image name. Defaults to ``condition``.
+
+        Returns:
+            Image specification for the condition.
+        """
+
         return cls(name=name or str(condition), condition=str(condition))
 
     def to_legacy_value(self) -> str:
+        """Return the string value expected by the legacy image contract.
+
+        Returns:
+            ``"FWI:<Property>"`` for FWI images, otherwise the condition name.
+        """
+
         if self.condition == "FWI":
             return f"FWI:{self.property}"
         return self.condition
@@ -246,7 +327,17 @@ def _normalize_image_specs(
 
 @dataclass
 class ModelSpace:
-    """Vectorization rules for elastic FWI model perturbations."""
+    """Vectorization rules for elastic FWI model perturbations.
+
+    Args:
+        grid: Cartesian inversion grid.
+        parameters: Optional property names to pack. Defaults to
+            ``("vp", "vs", "rho")``.
+        dtype: NumPy dtype for packed vectors.
+
+    Raises:
+        ValueError: If no parameters are supplied or parameter names repeat.
+    """
 
     grid: CartesianGrid
     parameters: Tuple[str, ...] = DEFAULT_FWI_PARAMETERS
@@ -264,34 +355,91 @@ class ModelSpace:
 
     @property
     def template(self) -> xr.DataArray:
+        """Return a grid-shaped xarray template for model perturbations.
+
+        Returns:
+            Data array with this model space's dimensions and coordinates.
+        """
+
         return self.grid.as_xarray()
 
     @property
     def dims(self) -> Tuple[str, ...]:
+        """Return model-space dimension names in packing order.
+
+        Returns:
+            Tuple of grid dimension names.
+        """
+
         return tuple(self.template.dims)
 
     @property
     def coords(self) -> Dict[str, Any]:
+        """Return model-space coordinates keyed by dimension name.
+
+        Returns:
+            Mapping from dimension name to xarray coordinate.
+        """
+
         return {name: self.template.coords[name] for name in self.template.dims}
 
     @property
     def grid_size(self) -> int:
+        """Return the number of grid points for one model parameter.
+
+        Returns:
+            Product of the Cartesian grid shape.
+        """
+
         return int(np.prod(self.grid.shape))
 
     @property
     def size(self) -> int:
+        """Return the total number of scalar entries in a model vector.
+
+        Returns:
+            Number of parameters multiplied by grid size.
+        """
+
         return len(self.parameters) * self.grid_size
 
     @property
     def shape(self) -> Tuple[int]:
+        """Return the one-dimensional shape expected by linear operators.
+
+        Returns:
+            Tuple containing ``size``.
+        """
+
         return (self.size,)
 
     def zeros(self) -> xr.Dataset:
+        """Return a zero-valued model perturbation dataset.
+
+        Returns:
+            Dataset with one zero-filled variable per model parameter.
+        """
+
         return self.unpack(np.zeros(self.size, dtype=self.dtype))
 
     def pack(
         self, model: Union[xr.Dataset, Mapping[str, Any], np.ndarray, Sequence[Any]]
     ) -> np.ndarray:
+        """Pack a model perturbation dataset or vector into operator order.
+
+        Args:
+            model: Dataset, mapping, imaging result with ``raw_images``, or
+                already-packed vector.
+
+        Returns:
+            One-dimensional complex vector in parameter-major order.
+
+        Raises:
+            KeyError: If a required parameter is missing.
+            ValueError: If parameter dimensions or vector size do not match the
+                model space.
+        """
+
         if hasattr(model, "raw_images"):
             return self.pack(model.raw_images)
         if isinstance(model, xr.Dataset):
@@ -342,6 +490,18 @@ class ModelSpace:
         return np.asarray(da.data).reshape(-1)
 
     def unpack(self, vector: Union[np.ndarray, Sequence[Any]]) -> xr.Dataset:
+        """Unpack a model vector into an ``xarray.Dataset`` by parameter.
+
+        Args:
+            vector: Packed model-space vector.
+
+        Returns:
+            Dataset containing one gridded data variable per model parameter.
+
+        Raises:
+            ValueError: If the vector size does not match this model space.
+        """
+
         vector = np.asarray(vector, dtype=self.dtype).reshape(-1)
         if vector.size != self.size:
             raise ValueError(
@@ -371,15 +531,41 @@ class _DataSegment:
 
     @property
     def shape(self) -> Tuple[int, int, int]:
+        """Return ``(sources, components, receivers)`` for this segment.
+
+        Returns:
+            Tuple describing the segment layout for one frequency.
+        """
+
         return (len(self.sources), len(self.components), len(self.receivers))
 
     def size(self, n_frequencies: int) -> int:
+        """Return packed scalar count for this segment.
+
+        Args:
+            n_frequencies: Number of frequencies included in the data space.
+
+        Returns:
+            Product of frequency count and segment shape.
+        """
+
         return n_frequencies * int(np.prod(self.shape))
 
 
 @dataclass
 class DataSpace:
-    """Vectorization rules for complex frequency-domain trace data."""
+    """Vectorization rules for complex frequency-domain trace data.
+
+    Args:
+        frequencies: Frequencies packed into the data vector.
+        segments: Receiver-group segments describing sources, components, and
+            receiver indices.
+        dtype: NumPy dtype for packed vectors.
+
+    Raises:
+        ValueError: If no frequencies or no receiver-group segments are
+            supplied.
+    """
 
     frequencies: Tuple[Any, ...]
     segments: Tuple[_DataSegment, ...]
@@ -406,6 +592,22 @@ class DataSpace:
         frequencies: Iterable[Any],
         dtype: Any = np.complex128,
     ) -> "DataSpace":
+        """Build a data space from a simulation's sources and receivers.
+
+        Args:
+            simulation: Simulation containing acquisition source and receiver
+                groups.
+            frequencies: Frequencies packed into the data vector.
+            dtype: NumPy dtype for packed vectors.
+
+        Returns:
+            ``DataSpace`` matching the simulation acquisition layout.
+
+        Raises:
+            ValueError: If there are no source groups or a receiver group has
+                no components.
+        """
+
         sources = tuple(range(1, len(simulation.acquisition.source_groups) + 1))
         if not sources:
             raise ValueError("FWI DataSpace requires at least one source group")
@@ -428,18 +630,51 @@ class DataSpace:
 
     @property
     def size(self) -> int:
+        """Return the total number of scalar entries in a data vector.
+
+        Returns:
+            Sum of all receiver-group segment sizes over all frequencies.
+        """
+
         return sum(segment.size(len(self.frequencies)) for segment in self.segments)
 
     @property
     def shape(self) -> Tuple[int]:
+        """Return the one-dimensional shape expected by linear operators.
+
+        Returns:
+            Tuple containing ``size``.
+        """
+
         return (self.size,)
 
     def zeros(self) -> xr.Dataset:
+        """Return a zero-valued trace dataset with the data-space layout.
+
+        Returns:
+            Dataset with one zero-filled trace array per receiver group.
+        """
+
         return self.unpack(np.zeros(self.size, dtype=self.dtype))
 
     def pack(
         self, data: Union[xr.Dataset, Mapping[str, Any], np.ndarray, Sequence[Any]]
     ) -> np.ndarray:
+        """Pack trace data into frequency/source/component/receiver order.
+
+        Args:
+            data: ``TraceDataset``, xarray dataset, mapping of group data, or
+                already-packed vector.
+
+        Returns:
+            One-dimensional complex vector in receiver-group order.
+
+        Raises:
+            KeyError: If a required receiver group is missing.
+            ValueError: If group dimensions or vector size do not match the
+                data space.
+        """
+
         if isinstance(data, TraceDataset):
             return self.pack(self._dataset_from_trace_dataset(data))
         if isinstance(data, xr.Dataset):
@@ -523,6 +758,18 @@ class DataSpace:
         return xr.Dataset(data_vars)
 
     def unpack(self, vector: Union[np.ndarray, Sequence[Any]]) -> xr.Dataset:
+        """Unpack a data vector into an ``xarray.Dataset`` by receiver group.
+
+        Args:
+            vector: Packed data-space vector.
+
+        Returns:
+            Dataset containing one trace data array per receiver group.
+
+        Raises:
+            ValueError: If the vector size does not match this data space.
+        """
+
         vector = np.asarray(vector, dtype=self.dtype).reshape(-1)
         if vector.size != self.size:
             raise ValueError(
@@ -551,7 +798,12 @@ class DataSpace:
 
 
 class FrequenSolveJacobian(_LinearOperator):
-    """PyLops-compatible linearized FrequenSolve FWI operator."""
+    """PyLops-compatible linearized FrequenSolve FWI operator.
+
+    Args:
+        problem: Bound FWI problem that supplies model/data spaces and
+            Jacobian callbacks.
+    """
 
     def __init__(self, problem: "FWIProblem"):
         self.problem = problem
@@ -577,7 +829,23 @@ class FrequenSolveJacobian(_LinearOperator):
 
 @dataclass
 class FWIProblem:
-    """Bound elastic FWI problem with model/data spaces and operator constructors."""
+    """Bound elastic FWI problem with model/data spaces and operators.
+
+    Args:
+        simulation: Simulation used for nonlinear, Born, and adjoint solves.
+        observed: Observed trace data, trace dataset, job, or path.
+        frequencies: Optional frequencies. Inferred from ``observed`` when
+            possible.
+        parameters: Optional property names to invert.
+        grid: Inversion grid or resolution sequence.
+        site: Optional execution site implementing ``FWISiteProtocol``.
+        matvec: Optional callback implementing ``J dm``.
+        rmatvec: Optional callback implementing ``J.H r``.
+        nonlinear_forward: Optional callback implementing ``F(m + dm)``.
+
+    Raises:
+        ValueError: If ``grid`` or frequencies cannot be resolved.
+    """
 
     simulation: Any
     observed: Any
@@ -624,24 +892,58 @@ class FWIProblem:
         self.nonlinear_forward = nonlinear_forward
 
     def jacobian(self) -> FrequenSolveJacobian:
+        """Return a PyLops-compatible Jacobian operator for this problem.
+
+        Returns:
+            ``FrequenSolveJacobian`` bound to this problem.
+        """
+
         return FrequenSolveJacobian(self)
 
     def forward_operator(self) -> FrequenSolveJacobian:
+        """Return the Jacobian operator.
+
+        Returns:
+            Same object returned by :meth:`jacobian`.
+        """
+
         return self.jacobian()
 
     def adjoint_operator(self):
-        """Return ``J.H``. This is the adjoint used by inverse solvers, not a true inverse."""
+        """Return ``J.H``, the adjoint used by inverse solvers.
+
+        Returns:
+            Hermitian adjoint view of the Jacobian operator.
+        """
 
         return self.jacobian().H
 
     def inverse_operator(self):
-        """Alias for ``adjoint_operator`` for inverse-problem workflows."""
+        """Return the adjoint operator.
+
+        Returns:
+            Same object returned by :meth:`adjoint_operator`.
+        """
 
         return self.adjoint_operator()
 
     def apply_jacobian(
         self, model_perturbation: Union[np.ndarray, xr.Dataset, Mapping[str, Any]]
     ) -> np.ndarray:
+        """Apply the linearized forward operator to a model perturbation.
+
+        Args:
+            model_perturbation: Model perturbation dataset, mapping, or packed
+                vector.
+
+        Returns:
+            Packed data-space residual vector.
+
+        Raises:
+            NotImplementedError: If neither a callback nor site hook is
+                available.
+        """
+
         vector = self.model_space.pack(model_perturbation)
         if self.matvec is not None:
             return self.data_space.pack(self.matvec(self, vector))
@@ -655,6 +957,19 @@ class FWIProblem:
     def apply_adjoint(
         self, residual: Union[np.ndarray, xr.Dataset, Mapping[str, Any]]
     ) -> np.ndarray:
+        """Apply the adjoint Jacobian to a data residual.
+
+        Args:
+            residual: Data residual dataset, mapping, or packed vector.
+
+        Returns:
+            Packed model-space gradient vector.
+
+        Raises:
+            NotImplementedError: If neither a callback nor site hook is
+                available.
+        """
+
         vector = self.data_space.pack(residual)
         if self.rmatvec is not None:
             return self.model_space.pack(self.rmatvec(self, vector))
@@ -668,6 +983,20 @@ class FWIProblem:
     def run_nonlinear_forward(
         self, model_perturbation: Union[np.ndarray, xr.Dataset, Mapping[str, Any]]
     ) -> np.ndarray:
+        """Run the nonlinear forward solver for a model perturbation.
+
+        Args:
+            model_perturbation: Model perturbation dataset, mapping, or packed
+                vector.
+
+        Returns:
+            Packed simulated data vector.
+
+        Raises:
+            NotImplementedError: If neither a callback nor site hook is
+                available.
+        """
+
         vector = self.model_space.pack(model_perturbation)
         if self.nonlinear_forward is not None:
             return self.data_space.pack(self.nonlinear_forward(self, vector))
@@ -689,6 +1018,21 @@ class FWIProblem:
         seed: int = 0,
         tolerance: float = 1.0e-8,
     ) -> Dict[str, Any]:
+        """Check adjoint consistency by comparing inner products.
+
+        Args:
+            model_perturbation: Optional model perturbation. Random complex
+                data are generated when omitted.
+            residual: Optional data residual. Random complex data are generated
+                when omitted.
+            seed: Random seed used when synthetic vectors are generated.
+            tolerance: Maximum relative inner-product mismatch for a pass.
+
+        Returns:
+            Mapping containing both inner products, relative error, and pass
+            flag.
+        """
+
         rng = np.random.default_rng(seed)
         if model_perturbation is None:
             model_perturbation = rng.standard_normal(
@@ -718,6 +1062,17 @@ class FWIProblem:
         model_perturbation: Union[np.ndarray, xr.Dataset, Mapping[str, Any]],
         epsilons: Sequence[float] = (1.0e-1, 3.0e-2, 1.0e-2, 3.0e-3),
     ) -> Dict[str, Any]:
+        """Estimate first-order linearization error across perturbation scales.
+
+        Args:
+            model_perturbation: Perturbation direction for the Taylor test.
+            epsilons: Perturbation scales to evaluate.
+
+        Returns:
+            Mapping containing scales, residual norms, observed convergence
+            rates, and pass flag.
+        """
+
         dm = self.model_space.pack(model_perturbation)
         f0 = self.run_nonlinear_forward(
             np.zeros(self.model_space.size, dtype=np.complex128)
@@ -766,6 +1121,33 @@ def build_imaging_job(
     misfit_norm: str = "L2",
     **kwargs,
 ) -> ImagingJob:
+    """Create an imaging job configured from FWI-style parameters and data.
+
+    Args:
+        simulation: Simulation used for imaging.
+        observed: Observed data as a job, trace dataset, or filesystem path.
+        frequencies: Optional frequencies. Inferred from ``observed`` when
+            possible.
+        parameters: Optional FWI parameters to image.
+        grid: Cartesian grid, xarray grid, serialized grid mapping, or
+            resolution sequence.
+        fields: Optional solver fields to image.
+        condition: Optional explicit imaging condition.
+        images: Optional mapping of image names to ``ImageSpec`` or condition
+            values.
+        name: Imaging job name.
+        weights: Optional per-frequency weights.
+        wavelet: Optional wavelet used to derive weights.
+        misfit_norm: Misfit norm name.
+        **kwargs: Additional options forwarded to ``ImagingJob``.
+
+    Returns:
+        Configured ``ImagingJob``.
+
+    Raises:
+        ValueError: If ``grid`` is missing or frequencies cannot be inferred.
+    """
+
     if grid is None:
         raise ValueError("imaging requires a grid or resolution")
     if "misfit_type" in kwargs:

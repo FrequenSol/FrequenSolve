@@ -205,7 +205,16 @@ def vtu_fields(
     *,
     association: str = "auto",
 ) -> list[str]:
-    """Return available point/cell data arrays in a VTU file."""
+    """Return available point/cell data arrays in a VTU file.
+
+    Args:
+        vtu: VTU file path or mesh object accepted by ``plot_vtu`` helpers.
+        association: Data association to inspect: ``"auto"``, ``"point"``, or
+            ``"cell"``.
+
+    Returns:
+        Field names in display order.
+    """
 
     mesh = _as_vtu_mesh(vtu)
     return _vtu_field_names(mesh, association)
@@ -907,7 +916,18 @@ def plot_vtu_slice(
     origin: Sequence[float] | None = None,
     **kwargs: Any,
 ):
-    """Plot a planar slice through a solver ``.vtu`` file."""
+    """Plot a planar slice through a solver ``.vtu`` file.
+
+    Args:
+        vtu: VTU file path or mesh object.
+        field: Optional field name to color by.
+        normal: Slice normal axis/name.
+        origin: Optional slice origin.
+        **kwargs: Additional ``plot_vtu`` keyword arguments.
+
+    Returns:
+        The value returned by ``plot_vtu``.
+    """
 
     slice_spec: dict[str, Any] = {"normal": normal}
     if origin is not None:

@@ -1,4 +1,4 @@
-"""Python structures defining seismic acquisition geometry"""
+"""Seismic source, receiver, and sparse-survey acquisition geometry."""
 
 import copy
 from dataclasses import dataclass, field
@@ -15,7 +15,12 @@ from frequensolve.seismic.receivers import (
 )
 from frequensolve.seismic.sources import CompoundSource, PointSource, SourceGroup
 from frequensolve.seismic.sparse_survey import ReceiverSampling, SparseSurvey
-from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
+from frequensolve.util.mixins import (
+    ExportContext,
+    ExtraFieldsMixin,
+    merge_extra,
+    warn_deprecated_path_api,
+)
 from frequensolve.util.named_list import NamedList
 
 __all__ = ["Acquisition"]
@@ -23,14 +28,15 @@ __all__ = ["Acquisition"]
 
 @dataclass
 class Acquisition(ExtraFieldsMixin):
-    """Defines a seismic source and receiver configuration.
+    """Seismic source, receiver, and survey configuration.
 
-    This class reads the input file to retrieve blocks describing sources, receivers, and
-    wavelet signatures. It then aggregates them into a single cohesive acquisition definition.
-
-    Attributes:
-       source_groups   (NamedList[SourceGroup]): A list of SourceGroup objects describing all shot points.
-       receiver_groups (NamedList[ReceiverGroup]): A list of ReceiverGroup objects (stations, geophones, or fibers).
+    Args:
+        source_groups: Source groups describing shots.
+        receiver_groups: Receiver groups describing stations, geophones, fibers,
+            or wavefield sample devices.
+        surveys: Sparse surveys that define trace-level source/receiver
+            sampling.
+        extra: Additional solver-facing acquisition fields.
     """
 
     source_groups: NamedList = field(default_factory=NamedList)
@@ -42,6 +48,15 @@ class Acquisition(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "Acquisition":
+        """Deserialize acquisition geometry from solver JSON.
+
+        Args:
+            data: Serialized acquisition mapping.
+
+        Returns:
+            ``Acquisition`` instance.
+        """
+
         data = copy.deepcopy(data)
         return cls(
             source_groups=NamedList(
@@ -60,7 +75,19 @@ class Acquisition(ExtraFieldsMixin):
         )
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize acquisition geometry for solver input.
+
+        Args:
+            ctx: Optional export context used by source, receiver, and survey
+                serializers.
+
+        Returns:
+            JSON-compatible acquisition block.
+        """
+
         from ..util.printing import print_warn
+
+        ctx = ctx or ExportContext(self._proj_path, self._rel_path)
 
         # Ensure receiver groups have unique names
         names = {}
@@ -100,13 +127,13 @@ class Acquisition(ExtraFieldsMixin):
         direction: Optional[np.ndarray] = None,
         domain: Optional[int] = None,
     ):
-        """Add a group of sources with common kind and direction.
+        """Add one point-source group for each coordinate row.
 
         Args:
-           kind (str):              Kind of the source group.
-           coords (np.ndarray):     Coordinates of the source group.
-           direction (np.ndarray):  Direction of the source group.
-           domain (int):            Optional domain in which the source group should be evaluated.
+            kind: Source kind understood by the solver.
+            coords: Coordinate array with one source per row.
+            direction: Optional source direction shared by all created sources.
+            domain: Optional domain where each source is evaluated.
         """
 
         for row in _source_coordinate_rows(coords):
@@ -128,6 +155,19 @@ class Acquisition(ExtraFieldsMixin):
         direction: Optional[np.ndarray] = None,
         domain: Optional[int] = None,
     ):
+        """Add a compound source with weighted points.
+
+        Args:
+            kind: Source kind understood by the solver.
+            coords: Coordinate array with one source point per row.
+            weights: Scalar weights applied to each point direction.
+            direction: Optional direction vector or per-point direction array.
+            domain: Optional domain where the source is evaluated.
+
+        Raises:
+            ValueError: If ``direction`` does not have one row per coordinate.
+        """
+
         coords = np.asarray(coords, dtype=np.float64)
         weights = np.asarray(weights, dtype=float)
         if direction is not None:
@@ -161,13 +201,20 @@ class Acquisition(ExtraFieldsMixin):
         domain: Optional[int] = None,
         **kwargs,
     ):
-        """Add a group of receivers with common device and coordinates.
+        """Add a receiver group with common device and coordinates.
 
         Args:
-           name (str):                Name of the receiver group.
-           device (ReceiverDevice):   Device defining receiver type and components.
-           coordinates (np.ndarray):  Coordinates of the receiver group.
-           domain (int):              Optional domain in which the receiver group should be evaluated.
+            name: Receiver group name.
+            device: Device defining receiver type and components.
+            coords: Receiver coordinate array or coordinate object.
+            domain: Optional domain where the receiver group is evaluated.
+            **kwargs: Additional solver-facing receiver group fields.
+
+        Returns:
+            Newly added ``ReceiverGroup``.
+
+        Raises:
+            TypeError: If deprecated frame arguments are supplied.
         """
         deprecated_frame_keys = {"frame", "source_frame", "receiver_frame"} & set(
             kwargs
@@ -188,7 +235,14 @@ class Acquisition(ExtraFieldsMixin):
         return group
 
     def add_survey(self, survey: SparseSurvey) -> SparseSurvey:
-        """Add or replace a named sparse survey layout."""
+        """Add or replace a named sparse survey layout.
+
+        Args:
+            survey: Sparse survey instance or serialized survey mapping.
+
+        Returns:
+            Stored ``SparseSurvey`` instance.
+        """
 
         if isinstance(survey, dict):
             survey = SparseSurvey.from_fs(survey)
@@ -199,7 +253,16 @@ class Acquisition(ExtraFieldsMixin):
         return survey
 
     def add_sparse_survey(self, name: str, traces=None, **kwargs) -> SparseSurvey:
-        """Create and add a named inline sparse survey."""
+        """Create and add a named inline sparse survey.
+
+        Args:
+            name: Survey name.
+            traces: Optional initial trace samples.
+            **kwargs: Additional ``SparseSurvey`` constructor arguments.
+
+        Returns:
+            Newly added ``SparseSurvey`` instance.
+        """
 
         return self.add_survey(SparseSurvey(name=name, traces=traces, **kwargs))
 
@@ -217,6 +280,17 @@ class Acquisition(ExtraFieldsMixin):
         ``survey`` can be a survey name, a ``SparseSurvey`` object, or a survey
         dictionary loaded from JSON. Survey objects are added to
         ``Acquisition.surveys`` automatically.
+
+        Args:
+            name: Receiver group name.
+            device: Receiver device for the sparse samples.
+            coords: Receiver coordinate array or coordinate object.
+            survey: Sparse survey name, object, or serialized mapping.
+            domain: Optional receiver domain.
+            **kwargs: Additional solver-facing receiver group fields.
+
+        Returns:
+            Newly added ``ReceiverGroup``.
         """
         deprecated_frame_keys = {"frame", "source_frame", "receiver_frame"} & set(
             kwargs
@@ -250,7 +324,15 @@ class Acquisition(ExtraFieldsMixin):
         return group
 
     def list_fields(self, recv_name: str = "") -> List[str]:
-        """List available fields for a specified receiver group or for all groups."""
+        """List receiver output field selectors.
+
+        Args:
+            recv_name: Optional receiver group name. When omitted, all receiver
+                groups are included.
+
+        Returns:
+            Field selectors of the form ``"<group>:<component>"``.
+        """
         field_list = []
 
         if recv_name:
@@ -266,29 +348,36 @@ class Acquisition(ExtraFieldsMixin):
         return field_list
 
     def list_sources(self) -> List[int]:
-        """List valid source numbers."""
+        """Return valid one-based source numbers."""
+
         return list(range(1, len(self.source_groups) + 1))
 
     def source(self, isrc: int) -> SourceGroup:
-        """Retrieve a source by index."""
+        """Return a source group by one-based index.
+
+        Args:
+            isrc: One-based source index.
+
+        Returns:
+            Matching ``SourceGroup``.
+        """
         try:
             return self.source_groups[isrc - 1]
         except IndexError:
             raise IndexError(f"Source index {isrc} is out of range.")
 
     def _set_path(self, proj_path: Path, rel_path: Path):
-        self._proj_path = proj_path
-        self._rel_path = rel_path
-        for group in self.receiver_groups:
-            group._set_path(proj_path, rel_path)
-        for group in self.source_groups:
-            group._set_path(proj_path, rel_path)
-        for survey in self.surveys:
-            if hasattr(survey, "_set_path"):
-                survey._set_path(proj_path, rel_path)
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
+        self._proj_path = Path(proj_path).expanduser().resolve()
+        self._rel_path = Path(rel_path)
 
     def receiver_coords(self, group: Optional[str] = None):
-        """Get receiver coordinates."""
+        """Return receiver coordinates.
+
+        Args:
+            group: Optional receiver group name. When omitted, all groups are
+                returned as a mapping.
+        """
         if group is None:
             group_locations = {}
             for group in self.receiver_groups:
@@ -298,7 +387,11 @@ class Acquisition(ExtraFieldsMixin):
             return self.receiver_groups[group].coordinates.get()
 
     def source_coords(self, src: Optional[int] = None):
-        """Get source locations for all sources."""
+        """Return source coordinates.
+
+        Args:
+            src: Optional one-based source index.
+        """
         if src is None:
             return np.array([src.coordinates()[0] for src in self.source_groups])
         else:
@@ -306,7 +399,12 @@ class Acquisition(ExtraFieldsMixin):
             return self.source_groups[isrc].coordinates()[0]
 
     def offsets(self, src: int, group: str) -> Dict:
-        """Get receiver offsets."""
+        """Return horizontal source-receiver offsets.
+
+        Args:
+            src: One-based source index.
+            group: Receiver group name.
+        """
         diff = self.receiver_coords(group) - self.source_coords(src)
         offsets = np.hypot(diff[:, 0], diff[:, 1])
         return offsets
@@ -328,6 +426,7 @@ class Acquisition(ExtraFieldsMixin):
 
     @property
     def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         return self._proj_path / self._rel_path
 
 

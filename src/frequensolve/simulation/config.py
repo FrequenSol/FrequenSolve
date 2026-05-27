@@ -2,6 +2,7 @@ from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from frequensolve.util.mixins import warn_deprecated_path_api
 from frequensolve.util.physics import (
     canonical_dimension,
     canonical_physics,
@@ -69,7 +70,18 @@ class SimulationConfig:
         self._axisymmetric = False
 
     def to_fs(self, ctx=None) -> Dict:
-        project_path = self._proj_path
+        """Serialize the simulation identity block for solver input.
+
+        Args:
+            ctx: Optional export context. When present, ``ctx.project_path`` is
+                used as the project path written into the payload.
+
+        Returns:
+            JSON-compatible simulation configuration with canonical physics and
+            dimension values.
+        """
+
+        project_path = getattr(ctx, "project_path", None) or self._proj_path
         if project_path is None:
             project_path = getattr(self, "project_path", None)
         return {
@@ -82,6 +94,16 @@ class SimulationConfig:
 
     @classmethod
     def from_fs(cls, data: Dict[str, Any]) -> "SimulationConfig":
+        """Build a configuration from a solver payload.
+
+        Args:
+            data: Serialized simulation configuration mapping.
+
+        Returns:
+            ``SimulationConfig`` with physics and dimension normalized through
+            the public constructor.
+        """
+
         return cls(
             name=data.get("name"),
             physics=data.get("physics"),
@@ -90,11 +112,13 @@ class SimulationConfig:
         )
 
     def _set_path(self, proj_path: Path, rel_path: Path):
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
         self._proj_path = proj_path
         self._rel_path = rel_path / self.name
 
     @property
     def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         return self._proj_path / self._rel_path
 
 

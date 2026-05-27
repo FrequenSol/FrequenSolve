@@ -16,7 +16,12 @@ import h5py
 import numpy as np
 
 from frequensolve.units import value_and_units_to_fs
-from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
+from frequensolve.util.mixins import (
+    ExportContext,
+    ExtraFieldsMixin,
+    merge_extra,
+    warn_deprecated_path_api,
+)
 
 __all__ = [
     "ReceiverSampling",
@@ -92,6 +97,11 @@ class ReceiverSampling(ExtraFieldsMixin):
     Dense receiver groups omit this object. Sparse receiver groups usually use
     ``ReceiverSampling.sparse("survey_name")`` or are created through
     ``Acquisition.add_sparse_receiver_group``.
+
+    Args:
+        kind: Solver sampling kind, usually ``"Sparse"``.
+        survey: Referenced survey name.
+        extra: Additional solver-facing sampling fields.
     """
 
     kind: str = "Sparse"
@@ -100,10 +110,22 @@ class ReceiverSampling(ExtraFieldsMixin):
 
     @classmethod
     def sparse(cls, survey: Union[str, "SparseSurvey"]) -> "ReceiverSampling":
+        """Create sparse sampling that references a survey by name or object."""
+
         return cls.from_value(survey)
 
     @classmethod
     def from_value(cls, value: Any) -> Optional["ReceiverSampling"]:
+        """Coerce common public inputs into ``ReceiverSampling``.
+
+        Args:
+            value: ``None``, existing sampling object, survey object, survey
+                name, or serialized mapping.
+
+        Returns:
+            ``ReceiverSampling`` or ``None``.
+        """
+
         if value is None:
             return None
         if isinstance(value, ReceiverSampling):
@@ -122,12 +144,16 @@ class ReceiverSampling(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "ReceiverSampling":
+        """Deserialize receiver sampling from solver JSON."""
+
         payload = copy.deepcopy(dict(data))
         kind = payload.pop("_type", payload.pop("kind", "Sparse"))
         survey = payload.pop("survey", None)
         return cls(kind=kind, survey=survey, extra=payload)
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
+        """Serialize receiver sampling for solver input."""
+
         payload = {"_type": self.kind}
         if self.survey is not None:
             payload["survey"] = self.survey
@@ -141,6 +167,34 @@ class SparseTrace(ExtraFieldsMixin):
     Parameters use 1-based ids to match the solver. ``source`` and ``receiver``
     are aliases for ``source_id`` and ``receiver_id``. ``point`` is the common
     case where a trace maps to exactly one receiver coordinate row.
+
+    Args:
+        source: Alias for ``source_id``.
+        receiver: Alias for ``receiver_id``.
+        component: Component id or component name.
+        point: Receiver-position id for one-point traces.
+        points: Inclusive ``(point_first, point_last)`` receiver-position range.
+        source_id: One-based source id.
+        receiver_id: One-based receiver id.
+        receiver_position: Alias for ``receiver_position_id``.
+        receiver_position_id: One-based receiver-position id.
+        trace_id: Optional one-based trace id. Export assigns this when omitted.
+        component_id: Optional component id/name override.
+        channel_number: Optional acquisition channel number.
+        field_record: Optional field-record/source gather id.
+        point_first: First receiver-position id in the trace.
+        point_last: Last receiver-position id in the trace.
+        active: Whether the trace is active.
+        offset: Optional source-receiver offset.
+        azimuth: Optional source-receiver azimuth.
+        source_name: Optional source display name.
+        receiver_name: Optional receiver display name.
+        component_name: Optional component display name.
+        extra: Additional solver-facing trace fields.
+        **kwargs: Additional solver-facing trace fields.
+
+    Raises:
+        ValueError: If source or receiver ids are missing.
     """
 
     source_id: int
@@ -227,6 +281,8 @@ class SparseTrace(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "SparseTrace":
+        """Deserialize a sparse trace row."""
+
         payload = copy.deepcopy(dict(data))
         if "recv_pos_id" in payload and "receiver_position_id" not in payload:
             payload["receiver_position_id"] = payload.pop("recv_pos_id")
@@ -237,6 +293,22 @@ class SparseTrace(ExtraFieldsMixin):
         trace_id: Optional[int] = None,
         component_map: Optional[Mapping[str, int]] = None,
     ) -> Dict[str, Any]:
+        """Serialize this trace row for solver input.
+
+        Args:
+            trace_id: One-based export row id used when the trace does not
+                already define one.
+            component_map: Optional mapping from component names to one-based
+                component ids.
+
+        Returns:
+            JSON-compatible sparse trace row.
+
+        Raises:
+            ValueError: If no positive trace id is available or a named
+                component cannot be resolved.
+        """
+
         out_trace_id = int(self.trace_id or trace_id or 0)
         if out_trace_id <= 0:
             raise ValueError("SparseTrace requires a positive trace_id or export row")
@@ -281,7 +353,19 @@ class SparseTrace(ExtraFieldsMixin):
 
 @dataclass(init=False)
 class EvalSample(ExtraFieldsMixin):
-    """Optional sparse sample row used for weighted/fiber-style traces."""
+    """Optional sparse sample row used for weighted/fiber-style traces.
+
+    Args:
+        point: Alias for ``point_id``.
+        point_id: Receiver point id sampled by this row.
+        sample_id: Optional sample id. Export assigns this when omitted.
+        receiver_position: Alias for ``receiver_position_id``.
+        receiver_position_id: Optional receiver position id.
+        x: Optional physical sample coordinate.
+        direction: Optional sample direction vector.
+        extra: Additional solver-facing sample fields.
+        **kwargs: Additional solver-facing sample fields.
+    """
 
     sample_id: Optional[int]
     point_id: int
@@ -320,12 +404,16 @@ class EvalSample(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "EvalSample":
+        """Deserialize an evaluation sample row."""
+
         payload = copy.deepcopy(dict(data))
         if "recveiver_position_id" in payload and "receiver_position_id" not in payload:
             payload["receiver_position_id"] = payload.pop("recveiver_position_id")
         return cls(**payload)
 
     def to_fs(self, sample_id: Optional[int] = None) -> Dict[str, Any]:
+        """Serialize this evaluation sample row for solver input."""
+
         out_sample_id = int(self.sample_id or sample_id or 0)
         if out_sample_id <= 0:
             raise ValueError("EvalSample requires a positive sample_id or export row")
@@ -347,7 +435,18 @@ class EvalSample(ExtraFieldsMixin):
 
 @dataclass(init=False)
 class TraceSample(ExtraFieldsMixin):
-    """Optional sparse trace/sample weight row."""
+    """Optional sparse trace/sample weight row.
+
+    Args:
+        trace: Alias for ``trace_row``.
+        trace_row: One-based trace row id.
+        sample: Alias for ``sample_id``.
+        sample_id: One-based evaluation sample id.
+        component: Component id or component name.
+        weight: Sample contribution weight.
+        extra: Additional solver-facing row fields.
+        **kwargs: Additional solver-facing row fields.
+    """
 
     trace_row: int
     sample_id: int
@@ -383,11 +482,15 @@ class TraceSample(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "TraceSample":
+        """Deserialize a trace/sample weight row."""
+
         return cls(**copy.deepcopy(dict(data)))
 
     def to_fs(
         self, component_map: Optional[Mapping[str, int]] = None
     ) -> Dict[str, Any]:
+        """Serialize this trace/sample weight row for solver input."""
+
         payload = {
             "trace_row": self.trace_row,
             "sample_id": self.sample_id,
@@ -404,6 +507,21 @@ class SparseSurvey(ExtraFieldsMixin):
     The default form exports inline JSON accepted by the fast solver's ``Sparse`` layout
     reader. Use ``SparseSurvey.file(...)`` for an existing HDF5 trace store or
     ``SparseSurvey.sps(...)`` for SPS source/receiver/relation files.
+
+    Args:
+        name: Survey name referenced by receiver groups.
+        traces: Inline sparse trace rows.
+        kind: Solver survey kind. Inferred from file/offset arguments when
+            omitted.
+        eval_samples: Optional evaluation sample rows.
+        trace_samples: Optional trace/sample weighting rows.
+        layout_file: Existing HDF5 trace-store layout file.
+        source_file: SPS source file.
+        receiver_file: SPS receiver file.
+        relation_file: SPS relation file.
+        offset_domain: Offset-domain selection payload.
+        extra: Additional solver-facing survey fields.
+        **kwargs: Additional solver-facing survey fields.
     """
 
     name: str
@@ -467,6 +585,8 @@ class SparseSurvey(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "SparseSurvey":
+        """Deserialize sparse survey configuration from solver JSON."""
+
         payload = copy.deepcopy(dict(data))
         kind = payload.pop("_type", payload.pop("kind", "Sparse"))
         return cls(kind=kind, **payload)
@@ -480,6 +600,15 @@ class SparseSurvey(ExtraFieldsMixin):
         kind: str = "HDF5TraceStore",
         **kwargs: Any,
     ) -> "SparseSurvey":
+        """Create a survey backed by an existing layout file.
+
+        Args:
+            name: Survey name.
+            layout_file: HDF5 layout file path.
+            kind: Solver survey kind.
+            **kwargs: Additional ``SparseSurvey`` constructor arguments.
+        """
+
         return cls(name=name, kind=kind, layout_file=layout_file, **kwargs)
 
     hdf5 = file
@@ -495,6 +624,8 @@ class SparseSurvey(ExtraFieldsMixin):
         kind: str = "SPSFiles",
         **kwargs: Any,
     ) -> "SparseSurvey":
+        """Create a survey backed by SPS source/receiver/relation files."""
+
         return cls(
             name=name,
             kind=kind,
@@ -517,6 +648,8 @@ class SparseSurvey(ExtraFieldsMixin):
         kind: str = "OffsetDomain",
         **kwargs: Any,
     ) -> "SparseSurvey":
+        """Create a survey that selects traces by source-receiver offset."""
+
         offset_domain: Dict[str, Any] = {
             "metric": metric,
             "absolute": bool(absolute),
@@ -546,6 +679,24 @@ class SparseSurvey(ExtraFieldsMixin):
         receiver_points: Optional[Mapping[int, int]] = None,
         **kwargs: Any,
     ) -> "SparseSurvey":
+        """Create a sparse survey from explicit source/receiver pairs.
+
+        Args:
+            name: Survey name.
+            pairs: Iterable of ``(source_id, receiver_id)`` pairs.
+            source_ids: Source ids used with ``receiver_ids`` when ``pairs`` is
+                omitted.
+            receiver_ids: Receiver ids used with ``source_ids`` when ``pairs``
+                is omitted.
+            component: Component id/name for created traces.
+            receiver_points: Optional mapping from receiver id to receiver point
+                id.
+            **kwargs: Additional ``SparseSurvey`` constructor arguments.
+
+        Returns:
+            Populated ``SparseSurvey``.
+        """
+
         survey = cls(name, **kwargs)
         if pairs is None:
             if source_ids is None or receiver_ids is None:
@@ -575,6 +726,8 @@ class SparseSurvey(ExtraFieldsMixin):
         receiver_points: Optional[Mapping[int, int]] = None,
         **kwargs: Any,
     ) -> "SparseSurvey":
+        """Create traces for the Cartesian product of sources and receivers."""
+
         if isinstance(components, (str, int)):
             component_list = [components]
         else:
@@ -597,24 +750,32 @@ class SparseSurvey(ExtraFieldsMixin):
         return survey
 
     def add_trace(self, *args: Any, **kwargs: Any) -> SparseTrace:
+        """Append a sparse trace row and return it."""
+
         trace = args[0] if args else SparseTrace(**kwargs)
         trace = _as_trace(trace)
         self.traces.append(trace)
         return trace
 
     def add_eval_sample(self, *args: Any, **kwargs: Any) -> EvalSample:
+        """Append an evaluation sample row and return it."""
+
         sample = args[0] if args else EvalSample(**kwargs)
         sample = _as_eval_sample(sample)
         self.eval_samples.append(sample)
         return sample
 
     def add_trace_sample(self, *args: Any, **kwargs: Any) -> TraceSample:
+        """Append a trace/sample weighting row and return it."""
+
         sample = args[0] if args else TraceSample(**kwargs)
         sample = _as_trace_sample(sample)
         self.trace_samples.append(sample)
         return sample
 
     def sampling(self) -> ReceiverSampling:
+        """Return receiver sampling that references this survey."""
+
         return ReceiverSampling(kind=self.kind, survey=self.name)
 
     def to_fs(
@@ -623,6 +784,8 @@ class SparseSurvey(ExtraFieldsMixin):
         *,
         component_map: Optional[Mapping[str, int]] = None,
     ) -> Dict[str, Any]:
+        """Serialize this sparse survey for solver input."""
+
         payload: Dict[str, Any] = {"name": self.name, "_type": self.kind}
         kind = self.kind.strip().lower()
 
@@ -661,7 +824,16 @@ class SparseSurvey(ExtraFieldsMixin):
         *,
         component_map: Optional[Mapping[str, int]] = None,
     ) -> Path:
-        """Write this survey as a fast solver-compatible HDF5 trace-store layout."""
+        """Write this survey as a fast solver-compatible HDF5 trace-store layout.
+
+        Args:
+            file: Destination HDF5 file path.
+            component_map: Optional mapping from component names to one-based
+                component ids.
+
+        Returns:
+            Path to the written HDF5 file.
+        """
 
         path = Path(file)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -869,5 +1041,6 @@ class SparseSurvey(ExtraFieldsMixin):
             )
 
     def _set_path(self, proj_path: Path, rel_path: Path) -> None:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
         self._proj_path = proj_path
         self._rel_path = rel_path

@@ -128,6 +128,20 @@ def _as_file_list(files: Iterable[Union[str, Path]]) -> List[Union[str, Path]]:
 
 @dataclass(init=False)
 class TraceStore:
+    """Low-level reader for FrequenSolve HDF5 trace products.
+
+    ``TraceDataset`` is the preferred public facade. Use ``TraceStore`` when
+    code needs direct access to consolidated HDF5 groups or legacy read
+    methods.
+
+    Args:
+        metadata: Trace metadata including frequency map, groups, and project
+            paths.
+        files: Trace HDF5 files or per-frequency shard files.
+        upscale: Default upscaling factor for reconstructed time-domain reads.
+        cache_dir: Optional directory for virtual HDF5 consolidation files.
+    """
+
     metadata: Dict[str, Any]
     files: List[str]
     _upscale: int
@@ -157,8 +171,11 @@ class TraceStore:
         """Create a TraceStore from a simulation job.
 
         Args:
-            job: A SimulationJob-like object.
+            job: A BaseJob-like object.
             upscale: Time-domain upscale factor.
+
+        Returns:
+            ``TraceStore`` initialized from the job's trace artifact metadata.
         """
         traces = job.traces
         proj_path = Path(job.project_path).resolve()
@@ -189,9 +206,13 @@ class TraceStore:
         return db
 
     def __enter__(self) -> "TraceStore":
+        """Enter a context manager for deterministic HDF5 cleanup."""
+
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
+        """Close HDF5 handles when leaving a context manager."""
+
         self.close()
         return False
 
@@ -207,14 +228,25 @@ class TraceStore:
 
     @property
     def upscale(self) -> int:
+        """Return the default upscaling factor for time-domain reads."""
+
         return self._upscale
 
     @upscale.setter
     def upscale(self, upscale: int) -> None:
+        """Set the default upscaling factor for time-domain reads."""
+
         self._upscale = upscale
 
     def times(self, upscale: Optional[int] = None) -> np.ndarray:
-        """Returns the trace sample times."""
+        """Return reconstructed trace sample times.
+
+        Args:
+            upscale: Optional upscaling factor. Defaults to ``self.upscale``.
+
+        Returns:
+            One-dimensional time sample array.
+        """
 
         upscale = self.upscale if upscale is None else upscale
         sampling = UniformSweepSampling(
@@ -237,11 +269,15 @@ class TraceStore:
 
     @property
     def groups(self) -> list[str]:
+        """Return receiver or wavefield groups available in the trace store."""
+
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             return self._h5_trace_groups(f, self.metadata.get("groups"))
 
     def dims(self, group) -> list[str]:
+        """Return xarray dimension names for a trace group."""
+
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             if self._is_indexed_packed_h5(f) and group not in f:
@@ -253,6 +289,8 @@ class TraceStore:
             ]
 
     def components(self, group) -> list[str]:
+        """Return component labels available in a trace group."""
+
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             for path in (
@@ -271,6 +309,8 @@ class TraceStore:
             return np.arange(1, dset.shape[-2] + 1)
 
     def sources(self, group) -> list[str]:
+        """Return source ids available in a trace group."""
+
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             path = f"survey/receiver_groups/{group}/traces/source_id"
@@ -291,6 +331,8 @@ class TraceStore:
         return self.sources(group)
 
     def frequencies(self, group) -> list[str]:
+        """Return frequencies available in a trace group."""
+
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             if self._is_indexed_packed_h5(f) and group not in f:
@@ -315,6 +357,8 @@ class TraceStore:
             return np.array(list(self.metadata["f_map"].values()))
 
     def laplace(self, group: Optional[str] = None) -> np.ndarray:
+        """Return Laplace offsets for all traces or a specific group."""
+
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             if group is not None and self._is_indexed_packed_h5(f) and group not in f:
@@ -342,6 +386,8 @@ class TraceStore:
             return self._metadata_laplace_values(frequencies)
 
     def receivers(self, group) -> list[str]:
+        """Return receiver ids available in a trace group."""
+
         self._ensure_consolidated()
         with h5py.File(self._consolidated, "r") as f:
             for path in (
@@ -362,6 +408,8 @@ class TraceStore:
             return np.arange(1, dset.shape[ind] + 1)
 
     def survey_tables(self) -> Dict[str, Any]:
+        """Return embedded survey metadata tables from the trace store."""
+
         if self._consolidated is None:
             self.consolidate()
 
@@ -381,6 +429,8 @@ class TraceStore:
             return read_group(f["survey"])
 
     def format_summary(self, colorize: bool = False) -> TraceSummary:
+        """Return a human-readable summary of groups, sources, and frequencies."""
+
         def _gray(text: str, light: bool = True) -> str:
             if colorize:
                 if light:
@@ -414,6 +464,8 @@ class TraceStore:
 
     @property
     def summary(self) -> TraceSummary:
+        """Return a notebook-friendly trace summary."""
+
         return self.format_summary()
 
     def print_summary(
@@ -422,6 +474,17 @@ class TraceStore:
         colorize: Optional[bool] = None,
         file: Optional[Any] = None,
     ) -> TraceSummary:
+        """Print and return a trace summary.
+
+        Args:
+            colorize: Whether to include ANSI color codes. Defaults to terminal
+                detection.
+            file: Optional text stream.
+
+        Returns:
+            Printed ``TraceSummary``.
+        """
+
         file = sys.stdout if file is None else file
         if colorize is None:
             isatty = getattr(file, "isatty", None)
@@ -649,6 +712,16 @@ class TraceStore:
         file: Union[str, Path],
         configured: Optional[Iterable[str]] = None,
     ) -> list[str]:
+        """Discover trace group names in an HDF5 trace file.
+
+        Args:
+            file: HDF5 trace file path.
+            configured: Optional configured group order/filter.
+
+        Returns:
+            List of trace group names.
+        """
+
         with h5py.File(file, "r") as h5:
             return TraceStore._h5_trace_groups(h5, configured)
 
@@ -815,7 +888,14 @@ class TraceStore:
         return None
 
     def consolidate(self, cache_dir: Optional[Union[str, Path]] = None) -> Path:
-        """Create a virtual HDF5 file with frequency as the leading axis."""
+        """Create or select a packed trace file with frequency as leading axis.
+
+        Args:
+            cache_dir: Optional directory for the generated virtual dataset.
+
+        Returns:
+            Path to a packed or virtual HDF5 trace file.
+        """
 
         records = [Path(file) for file in self.files]
         if not records:
@@ -909,6 +989,16 @@ class TraceStore:
         return self._consolidated
 
     def read_h5(self, group: str) -> DataArray:
+        """Open a lazy frequency-domain xarray view for one trace group.
+
+        Args:
+            group: Receiver or wavefield group name.
+
+        Returns:
+            Lazy ``xarray.DataArray`` with physical coordinates and complex-axis
+            metadata.
+        """
+
         try:
             import dask.array as da
         except ModuleNotFoundError as exc:
@@ -1033,6 +1123,19 @@ class TraceStore:
         wavelet: Optional[Wavelet] = None,
         **kwargs,
     ):
+        """Read one complex frequency-domain gather.
+
+        Args:
+            group: Receiver group name.
+            component: Component name.
+            source: One-based source id.
+            wavelet: Optional wavelet used to scale frequency samples.
+            **kwargs: Optional wavelet/taper controls.
+
+        Returns:
+            Complex ``xarray.DataArray`` indexed by frequency and receiver axes.
+        """
+
         if wavelet is None:
             dset = self.read_h5(group)
             gather = dset.sel(component=component, source=source)
@@ -1165,6 +1268,23 @@ class TraceStore:
         laplace_compensation: Union[str, bool] = "auto",
         **kwargs,
     ) -> DataArray:
+        """Read one reconstructed time-domain gather.
+
+        Args:
+            group: Receiver group name.
+            component: Component name.
+            source: One-based source id.
+            wavelet: Wavelet used for inverse transformation.
+            upscale: Reconstruction upscaling factor.
+            T_max: Optional maximum time to return.
+            laplace_compensation: ``"auto"``, ``"on"``, ``"off"``, or boolean
+                compatibility value controlling Laplace damping compensation.
+            **kwargs: Optional frequency-domain read controls.
+
+        Returns:
+            Time-domain ``xarray.DataArray``.
+        """
+
         compensation_mode = self._normalize_laplace_compensation(laplace_compensation)
         sampling = UniformSweepSampling(
             f_min=0.0,
@@ -1232,6 +1352,8 @@ class TraceStore:
         T_max: Optional[float] = None,
         **kwargs,
     ) -> DataArray:
+        """Read one Laplace-domain time gather without compensation."""
+
         td = self.read_TD(
             group,
             component,
@@ -1247,6 +1369,17 @@ class TraceStore:
         return td
 
     def CosineWindow(self, t0: float, tf: float, taper: float) -> DataArray:
+        """Create a cosine-tapered time window.
+
+        Args:
+            t0: Start time of the flat window.
+            tf: End time of the flat window.
+            taper: Taper duration on each side.
+
+        Returns:
+            Window ``DataArray`` indexed by time.
+        """
+
         sampling = UniformSweepSampling(
             f_min=0.0,
             f_max=self.metadata["f_max"],
@@ -1287,6 +1420,24 @@ class TraceStore:
         T_max: Optional[float] = None,
         **kwargs,
     ) -> DataArray:
+        """Read a time-domain gather after applying a frequency-domain window.
+
+        Args:
+            group: Receiver group name.
+            component: Component name.
+            source: One-based source id.
+            wavelet: Wavelet used for inverse transformation.
+            window: Time-domain window.
+            N_window: Number of frequency bins on each side of the window
+                kernel.
+            upscale: Reconstruction upscaling factor.
+            T_max: Optional maximum time to return.
+            **kwargs: Optional frequency-domain read controls.
+
+        Returns:
+            Windowed time-domain ``xarray.DataArray``.
+        """
+
         sampling = UniformSweepSampling(
             f_min=0.0,
             f_max=self.metadata["f_max"],

@@ -8,9 +8,19 @@ except ImportError:
 
 
 class CustomJSONEncoder(json.JSONEncoder):
-    """Custom JSON encoder for Simulation objects."""
+    """JSON encoder for FrequenSolve serialization helpers."""
 
     def default(self, obj):
+        """Encode FrequenSolve, NumPy, xarray, and path-like values.
+
+        Args:
+            obj: Object to encode.
+
+        Returns:
+            JSON-compatible representation, or the superclass result for
+            unsupported objects.
+        """
+
         from frequensolve.util.mixins import fs_serialize
 
         serialized = fs_serialize(obj)
@@ -22,7 +32,7 @@ class CustomJSONEncoder(json.JSONEncoder):
 if toml is not None:
 
     class CustomTOMLEncoder(toml.TomlEncoder):
-        """Custom TOML encoder for Simulation objects."""
+        """TOML encoder for FrequenSolve serialization helpers."""
 
         def dump_value(self, obj):
             from numpy import bool_, floating, integer, ndarray

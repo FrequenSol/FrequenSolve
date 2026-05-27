@@ -131,7 +131,15 @@ class _Stampede3ICXConfig(BaseSiteConfig):
 
 @dataclass
 class Stampede3Config:
-    """Combines immutable base configuration with queue info for Stampede3."""
+    """Combines immutable base configuration with queue info for Stampede3.
+
+    Args:
+        queue: Stampede3 queue/partition name. Supported values are ``"spr"``,
+            ``"icx"``, ``"skx"``, and ``"skx-dev"``.
+
+    Raises:
+        ValueError: If ``queue`` is not supported.
+    """
 
     _queue: _BaseQueue
     _base_config: BaseSiteConfig
@@ -154,66 +162,108 @@ class Stampede3Config:
 
     @property
     def hostname(self):
+        """Return the Stampede3 login host name."""
+
         return self._base_config._hostname
 
     @property
     def scheduler(self):
+        """Return the scheduler name used by this site."""
+
         return self._base_config._scheduler
 
     @property
     def mpi_wrapper(self):
+        """Return the MPI launcher command."""
+
         return self._base_config._mpi_wrapper
 
     @property
     def poll_interval(self):
+        """Return the default queue polling interval in seconds."""
+
         return self._base_config._poll_interval
 
     @property
     def sockets_per_node(self):
+        """Return the number of CPU sockets per node."""
+
         return self._base_config._sockets_per_node
 
     @property
     def gpus_per_node(self):
+        """Return the number of GPUs per node."""
+
         return self._base_config._gpus_per_node
 
     @property
     def cores_per_socket(self):
+        """Return the number of CPU cores per socket."""
+
         return self._base_config._cores_per_socket
 
     @property
     def cores_per_node(self):
+        """Return the total CPU cores per node."""
+
         return self.cores_per_socket * self.sockets_per_node
 
     @property
     def memory_per_node(self):
+        """Return memory per node in megabytes."""
+
         return self._base_config._memory_per_node
 
     @property
     def memory_per_core(self):
+        """Return memory per CPU core in megabytes."""
+
         return self._base_config._memory_per_node / self.cores_per_node
 
     @property
     def account(self):
+        """Return the default allocation account."""
+
         return self._base_config._account
 
     @property
     def queue(self):
+        """Return the active queue/partition name."""
+
         return self._queue._name
 
     @property
     def max_duration(self):
+        """Return the maximum wall-clock duration for the queue."""
+
         return self._queue._max_duration
 
     @property
     def max_nodes(self):
+        """Return the maximum number of nodes allowed by the queue."""
+
         return self._queue._max_nodes
 
     @property
     def min_nodes(self):
+        """Return the minimum number of nodes required by the queue."""
+
         return self._queue._min_nodes
 
     def validate_request(self, nhost: int, nproc: int, duration: str):
-        """Checks that request is within queue parameters"""
+        """Validate a requested allocation against queue limits.
+
+        Args:
+            nhost: Requested node count.
+            nproc: Requested process count.
+            duration: Requested wall time as ``HH:MM:SS`` or ``D-HH:MM:SS``.
+
+        Returns:
+            Validated duration, possibly clamped to the queue maximum.
+
+        Raises:
+            ValueError: If node or process counts violate queue limits.
+        """
         if nhost < self.min_nodes:
             raise ValueError(f"Minimum number of nodes is {self.min_nodes}")
         if nhost > self.max_nodes:

@@ -22,21 +22,52 @@ class Serializer(ABC):
     """
 
     def __init__(self, format: str) -> None:
+        """Initialize serializer callables for a stream format.
+
+        Args:
+            format: ``"JSON"`` or ``"YAML"``.
+        """
+
         self.format = format
         self.serialize_func = get_serializer(format)
         self.deserialize_func = get_deserializer(format)
 
     @abstractmethod
     def serialize(self, payload: dict) -> str:
-        """Abstract method for serialize."""
+        """Serialize a payload to the configured stream format.
+
+        Args:
+            payload: Mapping to encode.
+
+        Returns:
+            Encoded string.
+        """
 
     @abstractmethod
     def deserialize(self, stream: str) -> dict:
-        """Abstract method for deserialize."""
+        """Deserialize a stream from the configured format.
+
+        Args:
+            stream: Encoded JSON/YAML string.
+
+        Returns:
+            Decoded mapping.
+        """
 
     @staticmethod
     def validate(data: dict, signature: Signature) -> dict:
-        """Validate if required keys exist in the payload for a function signature."""
+        """Validate payload keys against a callable signature.
+
+        Args:
+            data: Decoded payload mapping.
+            signature: Signature whose parameter names are required.
+
+        Returns:
+            Mapping limited to expected keys.
+
+        Raises:
+            KeyError: If required keys are missing.
+        """
         observed = set(data)
         expected = set(signature.parameters)
 
@@ -51,7 +82,17 @@ class Serializer(ABC):
 
 
 def get_serializer(stream_format: str) -> Callable:
-    """Get serializer based on format."""
+    """Return a serializer function for a stream format.
+
+    Args:
+        stream_format: ``"JSON"`` or ``"YAML"``.
+
+    Returns:
+        Callable that converts a mapping to a string.
+
+    Raises:
+        ValueError: If the format is unsupported.
+    """
     stream_format = stream_format.upper()
     if stream_format == "JSON":
         return _serialize_to_json
@@ -62,7 +103,17 @@ def get_serializer(stream_format: str) -> Callable:
 
 
 def get_deserializer(stream_format: str) -> Callable:
-    """Get deserializer based on format."""
+    """Return a deserializer function for a stream format.
+
+    Args:
+        stream_format: ``"JSON"`` or ``"YAML"``.
+
+    Returns:
+        Callable that converts a string to a mapping.
+
+    Raises:
+        ValueError: If the format is unsupported.
+    """
     stream_format = stream_format.upper()
     if stream_format == "JSON":
         return _deserialize_json

@@ -12,7 +12,14 @@ __all__ = ["Report", "Figure", "Section"]
 
 @dataclass(init=False)
 class Figure:
-    """A figure in a report."""
+    """A figure included in a generated report.
+
+    Args:
+        title: Figure title.
+        caption: Figure caption.
+        image: Image path.
+        width: Fractional LaTeX text width.
+    """
 
     title: str = ""
     caption: str = ""
@@ -36,7 +43,12 @@ class Figure:
 
 @dataclass
 class Section:
-    """A section of a report."""
+    """A report section containing figures.
+
+    Args:
+        title: Section title.
+        figures: Initial figures.
+    """
 
     title: str = ""
     figures: List[Figure] = field(default_factory=list)
@@ -45,12 +57,26 @@ class Section:
         self,
         figure: Figure,
     ) -> Figure:
-        """Adds a Figure object to the section."""
+        """Add a figure object to the section.
+
+        Args:
+            figure: Figure to add.
+
+        Returns:
+            Stored figure.
+        """
         self.figures.append(figure)
         return self.figures[-1]
 
     def new_figure(self, title="", caption="", image="", width=1.0) -> Figure:
-        """Adds an empty figure to the section or initializes with given values."""
+        """Create, add, and return a new figure.
+
+        Args:
+            title: Figure title.
+            caption: Figure caption.
+            image: Image path.
+            width: Fractional LaTeX text width.
+        """
         fig = Figure(title=title, caption=caption, image=image, width=width)
         self.figures.append(fig)
         return fig
@@ -58,37 +84,52 @@ class Section:
 
 @dataclass
 class Report:
+    """LaTeX-backed PDF report description.
+
+    Args:
+        title: Report title.
+        subtitle: Report subtitle.
+        author: Report author.
+        sections: Initial report sections.
+    """
+
     title: str = "Simulation Report"
     subtitle: str = "An Automated Simulation Report"
     author: str = ""
     sections: List[Section] = field(default_factory=list)
 
     def add_section(self, section: Section) -> Section:
-        """Adds a section to report
+        """Add a section to the report.
 
-        Attributes:
-           section (Section): The section to add
+        Args:
+            section: Section to add.
+
+        Returns:
+            Stored section.
         """
         self.sections.append(section)
         return self.sections[-1]
 
     def new_section(self, title: str = "") -> Section:
-        """Adds an empty section to report
+        """Create, add, and return a new section.
 
-        Attributes:
-           title (str): Title of the section
+        Args:
+            title: Section title.
+
+        Returns:
+            Newly added section.
         """
         sec = Section(title=title)
         self.sections.append(sec)
         return sec
 
     def generate(self, path: Union[str, Path], name="report", timeout: int = 30):
-        """Compiles PDF from LaTeX
+        """Compile the report to PDF using the configured LaTeX template.
 
-        Attributes:
-           path (str): Where PDF will be saved
-           name (str): Name of the report
-           timeout (int): Timeout for compilation command (stalls on error)
+        Args:
+            path: Output PDF file or directory.
+            name: Output report stem.
+            timeout: Timeout in seconds for each ``pdflatex`` pass.
         """
         current_dir = os.getcwd()
         path = Path(path)
@@ -160,7 +201,11 @@ class Report:
 
 # Utility functions
 def setup_work_directory(work_dir: Path):
-    """Sets up the work directory for the report."""
+    """Set up the temporary LaTeX work directory for report generation.
+
+    Args:
+        work_dir: Directory that will receive the report template files.
+    """
     try:
         from dotenv import load_dotenv
     except ModuleNotFoundError as exc:

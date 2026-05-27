@@ -45,12 +45,11 @@ logger.addHandler(ch)
 
 
 class SystemInfo:
-    """
-    A class to gather system information such as OS, CPU, GPU, and
-    certain pre-installed software versions.
-    """
+    """Collect operating system, CPU, GPU, and software version information."""
 
     def __init__(self):
+        """Initialize a system information collector."""
+
         logger.debug("Initializing SystemInfo...")
 
     def get_os_info(self) -> Dict[str, str]:

@@ -7,6 +7,14 @@ __all__ = ["Version"]
 
 @dataclass
 class Version:
+    """Semantic project-format version.
+
+    Args:
+        major: Major version number. Defaults to ``0``.
+        minor: Minor version number. Defaults to ``0``.
+        patch: Patch version number. Defaults to ``0``.
+    """
+
     major: int
     minor: int
     patch: int

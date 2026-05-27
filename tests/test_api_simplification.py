@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import shutil
 import warnings
 from pathlib import Path
 
@@ -42,8 +43,8 @@ from frequensolve.seismic.receivers import (
 from frequensolve.seismic.sparse_survey import SparseSurvey
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.seismic.wavelet import RickerWavelet
-from frequensolve.simulation.artifacts import OutputArtifact, TraceManifest
 from frequensolve.simulation.jobs import FrequencyDomainJob
+from frequensolve.simulation.jobs.artifacts import OutputArtifact, TraceManifest
 from frequensolve.simulation.outputs import (
     JobOutputs,
     OutputUnits,
@@ -971,6 +972,20 @@ def test_explicit_axisymmetric_physics_sets_axisymmetric_flag(tmp_path):
     assert sim.physics == "acoustic_axisym"
     assert sim.axisymmetric is True
     assert components_for_physics("acoustic_axisym") is not None
+
+
+def test_private_path_api_warns_as_deprecated(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+
+    with pytest.warns(DeprecationWarning, match="_set_path"):
+        sim._set_path(tmp_path, Path("simulations"))
+    with pytest.warns(DeprecationWarning, match="_path"):
+        assert sim._path == tmp_path / "simulations" / "simple"
 
 
 def test_project_new_simulation_accepts_coupled_aep_physics(tmp_path):
@@ -2106,6 +2121,87 @@ def test_receiver_coordinate_file_exports_project_relative_locator(tmp_path):
         payload["Acquisition"]["receiver_groups"][0]["coordinates"]["file"]
         == "simulations/simple/simple.h5:inputs/acquisition/receivers/surface/coordinates"
     )
+
+
+def test_loaded_receiver_coordinate_file_resolves_project_relative_get(tmp_path):
+    coord_file = tmp_path / "simulations" / "simple" / "simple.h5"
+    coord_file.parent.mkdir(parents=True)
+    values = np.array([[0.25, 0.0], [0.75, 0.0]])
+    with h5py.File(coord_file, "w") as h5:
+        h5.create_dataset("coords", data=values)
+
+    coords = CoordsFromFile(
+        file="simulations/simple/simple.h5",
+        format="HDF5",
+        dset="coords",
+    )
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    loaded = SeismicSimulation.load(sim.save())
+    loaded_coords = loaded.acquisition.receiver_groups[0].coordinates
+
+    np.testing.assert_allclose(loaded_coords.get(), values)
+
+
+def test_loaded_receiver_coordinate_file_uses_json_location_not_cwd(
+    tmp_path, monkeypatch
+):
+    source_project = tmp_path / "source_project"
+    copied_project = tmp_path / "copied_project"
+    unrelated_dir = tmp_path / "unrelated"
+    unrelated_dir.mkdir()
+
+    coord_file = source_project / "inputs" / "receiver_coords.h5"
+    coord_file.parent.mkdir(parents=True)
+    source_values = np.array([[0.10, 0.0], [0.90, 0.0]])
+    copied_values = np.array([[0.25, 0.0], [0.75, 0.0]])
+    with h5py.File(coord_file, "w") as h5:
+        h5.create_dataset("coords", data=source_values)
+
+    coords = CoordsFromFile(file=coord_file, format="HDF5", dset="coords")
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=source_project,
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    shutil.copytree(source_project, copied_project)
+    with h5py.File(copied_project / "inputs" / "receiver_coords.h5", "w") as h5:
+        h5.create_dataset("coords", data=copied_values)
+
+    monkeypatch.chdir(unrelated_dir)
+
+    loaded = SeismicSimulation.load(
+        copied_project / "simulations" / "simple" / "simple.json"
+    )
+    loaded_coords = loaded.acquisition.receiver_groups[0].coordinates
+
+    assert loaded.project_path == copied_project.resolve()
+    assert loaded_coords.file == copied_project / "inputs" / "receiver_coords.h5"
+    np.testing.assert_allclose(loaded_coords.get(), copied_values)
 
 
 def test_receiver_coordinate_file_hash_changes_with_hdf5_contents(tmp_path):

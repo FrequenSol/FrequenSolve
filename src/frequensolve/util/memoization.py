@@ -17,11 +17,19 @@ __all__ = ["memoized_func", "memoized_meth", "memoized_generator", "quantize"]
 
 
 class memoized_func:
+    """Memoize calls to a standalone function with hashable arguments.
+
+    Args:
+        func: Function to wrap.
+    """
+
     def __init__(self, func):
         self.func = func
         self.cache = {}
 
     def __call__(self, *args, **kw):
+        """Return a cached function result when arguments are hashable."""
+
         if not isinstance(args, Hashable):
             return self.func(*args, **kw)
         key = (self.func, args, frozenset(kw.items()))
@@ -38,6 +46,12 @@ class memoized_func:
 
 
 class memoized_meth:
+    """Memoize instance-method calls on the owning object.
+
+    Args:
+        func: Method to wrap.
+    """
+
     def __init__(self, func):
         self.func = func
 
@@ -48,6 +62,8 @@ class memoized_meth:
         return partial(self, obj)
 
     def __call__(self, *args, **kw):
+        """Return a cached method result stored on the owning object."""
+
         if not isinstance(args, Hashable):
             return self.func(*args)
         obj = args[0]
@@ -64,6 +80,12 @@ class memoized_meth:
 
 
 class memoized_generator:
+    """Memoize generator-producing methods while preserving independent iterators.
+
+    Args:
+        func: Generator method to wrap.
+    """
+
     def __init__(self, func):
         self.func = func
 
@@ -74,6 +96,8 @@ class memoized_generator:
         return partial(self, obj)
 
     def __call__(self, *args, **kwargs):
+        """Return an independent iterator over cached generator output."""
+
         if not isinstance(args, Hashable):
             return self.func(*args)
         obj = args[0]
@@ -88,14 +112,10 @@ class memoized_generator:
 
 
 class quantize:
-    """
-    Decorator that quantizes float arguments to nearest power of a base.
+    """Decorator that quantizes float arguments to nearest power of a base.
 
     Args:
-       func: Decorated function.
-
-    Kwargs:
-       base: Base to use for quantization (default=1.5)
+        func: Decorated function.
     """
 
     def __init__(self, func):
@@ -103,6 +123,8 @@ class quantize:
         self.base = 1.5
 
     def __call__(self, *args, **kwargs):
+        """Return a wrapper that quantizes float positional arguments."""
+
         def wrapper(*args, **kwargs):
             args = list(args)
             base = kwargs["base"] if "base" in kwargs else self.base

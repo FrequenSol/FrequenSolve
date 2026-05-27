@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import shutil
@@ -23,20 +25,44 @@ __all__ = ["Project", "BaseProjectComponent"]
 
 
 class BaseProjectComponent(ABC):
-    """Base class for additional project components."""
+    """Base class for extension objects persisted with a project."""
 
     @abstractmethod
     def load(self):
+        """Load component state from project storage."""
+
         pass
 
     @abstractmethod
     def save(self):
+        """Persist component state into project storage."""
+
         pass
 
 
 @dataclass(kw_only=True)
 class Project:
-    """Project container for simulations, persisted inputs, and run state."""
+    """Project container for simulations, persisted inputs, and run state.
+
+    Args:
+        name: Project name and default JSON file stem.
+        pretty_name: Optional display name for user interfaces.
+        path: Project root directory. ``~`` is expanded and the result is
+            resolved during initialization.
+        version: Project file format version.
+        log_level: FrequenSolve logger level.
+        log_file: Optional file path for FrequenSolve logs.
+        log_to_console: Whether to emit FrequenSolve logs to the console.
+        dependency_log_level: Log level applied to noisy dependencies, or
+            ``None`` to leave them unchanged.
+        jupyter_logging: Whether to keep notebook display logging enabled.
+        load_if_exists: Load an existing project JSON from ``path`` instead of
+            creating a new project when possible.
+        auto_migrate: Whether compatible future migrations may run
+            automatically.
+        simulations: Initial simulations to attach to this project.
+        extras: Additional project components keyed by name.
+    """
 
     name: str
     pretty_name: Optional[str] = None
@@ -53,37 +79,447 @@ class Project:
     extras: Dict[str, BaseProjectComponent] = field(default_factory=dict)
     _active_jobs: Dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
-        """Load project from file and check version."""
-        self.path = Path(self.path).resolve()
-        log_level = self.log_level
-        log_file = self.log_file
-        log_to_console = self.log_to_console
-        dependency_log_level = self.dependency_log_level
-        jupyter_logging = self.jupyter_logging
+    def __post_init__(self) -> None:
+        self.path = Path(self.path).expanduser().resolve()
+        logging_options = self._logging_options()
+
         if self.load_if_exists:
             project_file = self._project_file(self.path, self.name)
             if project_file.exists():
-                loaded = Project.load(project_file, auto_migrate=self.auto_migrate)
+                loaded = type(self).load(
+                    project_file,
+                    auto_migrate=self.auto_migrate,
+                )
                 self.__dict__.update(loaded.__dict__)
-                self.log_level = log_level
-                self.log_file = log_file
-                self.log_to_console = log_to_console
-                self.dependency_log_level = dependency_log_level
-                self.jupyter_logging = jupyter_logging
+                self._restore_logging_options(logging_options)
                 self._configure_logging()
                 return
 
         self._configure_logging()
+        self.path.mkdir(parents=True, exist_ok=True)
+        self._bind_simulations_to_project()
 
-        if not self.path.exists():
-            self.path.mkdir(parents=True, exist_ok=True)
+    @classmethod
+    def load(cls, file: Union[str, Path], auto_migrate: bool = False) -> "Project":
+        """Load a project from a JSON file or project directory.
 
-        self._set_path_deep()
+        Args:
+            file: Project JSON file, or a project directory containing exactly
+                one project JSON file.
+            auto_migrate: Whether compatible migrations may be run
+                automatically after loading.
+
+        Returns:
+            Loaded ``Project`` instance with simulations rebound to the project
+            root.
+
+        Raises:
+            ValueError: If the project file cannot be located, parsed, or
+                deserialized.
+        """
+
+        try:
+            project_file = cls._project_file(file)
+        except Exception as exc:
+            raise ValueError(f"Failed to load project: {exc}") from exc
+
+        if not project_file.exists():
+            raise ValueError(f"Failed to load project: Project file not found: {file}")
+
+        try:
+            data = cls._read_json_file(project_file)
+            name = data.get("name")
+            version = Version.from_string(data.get("version"))
+            if name is None or version is None:
+                raise ValueError("Project JSON must include 'name' and 'version'.")
+
+            logging_config = data.get("logging", {})
+            project = cls(
+                name=name,
+                pretty_name=data.get("pretty_name"),
+                path=project_file.parent,
+                version=version,
+                log_level=logging_config.get("level", logging.INFO),
+                log_file=logging_config.get("file"),
+                log_to_console=logging_config.get("console", False),
+                dependency_log_level=logging_config.get(
+                    "dependency_level", logging.WARNING
+                ),
+                jupyter_logging=logging_config.get("jupyter", True),
+                load_if_exists=False,
+                auto_migrate=auto_migrate,
+            )
+            for sim_file in data.get("simulations", []):
+                project.simulations.append(
+                    SeismicSimulation.load(
+                        project._project_local_path(Path(sim_file)),
+                    )
+                )
+            project._bind_simulations_to_project()
+            project.check_version()
+            return project
+        except Exception as exc:
+            raise ValueError(f"Failed to load project {project_file}: {exc}") from exc
+
+    @classmethod
+    def copy(cls, src: Union[str, Path], dest: Union[str, Path], **kwargs) -> "Project":
+        """Copy a project tree and rewrite project-local paths.
+
+        Args:
+            src: Source project JSON file or directory.
+            dest: Destination project directory.
+            **kwargs: Optional constructor overrides for the copied project,
+                such as ``name`` or logging options.
+
+        Returns:
+            Reloaded ``Project`` instance rooted at ``dest``.
+        """
+
+        dest = Path(dest).expanduser().resolve()
+        if kwargs.get("load_if_exists", False):
+            existing = cls._load_existing_project(dest)
+            if existing is not None:
+                return existing
+
+        src_file = cls._project_file(src)
+        source = cls.load(src_file)
+        source_root = src_file.parent
+        dest.mkdir(parents=True, exist_ok=True)
+        cls._copy_project_inputs(source_root, dest)
+
+        copied = cls(
+            name=kwargs.get("name", source.name),
+            pretty_name=kwargs.get("pretty_name", source.pretty_name),
+            path=dest,
+            version=kwargs.get("version", source.version),
+            log_level=kwargs.get("log_level", source.log_level),
+            log_file=kwargs.get("log_file", source.log_file),
+            log_to_console=kwargs.get("log_to_console", source.log_to_console),
+            dependency_log_level=kwargs.get(
+                "dependency_log_level", source.dependency_log_level
+            ),
+            jupyter_logging=kwargs.get("jupyter_logging", source.jupyter_logging),
+            simulations=source.simulations,
+            extras=source.extras,
+        )
+        copied.save()
+        cls._rewrite_copied_input_files(
+            dest,
+            source_project=source_root,
+            target_project=dest,
+        )
+        return cls.load(dest / f"{copied.name}.json")
+
+    def save(self, file: Optional[Union[str, Path]] = None, **json_kwargs) -> Path:
+        """Save the project and all attached simulations.
+
+        Args:
+            file: Optional project JSON path. Relative paths are resolved under
+                the project root.
+            **json_kwargs: Additional keyword arguments forwarded to
+                ``json.dumps`` when writing project and simulation files.
+
+        Returns:
+            Path to the written project JSON file.
+        """
+
+        self._bind_simulations_to_project()
+        project_file = self._project_local_path(file or f"{self.name}.json")
+        project_file.parent.mkdir(parents=True, exist_ok=True)
+
+        payload: Dict[str, Any] = {
+            "name": self.name,
+            "path": str(self.path),
+            **({"pretty_name": self.pretty_name} if self.pretty_name else {}),
+            "version": str(self.version),
+        }
+        logging_payload = self._logging_payload()
+        if logging_payload:
+            payload["logging"] = logging_payload
+        payload["simulations"] = [
+            self._saved_simulation_path(sim, **json_kwargs) for sim in self.simulations
+        ]
+
+        indent = json_kwargs.pop("indent", 3)
+        self._write_json_file(project_file, payload, indent=indent, **json_kwargs)
+        return project_file
+
+    def as_json(self, **kwargs) -> str:
+        """Return the project payload as formatted JSON.
+
+        Args:
+            **kwargs: Keyword arguments forwarded to ``json.dumps``.
+
+        Returns:
+            Serialized project JSON string.
+        """
+
+        return json.dumps(self.to_fs(), cls=CustomJSONEncoder, **kwargs)
+
+    def to_fs(self) -> Dict:
+        """Serialize the project to the FrequenSolve project payload.
+
+        Returns:
+            JSON-compatible project mapping including attached simulations and
+            extension components.
+        """
+
+        return {
+            "name": self.name,
+            **({"pretty_name": self.pretty_name} if self.pretty_name else {}),
+            "version": str(self.version),
+            "simulations": [sim.to_fs() for sim in self.simulations],
+            "extras": [
+                extra.to_fs() if hasattr(extra, "to_fs") else dict(extra)
+                for extra in self.extras.values()
+            ],
+        }
+
+    def check_version(self) -> None:
+        """Check the project version against the installed SDK version.
+
+        Raises:
+            NotImplementedError: If the project is older than the SDK and
+                ``auto_migrate`` is enabled for a release without implemented
+                migrations.
+        """
+
+        try:
+            current_version = Version.current()
+        except Exception:
+            logging.debug("Skipping project version check for non-release SDK version")
+            return
+
+        if self.version >= current_version:
+            return
+        if self.auto_migrate:
+            raise NotImplementedError(
+                "Project migrations are not implemented for this SDK release; "
+                f"project version is {self.version}, current version is {current_version}."
+            )
+        logging.warning(
+            "Project %s was created with version %s; current SDK version is %s.",
+            self.name,
+            self.version,
+            current_version,
+        )
+
+    def new_simulation(
+        self, name: str, physics: str, dimension: int | float | str, **kwargs
+    ) -> BaseSimulation:
+        """Create a new simulation in the project.
+
+        Args:
+            name (str): The name of the simulation.
+            physics (str): The physics of the simulation.
+            dimension (int | float | str): The simulation dimension, accepting
+                2D, 2.5D, and 3D forms.
+            **kwargs: Simulation options. Recognized keys include
+                ``axisymmetric``, ``units``, ``unit_config``, and
+                ``default_units``; remaining keys are passed through as
+                simulation ``extra`` fields.
+
+        Returns:
+            Newly created and project-bound ``SeismicSimulation``.
+        """
+
+        options = self._simulation_options(kwargs)
+        sim = SeismicSimulation(
+            name=name,
+            physics=physics,
+            dimension=dimension,
+            axisymmetric=options["axisymmetric"],
+            project_path=self.path,
+            extra=options["extra"],
+        )
+        self._apply_simulation_units(
+            sim,
+            unit_config=options["unit_config"],
+            default_units=options["default_units"],
+        )
+        sim._project = self
+        self.simulations.append(sim)
+        return sim
+
+    def list_jobs(
+        self,
+        *,
+        simulation: Optional[Union[str, BaseSimulation]] = None,
+    ) -> list[Dict[str, Any]]:
+        """List saved project jobs and their persisted result status.
+
+        The returned rows are dictionaries with the saved job path, linked
+        simulation, workflow, result path, and two high-level checks:
+        ``results_exist`` reports whether the result directory contains
+        outputs or run metadata, and ``results_current`` reports whether the
+        saved result still matches the current job/simulation definitions.
+
+        Args:
+            simulation: Optional simulation name or object used to filter the
+                job tree.
+
+        Returns:
+            One dictionary per saved job JSON file.
+        """
+
+        return [
+            self._job_status_row(job_file)
+            for job_file in self._job_files(simulation=simulation)
+        ]
+
+    def job_file(
+        self,
+        name: str,
+        *,
+        simulation: Optional[Union[str, BaseSimulation]] = None,
+    ) -> Path:
+        """Return the saved job JSON path for a project job.
+
+        Jobs are stored under ``jobs/<simulation>/<job>/<job>.json``. When
+        ``simulation`` is omitted, the job name must be unique across the
+        project jobs tree.
+
+        Args:
+            name: Saved job name.
+            simulation: Optional simulation name or object used to disambiguate
+                jobs with the same name.
+
+        Returns:
+            Absolute path to the saved job JSON file.
+
+        Raises:
+            FileNotFoundError: If no matching job JSON exists.
+            ValueError: If the job name is ambiguous without ``simulation``.
+        """
+
+        job_name = str(name)
+        if simulation is not None:
+            path = (
+                self.path
+                / "jobs"
+                / self._simulation_name(simulation)
+                / job_name
+                / f"{job_name}.json"
+            )
+            if not path.exists():
+                raise FileNotFoundError(f"Job JSON file not found: {path}")
+            return path.resolve()
+
+        root = self.path / "jobs"
+        candidates = sorted(root.glob(f"*/{job_name}/{job_name}.json"))
+        if not candidates:
+            raise FileNotFoundError(
+                f"No job named {job_name!r} found under {root}; pass simulation=..."
+            )
+        if len(candidates) > 1:
+            names = ", ".join(str(path.relative_to(self.path)) for path in candidates)
+            raise ValueError(
+                f"Multiple jobs named {job_name!r} found; pass simulation=... "
+                f"to choose one: {names}"
+            )
+        return candidates[0].resolve()
+
+    def load_job(
+        self,
+        name: Union[str, Path],
+        *,
+        simulation: Optional[Union[str, BaseSimulation]] = None,
+    ):
+        """Load a saved job from this project without submitting it.
+
+        Args:
+            name: Job name or explicit job JSON path.
+            simulation: Optional simulation name or object used when ``name`` is
+                not a path.
+
+        Returns:
+            Loaded ``BaseJob`` subclass instance.
+        """
+
+        from frequensolve.simulation.jobs import BaseJob
+
+        path = Path(name).expanduser()
+        if path.suffix == ".json" or path.exists():
+            return BaseJob.load(path, project_path=self.path)
+        return BaseJob.load(
+            self.job_file(str(name), simulation=simulation),
+            project_path=self.path,
+        )
+
+    def terminate_jobs(self) -> None:
+        """Terminate all active job futures tracked by this project."""
+
+        for job, future in list(self._active_jobs.items()):
+            try:
+                if hasattr(future, "cancel"):
+                    future.cancel()
+                else:
+                    NotImplementedError("Job cancelation needs work")
+                logging.info("Terminated job %s", job)
+            except Exception as exc:
+                logging.error("Failed to terminate job %s: %s", job, exc)
+            self._active_jobs.pop(job)
+
+    def __iadd__(self, base: Union[BaseSimulation, BaseProjectComponent]) -> "Project":
+        """Attach a simulation or extension component to this project.
+
+        Args:
+            base: Simulation or project component to attach.
+
+        Returns:
+            This project instance.
+
+        Raises:
+            TypeError: If ``base`` is not a supported project member.
+        """
+
+        if isinstance(base, BaseSimulation):
+            base.project_path = self.path
+            base._project = self
+            self.simulations.append(base)
+        elif isinstance(base, BaseProjectComponent):
+            base.project_path = self.path
+            self.extras[base.name] = base
+        else:
+            raise TypeError(f"Cannot add {type(base).__name__} to Project")
+        self._bind_simulations_to_project()
+        return self
+
+    def __repr__(self) -> str:
+        return f"Project(name='{self.name}', path='{self.path}')"
+
+    def __del__(self):
+        """Cleanup method called when project object is destroyed."""
+
+        try:
+            self.terminate_jobs()
+        except Exception:
+            pass
+
+    def _transfer(self, site: BaseSite) -> None:
+        """Transfer project files to a remote site with path substitution."""
+
+        self.save()
+        if self._site_is_local(site):
+            return
+
+        remote = self._remote_project_root(site)
+        project_file = self.path / f"{self.name}.json"
+        if project_file.exists():
+            site.put(project_file, remote / f"{self.name}.json")
+
+        sim_dir = self.path / "simulations"
+        if not sim_dir.exists():
+            return
+
+        with tempfile.TemporaryDirectory(prefix=".fs_transfer_", dir=self.path) as tmp:
+            temp_dir = Path(tmp)
+            shutil.copytree(sim_dir, temp_dir / "simulations", dirs_exist_ok=True)
+            self._rewrite_transfer_simulations(temp_dir, remote)
+            self._copy_transfer_mesh_files(temp_dir)
+            site.put(temp_dir, remote)
 
     def _configure_logging(self) -> None:
-        """Apply project-level logging preferences."""
-
         configure_logging(
             level=self.log_level,
             log_file=self.log_file,
@@ -93,26 +529,60 @@ class Project:
         if not self.jupyter_logging:
             disable_jupyter_logging()
 
-    def check_version(self):
-        """Check project version against current version and migrate if necessary."""
+    def _logging_options(self) -> Dict[str, Any]:
+        return {
+            "log_level": self.log_level,
+            "log_file": self.log_file,
+            "log_to_console": self.log_to_console,
+            "dependency_log_level": self.dependency_log_level,
+            "jupyter_logging": self.jupyter_logging,
+        }
+
+    def _restore_logging_options(self, options: Mapping[str, Any]) -> None:
+        for key, value in options.items():
+            setattr(self, key, value)
+
+    def _logging_payload(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if normalize_log_level(self.log_level) != logging.INFO:
+            payload["level"] = self.log_level
+        if self.log_file is not None:
+            payload["file"] = str(self.log_file)
+        if self.log_to_console:
+            payload["console"] = True
+        if self.dependency_log_level is None:
+            payload["dependency_level"] = None
+        elif normalize_log_level(self.dependency_log_level) != logging.WARNING:
+            payload["dependency_level"] = self.dependency_log_level
+        if not self.jupyter_logging:
+            payload["jupyter"] = False
+        return payload
+
+    def _bind_simulations_to_project(self) -> None:
+        proj_path = self.path.resolve()
+        rel_path = Path("./simulations")
+        for sim in self.simulations:
+            sim._project = self
+            sim.project_path = proj_path
+            sim._attach_project_path(proj_path, rel_path)
+
+    def _project_local_path(self, path: Union[str, Path]) -> Path:
+        path = Path(path).expanduser()
+        return path if path.is_absolute() else self.path / path
+
+    def _saved_simulation_path(self, sim: BaseSimulation, **json_kwargs) -> str:
+        sim_file = Path(sim.save(**json_kwargs)).resolve()
         try:
-            current_version = Version.current()
-        except Exception:
-            logging.debug("Skipping project version check for non-release SDK version")
-            return
-        if self.version < current_version:
-            if self.auto_migrate:
-                raise NotImplementedError(
-                    "Project migrations are not implemented for this SDK release; "
-                    f"project version is {self.version}, current version is {current_version}."
-                )
-            else:
-                logging.warning(
-                    "Project %s was created with version %s; current SDK version is %s.",
-                    self.name,
-                    self.version,
-                    current_version,
-                )
+            return str(sim_file.relative_to(self.path))
+        except ValueError:
+            return str(sim_file)
+
+    @classmethod
+    def _load_existing_project(cls, path: Path) -> Optional["Project"]:
+        if not path.exists():
+            return None
+        json_files = sorted(path.glob("*.json"))
+        return cls.load(json_files[0]) if len(json_files) == 1 else None
 
     @staticmethod
     def _project_file(path: Union[str, Path], name: Optional[str] = None) -> Path:
@@ -131,59 +601,12 @@ class Project:
             f"Multiple project JSON files found in {path}; specify one explicitly: {names}"
         )
 
-    @classmethod
-    def copy(cls, src: Union[str, Path], dest: Union[str, Path], **kwargs):
-        """Copy a project from an existing project."""
-        from shutil import copytree
-
-        load_if_exists = kwargs.get("load_if_exists", False)
-
-        if load_if_exists:
-            if Path(dest).exists():
-                json_files = list(Path(dest).glob("*.json"))
-                if len(json_files) == 1:
-                    return cls.load(json_files[0])
-
-        src_file = cls._project_file(src)
-        old = Project.load(src_file)
-
-        dest = Path(dest).resolve()
-        dest.mkdir(parents=True, exist_ok=True)
-
-        src_root = src_file.parent
-        if (src_root / "simulations").exists():
-            copytree(src_root / "simulations", dest / "simulations", dirs_exist_ok=True)
-        if (src_root / "jobs").exists():
-            copytree(src_root / "jobs", dest / "jobs", dirs_exist_ok=True)
-
-        name = kwargs.get("name", old.name)
-        pretty_name = kwargs.get("pretty_name", old.pretty_name)
-        version = kwargs.get("version", old.version)
-
-        new = Project(
-            name=name,
-            pretty_name=pretty_name,
-            path=dest,
-            version=version,
-            log_level=kwargs.get("log_level", old.log_level),
-            log_file=kwargs.get("log_file", old.log_file),
-            log_to_console=kwargs.get("log_to_console", old.log_to_console),
-            dependency_log_level=kwargs.get(
-                "dependency_log_level", old.dependency_log_level
-            ),
-            jupyter_logging=kwargs.get("jupyter_logging", old.jupyter_logging),
-            simulations=old.simulations,
-            extras=old.extras,
-        )
-        new.save()
-        cls._rewrite_copied_input_files(
-            dest,
-            source_project=src_root,
-            target_project=dest,
-        )
-        del new, old
-
-        return Project.load(dest / f"{name}.json")
+    @staticmethod
+    def _copy_project_inputs(source_root: Path, target_root: Path) -> None:
+        for dirname in ("simulations", "jobs"):
+            source = source_root / dirname
+            if source.exists():
+                shutil.copytree(source, target_root / dirname, dirs_exist_ok=True)
 
     @classmethod
     def _rewrite_copied_input_files(
@@ -195,112 +618,76 @@ class Project:
     ) -> None:
         """Rewrite copied simulation/job JSON files to the new project root."""
 
-        from frequensolve.simulation.jobs import JobLayout
-
-        patterns = ("simulations/*/*.json", "jobs/*/*/*.json")
-        for input_file in (
-            path for pattern in patterns for path in sorted(project_dir.glob(pattern))
-        ):
-            try:
-                payload = json.loads(input_file.read_text())
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Failed to load copied JSON {input_file}: {exc}")
+        for input_file in cls._copied_input_files(project_dir):
+            payload = cls._read_json_file(input_file)
             if not isinstance(payload, dict):
                 continue
-            if "simulation" in payload and "name" in payload:
-                layout = JobLayout.from_payload(payload, job_file=input_file)
-                target_layout = layout.with_project(target_project)
-                payload = cls._map_project_paths(
-                    payload,
-                    source_project=layout.project,
-                    target_project=target_project,
-                )
-                payload["project_path"] = str(target_project)
-                try:
-                    payload["simulation"] = str(
-                        target_layout.simulation_file.relative_to(target_project)
-                    )
-                    payload["result_path"] = str(
-                        target_layout.result_dir.relative_to(target_project)
-                    )
-                except ValueError:
-                    payload["simulation"] = str(target_layout.simulation_file)
-                    payload["result_path"] = str(target_layout.result_dir)
-                tmp_file = input_file.with_name(f".{input_file.name}.tmp")
-                tmp_file.write_text(
-                    json.dumps(payload, cls=CustomJSONEncoder, indent=3)
-                )
-                tmp_file.replace(input_file)
-                continue
-
-            payload_project = Path(payload.get("project_path", source_project))
-            payload = cls._map_project_paths(
+            payload = cls._rewrite_copied_payload(
                 payload,
-                source_project=payload_project,
+                input_file=input_file,
+                source_project=source_project,
                 target_project=target_project,
             )
-            payload["project_path"] = str(target_project)
-            tmp_file = input_file.with_name(f".{input_file.name}.tmp")
-            tmp_file.write_text(json.dumps(payload, cls=CustomJSONEncoder, indent=3))
-            tmp_file.replace(input_file)
+            cls._write_json_file(input_file, payload)
 
-    def _transfer(self, site: BaseSite):
-        """Transfer project files to remote site with path substitution."""
-        self.save()
-        site_class = site.__class__
+    @staticmethod
+    def _copied_input_files(project_dir: Path) -> list[Path]:
+        patterns = ("simulations/*/*.json", "jobs/*/*/*.json")
+        return [
+            path for pattern in patterns for path in sorted(project_dir.glob(pattern))
+        ]
 
-        if site_class.__name__ == "LocalSite" and site_class.__module__.endswith(
-            ".local"
-        ):
-            return
+    @classmethod
+    def _rewrite_copied_payload(
+        cls,
+        payload: Dict[str, Any],
+        *,
+        input_file: Path,
+        source_project: Path,
+        target_project: Path,
+    ) -> Dict[str, Any]:
+        from frequensolve.simulation.jobs import JobLayout
 
-        if site_class.__name__ == "AWSSite" and ".aws" in site_class.__module__:
-            project_dir_name = Path(self.path).name
-            remote = site.work_dir / project_dir_name
-        else:
-            remote = site.work_dir
-        proj_file = (Path(self.path) / f"{self.name}").with_suffix(".json")
-        sim_dir = Path(self.path) / "simulations"
+        path_roots = cls._payload_project_roots(payload, fallback=source_project)
+        for root in path_roots:
+            payload = cls._map_project_paths(
+                payload,
+                source_project=root,
+                target_project=target_project,
+            )
+        payload["project_path"] = str(target_project)
 
-        if proj_file.exists():
-            site.put(proj_file, (remote / f"{self.name}").with_suffix(".json"))
+        if "simulation" not in payload or "name" not in payload:
+            return payload
 
-        if sim_dir.exists():
-            with tempfile.TemporaryDirectory(
-                prefix=".fs_transfer_", dir=self.path
-            ) as temp:
-                temp_dir = Path(temp)
-                shutil.copytree(sim_dir, temp_dir / "simulations", dirs_exist_ok=True)
+        layout_payload = {**payload, "project_path": str(path_roots[0])}
+        layout = JobLayout.from_payload(layout_payload, job_file=input_file)
+        target_layout = layout.with_project(target_project)
+        payload["simulation"] = cls._project_relative_or_absolute(
+            target_layout.simulation_file,
+            target_project,
+        )
+        payload["result_path"] = cls._project_relative_or_absolute(
+            target_layout.result_dir,
+            target_project,
+        )
+        return payload
 
-                for sim in self.simulations:
-                    if hasattr(sim, "_file") and sim._file:
-                        with open(sim._file, "r") as f:
-                            sim_data = json.load(f)
-
-                        rel_path = Path(sim._file).relative_to(self.path)
-                        temp_file = temp_dir / rel_path
-                        sim_data = self._map_project_paths(
-                            sim_data,
-                            source_project=Path(self.path),
-                            target_project=remote,
-                        )
-                        sim_data["project_path"] = str(remote)
-                        with open(temp_file, "w") as f:
-                            json.dump(
-                                sim_data,
-                                f,
-                                cls=CustomJSONEncoder,
-                                indent=3,
-                            )
-
-                for sim in self.simulations:
-                    if sim.mesh.file is not None:
-                        mesh_file = self.path / sim.mesh.file
-                        dest = temp_dir / mesh_file.relative_to(self.path)
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(mesh_file, dest)
-
-                site.put(temp_dir, remote)
+    @staticmethod
+    def _payload_project_roots(
+        payload: Mapping[str, Any],
+        *,
+        fallback: Path,
+    ) -> list[Path]:
+        roots = []
+        for value in (payload.get("project_path"), fallback):
+            try:
+                root = Path(value).expanduser().resolve()
+            except TypeError:
+                continue
+            if root not in roots:
+                roots.append(root)
+        return roots or [fallback]
 
     @staticmethod
     def _map_project_paths(
@@ -341,104 +728,49 @@ class Project:
                 return value.replace(source, str(target_project))
         return value
 
-    @classmethod
-    def load(cls, file: Union[str, Path], auto_migrate: bool = False) -> "Project":
-        """Load project from JSON file."""
-        try:
-            file_in = cls._project_file(file)
-        except Exception as e:
-            raise ValueError(f"Failed to load project: {e}")
-
-        path = file_in.parent
-
-        if not file_in.exists():
-            raise ValueError(f"Failed to load project: Project file not found: {file}")
-
-        try:
-            with open(file_in, "r") as f:
-                data = json.load(f)
-        except Exception as e:
-            raise ValueError(f"Failed to load project JSON {file_in}: {e}") from e
-
-        try:
-            name = data.get("name")
-            version = Version.from_string(data.get("version"))
-            pretty_name = data.get("pretty_name")
-            sim_files = data.get("simulations", [])
-            logging_config = data.get("logging", {})
-            if name is None or version is None:
-                raise ValueError("Project JSON must include 'name' and 'version'.")
-
-            project = cls(
-                name=name,
-                pretty_name=pretty_name,
-                path=path,
-                version=version,
-                log_level=logging_config.get("level", logging.INFO),
-                log_file=logging_config.get("file"),
-                log_to_console=logging_config.get("console", False),
-                dependency_log_level=logging_config.get(
-                    "dependency_level", logging.WARNING
-                ),
-                jupyter_logging=logging_config.get("jupyter", True),
-                load_if_exists=False,
-                auto_migrate=auto_migrate,
-            )
-
-            for sim_file in sim_files:
-                sim_file = Path(sim_file)
-                if not sim_file.is_absolute():
-                    sim_file = path / sim_file
-                sim = SeismicSimulation.load(sim_file)
-                project.simulations.append(sim)
-
-            project._set_path_deep()
-            project.check_version()
-            return project
-        except Exception as e:
-            raise ValueError(f"Failed to load project {file_in}: {e}") from e
-
-    def save(self, file: Optional[Union[str, Path]] = None, **json_kwargs) -> Path:
-        """Save project to JSON file."""
-
-        self._set_path_deep()
-
-        file = Path(self.path) / f"{self.name}.json" if file is None else Path(file)
-        file = file.expanduser().resolve()
-        file.parent.mkdir(parents=True, exist_ok=True)
-
-        payload = {
-            "name": self.name,
-            "path": str(self.path),
-            **({"pretty_name": self.pretty_name} if self.pretty_name else {}),
-            "version": str(self.version),
-        }
-        logging_payload = self._logging_payload()
-        if logging_payload:
-            payload["logging"] = logging_payload
-        sims = []
+    def _rewrite_transfer_simulations(self, temp_dir: Path, remote: Path) -> None:
         for sim in self.simulations:
-            sim_file = sim.save(**json_kwargs)
-            try:
-                sims.append(str(Path(sim_file).resolve().relative_to(self.path)))
-            except ValueError:
-                sims.append(str(Path(sim_file).resolve()))
-        payload["simulations"] = sims
+            sim_file = getattr(sim, "_file", None)
+            if not sim_file:
+                continue
+            rel_path = Path(sim_file).relative_to(self.path)
+            temp_file = temp_dir / rel_path
+            payload = self._read_json_file(sim_file)
+            payload = self._map_project_paths(
+                payload,
+                source_project=self.path,
+                target_project=remote,
+            )
+            payload["project_path"] = str(remote)
+            self._write_json_file(temp_file, payload)
 
-        indent = json_kwargs.pop("indent", 3)
-        tmp_file = file.with_name(f".{file.name}.tmp")
-        with open(tmp_file, "w") as f:
-            json.dump(payload, f, cls=CustomJSONEncoder, indent=indent, **json_kwargs)
-        tmp_file.replace(file)
-        return file
+    def _copy_transfer_mesh_files(self, temp_dir: Path) -> None:
+        for sim in self.simulations:
+            if sim.mesh.file is None:
+                continue
+            mesh_file = self.path / sim.mesh.file
+            dest = temp_dir / mesh_file.relative_to(self.path)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(mesh_file, dest)
+
+    @staticmethod
+    def _site_is_local(site: BaseSite) -> bool:
+        site_class = site.__class__
+        return site_class.__name__ == "LocalSite" and site_class.__module__.endswith(
+            ".local"
+        )
+
+    def _remote_project_root(self, site: BaseSite) -> Path:
+        site_class = site.__class__
+        if site_class.__name__ == "AWSSite" and ".aws" in site_class.__module__:
+            return site.work_dir / self.path.name
+        return site.work_dir
 
     def _job_files(
         self,
         *,
         simulation: Optional[Union[str, BaseSimulation]] = None,
     ) -> list[Path]:
-        """Return saved job JSON files in the project jobs tree."""
-
         root = self.path / "jobs"
         if not root.exists():
             return []
@@ -447,12 +779,7 @@ class Project:
             search_root = root
             pattern = "*/*/*.json"
         else:
-            sim_name = (
-                simulation.name
-                if isinstance(simulation, BaseSimulation)
-                else str(simulation)
-            )
-            search_root = root / sim_name
+            search_root = root / self._simulation_name(simulation)
             pattern = "*/*.json"
         if not search_root.exists():
             return []
@@ -460,10 +787,60 @@ class Project:
             path.resolve() for path in search_root.glob(pattern) if path.is_file()
         )
 
+    def _job_status_row(self, job_file: Path) -> Dict[str, Any]:
+        """Load a saved job and return a compact project listing row."""
+
+        from frequensolve.simulation.jobs import BaseJob
+
+        base = self._base_job_status_row(job_file)
+        try:
+            job = BaseJob.load(job_file, project_path=self.path)
+        except Exception as exc:
+            return {**base, "load_error": str(exc)}
+
+        metadata = job.run_metadata
+        state = job.run_state()
+        try:
+            traces_exist = job.trace_outputs_exist()
+        except Exception:
+            traces_exist = False
+        try:
+            results_current = job.is_run_current()
+        except Exception:
+            results_current = False
+
+        return {
+            **base,
+            "name": job.name,
+            "simulation": job.simulation.name,
+            "job_type": job.__class__.__name__,
+            "workflow": job.workflow,
+            "n_tasks": job.n_tasks,
+            "result_path": str(job._result_path),
+            "loaded": True,
+            "results_exist": self._job_results_exist(job),
+            "trace_outputs_exist": traces_exist,
+            "results_current": results_current,
+            "run_status": self._job_run_status(state, metadata, results_current),
+            "successful": metadata.successful,
+            "task_summary": self._job_task_summary(state, metadata),
+        }
+
+    def _base_job_status_row(self, job_file: Path) -> Dict[str, Any]:
+        rel_file = self._relative_to_project(job_file)
+        parts = rel_file.parts
+        return {
+            "name": job_file.stem,
+            "simulation": parts[1] if len(parts) >= 4 and parts[0] == "jobs" else None,
+            "job_file": str(job_file),
+            "relative_job_file": str(rel_file),
+            "loaded": False,
+            "results_exist": False,
+            "results_current": False,
+        }
+
     @staticmethod
     def _job_results_exist(job) -> bool:
-        """Return whether a job result directory contains any persisted output."""
-
         result_path = Path(job._result_path)
         if not result_path.exists():
             return False
@@ -491,212 +868,84 @@ class Project:
         except OSError:
             return False
 
-    def _job_status_row(self, job_file: Path) -> Dict[str, Any]:
-        """Load a saved job and return a compact project listing row."""
-
-        from frequensolve.simulation.jobs import SimulationJob
-
-        rel_file: Union[str, Path]
-        try:
-            rel_file = job_file.relative_to(self.path)
-        except ValueError:
-            rel_file = job_file
-
-        parts = rel_file.parts if isinstance(rel_file, Path) else Path(rel_file).parts
-        fallback_simulation = (
-            parts[1] if len(parts) >= 4 and parts[0] == "jobs" else None
-        )
-        fallback_name = job_file.stem
-        base = {
-            "name": fallback_name,
-            "simulation": fallback_simulation,
-            "job_file": str(job_file),
-            "relative_job_file": str(rel_file),
-            "loaded": False,
-            "results_exist": False,
-            "results_current": False,
-        }
-
-        try:
-            job = SimulationJob.load(job_file, project_path=self.path)
-        except Exception as exc:
-            base["load_error"] = str(exc)
-            return base
-
-        metadata = job.run_metadata
-        state = job.run_state()
-        results_exist = self._job_results_exist(job)
-        try:
-            traces_exist = job.trace_outputs_exist()
-        except Exception:
-            traces_exist = False
-        try:
-            results_current = job.is_run_current()
-        except Exception:
-            results_current = False
-
-        run_status = None
-        if isinstance(state, Mapping):
-            run_status = state.get("status")
-        if run_status is None and isinstance(metadata.manifest, Mapping):
+    @staticmethod
+    def _job_run_status(state: Any, metadata: Any, current: bool) -> Any:
+        if isinstance(state, Mapping) and state.get("status") is not None:
+            return state["status"]
+        if isinstance(metadata.manifest, Mapping):
             exit_status = metadata.manifest.get("exit_status")
             if isinstance(exit_status, Mapping):
-                run_status = exit_status.get("status")
-            elif exit_status is not None:
-                run_status = exit_status
+                return exit_status.get("status")
+            if exit_status is not None:
+                return exit_status
+        return "current" if current else "not_run"
 
-        task_summary = {}
-        if isinstance(state, Mapping) and isinstance(
-            state.get("task_summary"), Mapping
-        ):
-            task_summary = dict(state["task_summary"])
-        elif isinstance(metadata.manifest, Mapping) and isinstance(
-            metadata.manifest.get("task_summary"), Mapping
-        ):
-            task_summary = dict(metadata.manifest["task_summary"])
+    @staticmethod
+    def _job_task_summary(state: Any, metadata: Any) -> Dict[str, Any]:
+        for source in (state, metadata.manifest):
+            if isinstance(source, Mapping) and isinstance(
+                source.get("task_summary"), Mapping
+            ):
+                return dict(source["task_summary"])
+        return {}
 
-        return {
-            **base,
-            "name": job.name,
-            "simulation": job.simulation.name,
-            "job_type": job.__class__.__name__,
-            "workflow": job.workflow,
-            "n_tasks": job.n_tasks,
-            "result_path": str(job._result_path),
-            "loaded": True,
-            "results_exist": results_exist,
-            "trace_outputs_exist": traces_exist,
-            "results_current": results_current,
-            "run_status": run_status or ("current" if results_current else "not_run"),
-            "successful": metadata.successful,
-            "task_summary": task_summary,
-        }
-
-    def list_jobs(
-        self,
-        *,
-        simulation: Optional[Union[str, BaseSimulation]] = None,
-    ) -> list[Dict[str, Any]]:
-        """List saved project jobs and their persisted result status.
-
-        The returned rows are dictionaries with the saved job path, linked
-        simulation, workflow, result path, and two high-level checks:
-        ``results_exist`` reports whether the result directory contains
-        outputs or run metadata, and ``results_current`` reports whether the
-        saved result still matches the current job/simulation definitions.
-        """
-
-        return [
-            self._job_status_row(job_file)
-            for job_file in self._job_files(simulation=simulation)
-        ]
-
-    def job_file(
-        self,
-        name: str,
-        *,
-        simulation: Optional[Union[str, BaseSimulation]] = None,
-    ) -> Path:
-        """Return the saved job JSON path for a project job.
-
-        Jobs are stored under ``jobs/<simulation>/<job>/<job>.json``.  When
-        ``simulation`` is omitted, the job name must be unique across the
-        project jobs tree.
-        """
-
-        job_name = str(name)
-        if simulation is not None:
-            sim_name = (
-                simulation.name
-                if isinstance(simulation, BaseSimulation)
-                else str(simulation)
-            )
-            path = self.path / "jobs" / sim_name / job_name / f"{job_name}.json"
-            if not path.exists():
-                raise FileNotFoundError(f"Job JSON file not found: {path}")
-            return path.resolve()
-
-        root = self.path / "jobs"
-        candidates = sorted(root.glob(f"*/{job_name}/{job_name}.json"))
-        if not candidates:
-            raise FileNotFoundError(
-                f"No job named {job_name!r} found under {root}; pass simulation=..."
-            )
-        if len(candidates) > 1:
-            names = ", ".join(str(path.relative_to(self.path)) for path in candidates)
-            raise ValueError(
-                f"Multiple jobs named {job_name!r} found; pass simulation=... "
-                f"to choose one: {names}"
-            )
-        return candidates[0].resolve()
-
-    def load_job(
-        self,
-        name: Union[str, Path],
-        *,
-        simulation: Optional[Union[str, BaseSimulation]] = None,
-    ):
-        """Load a saved job from this project without submitting it."""
-
-        from frequensolve.simulation.jobs import SimulationJob
-
-        path = Path(name).expanduser()
-        if path.suffix == ".json" or path.exists():
-            return SimulationJob.load(path, project_path=self.path)
-        return SimulationJob.load(
-            self.job_file(str(name), simulation=simulation),
-            project_path=self.path,
+    @staticmethod
+    def _simulation_name(simulation: Union[str, BaseSimulation]) -> str:
+        return (
+            simulation.name
+            if isinstance(simulation, BaseSimulation)
+            else str(simulation)
         )
 
-    def _logging_payload(self) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {}
-        if normalize_log_level(self.log_level) != logging.INFO:
-            payload["level"] = self.log_level
-        if self.log_file is not None:
-            payload["file"] = str(self.log_file)
-        if self.log_to_console:
-            payload["console"] = True
-        if self.dependency_log_level is None:
-            payload["dependency_level"] = None
-        elif normalize_log_level(self.dependency_log_level) != logging.WARNING:
-            payload["dependency_level"] = self.dependency_log_level
-        if not self.jupyter_logging:
-            payload["jupyter"] = False
-        return payload
+    def _relative_to_project(self, path: Path) -> Path:
+        try:
+            return path.relative_to(self.path)
+        except ValueError:
+            return path
 
-    def as_json(self, **kwargs) -> str:
-        return json.dumps(self.to_fs(), cls=CustomJSONEncoder, **kwargs)
+    @staticmethod
+    def _project_relative_or_absolute(path: Path, project: Path) -> str:
+        try:
+            return str(path.relative_to(project))
+        except ValueError:
+            return str(path)
 
-    def to_fs(self) -> Dict:
-        return {
-            "name": self.name,
-            **({"pretty_name": self.pretty_name} if self.pretty_name else {}),
-            "version": str(self.version),
-            "simulations": [sim.to_fs() for sim in self.simulations],
-            "extras": [
-                extra.to_fs() if hasattr(extra, "to_fs") else dict(extra)
-                for extra in self.extras.values()
-            ],
-        }
+    @staticmethod
+    def _read_json_file(path: Union[str, Path]) -> Any:
+        try:
+            return json.loads(Path(path).read_text())
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Failed to load JSON {path}: {exc}") from exc
 
-    def new_simulation(
-        self, name: str, physics: str, dimension: int | float | str, **kwargs
-    ) -> BaseSimulation:
-        """Create a new simulation in the project.
+    @staticmethod
+    def _write_json_file(
+        path: Union[str, Path],
+        payload: Mapping[str, Any],
+        **json_kwargs,
+    ) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        indent = json_kwargs.pop("indent", 3)
+        tmp_file = path.with_name(f".{path.name}.tmp")
+        tmp_file.write_text(
+            json.dumps(
+                payload,
+                cls=CustomJSONEncoder,
+                indent=indent,
+                **json_kwargs,
+            )
+        )
+        tmp_file.replace(path)
 
-        Args:
-            name (str): The name of the simulation.
-            physics (str): The physics of the simulation.
-            dimension (int | float | str): The simulation dimension, accepting
-                2D, 2.5D, and 3D forms.
-            units/default_units (Mapping[str, Any]): Optional simulation-level
-                default output units. Values may be Pint units or unit strings.
-        """
-        extra = dict(kwargs.pop("extra", {}) or {})
-        axisymmetric = kwargs.pop("axisymmetric", False)
-        default_units = kwargs.pop("default_units", None)
-        units = kwargs.pop("units", None)
-        unit_config = kwargs.pop("unit_config", None)
+    @staticmethod
+    def _simulation_options(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        options = dict(kwargs)
+        extra = dict(options.pop("extra", {}) or {})
+        axisymmetric = options.pop("axisymmetric", False)
+        default_units = options.pop("default_units", None)
+        units = options.pop("units", None)
+        unit_config = options.pop("unit_config", None)
+
         if units is not None:
             if isinstance(units, UnitConfig):
                 if unit_config is not None:
@@ -706,15 +955,22 @@ class Project:
                 if default_units is not None:
                     raise ValueError("Pass only one of units and default_units")
                 default_units = units
-        extra.update(kwargs)
-        sim = SeismicSimulation(
-            name=name,
-            physics=physics,
-            dimension=dimension,
-            axisymmetric=axisymmetric,
-            project_path=self.path,
-            extra=extra,
-        )
+
+        extra.update(options)
+        return {
+            "axisymmetric": axisymmetric,
+            "default_units": default_units,
+            "unit_config": unit_config,
+            "extra": extra,
+        }
+
+    @staticmethod
+    def _apply_simulation_units(
+        sim: BaseSimulation,
+        *,
+        unit_config: Optional[UnitConfig],
+        default_units: Optional[Mapping[str, Any]],
+    ) -> None:
         if unit_config is not None:
             if not isinstance(unit_config, UnitConfig):
                 raise TypeError(
@@ -727,56 +983,3 @@ class Project:
                     "default_units must be a mapping of quantity names to units"
                 )
             sim.units.defaults.update(default_units)
-        sim._project = self
-        self.simulations.append(sim)
-        return sim
-
-    def __iadd__(self, base: Union[BaseSimulation, BaseProjectComponent]) -> "Project":
-        """Add simulations and project components to the project."""
-        if isinstance(base, BaseSimulation):
-            base.project_path = self.path
-            base._project = self
-            self.simulations.append(base)
-        elif isinstance(base, BaseProjectComponent):
-            base.project_path = self.path
-            self.extras[base.name] = base
-        else:
-            raise TypeError(f"Cannot add {type(base).__name__} to Project")
-        self._set_path_deep()
-        return self
-
-    def _set_path_deep(self):
-        proj_path = self.path.resolve()
-        rel_path = Path("./simulations")
-        for sim in self.simulations:
-            sim._project = self
-            sim.project_path = proj_path
-            sim._set_path(proj_path, rel_path)
-
-    def __repr__(self) -> str:
-        return f"Project(name='{self.name}', path='{self.path}')"
-
-    def terminate_jobs(self):
-        """Terminate all running jobs associated with this project."""
-        # TODO: on job submission, point to site
-
-        # TODO: keep list of active sites;
-        # TODO: get_site should check if the site is active otherwise it should connect and try to cancel the job
-        for job, future in list(self._active_jobs.items()):
-            try:
-                if hasattr(future, "cancel"):  # Dask future
-                    future.cancel()
-                else:  # Job ID
-                    NotImplementedError("Job cancelation needs work")
-                    # job.get_site().cancel_job(future)
-                logging.info(f"Terminated job {job}")
-            except Exception as e:
-                logging.error(f"Failed to terminate job {job}: {e}")
-            self._active_jobs.pop(job)
-
-    def __del__(self):
-        """Cleanup method called when project object is destroyed."""
-        try:
-            self.terminate_jobs()
-        except Exception:
-            pass

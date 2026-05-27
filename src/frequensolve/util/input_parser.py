@@ -25,9 +25,11 @@ class InputBlock:
     def find_block(self, name: str) -> Optional["InputBlock"]:
         """Recursively search for a sub-block matching the given name.
 
-        Attributes:
-           name (str): The block name to find.
-           A reference to the matching InputBlock or None if not found.
+        Args:
+            name: Block name to find.
+
+        Returns:
+            Matching ``InputBlock`` or ``None``.
         """
         if self.name == name:
             return self
@@ -125,11 +127,13 @@ class InputParser:
 
     @classmethod
     def read(cls, input_file: str) -> "InputParser":
-        """Class method to parse an input file and return an InputParser instance.
+        """Parse an input file into an ``InputParser`` instance.
 
-        Attributes:
-           input_file (str): Path to the input file.
-           An initialized InputParser instance with parsed blocks.
+        Args:
+            input_file: Path to the input file.
+
+        Returns:
+            Parser containing parsed top-level blocks.
         """
         with open(input_file, "r") as fin:
             txt = fin.read()
@@ -173,10 +177,14 @@ class InputParser:
     def get_block(self, block_name: str) -> InputBlock:
         """Retrieve a block by name, searching sub-blocks recursively.
 
-        Attributes:
-           block_name (str): The name of the block to find.
-           The matching InputBlock.
-           ValueError: If no block with the given name is found.
+        Args:
+            block_name: Name of the block to find.
+
+        Returns:
+            Matching block.
+
+        Raises:
+            ValueError: If no block with the given name exists.
         """
         for block in self.blocks:
             result = block.find_block(block_name)
@@ -187,10 +195,14 @@ class InputParser:
     def get_block_args(self, block_name: str) -> dict:
         """Convenience method to retrieve a dictionary of arguments from a named block.
 
-        Attributes:
-           block_name (str): The name of the block.
-           A dictionary of arguments for that block.
-           ValueError: If the block is not found.
+        Args:
+            block_name: Name of the block.
+
+        Returns:
+            Argument dictionary for the block.
+
+        Raises:
+            ValueError: If the block is not found.
         """
         block = self.get_block(block_name)
         return block.args

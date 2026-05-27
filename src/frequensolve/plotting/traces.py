@@ -321,7 +321,35 @@ def diff_gathers(
     colorbar: bool = False,
     **imshow_kwargs: Any,
 ):
-    """Plot baseline, monitor, and difference gathers."""
+    """Plot baseline, monitor, and difference gathers.
+
+    Args:
+        baseline: Baseline time-domain gather.
+        monitor: Monitor time-domain gather aligned to ``baseline``.
+        ax: Optional sequence of three Matplotlib axes.
+        A: Optional symmetric amplitude limit.
+        units: Receiver axis display units label.
+        cmap: Matplotlib colormap.
+        figsize: Figure size when creating axes.
+        fontsize: Optional global font size.
+        Tf: Deprecated final-time alias.
+        T_max: Optional final time to include.
+        T_scale: Time-axis scale factor.
+        aspect: Image aspect setting.
+        interpolation: Image interpolation method.
+        amplify_diff: Multiplicative factor applied to the difference panel.
+        titles: Three panel titles.
+        title: Optional figure title.
+        stack: ``"horizontal"`` or ``"vertical"`` panel layout.
+        save: Optional output image path.
+        show: Whether to show the figure.
+        grid: Whether to draw grid lines on each axes.
+        colorbar: Whether to add colorbars.
+        **imshow_kwargs: Additional image keyword arguments.
+
+    Returns:
+        ``(fig, axes)``.
+    """
 
     baseline = _prepare_time_gather(baseline, T_max=T_max, Tf=Tf)
     monitor = _prepare_time_gather(monitor, T_max=T_max, Tf=Tf)
@@ -398,7 +426,31 @@ def plot_xf(
     colorbar: bool = False,
     **imshow_kwargs: Any,
 ):
-    """Plot a frequency-domain receiver gather."""
+    """Plot a frequency-domain receiver gather.
+
+    Args:
+        trace: Frequency-domain gather with ``frequency`` and ``receiver``
+            dimensions.
+        ax: Optional Matplotlib axes.
+        A: Optional amplitude limit.
+        units: Receiver axis display units label.
+        cmap: Matplotlib colormap.
+        figsize: Figure size when creating axes.
+        fontsize: Optional global font size.
+        mode: Complex display mode, such as ``"real"``, ``"imag"``, or
+            ``"abs"``.
+        aspect: Image aspect setting.
+        interpolation: Image interpolation method.
+        title: Optional axes title.
+        save: Optional output image path.
+        show: Whether to show the figure.
+        grid: Whether to draw grid lines.
+        colorbar: Whether to add a colorbar.
+        **imshow_kwargs: Additional image keyword arguments.
+
+    Returns:
+        ``(fig, ax)``.
+    """
 
     trace = _prepare_frequency_gather(trace)
     values_complex = trace_values(trace, complex_=True)
@@ -547,7 +599,32 @@ def plot_cf(
     colorbar: bool = False,
     **imshow_kwargs: Any,
 ):
-    """Plot a frequency/phase-velocity diagnostic transform."""
+    """Plot a frequency/phase-velocity diagnostic transform.
+
+    Args:
+        trace: Frequency-domain receiver gather.
+        ax: Optional Matplotlib axes.
+        A: Optional amplitude limit.
+        units: Receiver/offset display units label.
+        cmap: Matplotlib colormap.
+        figsize: Figure size when creating axes.
+        fontsize: Optional global font size.
+        c_min: Minimum phase velocity.
+        c_max: Maximum phase velocity.
+        n_c: Number of phase-velocity samples.
+        smooth: Optional smoothing parameter passed to the transform.
+        aspect: Image aspect setting.
+        interpolation: Image interpolation method.
+        title: Optional axes title.
+        save: Optional output image path.
+        show: Whether to show the figure.
+        grid: Whether to draw grid lines.
+        colorbar: Whether to add a colorbar.
+        **imshow_kwargs: Additional image keyword arguments.
+
+    Returns:
+        ``(fig, ax)``.
+    """
 
     transform = phase_velocity_transform(
         trace,

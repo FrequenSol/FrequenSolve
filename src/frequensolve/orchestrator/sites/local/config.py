@@ -8,7 +8,13 @@ __all__ = ["LocalSiteConfig"]
 
 @dataclass
 class LocalSiteConfig(BaseSiteConfig):
-    """Local site configuration."""
+    """Local machine resource summary used by ``LocalSite``.
+
+    Attributes:
+        cores: Detected physical CPU cores.
+        memory: Detected system memory in bytes.
+        mpi_wrapper: MPI launcher executable.
+    """
 
     cores: int
     memory: int

@@ -3,15 +3,22 @@ from pathlib import Path
 
 import click
 
-from frequensolve.simulation.jobs import SimulationJob
+from frequensolve.simulation.jobs import BaseJob
 
 
 def get_job_size(job_file: str) -> int:
-    """Gets the number of frequencies in a job file."""
+    """Return the number of modeled frequencies in a job file.
+
+    Args:
+        job_file: Path to a saved FrequenSolve job JSON file.
+
+    Returns:
+        Number of frequency tasks in the job.
+    """
     job_file = Path(job_file)
     if not job_file.exists():
         raise FileNotFoundError(f"Job file {job_file} does not exist")
-    job = SimulationJob.load(job_file)
+    job = BaseJob.load(job_file)
     return len(job.f_list)
 
 

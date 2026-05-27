@@ -16,11 +16,12 @@ __all__ = ["Signal", "AnalyticalSignal", "SignalFromFile"]
 # ----------------------------------------------------------------------
 @dataclass(kw_only=True)
 class Signal:
-    """Base class for seismic signals.
+    """Base class for seismic source-time signals.
 
-    Attributes:
-       kind (Literal["from_file","analytical"]): The type of signals.
-       samples_out (np.ndarray): The output time samples.
+    Args:
+        domain_out: Output domain, ``"time"`` or ``"frequency"``.
+        samples_out: Output sample locations.
+        phase: Optional phase convention.
     """
 
     domain_out: Literal["time", "frequency"]
@@ -28,24 +29,31 @@ class Signal:
     phase: Optional[Literal["causal", "zero"]] = None
 
     def get(self, i: int):
+        """Return the signal for one source index."""
+
         raise NotImplementedError("This class must be overwritten by subclasses.")
 
     def to_fs(self, ctx=None):
+        """Serialize the signal definition for solver input."""
+
         raise NotImplementedError("This class must be overwritten by subclasses.")
 
     @classmethod
     def from_fs(cls, sim: SimulationConfig, data: Dict):
+        """Deserialize a signal definition from solver JSON."""
+
         raise NotImplementedError("This class must be overwritten by subclasses.")
 
 
 @dataclass(kw_only=True)
 class AnalyticalSignal(Signal):
-    """Wrapper object for getting analytical wavelet at each source
+    """Analytical wavelet signal shared across sources.
 
-    Attributes:
-       f_pts (List[float]): The frequencies for the wavelet.
-       offset (int): The time offset for the wavelet.
-       sigma (Optional[float]): The width of the wavelet taper.
+    Args:
+        kind: Wavelet family, ``"Ricker"``, ``"Klauder"``, or ``"Ormsby"``.
+        f_pts: Wavelet frequency parameters.
+        offset: Sample offset for generated wavelets.
+        sigma: Optional taper width.
     """
 
     kind: Literal["Ricker", "Klauder", "Ormsby"]
@@ -56,6 +64,8 @@ class AnalyticalSignal(Signal):
 
     @classmethod
     def from_fs(cls, sim: SimulationConfig, data: Dict) -> "AnalyticalSignal":
+        """Deserialize an analytical signal from solver JSON."""
+
         kind = data["kind"]
         f_pts = data["f_pts"]
 
@@ -85,6 +95,8 @@ class AnalyticalSignal(Signal):
         )
 
     def to_fs(self, ctx=None):
+        """Serialize this analytical signal for solver input."""
+
         return {
             "type": self.type,
             "kind": self.kind,
@@ -95,7 +107,12 @@ class AnalyticalSignal(Signal):
         }
 
     def get(self, i: int):
-        """Generate signal wavelet for given source at specified samples."""
+        """Generate the wavelet for one source index.
+
+        Args:
+            i: One-based source index. Analytical signals ignore the value but
+                keep the method signature consistent with file-backed signals.
+        """
         return Wavelet.generate(
             kind=self.kind,
             f_pts=self.f_pts,
@@ -108,13 +125,16 @@ class AnalyticalSignal(Signal):
 
 @dataclass(kw_only=True)
 class SignalFromFile(Signal):
-    """Wrapper object for getting signal for sources (and adjoint sources)
+    """Signal loaded from per-source files.
 
-    Attributes:
-       file_format (str): The format of the file.
-       file (str): The path to the file.
-       interval (Optional[float]): The interval between samples.
-       samples (Optional[np.ndarray]): The samples to use for the signal.
+    Args:
+        file_format: Input file format, ``"HDF5"`` or ``"SEGY"``.
+        file: File template. Python integer format braces may be used for
+            source ids.
+        interval: Optional input sample interval.
+        domain_in: Input signal domain.
+        samples_in: Optional input sample locations.
+        id_format: Parsed id-format tuple used internally.
     """
 
     type: Literal["from_file"] = "from_file"
@@ -126,6 +146,8 @@ class SignalFromFile(Signal):
     id_format: Tuple[str, str] = ("", "")
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this file-backed signal for solver input."""
+
         return {
             "file": str(self.file),
             "file_format": self.file_format,
@@ -180,7 +202,12 @@ class SignalFromFile(Signal):
                 )
 
     def get(self, i: int):
-        """Read Signal from file and evaluate at specified samples."""
+        """Read a source signal from file and evaluate it at output samples.
+
+        Args:
+            i: One-based source index used to format the file template.
+        """
+
         id = self.id_format[1].format(i)
         fname = self.file.replace(self.id_format[0], id)
         return self._get_wavelet(fname, self.samples_out)

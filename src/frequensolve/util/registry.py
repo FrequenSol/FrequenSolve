@@ -37,11 +37,23 @@ class MaterialBase(abc.ABC):
 
     @abc.abstractmethod
     def get_property_for_state(self, prop_name: str, state: Dict[str, float]) -> float:
+        """Return a material property for a given state.
+
+        Args:
+            prop_name: Property name.
+            state: State variables used by state-dependent materials.
+
+        Returns:
+            Property value.
+        """
+
         pass
 
     @property
     @abc.abstractmethod
     def name(self) -> str:
+        """Return the material name."""
+
         pass
 
     @abc.abstractmethod
@@ -61,8 +73,11 @@ class MaterialBase(abc.ABC):
 
 
 class ConstantMaterial(MaterialBase):
-    """
-    A simple material with constant property values.
+    """Material with constant property values.
+
+    Args:
+        mat_name: Material name.
+        properties: Mapping from property name to constant value.
     """
 
     def __init__(self, mat_name: str, properties: Dict[str, float]):
@@ -76,9 +91,21 @@ class ConstantMaterial(MaterialBase):
 
     @property
     def name(self) -> str:
+        """Return the material name."""
+
         return self._name
 
     def get_property_for_state(self, prop_name: str, state: Dict[str, float]) -> float:
+        """Return a constant property value.
+
+        Args:
+            prop_name: Property name.
+            state: Ignored state mapping, accepted for interface compatibility.
+
+        Returns:
+            Stored property value.
+        """
+
         if prop_name not in self._properties:
             raise ValueError(f"Property '{prop_name}' not defined in '{self._name}'")
         return self._properties[prop_name]

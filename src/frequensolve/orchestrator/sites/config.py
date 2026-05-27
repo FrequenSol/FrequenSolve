@@ -6,4 +6,6 @@ __all__ = ["BaseSiteConfig"]
 
 
 class BaseSiteConfig(ABC):
+    """Base class for provider-specific site configuration objects."""
+
     pass

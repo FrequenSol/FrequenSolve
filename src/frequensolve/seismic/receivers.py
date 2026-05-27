@@ -20,7 +20,13 @@ from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.fields import canonical_field
-from frequensolve.util.mixins import ExtraFieldsMixin, TypeTaggedMixin, merge_extra
+from frequensolve.util.mixins import (
+    ExportContext,
+    ExtraFieldsMixin,
+    TypeTaggedMixin,
+    merge_extra,
+    warn_deprecated_path_api,
+)
 from frequensolve.util.store import hash_dataarray_payload
 
 __all__ = [
@@ -45,10 +51,12 @@ class ReceiverComponent:
     A receiver component specifies what physical quantity is being measured
     (e.g., pressure, velocity) and in what direction for vector quantities.
 
-    Attributes:
-       name (str): String identifier for this receiver component.
-       field (str): Physical field being measured
-       direction (Optional[List[float]]): Measurement direction for vector fields.
+    Args:
+        name: String identifier for this receiver component.
+        field: Physical field being measured.
+        direction: Optional measurement direction for vector fields.
+        units: Optional output units for this component.
+        weight: Optional scalar/vector weight applied to the component.
     """
 
     name: str = "name"
@@ -61,6 +69,8 @@ class ReceiverComponent:
         self.field = canonical_field(self.field)
 
     def to_fs(self, ctx=None) -> dict:
+        """Serialize this receiver component for solver input."""
+
         return {
             "name": self.name,
             "field": canonical_field(self.field),
@@ -75,6 +85,8 @@ class ReceiverComponent:
 
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverComponent":
+        """Deserialize a receiver component payload."""
+
         data = copy.deepcopy(data)
         if "direction" in data:
             data["direction"] = Direction.from_fs(data["direction"])
@@ -93,12 +105,12 @@ class ReceiverComponent:
 @register_class
 @dataclass(kw_only=True)
 class ReceiverDevice(TypeTaggedMixin, ABC):
-    """Defines an abstract base class for a receiver device with multiple measurements (components).
+    """Abstract base class for a receiver device with measured components.
 
-    Attributes:
-       name (Optional[str]): Optional identifier for this receiver device.
-       components (List[ReceiverComponent]): List of components defining measurements.
-       response (Optional[Wavelet]): Wavelet response of the receiver.
+    Args:
+        name: Optional identifier for this receiver device.
+        components: Components defining measured quantities.
+        response: Optional receiver response wavelet.
     """
 
     name: Optional[str] = None
@@ -108,6 +120,17 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
     def add_component(
         self, name: str, field: str, direction: Optional[List[float]] = None
     ) -> "ReceiverComponent":
+        """Add a measured component to this device.
+
+        Args:
+            name: Component name used in trace output.
+            field: Physical field to measure.
+            direction: Optional measurement direction for vector fields.
+
+        Returns:
+            Newly added ``ReceiverComponent``.
+        """
+
         component = ReceiverComponent(
             name=name,
             field=canonical_field(field),
@@ -117,6 +140,8 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
         return component
 
     def to_fs(self, ctx=None) -> dict:
+        """Serialize this receiver device for solver input."""
+
         return {
             **({"name": self.name} if self.name is not None else {}),
             "components": [c.to_fs(ctx) for c in self.components],
@@ -129,6 +154,8 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
 
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverDevice":
+        """Deserialize a registered receiver-device payload."""
+
         return cls.dispatch_from_fs(data, class_registry)
 
 
@@ -141,14 +168,22 @@ class ReceiverFiber(ReceiverDevice):
     The response is integrated over the gauge length using either a reusable
     sample spacing or a requested number of points per gauge.
 
-    Attributes:
-       gauge_length (float or quantity): Length of the gauge.
-       channel_spacing (Optional[float or quantity]): Spacing between fiber channels.
-       sample_spacing (Optional[float or quantity]): Spacing for samples along the gauge.
-       points_per_gauge (Optional[int]): Number of samples per gauge when
-            sample_spacing is not provided.
-       radius (Optional[float or quantity]): Radius of the fiber.
-       pitch (Optional[float or quantity]): Pitch of the fiber.
+    Args:
+        name: Optional device name.
+        components: Receiver components measured by each channel.
+        gauge_length: Physical gauge length.
+        channel_spacing: Physical spacing between fiber channels. Defaults to
+            ``gauge_length``.
+        sample_spacing: Physical spacing for integration samples along a gauge.
+        points_per_gauge: Number of integration samples when sample spacing is
+            not provided.
+        radius: Optional fiber radius.
+        pitch: Optional fiber pitch.
+        response: Optional receiver response wavelet.
+
+    Raises:
+        ValueError: If ``gauge_length`` is omitted or ``points_per_gauge`` is
+            not positive.
     """
 
     gauge_length: Any = None
@@ -191,6 +226,8 @@ class ReceiverFiber(ReceiverDevice):
         self.pitch = pitch
 
     def to_fs(self, ctx=None) -> dict:
+        """Serialize this fiber receiver device for solver input."""
+
         data = {
             "_type": self.__class__.__name__,
             **super().to_fs(ctx),
@@ -210,6 +247,8 @@ class ReceiverFiber(ReceiverDevice):
 
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverFiber":
+        """Deserialize a fiber receiver device payload."""
+
         return cls(
             name=data.get("name"),
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
@@ -228,19 +267,19 @@ class ReceiverFiber(ReceiverDevice):
 class ReceiverNodeArray(ReceiverDevice):
     """Defines a group of nodes on a single channel; defined by list of offsets.
 
-    Attributes:
-       offsets (List[List[float]]): List of offsets from the 'location' of the array.
-            The fast dimension is over coordinates, the slow dimension is over nodes:
-            e.g., for a 9-node channel in 3D
-
-            - dx = 0.005 (5-m spacing)
-            - dy = 0.010 (10-m spacing)
-            - offsets = [[-dx, -dy, 0], [0, -dy, 0], [dx,-dy,0], ...
+    Args:
+        offsets: Node offsets from each receiver location. The fast dimension
+            is coordinates and the slow dimension is array node index.
+        name: Optional device name.
+        components: Receiver components measured by each array.
+        response: Optional receiver response wavelet.
     """
 
     offsets: List[List[float]] = field(default_factory=list)
 
     def to_fs(self, ctx=None) -> dict:
+        """Serialize this node-array device for solver input."""
+
         return {
             "_type": self.__class__.__name__,
             **super().to_fs(ctx),
@@ -249,6 +288,8 @@ class ReceiverNodeArray(ReceiverDevice):
 
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverNodeArray":
+        """Deserialize a node-array receiver device payload."""
+
         return cls(
             name=data.get("name"),
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
@@ -260,13 +301,17 @@ class ReceiverNodeArray(ReceiverDevice):
 @register_class
 @dataclass(kw_only=True)
 class ReceiverNode(ReceiverDevice):
-    """Defines a node receiver."""
+    """Point receiver device evaluated at each receiver coordinate."""
 
     def to_fs(self, ctx=None) -> dict:
+        """Serialize this point receiver device for solver input."""
+
         return {"_type": self.__class__.__name__, **super().to_fs(ctx)}
 
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverNode":
+        """Deserialize a point receiver device payload."""
+
         return cls(
             name=data.get("name"),
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
@@ -325,9 +370,12 @@ class ReceiverCoords(TypeTaggedMixin, ABC):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "ReceiverCoords":
+        """Deserialize a registered receiver-coordinate payload."""
+
         return cls.dispatch_from_fs(data, class_registry)
 
     def _set_path(self, proj_path: Path, rel_path: Path):
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
         try:
             self.path = proj_path / self.path.relative_to(self._proj_path)
         except Exception:
@@ -338,6 +386,7 @@ class ReceiverCoords(TypeTaggedMixin, ABC):
 
     @property
     def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         return self._proj_path / self._rel_path
 
 
@@ -346,10 +395,14 @@ class ReceiverCoords(TypeTaggedMixin, ABC):
 class CoordsFromFile(ReceiverCoords):
     """Receiver coordinates stored in a file.
 
-    Attributes:
-       path (Union[str, Path]):   Path to coordinate file.
-       format (str):              File format ('HDF5').
-       dset (str):                Dataset name in file.
+    Args:
+        file: Coordinate file path. Relative paths are resolved from the export
+            or project context when serialized/read.
+        format: Coordinate file format. Currently ``"HDF5"``.
+        dset: HDF5 dataset name. Defaults to ``"coords"``.
+        units: Optional coordinate units.
+        system: Optional coordinate-system name.
+        hash: Optional content hash for freshness checks.
     """
 
     file: Path
@@ -384,6 +437,8 @@ class CoordsFromFile(ReceiverCoords):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "CoordsFromFile":
+        """Deserialize file-backed receiver coordinates."""
+
         file = data["file"]
         format = data["format"]
         if format == "HDF5":
@@ -401,31 +456,65 @@ class CoordsFromFile(ReceiverCoords):
         )
 
     def _set_path(self, proj_path: Path, rel_path: Path):
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
         proj_path = Path(proj_path).resolve()
         rel_path = Path(rel_path)
-        file = Path(self.file).expanduser()
-
-        if not file.is_absolute():
-            file = proj_path / file
-        else:
-            simulation_path = rel_path.parent
-            expected = proj_path / simulation_path / f"{simulation_path.name}.h5"
-            is_simulation_store = (
-                file.name == expected.name
-                and file.parent.name == simulation_path.name
-                and file.parent.parent.name == "simulations"
-            )
-            if is_simulation_store and expected.exists():
-                file = expected
-
-        self.file = file
         self._proj_path = proj_path
         self._rel_path = rel_path
+        self.file = self._contextual_file(ExportContext(proj_path, rel_path))
         self._fill_metadata_from_file()
+
+    @staticmethod
+    def _simulation_rel_path(rel_path: Optional[Path]) -> Optional[Path]:
+        if rel_path is None:
+            return None
+        rel_path = Path(rel_path)
+        parts = rel_path.parts
+        if "simulations" not in parts:
+            return None
+        index = parts.index("simulations")
+        if len(parts) <= index + 1:
+            return None
+        return Path(*parts[: index + 2])
+
+    def _contextual_file(
+        self, ctx=None, *, source_project_path: Optional[Path] = None
+    ) -> Path:
+        file = Path(self.file).expanduser()
+        project_path = getattr(ctx, "project_path", None) or self._proj_path
+        rel_path = getattr(ctx, "rel_path", None) or self._rel_path
+        if project_path is not None:
+            project_path = Path(project_path).expanduser().resolve()
+
+        if not file.is_absolute():
+            return project_path / file if project_path is not None else file
+
+        if source_project_path is not None and project_path is not None:
+            try:
+                project_relative = file.resolve().relative_to(
+                    Path(source_project_path).expanduser().resolve()
+                )
+            except ValueError:
+                pass
+            else:
+                return project_path / project_relative
+
+        simulation_rel = self._simulation_rel_path(rel_path)
+        if project_path is None or simulation_rel is None:
+            return file
+        expected = project_path / simulation_rel / f"{simulation_rel.name}.h5"
+        is_simulation_store = (
+            file.name == expected.name
+            and file.parent.name == expected.parent.name
+            and file.parent.parent.name == "simulations"
+        )
+        if is_simulation_store and expected.exists():
+            return expected
+        return file
 
     def _relative_file(self, ctx=None) -> Path:
         project_path = getattr(ctx, "project_path", None) or self._proj_path
-        file = Path(self.file)
+        file = self._contextual_file(ctx)
         if project_path is None:
             return file
         try:
@@ -434,7 +523,7 @@ class CoordsFromFile(ReceiverCoords):
             return file
 
     def _local_file(self, ctx=None) -> Path:
-        file = Path(self.file)
+        file = self._contextual_file(ctx)
         if file.is_absolute():
             return file
         project_path = getattr(ctx, "project_path", None) or self._proj_path
@@ -518,8 +607,8 @@ class CoordsFromFile(ReceiverCoords):
            int: Number of receivers.
         """
         if self.format == "HDF5":
-            with h5py.File(self.file, "r") as f:
-                return f[self.dset].shape[0]
+            with h5py.File(self._local_file(), "r") as f:
+                return f[self.dset or "coords"].shape[0]
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
@@ -531,8 +620,8 @@ class CoordsFromFile(ReceiverCoords):
            Tuple[np.ndarray, np.ndarray]: Min and max coordinates.
         """
         if self.format == "HDF5":
-            with h5py.File(self.file, "r") as f:
-                coords = f[self.dset]
+            with h5py.File(self._local_file(), "r") as f:
+                coords = f[self.dset or "coords"]
                 return np.min(coords, axis=0), np.max(coords, axis=0)
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
@@ -550,15 +639,18 @@ class CoordsFromFile(ReceiverCoords):
            np.ndarray: Coordinate array for requested receivers.
         """
         if self.format == "HDF5":
-            with h5py.File(self.file, "r") as f:
+            with h5py.File(self._local_file(), "r") as f:
+                dataset = self.dset or "coords"
                 if indices is None:
-                    return f[self.dset][:]
+                    return f[dataset][:]
                 else:
-                    return f[self.dset][indices]
+                    return f[dataset][indices]
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize file-backed receiver coordinates for solver input."""
+
         rel_path = self._relative_file(ctx)
         default_units = getattr(ctx, "default_length_units", None)
         units = self.units if self.units is not None else default_units
@@ -588,8 +680,10 @@ class CoordsFromFile(ReceiverCoords):
 class CoordsGrid(ReceiverCoords):
     """Receiver coordinates defined by a Cartesian grid.
 
-    Attributes:
-       grid (CartesianGrid): Grid defining receiver locations.
+    Args:
+        grid: Cartesian grid defining receiver locations.
+        units: Optional coordinate units override.
+        system: Optional coordinate-system name override.
     """
 
     grid: CartesianGrid
@@ -598,10 +692,14 @@ class CoordsGrid(ReceiverCoords):
 
     @property
     def size(self) -> int:
+        """Return the number of receiver coordinates in the grid."""
+
         return np.prod(self.grid.n)
 
     @property
     def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return lower and upper coordinate bounds for the grid."""
+
         return self.grid.x0, self.grid.x1
 
     def get(
@@ -661,6 +759,8 @@ class CoordsGrid(ReceiverCoords):
             raise ValueError("Invalid indices type")
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize grid receiver coordinates for solver input."""
+
         payload = {"_type": self.__class__.__name__, "grid": self.grid.to_fs(ctx)}
         if self.units is not None:
             payload["units"] = unit_expression(self.units)
@@ -670,6 +770,8 @@ class CoordsGrid(ReceiverCoords):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "CoordsGrid":
+        """Deserialize grid-backed receiver coordinates."""
+
         return cls(
             grid=CartesianGrid.from_fs(data["grid"]),
             units=data.get("units"),
@@ -682,8 +784,15 @@ class CoordsGrid(ReceiverCoords):
 class CoordsArray(ReceiverCoords):
     """Receiver coordinates stored as an xarray/numpy array.
 
-    Attributes:
-       coords (Union[xr.DataArray, np.ndarray]): Coordinate array.
+    Args:
+        coordinates: Coordinate array with shape ``(n_receivers, dimension)``.
+            xarray input may carry ``units`` and ``system`` attributes.
+        units: Optional coordinate units.
+        system: Optional coordinate-system name.
+
+    Raises:
+        ValueError: If a NumPy coordinate array is not two-dimensional with two
+            or three coordinate columns.
     """
 
     coordinates: Union[xr.DataArray, np.ndarray]
@@ -721,16 +830,29 @@ class CoordsArray(ReceiverCoords):
 
     @property
     def size(self) -> int:
+        """Return the number of receiver coordinates."""
+
         return len(self.coordinates)
 
     @property
     def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return minimum and maximum coordinate values by coordinate axis."""
+
         return (
             self.coordinates.min(dim="receiver").values,
             self.coordinates.max(dim="receiver").values,
         )
 
     def get(self, indices: Optional[Union[int, slice]] = None) -> np.ndarray:
+        """Return coordinate values for all or selected receivers.
+
+        Args:
+            indices: Optional integer, slice, or indexer accepted by xarray.
+
+        Returns:
+            ``float64`` coordinate array.
+        """
+
         if indices is None:
             return np.asarray(self.coordinates.values, dtype=np.float64)
         else:
@@ -741,16 +863,27 @@ class CoordsArray(ReceiverCoords):
     ) -> CoordsFromFile:
         """Write coordinates to file and return CoordsFromFile object.
 
+        Args:
+            file_name: Output coordinate file path.
+            format: Optional file format. Inferred from ``file_name`` when
+                omitted.
+
         Returns:
-           CoordsFromFile: CoordsFromFile object.
+            ``CoordsFromFile`` pointing at the written HDF5 dataset.
+
+        Raises:
+            ValueError: If the file extension does not identify a supported
+                format.
         """
+        file = Path(file_name).expanduser()
         if format is None:
-            if file_name.endswith(".h5") or file_name.endswith(".hdf5"):
+            if str(file).endswith(".h5") or str(file).endswith(".hdf5"):
                 format = "HDF5"
             else:
                 raise ValueError(f"Unknown coordinates file extension: {file_name}")
 
-        file = self._path / file_name
+        if not file.is_absolute():
+            file = file.resolve()
         if not file.parent.exists():
             file.parent.mkdir(parents=True)
 
@@ -775,6 +908,8 @@ class CoordsArray(ReceiverCoords):
         )
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize inline receiver coordinates for solver input."""
+
         values = np.asarray(self.coordinates.values, dtype=np.float64).tolist()
         payload = {"_type": self.__class__.__name__}
         if self.units is not None or self.system is not None:
@@ -789,6 +924,8 @@ class CoordsArray(ReceiverCoords):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "CoordsArray":
+        """Deserialize inline receiver coordinates."""
+
         coords = np.array(data.get("coords", data.get("value")), dtype=np.float64)
         return cls(
             coordinates=coords, units=data.get("units"), system=data.get("system")
@@ -851,6 +988,12 @@ def coordinate_array_metadata(
     Pint quantities intentionally become magnitudes here, with their units
     carried on the receiver/source coordinate object instead of being stripped
     implicitly by NumPy.
+
+    Args:
+        coords: Raw coordinate array, Pint quantity, or ``CoordinateValue``.
+
+    Returns:
+        ``(values, units, system)`` with numeric values in double precision.
     """
 
     system = None
@@ -879,10 +1022,21 @@ class ReceiverGroup(ExtraFieldsMixin):
     quantities. All receivers in the group share output settings and their data will be
     written to the same output file.
 
-    Attributes:
-       name (str):                   String identifier for this receiver group.
-       device (ReceiverDevice):      Device defining receiver type and components.
-       coordinates (ReceiverCoords): Coordinates defining receiver locations.
+    Args:
+        name: String identifier for this receiver group.
+        device: Device defining receiver type and components.
+        coordinates: Receiver coordinates as an array, grid, file path, or
+            ``ReceiverCoords`` object.
+        domain: Optional domain where the receiver group is evaluated.
+        sampling: Optional sparse survey sampling reference.
+        survey: Convenience sparse survey name/reference. Merged with
+            ``sampling`` when both are supplied.
+        extra: Additional solver-facing receiver group fields.
+        **kwargs: Additional solver-facing receiver group fields.
+
+    Raises:
+        TypeError: If deprecated frame arguments are supplied.
+        ValueError: If ``coordinates`` cannot be interpreted.
     """
 
     name: str = "group"
@@ -896,6 +1050,8 @@ class ReceiverGroup(ExtraFieldsMixin):
 
     @property
     def size(self):
+        """Return the number of receiver locations in this group."""
+
         return self.coordinates.size
 
     @property
@@ -950,12 +1106,16 @@ class ReceiverGroup(ExtraFieldsMixin):
 
     @property
     def survey(self) -> Optional[str]:
+        """Return the sparse survey name referenced by this receiver group."""
+
         if self.sampling is None:
             return None
         return self.sampling.survey
 
     @survey.setter
     def survey(self, value: Optional[Union[str, ReceiverSampling]]) -> None:
+        """Set sparse survey sampling from a name or ``ReceiverSampling``."""
+
         self.sampling = ReceiverSampling.from_value(value)
 
     @staticmethod
@@ -989,6 +1149,12 @@ class ReceiverGroup(ExtraFieldsMixin):
         return out
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this receiver group for solver input.
+
+        Large inline coordinate arrays may be written to the simulation store or
+        export directory when an export context is available.
+        """
+
         coords = self.coordinates
         if isinstance(coords, CoordsArray):
             default_units = getattr(ctx, "default_length_units", None)
@@ -1024,17 +1190,16 @@ class ReceiverGroup(ExtraFieldsMixin):
                     ),
                     **({"system": coords.system} if coords.system is not None else {}),
                 }
-            elif (
-                coords.size > 200
-                and self._proj_path is not None
-                and self._rel_path is not None
-            ):
-                dump = coords.to_file(file_name="coords.h5", format="HDF5")
-                dump._set_path(
-                    proj_path=self._proj_path, rel_path=self._rel_path / self.name
+            elif coords.size > 200 and ctx is not None and ctx.path is not None:
+                coords_for_file = CoordsArray(
+                    coordinates=coords.coordinates,
+                    units=coordinate_units,
+                    system=coords.system,
                 )
-                if dump.units is None:
-                    dump.units = coordinate_units
+                dump = coords_for_file.to_file(
+                    file_name=ctx.path / self.name / "coords.h5",
+                    format="HDF5",
+                )
                 coords_payload = dump.to_fs(ctx)
             else:
                 coords_payload = coords.to_fs(ctx)
@@ -1060,6 +1225,8 @@ class ReceiverGroup(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "ReceiverGroup":
+        """Deserialize a receiver group payload."""
+
         data = copy.deepcopy(data)
         coords = ReceiverCoords.from_fs(data.pop("coordinates", None))
         sampling = data.pop("sampling", None)
@@ -1075,13 +1242,11 @@ class ReceiverGroup(ExtraFieldsMixin):
         )
 
     def _set_path(self, proj_path: Path, rel_path: Path):
-        self._proj_path = proj_path
-        self._rel_path = rel_path / self.name
-        if isinstance(self.coordinates, ReceiverCoords):
-            self.coordinates._set_path(
-                proj_path=proj_path, rel_path=rel_path / self.name
-            )
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
+        self._proj_path = Path(proj_path).expanduser().resolve()
+        self._rel_path = Path(rel_path) / self.name
 
     @property
     def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         return self._proj_path / self._rel_path

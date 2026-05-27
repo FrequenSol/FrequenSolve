@@ -43,6 +43,18 @@ def get_fft_backend(
 
     This imports pyFFTW only when an FFT is actually needed and silently falls
     back to NumPy when pyFFTW is not installed.
+
+    Args:
+        threads: Optional pyFFTW thread count for this lookup. When omitted,
+            the configured process default or ``FS_FFT_THREADS`` is used.
+        prefer_pyfftw: Optional override for whether pyFFTW should be preferred
+            over NumPy.
+
+    Returns:
+        Module exposing NumPy-compatible FFT functions.
+
+    Raises:
+        ValueError: If ``FS_FFT_THREADS`` is set to a non-positive integer.
     """
 
     selected_preference = _prefer_pyfftw if prefer_pyfftw is None else prefer_pyfftw
