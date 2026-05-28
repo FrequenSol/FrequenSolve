@@ -1,4 +1,4 @@
-"""Python structures defining mesh API"""
+"""Mesh generator configuration objects for solver input."""
 
 from abc import ABC
 from dataclasses import dataclass, field
@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional, Union
 from frequensolve.units import value_and_units_to_fs
 
 from ..util.class_registry import class_registry, register_class
-from ..util.mixins import TypeTaggedMixin, merge_extra
+from ..util.mixins import TypeTaggedMixin, merge_extra, warn_deprecated_path_api
 
 __all__ = [
     "BaseMeshGenerator",
@@ -23,27 +23,46 @@ __all__ = [
 @register_class
 @dataclass
 class BaseMeshGenerator(TypeTaggedMixin, ABC):
-    """Base class for mesh generators"""
+    """Base class for type-tagged mesh generator configurations."""
 
     _proj_path: Path = Path()
     _rel_path: Path = Path()
 
     @classmethod
     def from_fs(cls, data: Dict) -> "BaseMeshGenerator":
+        """Deserialize a registered mesh generator payload.
+
+        Args:
+            data: Serialized mesh generator mapping containing ``_type``.
+
+        Returns:
+            Concrete mesh generator instance.
+        """
+
         return cls.dispatch_from_fs(data, class_registry)
 
     def _set_path(self, proj_path: Path, rel_path: Path):
-        self._proj_path = proj_path
-        self._rel_path = rel_path
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
+        self._proj_path = Path(proj_path).expanduser().resolve()
+        self._rel_path = Path(rel_path)
 
     @property
     def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         return self._proj_path / self._rel_path
 
 
 @dataclass
 class HorizontalSpacingControl:
-    """Local horizontal mesh spacing control."""
+    """Local horizontal mesh spacing control around a named borehole.
+
+    Args:
+        around_borehole: Borehole name the control applies to.
+        padding: Optional physical padding around the borehole before the
+            maximum element size is relaxed.
+        max_size: Optional maximum horizontal element size near the borehole.
+        extra: Additional solver-facing control fields.
+    """
 
     around_borehole: str
     padding: Optional[Any] = None
@@ -52,6 +71,15 @@ class HorizontalSpacingControl:
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "HorizontalSpacingControl":
+        """Deserialize a local spacing-control payload.
+
+        Args:
+            data: Serialized horizontal spacing control mapping.
+
+        Returns:
+            ``HorizontalSpacingControl`` instance.
+        """
+
         payload = dict(data)
         return cls(
             around_borehole=payload.pop("around_borehole"),
@@ -61,6 +89,15 @@ class HorizontalSpacingControl:
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize this local spacing control for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible spacing-control payload.
+        """
+
         payload = {
             "around_borehole": self.around_borehole,
             **(
@@ -79,7 +116,16 @@ class HorizontalSpacingControl:
 
 @dataclass
 class HorizontalSpacing:
-    """Horizontal mesh-spacing policy for layered meshes."""
+    """Horizontal mesh-spacing policy for layered meshes.
+
+    Args:
+        include_borehole_edges: Whether borehole edges should be included in the
+            horizontal spacing constraints.
+        max_growth: Optional maximum growth factor between adjacent horizontal
+            element sizes.
+        controls: Local spacing controls, usually around boreholes.
+        extra: Additional solver-facing spacing policy fields.
+    """
 
     include_borehole_edges: Optional[bool] = None
     max_growth: Optional[float] = None
@@ -88,6 +134,15 @@ class HorizontalSpacing:
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "HorizontalSpacing":
+        """Deserialize a horizontal spacing policy.
+
+        Args:
+            data: Serialized horizontal spacing mapping.
+
+        Returns:
+            ``HorizontalSpacing`` instance.
+        """
+
         payload = dict(data)
         controls = [
             (
@@ -112,6 +167,19 @@ class HorizontalSpacing:
         max_size: Optional[Any] = None,
         **kwargs,
     ) -> "HorizontalSpacing":
+        """Add a local spacing control around a borehole.
+
+        Args:
+            name: Borehole name.
+            padding: Optional physical padding around the borehole.
+            max_size: Optional maximum horizontal element size near the
+                borehole.
+            **kwargs: Additional solver-facing control fields.
+
+        Returns:
+            This spacing policy, enabling fluent configuration.
+        """
+
         self.controls.append(
             HorizontalSpacingControl(
                 around_borehole=name,
@@ -123,6 +191,15 @@ class HorizontalSpacing:
         return self
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize the horizontal spacing policy for solver input.
+
+        Args:
+            ctx: Optional export context forwarded to local controls.
+
+        Returns:
+            JSON-compatible horizontal spacing payload.
+        """
+
         payload = {
             **(
                 {"include_borehole_edges": self.include_borehole_edges}
@@ -142,15 +219,18 @@ class HorizontalSpacing:
 @register_class
 @dataclass
 class HexMeshGenerator(BaseMeshGenerator):
-    """Generates a hexahedral mesh
+    """Structured hexahedral mesh generator.
 
-    Attributes:
-       l_bound (List[float]):
-          The lower bounds of a 'box' domain
-       u_bound (List[float]):
-          The upper bounds of a 'box' domain
-       n (List[int]):
-          Number of elements in each direction
+    Args:
+        l_bound: Lower coordinate bounds of the mesh box.
+        u_bound: Upper coordinate bounds of the mesh box.
+        n: Element counts in each mesh direction. When omitted, a small default
+            is inferred from the number of bounds.
+        units: Coordinate units for the bounds.
+        system: Coordinate-system name for the bounds.
+        clip_to_envelope: Whether to clip the mesh to the model envelope.
+        triangulate_strips: Whether to triangulate strip-like cells.
+        horizontal_spacing: Optional layered-mesh horizontal spacing policy.
     """
 
     l_bound: Optional[List[float]] = None
@@ -163,6 +243,17 @@ class HexMeshGenerator(BaseMeshGenerator):
     horizontal_spacing: Optional[Union[HorizontalSpacing, Dict[str, Any]]] = None
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize the mesh generator for solver input.
+
+        Args:
+            ctx: Optional export context. ``ctx.rel_path`` is used as the mesh
+                output path when available.
+
+        Returns:
+            JSON-compatible mesh generator payload.
+        """
+
+        rel_path = getattr(ctx, "rel_path", self._rel_path)
         if self.l_bound is not None:
             assert self.u_bound is not None
             l_bound = self.l_bound
@@ -177,7 +268,7 @@ class HexMeshGenerator(BaseMeshGenerator):
 
         return {
             "_type": self.__class__.__name__,
-            "path": self._rel_path,
+            "path": rel_path,
             "n": self.n,
             "l_bound": l_bound,
             "u_bound": u_bound,
@@ -210,6 +301,22 @@ class HexMeshGenerator(BaseMeshGenerator):
         max_growth: Optional[float] = None,
         **kwargs,
     ) -> "HexMeshGenerator":
+        """Request local horizontal refinement around a borehole.
+
+        Args:
+            name: Borehole name referenced by the layered model.
+            padding: Optional physical padding around the borehole.
+            max_size: Optional maximum horizontal element size near the
+                borehole.
+            include_edges: Whether borehole edges are included in spacing
+                constraints.
+            max_growth: Optional maximum horizontal element-size growth.
+            **kwargs: Additional solver-facing spacing-control fields.
+
+        Returns:
+            This mesh generator, enabling fluent configuration.
+        """
+
         if self.horizontal_spacing is None:
             self.horizontal_spacing = HorizontalSpacing()
         elif isinstance(self.horizontal_spacing, Mapping):
@@ -228,6 +335,15 @@ class HexMeshGenerator(BaseMeshGenerator):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "HexMeshGenerator":
+        """Deserialize a structured hexahedral mesh generator.
+
+        Args:
+            data: Serialized mesh generator mapping.
+
+        Returns:
+            ``HexMeshGenerator`` instance.
+        """
+
         return cls(
             n=data["n"],
             l_bound=data["l_bound"],
@@ -255,6 +371,15 @@ class LayeredMeshGenerator(HexMeshGenerator):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "LayeredMeshGenerator":
+        """Deserialize a layered structured mesh generator.
+
+        Args:
+            data: Serialized mesh generator mapping.
+
+        Returns:
+            ``LayeredMeshGenerator`` instance.
+        """
+
         return cls(
             n=data["n"],
             l_bound=data["l_bound"],
@@ -274,19 +399,30 @@ class LayeredMeshGenerator(HexMeshGenerator):
 @register_class
 @dataclass
 class TetMeshGenerator(HexMeshGenerator):
-    """Generates a tetrahedral mesh
+    """Tetrahedral mesh generator using the structured box parameters.
 
-    Attributes:
-       l_bound (List[float]):
-          The lower bounds of a 'box' domain
-       u_bound (List[float]):
-          The upper bounds of a 'box' domain
-       n (List[int]):
-          Number of elements in each direction
+    Args:
+        l_bound: Lower coordinate bounds of the mesh box.
+        u_bound: Upper coordinate bounds of the mesh box.
+        n: Element counts in each direction before tetrahedralization.
+        units: Coordinate units for the bounds.
+        system: Coordinate-system name for the bounds.
+        clip_to_envelope: Whether to clip the mesh to the model envelope.
+        triangulate_strips: Whether to triangulate strip-like cells.
+        horizontal_spacing: Optional layered-mesh horizontal spacing policy.
     """
 
     @classmethod
     def from_fs(cls, data: Dict) -> "TetMeshGenerator":
+        """Deserialize a tetrahedral mesh generator.
+
+        Args:
+            data: Serialized mesh generator mapping.
+
+        Returns:
+            ``TetMeshGenerator`` instance.
+        """
+
         return cls(
             n=data["n"],
             l_bound=data["l_bound"],

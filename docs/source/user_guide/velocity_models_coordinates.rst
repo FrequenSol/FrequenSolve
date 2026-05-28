@@ -155,7 +155,7 @@ Use an :term:`xarray` ``DataArray`` when the aperture varies along the fracture:
        properties={"vp": 1.5, "rho": 1.0},
    )
 
-When ``properties`` are provided, the :term:`SDK` assigns or uses the fracture
+When ``properties`` are provided, the :term:`Python API` assigns or uses the fracture
 ``mesh_block_id`` and creates the matching ``ModelSubdomain``. Material
 properties stay in ``subdomains``; the fracture entry in ``surfaces`` carries
 the geometry and the mesh-block reference:

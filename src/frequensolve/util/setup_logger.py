@@ -17,7 +17,17 @@ DEFAULT_DEPENDENCY_LOGGERS = ("dask", "distributed", "tornado", "bokeh")
 
 
 def normalize_log_level(level: Union[int, str]) -> int:
-    """Normalize integer or string log levels."""
+    """Normalize integer or string log levels.
+
+    Args:
+        level: Numeric logging level or standard level name.
+
+    Returns:
+        Integer logging level.
+
+    Raises:
+        ValueError: If the level name is unknown.
+    """
 
     if isinstance(level, int):
         return level
@@ -149,6 +159,12 @@ def configure_logging(
 
 
 def set_log_level(level: Union[int, str]):
+    """Update the process-wide FrequenSolve logger level.
+
+    Args:
+        level: Numeric logging level or standard level name.
+    """
+
     global logging_level
     level = normalize_log_level(level)
     logging_level = level
@@ -161,6 +177,8 @@ def set_log_level(level: Union[int, str]):
 
 
 def in_jupyter_notebook():
+    """Return whether code appears to be running inside a Jupyter notebook."""
+
     try:
         shell = get_ipython().__class__.__name__
         if shell == "ZMQInteractiveShell":
@@ -174,6 +192,8 @@ def in_jupyter_notebook():
 
 
 def disable_jupyter_logging():
+    """Disable logging output when running in a Jupyter notebook."""
+
     if in_jupyter_notebook():
         logging.disable(logging.CRITICAL)
 

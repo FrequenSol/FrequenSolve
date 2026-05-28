@@ -13,8 +13,8 @@ from pathlib import Path
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "FrequenSolve"
-copyright = f"{datetime.datetime.now().year}, Jacob Badger"
-author = "Jacob Badger"
+copyright = f"{datetime.datetime.now().year}, FrequenSol"
+author = "FrequenSol"
 
 # -- Path setup --------------------------------------------------------------
 # If your modules are in src/frequensolve, for example:
@@ -70,6 +70,34 @@ autodoc_typehints = (
     "description"  # Show types in the parameter description instead of inline
 )
 autodoc_typehints_format = "short"  # Use short names for type annotations
+autodoc_member_order = "bysource"
+
+
+def _strip_private_signature_params(
+    app, what, name, obj, options, signature, return_annotation
+):
+    """Hide implementation-only constructor parameters from rendered signatures."""
+
+    if not signature or what not in {"class", "function", "method"}:
+        return None
+    import inspect
+
+    try:
+        sig = inspect.signature(obj)
+    except (TypeError, ValueError):
+        return None
+
+    params = [
+        param for param in sig.parameters.values() if not param.name.startswith("_")
+    ]
+    if len(params) == len(sig.parameters):
+        return None
+    return str(sig.replace(parameters=params)), return_annotation
+
+
+def setup(app):
+    app.connect("autodoc-process-signature", _strip_private_signature_params)
+
 
 # Intersphinx configuration
 intersphinx_mapping = {

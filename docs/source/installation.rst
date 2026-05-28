@@ -2,7 +2,7 @@ Installation
 ============
 
 FrequenSolve Python is the authoring, orchestration, and output-reading
-:term:`SDK`. Installing the package lets you build :term:`projects <project>`,
+:term:`Python API`. Installing the package lets you build :term:`projects <project>`,
 inspect exported solver inputs, load :term:`trace` outputs, and configure
 execution :term:`sites <site>`. Running a :term:`job` also requires access to a
 licensed :term:`fast solver` through a local, cloud, or :term:`HPC` site.
@@ -10,7 +10,7 @@ licensed :term:`fast solver` through a local, cloud, or :term:`HPC` site.
 Basic Install
 -------------
 
-Install the released SDK from :term:`PyPI` with pip:
+Install the released FrequenSolve Python API from :term:`PyPI` with pip:
 
 .. code-block:: bash
 

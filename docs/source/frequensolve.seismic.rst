@@ -1,5 +1,5 @@
 Seismic
-=======
+========
 
 Acquisition
 -----------
@@ -26,14 +26,6 @@ Sources
    :show-inheritance:
    :noindex:
 
-Signals
--------
-
-.. automodule:: frequensolve.seismic.signals
-   :members:
-   :show-inheritance:
-   :noindex:
-
 Surveys
 -------
 
@@ -54,6 +46,14 @@ Traces
 ------
 
 .. automodule:: frequensolve.seismic.traces
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Trace Records
+-------------
+
+.. automodule:: frequensolve.seismic.trace_record
    :members:
    :show-inheritance:
    :noindex:

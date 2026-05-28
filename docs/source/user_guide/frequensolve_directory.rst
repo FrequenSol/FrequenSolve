@@ -62,7 +62,7 @@ Directory Contents
        ``:`` and ``/`` with ``_``.
 
 Only ``site.toml`` is intended for normal manual editing. Cloud credential and
-configuration cache files are managed by the :term:`SDK`; delete them to force
+configuration cache files are managed by the :term:`Python API`; delete them to force
 a fresh login or fresh domain configuration fetch, but do not hand-edit token
 values.
 

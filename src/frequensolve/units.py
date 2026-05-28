@@ -36,7 +36,12 @@ def _load_pint():
 
 
 class UnitRegistryProxy:
-    """Lazy proxy for the shared Pint unit registry."""
+    """Lazy proxy for the shared Pint unit registry.
+
+    The proxy keeps importing FrequenSolve cheap while still exposing the same
+    attribute and call surface as ``pint.UnitRegistry`` once unit functionality
+    is used.
+    """
 
     _registry = None
 
@@ -49,6 +54,16 @@ class UnitRegistryProxy:
         return getattr(self._load(), name)
 
     def __call__(self, *args, **kwargs) -> Any:
+        """Forward calls to the lazily created Pint unit registry.
+
+        Args:
+            *args: Positional arguments forwarded to ``pint.UnitRegistry``.
+            **kwargs: Keyword arguments forwarded to ``pint.UnitRegistry``.
+
+        Returns:
+            Pint unit or quantity object returned by the registry.
+        """
+
         return self._load()(*args, **kwargs)
 
     def __repr__(self) -> str:
@@ -61,13 +76,28 @@ ureg = UnitRegistryProxy()
 
 
 def Q_(*args, **kwargs):
-    """Construct a Pint quantity using FrequenSolve's shared unit registry."""
+    """Construct a Pint quantity using FrequenSolve's shared unit registry.
+
+    Args:
+        *args: Positional arguments forwarded to ``ureg.Quantity``.
+        **kwargs: Keyword arguments forwarded to ``ureg.Quantity``.
+
+    Returns:
+        Pint quantity.
+    """
 
     return ureg.Quantity(*args, **kwargs)
 
 
 def unit_expression(units: Any) -> str:
-    """Return a compact units_m-friendly unit expression."""
+    """Return a compact solver-friendly unit expression.
+
+    Args:
+        units: Unit string, Pint unit, or ``None``.
+
+    Returns:
+        Unit expression string. ``None`` becomes an empty string.
+    """
     if units is None:
         return ""
     if isinstance(units, str):
@@ -80,6 +110,15 @@ def unit_expression(units: Any) -> str:
 
 
 def is_quantity(value: Any) -> bool:
+    """Return whether ``value`` is a Pint quantity.
+
+    Args:
+        value: Object to inspect.
+
+    Returns:
+        ``True`` for Pint quantities, otherwise ``False``.
+    """
+
     if value is None:
         return False
     pint = _load_pint()
@@ -101,6 +140,18 @@ def _plain_value(value: Any) -> Any:
 
 
 def quantity_to_fs(value: Any) -> Dict[str, Any]:
+    """Serialize a Pint quantity as ``{"value": ..., "units": ...}``.
+
+    Args:
+        value: Pint quantity to serialize.
+
+    Returns:
+        JSON-compatible value/unit mapping.
+
+    Raises:
+        TypeError: If ``value`` is not a Pint quantity.
+    """
+
     if not is_quantity(value):
         raise TypeError(f"Expected Pint quantity, got {type(value)}")
     return {
@@ -110,7 +161,17 @@ def quantity_to_fs(value: Any) -> Dict[str, Any]:
 
 
 def value_and_units_to_fs(value: Any, units: Optional[Any] = None) -> Any:
-    """Serialize a numeric value, xarray object, or Pint quantity with optional units."""
+    """Serialize a value with optional unit metadata.
+
+    Args:
+        value: Scalar, array-like, mapping, xarray data array, or Pint
+            quantity.
+        units: Optional units to attach when ``value`` does not already carry
+            units.
+
+    Returns:
+        Raw JSON-compatible value or ``{"value": ..., "units": ...}`` mapping.
+    """
     if is_quantity(value):
         return quantity_to_fs(value)
 
@@ -141,7 +202,20 @@ def _has_dataarray_values(value: Any) -> bool:
 
 @dataclass
 class UnitConfig:
-    """Simulation-level unit scaling and output-unit defaults."""
+    """Simulation-level unit scaling and output-unit defaults.
+
+    Args:
+        disable_scaling: Optional flag that disables solver unit scaling.
+        f0: Optional reference frequency scale.
+        length_scale: Optional length scale.
+        time_scale: Optional time scale.
+        mass_scale: Optional mass scale.
+        defaults: Default units by physical quantity or output name.
+        scales: Unit scales by solver scale name.
+        units_extra: Additional fields nested inside the serialized ``Units``
+            block.
+        extra: Additional top-level serialized fields.
+    """
 
     disable_scaling: Optional[bool] = None
     f0: Optional[Any] = None
@@ -155,6 +229,16 @@ class UnitConfig:
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "UnitConfig":
+        """Deserialize unit configuration from a solver payload.
+
+        Args:
+            data: Serialized simulation or unit configuration mapping.
+
+        Returns:
+            ``UnitConfig`` with unit defaults, scales, and extra fields
+            restored.
+        """
+
         payload = dict(data)
         units = dict(payload.pop("Units", payload.pop("units", {})) or {})
         defaults = dict(units.pop("defaults", {}))
@@ -174,6 +258,15 @@ class UnitConfig:
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize unit configuration for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible unit configuration payload.
+        """
+
         payload: Dict[str, Any] = {}
         units_payload = dict(self.units_extra)
         if self.scales:

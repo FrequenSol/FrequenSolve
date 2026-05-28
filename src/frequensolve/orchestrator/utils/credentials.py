@@ -1,3 +1,5 @@
+"""Credential helpers for SSH/HPC and cloud-backed execution sites."""
+
 import getpass
 import os
 from dataclasses import dataclass
@@ -27,7 +29,12 @@ __all__ = ["Credentials", "CloudCredentials"]
 # ----------------------------------
 @dataclass
 class Credentials:
-    """Credentials for SSH-backed HPC sites."""
+    """Credentials for SSH-backed HPC sites.
+
+    Subclasses configure the environment variable names used for the username,
+    password, and SSH key passphrase. Missing values are requested
+    interactively.
+    """
 
     user_env: str
     pw_env: str
@@ -38,6 +45,8 @@ class Credentials:
 
     @cached_property
     def username(self):
+        """Return the SSH username from the environment or an interactive prompt."""
+
         user = os.getenv(self.user_env)
         if user is None or user == "":
             print(
@@ -48,6 +57,8 @@ class Credentials:
 
     @cached_property
     def password(self):
+        """Return the SSH password from the environment or an interactive prompt."""
+
         pw = os.getenv(self.pw_env)
         if pw is None or pw == "":
             print(
@@ -58,6 +69,12 @@ class Credentials:
 
     @cached_property
     def ssh_key(self):
+        """Load the default RSA private key for SSH authentication.
+
+        Returns:
+            Paramiko ``RSAKey`` loaded from ``~/.ssh/id_rsa``.
+        """
+
         filename = os.path.expanduser("~/.ssh/id_rsa")
         try:
             return RSAKey.from_private_key_file(filename)
@@ -77,6 +94,8 @@ class Credentials:
 
     @property
     def duo_code(self):
+        """Prompt for and return a site two-factor authentication code."""
+
         return input("Site 2FA Code:")
 
     def __str__(self):
@@ -105,10 +124,10 @@ class CloudCredentials:
 
     @cached_property
     def access_key(self):
-        """Retrieve AWS access key ID."""
+        """Retrieve AWS access key ID from the configured environment variable."""
         return os.getenv(self.key_env)
 
     @cached_property
     def secret_key(self):
-        """Retrieve AWS secret access key."""
+        """Retrieve AWS secret access key from the configured environment variable."""
         return os.getenv(self.secret_env)

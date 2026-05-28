@@ -6,7 +6,14 @@ from collections.abc import Iterable
 
 
 def unique_exports(*groups: Iterable[str]) -> list[str]:
-    """Return export names in declaration order without duplicates."""
+    """Return export names in declaration order without duplicates.
+
+    Args:
+        *groups: Export-name iterables to concatenate.
+
+    Returns:
+        Ordered list containing the first occurrence of each name.
+    """
 
     seen = set()
     exports = []

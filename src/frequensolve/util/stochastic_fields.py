@@ -1,3 +1,5 @@
+"""Random field generators used for model/property perturbations."""
+
 from typing import List, Optional, Union
 
 import numpy as np
@@ -15,27 +17,23 @@ def von_karman_stochastic_field(
     anisotropy: Optional[List[float]] = None,
     seed: Optional[int] = None,
 ):
-    """
-    Generates a stochastic field using the von Kármán spectral density.
+    """Generate a stochastic field using the von Karman spectral density.
 
-    Parameters:
-       grid (xarray.DataArray):
-          Array defining the sampling grid.
-       mean (float):
-          Mean value of the field.
-       std (float):
-          Standard deviation of the field.
-       k0 (float[0,inf]):
-          Correlation wavenumber (characteristic scale).
-          If k0 is a list, the Von Karman spectral density is summed over the list.
-          (to define a stochastic field with multiple characteristic scales)
-       nu (float[0,1]):
-          Smoothness parameter. Values close to 1 are smooth,
-          values close to 0 are rough.
-       anisotropy (List[float]):
-          Anisotropic stretching factor for each dimension.
-       seed (int):
-          Random seed (setting a value fixes the seed for reproducibility).
+    Args:
+        xarr: Data array whose dimensions and coordinates define the sampling
+            grid.
+        mean: Mean value of the generated field.
+        std: Standard deviation of the generated field.
+        k0: Correlation wavenumber or list of wavenumbers. Multiple values are
+            summed to create a multi-scale field.
+        nu: Smoothness parameter. Values near one are smoother; values near
+            zero are rougher.
+        anisotropy: Optional stretching factor per dimension.
+        seed: Optional random seed for reproducible fields.
+
+    Returns:
+        ``xarray.DataArray`` on the same coordinates and dimensions as
+        ``xarr``.
     """
     from frequensolve.util.fft import get_fft_backend
 

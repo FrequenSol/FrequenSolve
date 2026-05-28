@@ -1,3 +1,5 @@
+"""Output request objects for traces, ParaView files, wavefields, and units."""
+
 from __future__ import annotations
 
 import copy
@@ -129,9 +131,14 @@ def _canonical_field_list(fields: Iterable[str]) -> List[str]:
 
 @dataclass(kw_only=True)
 class Output(TypeTaggedMixin, ExtraFieldsMixin):
-    """Base class for all outputs.
+    """Base class for job output requests.
 
     Paths are relative to the job result directory.
+
+    Args:
+        name: Output name.
+        path: Output path relative to the job result directory.
+        extra: Additional solver-facing output fields.
     """
 
     name: str = ""
@@ -139,6 +146,15 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
     extra: Dict = field(default_factory=dict)
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize the output request.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible output payload.
+        """
+
         payload = {
             "_type": self.__class__.__name__,
             "name": self.name,
@@ -148,6 +164,15 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "Output":
+        """Deserialize a type-tagged output payload.
+
+        Args:
+            data: Serialized output mapping containing ``_type``.
+
+        Returns:
+            Concrete output request.
+        """
+
         output_types: Dict[str, Type[Output]] = {
             "TraceOutput": TraceOutput,
             "ParaViewOutput": ParaviewOutput,
@@ -159,13 +184,34 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
 
 @dataclass(kw_only=True)
 class TraceOutput(Output):
+    """Receiver trace output request.
+
+    Args:
+        path: Trace output directory relative to the job result directory.
+        **kwargs: Additional solver-facing trace output fields.
+
+    Raises:
+        ValueError: If ``path`` is absolute.
+    """
+
     path: Optional[Union[str, Path]] = None
 
     def __init__(self, path: Union[str, Path] = "traces", **kwargs):
+        """Create a trace output request with a job-relative path."""
+
         self.path = _relative_output_path(path)
         self._init_extra(None, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize receiver trace output configuration.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible trace output payload.
+        """
+
         return merge_extra(
             {"_type": self.__class__.__name__, "path": self.path},
             self.extra,
@@ -174,6 +220,15 @@ class TraceOutput(Output):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "TraceOutput":
+        """Deserialize receiver trace output configuration.
+
+        Args:
+            data: Serialized trace output payload.
+
+        Returns:
+            ``TraceOutput`` instance.
+        """
+
         data = copy.deepcopy(data)
         data.pop("_type", None)
         return cls(path=data.pop("path", "traces"), **data)
@@ -181,7 +236,19 @@ class TraceOutput(Output):
 
 @dataclass(kw_only=True)
 class OutputUnits(ExtraFieldsMixin):
-    """Default units for solver-produced output products."""
+    """Default units for solver-produced output products.
+
+    Args:
+        geometry: Optional default units for geometric coordinates.
+        dimensions: Units keyed by physical dimension name.
+        defaults: Legacy/default dimension-unit mapping merged with
+            ``dimensions``.
+        fields: Units keyed by output field name.
+        properties: Units keyed by material property name.
+        extra: Additional solver-facing unit fields.
+        **dimension_defaults: Convenience dimension-unit keywords such as
+            ``length="m"`` or ``velocity="m/s"``.
+    """
 
     geometry: Optional[str] = None
     dimensions: Dict[str, str] = field(default_factory=dict)
@@ -200,6 +267,16 @@ class OutputUnits(ExtraFieldsMixin):
         extra: Optional[Mapping[str, Any]] = None,
         **dimension_defaults,
     ):
+        """Create output-unit defaults.
+
+        Args:
+            geometry: Default coordinate/geometry units.
+            dimensions: Units keyed by physical dimension, such as ``length``.
+            defaults: Legacy alias for ``dimensions``.
+            fields: Units keyed by output field name.
+            properties: Units keyed by material-property name.
+        """
+
         self.geometry = unit_expression(geometry) if geometry is not None else None
         merged_dimensions: Dict[str, str] = {}
         for source in (defaults, dimensions, dimension_defaults):
@@ -220,6 +297,15 @@ class OutputUnits(ExtraFieldsMixin):
         self._init_extra(extra)
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize output units for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible output-unit payload.
+        """
+
         payload = _drop_none({"geometry": self.geometry})
         if self.dimensions:
             payload["dimensions"] = dict(self.dimensions)
@@ -231,6 +317,15 @@ class OutputUnits(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Optional[Mapping[str, Any]]) -> "OutputUnits":
+        """Deserialize output-unit configuration.
+
+        Args:
+            data: Serialized output-unit mapping, or ``None``.
+
+        Returns:
+            ``OutputUnits`` instance.
+        """
+
         data = copy.deepcopy(dict(data or {}))
         dimension_defaults = {
             key: data.pop(key) for key in list(data) if key in _OUTPUT_DIMENSIONS
@@ -248,7 +343,25 @@ class OutputUnits(ExtraFieldsMixin):
 
 @dataclass(kw_only=True)
 class ParaViewItem(ExtraFieldsMixin):
-    """Structured ParaView output item."""
+    """Structured ParaView output item.
+
+    Args:
+        kind: Item kind: ``"field"``, ``"property"``, or ``"info"``.
+        value: Field, property, or metadata selector.
+        name: Optional output name override.
+        units: Optional output units. A sequence may be used for vector
+            components.
+        parts: Optional complex parts for field output, such as ``"real"`` or
+            ``"abs"``.
+        basis: Optional coordinate-basis projection specification.
+        direction: Optional direction or coordinate-axis projection.
+        components: Optional source component names for derived field output.
+        system: Coordinate-system name used by basis/direction shortcuts.
+        **kwargs: Additional solver-facing item fields.
+
+    Raises:
+        ValueError: If ``kind`` or ``parts`` are invalid.
+    """
 
     kind: str
     value: str
@@ -275,6 +388,8 @@ class ParaViewItem(ExtraFieldsMixin):
         system: str = "global",
         **kwargs,
     ):
+        """Create a structured ParaView output selector."""
+
         normalized = str(kind).lower()
         if normalized not in {"field", "property", "info"}:
             raise ValueError("ParaViewItem kind must be field, property, or info")
@@ -308,6 +423,15 @@ class ParaViewItem(ExtraFieldsMixin):
         return self.kind
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize this ParaView item.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible ParaView item payload.
+        """
+
         payload: Dict[str, Any] = {
             "kind": self.kind,
             self._selector_key: self.value,
@@ -347,6 +471,18 @@ class ParaViewItem(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "ParaViewItem":
+        """Deserialize a ParaView item payload.
+
+        Args:
+            data: Serialized item mapping.
+
+        Returns:
+            ``ParaViewItem`` instance.
+
+        Raises:
+            ValueError: If the payload does not identify an item selector.
+        """
+
         payload = copy.deepcopy(dict(data))
         kind = payload.pop("kind", None)
         if kind is None:
@@ -383,6 +519,40 @@ class ParaviewOutput(Output):
     and material properties on the volume, selected surfaces, or a sampling
     grid. Advanced fast solver fields can still be passed through ``extra`` or
     loaded from existing solver JSON.
+
+    Args:
+        name: Output name.
+        path: Output directory relative to the job result directory.
+        fields: Solution fields to output.
+        properties: Material properties to output.
+        items: Explicit ``ParaViewItem`` objects or serialized item mappings.
+        sources: Source ids to output.
+        upscale: Mesh upscaling factor.
+        show_pml: Whether to include PML regions.
+        format: Writer format, one of ``"vtu"``, ``"xdmf"``, ``"xmf"``, or
+            ``"vtr"``.
+        encoding: Optional writer encoding.
+        execute_on: Solver phase where output is produced.
+        order: Optional output interpolation/order.
+        parts: Optional complex parts for field output.
+        target: Output target: ``"volume"``, ``"surface"``, ``"grid"``, or a
+            target mapping.
+        grid: Grid specification for grid-target output.
+        surfaces: Optional model-surface selections.
+        boundaries: Optional boundary-label selections.
+        shell: Whether to output the model shell surface.
+        plane: Optional plane-selection mapping.
+        planes: Optional collection of plane-selection mappings.
+        coordinates: Optional coordinate-system name for output coordinates.
+        target_coordinates: Optional coordinate-system name for target
+            selection coordinates.
+        writer: Optional explicit writer payload.
+        source: Optional source-selection payload.
+        **kwargs: Additional solver-facing output fields.
+
+    Raises:
+        ValueError: If mutually exclusive item/field options conflict or any
+            option is outside its supported set.
     """
 
     name: str = "ParaView"
@@ -442,6 +612,13 @@ class ParaviewOutput(Output):
         source: Optional[Mapping[str, Any]] = None,
         **kwargs,
     ):
+        """Create a ParaView output request.
+
+        Use ``fields`` and ``properties`` for common volume output, ``items``
+        when you need per-item units/parts/basis metadata, and class helpers
+        such as :meth:`surface` or :meth:`grid` for non-volume targets.
+        """
+
         if sources is None:
             sources = [1]
         if upscale < 0:
@@ -509,6 +686,15 @@ class ParaviewOutput(Output):
 
     @classmethod
     def volume(cls, **kwargs) -> "ParaviewOutput":
+        """Create a ParaView volume output request.
+
+        Args:
+            **kwargs: Arguments forwarded to ``ParaviewOutput``.
+
+        Returns:
+            Output request targeting the simulation volume.
+        """
+
         return cls(target="volume", **kwargs)
 
     @classmethod
@@ -522,6 +708,20 @@ class ParaviewOutput(Output):
         planes: Optional[Iterable[Mapping[str, Any]]] = None,
         **kwargs,
     ) -> "ParaviewOutput":
+        """Create a ParaView surface output request.
+
+        Args:
+            surfaces: Optional model surface names or indices to output.
+            boundaries: Optional mesh boundary labels to output.
+            shell: Whether to output the model shell.
+            plane: Optional plane-selection mapping.
+            planes: Optional collection of plane-selection mappings.
+            **kwargs: Arguments forwarded to ``ParaviewOutput``.
+
+        Returns:
+            Output request targeting selected surfaces.
+        """
+
         return cls(
             target="surface",
             surfaces=surfaces,
@@ -534,9 +734,31 @@ class ParaviewOutput(Output):
 
     @classmethod
     def grid(cls, grid: Any, **kwargs) -> "ParaviewOutput":
+        """Create a ParaView grid-sampling output request.
+
+        Args:
+            grid: Grid specification for sampled output.
+            **kwargs: Arguments forwarded to ``ParaviewOutput``.
+
+        Returns:
+            Output request targeting the supplied grid.
+        """
+
         return cls(target="grid", grid=grid, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this ParaView output request.
+
+        Args:
+            ctx: Optional export context used to serialize nested grid/items.
+
+        Returns:
+            JSON-compatible ParaView output payload.
+
+        Raises:
+            ValueError: If grid-target output is missing a grid.
+        """
+
         payload = {
             "_type": self.__class__.__name__,
             "name": self.name,
@@ -673,6 +895,15 @@ class ParaviewOutput(Output):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "ParaviewOutput":
+        """Deserialize a ParaView output payload.
+
+        Args:
+            data: Serialized ParaView output mapping.
+
+        Returns:
+            ``ParaviewOutput`` instance.
+        """
+
         data = copy.deepcopy(data)
         data.pop("_type", None)
         writer = data.pop("writer", None)
@@ -735,6 +966,26 @@ class WavefieldOutput(Output):
     ``xarray.DataArray``/``Dataset`` directly, or pass ``dims`` and ``coords``.
     Coordinate arrays may be nonuniform, but each coordinate must be 1D and
     strictly monotonic.
+
+    Args:
+        name: Logical output name written into job metadata.
+        path: Output directory relative to the job result directory.
+        fields: One or more solver fields to sample on the grid.
+        field: Convenience spelling for a single sampled field.
+        device: Receiver device that defines named wavefield components.
+        grid: Grid object, xarray object, or serialized grid mapping.
+        dims: xarray-style dimension names when ``coords`` is provided directly.
+        coords: Coordinate arrays keyed by dimension name, or ordered to match
+            ``dims``.
+        units: Default coordinate units for the grid.
+        system: Coordinate-system name for the grid coordinates.
+        sources: Optional one-based source ids to sample.
+        **kwargs: Additional solver-facing wavefield output fields.
+
+    Raises:
+        ValueError: If mutually exclusive field/device options are combined, if
+            the path is absolute, or if the grid coordinates are invalid.
+        TypeError: If ``device`` or ``grid`` use unsupported object types.
     """
 
     name: str = "wavefield"
@@ -761,6 +1012,12 @@ class WavefieldOutput(Output):
         sources: Optional[Iterable[int]] = None,
         **kwargs,
     ):
+        """Create a grid-backed wavefield output request.
+
+        Provide either a receiver-like ``device`` or one or more field names,
+        plus grid coordinates through ``grid`` or ``dims``/``coords``.
+        """
+
         if field is not None and fields is not None:
             raise ValueError("Pass only one of field or fields")
         if device is not None and (field is not None or fields is not None):
@@ -790,10 +1047,19 @@ class WavefieldOutput(Output):
 
     @property
     def component_names(self) -> List[str]:
+        """Return the output component names in solver write order."""
+
         return [component.name for component in self.components]
 
     @property
     def components(self) -> List[ReceiverComponent]:
+        """Return receiver components represented by this wavefield request.
+
+        Device-backed requests use the device's components directly. Field-only
+        requests synthesize one component per requested field so downstream trace
+        handling can treat both forms uniformly.
+        """
+
         if self.device is not None:
             return list(self.device.components)
         fields = self.fields if self.fields is not None else ["primary"]
@@ -803,9 +1069,30 @@ class WavefieldOutput(Output):
         ]
 
     def component_payloads(self, ctx=None) -> List[Dict[str, Any]]:
+        """Serialize the wavefield components.
+
+        Args:
+            ctx: Optional export context used by nested component serializers.
+
+        Returns:
+            List of solver-compatible receiver component payloads.
+        """
+
         return [component.to_fs(ctx) for component in self.components]
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this wavefield output request for the solver.
+
+        Args:
+            ctx: Optional export context accepted for nested serialization.
+
+        Returns:
+            JSON-compatible wavefield output payload.
+
+        Raises:
+            ValueError: If no grid has been supplied.
+        """
+
         if self.grid is None:
             raise ValueError("WavefieldOutput requires a grid")
 
@@ -833,6 +1120,15 @@ class WavefieldOutput(Output):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "WavefieldOutput":
+        """Deserialize a wavefield output request.
+
+        Args:
+            data: Serialized wavefield output mapping.
+
+        Returns:
+            ``WavefieldOutput`` instance.
+        """
+
         data = copy.deepcopy(data)
         data.pop("_type", None)
         grid = data.pop("grid", None)
@@ -1063,6 +1359,15 @@ class JobOutputs:
 
     Trace output is always present. Adding a ``TraceOutput`` only changes its
     configuration, such as the output directory.
+
+    Args:
+        outputs: Existing output object, sequence, or solver-style mapping to
+            merge into the configuration.
+        traces: Trace output configuration. ``None`` leaves the default trace
+            output in place.
+        paraview: Initial ParaView output requests.
+        wavefields: Initial wavefield output requests.
+        units: Optional default output-unit configuration.
     """
 
     traces: TraceOutput = field(default_factory=TraceOutput)
@@ -1079,6 +1384,12 @@ class JobOutputs:
         wavefields: Optional[Iterable[WavefieldOutput]] = None,
         units: Optional[Union[OutputUnits, Mapping[str, Any]]] = None,
     ):
+        """Create a collection of job output requests.
+
+        The collection always contains trace output and may also include any
+        number of ParaView and wavefield outputs.
+        """
+
         self.traces = traces or TraceOutput()
         self.paraview = []
         self.wavefields = []
@@ -1091,9 +1402,31 @@ class JobOutputs:
             self.add(outputs)
 
     def __iadd__(self, output: Any) -> "JobOutputs":
+        """Merge an output request into this collection.
+
+        Args:
+            output: Output request, sequence, or serialized mapping.
+
+        Returns:
+            This ``JobOutputs`` instance.
+        """
+
         return self.add(output)
 
     def add(self, output: Any) -> "JobOutputs":
+        """Merge one or more output requests into this collection.
+
+        Args:
+            output: Output request, ``JobOutputs`` instance, sequence of output
+                requests, or solver-style output mapping.
+
+        Returns:
+            This ``JobOutputs`` instance, enabling fluent updates.
+
+        Raises:
+            TypeError: If ``output`` cannot be interpreted as an output request.
+        """
+
         if output is None:
             return self
         if isinstance(output, JobOutputs):
@@ -1101,7 +1434,7 @@ class JobOutputs:
             self.paraview.extend(output.paraview)
             self.wavefields.extend(output.wavefields)
             self.units = output.units
-            return self
+            return self.ensure_unique_names()
         if isinstance(output, OutputUnits):
             self.units = output
             return self
@@ -1115,7 +1448,7 @@ class JobOutputs:
         if isinstance(output, Iterable) and not isinstance(output, (str, bytes)):
             for item in output:
                 self.add(item)
-            return self
+            return self.ensure_unique_names()
         if isinstance(output, TraceOutput):
             self.traces = output
         elif isinstance(output, ParaviewOutput):
@@ -1124,9 +1457,37 @@ class JobOutputs:
             self.wavefields.append(output)
         else:
             raise TypeError(f"Unsupported output type: {type(output).__name__}")
+        return self.ensure_unique_names()
+
+    def ensure_unique_names(self) -> "JobOutputs":
+        """Ensure all named output requests have solver-unique names.
+
+        ParaView and wavefield outputs use their names as solver-side output
+        identifiers, artifact keys, and file-name bases. When duplicate names
+        are present, this method keeps the first output unchanged and appends a
+        numeric suffix such as ``"_1"`` to later duplicates.
+
+        Returns:
+            This ``JobOutputs`` instance after any duplicate names have been
+            normalized in place.
+        """
+
+        used: set[str] = set()
+        for output in self._named_outputs():
+            output.name = _unique_output_name(output.name, used)
         return self
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize all output requests for a job JSON file.
+
+        Args:
+            ctx: Optional export context used by nested serializers.
+
+        Returns:
+            Solver-compatible output configuration with empty sections omitted.
+        """
+
+        self.ensure_unique_names()
         payload = {
             "Units": self.units.to_fs(ctx) if self.units is not None else None,
             "traces": self.traces.to_fs(ctx),
@@ -1137,6 +1498,16 @@ class JobOutputs:
 
     @classmethod
     def from_fs(cls, data: Optional[Dict]) -> "JobOutputs":
+        """Deserialize job output configuration from solver JSON.
+
+        Args:
+            data: Serialized ``outputs`` block. ``None`` creates the default
+                trace-only configuration.
+
+        Returns:
+            ``JobOutputs`` instance.
+        """
+
         data = copy.deepcopy(data or {})
         traces = data.get("traces") or data.get("receivers")
         paraview_data = data.get("ParaView", [])
@@ -1152,6 +1523,22 @@ class JobOutputs:
             wavefields=wavefields,
             units=OutputUnits.from_fs(data["Units"]) if "Units" in data else None,
         )
+
+    def _named_outputs(self) -> List[Union[ParaviewOutput, WavefieldOutput]]:
+        return [*self.paraview, *self.wavefields]
+
+
+def _unique_output_name(name: Any, used: set[str]) -> str:
+    base = str(name) if name is not None else "output"
+    if not base:
+        base = "output"
+    candidate = base
+    suffix = 1
+    while candidate in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
 
 
 def _output_units(
@@ -1173,7 +1560,19 @@ def output_property(
     units: Optional[Union[str, Sequence[str]]] = None,
     **kwargs,
 ) -> ParaViewItem:
-    """Select a material property for ParaView output."""
+    """Select a material property for ParaView output.
+
+    Args:
+        name: Material property name to write, such as ``"vp"`` or
+            ``"density"``.
+        output_name: Optional name to use in the output file.
+        units: Units for the written property. A sequence may be used for
+            vector-valued properties.
+        **kwargs: Additional solver-facing item fields.
+
+    Returns:
+        ``ParaViewItem`` selecting the requested material property.
+    """
 
     return ParaViewItem("property", name, name=output_name, units=units, **kwargs)
 
@@ -1185,7 +1584,17 @@ def info(
     units: Optional[Union[str, Sequence[str]]] = None,
     **kwargs,
 ) -> ParaViewItem:
-    """Select unitless mesh/domain metadata for ParaView output."""
+    """Select mesh or domain metadata for ParaView output.
+
+    Args:
+        name: Metadata selector understood by the solver.
+        output_name: Optional name to use in the output file.
+        units: Optional units for metadata with physical dimensions.
+        **kwargs: Additional solver-facing item fields.
+
+    Returns:
+        ``ParaViewItem`` selecting the requested metadata.
+    """
 
     return ParaViewItem("info", name, name=output_name, units=units, **kwargs)
 
@@ -1202,7 +1611,23 @@ def field(
     system: str = "global",
     **kwargs,
 ) -> ParaViewItem:
-    """Select a solution, xarray, or wavefield field for ParaView output."""
+    """Select a solution, xarray, or wavefield field for ParaView output.
+
+    Args:
+        name: Field selector, such as ``"pressure"`` or a solver field alias.
+        output_name: Optional name to use in the output file.
+        units: Units for the written field. A sequence may be used for vector
+            components.
+        parts: Complex parts to write, such as ``"real"`` or ``"abs"``.
+        basis: Coordinate-basis projection specification.
+        direction: Direction or axis projection specification.
+        components: Source components used to build this output item.
+        system: Coordinate-system name used by basis/direction shortcuts.
+        **kwargs: Additional solver-facing item fields.
+
+    Returns:
+        ``ParaViewItem`` selecting the requested field.
+    """
 
     return ParaViewItem(
         "field",
@@ -1267,7 +1692,33 @@ def wavefield(
     sources: Optional[Iterable[int]] = None,
     **kwargs,
 ) -> WavefieldOutput:
-    """Create a concise grid-backed wavefield output request."""
+    """Create a concise grid-backed wavefield output request.
+
+    Args:
+        fields: Field name or field names to sample. A string creates a
+            single-field request by default.
+        name: Optional output name. When omitted, a stable name is inferred from
+            the field or device.
+        path: Output directory relative to the job result directory.
+        field: Keyword-only spelling for a single field. Mutually exclusive
+            with ``fields``.
+        device: Receiver device or serialized device mapping describing named
+            wavefield components.
+        grid: Grid object, xarray object, or serialized xarray-style grid.
+        dims: Dimension names when passing ``coords`` directly.
+        coords: Coordinate arrays keyed by dimension name, or ordered to match
+            ``dims``.
+        units: Default coordinate units.
+        system: Coordinate-system name for the grid coordinates.
+        sources: Optional one-based source ids to sample.
+        **kwargs: Additional solver-facing wavefield output fields.
+
+    Returns:
+        ``WavefieldOutput`` configured for the requested sampled fields.
+
+    Raises:
+        ValueError: If both ``fields`` and ``field`` are provided.
+    """
 
     if field is not None and fields is not None:
         raise ValueError("Pass only one of the positional field(s) or field")
@@ -1324,7 +1775,20 @@ def outputs(
     wavefields: Any = None,
     units: Optional[Union[OutputUnits, Mapping[str, Any]]] = None,
 ) -> JobOutputs:
-    """Create a complete job output configuration."""
+    """Create a complete job output configuration.
+
+    Args:
+        value: Existing output configuration, individual output request,
+            sequence of requests, or solver-style mapping.
+        traces: Trace output path or ``TraceOutput``. ``None`` keeps the
+            default trace path.
+        paraview: Additional ParaView output request or requests.
+        wavefields: Additional wavefield output request or requests.
+        units: Optional output-unit defaults.
+
+    Returns:
+        ``JobOutputs`` ready to attach to a simulation or job.
+    """
 
     if isinstance(value, JobOutputs):
         config = JobOutputs(value)

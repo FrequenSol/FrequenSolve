@@ -103,17 +103,25 @@ def _source_coordinates_in_output_units(
 
 @register_dataarray_accessor("fs")
 class TraceAccessor:
-    """FrequenSolve helpers for trace ``DataArray`` objects."""
+    """FrequenSolve helpers for trace ``DataArray`` objects.
+
+    Args:
+        trace: Trace data array being accessed through ``trace.fs``.
+    """
 
     def __init__(self, trace: DataArray):
         self._trace = trace
 
     @property
     def source_group(self) -> SourceGroup:
+        """Return source-group metadata reconstructed from trace attributes."""
+
         return _source_group(self._trace)
 
     @property
     def receiver_group(self) -> ReceiverGroup:
+        """Return receiver-group metadata reconstructed from trace attributes."""
+
         return _receiver_group(self._trace)
 
     def to_segy(
@@ -123,7 +131,19 @@ class TraceAccessor:
         units_out: str = "m",
         **kwargs,
     ) -> Path:
-        """Write a time-domain trace gather to a SEGY file."""
+        """Write a time-domain trace gather to a SEG-Y file.
+
+        Args:
+            file: Destination SEG-Y file path.
+            units_in: Assumed input coordinate units when trace metadata does
+                not provide units.
+            units_out: Output coordinate units, either ``"m"`` or ``"ft"``.
+            **kwargs: Optional export controls, including ``T_max`` and
+                ``preview``.
+
+        Returns:
+            Path to the written SEG-Y file.
+        """
 
         import datetime
 
@@ -239,7 +259,17 @@ def array_to_segy(
     units_out: str = "m",
     **kwargs: Any,
 ) -> None:
-    """Write a single time-domain array to a minimal SEGY file."""
+    """Write a single time-domain array to a minimal SEG-Y file.
+
+    Args:
+        samples: Time sample values in seconds.
+        data: Trace values with shape ``(n_samples, n_traces)`` or compatible
+            one-dimensional input.
+        fname: Destination SEG-Y file path.
+        units_in: Assumed input coordinate units for metadata.
+        units_out: Output coordinate units, either ``"m"`` or ``"ft"``.
+        **kwargs: Optional SEG-Y header and preview controls.
+    """
 
     import datetime
 

@@ -25,6 +25,7 @@ class FakeJob:
     name = "demo-job"
 
     def __init__(self):
+        self.project_path = Path("project-a")
         self.simulation = SimpleNamespace(_remote_path=Path("project-a/simulation-a"))
         self._job_id = None
 
@@ -40,7 +41,7 @@ class FakeJob:
 def make_graphql_site():
     site = AWSSite.__new__(AWSSite)
     site.graphql_client = FakeGraphQLClient()
-    site.prepare_job = lambda job, sync_project=False: None
+    site.prepare_job = lambda job, sync_project=False, validate=True: None
     site.sync_s3 = lambda local, remote: remote
     site._emit = lambda message: None
     site._make_run_handle = (

@@ -11,7 +11,7 @@ availability.
 Running a Notebook
 ------------------
 
-1. Install the :term:`SDK` and any extras listed in the notebook table below.
+1. Install the :term:`Python API` and any extras listed in the notebook table below.
 2. Download the notebook from this page or the `FrequenSolve repository
    <https://github.com/FrequenSol/FrequenSolve/tree/v2/examples/tutorials>`__.
 3. Open it in JupyterLab, Jupyter Notebook, VS Code, or another notebook

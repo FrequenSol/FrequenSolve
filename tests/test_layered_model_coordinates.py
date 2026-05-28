@@ -1,3 +1,5 @@
+import json
+
 import h5py
 import matplotlib
 import numpy as np
@@ -6,7 +8,7 @@ import xarray as xr
 
 matplotlib.use("Agg")
 
-from frequensolve.geometry.frame import Axis, SurfaceCoordinateSystem
+from frequensolve.geometry.frame import Axis, CoordinateSystem, SurfaceCoordinateSystem
 from frequensolve.mesh.mesh_generators import LayeredMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.model.layered import (
@@ -70,6 +72,31 @@ def test_layered_model_exports_units_and_coordinate_systems():
         "units": "kg/m^3",
         "system": "density_grid",
     }
+
+
+def test_layered_model_save_uses_export_context_without_child_path_binding(tmp_path):
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="rock", mesh_block_id=1, properties={"Vp": 1.0})
+    model.add_surface(name="bottom", depth=1.0)
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.model = model
+    sim.mesh = MeshManager(
+        LayeredMeshGenerator(l_bound=[0.0, 0.0], u_bound=[1.0, 1.0], n=[2, 2])
+    )
+
+    sim_file = sim.save()
+    payload = json.loads(sim_file.read_text())
+
+    assert sim_file == tmp_path / "simulations" / "simple" / "simple.json"
+    assert payload["Model"]["_type"] == "LayeredModel"
+    assert payload["Mesh"]["generator"]["path"] == "simulations/simple"
 
 
 def test_layered_model_domain_limits_accept_units_and_convert():
@@ -995,6 +1022,52 @@ def test_layered_model_samples_physical_grid_without_reference_remap():
     )
 
 
+def test_layered_model_samples_surface_depth_coordinate_system(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="elastic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim += CoordinateSystem.cartesian(
+        name="section",
+        axes=[Axis("offset", direction="x", origin=5.0 * u.km)],
+        inherit_axes=True,
+    )
+
+    interface = xr.DataArray(
+        [0.25, 0.75],
+        dims=["offset"],
+        coords={"offset": [0.0, 1.0]},
+        attrs={"units": "km"},
+    )
+    model = LayeredModel(
+        dimension=2,
+        x_limits=u.Quantity([5.0, 6.0], "km"),
+    )
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(name="upper", properties={"Vp": 1.0})
+    model.add_surface(
+        name="interface",
+        depth={"value": interface, "coordinate_system": "section"},
+    )
+    model.add_layer(name="lower", properties={"Vp": 2.0})
+    model.add_surface(name="bottom", depth=1.0 * u.km)
+    sim += model
+
+    sampled = model.sample_uniform([3, 5], axes_units={"x": "km", "z": "km"})
+
+    np.testing.assert_allclose(sampled.coords["x"].values, [5.0, 5.5, 6.0])
+    np.testing.assert_allclose(
+        sampled["vp"].values,
+        [
+            [1.0, 2.0, 2.0, 2.0, 2.0],
+            [1.0, 1.0, 2.0, 2.0, 2.0],
+            [1.0, 1.0, 1.0, 2.0, 2.0],
+        ],
+    )
+
+
 def test_layered_model_samples_surface_relative_property_grid(tmp_path):
     sim = SeismicSimulation(
         name="simple",
@@ -1046,6 +1119,87 @@ def test_layered_model_samples_surface_relative_property_grid(tmp_path):
     )
 
 
+def test_layered_model_samples_property_in_cartesian_coordinate_system(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="elastic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    section = CoordinateSystem.cartesian(
+        name="section",
+        axes=[
+            Axis("offset", direction="x", origin=5.0 * u.km),
+            Axis("depth", direction="z"),
+        ],
+    )
+    sim += section
+
+    vp = xr.DataArray(
+        [[1.0, 1.5, 2.0], [2.0, 2.5, 3.0], [3.0, 3.5, 4.0]],
+        dims=["offset", "depth"],
+        coords={"offset": [0.0, 0.5, 1.0], "depth": [0.0, 0.25, 0.5]},
+    )
+
+    model = LayeredModel(
+        dimension=2,
+        x_limits=u.Quantity([5.0, 6.0], "km"),
+    )
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(
+        name="layer",
+        properties={"Vp": {"value": vp, "coordinate_system": "section"}},
+    )
+    model.add_surface(name="bottom", depth=0.5 * u.km)
+    sim += model
+
+    sampled = model.sample_uniform([3, 3], axes_units={"x": "km", "z": "km"})
+
+    assert sampled.sizes["x"] == 3
+    assert sampled.sizes["z"] == 3
+    np.testing.assert_allclose(sampled["vp"].values, vp.values)
+
+
+def test_layered_model_sample_uniform_can_expose_coordinate_system_axes(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="elastic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim += CoordinateSystem.cartesian(
+        name="section",
+        axes=[
+            Axis("depth", direction="z"),
+            Axis("offset", direction="x", origin=5.0 * u.km),
+        ],
+    )
+
+    model = LayeredModel(
+        dimension=2,
+        x_limits=u.Quantity([5.0, 6.0], "km"),
+    )
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(name="layer", properties={"Vp": 2.0})
+    model.add_surface(name="bottom", depth=0.5 * u.km)
+    sim += model
+
+    sampled = model.sample_uniform(
+        [3, 3],
+        axes_units={"offset": "km", "depth": "km"},
+        frame="section",
+    )
+
+    assert sampled["vp"].dims == ("depth", "offset")
+    np.testing.assert_allclose(sampled.coords["offset"], [0.0, 0.5, 1.0])
+    np.testing.assert_allclose(sampled.coords["depth"], [0.0, 0.25, 0.5])
+    np.testing.assert_allclose(sampled.coords["x"], [5.0, 5.5, 6.0])
+    np.testing.assert_allclose(sampled.coords["z"], [0.0, 0.25, 0.5])
+    assert sampled.coords["offset"].attrs["units"] == "km"
+    assert sampled.coords["x"].attrs["units"] == "km"
+    assert sampled.attrs["frame"] == "section"
+
+
 def test_property_coordinate_system_overrides_layer_default(tmp_path):
     sim = SeismicSimulation(
         name="simple",
@@ -1076,6 +1230,79 @@ def test_property_coordinate_system_overrides_layer_default(tmp_path):
 
     assert payload["vp"]["system"] == "property_system"
     assert payload["rho"]["system"] == "layer_default"
+
+
+def test_property_grid_mismatch_error_mentions_coordinate_systems():
+    vp = xr.DataArray(
+        [1.0, 2.0],
+        dims=["height"],
+        coords={"height": [0.0, 0.5]},
+    )
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="layer", properties={"Vp": vp})
+    model.add_surface(name="bottom", depth=0.5)
+
+    with pytest.raises(ValueError) as excinfo:
+        model.sample_uniform([2, 3])
+
+    message = str(excinfo.value)
+    assert "Property dimensions ['height'] are not available" in message
+    assert "coordinate-system axes" in message
+    assert "Note that in 2D" not in message
+
+
+def test_property_unknown_coordinate_system_error_is_actionable():
+    vp = xr.DataArray(
+        [1.0, 2.0],
+        dims=["height"],
+        coords={"height": [0.0, 0.5]},
+    )
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(
+        name="layer",
+        properties={"Vp": {"value": vp, "coordinate_system": "missing_system"}},
+    )
+    model.add_surface(name="bottom", depth=0.5)
+
+    with pytest.raises(ValueError, match="missing_system") as excinfo:
+        model.sample_uniform([2, 3])
+
+    assert "Add the CoordinateSystem to the simulation" in str(excinfo.value)
+
+
+def test_property_coordinate_system_missing_axis_error_is_actionable(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="elastic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim += SurfaceCoordinateSystem(
+        name="interface_relative",
+        surface="top",
+        axes=[Axis("up", direction="z", positive="up")],
+    )
+    vp = xr.DataArray(
+        [1.0, 2.0],
+        dims=["height"],
+        coords={"height": [0.0, 0.5]},
+    )
+
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(
+        name="layer",
+        properties={"Vp": {"value": vp, "coordinate_system": "interface_relative"}},
+    )
+    model.add_surface(name="bottom", depth=0.5)
+    sim += model
+
+    with pytest.raises(ValueError, match="Axis named 'height'") as excinfo:
+        model.sample_uniform([2, 3])
+
+    assert "coordinate system 'interface_relative'" in str(excinfo.value)
 
 
 def test_layered_model_sampling_converts_mixed_property_units():

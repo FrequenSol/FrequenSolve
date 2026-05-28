@@ -12,4 +12,4 @@ prepared.
 
 ## 0.0.1
 
-- Initial tagged SDK baseline.
+- Initial tagged FrequenSolve Python API baseline.

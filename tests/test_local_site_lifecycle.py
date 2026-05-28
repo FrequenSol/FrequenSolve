@@ -3,13 +3,13 @@ import json
 import logging
 from types import SimpleNamespace
 
-from frequensolve.orchestrator.progress import status_table_html
 from frequensolve.orchestrator.sites.base import JobStatus, RunHandle
 from frequensolve.orchestrator.sites.local import LocalSite, run_task
 from frequensolve.orchestrator.sites.local import site as local_module
 from frequensolve.orchestrator.sites.local.dask_logging import (
     configure_dependency_logging,
 )
+from frequensolve.orchestrator.utils.progress import status_table_html
 
 
 class DummyFuture:

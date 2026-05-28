@@ -8,8 +8,6 @@ import pytest
 
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
-from frequensolve.orchestrator.pool import PoolStatus
-from frequensolve.orchestrator.progress import status_table_html, wait_all
 from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.hpc import (
     SlurmLoginCredentials,
@@ -25,6 +23,8 @@ from frequensolve.orchestrator.sites.hpc.stampede3 import (
     Stampede3Site,
     TACCLoginCredentials,
 )
+from frequensolve.orchestrator.utils.pool import PoolStatus
+from frequensolve.orchestrator.utils.progress import status_table_html, wait_all
 from frequensolve.project.project import Project
 from frequensolve.simulation.jobs import FrequencyDomainJob
 from frequensolve.simulation.outputs import WavefieldOutput

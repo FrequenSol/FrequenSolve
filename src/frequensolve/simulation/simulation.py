@@ -18,11 +18,11 @@ from frequensolve.simulation.numerics_manager import Discretization, SolverConfi
 from frequensolve.units import UnitConfig
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.encoders import CustomJSONEncoder
-from frequensolve.util.memoization import memoized_func, quantize
 from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
     merge_extra,
+    warn_deprecated_path_api,
 )
 from frequensolve.util.named_list import NamedList
 from frequensolve.util.physics import (
@@ -76,7 +76,14 @@ class BaseSimulation(SimulationConfig):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "BaseSimulation":
-        """Dispatch a solver simulation payload to its registered Python class."""
+        """Dispatch a solver simulation payload to its registered Python class.
+
+        Args:
+            data: Serialized simulation mapping containing ``_type``.
+
+        Returns:
+            Concrete simulation instance.
+        """
 
         class_name = data["_type"]
         if class_name in class_registry:
@@ -86,9 +93,18 @@ class BaseSimulation(SimulationConfig):
 
     @classmethod
     def load(cls, path: Union[str, Path], **kwargs) -> "SeismicSimulation":
-        """Load a simulation JSON file and dispatch by its ``_type`` field."""
+        """Load a simulation JSON file and dispatch by its ``_type`` field.
+
+        Args:
+            path: Simulation JSON path.
+            **kwargs: Optional load controls, including ``project_path``.
+
+        Returns:
+            Loaded ``SeismicSimulation`` or other registered subclass.
+        """
 
         path = Path(path).resolve()
+        project_path = kwargs.pop("project_path", None)
         with open(path, "r") as f:
             data = json.load(f)
         class_name = data["_type"]
@@ -96,12 +112,28 @@ class BaseSimulation(SimulationConfig):
             sim_class = class_registry[class_name]
             sim = sim_class.from_fs(data)
             sim._file = path
+            project = (
+                Path(project_path).expanduser().resolve()
+                if project_path is not None
+                else _project_path_from_simulation_file(path)
+            )
+            if project is not None:
+                sim.project_path = project
+                sim._attach_project_path(project, Path("simulations"))
             return sim
         else:
             raise Exception(f"Unknown simulation class: {class_name}")
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
-        """Serialize common simulation blocks to the FrequenSolve JSON contract."""
+        """Serialize common simulation blocks to the FrequenSolve JSON contract.
+
+        Args:
+            ctx: Optional export context used by nested model, mesh, and
+                acquisition serializers.
+
+        Returns:
+            JSON-compatible base simulation payload.
+        """
 
         from frequensolve.util.printing import print_note
 
@@ -122,7 +154,7 @@ class BaseSimulation(SimulationConfig):
                 if self.model
                 else {}
             ),
-            **({"Mesh": self.mesh.to_fs(ctx.child("mesh"))} if self.mesh else {}),
+            **({"Mesh": self.mesh.to_fs(ctx)} if self.mesh else {}),
             **({"BCs": self.BCs.to_fs(ctx)} if self.BCs else {}),
             **({"Solver": self.solver.to_fs(ctx)} if self.solver else {}),
             **(
@@ -203,7 +235,14 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "SeismicSimulation":
-        """Build a seismic simulation from an ``fs-simulation-1`` payload."""
+        """Build a seismic simulation from an ``fs-simulation-1`` payload.
+
+        Args:
+            data: Serialized seismic simulation mapping.
+
+        Returns:
+            ``SeismicSimulation`` instance with nested objects deserialized.
+        """
 
         data = copy.deepcopy(data)
         data.pop("schema", None)
@@ -261,7 +300,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             sim.acquisition = Acquisition.from_fs(data.pop("Acquisition"))
 
         sim.extra = data
-        sim._set_path(project_path, Path("simulations"))
+        sim._attach_project_path(project_path, Path("simulations"))
         return sim
 
     def _bind_model_coordinate_systems(self) -> None:
@@ -277,7 +316,15 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return self.coordinate_systems
 
     def copy(self, name, **kwargs) -> "SeismicSimulation":
-        """Persist, reload, and rename this simulation with optional overrides."""
+        """Persist, reload, and rename this simulation with optional overrides.
+
+        Args:
+            name: Name for the copied simulation.
+            **kwargs: Attribute overrides applied to the copied simulation.
+
+        Returns:
+            Copied simulation instance.
+        """
 
         file = self.save()
         sim_copy = self.__class__.load(file)
@@ -300,7 +347,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
 
         # Change file path
         sim_copy._file = file.parent.parent / name / name
-        sim_copy._set_path(self.project_path, Path("simulations") / name)
+        sim_copy._attach_project_path(self.project_path, Path("simulations"))
         return sim_copy
 
     def fwi(
@@ -317,9 +364,17 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         The returned object exposes PyLops-compatible Jacobian and adjoint
         operators. The adjoint is the inverse-problem transpose, not a true
         inverse solve.
+
+        Args:
+            observed: Observed data used by the inverse problem.
+            frequencies: Optional modeled frequencies.
+            parameters: Optional model parameters to invert.
+            grid: Optional inversion grid.
+            site: Optional execution site.
+            **kwargs: Additional FWI problem options.
         """
 
-        from frequensolve.simulation.fwi import FWIProblem
+        from frequensolve.simulation.jobs.fwi import FWIProblem
 
         return FWIProblem(
             simulation=self,
@@ -342,9 +397,20 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         images=None,
         **kwargs,
     ):
-        """Create an imaging job using natural parameter/field specifications."""
+        """Create an imaging job using natural parameter/field specifications.
 
-        from frequensolve.simulation.fwi import build_imaging_job
+        Args:
+            observed: Observed data used by the imaging condition.
+            frequencies: Optional modeled frequencies.
+            parameters: Optional image parameters.
+            grid: Optional imaging grid.
+            fields: Optional field selections.
+            condition: Optional imaging condition.
+            images: Optional explicit image outputs.
+            **kwargs: Additional imaging job options.
+        """
+
+        from frequensolve.simulation.jobs.fwi import build_imaging_job
 
         return build_imaging_job(
             self,
@@ -361,7 +427,14 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
     def add_coordinate_system(
         self, system: Union[CoordinateSystem, Mapping[str, Any]]
     ) -> CoordinateSystem:
-        """Add a coordinate system, replacing an existing one with the same name."""
+        """Add a coordinate system, replacing an existing one with the same name.
+
+        Args:
+            system: Coordinate system instance or serialized mapping.
+
+        Returns:
+            Stored coordinate system.
+        """
 
         if isinstance(system, Mapping):
             system = CoordinateSystem.from_fs(system)
@@ -390,7 +463,16 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         offset_units: Optional[Any] = None,
         **kwargs,
     ) -> CoordinateSystem:
-        """Create and register a coordinate system tied to a model surface."""
+        """Create and register a coordinate system tied to a model surface.
+
+        Args:
+            name: Coordinate-system name.
+            surface: Model surface name or index.
+            normal: Surface-normal direction convention.
+            offset: Optional surface offset.
+            offset_units: Units for ``offset`` when it is not a quantity.
+            **kwargs: Additional coordinate-system fields.
+        """
 
         system = CoordinateSystem.surface(
             name,
@@ -410,7 +492,14 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         normal: str = "up",
         **kwargs,
     ) -> "_SimulationSurface":
-        """Return a registered model-surface helper for surface-relative points."""
+        """Return a registered model-surface helper for surface-relative points.
+
+        Args:
+            surface: Model surface name or index.
+            name: Optional coordinate-system name.
+            normal: Surface-normal direction convention.
+            **kwargs: Additional surface coordinate-system fields.
+        """
 
         system = self.add_surface_coordinate_system(
             name or _model_surface_name(surface),
@@ -421,7 +510,14 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return _SimulationSurface(self, system)
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
-        """Serialize the complete seismic simulation to solver JSON."""
+        """Serialize the complete seismic simulation to solver JSON.
+
+        Args:
+            ctx: Optional export context.
+
+        Returns:
+            JSON-compatible ``fs-simulation-1`` payload.
+        """
 
         ctx = ctx or self.export_context()
         if getattr(ctx, "default_length_units", None) is None:
@@ -440,7 +536,15 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return merge_extra(payload, self.extra, "Simulation")
 
     def __iadd__(self, other):
-        """Add or replace simulation member objects with ``simulation += obj``."""
+        """Add or replace simulation member objects with ``simulation += obj``.
+
+        Args:
+            other: Model, mesh, coordinate system, boundary condition, solver,
+                discretization, or acquisition object.
+
+        Returns:
+            This simulation instance.
+        """
 
         if isinstance(other, ModelBase):
             self.model = other
@@ -477,15 +581,26 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return ExportContext(proj_path, rel_path, store=store)
 
     def as_json(self, **kwargs) -> str:
-        """Return the solver JSON payload as a formatted string."""
+        """Return the solver JSON payload as a formatted string.
+
+        Args:
+            **kwargs: Keyword arguments forwarded to ``json.dumps``.
+        """
 
         indent = kwargs.get("indent", 3)
         return json.dumps(self.to_fs(), cls=CustomJSONEncoder, indent=indent, **kwargs)
 
     def save(self, **json_kwargs) -> Path:
-        """Write the simulation JSON file under this simulation's project path."""
+        """Write the simulation JSON file under this simulation's project path.
 
-        self._set_path(self.project_path, Path("simulations"))
+        Args:
+            **json_kwargs: Keyword arguments forwarded to ``json.dump``.
+
+        Returns:
+            Path to the written simulation JSON file.
+        """
+
+        self._attach_project_path(self.project_path, Path("simulations"))
 
         file = self.project_path / "simulations" / f"{self.name}" / f"{self.name}"
         file = file.with_suffix(".json").resolve()
@@ -502,35 +617,66 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return file
 
     def check(self) -> bool:
-        """Placeholder validation hook for simulation completeness checks."""
+        """Return whether the simulation passes SDK validation."""
 
-        return True
+        return self.validate().ok
 
-    @quantize
-    @memoized_func
-    def _estimate_memory(self, f) -> int:
-        """Estimate memory required for the simulation."""
-        pass
+    def validate(self, *, raise_errors: bool = False):
+        """Validate this simulation for common authoring mistakes.
 
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        """Set project-relative paths on the simulation and owned file-backed members."""
+        Args:
+            raise_errors: If ``True``, raise ``ValidationError`` when blocking
+                issues are found.
 
-        self._proj_path = proj_path
-        self._rel_path = rel_path / self.name
-        if self.acquisition:
-            self.acquisition._set_path(self._proj_path, self._rel_path)
-        if self.model:
-            self.model._set_path(self._proj_path, self._rel_path)
-        if self.mesh:
-            self.mesh._set_path(self._proj_path, self._rel_path)
+        Returns:
+            ``ValidationReport`` with errors and warnings.
+        """
+
+        from frequensolve.validation import validate_simulation
+
+        return validate_simulation(self, raise_errors=raise_errors)
+
+    def _attach_project_path(self, proj_path: Path, rel_path: Path) -> None:
+        """Attach this simulation to a project-relative export root."""
+
+        previous_project_path = self._proj_path
+        self._proj_path = Path(proj_path).expanduser().resolve()
+        self._rel_path = Path(rel_path) / self.name
+        self._resolve_project_references(source_project_path=previous_project_path)
+
+    def _set_path(self, proj_path: Path, rel_path: Path) -> None:
+        """Backward-compatible alias for attaching the simulation path."""
+
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
+        self._attach_project_path(proj_path, rel_path)
+
+    def _resolve_project_references(
+        self, *, source_project_path: Optional[Path] = None
+    ) -> None:
+        """Normalize loaded file references that need project context at runtime."""
+
+        from frequensolve.seismic.receivers import CoordsFromFile
+
+        if not self.acquisition:
+            return
+        ctx = self.export_context()
+        for group in self.acquisition.receiver_groups:
+            coords = getattr(group, "coordinates", None)
+            if isinstance(coords, CoordsFromFile):
+                coords.file = coords._contextual_file(
+                    ctx, source_project_path=source_project_path
+                )
+                coords._fill_metadata_from_file(ctx)
 
     @property
     def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         return self._proj_path / self._rel_path
 
     @property
     def _remote_path(self) -> Path:
-        return self._proj_path.name / self._rel_path
+        warn_deprecated_path_api(f"{self.__class__.__name__}._remote_path")
+        return Path(self._proj_path.name) / self._rel_path
 
 
 class _SimulationSurface:
@@ -637,3 +783,10 @@ def _coerce_named_coordinate_systems(systems: Any) -> NamedList:
         CoordinateSystem.from_fs(system) if isinstance(system, Mapping) else system
         for system in systems
     )
+
+
+def _project_path_from_simulation_file(path: Path) -> Optional[Path]:
+    path = Path(path).expanduser().resolve()
+    if path.parent.parent.name == "simulations":
+        return path.parent.parent.parent.resolve()
+    return None

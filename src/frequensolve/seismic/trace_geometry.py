@@ -25,7 +25,15 @@ class AxisInfo:
 
 
 def as_trace_array(trace: xr.DataArray, *, caller: str = "trace") -> xr.DataArray:
-    """Validate and squeeze a trace ``DataArray``."""
+    """Validate and squeeze a trace ``DataArray``.
+
+    Args:
+        trace: Trace data array.
+        caller: Name used in error messages.
+
+    Returns:
+        Squeezed trace array.
+    """
 
     if not isinstance(trace, xr.DataArray):
         raise TypeError(f"{caller} expects an xarray.DataArray")
@@ -42,7 +50,14 @@ def require_dims(trace: xr.DataArray, *dims: str) -> None:
 
 
 def to_numpy(value: Any) -> np.ndarray:
-    """Convert eager or dask-backed array values to ``numpy``."""
+    """Convert eager or dask-backed array values to ``numpy``.
+
+    Args:
+        value: Array-like object, possibly with ``compute``.
+
+    Returns:
+        NumPy array.
+    """
 
     if hasattr(value, "compute"):
         value = value.compute()
@@ -50,7 +65,15 @@ def to_numpy(value: Any) -> np.ndarray:
 
 
 def trace_values(trace: xr.DataArray, *, complex_: bool = False) -> np.ndarray:
-    """Return trace values as a real or complex ``numpy`` array."""
+    """Return trace values as a real or complex ``numpy`` array.
+
+    Args:
+        trace: Trace data array.
+        complex_: Whether to preserve/convert to complex values.
+
+    Returns:
+        NumPy array of trace values.
+    """
 
     values = to_numpy(trace.data)
     if complex_:
@@ -82,7 +105,16 @@ def coordinate_values(
 
 
 def coordinate_label(trace: xr.DataArray, dim: str, default: str) -> str:
-    """Build a display label from coordinate metadata."""
+    """Build a display label from coordinate metadata.
+
+    Args:
+        trace: Trace data array.
+        dim: Coordinate dimension name.
+        default: Label used when coordinate metadata is unavailable.
+
+    Returns:
+        Display label, including units when present.
+    """
 
     if dim not in trace.coords:
         return default
@@ -93,7 +125,16 @@ def coordinate_label(trace: xr.DataArray, dim: str, default: str) -> str:
 
 
 def ensure_monotonic(values: np.ndarray, *, name: str) -> None:
-    """Validate a strictly increasing coordinate axis."""
+    """Validate a strictly increasing coordinate axis.
+
+    Args:
+        values: Coordinate values.
+        name: Coordinate name used in error messages.
+
+    Raises:
+        ValueError: If fewer than two samples exist or values are not strictly
+            increasing.
+    """
 
     if values.size < 2:
         raise ValueError(f"{name} needs at least two samples")
@@ -102,7 +143,15 @@ def ensure_monotonic(values: np.ndarray, *, name: str) -> None:
 
 
 def select_time(trace: xr.DataArray, t_max: float | None = None) -> xr.DataArray:
-    """Slice a time-domain trace by final time."""
+    """Slice a time-domain trace by final time.
+
+    Args:
+        trace: Time-domain trace array.
+        t_max: Optional final time.
+
+    Returns:
+        Trace sliced through ``t_max``.
+    """
 
     if t_max is None:
         return trace
@@ -151,7 +200,14 @@ def _selected_frequency_value(trace: xr.DataArray) -> float | None:
 
 
 def sampling_rate(trace: xr.DataArray) -> float:
-    """Return samples per second from the ``time`` coordinate."""
+    """Return samples per second from the ``time`` coordinate.
+
+    Args:
+        trace: Time-domain trace array.
+
+    Returns:
+        Sampling rate in hertz.
+    """
 
     times = coordinate_values(trace, "time", require_numeric=True)
     ensure_monotonic(times, name="time")
@@ -164,7 +220,16 @@ def receiver_axis(
     units: str = "",
     scale: float = 1.0,
 ) -> AxisInfo:
-    """Infer the most useful receiver plotting axis."""
+    """Infer the most useful receiver plotting axis.
+
+    Args:
+        trace: Trace data array with a receiver dimension.
+        units: Optional display units label.
+        scale: Multiplicative coordinate scale.
+
+    Returns:
+        Axis values, label, and optional physical coordinate index.
+    """
 
     require_dims(trace, "receiver")
     try:
@@ -228,7 +293,15 @@ def receiver_grid_shape(
     trace: xr.DataArray,
     grid_shape: tuple[int, int] | None = None,
 ) -> tuple[int, int]:
-    """Infer the display array shape for a 2D receiver grid."""
+    """Infer the display array shape for a 2D receiver grid.
+
+    Args:
+        trace: Trace data array with a receiver dimension.
+        grid_shape: Optional explicit ``(ny, nx)`` shape.
+
+    Returns:
+        Two-dimensional display shape.
+    """
 
     require_dims(trace, "receiver")
     if grid_shape is not None:
@@ -342,6 +415,17 @@ def wavefield_grid_display(
     *,
     L_scale: float = 1.0,
 ) -> dict[str, Any] | None:
+    """Return display metadata for gridded wavefield traces.
+
+    Args:
+        trace: Wavefield trace data array.
+        L_scale: Coordinate scale factor applied to display extents.
+
+    Returns:
+        Mapping with extent, labels, coordinates, and uniform-grid flag, or
+        ``None`` when no compatible grid metadata is available.
+    """
+
     payload = _wavefield_grid_payload(trace)
     if payload is not None:
         dims = list(payload["dims"])

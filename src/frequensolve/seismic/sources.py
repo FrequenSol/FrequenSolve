@@ -1,3 +1,5 @@
+"""Source objects for seismic acquisition definitions."""
+
 import copy
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
@@ -13,7 +15,7 @@ from frequensolve.geometry.frame import (
     direction_to_fs,
 )
 from frequensolve.util.class_registry import class_registry, register_class
-from frequensolve.util.mixins import TypeTaggedMixin
+from frequensolve.util.mixins import TypeTaggedMixin, warn_deprecated_path_api
 
 __all__ = ["SourceGroup", "Source", "RuptureSource", "PointSource", "CompoundSource"]
 
@@ -21,13 +23,32 @@ __all__ = ["SourceGroup", "Source", "RuptureSource", "PointSource", "CompoundSou
 @register_class
 @dataclass
 class Source(TypeTaggedMixin, ABC):
+    """Abstract base class for solver source definitions."""
 
     @classmethod
     def from_fs(cls, data: Dict) -> "Source":
+        """Deserialize a registered source payload.
+
+        Args:
+            data: Serialized source mapping containing ``_type``.
+
+        Returns:
+            Concrete source instance.
+        """
+
         return cls.dispatch_from_fs(data, class_registry)
 
     @abstractmethod
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize the source for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible source payload.
+        """
+
         pass
 
 
@@ -50,16 +71,31 @@ class RuptureSource(Source):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "RuptureSource":
+        """Deserialize a rupture source payload."""
+
         return cls(**data)
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this rupture source for solver input."""
+
         return {"_type": self.__class__.__name__, **asdict(self)}
 
 
 @register_class
 @dataclass
 class PointSource(Source):
-    kind: Literal["scalar", "vector", "moment", "monopole", "dipole"]
+    """Point source located at one physical coordinate.
+
+    Args:
+        kind: Source kind understood by the solver.
+        coordinates: Source coordinate values, optionally with units/system
+            metadata through ``CoordinateValue``.
+        direction: Optional vector or moment direction.
+        domain: Optional model domain id where the source is evaluated.
+        name: Source name.
+    """
+
+    kind: Literal["scalar", "vector", "tensor", "monopole", "dipole"]
     coordinates: Any = field(default_factory=list)
     direction: Optional[Any] = None
     domain: Optional[int] = None
@@ -67,6 +103,15 @@ class PointSource(Source):
 
     @classmethod
     def from_fs(cls, data: Dict):
+        """Deserialize a point source payload.
+
+        Args:
+            data: Serialized point-source mapping.
+
+        Returns:
+            ``PointSource`` instance.
+        """
+
         data = copy.deepcopy(data)
         data.pop("frame", None)
         if "coordinates" in data:
@@ -76,6 +121,8 @@ class PointSource(Source):
         return cls(**data)
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this point source for solver input."""
+
         return {
             "_type": self.__class__.__name__,
             "name": self.name,
@@ -93,6 +140,16 @@ class PointSource(Source):
 @register_class
 @dataclass
 class CompoundSource(Source):
+    """Compound source made from multiple weighted source points.
+
+    Args:
+        kind: Source kind understood by the solver.
+        coordinates: Source point coordinates.
+        direction: Direction/weight vectors for each source point.
+        domain: Optional model domain id where the source is evaluated.
+        name: Source name.
+    """
+
     kind: Literal["scalar", "vector"]
     coordinates: Any = field(default_factory=list)
     direction: Any = field(default_factory=list)
@@ -101,6 +158,8 @@ class CompoundSource(Source):
 
     @classmethod
     def from_fs(cls, data: Dict):
+        """Deserialize a compound source payload."""
+
         data = copy.deepcopy(data)
         data.pop("n_points", None)
         data.pop("frame", None)
@@ -111,6 +170,8 @@ class CompoundSource(Source):
         return cls(**data)
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this compound source for solver input."""
+
         return {
             "_type": self.__class__.__name__,
             "name": self.name,
@@ -128,10 +189,10 @@ class CompoundSource(Source):
 
 @dataclass
 class SourceGroup:
-    """A group of sources (to simulate simultaneously)
+    """A source group simulated as one shot.
 
-    Attributes:
-       sources (List[PointSource]):     List of source objects
+    Args:
+        source: Source definition for this shot.
     """
 
     source: Source = field(default_factory=Source)
@@ -140,17 +201,24 @@ class SourceGroup:
 
     @classmethod
     def from_fs(cls, data: Dict):
+        """Deserialize a source-group payload."""
+
         source = Source.from_fs(copy.deepcopy(data.get("source", {})))
         return cls(source=source)
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize the source group for solver input."""
+
         return {"source": self.source.to_fs(ctx)}
 
     def _set_path(self, proj_path: Path, rel_path: Path):
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
         self._proj_path = proj_path
         self._rel_path = rel_path
 
     def get_coordinates(self) -> NPArray:
+        """Return source coordinates as a two-dimensional NumPy array."""
+
         coords = self.source.coordinates
         if isinstance(coords, CoordinateValue):
             coords = coords.value
@@ -161,8 +229,11 @@ class SourceGroup:
 
     # TODO: fix this, point source will need to make 2D array
     def coordinates(self) -> NPArray:
+        """Compatibility alias for ``get_coordinates``."""
+
         return self.get_coordinates()
 
     @property
     def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         return self._proj_path / self._rel_path

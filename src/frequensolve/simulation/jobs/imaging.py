@@ -1,3 +1,5 @@
+"""Imaging-job definitions and readers for solver imaging products."""
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple, Union
@@ -6,7 +8,7 @@ import numpy as np
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.seismic.wavelet import Wavelet
-from frequensolve.simulation.jobs import SimulationJob
+from frequensolve.simulation.jobs.base import BaseJob
 from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.util.class_registry import register_class
 
@@ -21,19 +23,37 @@ __all__ = [
 
 @dataclass(kw_only=True)
 class ImageDatabase:
-    """Reader for solver imaging output files."""
+    """Reader for solver imaging output files.
+
+    Args:
+        path: Directory containing aggregate and per-frequency image HDF5
+            files.
+        parts: Number of per-frequency image parts.
+        shape: Expected image-grid shape.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+    """
 
     path: Path
     parts: int
     shape: Tuple[int, ...]
 
     def __post_init__(self):
+        """Normalize and validate the image output directory."""
+
         self.path = Path(self.path)
         if not self.path.exists():
             raise FileNotFoundError(f"Image path {self.path} does not exist")
 
     @property
     def f_list(self):
+        """Return frequency values recorded in per-part image files.
+
+        Returns:
+            NumPy array with one frequency per image part.
+        """
+
         import h5py
 
         f_list = np.zeros(self.parts)
@@ -44,6 +64,16 @@ class ImageDatabase:
         return f_list
 
     def image_file(self, part: Optional[int] = None):
+        """Return the aggregate or per-frequency image HDF5 file path.
+
+        Args:
+            part: Optional one-based image part number. When omitted, the
+                aggregate ``image.h5`` path is returned.
+
+        Returns:
+            Path to the requested image file.
+        """
+
         if part is None:
             return self.path / "image.h5"
         else:
@@ -51,13 +81,21 @@ class ImageDatabase:
 
     @property
     def raw_images(self):
-        """Images from the solver ``image/raw`` group."""
+        """Return images from the solver ``image/raw`` group.
+
+        Returns:
+            Dataset containing raw image volumes.
+        """
 
         return self.read_images("raw")
 
     @property
     def smoothed_images(self):
-        """Images from the solver ``image/phi`` group."""
+        """Return images from the solver ``image/phi`` group.
+
+        Returns:
+            Dataset containing smoothed image volumes.
+        """
 
         return self.read_images("phi")
 
@@ -68,6 +106,16 @@ class ImageDatabase:
         return str(value)
 
     def read_images(self, group):
+        """Read one solver image group into an ``xarray.Dataset``.
+
+        Args:
+            group: HDF5 group under ``image`` to read, such as ``"raw"`` or
+                ``"phi"``.
+
+        Returns:
+            Dataset containing one data variable per imaged property.
+        """
+
         import h5py
         import xarray as xr
 
@@ -96,13 +144,23 @@ class ImageDatabase:
 
 @dataclass(kw_only=True)
 class MisfitGroup:
-    """Base class for misfit groups."""
+    """Observed and simulated trace paths for one receiver group misfit.
+
+    Args:
+        name: Receiver group name.
+        observed: Directory containing observed traces, or a group-specific
+            trace path.
+        simulated: Directory containing simulated traces, or a group-specific
+            trace path.
+    """
 
     name: str = ""
     observed: Union[str, Path] = ""
     simulated: Union[str, Path] = ""
 
     def __post_init__(self):
+        """Append the group name to observed/simulated paths when needed."""
+
         self.observed = self._with_group(self.observed)
         self.simulated = self._with_group(self.simulated)
 
@@ -113,6 +171,17 @@ class MisfitGroup:
         return path
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
+        """Serialize the receiver-group misfit path mapping.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+            project_relative: Accepted for API consistency; path conversion is
+                handled by ``ImagingJob``.
+
+        Returns:
+            JSON-compatible receiver-group misfit payload.
+        """
+
         return {
             "name": self.name,
             "observed": self.observed,
@@ -121,6 +190,15 @@ class MisfitGroup:
 
     @classmethod
     def from_fs(cls, data: Dict) -> "MisfitGroup":
+        """Deserialize a receiver-group misfit path mapping.
+
+        Args:
+            data: Serialized misfit-group payload.
+
+        Returns:
+            ``MisfitGroup`` with group-specific paths restored.
+        """
+
         return cls(
             name=data["name"],
             observed=data["observed"],
@@ -130,7 +208,13 @@ class MisfitGroup:
 
 @dataclass(kw_only=True)
 class Misfit:
-    """Base class for misfit functions."""
+    """Misfit norm and receiver groups used by an imaging job.
+
+    Args:
+        norm: Misfit norm name. Currently the solver-facing contract supports
+            ``"L2"``.
+        receiver_groups: Receiver-group misfit path mappings.
+    """
 
     norm: Literal["L2"] = "L2"
     receiver_groups: List[MisfitGroup] = field(default_factory=list)
@@ -138,6 +222,17 @@ class Misfit:
     _rel_path: Optional[Path] = None
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
+        """Serialize the imaging misfit configuration.
+
+        Args:
+            ctx: Optional export context forwarded to receiver groups.
+            project_relative: Accepted for API consistency; path conversion is
+                handled by ``ImagingJob``.
+
+        Returns:
+            JSON-compatible misfit payload.
+        """
+
         return {
             "norm": self.norm,
             "receiver_groups": [group.to_fs(ctx) for group in self.receiver_groups],
@@ -145,6 +240,15 @@ class Misfit:
 
     @classmethod
     def from_fs(cls, data: Dict) -> "Misfit":
+        """Deserialize an imaging misfit configuration.
+
+        Args:
+            data: Serialized misfit payload.
+
+        Returns:
+            ``Misfit`` with receiver groups restored.
+        """
+
         return cls(
             norm=data["norm"],
             receiver_groups=[
@@ -155,8 +259,34 @@ class Misfit:
 
 @register_class
 @dataclass(kw_only=True)
-class ImagingJob(SimulationJob):
-    """Defines imaging job."""
+class ImagingJob(BaseJob):
+    """Reverse-time migration or FWI-imaging job configuration.
+
+    Args:
+        name: Job name used in project paths and serialized payloads.
+        simulation: Seismic simulation used to compute simulated data.
+        data_path: Directory containing observed trace data.
+        f_list: Frequencies to image.
+        resolution: Optional image-grid resolution used when ``grid`` is not
+            provided.
+        grid: Optional explicit Cartesian image grid.
+        images: Mapping from image name to solver imaging condition.
+        weights: Optional per-frequency weights.
+        wavelet: Optional wavelet whose spectrum is sampled for weights.
+        misfit_norm: Misfit norm name.
+        keep_forward: Keep forward wavefields after imaging.
+        keep_adjoint: Keep adjoint wavefields after imaging.
+        keep_unstacked: Keep per-source or per-frequency image contributions.
+        regularization: Optional smoothing/regularization payload.
+        save_path: Optional image-output directory.
+        reassemble_adjoint: Request adjoint reassembly from stored pieces.
+        **kwargs: Extra imaging payload fields preserved on export.
+
+    Raises:
+        FileNotFoundError: If ``data_path`` does not exist.
+        ValueError: If weights do not match frequencies or a grid cannot be
+            inferred from the simulation model.
+    """
 
     misfit: Misfit = field(default_factory=Misfit)
     data_path: Union[str, Path]
@@ -189,6 +319,13 @@ class ImagingJob(SimulationJob):
         reassemble_adjoint: bool = False,
         **kwargs,
     ) -> None:
+        """Create an imaging job.
+
+        The job compares simulated traces against observed data at
+        ``data_path`` and writes image products to ``save_path`` or the job
+        result directory.
+        """
+
         if "misfit_type" in kwargs:
             misfit_norm = kwargs.pop("misfit_type")
         simulation.save()
@@ -332,13 +469,24 @@ class ImagingJob(SimulationJob):
         if project_path is not None:
             return Path(project_path) / path
         if base_path is not None:
-            project_root = SimulationJob._project_root_from_job_path(Path(base_path))
+            project_root = BaseJob._project_root_from_job_path(Path(base_path))
             if project_root is not None:
                 return project_root / path
             return Path(base_path).resolve() / path
         return path
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
+        """Serialize this imaging job to the solver job contract.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+            project_relative: When true, emit project-relative paths where
+                possible.
+
+        Returns:
+            JSON-compatible imaging job payload.
+        """
+
         images = []
         for key, value in self.images.items():
             tmp = value.split(":")
@@ -386,6 +534,21 @@ class ImagingJob(SimulationJob):
         base_path: Optional[Union[str, Path]] = None,
         project_path: Optional[Union[str, Path]] = None,
     ) -> "ImagingJob":
+        """Deserialize an imaging job from a saved job payload.
+
+        Args:
+            data: Serialized imaging job payload.
+            base_path: Optional directory used to resolve relative paths.
+            project_path: Optional project root used to resolve
+                project-relative paths.
+
+        Returns:
+            Reconstructed ``ImagingJob``.
+
+        Raises:
+            KeyError: If the payload does not include an imaging section.
+        """
+
         data = dict(data)
         stored_project_path = data.get("project_path")
         resolved_project_path = project_path or stored_project_path
@@ -406,12 +569,15 @@ class ImagingJob(SimulationJob):
             for image in images
         }
         simulation_ref = data.pop("simulation")
-        simulation = SimulationJob._load_simulation_for_job(
-            simulation_ref,
-            base_path=base_path,
-            project_path=resolved_project_path,
-            source_project=stored_project_path,
-        )
+        simulation_path = Path(simulation_ref)
+        if not simulation_path.is_absolute():
+            project_path = project_path or data.get("project_path")
+            if project_path is None and base_path is not None:
+                project_path = BaseJob._project_root_from_job_path(Path(base_path))
+            if project_path is not None:
+                simulation_path = Path(project_path) / simulation_path
+
+        project_path = project_path or data.get("project_path")
         data_path = cls._resolve_saved_path(
             image_data.pop("data_path", None),
             base_path=base_path,
@@ -436,7 +602,7 @@ class ImagingJob(SimulationJob):
 
         job = cls(
             name=data.pop("name", None),
-            simulation=simulation,
+            simulation=SeismicSimulation.load(simulation_path),
             f_list=data.pop("f_list", None),
             data_path=data_path,
             resolution=resolution,
@@ -456,6 +622,16 @@ class ImagingJob(SimulationJob):
 
 
 def extract_frequencies_for_job(job: ImagingJob, td):
+    """Extract job frequencies from time traces into solver-ready HDF5 files.
+
+    Args:
+        job: Imaging job whose frequency list and data path define the output.
+        td: Time-domain trace data array.
+
+    Returns:
+        ``None``. One HDF5 trace file is written for each job frequency.
+    """
+
     import h5py
     import xarray as xr
 

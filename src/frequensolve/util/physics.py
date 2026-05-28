@@ -52,7 +52,17 @@ _AXISYMMETRIC_DEFAULTS = {
 
 
 def canonical_physics(physics: str) -> str:
-    """Return the solver-facing physics name for friendly user input."""
+    """Return the solver-facing physics name for friendly user input.
+
+    Args:
+        physics: User-facing physics name or alias.
+
+    Returns:
+        Canonical solver physics name.
+
+    Raises:
+        ValueError: If ``physics`` is not recognized.
+    """
 
     key = str(physics).strip()
     normalized = key.lower().replace(" ", "")
@@ -68,7 +78,21 @@ def normalize_simulation_physics(
     axisymmetric: bool = False,
     dimension: Any | None = None,
 ) -> tuple[str, bool]:
-    """Normalize physics and axisymmetry into the solver-facing formulation key."""
+    """Normalize physics and axisymmetry into the solver formulation key.
+
+    Args:
+        physics: User-facing physics name or alias.
+        axisymmetric: Whether to request the axisymmetric formulation.
+        dimension: Optional simulation dimension used to validate
+            axisymmetric requests.
+
+    Returns:
+        Tuple ``(canonical_physics, axisymmetric)``.
+
+    Raises:
+        ValueError: If the requested axisymmetric formulation is unsupported or
+            used with a non-2D simulation dimension.
+    """
 
     canonical = canonical_physics(physics)
     explicit_axisym = canonical in _AXISYMMETRIC_PHYSICS
@@ -90,7 +114,17 @@ def normalize_simulation_physics(
 
 
 def canonical_dimension(dimension: Any) -> int | float:
-    """Normalize 2D, 2.5D, and 3D user input for simulation JSON."""
+    """Normalize 2D, 2.5D, and 3D user input for simulation JSON.
+
+    Args:
+        dimension: Numeric or string dimension specifier.
+
+    Returns:
+        ``2``, ``2.5``, or ``3``.
+
+    Raises:
+        ValueError: If the dimension cannot be normalized.
+    """
 
     if isinstance(dimension, str):
         key = dimension.strip().lower().replace(" ", "")
@@ -124,7 +158,14 @@ def canonical_dimension(dimension: Any) -> int | float:
 
 
 def model_dimension(dimension: Any) -> int:
-    """Return the spatial model/mesh dimension used by a simulation dimension."""
+    """Return the spatial model/mesh dimension for a simulation dimension.
+
+    Args:
+        dimension: Numeric or string dimension specifier.
+
+    Returns:
+        Model dimension. ``2.5D`` simulations use a 2D model/mesh.
+    """
 
     value = canonical_dimension(dimension)
     return 2 if value == 2.5 else int(value)

@@ -1,7 +1,7 @@
 Glossary
 ========
 
-This glossary defines terms that appear throughout the SDK documentation,
+This glossary defines terms that appear throughout the FrequenSolve Python API documentation,
 tutorials, user guide, and solver-facing reference pages.
 
 Common concept terms are lower case. Acronyms, environment variables, product
@@ -71,7 +71,7 @@ standard capitalization.
       FrequenSolve jobs.
 
    finalizer
-      Solver-side step that completes and indexes trace outputs so the SDK can
+      Solver-side step that completes and indexes trace outputs so the FrequenSolve Python API can
       read the finalized trace files.
 
    FREQUENSOLVE_HOME
@@ -80,14 +80,14 @@ standard capitalization.
 
    FREQUENSOLVE_SITE_CONFIG
       Environment variable that points directly to the site configuration file
-      the SDK should read.
+      the FrequenSolve Python API should read.
 
    frequency-domain
       Solver workflow for frequency-domain simulations, where responses are
       computed at selected frequencies.
 
    FrequenSolve user directory
-      Local directory used by the SDK for package-managed configuration and
+      Local directory used by the FrequenSolve Python API for package-managed configuration and
       cached state. By default this is ``~/.frequensolve``.
 
    fracture
@@ -173,7 +173,7 @@ standard capitalization.
       readers.
 
    Pint
-      `Python units library <https://pint.readthedocs.io/>`__ used by the SDK
+      `Python units library <https://pint.readthedocs.io/>`__ used by the FrequenSolve Python API
       to represent values with physical units.
 
    PML
@@ -204,7 +204,7 @@ standard capitalization.
       screenshots of VTK/VTU data.
 
    Python API
-      The public Python classes, functions, and methods exposed by the SDK.
+      The public Python classes, functions, and methods exposed by the FrequenSolve Python API.
 
    QC
       Quality control. In these docs, QC usually refers to quick checks that
@@ -240,7 +240,7 @@ standard capitalization.
 
    run result
       Object returned after a submitted job completes or is inspected. In the
-      SDK this is represented by ``RunResult``.
+      FrequenSolve Python API this is represented by ``RunResult``.
 
    S3
       Amazon Simple Storage Service, used by cloud workflows for object storage.
@@ -248,10 +248,6 @@ standard capitalization.
    sample spacing
       Time or distance interval between adjacent samples in a signal, trace, or
       receiver layout.
-
-   SDK
-      The FrequenSolve Python package that users install to author, validate,
-      launch, and inspect simulations.
 
    SEG-Y
       Standard seismic trace exchange format.
@@ -276,7 +272,7 @@ standard capitalization.
       Cluster workload manager used by supported HPC execution sites.
 
    solver contract
-      The JSON and HDF5 files exported by the SDK and consumed by launchers and
+      The JSON and HDF5 files exported by the FrequenSolve Python API and consumed by launchers and
       the fast solver.
 
    source batching
@@ -331,7 +327,7 @@ standard capitalization.
       source-receiver-component combinations.
 
    trace dataset
-      SDK reader for HDF5-backed solver trace outputs. In the Python API this
+      FrequenSolve Python API reader for HDF5-backed solver trace outputs. In the Python API this
       is represented by ``TraceDataset``. Trace reads return
       ``xarray.DataArray`` objects.
 

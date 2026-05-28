@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import shutil
 import warnings
 from pathlib import Path
 
@@ -42,8 +43,8 @@ from frequensolve.seismic.receivers import (
 from frequensolve.seismic.sparse_survey import SparseSurvey
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.seismic.wavelet import RickerWavelet
-from frequensolve.simulation.artifacts import OutputArtifact, TraceManifest
 from frequensolve.simulation.jobs import FrequencyDomainJob
+from frequensolve.simulation.jobs.artifacts import OutputArtifact, TraceManifest
 from frequensolve.simulation.outputs import (
     JobOutputs,
     OutputUnits,
@@ -973,6 +974,20 @@ def test_explicit_axisymmetric_physics_sets_axisymmetric_flag(tmp_path):
     assert components_for_physics("acoustic_axisym") is not None
 
 
+def test_private_path_api_warns_as_deprecated(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+
+    with pytest.warns(DeprecationWarning, match="_set_path"):
+        sim._set_path(tmp_path, Path("simulations"))
+    with pytest.warns(DeprecationWarning, match="_path"):
+        assert sim._path == tmp_path / "simulations" / "simple"
+
+
 def test_project_new_simulation_accepts_coupled_aep_physics(tmp_path):
     project = Project(name="project", path=tmp_path)
     sim = project.new_simulation(
@@ -1099,6 +1114,34 @@ def test_job_outputs_adds_outputs_and_always_exports_traces():
 
     assert payload["traces"]["path"] == "traces"
     assert payload["ParaView"][0]["name"] == "pv"
+
+
+def test_job_outputs_make_named_outputs_unique():
+    grid = xr.DataArray(
+        np.zeros((2, 2)),
+        dims=("z", "r"),
+        coords={"z": [0.0, 1.0], "r": [0.0, 1.0]},
+    )
+    config = JobOutputs()
+
+    config += [
+        ParaviewOutput(name="snapshot", fields=["pressure"]),
+        ParaviewOutput(name="snapshot", fields=["velocity"]),
+        WavefieldOutput(name="snapshot", field="pressure", grid=grid),
+        WavefieldOutput(name="snapshot", field="velocity", grid=grid),
+    ]
+    first_payload = config.to_fs()
+    second_payload = config.to_fs()
+
+    assert [out["name"] for out in first_payload["ParaView"]] == [
+        "snapshot",
+        "snapshot_1",
+    ]
+    assert [out["name"] for out in first_payload["wavefields"]] == [
+        "snapshot_2",
+        "snapshot_3",
+    ]
+    assert second_payload == first_payload
 
 
 def test_output_config_helper_exports_units_paraview_and_wavefields():
@@ -2108,6 +2151,87 @@ def test_receiver_coordinate_file_exports_project_relative_locator(tmp_path):
     )
 
 
+def test_loaded_receiver_coordinate_file_resolves_project_relative_get(tmp_path):
+    coord_file = tmp_path / "simulations" / "simple" / "simple.h5"
+    coord_file.parent.mkdir(parents=True)
+    values = np.array([[0.25, 0.0], [0.75, 0.0]])
+    with h5py.File(coord_file, "w") as h5:
+        h5.create_dataset("coords", data=values)
+
+    coords = CoordsFromFile(
+        file="simulations/simple/simple.h5",
+        format="HDF5",
+        dset="coords",
+    )
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    loaded = SeismicSimulation.load(sim.save())
+    loaded_coords = loaded.acquisition.receiver_groups[0].coordinates
+
+    np.testing.assert_allclose(loaded_coords.get(), values)
+
+
+def test_loaded_receiver_coordinate_file_uses_json_location_not_cwd(
+    tmp_path, monkeypatch
+):
+    source_project = tmp_path / "source_project"
+    copied_project = tmp_path / "copied_project"
+    unrelated_dir = tmp_path / "unrelated"
+    unrelated_dir.mkdir()
+
+    coord_file = source_project / "inputs" / "receiver_coords.h5"
+    coord_file.parent.mkdir(parents=True)
+    source_values = np.array([[0.10, 0.0], [0.90, 0.0]])
+    copied_values = np.array([[0.25, 0.0], [0.75, 0.0]])
+    with h5py.File(coord_file, "w") as h5:
+        h5.create_dataset("coords", data=source_values)
+
+    coords = CoordsFromFile(file=coord_file, format="HDF5", dset="coords")
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=source_project,
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    shutil.copytree(source_project, copied_project)
+    with h5py.File(copied_project / "inputs" / "receiver_coords.h5", "w") as h5:
+        h5.create_dataset("coords", data=copied_values)
+
+    monkeypatch.chdir(unrelated_dir)
+
+    loaded = SeismicSimulation.load(
+        copied_project / "simulations" / "simple" / "simple.json"
+    )
+    loaded_coords = loaded.acquisition.receiver_groups[0].coordinates
+
+    assert loaded.project_path == copied_project.resolve()
+    assert loaded_coords.file == copied_project / "inputs" / "receiver_coords.h5"
+    np.testing.assert_allclose(loaded_coords.get(), copied_values)
+
+
 def test_receiver_coordinate_file_hash_changes_with_hdf5_contents(tmp_path):
     coord_file = tmp_path / "receiver_coords.h5"
     values = np.array([[x, 0.0] for x in np.linspace(0.0, 1.0, 12)])
@@ -2276,6 +2400,38 @@ def test_job_wavefields_use_output_requests_not_trace_receiver_groups(tmp_path):
     assert "pressure_wavefield" not in {
         group["name"] for group in sim.to_fs()["Acquisition"]["receiver_groups"]
     }
+
+
+def test_job_wavefield_artifacts_do_not_override_duplicate_output_names(tmp_path):
+    acq = Acquisition()
+    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.acquisition = acq
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    grid = xr.DataArray(
+        np.empty((2, 2)),
+        dims=("z", "r"),
+        coords={"z": [0.0, 1.0], "r": [0.0, 1.0]},
+    )
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job += [
+        WavefieldOutput(name="snapshot", field="pressure", grid=grid),
+        WavefieldOutput(name="snapshot", field="pressure", grid=grid),
+    ]
+
+    spec = job.wavefield_trace_outputs
+
+    assert spec.groups == ["snapshot", "snapshot_1"]
+    assert set(spec.wavefields) == {"snapshot", "snapshot_1"}
+    assert spec.wavefields["snapshot_1"]["components"] == ["snapshot_1:pressure"]
 
 
 def test_job_wavefields_open_with_unsaved_simulation_file(tmp_path):
@@ -2599,6 +2755,159 @@ def test_trace_dataset_uses_matching_shard_without_packed_manifest(tmp_path):
     assert traces.manifest.files == [shard]
     assert traces.manifest.frequencies == {1: 50.0}
     assert traces.manifest.laplace == {1: -0.5}
+
+
+def _write_indexed_packed_trace_product(path, group, *, frequencies, values):
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    numbers = np.arange(1, len(frequencies) + 1, dtype=np.int32)
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("frequency", data=np.asarray(frequencies, dtype=float))
+        h5.create_dataset("laplace", data=np.zeros(len(frequencies), dtype=float))
+        h5.create_dataset("task_id", data=numbers)
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["indexed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        catalog = h5.require_group("survey/receiver_groups/_catalog")
+        catalog.create_dataset("group_name", data=np.array([group], dtype=string_dtype))
+        catalog.create_dataset(
+            "dataset_path", data=np.array([f"/{group}"], dtype=string_dtype)
+        )
+        catalog.create_dataset(
+            "layout_kind", data=np.array(["dense_trace_v1"], dtype=string_dtype)
+        )
+        trace_group = h5.require_group(f"survey/receiver_groups/{group}/traces")
+        trace_group.create_dataset("receiver_id", data=np.array([101], dtype=np.int32))
+        trace_group.create_dataset("source_id", data=np.array([7], dtype=np.int32))
+        trace_group.create_dataset(
+            "component_name", data=np.array(["p"], dtype=string_dtype)
+        )
+        h5.require_group("trace_index/datasets")
+        h5.create_dataset(
+            "trace_index/schema_version",
+            data=np.array(["fs-trace-index-1"], dtype=string_dtype),
+        )
+        h5.create_dataset(
+            "trace_index/layout_kind",
+            data=np.array(["indexed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        h5.create_dataset(
+            "trace_index/data_root", data=np.array(["/trace_data"], dtype=string_dtype)
+        )
+        h5.create_dataset("trace_index/dataset_number", data=numbers)
+        h5.create_dataset(
+            "trace_index/frequency", data=np.asarray(frequencies, dtype=float)
+        )
+        h5.create_dataset("trace_index/laplace", data=np.zeros(len(frequencies)))
+        h5.create_dataset("trace_index/task_id", data=numbers)
+        h5.create_dataset(
+            "trace_index/shard_file",
+            data=np.array(
+                [f"wavefields/{group}/f_{freq:.5f}_hz.h5" for freq in frequencies],
+                dtype=string_dtype,
+            ),
+        )
+        h5.create_dataset("trace_index/datasets/dataset_number", data=numbers)
+        h5.create_dataset(
+            "trace_index/datasets/source_path",
+            data=np.array([f"/{group}"] * len(frequencies), dtype=string_dtype),
+        )
+        h5.create_dataset(
+            "trace_index/datasets/packed_path",
+            data=np.array(
+                [f"/trace_data/{group}/{number:06d}" for number in numbers],
+                dtype=string_dtype,
+            ),
+        )
+        for number, value in zip(numbers, values):
+            dset = h5.create_dataset(
+                f"trace_data/{group}/{number:06d}",
+                data=np.array([[[[value, 0.0]]]], dtype=np.float32),
+            )
+            dset.attrs["dims"] = ["receiver", "component", "shot"]
+            dset.attrs["layout_kind"] = ["dense_trace_v1"]
+            dset.attrs["receiver"] = np.array([101], dtype=np.int32)
+            dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+            dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+
+def test_trace_dataset_uses_named_wavefield_packed_products(tmp_path):
+    result_path = tmp_path / "results"
+    trace_dir = result_path / "wavefields"
+    trace_dir.mkdir(parents=True)
+    frequencies = [10.0, 20.0]
+    full = trace_dir / "full.h5"
+    fracture = trace_dir / "fracture.h5"
+
+    _write_indexed_packed_trace_product(
+        full,
+        "full",
+        frequencies=frequencies,
+        values=[1.0, 2.0],
+    )
+    _write_indexed_packed_trace_product(
+        fracture,
+        "fracture",
+        frequencies=frequencies,
+        values=[3.0, 4.0],
+    )
+    for name in ("full", "fracture"):
+        output_manifest = trace_dir / name / "manifest.json"
+        output_manifest.parent.mkdir()
+        output_manifest.write_text(
+            json.dumps(
+                {
+                    "schema": "fs-trace-manifest-1",
+                    "packed": {
+                        "format": "hdf5",
+                        "schema": "fs-traces-packed-1",
+                        "layout": "indexed_frequency_trace_v1",
+                        "relative_path": f"wavefields/{name}.h5",
+                    },
+                    "frequencies": [
+                        {
+                            "task_id": index,
+                            "frequency": frequency,
+                            "status": "packed",
+                            "relative_path": (
+                                f"wavefields/{name}/f_{frequency:.5f}_hz.h5"
+                            ),
+                        }
+                        for index, frequency in enumerate(frequencies, start=1)
+                    ],
+                }
+            )
+        )
+
+    manifest = TraceManifest(
+        files=[trace_dir / "traces_1.h5", trace_dir / "traces_2.h5"],
+        frequencies={1: 10.0, 2: 20.0},
+        groups=["full", "fracture"],
+        simulation=tmp_path / "simulation.json",
+        result_path=result_path,
+        output_path=trace_dir,
+        project_path=tmp_path,
+        wavefields={
+            "full": {"fields": ["pressure"]},
+            "fracture": {"fields": ["pressure"]},
+        },
+    )
+
+    traces = TraceDataset.from_manifest(manifest)
+
+    assert manifest.packed_files == [full, fracture]
+    assert manifest.complete is True
+    assert traces.manifest.files == [full, fracture]
+    assert traces.groups == ["full", "fracture"]
+    assert traces.frequencies("full").tolist() == [10.0, 20.0]
+    assert traces.frequencies("fracture").tolist() == [10.0, 20.0]
+    assert traces.components("full").tolist() == ["p"]
+
+    full_fd = traces.fd("full", "p", source=7)
+    fracture_fd = traces.fd("fracture", "p", source=7)
+
+    assert full_fd.values[:, 0].real.tolist() == [1.0, 2.0]
+    assert fracture_fd.values[:, 0].real.tolist() == [3.0, 4.0]
 
 
 def test_trace_dataset_reports_packed_product_with_no_requested_frequencies(tmp_path):

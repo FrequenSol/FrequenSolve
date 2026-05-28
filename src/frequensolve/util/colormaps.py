@@ -1,3 +1,5 @@
+"""FrequenSolve color maps and matplotlib conversion helpers."""
+
 import json
 
 import numpy as np
@@ -150,6 +152,17 @@ BuGrOr_data = """[
 
 
 def get_colormap(data, reverse=False):
+    """Create a matplotlib colormap from a ParaView-style color-map payload.
+
+    Args:
+        data: JSON string containing ``RGBPoints`` in ParaView color-map
+            format.
+        reverse: Whether to reverse the color-map direction.
+
+    Returns:
+        ``matplotlib.colors.LinearSegmentedColormap``.
+    """
+
     colormap_data = json.loads(data)
     rgb_points = colormap_data[0]["RGBPoints"]
 
