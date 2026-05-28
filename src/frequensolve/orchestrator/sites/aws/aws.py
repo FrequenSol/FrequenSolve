@@ -802,8 +802,9 @@ class AWSSite(BaseSite):
         Args:
             job: The task to submit.
             **kwargs: Additional job parameters (vcpu, memory, name,
-                description). Pass ``validate=False`` to skip SDK pre-run
-                validation.
+                description). Pass ``check=True`` to make ``wait()`` raise by
+                default for failed runs, or ``validate=False`` to skip SDK
+                pre-run validation.
 
         Returns:
             Awaitable run handle.
@@ -816,6 +817,7 @@ class AWSSite(BaseSite):
             or kwargs.pop("force", False)
             or kwargs.pop("rerun", False)
         )
+        check = bool(kwargs.pop("check", False))
         validate = kwargs.pop("validate", True)
         fetch = kwargs.pop("fetch", False)
         poll_interval = kwargs.pop("poll_interval", 10)
@@ -892,6 +894,7 @@ class AWSSite(BaseSite):
                     simulation_id,
                     poll_interval=poll_interval,
                     fetch=fetch,
+                    check=check,
                 )
 
             else:
@@ -947,6 +950,7 @@ class AWSSite(BaseSite):
                         simulation_id,
                         poll_interval=poll_interval,
                         fetch=fetch,
+                        check=check,
                     )
 
                 # Fallback to job_id for backwards compatibility
@@ -967,6 +971,7 @@ class AWSSite(BaseSite):
                     job_id,
                     poll_interval=poll_interval,
                     fetch=fetch,
+                    check=check,
                 )
 
         except Exception as e:
@@ -978,6 +983,7 @@ class AWSSite(BaseSite):
         job_id: str,
         poll_interval: float = 10,
         fetch: bool = False,
+        check: bool = False,
     ) -> RunHandle:
         return RunHandle(
             site=self,
@@ -985,6 +991,7 @@ class AWSSite(BaseSite):
             id=str(job_id),
             mode="aws",
             poll_interval=poll_interval,
+            check=check,
             _status_fn=self._poll_run,
             _cancel_fn=lambda run: self.cancel_job(str(run.id)),
             _fetch_fn=(lambda run: self.fetch_outputs(run.job)) if fetch else None,

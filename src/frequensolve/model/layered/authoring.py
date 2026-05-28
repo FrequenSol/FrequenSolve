@@ -1,3 +1,11 @@
+"""High-level builder methods mixed into :class:`LayeredModel`.
+
+The public ``LayeredModel`` class inherits these methods so users can build a
+model incrementally with surfaces, layers, fractures, boreholes, and explicit
+subdomains while the implementation keeps names, ordering, and legacy keyword
+aliases consistent.
+"""
+
 from __future__ import annotations
 
 import copy

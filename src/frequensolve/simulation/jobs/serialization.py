@@ -1,3 +1,10 @@
+"""Job serialization and fingerprinting helpers.
+
+The mixin in this module loads concrete job classes from saved JSON payloads,
+emits solver-contract job files, and computes stable whole-job and per-task
+fingerprints used to decide whether outputs are current.
+"""
+
 from __future__ import annotations
 
 import hashlib

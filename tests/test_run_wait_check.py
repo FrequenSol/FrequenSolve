@@ -24,11 +24,12 @@ class DummySite(BaseSite):
         super().__init__()
         self.fetch_traces_called = False
 
-    def submit(self, job, **kwargs):
+    def submit(self, job, *, check=False, **kwargs):
         return RunHandle(
             site=self,
             job=job,
             id="run-1",
+            check=check,
             poll_interval=0.0,
             _status_fn=lambda run: JobStatus(
                 state="failed",
@@ -82,6 +83,28 @@ def test_run_handle_wait_check_false_returns_failed_result():
 
     assert not result.successful
     assert result.status.state == "failed"
+
+
+def test_site_submit_defaults_to_non_strict_wait_for_failed_run():
+    run = DummySite().submit(DummyJob())
+
+    result = run.wait()
+
+    assert not result.successful
+    assert result.status.state == "failed"
+
+
+def test_site_submit_check_true_restores_strict_wait_for_failed_run():
+    run = DummySite().submit(DummyJob(), check=True)
+
+    with pytest.raises(
+        RunFailedError,
+        match=(
+            "FrequenSolve run failed: job=failed-job; state=failed; "
+            "job_id=run-1; solver failed"
+        ),
+    ):
+        run.wait()
 
 
 def test_run_handle_wait_async_raises_by_default_for_failed_run():

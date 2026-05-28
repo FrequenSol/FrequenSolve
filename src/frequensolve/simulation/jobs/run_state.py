@@ -1,3 +1,10 @@
+"""Run-state inspection and rerun helpers mixed into jobs.
+
+This module reads solver task metadata, compares trace files with stable job
+fingerprints, summarizes convergence failures, and writes the Python-side
+``_fs_python_run.json`` state used by status displays and incremental reruns.
+"""
+
 import json
 import os
 import shutil

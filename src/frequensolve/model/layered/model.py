@@ -1,3 +1,11 @@
+"""Layered seismic model container and serialization logic.
+
+``LayeredModel`` is the main user-facing model builder for stratigraphic
+velocity/property models. It owns ordered surfaces, layers, fractures,
+boreholes, project path handling, solver-contract export, and reconstruction
+from saved FrequenSolve payloads.
+"""
+
 from __future__ import annotations
 
 import copy

@@ -61,6 +61,7 @@ extensions = [
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False  # or True if you prefer NumPy-style
 napoleon_include_init_with_doc = True
+napoleon_attr_annotations = False
 
 templates_path = ["_templates"]
 
@@ -69,6 +70,7 @@ exclude_patterns = []
 autodoc_typehints = (
     "description"  # Show types in the parameter description instead of inline
 )
+autodoc_typehints_description_target = "documented"
 autodoc_typehints_format = "short"  # Use short names for type annotations
 autodoc_member_order = "bysource"
 

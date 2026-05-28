@@ -1,3 +1,10 @@
+"""Timing summaries and plots for frequency-domain job runs.
+
+These helpers turn per-task solver metadata into rows suitable for notebooks,
+reports, or matplotlib plots, including task durations, core-hour estimates,
+and solver phase breakdowns when the fast solver records them.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence

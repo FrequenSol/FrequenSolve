@@ -1,3 +1,10 @@
+"""Borehole geometry and radial material objects for layered models.
+
+These classes describe vertical 2D boreholes, their cumulative-radius surfaces,
+radial layers, axial plugs, and the solver subdomains generated from that
+authoring model.
+"""
+
 from __future__ import annotations
 
 import copy

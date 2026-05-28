@@ -28,7 +28,39 @@ Dispersion
 Layered Model
 -------------
 
-.. automodule:: frequensolve.model.layered
+.. automodule:: frequensolve.model.layered.model
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Layered Authoring Methods
+-------------------------
+
+.. automodule:: frequensolve.model.layered.authoring
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Layered Sampling Methods
+------------------------
+
+.. automodule:: frequensolve.model.layered.sampling
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Layered Surfaces And Layers
+---------------------------
+
+.. automodule:: frequensolve.model.layered.surfaces
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Borehole API
+------------
+
+.. automodule:: frequensolve.model.layered.borehole
    :members:
    :show-inheritance:
    :noindex:

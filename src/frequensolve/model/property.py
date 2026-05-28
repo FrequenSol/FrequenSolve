@@ -411,6 +411,15 @@ class PropertyMap(MutableMapping):
             self.update(values)
 
     def __getitem__(self, key: str) -> "Property":
+        """Return a property by canonical or alias name.
+
+        Args:
+            key: Property name or supported alias.
+
+        Returns:
+            Stored :class:`Property` instance.
+        """
+
         return self._store[canonical_property_name(key)]
 
     def __setitem__(self, key: str, value: Any) -> None:
@@ -429,9 +438,13 @@ class PropertyMap(MutableMapping):
         del self._store[canonical_property_name(key)]
 
     def __iter__(self) -> Iterator[str]:
+        """Iterate over canonical property names in insertion order."""
+
         return iter(self._store)
 
     def __len__(self) -> int:
+        """Return the number of stored properties."""
+
         return len(self._store)
 
     def __contains__(self, key: object) -> bool:

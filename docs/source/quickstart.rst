@@ -143,11 +143,10 @@ is configured.
 Run a Time-Domain Job
 ---------------------
 
-Jobs are :term:`strict <strict job>` by default: ``site.submit(job).wait()``
-raises if Python validation fails or if the solver reports a failure. Pass
-``check=False`` to ``wait()`` when you want to inspect a failed, cancelled, or
-timed-out ``RunResult`` yourself. Result paths, logs, trace files, and other
-outputs are written under the project directory.
+``site.submit(job)`` returns a run handle. Calling ``wait()`` blocks until the
+site reaches a terminal state and returns a ``RunResult`` with status, logs, and
+output helpers. Result paths, logs, trace files, and other outputs are written
+under the project directory.
 
 .. code-block:: python
 

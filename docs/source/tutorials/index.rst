@@ -40,8 +40,8 @@ Later notebooks reuse that same shape and add one idea at a time.
 Each tutorial should leave the reader with three concrete artifacts:
 
 1. A small project directory whose generated inputs can be inspected.
-2. One :term:`strict job` cell that either succeeds or leaves logs/results in
-   place for debugging.
+2. One submitted job cell that returns a result and leaves logs/results in
+   place for inspection.
 3. A plotted or listed result that shows what the selected option changed.
 
 The companion user-guide pages define the catalog-style tables and conceptual
@@ -62,7 +62,7 @@ Read the sections in order when learning the package for the first time:
      - Why it comes here
    * - Modeling basics
      - Projects, simulations, material properties, mesh sizing, acquisition,
-       :term:`strict jobs <strict job>`, traces, and :term:`ParaView` QC.
+       jobs, traces, and :term:`ParaView` QC.
      - This is the vocabulary every later tutorial reuses.
    * - Sites
      - Local, cloud, and :term:`HPC` execution plus saved project/job loading.
