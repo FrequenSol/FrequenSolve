@@ -26,7 +26,15 @@ __all__ = [
 
 
 def hilbert_envelope(signal: np.ndarray, axis: int = 0) -> np.ndarray:
-    """Return the analytic-signal envelope along ``axis``."""
+    """Return the analytic-signal envelope along ``axis``.
+
+    Args:
+        signal: Real-valued signal array.
+        axis: Axis along which to compute the Hilbert transform.
+
+    Returns:
+        Envelope magnitude array with the same shape as ``signal``.
+    """
 
     from scipy.signal import hilbert
 
@@ -123,7 +131,21 @@ def compute_timelag(
     T_max: float | None = None,
     Tf: float | None = None,
 ) -> xr.DataArray:
-    """Estimate receiver-by-receiver time lag in milliseconds."""
+    """Estimate receiver-by-receiver time lag in milliseconds.
+
+    Args:
+        baseline: Baseline time-domain gather with ``time`` and ``receiver``
+            dimensions.
+        monitor: Monitor time-domain gather aligned to ``baseline``.
+        threshold: First-arrival envelope threshold relative to each trace peak.
+        window_length: Window length around picked first arrivals in seconds.
+        max_lag: Optional maximum correlation lag in seconds.
+        T_max: Optional final time to include.
+        Tf: Deprecated alias retained for compatibility.
+
+    Returns:
+        One-dimensional ``DataArray`` of receiver time lags in milliseconds.
+    """
 
     baseline, monitor = _aligned_time_pair(baseline, monitor, T_max=T_max, Tf=Tf)
     rate = sampling_rate(baseline)

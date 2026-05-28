@@ -338,6 +338,27 @@ class Survey:
         source_system: Optional[str] = None,
         receiver_system: Optional[str] = None,
     ) -> "Survey":
+        """Create a dense survey from explicit source and receiver catalogs.
+
+        Args:
+            name: Survey name.
+            sources: Source coordinates.
+            receivers: Receiver coordinates.
+            source_ids: Optional one-based source ids.
+            receiver_ids: Optional one-based receiver ids.
+            source_names: Optional source display names.
+            receiver_names: Optional receiver display names.
+            units: Shared source/receiver coordinate units.
+            system: Shared source/receiver coordinate system.
+            source_units: Source coordinate units override.
+            receiver_units: Receiver coordinate units override.
+            source_system: Source coordinate-system override.
+            receiver_system: Receiver coordinate-system override.
+
+        Returns:
+            Dense ``Survey`` containing every source-receiver pairing.
+        """
+
         if isinstance(sources, CoordinateValue):
             if source_units is None:
                 source_units = sources.units
@@ -394,6 +415,32 @@ class Survey:
         source_system: Optional[str] = None,
         receiver_system: Optional[str] = None,
     ) -> "Survey":
+        """Create a survey defined by source-receiver offset criteria.
+
+        Args:
+            name: Survey name.
+            sources: Source coordinates.
+            receivers: Receiver coordinates.
+            min: Optional minimum accepted offset.
+            max: Optional maximum accepted offset.
+            metric: Offset metric understood by the solver.
+            axis: Optional projection axis for directional offset metrics.
+            absolute: Whether to use absolute projected offsets.
+            source_ids: Optional one-based source ids.
+            receiver_ids: Optional one-based receiver ids.
+            source_names: Optional source display names.
+            receiver_names: Optional receiver display names.
+            units: Shared source/receiver coordinate units.
+            system: Shared source/receiver coordinate system.
+            source_units: Source coordinate units override.
+            receiver_units: Receiver coordinate units override.
+            source_system: Source coordinate-system override.
+            receiver_system: Receiver coordinate-system override.
+
+        Returns:
+            ``Survey`` with an offset-domain sparse selection.
+        """
+
         if isinstance(sources, CoordinateValue):
             if source_units is None:
                 source_units = sources.units
@@ -451,6 +498,25 @@ class Survey:
         source_system: Optional[str] = None,
         receiver_system: Optional[str] = None,
     ) -> "Survey":
+        """Load a survey from SPS source, receiver, and relation files.
+
+        Args:
+            source_file: SPS source file path.
+            receiver_file: SPS receiver file path.
+            relation_file: SPS relation file path.
+            name: Survey name.
+            dimension: Coordinate dimension to read from SPS points.
+            units: Shared source/receiver coordinate units.
+            system: Shared source/receiver coordinate system.
+            source_units: Source coordinate units override.
+            receiver_units: Receiver coordinate units override.
+            source_system: Source coordinate-system override.
+            receiver_system: Receiver coordinate-system override.
+
+        Returns:
+            ``Survey`` populated from the SPS triplet.
+        """
+
         sources, source_ids, source_names, source_keys = cls._read_sps_points(
             source_file, "S", dimension
         )
@@ -504,6 +570,24 @@ class Survey:
         directory, a ``TraceDataset``/``TraceManifest``, a completed run result,
         or an SPS triplet supplied either as ``(sps, spr, spx)`` or as the first
         three positional arguments.
+
+        Args:
+            source: Survey-like object, path, trace dataset/manifest, run result,
+                or SPS source file.
+            receiver_file: Optional SPS receiver file.
+            relation_file: Optional SPS relation file.
+            group: Optional receiver group name for trace-store loading.
+            name: Survey name for the loaded object.
+            dimension: SPS coordinate dimension.
+            units: Shared source/receiver coordinate units.
+            system: Shared source/receiver coordinate system.
+            source_units: Source coordinate units override.
+            receiver_units: Receiver coordinate units override.
+            source_system: Source coordinate-system override.
+            receiver_system: Receiver coordinate-system override.
+
+        Returns:
+            Loaded ``Survey`` instance.
         """
 
         if isinstance(source, Survey):
@@ -567,7 +651,7 @@ class Survey:
         if isinstance(source, (str, Path)):
             path = Path(source)
             if path.is_dir():
-                from frequensolve.simulation.artifacts import RunMetadata
+                from frequensolve.simulation.jobs.artifacts import RunMetadata
 
                 return cls.from_result(
                     type("_SurveyRun", (), {"run_metadata": RunMetadata.read(path)})(),
@@ -601,7 +685,17 @@ class Survey:
         group: Optional[str] = None,
         name: str = "survey",
     ) -> "Survey":
-        """Load the resolved solver survey from a completed run result."""
+        """Load the resolved solver survey from a completed run result.
+
+        Args:
+            result: Completed ``RunResult`` or compatible object with run
+                metadata/artifact paths.
+            group: Optional receiver group name to load.
+            name: Survey name for the loaded object.
+
+        Returns:
+            ``Survey`` reconstructed from trace-store metadata.
+        """
 
         return cls.from_trace_file(
             cls._trace_file_from_result(result),
@@ -617,7 +711,17 @@ class Survey:
         group: Optional[str] = None,
         name: str = "survey",
     ) -> "Survey":
-        """Load the resolved survey from a ``TraceDataset`` or manifest."""
+        """Load the resolved survey from a ``TraceDataset`` or manifest.
+
+        Args:
+            traces: ``TraceDataset``, trace manifest, or compatible object with
+                trace files.
+            group: Optional receiver group name to load.
+            name: Survey name for the loaded object.
+
+        Returns:
+            ``Survey`` reconstructed from trace-store metadata.
+        """
 
         files = getattr(traces, "paths", None)
         if files is None:
@@ -644,7 +748,21 @@ class Survey:
         group: Optional[str] = None,
         name: str = "survey",
     ) -> "Survey":
-        """Load a resolved survey from a fast solver ``fs_seismic_trace_store_v1`` HDF5 file."""
+        """Load a resolved survey from a fast solver trace-store HDF5 file.
+
+        Args:
+            file: HDF5 trace-store file using schema
+                ``fs_seismic_trace_store_v1``.
+            group: Optional receiver group name to load.
+            name: Survey name for the loaded object.
+
+        Returns:
+            ``Survey`` reconstructed from solver metadata.
+
+        Raises:
+            ValueError: If the file lacks compatible survey metadata.
+            FileNotFoundError: If referenced trace metadata cannot be found.
+        """
 
         try:
             import h5py
@@ -1458,6 +1576,21 @@ class Survey:
         receiver_domain: Optional[int] = None,
         **receiver_kwargs: Any,
     ) -> Acquisition:
+        """Create an ``Acquisition`` object from this survey.
+
+        Args:
+            device: Receiver device assigned to generated receiver groups.
+            receiver_group_name: Optional receiver group name override.
+            source_kind: Source kind for generated source groups.
+            source_direction: Optional source direction.
+            source_domain: Optional source domain id.
+            receiver_domain: Optional receiver domain id.
+            **receiver_kwargs: Additional receiver group fields.
+
+        Returns:
+            New ``Acquisition`` populated from this survey.
+        """
+
         _reject_frame_kwargs(receiver_kwargs)
         acq = Acquisition()
         self.apply_to(
@@ -1484,6 +1617,22 @@ class Survey:
         receiver_domain: Optional[int] = None,
         **receiver_kwargs: Any,
     ) -> Acquisition:
+        """Add this survey's acquisition geometry to an existing acquisition.
+
+        Args:
+            acq: Acquisition object to mutate.
+            receiver_group_name: Optional receiver group name override.
+            device: Receiver device assigned to receiver groups.
+            source_kind: Source kind for generated source groups.
+            source_direction: Optional source direction.
+            source_domain: Optional source domain id.
+            receiver_domain: Optional receiver domain id.
+            **receiver_kwargs: Additional receiver group fields.
+
+        Returns:
+            The same acquisition object after mutation.
+        """
+
         _reject_frame_kwargs(receiver_kwargs)
         group_name = receiver_group_name or self.name
         acq.add_source_group(
@@ -1549,6 +1698,22 @@ class Survey:
         receiver_kwargs: Optional[Mapping[str, Any]] = None,
         link_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> Any:
+        """Plot survey sources, receivers, and optional source-receiver links.
+
+        Args:
+            sources: Optional source id or ids to display.
+            receivers: Optional receiver id or ids to display.
+            ax: Optional Matplotlib axes.
+            show_links: Whether to draw relation lines.
+            annotate: Whether to label source/receiver ids.
+            source_kwargs: Matplotlib scatter style for sources.
+            receiver_kwargs: Matplotlib scatter style for receivers.
+            link_kwargs: Matplotlib line style for links.
+
+        Returns:
+            Matplotlib axes containing the plot.
+        """
+
         try:
             import matplotlib.pyplot as plt
         except ModuleNotFoundError as exc:

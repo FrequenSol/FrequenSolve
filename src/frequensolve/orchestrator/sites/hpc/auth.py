@@ -21,20 +21,37 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
-from frequensolve.orchestrator.ssh import SSHProxy
+from frequensolve.orchestrator.utils.ssh import SSHProxy
 from frequensolve.util.setup_logger import init_logger
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
 
 
 class SlurmAuthenticator:
-    """Owns SSH login-node and compute-node authentication flows."""
+    """Owns SSH login-node and compute-node authentication flows.
+
+    Args:
+        site: ``SlurmSite`` instance that provides credentials and remote
+            command helpers.
+    """
 
     def __init__(self, site):
         self.site = site
 
     def authenticate(self, host: Optional[str] = None):
-        """Connect to the login node using Paramiko or an SSH control socket."""
+        """Connect to the login node using Paramiko or an SSH control socket.
+
+        Args:
+            host: Optional login host override.
+
+        Returns:
+            Paramiko ``SSHClient`` or ``SSHProxy`` using an existing control
+            socket.
+
+        Raises:
+            RuntimeError: If called outside the main thread.
+            ValueError: If no login host is configured.
+        """
 
         site = self.site
         if threading.current_thread() != threading.main_thread():
@@ -82,7 +99,18 @@ class SlurmAuthenticator:
         return self._interactive_authentication(host)
 
     def get_job_host(self, job_id: int) -> str:
-        """Return the host assigned to a running SLURM job."""
+        """Return the host assigned to a running SLURM job.
+
+        Args:
+            job_id: SLURM job id.
+
+        Returns:
+            Compute-node host name.
+
+        Raises:
+            RuntimeError: If the job is not running or the host cannot be
+                determined.
+        """
 
         site = self.site
         status = site.run_login(f"squeue -j {job_id} -h -o %t").strip()
@@ -96,7 +124,15 @@ class SlurmAuthenticator:
         return hostname
 
     def connect_to_job_host(self, job_id: int):
-        """Connect to the compute node assigned to a running SLURM job."""
+        """Connect to the compute node assigned to a running SLURM job.
+
+        Args:
+            job_id: SLURM job id for a running allocation.
+
+        Returns:
+            Paramiko ``SSHClient`` or ``SSHProxy`` connected to the compute
+            node.
+        """
 
         site = self.site
         job_host = self.get_job_host(job_id)

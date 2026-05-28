@@ -184,6 +184,3 @@ line-length = 88
 [tool.ruff.lint]
 select = ["F"]
 ignore = ["F841"]
-
-[tool.ruff.lint.per-file-ignores]
-"src/frequensolve/util/paraview_wrapper.py" = ["F405"]

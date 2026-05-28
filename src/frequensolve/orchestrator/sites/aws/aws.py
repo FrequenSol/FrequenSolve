@@ -31,7 +31,7 @@ except ModuleNotFoundError as exc:
 from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.jobs import SimulationJob
+from frequensolve.simulation.jobs import BaseJob
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
@@ -593,7 +593,7 @@ class AWSSite(BaseSite):
         return True
 
     def fetch_paraview(
-        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
+        self, job: BaseJob, path: Optional[Union[str, Path]] = None
     ) -> None:
         """Get ParaView files from S3.
 
@@ -601,7 +601,7 @@ class AWSSite(BaseSite):
         project's S3 bucket to the local project path.
 
         Args:
-            job: A SimulationJob object.
+            job: A BaseJob object.
             path: Optional local path to save results. If None, uses
                 job.project_path.
         """
@@ -791,13 +791,7 @@ class AWSSite(BaseSite):
         project._transfer(self)
         self._emit(f"Project '{project.name}' synced to S3")
 
-    def submit(
-        self,
-        job: SimulationJob,
-        vcpu: Optional[int] = None,
-        memory: Optional[int] = None,
-        **kwargs,
-    ) -> RunHandle:
+    def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit a simulation job.
 
         Automatically creates compute stack if it doesn't exist.
@@ -807,14 +801,9 @@ class AWSSite(BaseSite):
 
         Args:
             job: The task to submit.
-            vcpu: Number of vCPUs for the resource planner phase. When omitted,
-                cloud submissions preserve the backend default.
-            memory: Memory in MB for the resource planner phase. When omitted,
-                cloud submissions preserve the backend default.
-            **kwargs: Additional job parameters (``name``, ``description``,
-                ``send_simulation_status_email``). When ``send_simulation_status_email`` is
-                ``True`` or ``False`` (GraphQL path only), overrides cloud communication
-                preferences for simulation status emails for this run.
+            **kwargs: Additional job parameters (vcpu, memory, name,
+                description). Pass ``validate=False`` to skip SDK pre-run
+                validation.
 
         Returns:
             Awaitable run handle.
@@ -827,15 +816,18 @@ class AWSSite(BaseSite):
             or kwargs.pop("force", False)
             or kwargs.pop("rerun", False)
         )
+        validate = kwargs.pop("validate", True)
         fetch = kwargs.pop("fetch", False)
         poll_interval = kwargs.pop("poll_interval", 10)
-        self.prepare_job(job)
+        vcpu = kwargs.pop("vcpu", None)
+        memory = kwargs.pop("memory", None)
+        self.prepare_job(job, validate=validate)
         if not force_run and job.is_run_current():
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
             return RunHandle.skipped(self, job)
 
-        self.prepare_job(job, sync_project=True)
+        self.prepare_job(job, sync_project=True, validate=validate)
 
         # Check if compute stack exists, create if missing
         if self.graphql_client is not None:
@@ -866,7 +858,7 @@ class AWSSite(BaseSite):
 
         try:
             # Sync job file to S3
-            project = job.simulation._remote_path.parts[0]
+            project = job.project_path.name
             local_job, remote_job = job.save_for_remote(
                 self.__class__.__name__, project
             )
@@ -982,7 +974,7 @@ class AWSSite(BaseSite):
 
     def _make_run_handle(
         self,
-        job: SimulationJob,
+        job: BaseJob,
         job_id: str,
         poll_interval: float = 10,
         fetch: bool = False,
@@ -1029,18 +1021,18 @@ class AWSSite(BaseSite):
 
     def fetch_traces(
         self,
-        job: Union[SimulationJob, List[SimulationJob]],
+        job: Union[BaseJob, List[BaseJob]],
         path: Optional[Union[str, Path]] = None,
         upscale: int = 1,
     ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
         """Get results from Stampede3.
 
         Args:
-            job: A SimulationJob object.
+            job: A BaseJob object.
             path: The path to save the results to.
         """
 
-        if isinstance(job, SimulationJob):
+        if isinstance(job, BaseJob):
             jobs = [job]
         else:
             jobs = job
@@ -1057,7 +1049,7 @@ class AWSSite(BaseSite):
                 # Build the path for the s3 results directory and the local results directory.
                 # The job results are stored in the job's result_path, not the simulation path
                 # Format: ex_01/jobs/simulation_name/job_name/results/traces/
-                project_name = job.simulation._remote_path.parts[0]  # e.g., "ex_01"
+                project_name = job.project_path.name  # e.g., "ex_01"
                 simulation_name = job.simulation.name  # e.g., "simple_acoustic"
                 job_name = job.name  # e.g., "time"
                 trace_dir_name = Path(job.trace_outputs.path).name
@@ -1088,13 +1080,22 @@ class AWSSite(BaseSite):
 
     def fetch_wavefields(
         self,
-        job: Union[SimulationJob, List[SimulationJob]],
+        job: Union[BaseJob, List[BaseJob]],
         path: Optional[Union[str, Path]] = None,
         upscale: int = 1,
     ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
-        """Get wavefield results from AWS storage."""
+        """Get wavefield results from AWS storage.
 
-        if isinstance(job, SimulationJob):
+        Args:
+            job: Single job or list of jobs to fetch.
+            path: Optional local project root for downloaded artifacts.
+            upscale: Optional upscaling factor for wavefield trace reads.
+
+        Returns:
+            Wavefield dataset for one job, or a mapping keyed by job name.
+        """
+
+        if isinstance(job, BaseJob):
             jobs = [job]
         else:
             jobs = job
@@ -1112,7 +1113,7 @@ class AWSSite(BaseSite):
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")
 
-                project_name = item.simulation._remote_path.parts[0]
+                project_name = item.project_path.name
                 simulation_name = item.simulation.name
                 job_name = item.name
                 wavefield_dir_name = Path(wavefield_outputs.path).name
@@ -1141,8 +1142,16 @@ class AWSSite(BaseSite):
             return db_map[jobs[0].name]
         return db_map
 
-    def fetch_outputs(self, job: SimulationJob):
-        """Fetch common AWS result artifacts for a completed job."""
+    def fetch_outputs(self, job: BaseJob):
+        """Fetch common AWS result artifacts for a completed job.
+
+        Args:
+            job: Completed job whose S3 artifacts should be downloaded.
+
+        Returns:
+            Trace dataset, or a mapping containing traces and wavefields when
+            wavefield outputs exist.
+        """
 
         traces = self.fetch_traces(job)
         wavefields = None
@@ -1154,7 +1163,7 @@ class AWSSite(BaseSite):
 
     def fetch_logs(
         self,
-        job: Union[SimulationJob, List[SimulationJob]],
+        job: Union[BaseJob, List[BaseJob]],
         *,
         local_dir: Optional[Union[str, Path]] = None,
         task: Optional[int] = None,
@@ -1166,6 +1175,16 @@ class AWSSite(BaseSite):
         ``task`` is one-based. ``frequency`` selects the matching frequency in
         ``job.f_list``. Without either selector, the local log directory is
         returned.
+
+        Args:
+            job: Single job or list of jobs.
+            local_dir: Optional local destination for downloaded logs.
+            task: Optional one-based task number to select.
+            frequency: Optional frequency used to select a task log.
+            show: Whether to print the selected log contents.
+
+        Returns:
+            Log path for one job, or a mapping keyed by job name.
         """
 
         jobs, single = self._as_jobs(job)
@@ -1173,7 +1192,7 @@ class AWSSite(BaseSite):
         result: Dict[str, Path] = {}
 
         for item in jobs:
-            project_name = item.simulation._remote_path.parts[0]
+            project_name = item.project_path.name
             remote_logs_path = (
                 f"s3://{self.config.s3_bucket}/"
                 f"{project_name}/jobs/{item.simulation.name}/{item.name}/logs"

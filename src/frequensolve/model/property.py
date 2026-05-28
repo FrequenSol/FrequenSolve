@@ -44,7 +44,15 @@ PROPERTY_ALIASES = {
 
 
 def canonical_property_name(name: str) -> str:
-    """Return the canonical solver/API spelling for a material property name."""
+    """Normalize a user-facing material property name.
+
+    Args:
+        name: Property name or alias, such as ``"Vp"``, ``"density"``, or
+            ``"rho"``.
+
+    Returns:
+        The canonical lowercase name used in serialized model payloads.
+    """
 
     key = str(name).strip()
     normalized = key.lower()
@@ -131,7 +139,15 @@ def _resolve_system_alias(
 
 
 class PropertyExpression:
-    """Algebraic property expression serialized as a solver-friendly AST."""
+    """Algebraic expression used to define a property from other properties.
+
+    Expressions are stored as small solver-friendly dictionaries. They support
+    arithmetic operator overloads, references to other property names, scalar
+    literals, and unit conversion nodes.
+
+    Args:
+        node: Serialized expression node to copy into this expression.
+    """
 
     def __init__(self, node: Mapping[str, Any]):
         """Create an expression from an already-normalized expression node."""
@@ -140,13 +156,31 @@ class PropertyExpression:
 
     @classmethod
     def ref(cls, name: str) -> "PropertyExpression":
-        """Reference another material property by canonical name."""
+        """Reference another property by canonical name.
+
+        Args:
+            name: Property name or alias to reference.
+
+        Returns:
+            A property expression containing a ``ref`` node.
+        """
 
         return cls({"ref": canonical_property_name(name)})
 
     @classmethod
     def value(cls, value: Any) -> "PropertyExpression":
-        """Create a scalar expression value from Python, Pint, or xarray input."""
+        """Create a scalar literal expression.
+
+        Args:
+            value: Scalar Python value, Pint quantity, or scalar
+                ``xarray.DataArray`` to embed in the expression.
+
+        Returns:
+            A property expression containing a literal ``value`` node.
+
+        Raises:
+            ValueError: If ``value`` is a non-scalar ``xarray.DataArray``.
+        """
 
         if is_quantity(value):
             return cls(quantity_to_fs(value))
@@ -162,7 +196,15 @@ class PropertyExpression:
 
     @classmethod
     def from_value(cls, value: Any) -> "PropertyExpression":
-        """Normalize user expression input to a :class:`PropertyExpression`."""
+        """Coerce user input into a ``PropertyExpression``.
+
+        Args:
+            value: Existing expression, serialized expression payload, scalar
+                value, or mapping containing an ``expr`` field.
+
+        Returns:
+            A normalized property expression with canonicalized references.
+        """
 
         if isinstance(value, PropertyExpression):
             return value
@@ -174,12 +216,24 @@ class PropertyExpression:
         return cls.value(value)
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
-        """Serialize this expression to a solver-compatible expression tree."""
+        """Serialize the expression.
+
+        Args:
+            ctx: Optional export context. It is accepted for API consistency;
+                expression nodes are self-contained and do not currently use it.
+
+        Returns:
+            A deep copy of the solver expression payload.
+        """
 
         return copy.deepcopy(self.node)
 
     def depends_on(self) -> List[str]:
-        """List canonical property names referenced by this expression."""
+        """List property references used by the expression.
+
+        Returns:
+            Canonical property names in first-seen traversal order.
+        """
 
         out: List[str] = []
 
@@ -252,7 +306,14 @@ class PropertyExpression:
         return PropertyExpression({"op": "neg", "arg": self.to_fs()})
 
     def magnitude(self, units: Any) -> "PropertyExpression":
-        """Return an expression that converts the value to a unitless magnitude."""
+        """Convert a quantity expression to a scalar magnitude.
+
+        Args:
+            units: Target units for the magnitude operation.
+
+        Returns:
+            A new expression node representing the magnitude conversion.
+        """
 
         return PropertyExpression(
             {
@@ -263,7 +324,14 @@ class PropertyExpression:
         )
 
     def to(self, units: Any) -> "PropertyExpression":
-        """Return an expression that converts the value to target units."""
+        """Convert this expression to target units.
+
+        Args:
+            units: Target units accepted by ``unit_expression``.
+
+        Returns:
+            A new expression node representing the unit conversion.
+        """
 
         return PropertyExpression(
             {
@@ -278,7 +346,14 @@ class PropertyExpression:
 
 
 def prop(name: str) -> PropertyExpression:
-    """Reference another material property in a derived property expression."""
+    """Create a property-reference expression.
+
+    Args:
+        name: Property name or alias to reference.
+
+    Returns:
+        A ``PropertyExpression`` equivalent to ``PropertyExpression.ref(name)``.
+    """
     return PropertyExpression.ref(name)
 
 
@@ -299,7 +374,16 @@ def _canonicalize_expression_refs(node: Any) -> Any:
 
 
 class PropertyMap(MutableMapping):
-    """Dict-like material property mapping with normalized property values."""
+    """Mutable mapping of canonical property names to ``Property`` objects.
+
+    Args:
+        values: Optional initial mapping of property names to property-like
+            values.
+        grid: Default grid used when coercing array or file-backed values.
+        units: Default units applied to properties that do not specify units.
+        system: Default coordinate-system name applied to properties that do
+            not specify a system.
+    """
 
     def __init__(
         self,
@@ -362,7 +446,19 @@ class PropertyMap(MutableMapping):
         file_factory: Optional[Callable[[str, "Property"], Path]] = None,
         dataset_factory: Optional[Callable[[str, "Property"], str]] = None,
     ) -> Dict[str, Any]:
-        """Serialize all mapped properties for the solver input contract."""
+        """Serialize every stored property.
+
+        Args:
+            ctx: Optional export context used for project-relative paths and
+                HDF5-backed storage.
+            file_factory: Optional callback that returns the raw binary file
+                path for a non-constant in-memory property.
+            dataset_factory: Optional callback that returns the HDF5 dataset
+                path for a non-constant in-memory property.
+
+        Returns:
+            Mapping from canonical property name to serialized property payload.
+        """
 
         payload = {}
         for key, prop in self._store.items():
@@ -391,11 +487,28 @@ class PropertyMap(MutableMapping):
 
 
 class Property:
-    """A solver property specification.
+    """Material property value, expression, or file reference.
 
-    The object can represent constants, Pint quantities, in-memory arrays,
-    loaded local files, or structured file references that are only accessible
-    to the solver/server.
+    A property can be a scalar constant, Pint quantity, in-memory
+    ``xarray.DataArray``, local file loaded into memory, lazy file reference,
+    HDF5 dataset locator, remote solver-visible path, or derived
+    ``PropertyExpression``.
+
+    Args:
+        data: Property value or reference to wrap.
+        grid: Grid metadata used for file-backed or ungridded array values.
+        scale: Multiplicative scale applied to loaded or in-memory numeric data.
+        units: Optional units for the property values.
+        system: Optional coordinate-system name for array dimensions.
+        format: Optional explicit file format hint for lazy file references.
+        absolute: Whether a file path should be serialized as absolute or
+            solver-visible.
+        read: Whether a local file path should be read immediately.
+        **kwargs: Extra payload fields preserved during serialization.
+
+    Raises:
+        ValueError: If ``data`` has an unsupported type or conflicting
+            coordinate-system aliases are supplied.
     """
 
     def __init__(
@@ -539,10 +652,24 @@ class Property:
         coordinate_system: Optional[str] = None,
         **extra,
     ) -> "Property":
-        """Create a file-backed property reference without loading the file.
+        """Create a lazy file-backed property.
 
-        Use this when the solver should read an existing local, project-relative,
-        absolute, remote, or HDF5-locator dataset at run time.
+        Args:
+            path: Local path, remote path prefixed by ``remote:``, or HDF5
+                locator of the form ``file.h5:dataset``.
+            scale: Multiplicative scale recorded for the file data.
+            units: Optional property value units.
+            grid: Optional grid metadata required by raw binary files and some
+                external formats.
+            format: Optional explicit file format hint.
+            absolute: Serialize the path as solver-visible instead of
+                project-relative.
+            system: Optional coordinate-system name for the property grid.
+            coordinate_system: Alias accepted in serialized payloads.
+            **extra: Additional payload fields to preserve.
+
+        Returns:
+            A ``Property`` that references the file without reading it.
         """
 
         system = _resolve_system_alias(system, coordinate_system)
@@ -575,7 +702,20 @@ class Property:
         coordinate_system: Optional[str] = None,
         **extra,
     ) -> "Property":
-        """Create a derived property from an algebraic expression."""
+        """Create a property derived from a solver expression.
+
+        Args:
+            expression: Expression object, scalar, or serialized expression
+                payload accepted by ``PropertyExpression.from_value``.
+            units: Optional units associated with the derived value.
+            system: Optional coordinate-system name for the derived value.
+            coordinate_system: Alias accepted in serialized payloads.
+            **extra: Additional payload fields to preserve.
+
+        Returns:
+            A ``Property`` containing a ``PropertyExpression`` instead of
+            concrete data.
+        """
 
         system = _resolve_system_alias(system, coordinate_system)
         prop = cls(0.0, units=units, system=system, **extra)
@@ -589,7 +729,17 @@ class Property:
 
     @classmethod
     def from_value(cls, value: Any, grid: Optional[xr.DataArray] = None) -> "Property":
-        """Normalize a user value or solver payload into a :class:`Property`."""
+        """Coerce a user value or serialized payload into a ``Property``.
+
+        Args:
+            value: Existing property, expression, scalar, array, file payload,
+                expression payload, or other property-like value.
+            grid: Optional default grid metadata used when ``value`` does not
+                include its own grid.
+
+        Returns:
+            A normalized ``Property`` instance.
+        """
 
         if isinstance(value, Property):
             return value
@@ -646,13 +796,23 @@ class Property:
 
     @property
     def data(self):
-        """In-memory property data, or ``None`` for file/expression properties."""
+        """Return the in-memory data array.
+
+        Returns:
+            The underlying ``xarray.DataArray`` when the property is materialized,
+            otherwise ``None`` for expressions, remote references, and lazy files.
+        """
 
         return self.darr
 
     @property
     def is_constant(self) -> bool:
-        """Whether this property is a scalar value embedded in the job JSON."""
+        """Return whether the property is a materialized scalar constant.
+
+        Returns:
+            ``True`` when the property contains an in-memory scalar data array;
+            ``False`` for arrays, expressions, and file references.
+        """
 
         if self.expression is not None or self.is_remote or self.darr is None:
             return False
@@ -660,7 +820,14 @@ class Property:
 
     @property
     def extrema(self):
-        """Minimum and maximum of loaded property data."""
+        """Return the minimum and maximum materialized property values.
+
+        Returns:
+            Tuple of ``xarray.DataArray`` scalar reductions ``(min, max)``.
+
+        Raises:
+            ValueError: If the property is an expression or lazy file reference.
+        """
 
         if self.expression is not None:
             raise ValueError("Cannot get extrema of a derived property expression")
@@ -675,7 +842,15 @@ class Property:
 
     @property
     def grid(self) -> CartesianGrid:
-        """Grid metadata associated with this property."""
+        """Return Cartesian grid metadata for this property.
+
+        Returns:
+            A ``CartesianGrid`` inferred from explicit file grid metadata or the
+            in-memory data array.
+
+        Raises:
+            ValueError: If a file-backed property has no explicit grid metadata.
+        """
 
         if isinstance(self.file_grid, CartesianGrid):
             return self.file_grid
@@ -688,7 +863,20 @@ class Property:
         return CartesianGrid.from_xarray(self.darr)
 
     def get(self, grid: Optional[xr.DataArray] = None):
-        """Return loaded property data, interpolated or broadcast to ``grid``."""
+        """Return materialized property values.
+
+        Args:
+            grid: Optional target xarray grid. Constants are broadcast to this
+                grid; gridded data are linearly interpolated to matching
+                coordinate names with nearest extrapolation used for edge NaNs.
+
+        Returns:
+            A scalar value or ``xarray.DataArray`` on the requested grid.
+
+        Raises:
+            ValueError: If the property is an expression, lazy file reference,
+                or its dimensions are incompatible with the requested grid.
+        """
 
         if self.expression is not None:
             raise ValueError("Cannot access data from a derived property expression")
@@ -730,10 +918,7 @@ class Property:
                     out = out.broadcast_like(grid)
                 result = out
             else:
-                raise ValueError(
-                    f"Incompatible dimensions: {coords} != {self.darr.dims}\n"
-                    "Note that in 2D the dimensions should be x and z."
-                )
+                raise self._dimension_error(coords)
         return result
 
     def to_fs(
@@ -742,7 +927,20 @@ class Property:
         file: Optional[Union[str, Path]] = None,
         dataset: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Serialize this property to the solver input contract."""
+        """Serialize the property for a FrequenSolve input payload.
+
+        Args:
+            ctx: Optional export context used for project-relative paths and
+                HDF5-backed storage.
+            file: Optional binary file path used when writing non-constant
+                in-memory arrays outside an HDF5 store.
+            dataset: Optional HDF5 dataset path used when ``ctx`` provides a
+                store.
+
+        Returns:
+            Serialized property payload containing one of ``value``, ``file``,
+            or ``expr`` plus optional units, system, grid, and extra fields.
+        """
 
         if self.expression is not None:
             payload = {"expr": self.expression.to_fs(ctx)}
@@ -812,6 +1010,15 @@ class Property:
             pass
         return payload
 
+    def _dimension_error(self, coords: Mapping[str, Any]) -> ValueError:
+        return ValueError(
+            _property_dimension_error(
+                self.darr.dims if self.darr is not None else (),
+                coords,
+                system=self.system,
+            )
+        )
+
     def __iadd__(self, other: Union[float, xr.DataArray]) -> "Property":
         if self.is_remote or self.darr is None:
             raise ValueError(
@@ -835,7 +1042,17 @@ class Property:
         return prop
 
     def write(self, file: Path):
-        """Write loaded property data to a binary file and return the path."""
+        """Write materialized property values to a raw binary file.
+
+        Args:
+            file: Output path for single-precision floating-point values.
+
+        Returns:
+            The output path that was written.
+
+        Raises:
+            ValueError: If the property is not materialized in memory.
+        """
 
         if self.is_remote or self.darr is None:
             raise ValueError(f"Cannot write file property: {self.file_path}")
@@ -865,7 +1082,21 @@ class Property:
 
     @staticmethod
     def read(file: Path, grid: Optional[xr.DataArray] = None) -> xr.DataArray:
-        """Read a property data file into an xarray ``DataArray``."""
+        """Read a property file into an ``xarray.DataArray``.
+
+        Args:
+            file: File path or HDF5 locator to read.
+            grid: Optional grid metadata required by raw binary files and used
+                for interpolation by some readers.
+
+        Returns:
+            Data array containing the property values.
+
+        Raises:
+            FileNotFoundError: If the referenced file does not exist.
+            ValueError: If the file format is unsupported or required grid
+                metadata are missing.
+        """
 
         reader = Property._get_reader(file)
         return reader(file, grid=grid)
@@ -984,7 +1215,22 @@ class Property:
         grid: Optional[xr.DataArray] = None,
         **kwargs,
     ) -> None:
-        """Apply a stochastic perturbation to loaded property data in place."""
+        """Apply a stochastic perturbation to materialized values in place.
+
+        Args:
+            std: Standard deviation of the generated perturbation field.
+            method: Perturbation generator name. Currently only
+                ``"von_karman"`` is supported.
+            type: Perturbation application mode, either ``"additive"`` or
+                ``"multiplicative"``.
+            grid: Optional grid used to generate the perturbation field.
+            **kwargs: Generator options such as ``k0``, ``nu``, ``anisotropy``,
+                and ``seed``.
+
+        Raises:
+            ValueError: If the property is file-backed or ``method`` is not
+                supported.
+        """
 
         if self.is_remote or self.darr is None:
             raise ValueError(
@@ -1027,16 +1273,40 @@ def _ensure_minimum_coordinates(da: xr.DataArray) -> xr.DataArray:
     return out
 
 
-def _dims_compatible(dims1: List[str], dims2: List[str]) -> bool:
-    dims1 = set(dims1)
-    dims2 = set(dims2)
-    return dims1.issubset(dims2)
+def _dims_compatible(dims1: Sequence[str], dims2: Sequence[str]) -> bool:
+    return set(dims1).issubset(set(dims2))
 
 
-def _dims_in(dims1: List[str], dims2: List[str]) -> bool:
-    dims1 = set(dims1)
-    dims2 = set(dims2)
-    return dims1.issubset(dims2)
+def _format_names(values: Sequence[str]) -> str:
+    return ", ".join(repr(str(value)) for value in values) or "none"
+
+
+def _property_dimension_error(
+    data_dims: Sequence[str],
+    coords: Mapping[str, Any],
+    *,
+    system: Optional[str],
+) -> str:
+    data_dims = [str(dim) for dim in data_dims]
+    coord_names = [str(name) for name in coords.keys()]
+    missing = [dim for dim in data_dims if dim not in coord_names]
+    if system is not None:
+        return (
+            f"Property dimensions [{_format_names(missing or data_dims)}] are not "
+            f"available on the requested grid for coordinate system {system!r}. "
+            f"Grid coordinates are [{_format_names(coord_names)}]. Define "
+            f"coordinate-system axes with these property dimension names, bind that "
+            "coordinate system to the simulation/model before sampling, or rename "
+            "the property dimensions to match available grid coordinates."
+        )
+    return (
+        f"Property dimensions [{_format_names(missing or data_dims)}] are not "
+        f"available on the requested grid. Grid coordinates are "
+        f"[{_format_names(coord_names)}]. Property array dimensions may be physical "
+        "grid coordinates such as 'x', 'y', and 'z', or coordinate-system axes. "
+        "For coordinate-system axes, set the property `system`/`coordinate_system` "
+        "and define matching axes on the simulation."
+    )
 
 
 def _coords_compatible(

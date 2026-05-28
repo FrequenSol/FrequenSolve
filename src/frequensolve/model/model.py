@@ -10,7 +10,12 @@ import xarray as xr
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.property import Property, PropertyMap
 from frequensolve.util.class_registry import class_registry, register_class
-from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
+from frequensolve.util.mixins import (
+    ExportContext,
+    ExtraFieldsMixin,
+    merge_extra,
+    warn_deprecated_path_api,
+)
 from frequensolve.util.named_list import NamedList
 from frequensolve.util.physics import model_dimension
 
@@ -19,14 +24,25 @@ __all__ = ["ModelSubdomain", "ModelBase"]
 
 @dataclass(kw_only=True)
 class ModelSubdomain(ExtraFieldsMixin):
-    """A subdomain within a model with associated properties.
+    """Material subdomain associated with one mesh block.
 
-    Attributes:
-       mesh_block_id (int):  Unique identifier for the mesh block.
-       name (Optional[str]): Optional name for the mesh block.
-       physics (Optional[str]): Optional physics model name for the subdomain.
-       properties (Dict[str, Union[float, str, xarray.DataArray]]): Dictionary of subdomain properties.
-          Keys are property names, values can be numeric constants, file paths, or xarray DataArrays.
+    Args:
+        mesh_block_id: Solver mesh-block identifier. ``-1`` may be used for
+            unlabeled subdomains that will be assigned during model export.
+        name: Optional user-facing subdomain name.
+        physics: Optional physics/material family for this subdomain.
+        properties: Mapping of property names to property-like values.
+        grid: Default grid metadata used when coercing subdomain properties.
+        units: Default units applied to properties that omit units.
+        system: Default coordinate-system name applied to properties that omit
+            a system.
+        extra: Additional serialized fields preserved on round trip.
+        **kwargs: Additional serialized fields preserved on round trip.
+
+    Raises:
+        TypeError: If deprecated ``frame`` metadata is provided.
+        ValueError: If both ``system`` and ``coordinate_system`` are provided
+            with different values.
     """
 
     mesh_block_id: int = -1
@@ -78,16 +94,34 @@ class ModelSubdomain(ExtraFieldsMixin):
         self._init_extra(extra, **kwargs)
 
     def set_property(self, key: str, value: Union[float, xr.DataArray]):
+        """Set or replace a material property.
+
+        Args:
+            key: Property name or alias.
+            value: Property-like value accepted by ``PropertyMap``.
+        """
+
         self.properties[key] = value
 
     def __getitem__(self, key: str):
         return self.properties[key].get()
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
+        """Serialize the subdomain for solver input.
+
+        Args:
+            ctx: Optional export context used for project-relative paths and
+                property storage.
+
+        Returns:
+            Payload containing the mesh-block id, optional name/physics, and
+            serialized property mapping.
+        """
+
         ctx = ctx or ExportContext(self._proj_path, self._rel_path)
 
         def property_file(key: str, prop: Property) -> Path:
-            return self._path / f"layer_{self.mesh_block_id}_{key}.bin"
+            return ctx.path / f"layer_{self.mesh_block_id}_{key}.bin"
 
         def property_dataset(key: str, prop: Property) -> str:
             return f"inputs/model/subdomains/{self.mesh_block_id}/properties/{key}"
@@ -98,7 +132,7 @@ class ModelSubdomain(ExtraFieldsMixin):
             **({"physics": self.physics} if self.physics is not None else {}),
             "properties": self.properties.to_fs(
                 ctx=ctx,
-                file_factory=property_file,
+                file_factory=property_file if ctx.path is not None else None,
                 dataset_factory=property_dataset,
             ),
         }
@@ -106,6 +140,16 @@ class ModelSubdomain(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "ModelSubdomain":
+        """Deserialize a model subdomain payload.
+
+        Args:
+            data: Serialized subdomain mapping from a model payload.
+
+        Returns:
+            A ``ModelSubdomain`` with normalized properties and preserved extra
+            fields.
+        """
+
         data = copy.deepcopy(data)
         props = {}
         grid = None
@@ -128,6 +172,19 @@ class ModelSubdomain(ExtraFieldsMixin):
         )
 
     def like(self, grid: xr.DataArray, **kwargs) -> None:
+        """Interpolate all compatible properties onto another grid in place.
+
+        Args:
+            grid: Target xarray grid whose dimensions and coordinates define
+                the new property layout.
+            **kwargs: Legacy keyword aliases. ``grid=...`` is accepted for
+                older call sites.
+
+        Raises:
+            ValueError: If any property dimensions are incompatible with
+                ``grid``.
+        """
+
         # Legacy argument naming convention
         if "grid" in kwargs:
             grid = kwargs.pop("grid")
@@ -139,30 +196,31 @@ class ModelSubdomain(ExtraFieldsMixin):
                 raise ValueError(f"Property {key} does not match dimensions of grid")
 
     def _set_path(self, proj_path: Path, rel_path: Path):
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
         self._proj_path = proj_path
         self._rel_path = rel_path
 
     @property
     def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         return self._proj_path / self._rel_path
 
 
 @register_class
 @dataclass(kw_only=True)
 class ModelBase(ExtraFieldsMixin):
-    """Base class for simulation models.
+    """Base class for serializable simulation models.
 
-    Provides common attributes and functionality shared by different model types.
+    Args:
+        name: Model name used in project paths and serialized payloads.
+        dimension: Model dimension. ``0`` is allowed for an uninitialized base
+            model; concrete models normalize to 2D or 3D.
+        subdomains: Material subdomains belonging to this model.
+        extra: Additional serialized fields preserved on round trip.
 
-    Attributes:
-       name (str):                Name identifier for the model.
-       dimension (Literal[2, 3]): Model dimension (2D or 3D). A 2.5D simulation
-          still uses a 2D model and mesh.
-       x_limits (List[float]):    Model extent in x-direction [xmin, xmax].
-       y_limits (List[float]):    Model extent in y-direction [ymin, ymax].
-       z_limits (List[float]):    Model extent in z-direction [zmin, zmax].
-       properties (Dict[str, Union[float, str]]): Dictionary of model properties.
-          Keys are property names, values can be numeric constants or file paths.
+    Notes:
+        Concrete model types are registered in ``class_registry`` and are
+        dispatched by ``from_fs`` when the payload ``_type`` names a subclass.
     """
 
     name: str = "model"
@@ -177,6 +235,19 @@ class ModelBase(ExtraFieldsMixin):
             self.dimension = model_dimension(self.dimension)
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
+        """Serialize the model and its material subdomains.
+
+        Args:
+            ctx: Optional export context passed to subdomain/property export.
+
+        Returns:
+            Solver model payload with model type, name, dimension, and
+            serialized subdomains. Unlabeled subdomains receive unique positive
+            mesh-block identifiers during export.
+
+        Raises:
+            ValueError: If two explicit subdomains use the same mesh-block id.
+        """
 
         assert self.dimension in [0, 2, 3], "Dimension must be 0, 2, or 3"
 
@@ -210,6 +281,19 @@ class ModelBase(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "ModelBase":
+        """Deserialize a model payload.
+
+        Args:
+            data: Serialized model mapping.
+
+        Returns:
+            A ``ModelBase`` instance or a registered concrete model subclass
+            named by the payload ``_type`` field.
+
+        Raises:
+            ValueError: If the payload names an unknown model class.
+        """
+
         data = copy.deepcopy(data)
         data.pop("schema", None)
         class_name = data.pop("_type", cls.__name__)
@@ -230,11 +314,11 @@ class ModelBase(ExtraFieldsMixin):
         raise ValueError(f"Unknown model class: {class_name}")
 
     def add_subdomain(self, subdomain: ModelSubdomain) -> None:
-        """Adds a subdomain to the model.
+        """Add a material subdomain to the model.
 
         Args:
-           id (int): Unique mesh block identifier
-           **kwargs: Additional subdomain parameters.
+            subdomain: Subdomain to append. If it has no name, a stable
+                ``unlabeled_N`` name is assigned before insertion.
         """
         if subdomain.name is None:
             subdomain.name = f"unlabeled_{len(self.subdomains)}"
@@ -245,11 +329,11 @@ class ModelBase(ExtraFieldsMixin):
         return self
 
     def _set_path(self, proj_path: Path, rel_path: Path):
-        self._proj_path = proj_path
-        self._rel_path = rel_path / self.name
-        for subdomain in self.subdomains:
-            subdomain._set_path(proj_path, self._rel_path)
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
+        self._proj_path = Path(proj_path).expanduser().resolve()
+        self._rel_path = Path(rel_path) / self.name
 
     @property
     def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         return self._proj_path / self._rel_path

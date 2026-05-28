@@ -4,15 +4,27 @@ __all__ = ["ANSIColorCodes"]
 
 
 def print_note(msg: str):
+    """Print a styled note message.
+
+    Args:
+        msg: Message text.
+    """
+
     print(f"{ANSIColorCodes.note}Note: {msg}{ANSIColorCodes.none}")
 
 
 def print_warn(msg: str):
+    """Print a styled warning message.
+
+    Args:
+        msg: Message text.
+    """
+
     print(f"{ANSIColorCodes.warn}Warning: {msg}{ANSIColorCodes.none}")
 
 
 class ANSIColorCodes:
-    """Class for storing ANSI color codes."""
+    """ANSI escape-code constants used by simple terminal output helpers."""
 
     # Simple colors
     fg_Black = "\033[30m"

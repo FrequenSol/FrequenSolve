@@ -28,7 +28,13 @@ def wait(
     """Wait for one run using the generic progress monitor.
 
     Args:
-        check: Raise ``RunFailedError`` for unsuccessful terminal statuses.
+        run: Run handle to poll.
+        timeout: Optional maximum wait time in seconds.
+        poll_interval: Optional polling interval in seconds.
+        fetch: Whether to fetch outputs after a successful run.
+
+    Returns:
+        Final run result.
     """
 
     return wait_all(
@@ -51,7 +57,13 @@ def wait_all(
     """Wait for many runs, possibly from different sites, in input order.
 
     Args:
-        check: Raise ``RunFailedError`` for unsuccessful terminal statuses.
+        runs: Run handles to poll.
+        timeout: Optional maximum wait time in seconds.
+        poll_interval: Optional polling interval in seconds.
+        fetch: Whether to fetch outputs after successful runs.
+
+    Returns:
+        Final run results in input order.
     """
 
     return RunMonitor(runs).wait(
@@ -64,7 +76,12 @@ def wait_all(
 
 @dataclass
 class RunMonitor:
-    """Poll and render progress for one or more submitted runs."""
+    """Poll and render progress for one or more submitted runs.
+
+    Args:
+        runs: Run handles to monitor.
+        is_notebook: Whether to render notebook HTML instead of terminal text.
+    """
 
     runs: Iterable[RunHandle]
     is_notebook: bool = field(default_factory=_check_if_notebook)
@@ -79,6 +96,17 @@ class RunMonitor:
         fetch: bool = False,
         check: bool = True,
     ) -> list[RunResult]:
+        """Poll runs until all complete or the timeout expires.
+
+        Args:
+            timeout: Optional maximum wait time in seconds.
+            poll_interval: Optional polling interval in seconds.
+            fetch: Whether to fetch outputs after successful completion.
+
+        Returns:
+            Final run results in input order.
+        """
+
         handles = list(self.runs)
         if not handles:
             return []
@@ -210,7 +238,15 @@ class RunMonitor:
 
 
 def status_text(runs: list[RunHandle], statuses: Dict[int, JobStatus]) -> str:
-    """Return terminal-friendly progress text for many runs."""
+    """Return terminal-friendly progress text for many runs.
+
+    Args:
+        runs: Run handles being monitored.
+        statuses: Latest statuses keyed by run index.
+
+    Returns:
+        Multiline plain-text status summary.
+    """
 
     lines = []
     for index, run in enumerate(runs):
@@ -224,7 +260,15 @@ def status_text(runs: list[RunHandle], statuses: Dict[int, JobStatus]) -> str:
 
 
 def status_table_html(runs: list[RunHandle], statuses: Dict[int, JobStatus]) -> str:
-    """Render the generic run progress table as HTML."""
+    """Render the generic run progress table as HTML.
+
+    Args:
+        runs: Run handles being monitored.
+        statuses: Latest statuses keyed by run index.
+
+    Returns:
+        HTML table suitable for notebook display.
+    """
 
     rows = []
     complete = 0

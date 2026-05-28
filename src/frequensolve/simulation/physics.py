@@ -28,11 +28,12 @@ __all__ = [
 
 
 class ValidComponents(ABC):
-    """Valid components for each physics type.
+    """Component registry for one solver physics family.
 
     Attributes:
-       primary (List[str]): Simulated variables.
-       secondary (List[str]): Derived variables.
+        primary: Fields solved directly by the physics formulation.
+        secondary: Derived fields that can be requested from solver output.
+        aliases: Mapping from public aliases to canonical component names.
     """
 
     primary: ClassVar[List[str]] = []
@@ -41,13 +42,24 @@ class ValidComponents(ABC):
 
     @classmethod
     def allowed_components(cls) -> List[str]:
-        """Return all primary and derived components allowed for this physics."""
+        """Return all canonical component names accepted by this registry."""
 
         return list(dict.fromkeys([*cls.primary, *cls.secondary]))
 
     @classmethod
     def check_components(cls, components: Iterable[str]) -> List[str]:
-        """Canonicalize and validate component names for this physics."""
+        """Normalize and validate component names.
+
+        Args:
+            components: Component names or aliases requested by the user.
+
+        Returns:
+            Canonical component names in input order.
+
+        Raises:
+            ValueError: If any component is not supported by this physics
+                family.
+        """
 
         canonical = [cls.aliases.get(component, component) for component in components]
         allowed = set(cls.allowed_components())
@@ -63,33 +75,33 @@ class ValidComponents(ABC):
 
 
 class AcousticComponents(ValidComponents):
-    """Field components available for acoustic simulations."""
+    """Valid output components for acoustic simulations."""
 
     primary = ["pressure", "velocity"]
 
 
 class EMComponents(ValidComponents):
-    """Field components available for electromagnetic simulations."""
+    """Valid output components for electromagnetic simulations."""
 
     primary = ["electric", "magnetic"]
 
 
 class ElasticComponents(ValidComponents):
-    """Field components available for elastic simulations."""
+    """Valid output components for elastic simulations."""
 
     primary = ["velocity", "stress"]
     secondary = ["strain", "pressure"]
 
 
 class PoroelasticComponents(ValidComponents):
-    """Field components available for poroelastic simulations."""
+    """Valid output components for poroelastic simulations."""
 
     primary = ["velocity", "fluid_flux", "stress", "pressure"]
     secondary = ["strain", "displacement", "fluid_displacement"]
 
 
 class CoupledAEPComponents(ValidComponents):
-    """Field components available for coupled acoustic-elastic-poroelastic runs."""
+    """Valid output components for coupled acoustic-elastic-poroelastic runs."""
 
     primary = ["pressure", "velocity", "fluid_flux", "stress"]
     secondary = ["strain", "displacement", "fluid_displacement"]
@@ -111,6 +123,17 @@ _COMPONENTS_BY_PHYSICS = {
 
 
 def components_for_physics(physics: str) -> type[ValidComponents]:
-    """Return the component registry for a physics name or alias."""
+    """Return the component registry for a physics name or alias.
+
+    Args:
+        physics: Physics name or supported alias.
+
+    Returns:
+        ``ValidComponents`` subclass for the canonical physics family.
+
+    Raises:
+        KeyError: If no component registry is defined for the canonical physics.
+        ValueError: If ``physics`` is not a supported physics name.
+    """
 
     return _COMPONENTS_BY_PHYSICS[canonical_physics(physics)]

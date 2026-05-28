@@ -49,7 +49,17 @@ def hash_dataarray_payload(
     attrs: Optional[Mapping[str, Any]] = None,
     dtype: Optional[Any] = None,
 ) -> str:
-    """Hash data and metadata that affect the solver-facing meaning of an array."""
+    """Hash data and metadata that affect solver-facing array meaning.
+
+    Args:
+        data: Data array to hash, including dimensions and coordinates.
+        attrs: Additional attributes that will be written with the stored
+            dataset.
+        dtype: Optional dtype used for the hashed data payload.
+
+    Returns:
+        Hex digest of the deterministic BLAKE3 hash.
+    """
     values = np.ascontiguousarray(data.values)
     if dtype is not None:
         values = values.astype(dtype, copy=False)
@@ -77,11 +87,14 @@ def hash_dataarray_payload(
 
 @dataclass(frozen=True)
 class HDF5Reference:
-    """Reference to one array stored in a simulation HDF5 sidecar file.
+    """Reference to an array stored in a simulation HDF5 input store.
 
-    The reference is what eventually appears in solver-facing JSON, including a
-    project-relative file locator when possible and a content hash for
-    reproducibility.
+    Args:
+        file: HDF5 file path.
+        dataset: Dataset path inside ``file``.
+        hash: BLAKE3 content hash without the ``blake3:`` prefix.
+        project_path: Optional project root used to emit project-relative
+            locators.
     """
 
     file: Path
@@ -91,12 +104,17 @@ class HDF5Reference:
 
     @property
     def clean_dataset(self) -> str:
-        """Dataset path without leading or trailing slashes."""
+        """Return the dataset path without leading or trailing slashes."""
 
         return self.dataset.strip("/")
 
     def locator(self) -> str:
-        """Return a ``file:dataset`` locator, relative to the project when possible."""
+        """Return a ``file:dataset`` locator for this HDF5 reference.
+
+        Returns:
+            Project-relative locator when possible, otherwise an absolute file
+            locator.
+        """
 
         file = self.file
         if self.project_path is not None:
@@ -107,7 +125,12 @@ class HDF5Reference:
         return f"{file}:{self.clean_dataset}"
 
     def to_fs(self) -> Dict[str, Any]:
-        """Serialize the reference to the solver input contract."""
+        """Serialize this HDF5 reference for solver input.
+
+        Returns:
+            Property/file payload containing locator, format, dataset, and
+            content hash.
+        """
 
         return {
             "file": self.locator(),
@@ -118,10 +141,20 @@ class HDF5Reference:
 
 
 class SimulationStore:
-    """Single HDF5 store for local simulation input arrays."""
+    """Single HDF5 store for local simulation input arrays.
+
+    Args:
+        path: HDF5 file path.
+        project_path: Optional project root used when serializing references.
+    """
 
     def __init__(self, path: Path, project_path: Optional[Path] = None):
-        """Create a store at ``path`` with optional project-relative locators."""
+        """Create an HDF5 simulation store.
+
+        Args:
+            path: HDF5 file path.
+            project_path: Optional project root used for relative references.
+        """
 
         self.path = Path(path)
         self.project_path = (
@@ -137,7 +170,20 @@ class SimulationStore:
         compression: Optional[str] = None,
         dtype: Optional[Any] = np.float32,
     ) -> HDF5Reference:
-        """Write a data array into the store and return its solver reference."""
+        """Write a data array to the store and return its reference.
+
+        Args:
+            dataset: Dataset path inside the HDF5 file.
+            data: Data array to write.
+            attrs: Additional HDF5 attributes to write on the dataset.
+            compression: Optional HDF5 compression filter.
+            dtype: Optional dtype used for stored values. ``None`` preserves
+                the input dtype.
+
+        Returns:
+            ``HDF5Reference`` for the stored dataset. Existing datasets are
+            reused when their stored hash matches.
+        """
 
         dataset = dataset.strip("/")
         attrs = dict(attrs or {})

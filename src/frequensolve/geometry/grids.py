@@ -16,11 +16,18 @@ __all__ = ["Grid", "CartesianGrid"]
 @register_class
 @dataclass
 class Grid(TypeTaggedMixin, ABC):
-    """Base class for solver-facing coordinate grids."""
+    """Abstract base class for solver grid descriptions."""
 
     @abstractmethod
     def get_coords(self, slices: Optional[List[slice]] = None) -> np.ndarray:
-        """Gets coordinates for all grid points or a subset defined by slices."""
+        """Return coordinates for all grid points or a sliced subset.
+
+        Args:
+            slices: Optional slice per grid dimension.
+
+        Returns:
+            Array of coordinate rows.
+        """
         pass
 
     @abstractmethod
@@ -40,12 +47,26 @@ class Grid(TypeTaggedMixin, ABC):
 
     @abstractmethod
     def to_fs(self, ctx=None) -> Dict:
-        """Convert the grid to a solver payload."""
+        """Serialize the grid to a solver payload.
+
+        Args:
+            ctx: Optional export context.
+
+        Returns:
+            JSON-compatible grid payload.
+        """
         pass
 
     @classmethod
     def from_fs(cls, data: Dict) -> "Grid":
-        """Deserialize a registered grid subclass from a solver payload."""
+        """Deserialize a registered grid payload.
+
+        Args:
+            data: Serialized grid mapping containing ``_type``.
+
+        Returns:
+            Concrete ``Grid`` subclass.
+        """
 
         return cls.dispatch_from_fs(data, class_registry)
 
@@ -56,22 +77,19 @@ class Grid(TypeTaggedMixin, ABC):
 @register_class
 @dataclass
 class CartesianGrid(Grid):
-    """Uniform Cartesian grid used for receivers, properties, and wavefields.
+    """Uniform Cartesian grid for receivers, wavefields, and inversion images.
 
-    Specify any two of ``n``, ``x1``, and ``dx`` together with ``x0``; the
-    missing quantity is calculated during initialization. The stored axis order
-    follows the solver convention, while :attr:`shape` returns the xarray-style
-    reversed order used by sampled data arrays.
-
-    Attributes:
-        n: Number of points in each dimension.
-        x0: Starting coordinates in each dimension.
-        x1: Ending coordinates in each dimension.
-        dx: Grid spacing in each dimension.
-        dims: Coordinate dimension names. Defaults to ``["x"]``, ``["x", "z"]``,
-            or ``["x", "y", "z"]`` based on dimensionality.
-        units: Coordinate units.
-        system: Coordinate-system name for the grid coordinates.
+    Args:
+        n: Number of points along each grid dimension.
+        x0: Lower coordinate bound for each dimension.
+        x1: Upper coordinate bound for each dimension. If omitted, it is
+            derived from ``x0``, ``n``, and ``dx``.
+        dx: Grid spacing for each dimension. If omitted, it is derived from
+            ``x0``, ``x1``, and ``n``.
+        dims: Optional xarray dimension names. Defaults to ``["x"]``,
+            ``["x", "z"]``, or ``["x", "y", "z"]``.
+        units: Optional coordinate units.
+        system: Optional coordinate-system name.
     """
 
     n: List[int] = field(default_factory=list)
@@ -144,7 +162,15 @@ class CartesianGrid(Grid):
             raise ValueError("Grid must have 1, 2, or 3 dimensions")
 
     def as_xarray(self):
-        """Return an xarray ``DataArray`` shell carrying this grid's coordinates."""
+        """Convert the grid to an xarray coordinate template.
+
+        Returns:
+            ``xarray.DataArray`` with dimensions and coordinate vectors but no
+            data variable.
+
+        Raises:
+            ValueError: If the grid dimension is not 1, 2, or 3.
+        """
         from xarray import DataArray
 
         if len(self.dims) == len(self.n):
@@ -167,7 +193,17 @@ class CartesianGrid(Grid):
 
     @classmethod
     def from_xarray(cls, xarr: "xr.DataArray") -> "CartesianGrid":
-        """Build a grid from an xarray object with uniformly spaced coordinates."""
+        """Create a Cartesian grid from an xarray coordinate template.
+
+        Args:
+            xarr: Data array whose coordinates define a uniform Cartesian grid.
+
+        Returns:
+            ``CartesianGrid`` matching the xarray coordinates.
+
+        Raises:
+            ValueError: If any xarray coordinate is not uniformly spaced.
+        """
 
         coords = xarr.coords
         dims = xarr.dims[::-1]
@@ -189,13 +225,13 @@ class CartesianGrid(Grid):
 
     @property
     def dimension(self) -> int:
-        """Number of coordinate dimensions in the grid."""
+        """Return the number of grid dimensions."""
 
         return len(self.n)
 
     @property
     def shape(self) -> Tuple[int, ...]:
-        """Data-array shape corresponding to this grid's dimension order."""
+        """Return the xarray-style array shape for this grid."""
 
         return tuple(self.n[::-1])
 
@@ -244,10 +280,13 @@ class CartesianGrid(Grid):
             raise ValueError("Grid must have 1, 2, or 3 dimensions")
 
     def to_fs(self, ctx=None) -> Dict:
-        """Converts the grid to a dictionary representation.
+        """Serialize the grid to a solver payload.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
 
         Returns:
-           Dict: Dictionary containing the grid parameters.
+            JSON-compatible grid payload.
         """
         return {
             "_type": self.__class__.__name__,
@@ -262,13 +301,13 @@ class CartesianGrid(Grid):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "CartesianGrid":
-        """Creates a CartesianGrid instance from a dictionary.
+        """Create a Cartesian grid from a solver payload.
 
         Args:
-           data (Dict): Dictionary containing the grid parameters.
+            data: Serialized Cartesian grid mapping.
 
         Returns:
-           CartesianGrid: A new CartesianGrid instance.
+            New ``CartesianGrid`` instance.
         """
         if "dims" in data:
             dims = data["dims"]

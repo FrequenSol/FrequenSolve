@@ -13,8 +13,8 @@ from pathlib import Path
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "FrequenSolve"
-copyright = f"{datetime.datetime.now().year}, Jacob Badger"
-author = "Jacob Badger"
+copyright = f"{datetime.datetime.now().year}, FrequenSol"
+author = "FrequenSol"
 
 # -- Path setup --------------------------------------------------------------
 # If your modules are in src/frequensolve, for example:

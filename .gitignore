@@ -33,6 +33,7 @@ MANIFEST
 
 *.manifest
 *.spec
+*_back_*
 
 # Installer logs
 pip-log.txt

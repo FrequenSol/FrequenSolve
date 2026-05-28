@@ -45,8 +45,8 @@ from frequensolve.orchestrator.sites.local.dask_logging import (
     configure_dependency_logging,
 )
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.imaging import ImageDatabase, ImagingJob
-from frequensolve.simulation.jobs import SimulationJob
+from frequensolve.simulation.jobs import BaseJob
+from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,7 @@ def _read_task_solver_convergence(
         manifest = json.loads(manifest_path.read_text())
     except json.JSONDecodeError:
         return manifest_path, None
-    return manifest_path, SimulationJob.solver_convergence_summary(manifest)
+    return manifest_path, BaseJob.solver_convergence_summary(manifest)
 
 
 def _fallback_task_summary(records: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
@@ -127,7 +127,7 @@ def _fallback_task_summary(records: Iterable[Mapping[str, Any]]) -> Dict[str, in
     }
     for record in records:
         summary["total"] += 1
-        status = SimulationJob._normalized_task_status(record.get("status"))
+        status = BaseJob._normalized_task_status(record.get("status"))
         if record.get("complete") or status in {"succeeded", "current", "skipped"}:
             summary["complete"] += 1
         if status == "succeeded":
@@ -140,7 +140,7 @@ def _fallback_task_summary(records: Iterable[Mapping[str, Any]]) -> Dict[str, in
 
 
 def _job_task_summary(
-    job: SimulationJob, task_records: Iterable[Mapping[str, Any]]
+    job: BaseJob, task_records: Iterable[Mapping[str, Any]]
 ) -> Dict[str, int]:
     if hasattr(job, "run_state"):
         try:
@@ -380,13 +380,32 @@ def run_task(
 
 @dataclass
 class LocalTaskSubmission:
+    """Dask futures and task-plan metadata for one local job submission.
+
+    Args:
+        futures: Dask futures representing submitted mesh/frequency tasks.
+        task_plan: Serialized task plan used by status reporting and run
+            metadata.
+    """
+
     futures: List["Future"]
     task_plan: Dict[str, object]
 
 
 @dataclass(kw_only=True)
 class LocalSite(BaseSite):
-    """Site for local execution."""
+    """Site for local execution using a Dask local cluster.
+
+    Args:
+        verbose: Whether to print site status messages in addition to logging.
+        n_workers: Optional Dask worker count.
+        threads_per_worker: Optional thread count per Dask worker.
+        memory_per_worker: Optional worker memory limit.
+        shutdown_on_completion: Whether to close the Dask cluster after a run
+            completes.
+        dashboard_host: Hostname used for the Dask dashboard.
+        dashboard_port: Dashboard port, or ``0`` to let Dask choose.
+    """
 
     config: LocalSiteConfig = field(init=False)
     executable: str = field(init=False)
@@ -420,12 +439,13 @@ class LocalSite(BaseSite):
         )
         self._quiet_dependency_loggers()
 
-    def submit(self, job: SimulationJob, **kwargs) -> RunHandle:
+    def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit job and return an awaitable run handle.
 
         Args:
             job: The simulation job to run
-            **kwargs: Additional arguments for task configuration
+            **kwargs: Additional arguments for task configuration. Pass
+                ``validate=False`` to skip SDK pre-run validation.
 
         Returns:
             RunHandle for the submitted tasks
@@ -435,11 +455,12 @@ class LocalSite(BaseSite):
             or kwargs.pop("force", False)
             or kwargs.pop("rerun", False)
         )
+        validate = kwargs.pop("validate", True)
         pack = bool(kwargs.pop("pack", True))
         shutdown_on_completion = bool(
             kwargs.pop("shutdown_on_completion", self.shutdown_on_completion)
         )
-        self.prepare_job(job)
+        self.prepare_job(job, validate=validate)
         if not force_run and job.is_run_current():
             logger.info(
                 "Skipping job %s; fingerprint matches and expected trace outputs exist.",
@@ -729,7 +750,7 @@ class LocalSite(BaseSite):
             self.close(wait=False, retire=False)
 
     def _submit_local_tasks(
-        self, job: SimulationJob, force_run: bool = False, **kwargs
+        self, job: BaseJob, force_run: bool = False, **kwargs
     ) -> LocalTaskSubmission:
         """Submit job tasks to the local Dask executor.
 
@@ -829,13 +850,26 @@ class LocalSite(BaseSite):
 
     def fetch_traces(
         self,
-        job: Union[SimulationJob, List[SimulationJob]],
+        job: Union[BaseJob, List[BaseJob]],
         upscale: int = 1,
         path: Optional[Union[str, Path]] = None,
         combine: bool = False,
     ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
+        """Open trace outputs from completed local jobs.
+
+        Args:
+            job: Single job or list of jobs.
+            upscale: Optional time/frequency upscaling factor for trace reads.
+            path: Optional project path used to resolve relative artifacts.
+            combine: Whether to combine multiple jobs into one dataset.
+
+        Returns:
+            ``TraceDataset`` for a single job or combined reads, otherwise a
+            mapping keyed by job name.
+        """
+
         project_path = Path(path).resolve() if path is not None else None
-        if isinstance(job, SimulationJob):
+        if isinstance(job, BaseJob):
             db = TraceDataset.from_job(job, upscale, project_path=project_path)
             return db
         if combine:
@@ -849,12 +883,23 @@ class LocalSite(BaseSite):
 
     def fetch_wavefields(
         self,
-        job: Union[SimulationJob, List[SimulationJob]],
+        job: Union[BaseJob, List[BaseJob]],
         upscale: int = 1,
         path: Optional[Union[str, Path]] = None,
     ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
+        """Open wavefield outputs from completed local jobs.
+
+        Args:
+            job: Single job or list of jobs.
+            upscale: Optional upscaling factor for wavefield trace reads.
+            path: Optional project path used to resolve relative artifacts.
+
+        Returns:
+            Wavefield dataset for a single job or a mapping keyed by job name.
+        """
+
         project_path = Path(path).resolve() if path is not None else None
-        if isinstance(job, SimulationJob):
+        if isinstance(job, BaseJob):
             return job.wavefields.open(upscale=upscale, project_path=project_path)
         db_map = {}
         for j in job:
@@ -868,7 +913,14 @@ class LocalSite(BaseSite):
         self,
         job: Union[ImagingJob, List[ImagingJob]],
     ) -> ArrayLike:
-        """Gets and accumulates images."""
+        """Open and accumulate imaging outputs.
+
+        Args:
+            job: Imaging job or list of imaging jobs.
+
+        Returns:
+            ``ImageDatabase`` for a single job, or a mapping keyed by job name.
+        """
 
         if isinstance(job, ImagingJob):
             jobs = [job]
@@ -889,10 +941,17 @@ class LocalSite(BaseSite):
         else:
             return images
 
-    def fetch_paraview(
-        self, job: SimulationJob, path: Optional[Union[str, Path]] = None
-    ):
-        """Return local ParaView output paths for a job."""
+    def fetch_paraview(self, job: BaseJob, path: Optional[Union[str, Path]] = None):
+        """Return local ParaView output paths for a job.
+
+        Args:
+            job: Completed job.
+            path: Accepted for API compatibility; local paths are already
+                resolved by the job artifact handle.
+
+        Returns:
+            Mapping/list of ParaView output paths recorded by the job.
+        """
         return job.paraview_outputs
 
     @property
@@ -901,7 +960,14 @@ class LocalSite(BaseSite):
         return True
 
     def sync(self, project):
-        """Local execution does not require explicit synchronization."""
+        """Return ``project`` because local execution needs no synchronization.
+
+        Args:
+            project: Project object.
+
+        Returns:
+            The same project object.
+        """
         return project
 
     def _sync_project(self, project):
@@ -914,7 +980,19 @@ class LocalSite(BaseSite):
         local_path: Union[str, Path],
         overwrite: bool = False,
     ):
-        """Copy a local file or directory."""
+        """Copy a local file or directory.
+
+        Args:
+            remote_path: Source path in the local-site namespace.
+            local_path: Destination path.
+            overwrite: Whether to replace an existing destination.
+
+        Returns:
+            Destination path.
+
+        Raises:
+            FileNotFoundError: If ``remote_path`` does not exist.
+        """
         remote_path = Path(remote_path)
         local_path = Path(local_path)
         if not remote_path.exists():
@@ -931,7 +1009,15 @@ class LocalSite(BaseSite):
         return local_path
 
     def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
-        """Send a file or directory to the site."""
+        """Copy a file or directory into the local-site namespace.
+
+        Args:
+            local_path: Source path.
+            remote_path: Destination path in the local-site namespace.
+
+        Returns:
+            Destination path.
+        """
         return self.get(local_path, remote_path, overwrite=True)
 
     @property
@@ -1174,13 +1260,25 @@ class LocalSite(BaseSite):
             pass
 
     def __enter__(self) -> "LocalSite":
+        """Enter a context manager without changing site state."""
+
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        """Close the local cluster when leaving a context manager."""
+
         self.close()
         return False
 
     def close(self, *, wait: bool = True, retire: bool = True, timeout: float = 30.0):
+        """Close Dask client/cluster resources owned by this site.
+
+        Args:
+            wait: Whether to wait for orderly cluster shutdown.
+            retire: Accepted for compatibility with older shutdown semantics.
+            timeout: Maximum Dask close timeout in seconds.
+        """
+
         if self._closed and self._dask_client is None and self._dask_cluster is None:
             return
         self._closed = True
@@ -1218,6 +1316,8 @@ class LocalSite(BaseSite):
             self._active_memory_per_worker = None
 
     def stop(self):
+        """Alias for ``close()`` used by interactive workflows."""
+
         self.close()
 
     def _cancel_futures(self, futures: Iterable[Future]) -> None:

@@ -37,8 +37,6 @@ except ModuleNotFoundError as exc:
 
 from jinja2 import Environment, FileSystemLoader
 
-from frequensolve.orchestrator.credentials import Credentials
-from frequensolve.orchestrator.pool import PoolInfo
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
@@ -68,10 +66,12 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     temporary_text_file as _temporary_text_file,
 )
 from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
-from frequensolve.orchestrator.ssh import SSHClientClass
+from frequensolve.orchestrator.utils.credentials import Credentials
+from frequensolve.orchestrator.utils.pool import PoolInfo
+from frequensolve.orchestrator.utils.ssh import SSHClientClass
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.imaging import ImageDatabase, ImagingJob
-from frequensolve.simulation.jobs import SimulationJob
+from frequensolve.simulation.jobs import BaseJob
+from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = [
@@ -140,7 +140,21 @@ class SlurmLoginCredentials(Credentials):
 
 @dataclass
 class SlurmRunConfig:
-    """Default resource request for SLURM job submissions."""
+    """Default resource request for SLURM job submissions.
+
+    Args:
+        queue: Queue/partition name.
+        nodes: Requested node count.
+        duration: Requested wall time.
+        procs_per_node: MPI ranks per node.
+        procs_per_task: MPI ranks used by each FrequenSolve task.
+        account: Allocation account.
+        notify_on: Optional SLURM mail notification trigger.
+        notify_email: Optional notification email address.
+        poll_interval: Polling interval in seconds.
+        run_path: Remote run directory override.
+        slurm_args: Additional raw ``sbatch`` arguments.
+    """
 
     queue: Optional[str] = None
     nodes: int = 1
@@ -156,9 +170,20 @@ class SlurmRunConfig:
 
     @classmethod
     def field_names(cls) -> set[str]:
+        """Return dataclass field names accepted as run-config overrides."""
+
         return {item.name for item in dataclass_fields(cls)}
 
     def merged(self, **overrides) -> "SlurmRunConfig":
+        """Return a copy with non-``None`` overrides applied.
+
+        Args:
+            **overrides: Field values to override.
+
+        Returns:
+            New ``SlurmRunConfig`` instance.
+        """
+
         values = {
             "queue": self.queue,
             "nodes": self.nodes,
@@ -182,6 +207,17 @@ class SlurmRunConfig:
         site_config: Any,
         **overrides,
     ) -> tuple["SlurmRunConfig", Dict[str, Any]]:
+        """Resolve defaults against a site configuration.
+
+        Args:
+            site_config: Site configuration providing queue and poll defaults.
+            **overrides: Submission keyword arguments.
+
+        Returns:
+            ``(run_config, extra_kwargs)`` where extra kwargs were not recognized
+            as run-config fields.
+        """
+
         run_keys = self.field_names()
         config = self.merged(**{k: v for k, v in overrides.items() if k in run_keys})
         if config.queue is None:
@@ -197,10 +233,19 @@ class SlurmRunConfig:
 # ----------------------------------
 @dataclass(kw_only=True, init=False)
 class SlurmSite(BaseSite):
-    """
-    Generic SLURM HPC site.
+    """Generic SLURM HPC site.
 
     Manages authentication, transfer, provisioning, and job execution for SLURM-backed HPC systems.
+
+    Args:
+        rel_path: Remote project path relative to the configured work root.
+        transfer_method: File transfer backend, either ``"rsync"`` or
+            ``"sftp"``.
+        default_queue: Optional queue override.
+        config: Optional site configuration object.
+        credentials: Optional login credentials object.
+        run_config: Default SLURM resource request.
+        verbose: Whether to print site status messages in addition to logging.
     """
 
     credentials: SlurmLoginCredentials
@@ -334,9 +379,13 @@ class SlurmSite(BaseSite):
         return self.pool.is_running
 
     def __enter__(self):
+        """Enter a context manager without changing site state."""
+
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        """Close SSH clients when leaving a context manager."""
+
         self.close()
         return False
 
@@ -351,13 +400,20 @@ class SlurmSite(BaseSite):
             self._login_client = None
 
     def authenticate(self, host: Optional[str] = None):
-        """Connect to the login node."""
+        """Connect to the login node.
+
+        Args:
+            host: Optional login host override.
+
+        Returns:
+            Paramiko SSH client or local SSH control-socket proxy.
+        """
 
         return self._authenticator.authenticate(host)
 
     def submit(
         self,
-        job: SimulationJob,
+        job: BaseJob,
         *,
         force: bool = False,
         force_run: bool = False,
@@ -365,10 +421,25 @@ class SlurmSite(BaseSite):
         fetch: bool = False,
         **overrides,
     ) -> RunHandle:
-        """Submit job and return an awaitable run handle."""
+        """Submit a job and return an awaitable run handle.
+
+        Args:
+            job: Job to submit.
+            force: Force a new run even when current results exist.
+            force_run: Alias for ``force``.
+            mode: Submission mode: ``"auto"``, ``"attached"``, or ``"batch"``.
+            fetch: Whether to fetch outputs after completion.
+            **overrides: Resource-request or site-specific submission
+                overrides. Pass ``validate=False`` to skip SDK pre-run
+                validation.
+
+        Returns:
+            ``RunHandle`` for the submitted or attached run.
+        """
 
         force_run = bool(force_run or force or overrides.pop("rerun", False))
-        self.prepare_job(job)
+        validate = overrides.pop("validate", True)
+        self.prepare_job(job, validate=validate)
         if mode not in {"auto", "attached", "batch"}:
             raise ValueError("mode must be 'auto', 'attached', or 'batch'")
 
@@ -391,7 +462,7 @@ class SlurmSite(BaseSite):
                     self.fetch_outputs(job)
                 return handle
 
-        self.prepare_job(job, sync_project=True)
+        self.prepare_job(job, sync_project=True, validate=validate)
 
         active_allocation = self.provisioned if mode in {"auto", "attached"} else False
         use_attached = mode == "attached" or (mode == "auto" and active_allocation)
@@ -527,10 +598,10 @@ class SlurmSite(BaseSite):
         _, stdout, _ = self.run_login_cmd(cmd)
         return _read_stream(stdout)
 
-    def is_run_current(self, job: SimulationJob) -> bool:
+    def is_run_current(self, job: BaseJob) -> bool:
         """Return True when this site has current successful results for a job."""
 
-        if not isinstance(job, SimulationJob):
+        if not isinstance(job, BaseJob):
             return bool(job.is_run_current())
         record = job.latest_run(site=self.site_name)
         if record is None:
@@ -586,16 +657,16 @@ class SlurmSite(BaseSite):
 
     def fetch_traces(
         self,
-        job: Union[SimulationJob, List[SimulationJob]],
+        job: Union[BaseJob, List[BaseJob]],
         upscale: int = 1,
     ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
         """Get trace results from the remote site.
 
         Args:
-            job: A SimulationJob object.
+            job: A BaseJob object.
         """
 
-        jobs, single = _as_list(job, SimulationJob)
+        jobs, single = _as_list(job, BaseJob)
 
         db_map = {}
 
@@ -621,12 +692,12 @@ class SlurmSite(BaseSite):
 
     def fetch_wavefields(
         self,
-        job: Union[SimulationJob, List[SimulationJob]],
+        job: Union[BaseJob, List[BaseJob]],
         upscale: int = 1,
     ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
         """Get wavefield trace results from the remote site."""
 
-        jobs, single = _as_list(job, SimulationJob)
+        jobs, single = _as_list(job, BaseJob)
         db_map = {}
 
         for j in jobs:
@@ -650,7 +721,7 @@ class SlurmSite(BaseSite):
             return db_map[jobs[0].name]
         return db_map
 
-    def fetch_outputs(self, job: SimulationJob):
+    def fetch_outputs(self, job: BaseJob):
         """Fetch common result metadata and trace outputs for a completed job."""
 
         local_results = job._local_path / "results"
@@ -682,7 +753,7 @@ class SlurmSite(BaseSite):
 
         return local_results
 
-    def fetch_run_metadata(self, job: SimulationJob) -> Optional[Path]:
+    def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
         """Fetch ``_fs_run`` metadata and aggregate task manifests locally."""
 
         remote_run_dir = self._remote_result_dir(job) / "_fs_run"
@@ -694,11 +765,11 @@ class SlurmSite(BaseSite):
             return None
         return job.collect_task_run_manifests()
 
-    def fetch_paraview(self, job: SimulationJob):
+    def fetch_paraview(self, job: BaseJob):
         """Get Paraview files from the remote site.
 
         Args:
-            job: A SimulationJob object.
+            job: A BaseJob object.
         """
 
         try:
@@ -745,7 +816,7 @@ class SlurmSite(BaseSite):
 
     def fetch_logs(
         self,
-        job: Union[SimulationJob, List[SimulationJob]],
+        job: Union[BaseJob, List[BaseJob]],
         *,
         local_dir: Optional[Union[str, Path]] = None,
         task: Optional[int] = None,
@@ -760,7 +831,7 @@ class SlurmSite(BaseSite):
         (job_<id>.o, job_<id>.e) when include_batch is True.
 
         Args:
-            job: A SimulationJob or list of SimulationJobs whose logs to fetch.
+            job: A BaseJob or list of BaseJobs whose logs to fetch.
             local_dir: Optional local directory to write logs into. If None,
                 logs are written to job._local_path / "logs" for each job.
             task: Optional one-based frequency task number. When provided,
@@ -778,7 +849,7 @@ class SlurmSite(BaseSite):
             If a single job: Path to the local log directory or selected log
             file. If a list of jobs: dict mapping job name to Path.
         """
-        jobs, single = _as_list(job, SimulationJob)
+        jobs, single = _as_list(job, BaseJob)
         requested_local_dir = Path(local_dir) if local_dir is not None else None
         result = {}
 
@@ -890,7 +961,7 @@ class SlurmSite(BaseSite):
 
     def _reattach_inflight_run(
         self,
-        job: SimulationJob,
+        job: BaseJob,
         *,
         poll_interval: Optional[float] = None,
         fetch: bool = False,
@@ -917,8 +988,8 @@ class SlurmSite(BaseSite):
         handle.backend["reattached"] = True
         return handle
 
-    def _matching_inflight_run_record(self, job: SimulationJob):
-        if not isinstance(job, SimulationJob):
+    def _matching_inflight_run_record(self, job: BaseJob):
+        if not isinstance(job, BaseJob):
             return None
         try:
             current_payload = job.fingerprint_payload()
@@ -975,9 +1046,9 @@ class SlurmSite(BaseSite):
     ) -> bool:
         if section not in record_payload or section not in fingerprint_payload:
             return False
-        return SimulationJob._hash_payload(
-            record_payload[section]
-        ) == SimulationJob._hash_payload(fingerprint_payload[section])
+        return BaseJob._hash_payload(record_payload[section]) == BaseJob._hash_payload(
+            fingerprint_payload[section]
+        )
 
     def _remote_run_successful(self, record) -> bool:
         if not self._record_status_successful(record.status):
@@ -1065,12 +1136,12 @@ class SlurmSite(BaseSite):
 
     def _record_site_run(
         self,
-        job: SimulationJob,
+        job: BaseJob,
         *,
         scheduler_id: Optional[str] = None,
         status: str = "submitted",
     ):
-        if not isinstance(job, SimulationJob):
+        if not isinstance(job, BaseJob):
             return None
         record = job.record_site_run(
             site=self.site_name,
@@ -1084,7 +1155,7 @@ class SlurmSite(BaseSite):
         self._store_remote_run_records(job, record)
         return record
 
-    def _store_remote_run_records(self, job: SimulationJob, record=None) -> None:
+    def _store_remote_run_records(self, job: BaseJob, record=None) -> None:
         record = record or job.latest_run(site=self.site_name)
         if record is None:
             return
@@ -1099,7 +1170,7 @@ class SlurmSite(BaseSite):
 
     def _finalize_run_record(self, run: RunHandle, status: JobStatus) -> None:
         job = getattr(run, "job", None)
-        if not isinstance(job, SimulationJob):
+        if not isinstance(job, BaseJob):
             return
         record = job.latest_run(site=self.site_name)
         if record is None:
@@ -1111,29 +1182,23 @@ class SlurmSite(BaseSite):
         job.write_run_record(updated)
         self._store_remote_run_records(job, updated)
 
-    def _remote_job_dir(self, job: SimulationJob) -> Path:
+    def _remote_job_dir(self, job: BaseJob) -> Path:
         record = (
-            job.latest_run(site=self.site_name)
-            if isinstance(job, SimulationJob)
-            else None
+            job.latest_run(site=self.site_name) if isinstance(job, BaseJob) else None
         )
         return record.job_dir if record is not None else job._remote_path(self.work_dir)
 
-    def _remote_result_dir(self, job: SimulationJob) -> Path:
+    def _remote_result_dir(self, job: BaseJob) -> Path:
         record = (
-            job.latest_run(site=self.site_name)
-            if isinstance(job, SimulationJob)
-            else None
+            job.latest_run(site=self.site_name) if isinstance(job, BaseJob) else None
         )
         if record is not None:
             return record.result_dir
         return job._remote_path(self.work_dir) / "results"
 
-    def _remote_logs_dir(self, job: SimulationJob) -> Path:
+    def _remote_logs_dir(self, job: BaseJob) -> Path:
         record = (
-            job.latest_run(site=self.site_name)
-            if isinstance(job, SimulationJob)
-            else None
+            job.latest_run(site=self.site_name) if isinstance(job, BaseJob) else None
         )
         if record is not None:
             return record.logs_dir
@@ -1161,7 +1226,7 @@ class SlurmSite(BaseSite):
         )
         return job_status
 
-    def _scheduler_status_path(self, job: SimulationJob) -> Path:
+    def _scheduler_status_path(self, job: BaseJob) -> Path:
         """Return the remote scheduler progress file for a batch simulation job."""
 
         return self._remote_logs_dir(job) / "scheduler_status.json"
@@ -1320,7 +1385,7 @@ class SlurmSite(BaseSite):
 
     def _submit_slurm_batch(
         self,
-        job: SimulationJob,
+        job: BaseJob,
         config: SlurmRunConfig,
         **kwargs,
     ) -> str:
@@ -1451,7 +1516,7 @@ class SlurmSite(BaseSite):
 
     def _submit_attached(
         self,
-        job: SimulationJob,
+        job: BaseJob,
         procs_per_task: int = 2,
         *,
         pack: bool = True,
@@ -1645,7 +1710,7 @@ class SlurmSite(BaseSite):
             f"Available job ids: {job_ids}"
         )
 
-    def _transfer_SLURM_job(self, script: str, job: SimulationJob):
+    def _transfer_SLURM_job(self, script: str, job: BaseJob):
         """Transfer a SLURM job to the remote site."""
         remote_script = (self.work_dir / "sweep").with_suffix(".slurm")
         with _temporary_text_file(
@@ -1669,7 +1734,7 @@ class SlurmSite(BaseSite):
         self,
         run_path: Optional[Union[str, Path]],
         *,
-        job: Optional[SimulationJob] = None,
+        job: Optional[BaseJob] = None,
     ) -> Path:
         """Return the remote directory where SLURM scripts should run."""
 
@@ -1687,13 +1752,11 @@ class SlurmSite(BaseSite):
             return path
         return self.work_dir / relative
 
-    def _transfer_job(
-        self, job: SimulationJob, *, pack: bool = True, fresh: bool = False
-    ):
+    def _transfer_job(self, job: BaseJob, *, pack: bool = True, fresh: bool = False):
         """Submit a simulation job to the remote site.
 
         Args:
-            job (SimulationJob): The simulation job to submit
+            job (BaseJob): The simulation job to submit
         """
         if self._compute_client is None:
             raise NotImplementedError("Batch sweep job not implemented yet.")
@@ -1717,7 +1780,7 @@ class SlurmSite(BaseSite):
 
         return remote_script, remote_job
 
-    def _transfer_remote_simulation_inputs(self, job: SimulationJob) -> None:
+    def _transfer_remote_simulation_inputs(self, job: BaseJob) -> None:
         """Transfer the simulation JSON and direct file inputs for a staged job."""
 
         local_sim, remote_sim = job.save_simulation_for_remote(
@@ -1735,7 +1798,7 @@ class SlurmSite(BaseSite):
         status = self.run_login(f"squeue -j {job_id} -h -o %t")
         return status == "R"
 
-    def _sweep_script(self, job: SimulationJob, **kwargs) -> str:
+    def _sweep_script(self, job: BaseJob, **kwargs) -> str:
         """Generate a script for sweeping through tasks on pre-provisioned resources."""
 
         n_tasks = job.n_tasks

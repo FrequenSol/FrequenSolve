@@ -2,7 +2,6 @@ import asyncio
 
 import pytest
 
-from frequensolve.orchestrator.progress import wait_all
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
@@ -10,6 +9,7 @@ from frequensolve.orchestrator.sites.base import (
     RunHandle,
     RunResult,
 )
+from frequensolve.orchestrator.utils.progress import wait_all
 
 
 class DummyJob:

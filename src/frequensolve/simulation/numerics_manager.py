@@ -11,13 +11,16 @@ __all__ = ["Discretization", "SolverConfig", "SuperPatch", "NumericsManager"]
 
 @dataclass
 class Discretization(ExtraFieldsMixin):
-    """Class representing discretization parameters.
+    """Finite-element discretization settings for a simulation.
 
     Args:
-       method (str): The discretization method, defaults to "DPG".
-       DPG_alpha (float): The DPG stabilization parameter, defaults to 1.0.
-       DPG_enrich (int): The DPG enrichment parameter, defaults to 1.
-       DPG_penalty (float): The DPG penalty parameter (for enforcing constraints like continuity), defaults to 100.
+        method: Solver discretization method. The default is ``"DPG"``.
+        **kwargs: Additional solver-facing discretization fields such as DPG
+            stabilization parameters.
+
+    Raises:
+        ValueError: If legacy ``order`` is supplied here instead of through mesh
+            adaptivity.
     """
 
     method: str = "DPG"
@@ -44,7 +47,17 @@ class Discretization(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, d: Dict[str, Any]) -> "Discretization":
-        """Deserialize discretization settings from a solver payload."""
+        """Deserialize discretization settings from solver JSON.
+
+        Args:
+            d: Serialized discretization mapping.
+
+        Returns:
+            ``Discretization`` instance.
+
+        Raises:
+            ValueError: If the payload still uses the legacy ``order`` field.
+        """
 
         d = copy.deepcopy(d)
         if "order" in d:
@@ -58,7 +71,17 @@ class Discretization(ExtraFieldsMixin):
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
-        """Serialize discretization settings to the solver payload."""
+        """Serialize discretization settings for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible discretization payload.
+
+        Raises:
+            ValueError: If legacy ``order`` has been placed in ``extra``.
+        """
 
         payload = {
             "method": self.method,
@@ -124,7 +147,14 @@ class SuperPatch(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "SuperPatch":
-        """Deserialize a super-patch definition."""
+        """Deserialize a super-patch solver payload.
+
+        Args:
+            data: Serialized super-patch mapping.
+
+        Returns:
+            ``SuperPatch`` instance.
+        """
 
         data = copy.deepcopy(data)
         return cls(
@@ -134,7 +164,14 @@ class SuperPatch(ExtraFieldsMixin):
         )
 
     def to_fs(self, ctx=None) -> Dict:
-        """Serialize this super-patch definition."""
+        """Serialize this super patch for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible super-patch payload.
+        """
 
         payload = {
             "grid": self.grid,
@@ -145,14 +182,15 @@ class SuperPatch(ExtraFieldsMixin):
 
 @dataclass
 class SolverConfig(ExtraFieldsMixin):
-    """
-    Defines solver configuration.
+    """Linear/nonlinear solver settings for one simulation.
 
-    Attributes:
-       solve_on (Literal["final", "all"]): Whether to solve on the final or all time steps.
-       max_iter (int): The maximum number of iterations.
-       tolerance (float): The tolerance for the solver.
-       grids (int): The number of grids to use.
+    Args:
+        solve_on: Whether to solve only on the final adaptive mesh or on all
+            adaptive steps.
+        max_iter: Maximum Krylov/nonlinear iterations.
+        tolerance: Solver convergence tolerance.
+        grids: Number of multigrid levels.
+        **kwargs: Additional solver-facing configuration fields.
     """
 
     solve_on: Literal["final", "all"] = "final"
@@ -179,7 +217,14 @@ class SolverConfig(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "SolverConfig":
-        """Deserialize solver settings from a solver payload."""
+        """Deserialize solver settings from solver JSON.
+
+        Args:
+            data: Serialized solver configuration mapping.
+
+        Returns:
+            ``SolverConfig`` instance.
+        """
 
         data = copy.deepcopy(data)
         obj = cls(
@@ -192,6 +237,15 @@ class SolverConfig(ExtraFieldsMixin):
         return obj
 
     def __iadd__(self, other: SuperPatch) -> "SolverConfig":
+        """Append an advanced super patch to the solver configuration.
+
+        Args:
+            other: Super patch to add.
+
+        Returns:
+            This solver configuration.
+        """
+
         if isinstance(other, SuperPatch):
             if "super_patches" not in self.extra:
                 self.extra["super_patches"] = []
@@ -199,7 +253,14 @@ class SolverConfig(ExtraFieldsMixin):
         return self
 
     def to_fs(self, ctx=None) -> Dict:
-        """Serialize solver settings to the solver payload."""
+        """Serialize solver settings for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible solver configuration.
+        """
 
         payload = {
             "solve_on": self.solve_on,
@@ -212,11 +273,11 @@ class SolverConfig(ExtraFieldsMixin):
 
 @dataclass
 class NumericsManager:
-    """Container for numerical configuration.
+    """Container for numerical solver and discretization configuration.
 
-    Attributes:
-       solver (SolverConfig): The solver configuration.
-       discretization (Discretization): The discretization configuration.
+    Args:
+        solver: Solver iteration and multigrid settings.
+        discretization: Discretization method and related solver fields.
     """
 
     solver: SolverConfig = field(default_factory=SolverConfig)
@@ -224,7 +285,15 @@ class NumericsManager:
 
     @classmethod
     def from_fs(cls, data: Dict) -> "NumericsManager":
-        """Deserialize numerical configuration from a solver payload."""
+        """Deserialize numerical configuration from solver JSON.
+
+        Args:
+            data: Serialized numerics block containing ``solver`` and
+                ``discretization`` sections.
+
+        Returns:
+            ``NumericsManager`` instance.
+        """
 
         data = copy.deepcopy(data)
         return cls(
@@ -233,7 +302,14 @@ class NumericsManager:
         )
 
     def to_fs(self, ctx=None) -> Dict:
-        """Serialize numerical configuration to the solver payload."""
+        """Serialize numerical configuration for solver input.
+
+        Args:
+            ctx: Optional export context forwarded to nested serializers.
+
+        Returns:
+            JSON-compatible numerics block.
+        """
 
         return {
             "solver": self.solver.to_fs(ctx),

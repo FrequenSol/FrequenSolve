@@ -17,13 +17,27 @@ logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
 
 
 class SlurmTransferManager:
-    """Owns remote file transfer mechanics for a SLURM site."""
+    """Owns remote file transfer mechanics for a SLURM site.
+
+    Args:
+        site: ``SlurmSite`` instance that provides SSH clients and transfer
+            settings.
+    """
 
     def __init__(self, site):
         self.site = site
 
     def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
-        """Transfer a local file or directory to a remote path."""
+        """Transfer a local file or directory to a remote path.
+
+        Args:
+            local_path: Local source file or directory.
+            remote_path: Remote destination path.
+
+        Raises:
+            FileNotFoundError: If ``local_path`` does not exist.
+            RuntimeError: If rsync fails.
+        """
 
         site = self.site
         logger.debug("Transferring %s to %s", local_path, remote_path)
@@ -64,7 +78,17 @@ class SlurmTransferManager:
         local_path: Union[str, Path],
         overwrite: bool = False,
     ):
-        """Transfer a remote file or directory to a local path."""
+        """Transfer a remote file or directory to a local path.
+
+        Args:
+            remote_path: Remote source file or directory.
+            local_path: Local destination path.
+            overwrite: Accepted for API compatibility; transfer backends decide
+                replacement behavior.
+
+        Raises:
+            RuntimeError: If rsync fails.
+        """
 
         site = self.site
         logger.debug("Attempting to transfer from %s to %s", remote_path, local_path)

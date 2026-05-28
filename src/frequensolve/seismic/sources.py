@@ -15,7 +15,7 @@ from frequensolve.geometry.frame import (
     direction_to_fs,
 )
 from frequensolve.util.class_registry import class_registry, register_class
-from frequensolve.util.mixins import TypeTaggedMixin
+from frequensolve.util.mixins import TypeTaggedMixin, warn_deprecated_path_api
 
 __all__ = ["SourceGroup", "Source", "RuptureSource", "PointSource", "CompoundSource"]
 
@@ -23,17 +23,31 @@ __all__ = ["SourceGroup", "Source", "RuptureSource", "PointSource", "CompoundSou
 @register_class
 @dataclass
 class Source(TypeTaggedMixin, ABC):
-    """Base class for all solver-facing source definitions."""
+    """Abstract base class for solver source definitions."""
 
     @classmethod
     def from_fs(cls, data: Dict) -> "Source":
-        """Deserialize a registered source subclass from a solver payload."""
+        """Deserialize a registered source payload.
+
+        Args:
+            data: Serialized source mapping containing ``_type``.
+
+        Returns:
+            Concrete source instance.
+        """
 
         return cls.dispatch_from_fs(data, class_registry)
 
     @abstractmethod
     def to_fs(self, ctx=None) -> Dict:
-        """Serialize this source to the solver input contract."""
+        """Serialize the source for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible source payload.
+        """
 
         pass
 
@@ -57,12 +71,12 @@ class RuptureSource(Source):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "RuptureSource":
-        """Deserialize a rupture source from a solver payload."""
+        """Deserialize a rupture source payload."""
 
         return cls(**data)
 
     def to_fs(self, ctx=None) -> Dict:
-        """Serialize this rupture source to the solver input contract."""
+        """Serialize this rupture source for solver input."""
 
         return {"_type": self.__class__.__name__, **asdict(self)}
 
@@ -70,14 +84,18 @@ class RuptureSource(Source):
 @register_class
 @dataclass
 class PointSource(Source):
-    """Single point source with optional direction and domain targeting.
+    """Point source located at one physical coordinate.
 
-    ``coordinates`` may be raw coordinates or a :class:`CoordinateValue` that
-    names the coordinate system. Vector, moment, and dipole sources should also
-    provide ``direction``.
+    Args:
+        kind: Source kind understood by the solver.
+        coordinates: Source coordinate values, optionally with units/system
+            metadata through ``CoordinateValue``.
+        direction: Optional vector or moment direction.
+        domain: Optional model domain id where the source is evaluated.
+        name: Source name.
     """
 
-    kind: Literal["scalar", "vector", "moment", "monopole", "dipole"]
+    kind: Literal["scalar", "vector", "tensor", "monopole", "dipole"]
     coordinates: Any = field(default_factory=list)
     direction: Optional[Any] = None
     domain: Optional[int] = None
@@ -85,7 +103,14 @@ class PointSource(Source):
 
     @classmethod
     def from_fs(cls, data: Dict):
-        """Deserialize a point source from a solver payload."""
+        """Deserialize a point source payload.
+
+        Args:
+            data: Serialized point-source mapping.
+
+        Returns:
+            ``PointSource`` instance.
+        """
 
         data = copy.deepcopy(data)
         data.pop("frame", None)
@@ -96,7 +121,7 @@ class PointSource(Source):
         return cls(**data)
 
     def to_fs(self, ctx=None) -> Dict:
-        """Serialize this point source to the solver input contract."""
+        """Serialize this point source for solver input."""
 
         return {
             "_type": self.__class__.__name__,
@@ -115,7 +140,15 @@ class PointSource(Source):
 @register_class
 @dataclass
 class CompoundSource(Source):
-    """Multi-point source whose coordinates share one source kind and direction."""
+    """Compound source made from multiple weighted source points.
+
+    Args:
+        kind: Source kind understood by the solver.
+        coordinates: Source point coordinates.
+        direction: Direction/weight vectors for each source point.
+        domain: Optional model domain id where the source is evaluated.
+        name: Source name.
+    """
 
     kind: Literal["scalar", "vector"]
     coordinates: Any = field(default_factory=list)
@@ -125,7 +158,7 @@ class CompoundSource(Source):
 
     @classmethod
     def from_fs(cls, data: Dict):
-        """Deserialize a compound source from a solver payload."""
+        """Deserialize a compound source payload."""
 
         data = copy.deepcopy(data)
         data.pop("n_points", None)
@@ -137,7 +170,7 @@ class CompoundSource(Source):
         return cls(**data)
 
     def to_fs(self, ctx=None) -> Dict:
-        """Serialize this compound source to the solver input contract."""
+        """Serialize this compound source for solver input."""
 
         return {
             "_type": self.__class__.__name__,
@@ -156,10 +189,10 @@ class CompoundSource(Source):
 
 @dataclass
 class SourceGroup:
-    """A source group that is simulated as one shot.
+    """A source group simulated as one shot.
 
-    Attributes:
-        source: Source object that defines the emitted field.
+    Args:
+        source: Source definition for this shot.
     """
 
     source: Source = field(default_factory=Source)
@@ -168,22 +201,23 @@ class SourceGroup:
 
     @classmethod
     def from_fs(cls, data: Dict):
-        """Deserialize a source group from a solver payload."""
+        """Deserialize a source-group payload."""
 
         source = Source.from_fs(copy.deepcopy(data.get("source", {})))
         return cls(source=source)
 
     def to_fs(self, ctx=None) -> Dict:
-        """Serialize this source group to the solver input contract."""
+        """Serialize the source group for solver input."""
 
         return {"source": self.source.to_fs(ctx)}
 
     def _set_path(self, proj_path: Path, rel_path: Path):
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
         self._proj_path = proj_path
         self._rel_path = rel_path
 
     def get_coordinates(self) -> NPArray:
-        """Return source coordinates as a two-dimensional numpy array."""
+        """Return source coordinates as a two-dimensional NumPy array."""
 
         coords = self.source.coordinates
         if isinstance(coords, CoordinateValue):
@@ -195,10 +229,11 @@ class SourceGroup:
 
     # TODO: fix this, point source will need to make 2D array
     def coordinates(self) -> NPArray:
-        """Compatibility alias for :meth:`get_coordinates`."""
+        """Compatibility alias for ``get_coordinates``."""
 
         return self.get_coordinates()
 
     @property
     def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         return self._proj_path / self._rel_path

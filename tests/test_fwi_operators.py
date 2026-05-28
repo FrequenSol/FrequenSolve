@@ -8,9 +8,9 @@ from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
-from frequensolve.simulation.fwi import DataSpace, ModelSpace
-from frequensolve.simulation.imaging import ImageDatabase, ImagingJob
-from frequensolve.simulation.jobs import SimulationJob
+from frequensolve.simulation.jobs import BaseJob
+from frequensolve.simulation.jobs.fwi import DataSpace, ModelSpace
+from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
 from frequensolve.simulation.simulation import SeismicSimulation
 
 
@@ -169,7 +169,7 @@ def test_imaging_job_save_and_load_round_trips_project_relative_simulation(tmp_p
 
     job_file = job.save()
     saved_text = job_file.read_text()
-    loaded = SimulationJob.load(job_file)
+    loaded = BaseJob.load(job_file)
 
     assert "simulations/smooth/smooth.json" in saved_text
     assert str(tmp_path / "jobs" / "smooth") not in saved_text

@@ -1,5 +1,5 @@
 Seismic
-=======
+========
 
 Acquisition
 -----------
@@ -22,14 +22,6 @@ Sources
 -------
 
 .. automodule:: frequensolve.seismic.sources
-   :members:
-   :show-inheritance:
-   :noindex:
-
-Signals
--------
-
-.. automodule:: frequensolve.seismic.signals
    :members:
    :show-inheritance:
    :noindex:

@@ -6,9 +6,26 @@ __all__ = ["NamedList"]
 
 
 class NamedList(list):
-    """A list of objects with `name` attribute that can be indexed by name or index."""
+    """List of named objects addressable by name or index.
+
+    Items are expected to expose a ``name`` attribute. String indexing searches
+    for the first item with that name; integer indexing keeps normal list
+    behavior.
+    """
 
     def __getitem__(self, key: Union[str, int]):
+        """Return an item by integer index or by its ``name`` attribute.
+
+        Args:
+            key: Integer list index or item name.
+
+        Returns:
+            Matching item.
+
+        Raises:
+            ValueError: If a named item is not found or the key type is invalid.
+        """
+
         if isinstance(key, str):
             for idx, s in enumerate(self):
                 if s.name == key:
@@ -40,4 +57,10 @@ class NamedList(list):
             raise ValueError(f"Invalid key type: {type(key)}")
 
     def __iadd__(self, other):
+        """Append ``other`` and return the append result.
+
+        This keeps legacy ``named_list += item`` behavior, which mirrors
+        ``list.append`` rather than returning ``self``.
+        """
+
         return self.append(other)

@@ -28,12 +28,16 @@ __all__ = [
 
 @dataclass
 class CoordinateValue:
-    """Coordinate data annotated with units and a coordinate-system name.
+    """Coordinate values tagged with units and an optional coordinate system.
 
-    Use this wrapper when an argument accepts either raw coordinates or
-    coordinate-aware values. During export, ``system`` tells the solver how to
-    interpret the coordinate columns and ``units`` records the distance or angle
-    units for the values.
+    Args:
+        value: Scalar, array-like, mapping, or xarray object containing the
+            coordinate values.
+        units: Optional units for ``value``. Pint units and unit strings are
+            accepted.
+        system: Optional coordinate-system name that gives meaning to the
+            coordinate values.
+        extra: Additional solver-facing fields preserved during serialization.
     """
 
     value: Any
@@ -43,7 +47,15 @@ class CoordinateValue:
 
     @classmethod
     def from_fs(cls, data: Any) -> Union["CoordinateValue", Any]:
-        """Build a coordinate value from a solver payload when possible."""
+        """Deserialize a coordinate value payload.
+
+        Args:
+            data: Serialized coordinate mapping or a raw value.
+
+        Returns:
+            ``CoordinateValue`` when ``data`` is a mapping; otherwise the raw
+            value unchanged.
+        """
 
         if not isinstance(data, Mapping):
             return data
@@ -56,7 +68,15 @@ class CoordinateValue:
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
-        """Serialize this value to the solver coordinate-value payload."""
+        """Serialize the coordinate value for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible coordinate payload containing ``value`` and
+            optional ``units``/``system`` fields.
+        """
 
         payload = _coordinate_value_and_units_to_fs(self.value, self.units)
         if not isinstance(payload, dict):
@@ -68,11 +88,17 @@ class CoordinateValue:
 
 @dataclass
 class Direction:
-    """Direction specification used by axes, sources, and receiver components.
+    """Coordinate direction or basis vector used by coordinate-system metadata.
 
-    A direction may be a named coordinate axis, an explicit vector, or a basis
-    described by component names. Units are only meaningful for explicit vector
-    values.
+    Args:
+        type: Direction representation, such as ``"vector"``,
+            ``"coordinate_axis"``, or ``"coordinate_basis"``.
+        system: Optional coordinate-system name that owns the direction.
+        axis: Optional axis name for coordinate-axis directions.
+        value: Optional vector value.
+        components: Optional component names for basis directions.
+        units: Optional vector units.
+        extra: Additional solver-facing fields preserved during serialization.
     """
 
     type: str = "vector"
@@ -85,7 +111,15 @@ class Direction:
 
     @classmethod
     def axis_direction(cls, axis: str, system: Optional[str] = None) -> "Direction":
-        """Create a direction aligned with a named axis in a coordinate system."""
+        """Create a direction aligned with a named coordinate-system axis.
+
+        Args:
+            axis: Axis name.
+            system: Optional coordinate-system name.
+
+        Returns:
+            Direction payload of type ``"coordinate_axis"``.
+        """
 
         return cls(type="coordinate_axis", axis=axis, system=system)
 
@@ -93,19 +127,44 @@ class Direction:
     def vector(
         cls, value: Any, units: Optional[Any] = None, system: Optional[str] = None
     ) -> "Direction":
-        """Create a direction from explicit vector components."""
+        """Create an explicit vector direction.
+
+        Args:
+            value: Vector components.
+            units: Optional component units.
+            system: Optional coordinate-system name for the vector components.
+
+        Returns:
+            Direction payload of type ``"vector"``.
+        """
 
         return cls(type="vector", value=value, units=units, system=system)
 
     @classmethod
     def basis(cls, components: List[str], system: Optional[str] = None) -> "Direction":
-        """Create a basis direction from named vector components."""
+        """Create a coordinate-basis direction.
+
+        Args:
+            components: Component names that define the basis direction.
+            system: Optional coordinate-system name.
+
+        Returns:
+            Direction payload of type ``"coordinate_basis"``.
+        """
 
         return cls(type="coordinate_basis", components=components, system=system)
 
     @classmethod
     def from_fs(cls, data: Any) -> Union["Direction", Any]:
-        """Build a direction from a solver payload when possible."""
+        """Deserialize a direction payload.
+
+        Args:
+            data: Serialized direction mapping or raw value.
+
+        Returns:
+            ``Direction`` when ``data`` is a mapping; otherwise the raw value
+            unchanged.
+        """
 
         if not isinstance(data, Mapping):
             return data
@@ -121,7 +180,14 @@ class Direction:
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
-        """Serialize this direction to the solver direction payload."""
+        """Serialize the direction for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible direction payload.
+        """
 
         payload: Dict[str, Any] = {"type": self.type}
         if self.system is not None:
@@ -143,11 +209,17 @@ class Direction:
 
 @dataclass
 class Axis:
-    """Named coordinate-system axis and its physical orientation.
+    """Named coordinate axis mapped to a physical direction.
 
-    ``direction`` is the physical direction this axis follows, while
-    ``positive`` can describe the positive sense for surface-relative axes such
-    as ``up`` or ``down``.
+    Args:
+        name: Axis name exposed to xarray dimensions or user payloads.
+        direction: Physical direction or solver-recognized direction that this
+            axis follows, such as ``"x"``, ``"y"``, or ``"z"``.
+        positive: Optional positive orientation, primarily used by
+            surface-relative axes.
+        origin: Optional axis origin. Unit-bearing values are serialized with
+            ``value``/``units``.
+        extra: Additional solver-facing fields preserved during serialization.
     """
 
     name: str
@@ -158,7 +230,14 @@ class Axis:
 
     @classmethod
     def from_fs(cls, data: Union["Axis", Mapping[str, Any]]) -> "Axis":
-        """Build an axis from an existing instance or solver payload."""
+        """Deserialize an axis payload.
+
+        Args:
+            data: Existing ``Axis`` or serialized axis mapping.
+
+        Returns:
+            ``Axis`` instance.
+        """
 
         if isinstance(data, Axis):
             return data
@@ -172,7 +251,14 @@ class Axis:
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
-        """Serialize this axis to the solver coordinate-system payload."""
+        """Serialize this axis for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible axis payload.
+        """
 
         payload = {
             "name": self.name,
@@ -191,12 +277,27 @@ class Axis:
 
 @dataclass
 class CoordinateSystem:
-    """Coordinate-system definition used by model, acquisition, and output data.
+    """Named coordinate system used by solver inputs and xarray-backed data.
 
-    Coordinate systems can be standard Cartesian/cylindrical/spherical systems,
-    geographic systems, or surface-relative systems. Users usually construct
-    these with helpers such as :meth:`cartesian`, :meth:`surface`, or
-    :meth:`points` rather than writing the solver dictionary directly.
+    Args:
+        type: Coordinate-system family, such as ``"cartesian"`` or
+            ``"surface"``.
+        name: Optional coordinate-system name used by properties, grids, and
+            coordinate values.
+        origin: Optional coordinate-system origin.
+        axis_alignment: Optional mapping between physical directions and axis
+            names.
+        axes: Optional explicit axes exposed by this coordinate system.
+        inherit_axes: Whether unspecified physical axes should be inherited
+            from the global physical coordinates.
+        surface_ref: Optional model surface name or index for surface-relative
+            coordinate systems.
+        normal: Surface-normal direction convention for surface systems.
+        earth_radius: Optional Earth radius for geographic-style systems.
+        ndim: Optional declared coordinate dimension.
+        fixed_axis: Optional axis fixed to ``fixed_value``.
+        fixed_value: Optional fixed coordinate value for ``fixed_axis``.
+        extra: Additional solver-facing fields preserved during serialization.
     """
 
     type: str = "cartesian"
@@ -215,25 +316,57 @@ class CoordinateSystem:
 
     @classmethod
     def cartesian(cls, name: str = "global", **kwargs) -> "CoordinateSystem":
-        """Create a Cartesian coordinate system."""
+        """Create a Cartesian coordinate system.
+
+        Args:
+            name: Coordinate-system name.
+            **kwargs: Additional ``CoordinateSystem`` fields.
+
+        Returns:
+            Cartesian coordinate system.
+        """
 
         return cls(name=name, type="cartesian", **kwargs)
 
     @classmethod
     def cylindrical(cls, name: str, **kwargs) -> "CoordinateSystem":
-        """Create a cylindrical coordinate system."""
+        """Create a cylindrical coordinate system.
+
+        Args:
+            name: Coordinate-system name.
+            **kwargs: Additional ``CoordinateSystem`` fields.
+
+        Returns:
+            Cylindrical coordinate system.
+        """
 
         return cls(name=name, type="cylindrical", **kwargs)
 
     @classmethod
     def spherical(cls, name: str, **kwargs) -> "CoordinateSystem":
-        """Create a spherical coordinate system."""
+        """Create a spherical coordinate system.
+
+        Args:
+            name: Coordinate-system name.
+            **kwargs: Additional ``CoordinateSystem`` fields.
+
+        Returns:
+            Spherical coordinate system.
+        """
 
         return cls(name=name, type="spherical", **kwargs)
 
     @classmethod
     def geographic(cls, name: str = "geo", **kwargs) -> "CoordinateSystem":
-        """Create a geographic coordinate system."""
+        """Create a geographic coordinate system.
+
+        Args:
+            name: Coordinate-system name.
+            **kwargs: Additional ``CoordinateSystem`` fields.
+
+        Returns:
+            Geographic coordinate system.
+        """
 
         return cls(name=name, type="geographic", **kwargs)
 
@@ -252,6 +385,17 @@ class CoordinateSystem:
 
         ``normal`` is retained for compatibility and creates a surface-relative
         ``z`` axis when no explicit axes are supplied.
+
+        Args:
+            name: Coordinate-system name.
+            surface: Surface name or one-based surface index.
+            normal: Direction considered positive relative to the surface.
+            offset: Optional fixed offset along the surface-normal axis.
+            offset_units: Optional units for ``offset``.
+            **kwargs: Additional coordinate-system fields.
+
+        Returns:
+            ``SurfaceCoordinateSystem`` instance.
         """
         return SurfaceCoordinateSystem(
             name=name,
@@ -264,7 +408,19 @@ class CoordinateSystem:
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "CoordinateSystem":
-        """Deserialize a coordinate system from a solver payload."""
+        """Deserialize a coordinate-system payload.
+
+        Args:
+            data: Serialized coordinate-system mapping.
+
+        Returns:
+            ``CoordinateSystem`` or ``SurfaceCoordinateSystem`` depending on
+            the payload type.
+
+        Raises:
+            ValueError: If the payload names an unknown coordinate-system
+                subclass.
+        """
 
         payload = dict(data)
         class_name = payload.pop("_type", None)
@@ -321,7 +477,14 @@ class CoordinateSystem:
         return payload
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
-        """Serialize this coordinate system to the solver payload."""
+        """Serialize the coordinate system for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible coordinate-system payload.
+        """
 
         payload = self._payload(ctx)
         return merge_extra(payload, self.extra, "CoordinateSystem")
@@ -334,7 +497,17 @@ class CoordinateSystem:
         units: Optional[Any] = None,
         normal: Optional[str] = None,
     ) -> "CoordinateSystem":
-        """Return a copy with a fixed signed offset along the surface normal axis."""
+        """Return a copy with a fixed offset along the surface-normal axis.
+
+        Args:
+            name: Name for the returned coordinate system.
+            offset: Fixed offset value.
+            units: Optional units for ``offset``.
+            normal: Optional replacement surface-normal convention.
+
+        Returns:
+            New coordinate system with ``fixed_axis`` and ``fixed_value`` set.
+        """
 
         payload = self.to_fs()
         payload["name"] = name
@@ -352,7 +525,18 @@ class CoordinateSystem:
         *,
         units: Optional[Any] = None,
     ) -> CoordinateValue:
-        """Coordinate-aware points above the model surface."""
+        """Create coordinate-aware points above this surface system.
+
+        Args:
+            values: Lateral positions or explicit surface-system point values.
+            distance: Optional signed distance from the surface. When omitted,
+                the final coordinate column in ``values`` is interpreted as the
+                offset magnitude.
+            units: Optional units for values and distance.
+
+        Returns:
+            ``CoordinateValue`` tagged with this coordinate-system name.
+        """
 
         sign = self._above_sign()
         if distance is None:
@@ -366,7 +550,18 @@ class CoordinateSystem:
         *,
         units: Optional[Any] = None,
     ) -> CoordinateValue:
-        """Coordinate-aware points below the model surface."""
+        """Create coordinate-aware points below this surface system.
+
+        Args:
+            values: Lateral positions or explicit surface-system point values.
+            distance: Optional signed distance from the surface. When omitted,
+                the final coordinate column in ``values`` is interpreted as the
+                offset magnitude.
+            units: Optional units for values and distance.
+
+        Returns:
+            ``CoordinateValue`` tagged with this coordinate-system name.
+        """
 
         sign = self._below_sign()
         if distance is None:
@@ -394,7 +589,17 @@ class CoordinateSystem:
         units: Optional[Any] = None,
         offset: Optional[Any] = None,
     ) -> CoordinateValue:
-        """Coordinate-aware point values in this system."""
+        """Create coordinate-aware point values in this system.
+
+        Args:
+            values: Point coordinates in this coordinate system.
+            units: Optional coordinate units.
+            offset: Optional surface-normal offset. Used only for surface
+                coordinate systems.
+
+        Returns:
+            ``CoordinateValue`` tagged with this coordinate-system name.
+        """
 
         if self.type == "surface":
             return self.on_surface(values, units=units, offset=offset)
@@ -414,6 +619,18 @@ class CoordinateSystem:
         ``(n, 3)`` array of ``[x, y, z]`` coordinates for 3D models. Passing
         ``offset`` appends a constant or per-point normal offset to one-column
         2D laterals or two-column 3D laterals.
+
+        Args:
+            lateral: Lateral coordinates or explicit surface-system points.
+            units: Optional coordinate units.
+            offset: Optional scalar or per-point normal offset.
+
+        Returns:
+            ``CoordinateValue`` tagged with this coordinate-system name.
+
+        Raises:
+            ValueError: If lateral coordinates or offsets have unsupported
+                shapes.
         """
 
         lateral_values, lateral_units = _split_quantity(lateral, units)
@@ -427,7 +644,20 @@ class CoordinateSystem:
 
 
 class SurfaceCoordinateSystem(CoordinateSystem):
-    """Coordinate system whose selected axes are re-datumed to a model surface."""
+    """Coordinate system whose selected axes are re-datumed to a model surface.
+
+    Args:
+        name: Coordinate-system name.
+        surface: Surface name or one-based surface index.
+        axes: Optional axes to expose. Defaults to one surface-relative ``z``
+            axis.
+        normal: Direction considered positive relative to the surface.
+        inherit_axes: Whether missing physical axes should be inherited from
+            the global physical coordinate system.
+        offset: Optional fixed surface-normal offset.
+        offset_units: Optional units for ``offset``.
+        **kwargs: Additional coordinate-system fields.
+    """
 
     def __init__(
         self,
@@ -469,7 +699,17 @@ class SurfaceCoordinateSystem(CoordinateSystem):
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "SurfaceCoordinateSystem":
-        """Deserialize a surface-relative coordinate system."""
+        """Deserialize a surface coordinate-system payload.
+
+        Args:
+            data: Serialized surface coordinate-system mapping.
+
+        Returns:
+            ``SurfaceCoordinateSystem`` instance.
+
+        Raises:
+            ValueError: If the payload does not identify a surface.
+        """
 
         payload = dict(data)
         payload.pop("_type", None)
@@ -496,7 +736,14 @@ class SurfaceCoordinateSystem(CoordinateSystem):
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
-        """Serialize this surface-relative coordinate system."""
+        """Serialize this surface coordinate system for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible surface coordinate-system payload.
+        """
 
         payload = self._payload(ctx)
         payload.pop("type", None)
@@ -593,7 +840,15 @@ def _surface_coordinate_values(lateral: Any, offset: Optional[Any] = None) -> An
 
 
 def coordinate_value_to_fs(value: Any) -> Any:
-    """Serialize raw or coordinate-aware values for solver payloads."""
+    """Serialize coordinate-like values for solver input.
+
+    Args:
+        value: ``CoordinateValue``, Pint quantity, array-like value, or
+            JSON-compatible scalar/mapping.
+
+    Returns:
+        JSON-compatible coordinate value.
+    """
 
     if isinstance(value, CoordinateValue):
         return value.to_fs()
@@ -603,7 +858,14 @@ def coordinate_value_to_fs(value: Any) -> Any:
 
 
 def direction_to_fs(value: Any) -> Any:
-    """Serialize raw or structured directions for solver payloads."""
+    """Serialize direction-like values for solver input.
+
+    Args:
+        value: ``Direction``, Pint quantity, or raw solver-compatible value.
+
+    Returns:
+        JSON-compatible direction payload or the raw value unchanged.
+    """
 
     if isinstance(value, Direction):
         return value.to_fs()

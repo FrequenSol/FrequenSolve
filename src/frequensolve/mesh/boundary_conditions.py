@@ -1,4 +1,4 @@
-"""Python structures defining boundary conditions"""
+"""Boundary-condition models for FrequenSolve mesh boundaries."""
 
 import copy
 from dataclasses import dataclass, field
@@ -55,19 +55,30 @@ def _normalize_boundaries(
 
 @dataclass(init=False)
 class BoundaryCondition(ExtraFieldsMixin):
-    """Defines one or more boundary conditions applied to a boundary set.
+    """One named boundary-condition assignment.
 
-    Attributes:
-       name (str): BC name
-       conditions (List[str]): BC conditions applied to this boundary set
-       boundaries (List[str]): List of boundaries where BC should be applied
-       pml_wavelengths (float): PML width in wavelengths
-       pml_exponent (float): PML complex stretching exponent
-       pml_constant (float): PML complex stretching constant
+    A boundary condition can apply one or more condition names, such as
+    ``"pml"`` or solver-specific boundary operators, to one or more mesh
+    boundary labels. PML-related parameters are serialized only when ``"pml"``
+    is among the conditions.
 
-    :warning:
-       - When using PML, it is recommended to verify that the PML width and constant are
-         sufficient to avoid reflections.
+    Args:
+        name: Optional human-readable assignment name.
+        boundaries: Boundary label or labels where the condition applies.
+        conditions: Condition name or names to apply.
+        pml_wavelengths: PML width measured in local wavelengths.
+        pml_exponent: PML complex-stretching exponent.
+        pml_reflection: Target PML reflection coefficient.
+        pml_reflectivity: Deprecated spelling of ``pml_reflection``.
+        pml_constant: Optional PML stretching constant.
+        stretch_limit: Upper bound for PML stretch scaling.
+        extra: Additional solver-facing fields.
+        **kwargs: Additional solver-facing fields.
+
+    Raises:
+        ValueError: If required conditions are missing or conflicting PML
+            reflection arguments are supplied.
+        TypeError: If removed solver fields are provided.
     """
 
     name: Optional[str] = None
@@ -125,6 +136,15 @@ class BoundaryCondition(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "BoundaryCondition":
+        """Deserialize a boundary-condition assignment.
+
+        Args:
+            data: Serialized boundary-condition mapping.
+
+        Returns:
+            ``BoundaryCondition`` instance.
+        """
+
         data = copy.deepcopy(data)
         data.pop("_type", None)
         _reject_removed_fields(data, "BoundaryCondition")
@@ -142,9 +162,28 @@ class BoundaryCondition(ExtraFieldsMixin):
         )
 
     def has_condition(self, condition: str) -> bool:
+        """Return whether this assignment includes a condition.
+
+        Args:
+            condition: Condition name to check. The name is normalized using the
+                same rules as constructor input.
+
+        Returns:
+            ``True`` when the normalized condition is present.
+        """
+
         return _normalize_condition(condition) in self.conditions
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize the assignment for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible boundary-condition payload.
+        """
+
         bc_dict = {
             "conditions": list(self.conditions),
             "boundaries": self.boundaries,
@@ -170,7 +209,12 @@ class BoundaryCondition(ExtraFieldsMixin):
 
 
 class BoundaryConditions(NamedList):
-    """Named list of boundary conditions attached to a simulation."""
+    """Named collection of boundary conditions attached to a simulation.
+
+    Args:
+        conditions: Initial boundary conditions or serialized condition
+            mappings.
+    """
 
     def __init__(
         self,
@@ -200,6 +244,15 @@ class BoundaryConditions(NamedList):
         return len(self) > 0
 
     def append(self, bc: Union[BoundaryCondition, Mapping[str, Any]]) -> None:
+        """Append a boundary condition and update covered boundary labels.
+
+        Args:
+            bc: Boundary condition instance or serialized condition mapping.
+
+        Raises:
+            TypeError: If ``bc`` cannot be converted to ``BoundaryCondition``.
+        """
+
         bc = self._coerce_bc(bc)
         self._boundaries.update(bc.boundaries)
         super().append(bc)
@@ -209,6 +262,13 @@ class BoundaryConditions(NamedList):
         key: Union[str, int],
         value: Union[BoundaryCondition, Mapping[str, Any]],
     ) -> None:
+        """Replace a boundary condition by name or index.
+
+        Args:
+            key: Boundary-condition name or integer index.
+            value: Boundary condition instance or serialized mapping.
+        """
+
         super().__setitem__(key, self._coerce_bc(value))
         self._rebuild_boundaries()
 
@@ -216,11 +276,21 @@ class BoundaryConditions(NamedList):
         self, bc: Union[BoundaryCondition, Mapping[str, Any]]
     ) -> "BoundaryConditions":
         """Append a boundary condition and return the collection."""
+
         self.append(bc)
         return self
 
     def verify(self, mesh: Any) -> None:
-        """Verify that labeled mesh boundaries have boundary conditions."""
+        """Verify that all labeled mesh boundaries have assignments.
+
+        Args:
+            mesh: Mesh-like object with a ``boundaries`` attribute.
+
+        Raises:
+            ValueError: If a mesh boundary label is not covered by any stored
+                boundary condition.
+        """
+
         boundaries = getattr(mesh, "boundaries", None)
         if boundaries is None:
             return
@@ -230,10 +300,31 @@ class BoundaryConditions(NamedList):
 
     @classmethod
     def from_fs(cls, data: List[Dict]) -> "BoundaryConditions":
+        """Deserialize a boundary-condition collection.
+
+        Args:
+            data: List of serialized boundary-condition mappings.
+
+        Returns:
+            ``BoundaryConditions`` instance.
+
+        Raises:
+            TypeError: If ``data`` is not a list.
+        """
+
         data = copy.deepcopy(data)
         if not isinstance(data, list):
             raise TypeError("BCs must be a list of boundary condition payloads")
         return cls(BoundaryCondition.from_fs(bc_data) for bc_data in data)
 
     def to_fs(self, ctx=None) -> List[Dict]:
+        """Serialize all boundary conditions for solver input.
+
+        Args:
+            ctx: Optional export context forwarded to each condition.
+
+        Returns:
+            List of JSON-compatible boundary-condition payloads.
+        """
+
         return [bc.to_fs(ctx) for bc in self]

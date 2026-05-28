@@ -71,6 +71,7 @@ def test_top_level_authoring_exports_are_available():
         "field",
         "info",
         "output_property",
+        "BaseJob",
         "FrequencyDomainJob",
         "TimeDomainJob",
         "RunFailedError",
@@ -185,10 +186,18 @@ def test_public_package_imports_smoke():
         "frequensolve.project",
         "frequensolve.seismic",
         "frequensolve.simulation",
+        "frequensolve.simulation.jobs",
+        "frequensolve.simulation.jobs.base",
+        "frequensolve.simulation.jobs.fwi",
+        "frequensolve.simulation.jobs.imaging",
+        "frequensolve.simulation.jobs.forward",
         "frequensolve.simulation.outputs",
         "frequensolve.util",
         "frequensolve.orchestrator",
         "frequensolve.orchestrator.sites",
+        "frequensolve.orchestrator.utils",
+        "frequensolve.orchestrator.utils.pool",
+        "frequensolve.orchestrator.utils.progress",
     ]:
         importlib.import_module(name)
 
@@ -197,8 +206,12 @@ def test_removed_legacy_public_names_are_not_exported():
     trace_record = importlib.import_module("frequensolve.seismic.trace_record")
     traces = importlib.import_module("frequensolve.seismic.traces")
     fs = importlib.import_module("frequensolve")
+    project = importlib.import_module("frequensolve.project")
     seismic = importlib.import_module("frequensolve.seismic")
+    jobs = importlib.import_module("frequensolve.simulation.jobs")
 
+    assert not hasattr(jobs, "SimulationJob")
+    assert not hasattr(jobs, "JobRunRecord")
     assert not hasattr(trace_record, "ShotRecord")
     assert "TraceRecord" not in getattr(trace_record, "__all__", [])
     assert not hasattr(seismic, "TraceRecord")
@@ -207,17 +220,49 @@ def test_removed_legacy_public_names_are_not_exported():
     assert not hasattr(seismic, "plot_vtu_wavefield")
     assert not hasattr(seismic, "LayeredModel")
     assert not hasattr(fs, "OutputManager")
+    assert not hasattr(fs, "SimulationJob")
+    assert not hasattr(fs, "JobRunRecord")
     assert importlib.util.find_spec("frequensolve.simulation.output_manager") is None
+    assert importlib.util.find_spec("frequensolve.simulation.artifacts") is None
+    assert importlib.util.find_spec("frequensolve.simulation.fwi") is None
+    assert importlib.util.find_spec("frequensolve.simulation.imaging") is None
+    assert importlib.util.find_spec("frequensolve.simulation.jobs.jobs") is None
+    assert (
+        importlib.util.find_spec("frequensolve.simulation.jobs.artifact_access") is None
+    )
     assert importlib.util.find_spec("frequensolve.seismic.layered_model") is None
     assert importlib.util.find_spec("frequensolve.seismic.layered_plotting") is None
     assert importlib.util.find_spec("frequensolve.seismic.plotting") is None
+    assert importlib.util.find_spec("frequensolve.seismic.signals") is None
     assert importlib.util.find_spec("frequensolve.seismic.vtu") is None
+    assert not hasattr(seismic, "Signal")
+    assert not hasattr(seismic, "AnalyticalSignal")
+    assert not hasattr(seismic, "SignalFromFile")
+    assert not hasattr(fs, "Signal")
+    assert not hasattr(fs, "AnalyticalSignal")
+    assert not hasattr(fs, "SignalFromFile")
     assert not hasattr(fs, "read_vtu_wavefield")
     assert not hasattr(fs, "plot_vtu_wavefield")
     assert importlib.util.find_spec("frequensolve.seismic.record_database") is None
+    assert importlib.util.find_spec("frequensolve.orchestrator.credentials") is None
     assert importlib.util.find_spec("frequensolve.orchestrator.file_manager") is None
+    assert importlib.util.find_spec("frequensolve.orchestrator.pool") is None
+    assert importlib.util.find_spec("frequensolve.orchestrator.progress") is None
+    assert importlib.util.find_spec("frequensolve.orchestrator.ssh") is None
+    assert importlib.util.find_spec("frequensolve.project.migrate_version") is None
     assert importlib.util.find_spec("frequensolve.project.workflows") is None
     assert importlib.util.find_spec("frequensolve.util.data_file") is None
+    assert importlib.util.find_spec("frequensolve.util.input_parser") is None
+    assert importlib.util.find_spec("frequensolve.util.memoization") is None
+    assert importlib.util.find_spec("frequensolve.util.paraview_wrapper") is None
+    assert importlib.util.find_spec("frequensolve.util.registry") is None
+    assert importlib.util.find_spec("frequensolve.util.report_builder") is None
+    assert importlib.util.find_spec("frequensolve.util.serialize") is None
+    assert not hasattr(fs, "Report")
+    assert not hasattr(fs, "Figure")
+    assert not hasattr(fs, "Section")
+    assert not hasattr(fs, "Version")
+    assert not hasattr(project, "Version")
     assert not hasattr(traces.TraceDataset, "record_db")
     assert not hasattr(traces.TraceDataset, "read_FD")
     assert not hasattr(traces.TraceDataset, "read_TD")

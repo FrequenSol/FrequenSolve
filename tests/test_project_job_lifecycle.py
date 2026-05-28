@@ -14,12 +14,12 @@ from frequensolve.orchestrator.sites.base import JobStatus, RunResult
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project.project import Project
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.artifacts import RunMetadata
 from frequensolve.simulation.jobs import (
+    BaseJob,
     FrequencyDomainJob,
-    SimulationJob,
     TimeDomainJob,
 )
+from frequensolve.simulation.jobs.artifacts import RunMetadata
 
 
 def _project_with_trace_simulation(tmp_path):
@@ -40,6 +40,16 @@ def test_project_save_load_uses_relative_simulation_paths(tmp_path):
     assert loaded.path == project.path
     assert loaded.simulations["simple"].name == sim.name
     assert loaded.simulations["simple"]._project is loaded
+
+
+def test_project_api_rejects_auto_migrate_option(tmp_path):
+    project, _ = _project_with_trace_simulation(tmp_path)
+    project_file = project.save()
+
+    with pytest.raises(TypeError):
+        Project.load(project_file, auto_migrate=True)
+    with pytest.raises(TypeError):
+        Project(name="project", path=tmp_path / "other", auto_migrate=True)
 
 
 def test_loaded_copied_job_uses_explicit_project_override(tmp_path):
@@ -68,7 +78,7 @@ def test_loaded_copied_job_uses_explicit_project_override(tmp_path):
     sim_payload["project_path"] = str(original.path)
     copied_sim_file.write_text(json.dumps(sim_payload))
 
-    loaded = SimulationJob.load(copied_job_file, project_path=copied_root)
+    loaded = BaseJob.load(copied_job_file, project_path=copied_root)
     assert loaded.project_path == copied_root.resolve()
     assert loaded.simulation._file == copied_sim_file.resolve()
 
@@ -114,7 +124,7 @@ def test_remote_staging_rewrites_stale_absolute_artifact_roots(tmp_path, monkeyp
     shutil.copytree(original.path, copied_root)
     copied_job_file = copied_root / "jobs" / "simple" / "freq" / "freq.json"
     copied_sim_file = copied_root / "simulations" / "simple" / "simple.json"
-    loaded = SimulationJob.load(copied_job_file, project_path=copied_root)
+    loaded = BaseJob.load(copied_job_file, project_path=copied_root)
     loaded.save()
 
     sim_payload = json.loads(copied_sim_file.read_text())
@@ -143,7 +153,7 @@ def test_remote_input_files_maps_stale_absolute_refs_to_copied_inputs(tmp_path):
     shutil.copytree(original.path, copied_root)
     copied_job_file = copied_root / "jobs" / "simple" / "freq" / "freq.json"
     copied_sim_file = copied_root / "simulations" / "simple" / "simple.json"
-    loaded = SimulationJob.load(copied_job_file, project_path=copied_root)
+    loaded = BaseJob.load(copied_job_file, project_path=copied_root)
     loaded.save()
 
     sim_payload = json.loads(copied_sim_file.read_text())
@@ -337,7 +347,7 @@ def test_job_save_load_persists_required_simulation_inputs(tmp_path):
 
     job_file = job.save()
     payload = json.loads(job_file.read_text())
-    loaded = SimulationJob.load(job_file)
+    loaded = BaseJob.load(job_file)
 
     assert sim._file.exists()
     assert job_file.exists()
@@ -357,9 +367,9 @@ def test_job_loading_accepts_job_object_and_job_directory(tmp_path):
     job = TimeDomainJob(name="time", simulation=sim, f_max=5.0, T_max=1.0)
 
     job_file = job.save()
-    loaded_from_object = SimulationJob.load(job)
+    loaded_from_object = BaseJob.load(job)
     loaded_from_method = job.load_saved()
-    loaded_from_dir = SimulationJob.load(job_file.parent)
+    loaded_from_dir = BaseJob.load(job_file.parent)
 
     assert job.job_file == job_file
     assert loaded_from_object._file == job_file

@@ -83,7 +83,15 @@ def _add_filter_once(handler_or_logger: Any) -> None:
 
 
 def configure_dependency_logging(level: Optional[Union[int, str]] = None) -> int:
-    """Apply FrequenSolve's dependency logging policy in a Dask process."""
+    """Apply FrequenSolve's dependency logging policy in a Dask process.
+
+    Args:
+        level: Optional log level. When omitted, the Dask logging configuration
+            is used, falling back to ``logging.ERROR``.
+
+    Returns:
+        Normalized integer log level that was applied.
+    """
 
     normalized = _normalize_level(level, default=_level_from_dask_config())
     for name in _logger_names(DEPENDENCY_LOGGERS):
@@ -99,4 +107,10 @@ def configure_dependency_logging(level: Optional[Union[int, str]] = None) -> int
 
 
 def dask_setup(_server: Any) -> None:
+    """Dask preload entry point for worker-side logging configuration.
+
+    Args:
+        _server: Dask passes the worker/scheduler object; it is unused.
+    """
+
     configure_dependency_logging()

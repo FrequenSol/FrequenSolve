@@ -28,6 +28,8 @@ from frequensolve.units import *  # noqa: F403
 from frequensolve.units import __all__ as _units_all
 from frequensolve.util import *  # noqa: F403
 from frequensolve.util import __all__ as _util_all
+from frequensolve.validation import *  # noqa: F403
+from frequensolve.validation import __all__ as _validation_all
 
 _colormap_all = ["get_colormap", "RdYlBu", "RdYlBu_r", "BuGrOr", "BuGrOr_r"]
 
@@ -46,6 +48,7 @@ __all__ = [
         _simulation_all,
         _orchestrator_all,
         _util_all,
+        _validation_all,
         _colormap_all,
     ),
 ]

@@ -107,32 +107,42 @@ class JobStatus:
 
     @property
     def is_queued(self) -> bool:
-        """Whether this status represents a queued job."""
+        """Return whether the run is waiting to start."""
 
         return self.state == "pending"
 
     @property
     def is_running(self) -> bool:
-        """Whether this status represents an actively running job."""
+        """Return whether the run is currently executing."""
 
         return self.state == "running"
 
     @property
     def is_complete(self) -> bool:
-        """Whether this status is terminal."""
+        """Return whether the run has reached a terminal state."""
 
         return self.state in TERMINAL_STATES
 
     @property
     def is_successful(self) -> bool:
-        """Whether this terminal status is considered successful."""
+        """Return whether the terminal state and return code indicate success."""
 
         return self.state in SUCCESS_STATES and self.return_code in {0, -1}
 
 
 @dataclass
 class RunResult:
-    """Final result returned by a completed run handle."""
+    """Final result returned by a completed run handle.
+
+    Args:
+        job: Job object associated with the run.
+        status: Final job status.
+        site: Site that submitted or attached to the run.
+        artifacts: Optional site-specific artifact bundle.
+        trace_manifest: Optional resolved trace manifest.
+        logs_path: Optional path to run logs.
+        run_metadata: Optional persisted run metadata.
+    """
 
     job: Any
     status: JobStatus
@@ -144,7 +154,7 @@ class RunResult:
 
     @property
     def successful(self) -> bool:
-        """Whether the completed run succeeded."""
+        """Return whether the run completed successfully."""
 
         return self.status.is_successful
 
@@ -155,7 +165,15 @@ class RunResult:
             raise RunFailedError(self)
 
     def traces(self, upscale: int = 1):
-        """Open or fetch receiver trace outputs for this run."""
+        """Open receiver trace outputs for this run.
+
+        Args:
+            upscale: Optional time/frequency upscaling factor for trace reads.
+
+        Returns:
+            ``TraceDataset`` for local results or the site's fetched trace
+            dataset for remote results.
+        """
 
         self.raise_for_status()
         if self.site is not None:
@@ -165,7 +183,14 @@ class RunResult:
         return TraceDataset.from_job(self.job, upscale=upscale)
 
     def wavefields(self, upscale: int = 1):
-        """Open or fetch wavefield trace outputs for this run."""
+        """Open wavefield outputs for this run.
+
+        Args:
+            upscale: Optional upscaling factor used by trace readers.
+
+        Returns:
+            Wavefield trace dataset from the site or job artifact handle.
+        """
 
         self.raise_for_status()
         if self.site is not None:
@@ -180,7 +205,18 @@ class RunResult:
         base: Optional[Union[str, Path]] = None,
         existing: bool = False,
     ) -> list[Path]:
-        """Return output files reported by the completed run."""
+        """Return output files reported by the completed run.
+
+        Args:
+            kind: Optional artifact kind filter.
+            suffix: Optional filename suffix or suffixes to include.
+            base: Optional base directory used to resolve relative artifact
+                paths.
+            existing: If ``True``, return only files that currently exist.
+
+        Returns:
+            List of matching output paths.
+        """
 
         metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
         if metadata is None:
@@ -193,7 +229,15 @@ class RunResult:
         )
 
     def logs(self, **kwargs):
-        """Return or fetch logs associated with this run."""
+        """Return or fetch run logs.
+
+        Args:
+            **kwargs: Site-specific log selection options such as ``task`` or
+                ``frequency``.
+
+        Returns:
+            Path to logs, fetched log mapping, or ``None`` when unavailable.
+        """
 
         if self.site is not None:
             return self.site.fetch_logs(self.job, **kwargs)
@@ -229,7 +273,17 @@ class RunFailedError(RuntimeError):
 
 @dataclass
 class RunHandle:
-    """Awaitable handle for a submitted, attached, or skipped run."""
+    """Awaitable handle for a submitted or skipped run.
+
+    Args:
+        site: Site that owns the run.
+        job: Submitted job object.
+        id: Site-specific run id.
+        mode: Submission mode such as ``"batch"``, ``"local"``, or
+            ``"skipped"``.
+        poll_interval: Default polling interval in seconds.
+        backend: Site-specific run metadata.
+    """
 
     site: "BaseSite"
     job: Any
@@ -256,7 +310,16 @@ class RunHandle:
     def skipped(
         cls, site: "BaseSite", job: Any, message: str = "Run is current"
     ) -> "RunHandle":
-        """Create a completed handle for a job that did not need to run."""
+        """Create a completed handle for a run skipped as already current.
+
+        Args:
+            site: Site that would have submitted the job.
+            job: Job object associated with the skipped run.
+            message: Human-readable reason the run was skipped.
+
+        Returns:
+            ``RunHandle`` whose result is already available.
+        """
 
         status = JobStatus(
             state="skipped",
@@ -288,7 +351,7 @@ class RunHandle:
         )
 
     def status(self) -> JobStatus:
-        """Poll and return the latest known job status."""
+        """Poll and return the latest run status."""
 
         if self._result is not None:
             return self._result.status
@@ -323,13 +386,14 @@ class RunHandle:
         *,
         check: bool = True,
     ) -> RunResult:
-        """Block until this run is terminal.
+        """Block until the run reaches a terminal state.
 
         Args:
-            timeout: Maximum wait time in seconds.
-            poll_interval: Poll interval in seconds.
-            check: Raise ``RunFailedError`` for failed, cancelled, or timed-out
-                runs. Pass ``False`` to inspect the returned ``RunResult``.
+            timeout: Optional maximum wait time in seconds.
+            poll_interval: Optional polling interval in seconds.
+
+        Returns:
+            Final ``RunResult``.
         """
 
         if self._result is not None:
@@ -341,7 +405,7 @@ class RunHandle:
             if check:
                 self._result.raise_for_status()
             return self._result
-        from frequensolve.orchestrator.progress import wait
+        from frequensolve.orchestrator.utils.progress import wait
 
         self._result = wait(
             self,
@@ -358,7 +422,15 @@ class RunHandle:
         *,
         check: bool = True,
     ) -> RunResult:
-        """Asynchronously wait until this run is terminal."""
+        """Asynchronously wait for the run to finish.
+
+        Args:
+            timeout: Optional maximum wait time in seconds.
+            poll_interval: Optional polling interval in seconds.
+
+        Returns:
+            Final ``RunResult``.
+        """
 
         if self._result is not None:
             if check:
@@ -381,7 +453,15 @@ class RunHandle:
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
     ) -> Iterable[JobStatus]:
-        """Yield status changes until this run reaches a terminal state."""
+        """Yield status changes until the run finishes or times out.
+
+        Args:
+            timeout: Optional maximum watch time in seconds.
+            poll_interval: Optional polling interval in seconds.
+
+        Yields:
+            ``JobStatus`` objects whenever the public state changes.
+        """
 
         interval = self.poll_interval if poll_interval is None else poll_interval
         start = time.monotonic()
@@ -408,7 +488,7 @@ class RunHandle:
             time.sleep(interval)
 
     def cancel(self) -> None:
-        """Cancel the run when the backing site supports cancellation."""
+        """Cancel the run using the site-specific cancel operation when possible."""
 
         if self._cancel_fn is not None:
             self._cancel_fn(self)
@@ -418,7 +498,12 @@ class RunHandle:
         self.site.cancel_job(self.id)
 
     def fetch(self):
-        """Fetch standard outputs for this run when supported by the site."""
+        """Fetch completed run outputs using the site implementation.
+
+        Returns:
+            Site-specific fetch result, or ``None`` when no fetch operation is
+            available.
+        """
 
         if self._fetch_fn is not None:
             return self._fetch_fn(self)
@@ -427,19 +512,40 @@ class RunHandle:
         return None
 
     def traces(self, upscale: int = 1):
-        """Fetch and open receiver traces for the run's job."""
+        """Fetch outputs if needed and open receiver traces.
+
+        Args:
+            upscale: Optional time/frequency upscaling factor for trace reads.
+
+        Returns:
+            Trace dataset returned by the site.
+        """
 
         self.fetch()
         return self.site.fetch_traces(self.job, upscale=upscale)
 
     def wavefields(self, upscale: int = 1):
-        """Fetch and open wavefield traces for the run's job."""
+        """Fetch outputs if needed and open wavefield traces.
+
+        Args:
+            upscale: Optional upscaling factor for wavefield trace reads.
+
+        Returns:
+            Wavefield dataset returned by the site.
+        """
 
         self.fetch()
         return self.site.fetch_wavefields(self.job, upscale=upscale)
 
     def logs(self, **kwargs):
-        """Return or fetch logs associated with this run."""
+        """Return or fetch logs for this run.
+
+        Args:
+            **kwargs: Site-specific log selection options.
+
+        Returns:
+            Path to logs, fetched log mapping, or ``None`` when unavailable.
+        """
 
         if self.site is not None:
             return self.site.fetch_logs(self.job, **kwargs)
@@ -450,10 +556,11 @@ class RunHandle:
 
 @dataclass(kw_only=True)
 class BaseSite:
-    """Base execution-site interface.
+    """Base class for execution-site implementations.
 
-    Concrete sites implement submission, polling, fetching, and cancellation
-    for a specific runtime such as local execution, SLURM, or FrequenSol cloud.
+    Args:
+        verbose: Whether site methods should print status messages in addition
+            to logging them.
     """
 
     _is_notebook: bool = field(default_factory=_check_if_notebook)
@@ -488,16 +595,33 @@ class BaseSite:
             message = f"{message} - {status.message}"
         self._emit(message, force=force)
 
-    def prepare_job(self, job, *, sync_project: bool = False):
+    def prepare_job(
+        self,
+        job,
+        *,
+        sync_project: bool = False,
+        validate: bool = True,
+    ):
         """Persist local job inputs before a run is submitted.
 
         Site implementations call this before checking run fingerprints or
         transferring files.  It keeps the user-facing lifecycle simple:
         creating a job and calling ``site.submit(job)`` is enough.
+
+        Args:
+            job: Job object with an optional ``save`` method.
+            sync_project: Whether to synchronize the owning project after the
+                job is saved.
+            validate: Whether to run job validation before submission.
+
+        Returns:
+            The same job object, for fluent site implementations.
         """
 
         if hasattr(job, "save"):
             job.save()
+        if validate and hasattr(job, "validate"):
+            job.validate(raise_errors=True)
         project = getattr(getattr(job, "simulation", None), "_project", None)
         if sync_project and project is not None and hasattr(self, "sync"):
             self.sync(project)
@@ -616,7 +740,18 @@ class BaseSite:
         project_path: Optional[Union[str, Path]] = None,
         **_: Any,
     ) -> Any:
-        """Return local wavefield outputs for one job or a mapping for many jobs."""
+        """Return local wavefield outputs for one job or many jobs.
+
+        Args:
+            job: Single job or a sequence of jobs.
+            upscale: Optional upscaling factor for wavefield trace reads.
+            path: Optional project path alias used to resolve relative outputs.
+            project_path: Optional project path used to resolve relative outputs.
+            **_: Ignored compatibility keyword arguments.
+
+        Returns:
+            Wavefield dataset for a single job, or a mapping keyed by job name.
+        """
 
         jobs, single = self._as_jobs(job)
         mapped_project = project_path if project_path is not None else path
@@ -646,6 +781,17 @@ class BaseSite:
 
         ``task`` is one-based. ``frequency`` selects the matching frequency in
         ``job.f_list`` and returns that task's log file.
+
+        Args:
+            job: Single job or sequence of jobs.
+            local_dir: Optional log directory or destination directory.
+            task: Optional one-based task number.
+            frequency: Optional frequency used to select a task log.
+            show: Whether to print the selected log contents.
+            **_: Ignored compatibility keyword arguments.
+
+        Returns:
+            Log path for a single job, or a mapping keyed by job name.
         """
 
         jobs, single = self._as_jobs(job)
@@ -672,7 +818,15 @@ class BaseSite:
         return out
 
     def submit(self, job, **kwargs) -> RunHandle:
-        """Submit a job and return an awaitable run handle."""
+        """Submit a job and return an awaitable run handle.
+
+        Args:
+            job: Job object to submit.
+            **kwargs: Site-specific submission options.
+
+        Returns:
+            ``RunHandle`` for the submitted run.
+        """
         raise NotImplementedError
 
     def run(
@@ -684,12 +838,18 @@ class BaseSite:
         check: bool = True,
         **submit_kwargs,
     ) -> RunResult:
-        """Submit a job and block until completion."""
-        return self.submit(job, **submit_kwargs).wait(
-            timeout,
-            poll_interval,
-            check=check,
-        )
+        """Submit a job and block until completion.
+
+        Args:
+            job: Job object to submit.
+            timeout: Optional maximum wait time in seconds.
+            poll_interval: Optional polling interval in seconds.
+            **submit_kwargs: Site-specific submission options.
+
+        Returns:
+            Final ``RunResult``.
+        """
+        return self.submit(job, **submit_kwargs).wait(timeout, poll_interval)
 
     def wait(
         self,
@@ -700,7 +860,17 @@ class BaseSite:
         fetch: bool = False,
         check: bool = True,
     ) -> list[RunResult]:
-        """Wait for multiple run handles while rendering one combined status."""
+        """Wait for multiple run handles while rendering one combined status.
+
+        Args:
+            runs: Run handles to wait on.
+            timeout: Optional maximum wait time in seconds.
+            poll_interval: Optional polling interval in seconds.
+            fetch: Whether to fetch outputs after each successful run.
+
+        Returns:
+            Final results in input order.
+        """
 
         return self.wait_all(
             runs,
@@ -719,9 +889,19 @@ class BaseSite:
         fetch: bool = False,
         check: bool = True,
     ) -> list[RunResult]:
-        """Wait for many submitted runs and return results in input order."""
+        """Wait for many submitted runs and return results in input order.
 
-        from frequensolve.orchestrator.progress import wait_all
+        Args:
+            runs: Run handles to wait on.
+            timeout: Optional maximum wait time in seconds.
+            poll_interval: Optional polling interval in seconds.
+            fetch: Whether to fetch outputs after each successful run.
+
+        Returns:
+            Final results in input order.
+        """
+
+        from frequensolve.orchestrator.utils.progress import wait_all
 
         return wait_all(
             runs,
@@ -734,7 +914,20 @@ class BaseSite:
     def handle(
         self, job, job_id: Optional[str] = None, mode: str = "attached"
     ) -> RunHandle:
-        """Create a run handle for an existing submitted job."""
+        """Create a run handle for an existing submitted job.
+
+        Args:
+            job: Job object associated with the existing run.
+            job_id: Site-specific run id. Defaults to ``job._job_id``.
+            mode: Handle mode label.
+
+        Returns:
+            ``RunHandle`` attached to the existing run.
+
+        Raises:
+            ValueError: If no job id is available.
+            NotImplementedError: If the site cannot poll existing jobs.
+        """
         job_id = job_id or getattr(job, "_job_id", None)
         if job_id is None:
             raise ValueError("Cannot create a run handle without a job id")

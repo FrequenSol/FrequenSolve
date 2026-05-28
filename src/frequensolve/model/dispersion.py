@@ -16,18 +16,30 @@ __all__ = [
 
 @register_class
 class DispersionRelation(TypeTaggedMixin, ABC):
-    """Base class for frequency-dependent property scaling."""
+    """Abstract base class for frequency-dependent material scaling."""
 
     @classmethod
     def from_fs(cls, data: Dict) -> "DispersionRelation":
-        """Deserialize a registered dispersion relation from a solver payload."""
+        """Deserialize a registered dispersion relation payload.
+
+        Args:
+            data: Serialized dispersion mapping containing ``_type``.
+
+        Returns:
+            Concrete dispersion relation instance.
+        """
 
         return cls.dispatch_from_fs(data, class_registry)
 
     @abstractmethod
     def to_fs(self, ctx=None) -> Dict:
-        """
-        Serialize the dispersion relation to a dictionary.
+        """Serialize the dispersion relation for solver input.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible dispersion payload.
         """
         pass
 
@@ -44,15 +56,19 @@ class DispersionRelation(TypeTaggedMixin, ABC):
         return DispersionScaling(property=other, dispersion=self)
 
     def __lmul__(self, other: Any) -> "DispersionScaling":
-        """
-        Same as __rmul__.
-        """
+        """Return a scaled property using left-multiplication syntax."""
+
         return DispersionScaling(property=other, dispersion=self)
 
 
 @register_class
 class PowerLawDispersion(DispersionRelation):
-    """Power-law dispersion relation defined by a reference frequency and exponent."""
+    """Power-law frequency-dependent dispersion relation.
+
+    Args:
+        f0: Reference frequency in hertz.
+        alpha: Power-law exponent.
+    """
 
     def __init__(self, f0: float, alpha: float):
         """Create a power-law dispersion model.
@@ -67,21 +83,39 @@ class PowerLawDispersion(DispersionRelation):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "PowerLawDispersion":
-        """Deserialize a power-law dispersion relation."""
+        """Deserialize a power-law dispersion payload.
+
+        Args:
+            data: Serialized dispersion mapping.
+
+        Returns:
+            ``PowerLawDispersion`` instance.
+        """
 
         return cls(**data)
 
     def to_fs(self, ctx=None) -> Dict:
-        """Serialize this relation to the solver payload."""
+        """Serialize this power-law dispersion relation.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible power-law dispersion payload.
+        """
 
         return {"_type": self.__class__.__name__, "f0": self.f0, "alpha": self.alpha}
 
 
 @register_class
 class TablulatedDispersion(DispersionRelation):
-    """Table-based dispersion relation with configurable interpolation.
+    """Table-based dispersion relation with interpolation controls.
 
-    The class name preserves the current public API spelling.
+    Args:
+        frequencies: Tabulated frequencies in hertz.
+        values: Scaling values corresponding to ``frequencies``.
+        interpolation: Interpolation method between tabulated frequencies.
+        extrapolation: Extrapolation method outside the tabulated range.
     """
 
     def __init__(
@@ -107,12 +141,26 @@ class TablulatedDispersion(DispersionRelation):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "TablulatedDispersion":
-        """Deserialize a table-based dispersion relation."""
+        """Deserialize a tabulated dispersion payload.
+
+        Args:
+            data: Serialized dispersion mapping.
+
+        Returns:
+            ``TablulatedDispersion`` instance.
+        """
 
         return cls(**data)
 
     def to_fs(self, ctx=None) -> Dict:
-        """Serialize this relation to the solver payload."""
+        """Serialize this tabulated dispersion relation.
+
+        Args:
+            ctx: Optional export context accepted for API consistency.
+
+        Returns:
+            JSON-compatible tabulated dispersion payload.
+        """
 
         return {
             "_type": self.__class__.__name__,
@@ -124,10 +172,12 @@ class TablulatedDispersion(DispersionRelation):
 
 @register_class
 class DispersionScaling:
-    """Pair a property data source with a dispersion relation.
+    """Material property paired with a dispersion relation.
 
-    Users normally create this by multiplying a constant, file, or xarray value
-    by a :class:`DispersionRelation`.
+    Args:
+        property: Constant, file path, xarray object, or other material property
+            source to scale.
+        dispersion: Dispersion relation applied to the property.
     """
 
     def __init__(self, property: Any, dispersion: DispersionRelation):

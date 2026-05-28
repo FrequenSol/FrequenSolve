@@ -7,7 +7,15 @@ __all__ = ["PoolStatus", "PoolInfo"]
 
 @dataclass
 class PoolStatus:
-    """Status snapshot for a provisioned or queued execution pool."""
+    """Status returned for a provisioned execution resource pool.
+
+    Args:
+        status: Public pool state such as ``"pending"``, ``"running"``, or
+            ``"complete"``.
+        return_code: Exit code from the provisioning command when available.
+        stdout: Captured standard output.
+        stderr: Captured standard error.
+    """
 
     status: str = "unknown"
     return_code: int = -1
@@ -16,19 +24,19 @@ class PoolStatus:
 
     @property
     def is_queued(self) -> bool:
-        """Whether the pool is waiting to start."""
+        """Return whether the pool request is queued."""
 
         return self.status == "pending"
 
     @property
     def is_running(self) -> bool:
-        """Whether the pool is currently running."""
+        """Return whether the pool is active."""
 
         return self.status == "running"
 
     @property
     def is_complete(self) -> bool:
-        """Whether the pool is in a terminal state."""
+        """Return whether the pool request has reached a terminal state."""
 
         return self.status in [
             "complete",
@@ -41,7 +49,17 @@ class PoolStatus:
 
 @dataclass
 class PoolInfo:
-    """Information about the resource pool."""
+    """Information about a provisioned resource pool.
+
+    Args:
+        id: Scheduler or provider pool id.
+        hostnode: Primary host name.
+        nhost: Number of hosts.
+        nproc: Number of processes.
+        ncore: Number of CPU cores.
+        start_time: Provider-reported start time.
+        end_time: Provider-reported end time.
+    """
 
     id: int = 0
     hostnode: str = ""
@@ -54,24 +72,24 @@ class PoolInfo:
 
     @property
     def status(self):
-        """Raw status string for the pool."""
+        """Return the public pool state string."""
 
         return self._status.status
 
     @property
     def is_queued(self) -> bool:
-        """Whether the pool is waiting to start."""
+        """Return whether the pool request is queued."""
 
         return self._status.is_queued
 
     @property
     def is_running(self) -> bool:
-        """Whether the pool is currently running."""
+        """Return whether the pool is active."""
 
         return self._status.is_running
 
     @property
     def is_complete(self) -> bool:
-        """Whether the pool is in a terminal state."""
+        """Return whether the pool request has reached a terminal state."""
 
         return self._status.is_complete
