@@ -1,3 +1,5 @@
+"""List subclass that supports lookup by item ``name``."""
+
 from typing import Union
 
 __all__ = ["NamedList"]

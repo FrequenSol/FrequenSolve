@@ -1,4 +1,4 @@
-"""Python structures defining mesh API"""
+"""Python structures defining mesh selection, parallelism, and adaptivity."""
 
 import copy
 from dataclasses import dataclass, field
@@ -22,11 +22,21 @@ __all__ = [
 
 @dataclass
 class MeshParallelism:
+    """Solver mesh-distribution options.
+
+    Attributes:
+        distribute: Whether to distribute generated mesh parts across ranks.
+        ranks_per_part: Number of MPI ranks assigned to each mesh part.
+        partitioner: Optional partitioner backend or algorithm name.
+    """
+
     distribute: Optional[bool] = True
     ranks_per_part: Optional[int] = None
     partitioner: Optional[str] = None
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize mesh parallelism options to the solver payload."""
+
         return {
             "distribute": self.distribute,
             **({"ranks_per_part": self.ranks_per_part} if self.ranks_per_part else {}),
@@ -35,6 +45,8 @@ class MeshParallelism:
 
     @classmethod
     def from_fs(cls, data: Dict) -> "MeshParallelism":
+        """Deserialize mesh parallelism options from a solver payload."""
+
         return cls(
             distribute=data["distribute"],
             ranks_per_part=data.get("ranks_per_part"),
@@ -572,22 +584,30 @@ class MeshManager:
         ] = None,
         **kwargs,
     ) -> None:
-        """Sets mesh adaptivity options
+        """Set mesh adaptivity options.
 
-        Attributes:
-           elems_per_wave (float):           Elements per wavelength.
-           order (int | Dict[str, int]):      Element order used by mesh adaptivity.
-           adapt_sources (Optional[int]):    Number of additional refinements near sources
-           adapt_receivers (Optional[int]):  Number of additional refinements near receivers
-           jump_tolerance (Optional[float]): Maximum relative change in wavespeed that consitutes
-                                             a "jump" in material properties
-           jump_factor (Optional[float]):    Multiplicative factor for elems_per_wave on "jump" elements
-           smooth_refs (Optional[bool]):     Do additional refinements to unconstrain element DOFs
-           f_low (Optional[float]):           Frequency used for low-frequency mesh adaptation
-           f_high (Optional[float]):          Maximum frequency used for mesh adaptation
-           source_grading:                   Distance grading around sources
-           receiver_grading:                 Distance grading around receivers
-           surface_gradings:                 Geometry-based grading rules keyed by implicit surface
+        Args:
+            elems_per_wave: Elements per wavelength. ``epw`` is accepted as an
+                alias.
+            min_epw: Lower bound on elements per wavelength when adaptive
+                rules reduce local density.
+            order: Element order used by mesh adaptivity.
+            jump_tolerance: Relative wavespeed change that constitutes a
+                material-property jump.
+            jump_factor: Multiplicative factor for ``elems_per_wave`` on jump
+                elements.
+            smooth_refs: Whether to add refinements that unconstrain element
+                degrees of freedom.
+            f_low: Frequency used for low-frequency mesh adaptation.
+            f_high: Maximum frequency used for mesh adaptation.
+            f_adapt: Single frequency used for adaptation when low/high bounds
+                are not needed.
+            adapt_order: Whether the solver may adapt element order.
+            source_grading: Distance grading around sources.
+            receiver_grading: Distance grading around receivers.
+            surface_gradings: Geometry-based grading rules keyed by implicit
+                surface.
+            **kwargs: Additional solver-specific adaptivity options.
         """
         self.adapt = MeshAdaptor(
             elems_per_wave=elems_per_wave,
@@ -671,12 +691,12 @@ class MeshManager:
         ranks_per_part: Optional[int] = None,
         partitioner: Optional[str] = None,
     ) -> None:
-        """Sets mesh parallel options
+        """Set mesh parallelization options.
 
-        Attributes:
-           distribute (bool):               Distribute mesh
-           ranks_per_part (Optional[int]):  Number of ranks per mesh part
-           partitioner (Optional[str]):     Partitioner type
+        Args:
+            distribute: Whether to distribute mesh parts across ranks.
+            ranks_per_part: Number of ranks assigned to each mesh part.
+            partitioner: Partitioner backend or algorithm name.
         """
         self.parallel = MeshParallelism(
             distribute=distribute,

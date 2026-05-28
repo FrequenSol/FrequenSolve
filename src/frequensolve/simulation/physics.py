@@ -41,10 +41,14 @@ class ValidComponents(ABC):
 
     @classmethod
     def allowed_components(cls) -> List[str]:
+        """Return all primary and derived components allowed for this physics."""
+
         return list(dict.fromkeys([*cls.primary, *cls.secondary]))
 
     @classmethod
     def check_components(cls, components: Iterable[str]) -> List[str]:
+        """Canonicalize and validate component names for this physics."""
+
         canonical = [cls.aliases.get(component, component) for component in components]
         allowed = set(cls.allowed_components())
         unknown = sorted(
@@ -59,24 +63,34 @@ class ValidComponents(ABC):
 
 
 class AcousticComponents(ValidComponents):
+    """Field components available for acoustic simulations."""
+
     primary = ["pressure", "velocity"]
 
 
 class EMComponents(ValidComponents):
+    """Field components available for electromagnetic simulations."""
+
     primary = ["electric", "magnetic"]
 
 
 class ElasticComponents(ValidComponents):
+    """Field components available for elastic simulations."""
+
     primary = ["velocity", "stress"]
     secondary = ["strain", "pressure"]
 
 
 class PoroelasticComponents(ValidComponents):
+    """Field components available for poroelastic simulations."""
+
     primary = ["velocity", "fluid_flux", "stress", "pressure"]
     secondary = ["strain", "displacement", "fluid_displacement"]
 
 
 class CoupledAEPComponents(ValidComponents):
+    """Field components available for coupled acoustic-elastic-poroelastic runs."""
+
     primary = ["pressure", "velocity", "fluid_flux", "stress"]
     secondary = ["strain", "displacement", "fluid_displacement"]
 

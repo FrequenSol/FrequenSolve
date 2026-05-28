@@ -1,3 +1,5 @@
+"""Local execution site using Dask workers and local filesystem artifacts."""
+
 from __future__ import annotations
 
 import json

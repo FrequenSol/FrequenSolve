@@ -1,3 +1,5 @@
+"""HDF5 backing store for arrays materialized during solver export."""
+
 from __future__ import annotations
 
 import json
@@ -75,6 +77,13 @@ def hash_dataarray_payload(
 
 @dataclass(frozen=True)
 class HDF5Reference:
+    """Reference to one array stored in a simulation HDF5 sidecar file.
+
+    The reference is what eventually appears in solver-facing JSON, including a
+    project-relative file locator when possible and a content hash for
+    reproducibility.
+    """
+
     file: Path
     dataset: str
     hash: str
@@ -82,9 +91,13 @@ class HDF5Reference:
 
     @property
     def clean_dataset(self) -> str:
+        """Dataset path without leading or trailing slashes."""
+
         return self.dataset.strip("/")
 
     def locator(self) -> str:
+        """Return a ``file:dataset`` locator, relative to the project when possible."""
+
         file = self.file
         if self.project_path is not None:
             try:
@@ -94,6 +107,8 @@ class HDF5Reference:
         return f"{file}:{self.clean_dataset}"
 
     def to_fs(self) -> Dict[str, Any]:
+        """Serialize the reference to the solver input contract."""
+
         return {
             "file": self.locator(),
             "format": "hdf5",
@@ -106,6 +121,8 @@ class SimulationStore:
     """Single HDF5 store for local simulation input arrays."""
 
     def __init__(self, path: Path, project_path: Optional[Path] = None):
+        """Create a store at ``path`` with optional project-relative locators."""
+
         self.path = Path(path)
         self.project_path = (
             Path(project_path).resolve() if project_path is not None else None
@@ -120,6 +137,8 @@ class SimulationStore:
         compression: Optional[str] = None,
         dtype: Optional[Any] = np.float32,
     ) -> HDF5Reference:
+        """Write a data array into the store and return its solver reference."""
+
         dataset = dataset.strip("/")
         attrs = dict(attrs or {})
         hash_dtype = dtype

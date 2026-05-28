@@ -1,3 +1,5 @@
+"""Numerical discretization and solver-configuration objects."""
+
 import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Union
@@ -26,6 +28,12 @@ class Discretization(ExtraFieldsMixin):
         method: str = "DPG",
         **kwargs,
     ):
+        """Create discretization settings.
+
+        Solver order is now configured through mesh adaptivity, so legacy
+        ``order`` values are rejected with an actionable error.
+        """
+
         if "order" in kwargs:
             raise ValueError(
                 "'order' has moved from Discretization to mesh adaptivity; "
@@ -36,6 +44,8 @@ class Discretization(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, d: Dict[str, Any]) -> "Discretization":
+        """Deserialize discretization settings from a solver payload."""
+
         d = copy.deepcopy(d)
         if "order" in d:
             raise ValueError(
@@ -48,6 +58,8 @@ class Discretization(ExtraFieldsMixin):
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize discretization settings to the solver payload."""
+
         payload = {
             "method": self.method,
         }
@@ -91,6 +103,12 @@ class SuperPatch(ExtraFieldsMixin):
         warning_acknowledged: bool = False,
         **kwargs,
     ):
+        """Create an advanced super-patch definition.
+
+        ``warning_acknowledged`` must be set explicitly to avoid accidental use
+        of a very expensive solver mode.
+        """
+
         if not warning_acknowledged:
             raise ValueError(
                 "Super patches are an advanced feature that can slow down your simulation by > 100x; they "
@@ -106,6 +124,8 @@ class SuperPatch(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "SuperPatch":
+        """Deserialize a super-patch definition."""
+
         data = copy.deepcopy(data)
         return cls(
             grid=data.pop("grid"),
@@ -114,6 +134,8 @@ class SuperPatch(ExtraFieldsMixin):
         )
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this super-patch definition."""
+
         payload = {
             "grid": self.grid,
             "domain": self.domain,
@@ -147,6 +169,8 @@ class SolverConfig(ExtraFieldsMixin):
         grids: int = 3,
         **kwargs,
     ):
+        """Create iterative solver settings."""
+
         self.solve_on = solve_on
         self.max_iter = max_iter
         self.tolerance = tolerance
@@ -155,6 +179,8 @@ class SolverConfig(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "SolverConfig":
+        """Deserialize solver settings from a solver payload."""
+
         data = copy.deepcopy(data)
         obj = cls(
             solve_on=data.pop("solve_on", "final"),
@@ -173,6 +199,8 @@ class SolverConfig(ExtraFieldsMixin):
         return self
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize solver settings to the solver payload."""
+
         payload = {
             "solve_on": self.solve_on,
             "max_iter": self.max_iter,
@@ -196,6 +224,8 @@ class NumericsManager:
 
     @classmethod
     def from_fs(cls, data: Dict) -> "NumericsManager":
+        """Deserialize numerical configuration from a solver payload."""
+
         data = copy.deepcopy(data)
         return cls(
             solver=SolverConfig.from_fs(data["solver"]),
@@ -203,6 +233,8 @@ class NumericsManager:
         )
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize numerical configuration to the solver payload."""
+
         return {
             "solver": self.solver.to_fs(ctx),
             "discretization": self.discretization.to_fs(ctx),

@@ -1,7 +1,7 @@
 Quickstart
 ==========
 
-This page shows the compact FrequenSolve :term:`SDK` workflow: create a
+This page shows the compact FrequenSolve :term:`Python API` workflow: create a
 :term:`project`, define a :term:`simulation`, submit a :term:`job`, and inspect
 outputs. For deeper runnable examples with plots and output inspection, see the
 :doc:`tutorial collection

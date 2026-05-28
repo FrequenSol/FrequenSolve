@@ -1,3 +1,5 @@
+"""Imaging-job definitions and readers for solver imaging products."""
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple, Union
@@ -28,12 +30,16 @@ class ImageDatabase:
     shape: Tuple[int, ...]
 
     def __post_init__(self):
+        """Normalize and validate the image output directory."""
+
         self.path = Path(self.path)
         if not self.path.exists():
             raise FileNotFoundError(f"Image path {self.path} does not exist")
 
     @property
     def f_list(self):
+        """Frequencies represented by each image part."""
+
         import h5py
 
         f_list = np.zeros(self.parts)
@@ -44,6 +50,8 @@ class ImageDatabase:
         return f_list
 
     def image_file(self, part: Optional[int] = None):
+        """Return the HDF5 file for all images or a numbered image part."""
+
         if part is None:
             return self.path / "image.h5"
         else:
@@ -68,6 +76,8 @@ class ImageDatabase:
         return str(value)
 
     def read_images(self, group):
+        """Read one image group into an xarray dataset."""
+
         import h5py
         import xarray as xr
 
@@ -96,13 +106,15 @@ class ImageDatabase:
 
 @dataclass(kw_only=True)
 class MisfitGroup:
-    """Base class for misfit groups."""
+    """Observed/simulated trace locations for one receiver-group misfit."""
 
     name: str = ""
     observed: Union[str, Path] = ""
     simulated: Union[str, Path] = ""
 
     def __post_init__(self):
+        """Append the group name to observed/simulated paths when needed."""
+
         self.observed = self._with_group(self.observed)
         self.simulated = self._with_group(self.simulated)
 
@@ -113,6 +125,8 @@ class MisfitGroup:
         return path
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
+        """Serialize this misfit group."""
+
         return {
             "name": self.name,
             "observed": self.observed,
@@ -121,6 +135,8 @@ class MisfitGroup:
 
     @classmethod
     def from_fs(cls, data: Dict) -> "MisfitGroup":
+        """Deserialize a misfit group."""
+
         return cls(
             name=data["name"],
             observed=data["observed"],
@@ -130,7 +146,7 @@ class MisfitGroup:
 
 @dataclass(kw_only=True)
 class Misfit:
-    """Base class for misfit functions."""
+    """Misfit configuration shared by imaging and FWI workflows."""
 
     norm: Literal["L2"] = "L2"
     receiver_groups: List[MisfitGroup] = field(default_factory=list)
@@ -138,6 +154,8 @@ class Misfit:
     _rel_path: Optional[Path] = None
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
+        """Serialize this misfit configuration."""
+
         return {
             "norm": self.norm,
             "receiver_groups": [group.to_fs(ctx) for group in self.receiver_groups],
@@ -145,6 +163,8 @@ class Misfit:
 
     @classmethod
     def from_fs(cls, data: Dict) -> "Misfit":
+        """Deserialize a misfit configuration."""
+
         return cls(
             norm=data["norm"],
             receiver_groups=[
@@ -156,7 +176,7 @@ class Misfit:
 @register_class
 @dataclass(kw_only=True)
 class ImagingJob(SimulationJob):
-    """Defines imaging job."""
+    """Reverse-time migration/imaging job built from a seismic simulation."""
 
     misfit: Misfit = field(default_factory=Misfit)
     data_path: Union[str, Path]
@@ -189,6 +209,13 @@ class ImagingJob(SimulationJob):
         reassemble_adjoint: bool = False,
         **kwargs,
     ) -> None:
+        """Create an imaging job.
+
+        The job compares simulated traces against observed data at
+        ``data_path`` and writes image products to ``save_path`` or the job
+        result directory.
+        """
+
         if "misfit_type" in kwargs:
             misfit_norm = kwargs.pop("misfit_type")
         simulation.save()

@@ -1,3 +1,5 @@
+"""Layered seismic model, surfaces, boreholes, fractures, and sampling helpers."""
+
 import copy
 import warnings
 from dataclasses import dataclass, field
@@ -455,8 +457,15 @@ class SimpleSurface:
 # Model
 # ----------------------------------------------------------------------
 class Layer(ModelSubdomain):
+    """Model subdomain representing one interval between layered surfaces.
+
+    Layers carry material properties and are assigned upper/lower bounds by
+    ``LayeredModel`` as surfaces are added or imported.
+    """
 
     def __init__(self, *args, **kwargs):
+        """Create a layer with no assigned upper or lower surface bounds."""
+
         super().__init__(*args, **kwargs)
         self.lower = None
         self.upper = None
@@ -529,6 +538,8 @@ class Layer(ModelSubdomain):
             )
 
     def set_property(self, key: str, value: Union[float, xr.DataArray]):
+        """Set or replace one layer material property."""
+
         self.properties[key] = value
 
 

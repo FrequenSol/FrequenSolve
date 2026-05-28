@@ -24,10 +24,10 @@ borehole, add a radial material layer, then close that layer with a
 cumulative-radius surface. The borehole axis at ``r = 0`` is assumed, so the
 first surface you add is normally the fluid wall rather than an explicit axis.
 Name a surface only when user code needs to refer to it later. If a layer
-includes ``physics`` and ``properties``, the :term:`SDK` creates the corresponding
+includes ``physics`` and ``properties``, the :term:`Python API` creates the corresponding
 material subdomain automatically.
 
-For scalar radial intervals, pass ``width=`` to ``add_layer``. The SDK adds the
+For scalar radial intervals, pass ``width=`` to ``add_layer``. The FrequenSolve Python API adds the
 width to the previous radius and creates the next surface immediately. That
 surface is unnamed; if a stable name is needed for a grading or diagnostic,
 close the layer explicitly with ``add_surface(...)``. Use explicit
@@ -393,5 +393,5 @@ surfaces.
    }
 
 The solver should treat ``boreholes[].layers[].mesh_block_id`` as references to
-material subdomains. The Python SDK keeps the material definitions in
+material subdomains. The FrequenSolve Python API keeps the material definitions in
 ``subdomains`` and emits borehole geometry under ``boreholes[].surfaces``.

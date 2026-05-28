@@ -1,3 +1,5 @@
+"""Credential helpers for SSH/HPC and cloud-backed execution sites."""
+
 import getpass
 import os
 from dataclasses import dataclass

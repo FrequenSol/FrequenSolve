@@ -1,4 +1,4 @@
-"""Python structures defining mesh API"""
+"""Mesh generator objects used to describe solver mesh construction."""
 
 from abc import ABC
 from dataclasses import dataclass, field
@@ -23,13 +23,15 @@ __all__ = [
 @register_class
 @dataclass
 class BaseMeshGenerator(TypeTaggedMixin, ABC):
-    """Base class for mesh generators"""
+    """Base class for serializable mesh-generator definitions."""
 
     _proj_path: Path = Path()
     _rel_path: Path = Path()
 
     @classmethod
     def from_fs(cls, data: Dict) -> "BaseMeshGenerator":
+        """Deserialize a registered mesh generator from a solver payload."""
+
         return cls.dispatch_from_fs(data, class_registry)
 
     def _set_path(self, proj_path: Path, rel_path: Path):
@@ -43,7 +45,12 @@ class BaseMeshGenerator(TypeTaggedMixin, ABC):
 
 @dataclass
 class HorizontalSpacingControl:
-    """Local horizontal mesh spacing control."""
+    """Local horizontal spacing rule around one borehole.
+
+    These controls are attached to :class:`HorizontalSpacing` and let a layered
+    mesh retain smaller elements near named borehole geometry without lowering
+    the maximum size across the whole model.
+    """
 
     around_borehole: str
     padding: Optional[Any] = None
@@ -52,6 +59,8 @@ class HorizontalSpacingControl:
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "HorizontalSpacingControl":
+        """Deserialize a local spacing control from a solver payload."""
+
         payload = dict(data)
         return cls(
             around_borehole=payload.pop("around_borehole"),
@@ -61,6 +70,8 @@ class HorizontalSpacingControl:
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize this local spacing control."""
+
         payload = {
             "around_borehole": self.around_borehole,
             **(
@@ -79,7 +90,11 @@ class HorizontalSpacingControl:
 
 @dataclass
 class HorizontalSpacing:
-    """Horizontal mesh-spacing policy for layered meshes."""
+    """Horizontal mesh-spacing policy for layered or box meshes.
+
+    Use :meth:`add_around_borehole` to add focused spacing rules while keeping
+    global growth and edge-preservation behavior in one serializable object.
+    """
 
     include_borehole_edges: Optional[bool] = None
     max_growth: Optional[float] = None
@@ -88,6 +103,8 @@ class HorizontalSpacing:
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "HorizontalSpacing":
+        """Deserialize a spacing policy from a solver payload."""
+
         payload = dict(data)
         controls = [
             (
@@ -112,6 +129,8 @@ class HorizontalSpacing:
         max_size: Optional[Any] = None,
         **kwargs,
     ) -> "HorizontalSpacing":
+        """Add a local spacing rule around a named borehole and return ``self``."""
+
         self.controls.append(
             HorizontalSpacingControl(
                 around_borehole=name,
@@ -123,6 +142,8 @@ class HorizontalSpacing:
         return self
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize this spacing policy to the solver payload."""
+
         payload = {
             **(
                 {"include_borehole_edges": self.include_borehole_edges}
@@ -142,15 +163,14 @@ class HorizontalSpacing:
 @register_class
 @dataclass
 class HexMeshGenerator(BaseMeshGenerator):
-    """Generates a hexahedral mesh
+    """Generate a structured hexahedral mesh over a box-like domain.
 
     Attributes:
-       l_bound (List[float]):
-          The lower bounds of a 'box' domain
-       u_bound (List[float]):
-          The upper bounds of a 'box' domain
-       n (List[int]):
-          Number of elements in each direction
+        l_bound: Lower coordinate bounds of the mesh domain.
+        u_bound: Upper coordinate bounds of the mesh domain.
+        n: Number of elements in each coordinate direction.
+        units: Units for the bounds.
+        system: Coordinate-system name for the bounds.
     """
 
     l_bound: Optional[List[float]] = None
@@ -163,6 +183,8 @@ class HexMeshGenerator(BaseMeshGenerator):
     horizontal_spacing: Optional[Union[HorizontalSpacing, Dict[str, Any]]] = None
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this hexahedral mesh generator."""
+
         if self.l_bound is not None:
             assert self.u_bound is not None
             l_bound = self.l_bound
@@ -210,6 +232,8 @@ class HexMeshGenerator(BaseMeshGenerator):
         max_growth: Optional[float] = None,
         **kwargs,
     ) -> "HexMeshGenerator":
+        """Request local horizontal refinement around a named borehole."""
+
         if self.horizontal_spacing is None:
             self.horizontal_spacing = HorizontalSpacing()
         elif isinstance(self.horizontal_spacing, Mapping):
@@ -228,6 +252,8 @@ class HexMeshGenerator(BaseMeshGenerator):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "HexMeshGenerator":
+        """Deserialize a hexahedral mesh generator."""
+
         return cls(
             n=data["n"],
             l_bound=data["l_bound"],
@@ -255,6 +281,8 @@ class LayeredMeshGenerator(HexMeshGenerator):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "LayeredMeshGenerator":
+        """Deserialize a layered mesh generator."""
+
         return cls(
             n=data["n"],
             l_bound=data["l_bound"],
@@ -274,19 +302,18 @@ class LayeredMeshGenerator(HexMeshGenerator):
 @register_class
 @dataclass
 class TetMeshGenerator(HexMeshGenerator):
-    """Generates a tetrahedral mesh
+    """Generate a tetrahedral mesh over a box-like domain.
 
     Attributes:
-       l_bound (List[float]):
-          The lower bounds of a 'box' domain
-       u_bound (List[float]):
-          The upper bounds of a 'box' domain
-       n (List[int]):
-          Number of elements in each direction
+        l_bound: Lower coordinate bounds of the mesh domain.
+        u_bound: Upper coordinate bounds of the mesh domain.
+        n: Number of elements in each coordinate direction.
     """
 
     @classmethod
     def from_fs(cls, data: Dict) -> "TetMeshGenerator":
+        """Deserialize a tetrahedral mesh generator."""
+
         return cls(
             n=data["n"],
             l_bound=data["l_bound"],

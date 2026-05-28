@@ -1,3 +1,5 @@
+"""Small LaTeX/PDF report builder used by legacy workflows."""
+
 import os
 import shutil
 import subprocess
@@ -58,37 +60,45 @@ class Section:
 
 @dataclass
 class Report:
+    """LaTeX-backed simulation report with ordered sections."""
+
     title: str = "Simulation Report"
     subtitle: str = "An Automated Simulation Report"
     author: str = ""
     sections: List[Section] = field(default_factory=list)
 
     def add_section(self, section: Section) -> Section:
-        """Adds a section to report
+        """Add an existing section to the report.
 
-        Attributes:
-           section (Section): The section to add
+        Args:
+            section: Section to append.
+
+        Returns:
+            The appended section.
         """
         self.sections.append(section)
         return self.sections[-1]
 
     def new_section(self, title: str = "") -> Section:
-        """Adds an empty section to report
+        """Create and append an empty section.
 
-        Attributes:
-           title (str): Title of the section
+        Args:
+            title: Title for the new section.
+
+        Returns:
+            The newly created section.
         """
         sec = Section(title=title)
         self.sections.append(sec)
         return sec
 
     def generate(self, path: Union[str, Path], name="report", timeout: int = 30):
-        """Compiles PDF from LaTeX
+        """Compile the report PDF from the bundled LaTeX template.
 
-        Attributes:
-           path (str): Where PDF will be saved
-           name (str): Name of the report
-           timeout (int): Timeout for compilation command (stalls on error)
+        Args:
+            path: Directory where the final PDF will be copied.
+            name: Base filename for generated report artifacts.
+            timeout: Timeout in seconds for each ``pdflatex`` pass.
         """
         current_dir = os.getcwd()
         path = Path(path)

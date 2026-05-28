@@ -1,3 +1,5 @@
+"""Signal specifications for analytical and file-backed seismic sources."""
+
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,24 +30,31 @@ class Signal:
     phase: Optional[Literal["causal", "zero"]] = None
 
     def get(self, i: int):
+        """Return source signal samples for source index ``i``."""
+
         raise NotImplementedError("This class must be overwritten by subclasses.")
 
     def to_fs(self, ctx=None):
+        """Serialize this signal specification to the solver payload."""
+
         raise NotImplementedError("This class must be overwritten by subclasses.")
 
     @classmethod
     def from_fs(cls, sim: SimulationConfig, data: Dict):
+        """Deserialize a signal specification using simulation sampling metadata."""
+
         raise NotImplementedError("This class must be overwritten by subclasses.")
 
 
 @dataclass(kw_only=True)
 class AnalyticalSignal(Signal):
-    """Wrapper object for getting analytical wavelet at each source
+    """Analytical source signal generated from a named wavelet family.
 
     Attributes:
-       f_pts (List[float]): The frequencies for the wavelet.
-       offset (int): The time offset for the wavelet.
-       sigma (Optional[float]): The width of the wavelet taper.
+        kind: Wavelet family: ``"Ricker"``, ``"Klauder"``, or ``"Ormsby"``.
+        f_pts: Wavelet frequency parameters for the chosen family.
+        offset: Sample offset for generated wavelets.
+        sigma: Optional Gaussian taper width.
     """
 
     kind: Literal["Ricker", "Klauder", "Ormsby"]
@@ -56,6 +65,8 @@ class AnalyticalSignal(Signal):
 
     @classmethod
     def from_fs(cls, sim: SimulationConfig, data: Dict) -> "AnalyticalSignal":
+        """Build an analytical signal from a solver payload."""
+
         kind = data["kind"]
         f_pts = data["f_pts"]
 
@@ -85,6 +96,8 @@ class AnalyticalSignal(Signal):
         )
 
     def to_fs(self, ctx=None):
+        """Serialize this analytical signal specification."""
+
         return {
             "type": self.type,
             "kind": self.kind,
@@ -108,13 +121,17 @@ class AnalyticalSignal(Signal):
 
 @dataclass(kw_only=True)
 class SignalFromFile(Signal):
-    """Wrapper object for getting signal for sources (and adjoint sources)
+    """Signal loaded from per-source HDF5 or SEG-Y files.
+
+    The ``file`` path may contain a Python integer format placeholder for the
+    source id, such as ``source_{:04d}.sgy``. Samples are interpolated to the
+    requested output sampling when read.
 
     Attributes:
-       file_format (str): The format of the file.
-       file (str): The path to the file.
-       interval (Optional[float]): The interval between samples.
-       samples (Optional[np.ndarray]): The samples to use for the signal.
+        file_format: File format, currently ``"HDF5"`` or ``"SEGY"``.
+        file: File path or HDF5 locator pattern.
+        interval: Time sample interval when it cannot be inferred from the file.
+        samples_in: Optional input sample coordinates.
     """
 
     type: Literal["from_file"] = "from_file"
@@ -126,6 +143,8 @@ class SignalFromFile(Signal):
     id_format: Tuple[str, str] = ("", "")
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this file-backed signal specification."""
+
         return {
             "file": str(self.file),
             "file_format": self.file_format,
@@ -140,6 +159,8 @@ class SignalFromFile(Signal):
         }
 
     def __post_init__(self):
+        """Validate the file pattern and infer missing input sampling."""
+
         match = re.search(r"(\{)\w([:\w]*\})", self.file)
         self.id_format = (match[0], match[1] + match[2])
 

@@ -1,3 +1,5 @@
+"""Shared run-handle and site abstractions for local, cloud, and HPC execution."""
+
 import asyncio
 import logging
 import time
@@ -80,25 +82,17 @@ class JobStatus:
     and ongoing job status information for batch/queued jobs.
 
     Attributes:
-       state (str):
-          Current status of the execution:
-             "pending":   Job is queued/waiting to start
-             "running":   Job is currently executing
-             "completed": Job finished successfully
-             "failed":    Job failed or was cancelled
-             "unknown":   Status cannot be determined
-       return_code (int):
-          Exit code from the command (0 typically indicates success)
-       stdout (str):
-          Standard output captured from the command
-       stderr (str):
-          Standard error output from the command
-       job_id (Optional[str]):
-          Job identifier for batch/queued jobs
-       start_time (Optional[float]):
-          Unix timestamp when job started
+        state: Current lifecycle state, such as ``"pending"``, ``"running"``,
+            ``"completed"``, ``"failed"``, or ``"unknown"``.
+        return_code: Exit code from the command. ``0`` typically indicates
+            success.
+        stdout: Standard output captured from the command.
+        stderr: Standard error output captured from the command.
+        job_id: Identifier for batch or queued jobs.
+        start_time: Timestamp when the job started, when the site reports it.
     """
 
+    #: Current lifecycle state for the run.
     state: str = "unknown"
     return_code: int = -1
     stdout: str = ""
@@ -113,18 +107,26 @@ class JobStatus:
 
     @property
     def is_queued(self) -> bool:
+        """Whether this status represents a queued job."""
+
         return self.state == "pending"
 
     @property
     def is_running(self) -> bool:
+        """Whether this status represents an actively running job."""
+
         return self.state == "running"
 
     @property
     def is_complete(self) -> bool:
+        """Whether this status is terminal."""
+
         return self.state in TERMINAL_STATES
 
     @property
     def is_successful(self) -> bool:
+        """Whether this terminal status is considered successful."""
+
         return self.state in SUCCESS_STATES and self.return_code in {0, -1}
 
 
@@ -142,13 +144,19 @@ class RunResult:
 
     @property
     def successful(self) -> bool:
+        """Whether the completed run succeeded."""
+
         return self.status.is_successful
 
     def raise_for_status(self) -> None:
+        """Raise ``RunFailedError`` if the run did not succeed."""
+
         if not self.successful:
             raise RunFailedError(self)
 
     def traces(self, upscale: int = 1):
+        """Open or fetch receiver trace outputs for this run."""
+
         self.raise_for_status()
         if self.site is not None:
             return self.site.fetch_traces(self.job, upscale=upscale)
@@ -157,6 +165,8 @@ class RunResult:
         return TraceDataset.from_job(self.job, upscale=upscale)
 
     def wavefields(self, upscale: int = 1):
+        """Open or fetch wavefield trace outputs for this run."""
+
         self.raise_for_status()
         if self.site is not None:
             return self.site.fetch_wavefields(self.job, upscale=upscale)
@@ -183,6 +193,8 @@ class RunResult:
         )
 
     def logs(self, **kwargs):
+        """Return or fetch logs associated with this run."""
+
         if self.site is not None:
             return self.site.fetch_logs(self.job, **kwargs)
         if hasattr(self.job, "_stdout_path"):
@@ -194,6 +206,8 @@ class RunFailedError(RuntimeError):
     """Raised when a run reaches an unsuccessful terminal status."""
 
     def __init__(self, result: RunResult):
+        """Create an error that keeps the failed run result attached."""
+
         self.result = result
         super().__init__(self._message(result))
 
@@ -215,7 +229,7 @@ class RunFailedError(RuntimeError):
 
 @dataclass
 class RunHandle:
-    """Awaitable handle for a submitted or skipped run."""
+    """Awaitable handle for a submitted, attached, or skipped run."""
 
     site: "BaseSite"
     job: Any
@@ -242,6 +256,8 @@ class RunHandle:
     def skipped(
         cls, site: "BaseSite", job: Any, message: str = "Run is current"
     ) -> "RunHandle":
+        """Create a completed handle for a job that did not need to run."""
+
         status = JobStatus(
             state="skipped",
             return_code=0,
@@ -272,6 +288,8 @@ class RunHandle:
         )
 
     def status(self) -> JobStatus:
+        """Poll and return the latest known job status."""
+
         if self._result is not None:
             return self._result.status
         if self._status_fn is not None:
@@ -340,6 +358,8 @@ class RunHandle:
         *,
         check: bool = True,
     ) -> RunResult:
+        """Asynchronously wait until this run is terminal."""
+
         if self._result is not None:
             if check:
                 self._result.raise_for_status()
@@ -361,6 +381,8 @@ class RunHandle:
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
     ) -> Iterable[JobStatus]:
+        """Yield status changes until this run reaches a terminal state."""
+
         interval = self.poll_interval if poll_interval is None else poll_interval
         start = time.monotonic()
         last_state = object()
@@ -386,6 +408,8 @@ class RunHandle:
             time.sleep(interval)
 
     def cancel(self) -> None:
+        """Cancel the run when the backing site supports cancellation."""
+
         if self._cancel_fn is not None:
             self._cancel_fn(self)
             return
@@ -394,6 +418,8 @@ class RunHandle:
         self.site.cancel_job(self.id)
 
     def fetch(self):
+        """Fetch standard outputs for this run when supported by the site."""
+
         if self._fetch_fn is not None:
             return self._fetch_fn(self)
         if hasattr(self.site, "fetch_outputs"):
@@ -401,14 +427,20 @@ class RunHandle:
         return None
 
     def traces(self, upscale: int = 1):
+        """Fetch and open receiver traces for the run's job."""
+
         self.fetch()
         return self.site.fetch_traces(self.job, upscale=upscale)
 
     def wavefields(self, upscale: int = 1):
+        """Fetch and open wavefield traces for the run's job."""
+
         self.fetch()
         return self.site.fetch_wavefields(self.job, upscale=upscale)
 
     def logs(self, **kwargs):
+        """Return or fetch logs associated with this run."""
+
         if self.site is not None:
             return self.site.fetch_logs(self.job, **kwargs)
         if hasattr(self.job, "_stdout_path"):
@@ -418,7 +450,11 @@ class RunHandle:
 
 @dataclass(kw_only=True)
 class BaseSite:
-    """Base class for site configuration."""
+    """Base execution-site interface.
+
+    Concrete sites implement submission, polling, fetching, and cancellation
+    for a specific runtime such as local execution, SLURM, or FrequenSol cloud.
+    """
 
     _is_notebook: bool = field(default_factory=_check_if_notebook)
     verbose: bool = False

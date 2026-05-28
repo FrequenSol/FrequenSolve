@@ -1,3 +1,5 @@
+"""Output request objects for traces, ParaView files, wavefields, and units."""
+
 from __future__ import annotations
 
 import copy
@@ -139,6 +141,8 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
     extra: Dict = field(default_factory=dict)
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this output request to the solver job payload."""
+
         payload = {
             "_type": self.__class__.__name__,
             "name": self.name,
@@ -148,6 +152,8 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "Output":
+        """Deserialize a concrete output request from a solver payload."""
+
         output_types: Dict[str, Type[Output]] = {
             "TraceOutput": TraceOutput,
             "ParaViewOutput": ParaviewOutput,
@@ -159,13 +165,23 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
 
 @dataclass(kw_only=True)
 class TraceOutput(Output):
+    """Trace output request for receiver traces.
+
+    Every job has a trace output. Supplying this object mainly customizes the
+    result-directory path used for trace files.
+    """
+
     path: Optional[Union[str, Path]] = None
 
     def __init__(self, path: Union[str, Path] = "traces", **kwargs):
+        """Create a trace output request with a job-relative path."""
+
         self.path = _relative_output_path(path)
         self._init_extra(None, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this trace output request."""
+
         return merge_extra(
             {"_type": self.__class__.__name__, "path": self.path},
             self.extra,
@@ -174,6 +190,8 @@ class TraceOutput(Output):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "TraceOutput":
+        """Deserialize a trace output request."""
+
         data = copy.deepcopy(data)
         data.pop("_type", None)
         return cls(path=data.pop("path", "traces"), **data)
@@ -200,6 +218,16 @@ class OutputUnits(ExtraFieldsMixin):
         extra: Optional[Mapping[str, Any]] = None,
         **dimension_defaults,
     ):
+        """Create output-unit defaults.
+
+        Args:
+            geometry: Default coordinate/geometry units.
+            dimensions: Units keyed by physical dimension, such as ``length``.
+            defaults: Legacy alias for ``dimensions``.
+            fields: Units keyed by output field name.
+            properties: Units keyed by material-property name.
+        """
+
         self.geometry = unit_expression(geometry) if geometry is not None else None
         merged_dimensions: Dict[str, str] = {}
         for source in (defaults, dimensions, dimension_defaults):
@@ -220,6 +248,8 @@ class OutputUnits(ExtraFieldsMixin):
         self._init_extra(extra)
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize unit defaults for the solver output block."""
+
         payload = _drop_none({"geometry": self.geometry})
         if self.dimensions:
             payload["dimensions"] = dict(self.dimensions)
@@ -231,6 +261,8 @@ class OutputUnits(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Optional[Mapping[str, Any]]) -> "OutputUnits":
+        """Deserialize output-unit defaults from a solver payload."""
+
         data = copy.deepcopy(dict(data or {}))
         dimension_defaults = {
             key: data.pop(key) for key in list(data) if key in _OUTPUT_DIMENSIONS
@@ -248,7 +280,7 @@ class OutputUnits(ExtraFieldsMixin):
 
 @dataclass(kw_only=True)
 class ParaViewItem(ExtraFieldsMixin):
-    """Structured ParaView output item."""
+    """One selected field, material property, or metadata value for ParaView."""
 
     kind: str
     value: str
@@ -275,6 +307,8 @@ class ParaViewItem(ExtraFieldsMixin):
         system: str = "global",
         **kwargs,
     ):
+        """Create a structured ParaView output selector."""
+
         normalized = str(kind).lower()
         if normalized not in {"field", "property", "info"}:
             raise ValueError("ParaViewItem kind must be field, property, or info")
@@ -308,6 +342,8 @@ class ParaViewItem(ExtraFieldsMixin):
         return self.kind
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize this ParaView selector."""
+
         payload: Dict[str, Any] = {
             "kind": self.kind,
             self._selector_key: self.value,
@@ -347,6 +383,8 @@ class ParaViewItem(ExtraFieldsMixin):
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "ParaViewItem":
+        """Deserialize a ParaView selector."""
+
         payload = copy.deepcopy(dict(data))
         kind = payload.pop("kind", None)
         if kind is None:
@@ -442,6 +480,13 @@ class ParaviewOutput(Output):
         source: Optional[Mapping[str, Any]] = None,
         **kwargs,
     ):
+        """Create a ParaView output request.
+
+        Use ``fields`` and ``properties`` for common volume output, ``items``
+        when you need per-item units/parts/basis metadata, and class helpers
+        such as :meth:`surface` or :meth:`grid` for non-volume targets.
+        """
+
         if sources is None:
             sources = [1]
         if upscale < 0:
@@ -509,6 +554,8 @@ class ParaviewOutput(Output):
 
     @classmethod
     def volume(cls, **kwargs) -> "ParaviewOutput":
+        """Create a volume-targeted ParaView output request."""
+
         return cls(target="volume", **kwargs)
 
     @classmethod
@@ -522,6 +569,8 @@ class ParaviewOutput(Output):
         planes: Optional[Iterable[Mapping[str, Any]]] = None,
         **kwargs,
     ) -> "ParaviewOutput":
+        """Create a surface-targeted ParaView output request."""
+
         return cls(
             target="surface",
             surfaces=surfaces,
@@ -534,9 +583,13 @@ class ParaviewOutput(Output):
 
     @classmethod
     def grid(cls, grid: Any, **kwargs) -> "ParaviewOutput":
+        """Create a grid-targeted ParaView output request."""
+
         return cls(target="grid", grid=grid, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this ParaView output request."""
+
         payload = {
             "_type": self.__class__.__name__,
             "name": self.name,
@@ -673,6 +726,8 @@ class ParaviewOutput(Output):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "ParaviewOutput":
+        """Deserialize a ParaView output request."""
+
         data = copy.deepcopy(data)
         data.pop("_type", None)
         writer = data.pop("writer", None)
@@ -761,6 +816,12 @@ class WavefieldOutput(Output):
         sources: Optional[Iterable[int]] = None,
         **kwargs,
     ):
+        """Create a grid-backed wavefield output request.
+
+        Provide either a receiver-like ``device`` or one or more field names,
+        plus grid coordinates through ``grid`` or ``dims``/``coords``.
+        """
+
         if field is not None and fields is not None:
             raise ValueError("Pass only one of field or fields")
         if device is not None and (field is not None or fields is not None):
@@ -790,10 +851,14 @@ class WavefieldOutput(Output):
 
     @property
     def component_names(self) -> List[str]:
+        """Names of the receiver components represented by this wavefield."""
+
         return [component.name for component in self.components]
 
     @property
     def components(self) -> List[ReceiverComponent]:
+        """Receiver components used to sample the requested wavefield fields."""
+
         if self.device is not None:
             return list(self.device.components)
         fields = self.fields if self.fields is not None else ["primary"]
@@ -803,9 +868,13 @@ class WavefieldOutput(Output):
         ]
 
     def component_payloads(self, ctx=None) -> List[Dict[str, Any]]:
+        """Serialized component payloads for this wavefield request."""
+
         return [component.to_fs(ctx) for component in self.components]
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this wavefield output request."""
+
         if self.grid is None:
             raise ValueError("WavefieldOutput requires a grid")
 
@@ -833,6 +902,8 @@ class WavefieldOutput(Output):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "WavefieldOutput":
+        """Deserialize a wavefield output request."""
+
         data = copy.deepcopy(data)
         data.pop("_type", None)
         grid = data.pop("grid", None)
@@ -1079,6 +1150,12 @@ class JobOutputs:
         wavefields: Optional[Iterable[WavefieldOutput]] = None,
         units: Optional[Union[OutputUnits, Mapping[str, Any]]] = None,
     ):
+        """Create a collection of job output requests.
+
+        The collection always contains trace output and may also include any
+        number of ParaView and wavefield outputs.
+        """
+
         self.traces = traces or TraceOutput()
         self.paraview = []
         self.wavefields = []
@@ -1094,6 +1171,8 @@ class JobOutputs:
         return self.add(output)
 
     def add(self, output: Any) -> "JobOutputs":
+        """Add or merge an output request and return ``self`` for chaining."""
+
         if output is None:
             return self
         if isinstance(output, JobOutputs):
@@ -1127,6 +1206,8 @@ class JobOutputs:
         return self
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize the complete job output block."""
+
         payload = {
             "Units": self.units.to_fs(ctx) if self.units is not None else None,
             "traces": self.traces.to_fs(ctx),
@@ -1137,6 +1218,8 @@ class JobOutputs:
 
     @classmethod
     def from_fs(cls, data: Optional[Dict]) -> "JobOutputs":
+        """Deserialize a job output block."""
+
         data = copy.deepcopy(data or {})
         traces = data.get("traces") or data.get("receivers")
         paraview_data = data.get("ParaView", [])

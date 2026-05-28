@@ -1,3 +1,5 @@
+"""CLI helper for inspecting saved FrequenSolve job files."""
+
 import sys
 from pathlib import Path
 

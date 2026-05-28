@@ -20,10 +20,14 @@ a class by task, start here:
      - :doc:`frequensolve.mesh`
    * - Define sources, receivers, surveys, traces, and wavelets
      - :doc:`frequensolve.seismic`
+   * - Create jobs and configure local, cloud, or HPC execution
+     - :doc:`frequensolve.orchestrator`
    * - Plot traces, layered models, and VTK/VTU files
      - :doc:`frequensolve.plotting`
    * - Work with coordinate frames
      - :doc:`frequensolve.geometry`
+   * - Work with units and exported array stores
+     - :doc:`frequensolve.util`
 
 The conceptual user guide explains how these pieces fit together. Use this
 reference when you need constructor arguments, method names, or class members.
@@ -34,6 +38,7 @@ reference when you need constructor arguments, method names, or class members.
    frequensolve.geometry
    frequensolve.mesh
    frequensolve.model
+   frequensolve.orchestrator
    frequensolve.plotting
    frequensolve.project
    frequensolve.seismic

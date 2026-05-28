@@ -1,6 +1,6 @@
 """Lazy FFT backend selection.
 
-The SDK keeps pyFFTW optional so authoring/import workflows do not require it, but
+The FrequenSolve Python API keeps pyFFTW optional so authoring/import workflows do not require it, but
 numerical paths should still use it automatically when it is installed.
 """
 

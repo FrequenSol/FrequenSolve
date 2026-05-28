@@ -30,65 +30,53 @@ logging.basicConfig(level=logging.INFO)
 
 
 class MaterialBase(abc.ABC):
-    """
-    Abstract base class for materials. Requires a method to get properties
-    for a given state, plus methods to read/write from HDF5 for persistence.
-    """
+    """Base protocol for materials persisted in an HDF5 material library."""
 
     @abc.abstractmethod
     def get_property_for_state(self, prop_name: str, state: Dict[str, float]) -> float:
-        pass
+        """Return a material property value for a named state point."""
 
     @property
     @abc.abstractmethod
     def name(self) -> str:
-        pass
+        """Material name used as the library key."""
 
     @abc.abstractmethod
     def to_hdf(self, hdf_group: h5py.Group) -> None:
-        """
-        Save all necessary data into hdf_group. Should also save enough metadata
-        to reconstruct the object type (class) on load.
-        """
-        pass
+        """Write enough data and metadata to reconstruct the material."""
 
     @classmethod
     @abc.abstractmethod
     def from_hdf(cls, hdf_group: h5py.Group) -> "MaterialBase":
-        """
-        Load material data from hdf_group and return the appropriate subclass instance.
-        """
+        """Load a material from an HDF5 group."""
 
 
 class ConstantMaterial(MaterialBase):
-    """
-    A simple material with constant property values.
-    """
+    """Material whose properties do not vary with state."""
 
     def __init__(self, mat_name: str, properties: Dict[str, float]):
-        """
-        Attributes:
-            mat_name (str): name of the material
-            properties (dict): { property_name -> value }
+        """Create a material from a fixed property dictionary.
+
+        Args:
+            mat_name: Material name.
+            properties: Mapping from property name to constant value.
         """
         self._name = mat_name
         self._properties = properties
 
     @property
     def name(self) -> str:
+        """Material name used as the library key."""
         return self._name
 
     def get_property_for_state(self, prop_name: str, state: Dict[str, float]) -> float:
+        """Return a constant property value, ignoring the state argument."""
         if prop_name not in self._properties:
             raise ValueError(f"Property '{prop_name}' not defined in '{self._name}'")
         return self._properties[prop_name]
 
     def to_hdf(self, hdf_group: h5py.Group) -> None:
-        """
-        Store:
-            material class name (so we know how to load it)
-            property dictionary as a JSON (or separate datasets).
-        """
+        """Store the material type, name, and property dictionary in HDF5."""
         hdf_group.attrs["class_type"] = "ConstantMaterial"
         # Save the name
         hdf_group.attrs["material_name"] = self._name
@@ -98,9 +86,7 @@ class ConstantMaterial(MaterialBase):
 
     @classmethod
     def from_hdf(cls, hdf_group: h5py.Group) -> "ConstantMaterial":
-        """
-        Recreate from the stored JSON data.
-        """
+        """Recreate a constant material from its HDF5 representation."""
         mat_name = hdf_group.attrs["material_name"]
         props_json = hdf_group["properties_json"][()].decode("utf-8")
         properties = json.loads(props_json)

@@ -58,6 +58,14 @@ Traces
    :show-inheritance:
    :noindex:
 
+Trace Records
+-------------
+
+.. automodule:: frequensolve.seismic.trace_record
+   :members:
+   :show-inheritance:
+   :noindex:
+
 Wavelet
 -------
 

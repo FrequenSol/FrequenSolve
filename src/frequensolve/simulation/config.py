@@ -1,3 +1,5 @@
+"""Simulation-level metadata shared by jobs, signals, and solver contracts."""
+
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -38,6 +40,8 @@ class SimulationConfig:
     }
 
     def __post_init__(self, axisymmetric: bool) -> None:
+        """Normalize physics and dimension aliases after dataclass initialization."""
+
         self.dimension = canonical_dimension(self.dimension)
         self.physics, self._axisymmetric = normalize_simulation_physics(
             self.physics,
@@ -69,6 +73,8 @@ class SimulationConfig:
         self._axisymmetric = False
 
     def to_fs(self, ctx=None) -> Dict:
+        """Serialize this simulation configuration to the solver payload."""
+
         project_path = self._proj_path
         if project_path is None:
             project_path = getattr(self, "project_path", None)
@@ -82,6 +88,8 @@ class SimulationConfig:
 
     @classmethod
     def from_fs(cls, data: Dict[str, Any]) -> "SimulationConfig":
+        """Deserialize simulation configuration from a solver payload."""
+
         return cls(
             name=data.get("name"),
             physics=data.get("physics"),

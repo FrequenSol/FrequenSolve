@@ -1,3 +1,5 @@
+"""High-level accessors for solver trace output datasets."""
+
 from __future__ import annotations
 
 import warnings
@@ -29,6 +31,8 @@ class TraceDataset:
     _store: Optional[TraceStore] = None
 
     def __post_init__(self) -> None:
+        """Validate manifest coverage before any files are opened."""
+
         if self.upscale < 1:
             raise ValueError("TraceDataset upscale must be >= 1")
         if not self.manifest.files:
@@ -38,6 +42,8 @@ class TraceDataset:
 
     @property
     def metadata(self) -> Dict[str, Any]:
+        """Trace-store metadata derived from the manifest."""
+
         f_list = np.sort(np.asarray(list(self.manifest.frequencies.values())))
         df = float(np.diff(f_list).min()) if len(f_list) > 1 else 1.0
         laplace_map = {
@@ -72,10 +78,14 @@ class TraceDataset:
 
     @property
     def files(self) -> List[str]:
+        """Trace file paths as strings for compatibility with ``TraceStore``."""
+
         return [str(file) for file in self.manifest.files]
 
     @property
     def paths(self) -> List[Path]:
+        """Trace file paths as ``Path`` objects."""
+
         return [Path(file) for file in self.manifest.files]
 
     @classmethod
@@ -85,6 +95,8 @@ class TraceDataset:
         upscale: int = 1,
         project_path: Optional[Path] = None,
     ) -> "TraceDataset":
+        """Open trace outputs declared by a simulation job."""
+
         return cls.from_manifest(
             TraceManifest.from_job(
                 job,
@@ -100,6 +112,8 @@ class TraceDataset:
         manifest: TraceManifest,
         upscale: int = 1,
     ) -> "TraceDataset":
+        """Open trace outputs from a resolved trace manifest."""
+
         packed_file = manifest.packed_file
         if packed_file is not None:
             packed_incomplete = not manifest.packed_complete
@@ -307,6 +321,8 @@ class TraceDataset:
         upscale: int = 1,
         project_path: Optional[Path] = None,
     ) -> "TraceDataset":
+        """Open traces from a manifest, job, or direct trace HDF5 file path."""
+
         if isinstance(source, TraceManifest):
             return cls.from_manifest(source, upscale=upscale)
         if hasattr(source, "trace_manifest"):
@@ -339,6 +355,8 @@ class TraceDataset:
         project_path: Optional[Path] = None,
         duplicate: str = "first",
     ) -> "TraceDataset":
+        """Combine trace outputs from multiple jobs into one dataset."""
+
         datasets = [
             cls.from_job(job, upscale=upscale, project_path=project_path)
             for job in jobs
@@ -351,6 +369,8 @@ class TraceDataset:
         datasets: Iterable["TraceDataset"],
         duplicate: str = "first",
     ) -> "TraceDataset":
+        """Combine multiple trace datasets by merging their manifests."""
+
         datasets = list(datasets)
         if not datasets:
             raise ValueError("At least one TraceDataset is required")
@@ -371,6 +391,8 @@ class TraceDataset:
 
     @property
     def store(self) -> TraceStore:
+        """Lazily opened lower-level trace store."""
+
         if self._store is None:
             store = TraceStore(
                 metadata=self.metadata,
@@ -422,6 +444,8 @@ class TraceDataset:
         )
 
     def times(self, upscale: Optional[int] = None) -> np.ndarray:
+        """Return time samples implied by the frequency sampling."""
+
         upscale = self.upscale if upscale is None else upscale
         sampling = UniformSweepSampling(
             f_min=0.0,
@@ -433,30 +457,46 @@ class TraceDataset:
 
     @property
     def groups(self) -> list[str]:
+        """Names of available receiver or wavefield trace groups."""
+
         return self.store.groups
 
     def components(self, group: str):
+        """List components available for a trace group."""
+
         return self.store.components(group)
 
     def sources(self, group: str):
+        """List source ids available for a trace group."""
+
         return self.store.sources(group)
 
     def receivers(self, group: str):
+        """List receiver ids available for a trace group."""
+
         return self.store.receivers(group)
 
     def frequencies(self, group: Optional[str] = None):
+        """Return available frequencies globally or for one trace group."""
+
         if group is not None:
             return self.store.frequencies(group)
         return np.sort(np.asarray(list(self.metadata["f_map"].values())))
 
     def laplace(self, group: Optional[str] = None):
+        """Return Laplace damping values globally or for one trace group."""
+
         return self.store.laplace(group)
 
     def format_summary(self, colorize: bool = False) -> TraceSummary:
+        """Return a formatted summary of available trace contents."""
+
         return self.store.format_summary(colorize=colorize)
 
     @property
     def summary(self) -> TraceSummary:
+        """Notebook-friendly summary of available trace contents."""
+
         return self.store.summary
 
     def print_summary(
@@ -465,12 +505,18 @@ class TraceDataset:
         colorize: Optional[bool] = None,
         file: Optional[Any] = None,
     ) -> TraceSummary:
+        """Print and return a summary of available trace contents."""
+
         return self.store.print_summary(colorize=colorize, file=file)
 
     def open_frequency_domain(self, group: str):
+        """Open the raw frequency-domain HDF5 view for one trace group."""
+
         return self.store.read_h5(group)
 
     def survey_tables(self) -> Dict[str, Any]:
+        """Return source/receiver survey tables stored with the traces."""
+
         return self.store.survey_tables()
 
     def frequency_domain(
@@ -481,6 +527,8 @@ class TraceDataset:
         wavelet: Optional[Wavelet] = None,
         **kwargs,
     ):
+        """Read frequency-domain traces for one group/component/source."""
+
         return self.store.read_FD(group, component, source, wavelet=wavelet, **kwargs)
 
     def time_domain(
@@ -494,6 +542,8 @@ class TraceDataset:
         laplace_compensation: str = "auto",
         **kwargs,
     ):
+        """Synthesize time-domain traces for one group/component/source."""
+
         return self.store.read_TD(
             group,
             component,
@@ -515,6 +565,8 @@ class TraceDataset:
         T_max: Optional[float] = None,
         **kwargs,
     ):
+        """Read Laplace-domain traces for one group/component/source."""
+
         return self.store.read_LD(
             group,
             component,
@@ -533,6 +585,8 @@ class TraceDataset:
         wavelet: Optional[Wavelet] = None,
         **kwargs,
     ):
+        """Short alias for :meth:`frequency_domain`."""
+
         return self.frequency_domain(
             group,
             component,
@@ -552,6 +606,8 @@ class TraceDataset:
         laplace_compensation: str = "auto",
         **kwargs,
     ):
+        """Short alias for :meth:`time_domain`."""
+
         return self.time_domain(
             group,
             component,
@@ -573,6 +629,8 @@ class TraceDataset:
         T_max: Optional[float] = None,
         **kwargs,
     ):
+        """Short alias for :meth:`laplace_domain`."""
+
         return self.laplace_domain(
             group,
             component,

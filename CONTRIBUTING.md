@@ -1,6 +1,6 @@
 # Contributing
 
-FrequenSolve is a Python SDK with optional local, cloud, HPC, visual, and docs
+FrequenSolve is a FrequenSolve Python API with optional local, cloud, HPC, visual, and docs
 dependencies. Keep changes small, test the relevant marked lanes explicitly,
 and keep public examples aligned with the current project-owned simulation API.
 

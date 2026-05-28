@@ -1,3 +1,5 @@
+"""Frequency and time sampling helpers for seismic simulations."""
+
 from abc import ABC
 from dataclasses import dataclass
 from typing import List, Optional
@@ -26,9 +28,13 @@ class DiscreteSampling(Sampling):
 
     @property
     def nfreq(self):
+        """Number of explicitly requested frequencies."""
+
         return len(self.freqs)
 
     def to_fs(self, ctx=None) -> dict:
+        """Serialize discrete sampling to the solver payload."""
+
         return {
             "f_list": self.f_list,
         }
@@ -53,55 +59,81 @@ class UniformSweepSampling(Sampling):
 
     @property
     def t0(self):
+        """First time sample after applying the configured time shift."""
+
         return -self.t_shift
 
     @property
     def T(self):
+        """Base signal period implied by the frequency spacing."""
+
         return 1 / self.df
 
     @property
     def ofreq(self):
+        """Frequency-index offset for the minimum requested frequency."""
+
         return round(self.f_min / self.df)
 
     @property
     def nfreq(self):
+        """Number of base frequency samples from zero through ``f_max``."""
+
         return round(self.f_max / self.df) + 1
 
     @property
     def ntime(self):
+        """Number of base time intervals required by the real FFT grid."""
+
         return int(2 * (self.nfreq - 1))
 
     @property
     def t_list(self):
+        """Base time samples over one period."""
+
         return np.linspace(0, self.T, self.ntime + 1)
 
     @property
     def f_list(self):
+        """Base frequency samples from zero through ``f_max``."""
+
         return np.linspace(0, self.f_max, self.nfreq)
 
     @property
     def dt(self):
+        """Base time-sample interval."""
+
         return self.T / self.ntime
 
     # Upscaled
     @property
     def nFreq(self):
+        """Upscaled number of frequency samples."""
+
         return self.upscale * (self.nfreq - 1) + 1
 
     @property
     def F_list(self):
+        """Upscaled frequency samples."""
+
         return np.linspace(0, self.upscale * self.f_max, self.nFreq)
 
     @property
     def nTime(self):
+        """Upscaled number of time intervals."""
+
         return int(2 * (self.nFreq - 1))
 
     @property
     def T_list(self):
+        """Upscaled time samples over one period."""
+
         return np.linspace(0, self.T, self.nTime + 1)
 
     @property
     def dT(self):
+        """Upscaled time-sample interval."""
+
         return self.T / self.nTime
 
     def cutoff(self, Tf: Optional[float] = None):
@@ -122,6 +154,8 @@ class UniformSweepSampling(Sampling):
             return self.nTime, self.T
 
     def to_fs(self, ctx=None) -> dict:
+        """Serialize uniform sweep sampling to the solver payload."""
+
         return {
             "f_min": self.f_min,
             "f_max": self.f_max,
@@ -131,6 +165,8 @@ class UniformSweepSampling(Sampling):
 
     @classmethod
     def from_fs(cls, data: dict) -> "Sampling":
+        """Deserialize uniform sweep sampling from a solver payload."""
+
         return cls(
             f_min=data["f_min"],
             f_max=data["f_max"],

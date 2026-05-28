@@ -1,7 +1,7 @@
 FrequenSolve Documentation
 ==========================
 
-Welcome to FrequenSolve's documentation. FrequenSolve is the Python :term:`SDK`
+Welcome to FrequenSolve's documentation. FrequenSolve is the :term:`Python API`
 for authoring, validating, launching, and reading finite-element wave
 :term:`simulations <simulation>`. The Python package can build and inspect
 :term:`projects <project>` on any development machine; executing
@@ -23,7 +23,7 @@ Getting Started
 If you're new to FrequenSolve, follow this path:
 
 - :doc:`installation`
-- :doc:`quickstart` to build the compact SDK workflow and see where site
+- :doc:`quickstart` to build the compact FrequenSolve Python API workflow and see where site
   execution enters
 - :download:`Acoustic modeling
   <../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>` for the

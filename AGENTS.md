@@ -1,6 +1,6 @@
 # FrequenSolve — Agent Guide
 
-This repository contains the FrequenSolve Python SDK for authoring, packaging,
+This repository contains the FrequenSolve Python API for authoring, packaging,
 and running FrequenSol finite-element simulations. Agents should read this file
 first to orient themselves before changing code, tests, docs, or release assets.
 
@@ -95,7 +95,7 @@ Required labels:
 Suggested component labels for this repository:
 
 - `component:python-sdk` — public Python APIs, models, simulation builders, and
-  user-facing SDK behavior.
+  user-facing FrequenSolve Python API behavior.
 - `component:solver-contracts` — generated input/output contracts consumed by
   solver builds.
 - `component:orchestrator` — local, SLURM, cloud, and execution orchestration.

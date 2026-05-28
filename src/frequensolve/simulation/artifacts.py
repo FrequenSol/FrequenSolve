@@ -1,3 +1,5 @@
+"""Runtime artifact metadata and handles for solver trace/wavefield outputs."""
+
 from __future__ import annotations
 
 import copy
@@ -186,7 +188,11 @@ def _artifact_matches_kind(artifact: "OutputArtifact", kind: Optional[str]) -> b
 
 @dataclass(frozen=True)
 class OutputArtifact:
-    """One file produced by a solver run."""
+    """One file produced by a solver run.
+
+    Artifacts are read from solver run metadata and can be filtered by kind,
+    schema, suffix, or output base when users fetch result products.
+    """
 
     path: Path
     relative_path: Optional[str] = None
@@ -198,6 +204,8 @@ class OutputArtifact:
     def from_fs(
         cls, data: Mapping[str, Any], result_path: Optional[Union[str, Path]] = None
     ) -> "OutputArtifact":
+        """Deserialize an artifact from run metadata."""
+
         root = _as_path(result_path) if result_path is not None else None
         raw_path = data.get("path") or data.get("relative_path")
         path = _as_path(raw_path)
@@ -217,6 +225,8 @@ class OutputArtifact:
         )
 
     def to_fs(self, project_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
+        """Serialize this artifact for run metadata or trace manifests."""
+
         base = _as_path(project_path) if project_path is not None else None
         payload = {
             "path": str(self.path),
@@ -243,6 +253,8 @@ class RunMetadata:
 
     @classmethod
     def read(cls, result_path: Union[str, Path]) -> "RunMetadata":
+        """Read solver metadata files under a result directory."""
+
         result_path = _as_path(result_path)
         run_dir = result_path / "_fs_run"
 
@@ -265,6 +277,8 @@ class RunMetadata:
 
     @property
     def successful(self) -> bool:
+        """Whether metadata reports a successful or skipped run."""
+
         if self.manifest:
             status = self.manifest.get("exit_status")
             if isinstance(status, Mapping):
@@ -276,6 +290,8 @@ class RunMetadata:
 
     @property
     def job_file_hash(self) -> Optional[str]:
+        """Hash of the job JSON recorded by the solver, when available."""
+
         if "job_file_sha256" in self.manifest:
             return self.manifest.get("job_file_sha256")
         inputs = self.manifest.get("inputs", {})
@@ -287,6 +303,8 @@ class RunMetadata:
 
     @property
     def simulation_file_hash(self) -> Optional[str]:
+        """Hash of the simulation JSON recorded by the solver, when available."""
+
         if "simulation_file_sha256" in self.manifest:
             return self.manifest.get("simulation_file_sha256")
         inputs = self.manifest.get("inputs", {})
@@ -387,7 +405,12 @@ class RunMetadata:
 
 @dataclass(frozen=True)
 class TraceManifest:
-    """Typed description of a job's per-frequency trace files."""
+    """Typed description of trace files expected or produced by a job.
+
+    The manifest bridges saved job metadata, legacy per-frequency files, and
+    newer packed trace outputs so :class:`frequensolve.seismic.TraceDataset`
+    can open whichever layout exists on disk.
+    """
 
     files: List[Path]
     frequencies: Dict[int, float]
@@ -412,6 +435,8 @@ class TraceManifest:
         project_path: Optional[Union[str, Path]] = None,
         resolve_legacy: bool = False,
     ) -> "TraceManifest":
+        """Build a trace manifest from a simulation job."""
+
         sim = job.simulation
         source_project = _as_path(job.project_path).resolve()
         local_project = (
@@ -463,6 +488,8 @@ class TraceManifest:
         manifests: Iterable["TraceManifest"],
         duplicate: str = "first",
     ) -> "TraceManifest":
+        """Merge manifests from multiple jobs into one frequency-ordered manifest."""
+
         manifests = list(manifests)
         if not manifests:
             raise ValueError("At least one TraceManifest is required")
@@ -592,6 +619,8 @@ class TraceManifest:
 
     @staticmethod
     def resolve_trace_file(path: Union[str, Path]) -> Path:
+        """Return an existing trace file, including legacy receiver-file names."""
+
         path = _as_path(path)
         if path.exists():
             return path
@@ -661,11 +690,15 @@ class TraceManifest:
 
     @property
     def packed_frequencies(self) -> Dict[int, float]:
+        """Frequencies recorded in the packed trace manifest."""
+
         packed = self._packed_manifest(self.result_path, self.output_path)
         return {} if packed is None else packed[1]
 
     @property
     def packed_laplace(self) -> Dict[int, float]:
+        """Laplace damping values recorded in the packed trace manifest."""
+
         packed = self._packed_manifest(self.result_path, self.output_path)
         return {} if packed is None else packed[2]
 
@@ -693,6 +726,8 @@ class TraceManifest:
         return not self.missing_packed_frequencies
 
     def packed_incomplete_message(self) -> str:
+        """Human-readable explanation of missing packed trace frequencies."""
+
         missing = self.missing_packed_frequencies
         detail = _compact_frequency_ranges(missing)
         packed_file = self.packed_file or self.output_path / "traces.h5"
@@ -703,6 +738,8 @@ class TraceManifest:
 
     @property
     def existing_files(self) -> List[Path]:
+        """Existing trace files that can be opened for this manifest."""
+
         packed_file = self.packed_file
         if packed_file is not None and self.packed_complete:
             return [packed_file]
@@ -714,6 +751,8 @@ class TraceManifest:
 
     @property
     def complete(self) -> bool:
+        """Whether every expected trace file or packed frequency exists."""
+
         if self.packed_file is not None:
             return self.packed_complete
         return bool(self.files) and all(
@@ -721,6 +760,8 @@ class TraceManifest:
         )
 
     def to_fs(self) -> Dict[str, Any]:
+        """Serialize this manifest to a JSON-compatible mapping."""
+
         return {
             "schema": "frequensolve-trace-manifest-1",
             "files": [str(file) for file in self.files],
@@ -758,6 +799,8 @@ class TraceOutputHandle:
     job: Any
 
     def __call__(self, path: Union[str, Path] = "traces", **kwargs) -> Any:
+        """Configure the job's trace output and return the owning job."""
+
         from frequensolve.simulation.outputs import TraceOutput
 
         self.job.outputs.traces = TraceOutput(path=path, **kwargs)
@@ -765,9 +808,13 @@ class TraceOutputHandle:
 
     @property
     def manifest(self) -> TraceManifest:
+        """Resolved trace manifest for the owning job."""
+
         return self.job.trace_manifest
 
     def open(self, upscale: int = 1, project_path: Optional[Union[str, Path]] = None):
+        """Open the owning job's trace outputs as a ``TraceDataset``."""
+
         from frequensolve.seismic.traces import TraceDataset
 
         manifest = TraceManifest.from_job(
@@ -778,6 +825,8 @@ class TraceOutputHandle:
         return TraceDataset.from_manifest(manifest, upscale=upscale)
 
     def to_fs(self) -> Dict[str, Any]:
+        """Serialize the owning job's trace manifest."""
+
         return self.manifest.to_fs()
 
     def __getitem__(self, key: str) -> Any:
@@ -791,6 +840,8 @@ class WavefieldOutputHandle:
     job: Any
 
     def __call__(self, *args, **kwargs) -> Any:
+        """Add a wavefield output to the job and return the owning job."""
+
         from frequensolve.simulation.outputs import wavefield
 
         self.job += wavefield(*args, **kwargs)
@@ -798,9 +849,13 @@ class WavefieldOutputHandle:
 
     @property
     def manifest(self) -> TraceManifest:
+        """Resolved wavefield trace manifest for the owning job."""
+
         return self.job.wavefield_manifest
 
     def open(self, upscale: int = 1, project_path: Optional[Union[str, Path]] = None):
+        """Open the owning job's wavefield traces as a ``TraceDataset``."""
+
         from frequensolve.seismic.traces import TraceDataset
 
         manifest = TraceManifest.from_job(
@@ -814,6 +869,8 @@ class WavefieldOutputHandle:
         return TraceDataset.from_manifest(manifest, upscale=upscale)
 
     def to_fs(self) -> Dict[str, Any]:
+        """Serialize the owning job's wavefield trace manifest."""
+
         return self.manifest.to_fs()
 
     def __getitem__(self, key: str) -> Any:

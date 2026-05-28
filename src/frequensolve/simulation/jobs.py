@@ -1,3 +1,5 @@
+"""Simulation job containers, saved-job layouts, and run bookkeeping."""
+
 import copy
 import hashlib
 import importlib
@@ -54,6 +56,8 @@ class JobLayout:
 
     @classmethod
     def from_job(cls, job: "SimulationJob", project: Union[str, Path]) -> "JobLayout":
+        """Construct default saved paths for a job under ``project``."""
+
         return cls(
             project=Path(project),
             simulation_name=job.simulation.name,
@@ -99,6 +103,8 @@ class JobLayout:
         return path
 
     def with_project(self, project: Union[str, Path]) -> "JobLayout":
+        """Return this layout remapped to a different project root."""
+
         return JobLayout(
             project=Path(project),
             simulation_name=self.simulation_name,
@@ -110,10 +116,14 @@ class JobLayout:
 
     @property
     def simulation_dir(self) -> Path:
+        """Directory containing the saved simulation JSON."""
+
         return self.simulation_file.parent
 
     @property
     def simulation_file(self) -> Path:
+        """Absolute path to the saved simulation JSON."""
+
         relpath = self.simulation_relpath
         if relpath is None:
             relpath = (
@@ -125,14 +135,20 @@ class JobLayout:
 
     @property
     def job_dir(self) -> Path:
+        """Directory containing the saved job JSON and logs."""
+
         return self.result_dir.parent
 
     @property
     def job_file(self) -> Path:
+        """Absolute path to the saved job JSON."""
+
         return self.job_dir / (self.job_file_name or f"{self.job_name}.json")
 
     @property
     def result_dir(self) -> Path:
+        """Directory where local or fetched solver results are stored."""
+
         relpath = self.result_relpath
         if relpath is None:
             relpath = Path("jobs") / self.simulation_name / self.job_name / "results"
@@ -140,6 +156,8 @@ class JobLayout:
 
     @property
     def logs_dir(self) -> Path:
+        """Directory where job logs are stored."""
+
         return self.job_dir / "logs"
 
 
@@ -166,6 +184,8 @@ class JobRunRecord:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_fs(self) -> Dict[str, Any]:
+        """Serialize this run record to a JSON-compatible mapping."""
+
         payload = {
             "site": self.site,
             "work_dir": str(self.work_dir),
@@ -194,6 +214,8 @@ class JobRunRecord:
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "JobRunRecord":
+        """Deserialize a run record from saved job metadata."""
+
         return cls(
             site=str(data["site"]),
             work_dir=Path(data["work_dir"]),
@@ -215,6 +237,8 @@ class JobRunRecord:
         )
 
     def with_updates(self, **updates: Any) -> "JobRunRecord":
+        """Return a copy with selected fields replaced."""
+
         data = self.to_fs()
         data.update(updates)
         return self.from_fs(data)
@@ -223,6 +247,13 @@ class JobRunRecord:
 @register_class
 @dataclass
 class SimulationJob(ABC):
+    """Base class for saved, runnable FrequenSolve simulation jobs.
+
+    Jobs bind a saved simulation to a workflow, frequency list, and requested
+    outputs. They can be serialized to the solver contract, fingerprinted for
+    rerun checks, submitted to a site, and reopened later from JSON.
+    """
+
     name: str
     simulation: BaseSimulation
     workflow: str
@@ -232,6 +263,8 @@ class SimulationJob(ABC):
     _job_id: Optional[str] = None
 
     def __post_init__(self) -> None:
+        """Validate the job and normalize frequency/output containers."""
+
         if not self.name:
             raise ValueError("SimulationJob requires a non-empty name")
         if self.simulation is None:
@@ -248,32 +281,44 @@ class SimulationJob(ABC):
         return self
 
     def add_output(self, output: Union[Output, Iterable[Output]]) -> "SimulationJob":
+        """Add one or more output requests and return ``self``."""
+
         self += output
         return self
 
     def output_units(self, **units) -> "SimulationJob":
+        """Set output-unit defaults and return ``self``."""
+
         self.outputs.units = OutputUnits(**units)
         return self
 
     def output_traces(
         self, path: Union[str, Path] = "traces", **kwargs
     ) -> "SimulationJob":
+        """Set the receiver trace output path and return ``self``."""
+
         self.outputs.traces = TraceOutput(path=path, **kwargs)
         return self
 
     def paraview(self, *args, **kwargs) -> "SimulationJob":
+        """Add a ParaView output request and return ``self``."""
+
         from frequensolve.simulation.outputs import paraview
 
         self += paraview(*args, **kwargs)
         return self
 
     def wavefield(self, *args, **kwargs) -> "SimulationJob":
+        """Add a wavefield trace output request and return ``self``."""
+
         from frequensolve.simulation.outputs import wavefield
 
         self += wavefield(*args, **kwargs)
         return self
 
     def validate_outputs(self) -> None:
+        """Validate output requests against the current job frequency list."""
+
         if self.outputs.paraview and len(self.f_list) != 1:
             raise ValueError(
                 "ParaView outputs currently require a single-frequency job. "
@@ -287,6 +332,8 @@ class SimulationJob(ABC):
         base_path: Optional[Union[str, Path]] = None,
         project_path: Optional[Union[str, Path]] = None,
     ) -> "SimulationJob":
+        """Deserialize a concrete job subclass from a solver payload."""
+
         data = dict(d)
         class_name = data.get("_type")
         if class_name not in class_registry:
@@ -325,6 +372,8 @@ class SimulationJob(ABC):
         *,
         project_path: Optional[Union[str, Path]] = None,
     ):
+        """Load a saved job JSON file or directory."""
+
         if isinstance(path, SimulationJob):
             path = path.job_file
         path = cls._job_file_from_path(path)
@@ -446,6 +495,8 @@ class SimulationJob(ABC):
         return Path(project_path).resolve()
 
     def to_fs(self, *, project_relative: bool = False) -> Dict[str, Any]:
+        """Serialize this job to the solver job contract."""
+
         self.validate_outputs()
         f_list = self._encoded_frequencies()
         payload = {
@@ -487,6 +538,8 @@ class SimulationJob(ABC):
         return f"sha256:{digest.hexdigest()}"
 
     def fingerprint_payload(self) -> Dict[str, Any]:
+        """Return the deterministic payload used for whole-job rerun checks."""
+
         job_data = self.to_fs()
         if self.simulation._file is None:
             raise ValueError("Simulation must be saved before fingerprinting a job")
@@ -503,6 +556,8 @@ class SimulationJob(ABC):
         }
 
     def fingerprint(self) -> str:
+        """Return a stable hash of the whole-job fingerprint payload."""
+
         return self._hash_payload(self.fingerprint_payload())
 
     @staticmethod
@@ -551,18 +606,26 @@ class SimulationJob(ABC):
         }
 
     def task_fingerprint(self, task: int) -> str:
+        """Return a stable hash for one one-based frequency task."""
+
         return self._hash_payload(self.task_fingerprint_payload(task))
 
     @property
     def run_state_file(self) -> Path:
+        """Path to Python-side run-state metadata for this job."""
+
         return self._result_path / "_fs_python_run.json"
 
     @property
     def run_records_file(self) -> Path:
+        """Path to saved remote run records for this job."""
+
         return self._result_path / "_fs_run" / "runs.json"
 
     @property
     def run_metadata(self) -> RunMetadata:
+        """Metadata read from the current result directory."""
+
         return RunMetadata.read(self._result_path)
 
     def run_records(self) -> List[JobRunRecord]:
@@ -704,6 +767,8 @@ class SimulationJob(ABC):
         return self._resolve_fetch_site(site).fetch_logs(self, **kwargs)
 
     def expected_trace_files(self) -> List[Path]:
+        """Trace files expected for this job's receiver trace output."""
+
         return list(self.trace_manifest.files)
 
     @staticmethod
@@ -715,6 +780,8 @@ class SimulationJob(ABC):
         return path.exists() or cls._legacy_trace_file(path).exists()
 
     def trace_outputs_exist(self) -> bool:
+        """Whether all expected receiver trace outputs are present."""
+
         manifest = self.trace_manifest
         if manifest.packed_file is not None and not manifest.packed_complete:
             warnings.warn(
@@ -3124,6 +3191,8 @@ class SimulationJob(ABC):
 
 @register_class
 class FrequencyDomainJob(SimulationJob):
+    """Forward job at explicitly requested real or complex frequencies."""
+
     def __init__(
         self,
         name: str,
@@ -3131,6 +3200,8 @@ class FrequencyDomainJob(SimulationJob):
         f_list: List[Union[float, complex]],
         outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
     ):
+        """Create a frequency-domain forward job."""
+
         workflow = "forward"
         frequencies = np.asarray(f_list)
         if np.iscomplexobj(frequencies):
@@ -3150,6 +3221,8 @@ class FrequencyDomainJob(SimulationJob):
         base_path: Optional[Union[str, Path]] = None,
         project_path: Optional[Union[str, Path]] = None,
     ):
+        """Deserialize a frequency-domain job from a solver payload."""
+
         sim = SimulationJob._load_simulation_for_job(
             d["simulation"],
             base_path=base_path,
@@ -3169,6 +3242,8 @@ class FrequencyDomainJob(SimulationJob):
 
 @register_class
 class TimeDomainJob(SimulationJob):
+    """Forward job represented by a uniform frequency sweep for time synthesis."""
+
     def __init__(
         self,
         name: str,
@@ -3181,6 +3256,8 @@ class TimeDomainJob(SimulationJob):
         T_max: Optional[float] = None,
         outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
     ):
+        """Create a time-domain job from ``f_min``/``f_max`` and ``df`` or ``T_max``."""
+
         if damping_factor is not None and laplace is not None:
             raise ValueError("Specify only one of damping_factor or laplace")
         if df is None and T_max is None:
@@ -3220,6 +3297,8 @@ class TimeDomainJob(SimulationJob):
         base_path: Optional[Union[str, Path]] = None,
         project_path: Optional[Union[str, Path]] = None,
     ):
+        """Deserialize a time-domain job from a solver payload."""
+
         f_list = cls._decode_frequencies(d["f_list"])
         if f_list.size < 2:
             raise ValueError("TimeDomainJob requires at least two frequencies")

@@ -1,17 +1,17 @@
-# FrequenSolve Python SDK
+# FrequenSolve Python API
 
 [![Coverage](https://codecov.io/gh/FrequenSol/FrequenSolve/branch/v2/graph/badge.svg)](https://app.codecov.io/gh/FrequenSol/FrequenSolve/tree/v2)
 [![Python 3.10-3.14](https://img.shields.io/badge/python-3.10--3.14-blue.svg)](pyproject.toml)
 
-FrequenSolve Python is the authoring and orchestration SDK for FrequenSol finite-element wave simulation software. It builds solver-ready simulation inputs, manages model and acquisition metadata, reads trace outputs, and provides optional adapters for local, SLURM, and cloud execution.
+FrequenSolve Python is the authoring and orchestration API for FrequenSol finite-element wave simulation software. It builds solver-ready simulation inputs, manages model and acquisition metadata, reads trace outputs, and provides optional adapters for local, SLURM, and cloud execution.
 
-The commercial solver binaries and backend services are licensed separately. This repository contains the Python SDK and lightweight mesh bindings needed to prepare inputs and inspect outputs.
+The commercial solver binaries and backend services are licensed separately. This repository contains the FrequenSolve Python API and lightweight mesh bindings needed to prepare inputs and inspect outputs.
 
 ## Installation
 
 FrequenSolve supports Python 3.10 through 3.14 on macOS and Linux.
 
-Install the released SDK with:
+Install the released FrequenSolve Python API with:
 
 ```bash
 python -m pip install frequensolve
@@ -64,7 +64,7 @@ sim += model.hex_mesh_generator([8, 4])
 project.save()
 ```
 
-The SDK exports JSON/HDF5 contracts consumed by fast solver builds. Solver execution requires a licensed solver binary or an enabled FrequenSol execution backend.
+The FrequenSolve Python API exports JSON/HDF5 contracts consumed by fast solver builds. Solver execution requires a licensed solver binary or an enabled FrequenSol execution backend.
 
 ## Sites And Tutorials
 
@@ -128,4 +128,4 @@ Fast solver contract updates are tracked in `docs/source/fast_solver_api_updates
 
 ## License And Support
 
-FrequenSolve Python SDK is open source under the MIT license. The fast solver is licensed separately; for solver access and support, contact support@frequensol.com.
+FrequenSolve Python API is open source under the MIT license. The fast solver is licensed separately; for solver access and support, contact support@frequensol.com.

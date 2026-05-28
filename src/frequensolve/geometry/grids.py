@@ -1,3 +1,5 @@
+"""Grid definitions for regular coordinate sampling and wavefield outputs."""
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Generator, List, Optional, Tuple
@@ -14,7 +16,7 @@ __all__ = ["Grid", "CartesianGrid"]
 @register_class
 @dataclass
 class Grid(TypeTaggedMixin, ABC):
-    """Base class for all grid types."""
+    """Base class for solver-facing coordinate grids."""
 
     @abstractmethod
     def get_coords(self, slices: Optional[List[slice]] = None) -> np.ndarray:
@@ -43,6 +45,8 @@ class Grid(TypeTaggedMixin, ABC):
 
     @classmethod
     def from_fs(cls, data: Dict) -> "Grid":
+        """Deserialize a registered grid subclass from a solver payload."""
+
         return cls.dispatch_from_fs(data, class_registry)
 
 
@@ -52,17 +56,22 @@ class Grid(TypeTaggedMixin, ABC):
 @register_class
 @dataclass
 class CartesianGrid(Grid):
-    """A uniform Cartesian grid for defining receiver locations.
+    """Uniform Cartesian grid used for receivers, properties, and wavefields.
 
-    This class represents a uniform grid in 2D or 3D space, defined by the number of points,
-    starting coordinates, ending coordinates, and/or grid spacing in each dimension.
-    Only two of n, dx, and x1 need to be specified - the third will be calculated.
+    Specify any two of ``n``, ``x1``, and ``dx`` together with ``x0``; the
+    missing quantity is calculated during initialization. The stored axis order
+    follows the solver convention, while :attr:`shape` returns the xarray-style
+    reversed order used by sampled data arrays.
 
     Attributes:
-       n  (List[int]):   Number of points in each dimension.
-       x0 (List[float]): Starting coordinates in each dimension.
-       x1 (List[float]): Ending coordinates in each dimension.
-       dx (List[float]): Grid spacing in each dimension.
+        n: Number of points in each dimension.
+        x0: Starting coordinates in each dimension.
+        x1: Ending coordinates in each dimension.
+        dx: Grid spacing in each dimension.
+        dims: Coordinate dimension names. Defaults to ``["x"]``, ``["x", "z"]``,
+            or ``["x", "y", "z"]`` based on dimensionality.
+        units: Coordinate units.
+        system: Coordinate-system name for the grid coordinates.
     """
 
     n: List[int] = field(default_factory=list)
@@ -74,6 +83,8 @@ class CartesianGrid(Grid):
     system: Optional[str] = None
 
     def __post_init__(self):
+        """Derive missing spacing, endpoint, count, and default dimension names."""
+
         if len(self.x1) == 0:
             self.x1 = [x0 + (n - 1) * dx for x0, n, dx in zip(self.x0, self.n, self.dx)]
         elif len(self.dx) == 0:
@@ -133,7 +144,7 @@ class CartesianGrid(Grid):
             raise ValueError("Grid must have 1, 2, or 3 dimensions")
 
     def as_xarray(self):
-        """Converts the grid to an xarray Dataset (without variables)."""
+        """Return an xarray ``DataArray`` shell carrying this grid's coordinates."""
         from xarray import DataArray
 
         if len(self.dims) == len(self.n):
@@ -156,7 +167,7 @@ class CartesianGrid(Grid):
 
     @classmethod
     def from_xarray(cls, xarr: "xr.DataArray") -> "CartesianGrid":
-        """Converts the grid to an xarray Dataset (without variables)."""
+        """Build a grid from an xarray object with uniformly spaced coordinates."""
 
         coords = xarr.coords
         dims = xarr.dims[::-1]
@@ -178,10 +189,14 @@ class CartesianGrid(Grid):
 
     @property
     def dimension(self) -> int:
+        """Number of coordinate dimensions in the grid."""
+
         return len(self.n)
 
     @property
     def shape(self) -> Tuple[int, ...]:
+        """Data-array shape corresponding to this grid's dimension order."""
+
         return tuple(self.n[::-1])
 
     # TODO: indexing below is confusing to align with fortran definition, should be changed

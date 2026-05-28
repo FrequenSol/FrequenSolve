@@ -2,13 +2,13 @@ Fast Solver API Updates
 =======================
 
 This page is the implementation checklist for :term:`fast solver` contracts
-required by the public Python :term:`SDK`. The Python SDK now treats these
+required by the public :term:`Python API`. The FrequenSolve Python API now treats these
 features as first-class API concepts and keeps any legacy compatibility private.
 
 Input Layout
 ------------
 
-The :term:`SDK` is converging on a two-file default export:
+The :term:`Python API` is converging on a two-file default export:
 
 * ``sim.json`` contains solver configuration, model references, acquisition,
   :term:`output requests <output request>`, units, coordinate-system declarations, :term:`rerun fingerprints <rerun fingerprint>`,
@@ -18,7 +18,7 @@ The :term:`SDK` is converging on a two-file default export:
 
 The solver should continue to accept external model files when a user explicitly
 references a file-backed property, :term:`SEG-Y` input, or another specialized format.
-The SDK will not read or validate server-only files before export.
+The FrequenSolve Python API will not read or validate server-only files before export.
 
 Units and Coordinate Systems
 ----------------------------
@@ -35,7 +35,7 @@ coordinate-bearing value is accepted:
 * ``value``: scalar, vector, or array payload.
 * ``units``: optional :term:`Pint`-compatible unit string.
 * ``system``: optional coordinate-system name.
-* additional advanced fields supplied by SDK ``extra`` dictionaries.
+* additional advanced fields supplied by Python API ``extra`` dictionaries.
 
 :term:`Simulations <simulation>` may include ``global_coordinate_system`` and ``coordinate_systems``.
 Solver outputs should store physical source and receiver coordinates in the
@@ -76,7 +76,7 @@ Expression-backed property:
    }
 
 The fast solver should evaluate expression-backed properties after loading
-referenced base properties. Expression nodes currently used by the SDK are ``property``,
+referenced base properties. Expression nodes currently used by the FrequenSolve Python API are ``property``,
 ``value``, ``op``, and ``args``. Required operations are ``add``, ``subtract``,
 ``multiply``, ``divide``, and ``power``.
 
@@ -99,7 +99,7 @@ Expected :term:`HDF5` datasets:
 Trace Storage
 -------------
 
-Public :term:`SDK` naming is now ``TraceDataset``. :term:`Trace <trace>` reads return plain
+Public Python API naming is now ``TraceDataset``. :term:`Trace <trace>` reads return plain
 ``xarray.DataArray`` objects with FrequenSolve helpers available through the
 ``.fs`` accessor. The fast solver should
 rename receiver-output folders and files from ``receivers`` to ``traces`` when
@@ -149,7 +149,7 @@ value and source job metadata, not only by task number.
 
 ``outputs.json`` should list the packed trace file and trace :term:`manifest` with
 stable relative paths and schema versions. In separate-storage mode, it should
-list the shard manifest or every produced shard. The SDK can then use the fast
+list the shard manifest or every produced shard. The FrequenSolve Python API can then use the fast
 solver's output manifest as the authoritative artifact list instead of guessing
 file names.
 
@@ -157,7 +157,7 @@ Rerun Fingerprints
 ------------------
 
 The fast solver already writes useful run metadata under ``results/_fs_run``.
-The SDK now uses this directory when deciding whether a completed job is
+The FrequenSolve Python API now uses this directory when deciding whether a completed job is
 current. Required or strongly preferred files:
 
 * :term:`run manifest` data in ``run_manifest.json`` with ``schema``, ``solver_version``, ``build_id``,
@@ -175,7 +175,7 @@ A :term:`job` can be skipped or treated as complete only when:
 * ``run_manifest.json`` reports ``exit_status: "success"``;
 * ``job_file_sha256`` matches the current job JSON;
 * ``simulation_file_sha256`` matches the current simulation JSON;
-* every required trace file from the SDK ``TraceManifest`` or fast solver
+* every required trace file from the FrequenSolve Python API ``TraceManifest`` or fast solver
   ``outputs.json`` exists locally/remotely.
 
 Large local datasets may also carry dataset-level hashes in ``sim.h5``. The
@@ -191,7 +191,7 @@ should read ``Outputs`` from ``frequensolve-job-1`` files and write output paths
 relative to the job result directory. Trace output is always requested under
 ``Outputs.traces`` and new runs should write ``traces/traces_<task>.h5``.
 
-The public SDK exposes a deliberately small :term:`ParaView` API and emits the richer
+The public Python API exposes a deliberately small :term:`ParaView` API and emits the richer
 fast solver contract internally. The default writer is :term:`VTK` :term:`VTU` with
 appended binary data:
 
@@ -207,7 +207,7 @@ The only alternate writer exposed publicly for now is :term:`XDMF` backed by HDF
 
 Simple volume output continues to use ``fields`` and ``properties``. Surface
 output is exposed through shell, boundary-label, model-surface, and plane
-selectors. The SDK also exposes regular grid targets.
+selectors. The FrequenSolve Python API also exposes regular grid targets.
 
 .. code-block:: json
 
@@ -224,20 +224,20 @@ selectors. The SDK also exposes regular grid targets.
    }
 
 The only public complex field-part names are ``real``, ``imag``, and ``abs``.
-When a user requests parts, the SDK emits normalized ``items`` internally.
+When a user requests parts, the FrequenSolve Python API emits normalized ``items`` internally.
 
 Alternate data sources, :term:`VTR`, field-component bases, arbitrary item objects, and
 other specialized controls are intentionally not part of the public :term:`Python API`
 yet. They may still be supplied through advanced ``extra`` dictionaries when
 needed for internal solver testing. Advanced nested writer fields should be
-supplied through the ``writer`` argument so the SDK can keep the enforced public
+supplied through the ``writer`` argument so the FrequenSolve Python API can keep the enforced public
 ``format`` and ``encoding`` defaults intact.
 
 Mesh Adaptivity
 ---------------
 
 The :term:`fast solver` should expose the :term:`mesh adaptivity` options used by
-``adapt_mesh.F90`` as structured JSON fields. The SDK currently models:
+``adapt_mesh.F90`` as structured JSON fields. The FrequenSolve Python API currently models:
 
 * distance and :term:`surface grading` specifications;
 * grading fields compatible with ``grading_fields_m``;
@@ -245,4 +245,4 @@ The :term:`fast solver` should expose the :term:`mesh adaptivity` options used b
 * :term:`receiver grading` controls.
 
 Refinement payloads should be extensible and accept solver-specific advanced
-fields without requiring SDK changes.
+fields without requiring FrequenSolve Python API changes.

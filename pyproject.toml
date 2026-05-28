@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "frequensolve"
 dynamic = ["version"]
-description = "Python SDK for authoring and running FrequenSolve finite-element simulations"
+description = "FrequenSolve Python API for authoring and running FrequenSolve finite-element simulations"
 authors = [{ name = "FrequenSol", email = "support@frequensol.com" }]
 maintainers = [{ name = "FrequenSol", email = "support@frequensol.com" }]
 keywords = ["finite-elements", "seismic", "wave-propagation", "modeling"]

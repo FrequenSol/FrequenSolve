@@ -28,6 +28,14 @@ __all__ = [
 
 @dataclass
 class CoordinateValue:
+    """Coordinate data annotated with units and a coordinate-system name.
+
+    Use this wrapper when an argument accepts either raw coordinates or
+    coordinate-aware values. During export, ``system`` tells the solver how to
+    interpret the coordinate columns and ``units`` records the distance or angle
+    units for the values.
+    """
+
     value: Any
     units: Optional[Any] = None
     system: Optional[str] = None
@@ -35,6 +43,8 @@ class CoordinateValue:
 
     @classmethod
     def from_fs(cls, data: Any) -> Union["CoordinateValue", Any]:
+        """Build a coordinate value from a solver payload when possible."""
+
         if not isinstance(data, Mapping):
             return data
         payload = dict(data)
@@ -46,6 +56,8 @@ class CoordinateValue:
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize this value to the solver coordinate-value payload."""
+
         payload = _coordinate_value_and_units_to_fs(self.value, self.units)
         if not isinstance(payload, dict):
             payload = {"value": payload}
@@ -56,6 +68,13 @@ class CoordinateValue:
 
 @dataclass
 class Direction:
+    """Direction specification used by axes, sources, and receiver components.
+
+    A direction may be a named coordinate axis, an explicit vector, or a basis
+    described by component names. Units are only meaningful for explicit vector
+    values.
+    """
+
     type: str = "vector"
     system: Optional[str] = None
     axis: Optional[str] = None
@@ -66,20 +85,28 @@ class Direction:
 
     @classmethod
     def axis_direction(cls, axis: str, system: Optional[str] = None) -> "Direction":
+        """Create a direction aligned with a named axis in a coordinate system."""
+
         return cls(type="coordinate_axis", axis=axis, system=system)
 
     @classmethod
     def vector(
         cls, value: Any, units: Optional[Any] = None, system: Optional[str] = None
     ) -> "Direction":
+        """Create a direction from explicit vector components."""
+
         return cls(type="vector", value=value, units=units, system=system)
 
     @classmethod
     def basis(cls, components: List[str], system: Optional[str] = None) -> "Direction":
+        """Create a basis direction from named vector components."""
+
         return cls(type="coordinate_basis", components=components, system=system)
 
     @classmethod
     def from_fs(cls, data: Any) -> Union["Direction", Any]:
+        """Build a direction from a solver payload when possible."""
+
         if not isinstance(data, Mapping):
             return data
         payload = dict(data)
@@ -94,6 +121,8 @@ class Direction:
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize this direction to the solver direction payload."""
+
         payload: Dict[str, Any] = {"type": self.type}
         if self.system is not None:
             payload["system"] = self.system
@@ -114,6 +143,13 @@ class Direction:
 
 @dataclass
 class Axis:
+    """Named coordinate-system axis and its physical orientation.
+
+    ``direction`` is the physical direction this axis follows, while
+    ``positive`` can describe the positive sense for surface-relative axes such
+    as ``up`` or ``down``.
+    """
+
     name: str
     direction: str
     positive: Optional[str] = None
@@ -122,6 +158,8 @@ class Axis:
 
     @classmethod
     def from_fs(cls, data: Union["Axis", Mapping[str, Any]]) -> "Axis":
+        """Build an axis from an existing instance or solver payload."""
+
         if isinstance(data, Axis):
             return data
         payload = dict(data)
@@ -134,6 +172,8 @@ class Axis:
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize this axis to the solver coordinate-system payload."""
+
         payload = {
             "name": self.name,
             "direction": self.direction,
@@ -151,6 +191,14 @@ class Axis:
 
 @dataclass
 class CoordinateSystem:
+    """Coordinate-system definition used by model, acquisition, and output data.
+
+    Coordinate systems can be standard Cartesian/cylindrical/spherical systems,
+    geographic systems, or surface-relative systems. Users usually construct
+    these with helpers such as :meth:`cartesian`, :meth:`surface`, or
+    :meth:`points` rather than writing the solver dictionary directly.
+    """
+
     type: str = "cartesian"
     name: Optional[str] = None
     origin: Optional[Union[CoordinateValue, Any]] = None
@@ -167,18 +215,26 @@ class CoordinateSystem:
 
     @classmethod
     def cartesian(cls, name: str = "global", **kwargs) -> "CoordinateSystem":
+        """Create a Cartesian coordinate system."""
+
         return cls(name=name, type="cartesian", **kwargs)
 
     @classmethod
     def cylindrical(cls, name: str, **kwargs) -> "CoordinateSystem":
+        """Create a cylindrical coordinate system."""
+
         return cls(name=name, type="cylindrical", **kwargs)
 
     @classmethod
     def spherical(cls, name: str, **kwargs) -> "CoordinateSystem":
+        """Create a spherical coordinate system."""
+
         return cls(name=name, type="spherical", **kwargs)
 
     @classmethod
     def geographic(cls, name: str = "geo", **kwargs) -> "CoordinateSystem":
+        """Create a geographic coordinate system."""
+
         return cls(name=name, type="geographic", **kwargs)
 
     @classmethod
@@ -208,6 +264,8 @@ class CoordinateSystem:
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "CoordinateSystem":
+        """Deserialize a coordinate system from a solver payload."""
+
         payload = dict(data)
         class_name = payload.pop("_type", None)
         if class_name == "SurfaceCoordinateSystem":
@@ -263,6 +321,8 @@ class CoordinateSystem:
         return payload
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize this coordinate system to the solver payload."""
+
         payload = self._payload(ctx)
         return merge_extra(payload, self.extra, "CoordinateSystem")
 
@@ -381,6 +441,13 @@ class SurfaceCoordinateSystem(CoordinateSystem):
         offset_units: Optional[Any] = None,
         **kwargs,
     ) -> None:
+        """Create a coordinate system whose last axis follows a model surface.
+
+        Parameters mirror :meth:`CoordinateSystem.surface`. If ``offset`` is
+        supplied, the generated system is fixed at that signed distance from
+        the referenced surface.
+        """
+
         if axes is None:
             axes = [Axis("z", direction="z", positive=normal)]
         axis_list = [Axis.from_fs(axis) for axis in axes]
@@ -402,6 +469,8 @@ class SurfaceCoordinateSystem(CoordinateSystem):
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "SurfaceCoordinateSystem":
+        """Deserialize a surface-relative coordinate system."""
+
         payload = dict(data)
         payload.pop("_type", None)
         payload.pop("type", None)
@@ -427,6 +496,8 @@ class SurfaceCoordinateSystem(CoordinateSystem):
         )
 
     def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize this surface-relative coordinate system."""
+
         payload = self._payload(ctx)
         payload.pop("type", None)
         payload["_type"] = "SurfaceCoordinateSystem"
@@ -522,6 +593,8 @@ def _surface_coordinate_values(lateral: Any, offset: Optional[Any] = None) -> An
 
 
 def coordinate_value_to_fs(value: Any) -> Any:
+    """Serialize raw or coordinate-aware values for solver payloads."""
+
     if isinstance(value, CoordinateValue):
         return value.to_fs()
     if is_quantity(value):
@@ -530,6 +603,8 @@ def coordinate_value_to_fs(value: Any) -> Any:
 
 
 def direction_to_fs(value: Any) -> Any:
+    """Serialize raw or structured directions for solver payloads."""
+
     if isinstance(value, Direction):
         return value.to_fs()
     if is_quantity(value):

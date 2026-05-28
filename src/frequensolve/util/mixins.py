@@ -1,3 +1,5 @@
+"""Shared mixins for serialization, extra fields, paths, and change tracking."""
+
 import copy
 import json
 from dataclasses import fields, is_dataclass

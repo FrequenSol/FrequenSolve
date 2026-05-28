@@ -1,3 +1,5 @@
+"""Project containers for saved simulations, jobs, units, and site helpers."""
+
 import json
 import logging
 import shutil
@@ -27,10 +29,14 @@ class BaseProjectComponent(ABC):
 
     @abstractmethod
     def load(self):
+        """Load component state from its backing storage."""
+
         pass
 
     @abstractmethod
     def save(self):
+        """Save component state to its backing storage."""
+
         pass
 
 
@@ -98,17 +104,19 @@ class Project:
         try:
             current_version = Version.current()
         except Exception:
-            logging.debug("Skipping project version check for non-release SDK version")
+            logging.debug(
+                "Skipping project version check for non-release FrequenSolve Python API version"
+            )
             return
         if self.version < current_version:
             if self.auto_migrate:
                 raise NotImplementedError(
-                    "Project migrations are not implemented for this SDK release; "
+                    "Project migrations are not implemented for this FrequenSolve Python API release; "
                     f"project version is {self.version}, current version is {current_version}."
                 )
             else:
                 logging.warning(
-                    "Project %s was created with version %s; current SDK version is %s.",
+                    "Project %s was created with version %s; current FrequenSolve Python API version is %s.",
                     self.name,
                     self.version,
                     current_version,

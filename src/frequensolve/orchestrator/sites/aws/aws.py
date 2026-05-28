@@ -1,3 +1,5 @@
+"""FrequenSol cloud execution site backed by Cognito, AppSync, S3, and Batch."""
+
 import getpass
 import json
 import os
@@ -54,20 +56,15 @@ class AWSSiteConfig(BaseSiteConfig):
         config = AWSSiteConfig.from_domain()
 
     Attributes:
-        # Cognito/API settings (auto-populated from domain)
-        user_pool_id: Cognito User Pool ID
-        client_id: Cognito App Client ID
-        identity_pool_id: Cognito Identity Pool ID
-        api_url: GraphQL API endpoint URL
-        domain: Frontend domain
-
-        # AWS settings (auto-populated from stack info after auth)
-        s3_bucket: S3 bucket for simulation data
-
-        # Shared settings
-        region: AWS region
-        s3_prefix: S3 prefix for organizing data
-        max_duration: Maximum time resources can be requested
+        user_pool_id: Cognito user pool ID populated from the cloud domain.
+        client_id: Cognito app client ID populated from the cloud domain.
+        identity_pool_id: Cognito identity pool ID populated from the cloud domain.
+        api_url: GraphQL API endpoint URL.
+        domain: Frontend domain used to discover public configuration.
+        s3_bucket: S3 bucket for simulation data, populated after authentication.
+        region: AWS region used for Cognito, S3, and Batch resources.
+        s3_prefix: Prefix for organizing simulation data inside the S3 bucket.
+        max_duration: Maximum duration users may request for cloud resources.
     """
 
     # Cognito/API configuration (from domain or env vars)

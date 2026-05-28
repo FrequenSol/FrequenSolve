@@ -1629,7 +1629,7 @@ class SlurmSite(BaseSite):
     def _select_job(self):
         """Select a queued job when exactly one is available.
 
-        Interactive prompts are intentionally avoided in the SDK core. Callers
+        Interactive prompts are intentionally avoided in the FrequenSolve Python API core. Callers
         should pass a job id explicitly when more than one allocation exists.
         """
         jobs = self._list_jobs()

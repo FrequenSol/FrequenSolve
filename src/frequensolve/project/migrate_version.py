@@ -1,3 +1,5 @@
+"""Version helpers for migrating saved FrequenSolve project files."""
+
 from dataclasses import dataclass
 
 from frequensolve._version import get_versions
@@ -7,6 +9,8 @@ __all__ = ["Version"]
 
 @dataclass
 class Version:
+    """Semantic version tuple used by project migration checks."""
+
     major: int
     minor: int
     patch: int
