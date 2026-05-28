@@ -126,11 +126,11 @@ python -m twine check dist/*
 ```
 
 For a release, build from a clean tagged commit. Versioneer uses plain PEP 440
-tags, so tag releases as `0.2.0`, `0.2.1`, and so on. The GitHub release
-workflow builds the sdist and wheel, rejects dirty or untagged versions, and can
-publish to TestPyPI from `workflow_dispatch` or PyPI from a published GitHub
-Release after Trusted Publishing is configured for the `testpypi` and `pypi`
-environments.
+tags, so tag releases as `0.2.0`, `0.2.1`, and so on. The `Release` workflow
+builds the sdist and wheel, rejects dirty or untagged versions, and can publish
+to TestPyPI from `workflow_dispatch` or PyPI from a published GitHub Release
+after Trusted Publishing is configured for the `testpypi` and `pypi`
+environments. See `RELEASING.md` for the narrower `Publish PyPI` tag-ref path.
 
 Solver, cloud, HPC, and visual tests are marked and must be selected explicitly:
 

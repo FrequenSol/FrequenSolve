@@ -1,12 +1,18 @@
 # FrequenSolve Tests
 
-This directory contains the test suite for the FrequenSolve Python project. The tests are organized into two categories:
+This directory contains the test suite for the FrequenSolve Python project. The
+default lane is deterministic and avoids solver binaries, cloud services,
+schedulers, manual input, and visual baselines. Tests that need those resources
+use explicit pytest markers.
 
 1. **Unit Tests**: These tests can be run independently without requiring the full solver code. They focus on testing individual components and functions in isolation.
 
-2. **Integration Tests**: These tests require the full solver code to be present and are marked with the `integration` pytest marker. They test the interaction between different components and the solver's functionality as a whole.
+2. **Opt-in Marked Tests**: These tests require extra resources and are marked
+   with `integration`, `cloud`, `hpc`, `interactive`, or `visual`. They test
+   solver execution, external services, scheduler access, manual workflows, or
+   image baselines.
 
-Test files can contain both unit tests and integration tests.
+Test files can contain both unit tests and opt-in marked tests.
 
 ## Writing Tests
 
@@ -16,7 +22,9 @@ We use pytest as our testing framework. Some key features we use include:
 
 - **Fixtures**: We make extensive use of pytest fixtures to create reusable test components. Fixtures can be used to set up test data, create test environments, or provide common test utilities.
 
-- **Markers**: We use pytest markers to categorize tests. The `integration` marker is used to identify integration tests.
+- **Markers**: We use pytest markers to categorize tests. The default
+  `python -m pytest` lane excludes `integration`, `cloud`, `hpc`,
+  `interactive`, and `visual` tests.
 
 ### Writing Image Comparison Tests
 
@@ -50,8 +58,10 @@ We use pytest-mpl for comparing matplotlib-generated images. Here's a guide for 
    - New image comparison tests will be skipped until reference images are generated
    - Reference images are stored in `tests/reference_images/`
    - Generate reference images using:
-     - `make generate_reference_images` in this repo (non-integration tests only)
-     - Recommended: Run same command in FrequenSolveDockerImage to generate all reference images (including for integration tests)
+     - `make generate_reference_images` in this repo for non-integration,
+       non-cloud, non-HPC visual tests
+     - Recommended: Run the corresponding workflow in FrequenSolveDockerImage
+       to generate solver-backed reference images
 
 4. **Test Output**:
    - Image comparison tests create output in `tests/output/`
@@ -68,60 +78,52 @@ We use pytest-mpl for comparing matplotlib-generated images. Here's a guide for 
 
 The project includes several Makefile targets for running tests:
 
-- `make test`: Runs all non-integration tests with coverage reporting and matplotlib baseline testing
+- `make test`: Runs deterministic non-integration tests with coverage reporting and matplotlib baseline testing
   - Generates XML coverage reports
   - Compares matplotlib figures against baseline images
   - Generates an HTML summary of matplotlib comparisons
-  - Skips all integration tests
+  - Skips integration, cloud, HPC, interactive, and visual tests
 
 - `make generate_reference_images`: Generates reference images for matplotlib tests
   - Creates baseline images in `tests/reference_images/`
-  - Skips all integration tests (doesn't generate images for integration tests either)
-
-### Using Cursor for Test Analysis
-
-When working with tests in Cursor, you can leverage AI assistance to analyze test failures and prioritize fixes:
-
-1. **Running Tests in Docker**:
-   - Run the full test suite in FrequenSolveDockerImage
-   - Copy the terminal output into Cursor chat
-   - Ask Cursor to analyze the failures
-
-2. **Failure Analysis**:
-   - Ask Cursor to rate each failure by probability of being caused by source code issues
-   - Example prompt: "Rate each of these failures by probability that the failure is caused by an underlying source code issue. List in descending order so I can address issues that are most urgent."
-   - Cursor will help prioritize which failures to investigate first
-
-3. **Using Analysis Results**:
-   - Focus on high-probability source code issues first
-   - Use Cursor to help investigate specific failures
-   - Get suggestions for potential fixes
-   - Verify fixes by running tests again
+  - Skips integration, cloud, HPC, and interactive tests
 
 ## Continuous Integration
 
-The project uses GitHub Actions for continuous integration. The workflow (`cicd-workflow.yml`) includes:
+The project uses GitHub Actions for continuous integration. The
+`.github/workflows/cicd-workflow.yml` workflow runs for `v2` pull requests and
+pushes, and can also be started manually. It includes:
 
 1. **Test Job**:
-   - Runs on Python 3.10
-   - Installs dependencies using Poetry
-   - Runs pre-commit hooks
-   - Executes all **non-integration** tests
-   - Uploads coverage reports to Codecov (future capability)
+   - Runs on Python 3.10 through 3.14
+   - Installs the package with pip using `.[dev,parallel,cloud]`
+   - Runs pre-commit hooks once on Python 3.10
+   - Executes the deterministic non-integration test lane with `make test`
+   - Uploads coverage reports to Codecov
 
-2. **Documentation Job**:
+2. **Integration Test Job**:
+   - Triggers the `FrequenSol/FrequenSolveDockerImage` CI workflow with the
+     current FrequenSolve branch
+   - Waits for that downstream workflow to finish
+   - Downloads the downstream test artifacts into `tests/output/`
+   - Requires the GitHub App secrets configured for the repository workflow
+
+3. **Documentation Job**:
    - Builds the project documentation
    - Uploads documentation as an artifact
 
-3. **Deploy Documentation Job**:
-   - Deploys documentation to AWS (only on main branch pushes)
-
 4. **Build Job**:
-   - Builds the Python package (only on main branch pushes)
+   - Builds the Python package
+   - Checks package metadata with `twine`
+   - Uploads the `dist/` artifact
 
 ## Important Notes
 
-- While you can run tests directly in this repository for quick checks, it's recommended to run the full test suite (including integration tests) from the FrequenSolveDockerImage repository before releasing.
-- The CI pipeline only runs non-integration tests since integration tests are run in the FrequenSolveDockerImage repo.
-- Integration tests are crucial for ensuring the solver works correctly in a production environment and should be run before any release.
-- Use Cursor's AI capabilities to help analyze and debug test failures, especially for complex integration tests.
+- While you can run tests directly in this repository for quick checks, it's
+  recommended to run the full solver-backed suite through the
+  FrequenSolveDockerImage workflow before releasing.
+- Local `python -m pytest` and `make test` intentionally skip solver, cloud,
+  HPC, interactive, and visual lanes unless you select those markers
+  explicitly.
+- Solver-backed integration tests are crucial for ensuring the solver works
+  correctly in a production environment and should be run before any release.

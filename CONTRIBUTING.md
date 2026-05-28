@@ -1,8 +1,9 @@
 # Contributing
 
-FrequenSolve is a FrequenSolve Python API with optional local, cloud, HPC, visual, and docs
-dependencies. Keep changes small, test the relevant marked lanes explicitly,
-and keep public examples aligned with the current project-owned simulation API.
+FrequenSolve is the Python API for authoring and running FrequenSol
+simulations, with optional local, cloud, HPC, visual, and docs dependencies.
+Keep changes small, test the relevant marked lanes explicitly, and keep public
+examples aligned with the current project-owned simulation API.
 
 ## Development Setup
 
@@ -69,7 +70,10 @@ make generate_reference_images
 2. Add or update tests for behavior changes.
 3. Update docs and examples when public API or workflow guidance changes.
 4. Run `make test` and any affected marked lanes locally.
-5. Open a pull request and let the CI matrix verify Python 3.10 through 3.14.
+5. Open a pull request. The CI matrix in
+   `.github/workflows/cicd-workflow.yml` runs for `v2` pull requests and
+   pushes; for maintenance branches, run the same local checks before handoff
+   or ask a maintainer to retarget or manually dispatch CI.
 
 Release and deployment workflows are handled by GitHub Actions. Do not add PyPI
 tokens, cloud credentials, or solver licenses to the repository. See
