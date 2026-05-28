@@ -292,11 +292,6 @@ standard capitalization.
    SSH
       Secure Shell protocol used to connect to remote HPC systems.
 
-   strict job
-      A job submission pattern where validation or solver failures raise by
-      default. Use ``wait(check=False)`` when you need to inspect a failed
-      ``RunResult``.
-
    subdomain
       Named or identified region of a model or mesh that can receive different
       material, boundary, or output settings.

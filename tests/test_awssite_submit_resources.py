@@ -45,11 +45,12 @@ def make_graphql_site():
     site.sync_s3 = lambda local, remote: remote
     site._emit = lambda message: None
     site._make_run_handle = (
-        lambda job, simulation_id, poll_interval, fetch: SimpleNamespace(
+        lambda job, simulation_id, poll_interval, fetch, check=False: SimpleNamespace(
             job=job,
             simulation_id=simulation_id,
             poll_interval=poll_interval,
             fetch=fetch,
+            check=check,
         )
     )
     return site

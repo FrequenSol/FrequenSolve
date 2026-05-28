@@ -1,3 +1,10 @@
+"""Sampling and plotting helpers mixed into :class:`LayeredModel`.
+
+The public layered-model API uses this module to evaluate material properties
+on regular xarray grids, convert between coordinate frames and physical axes,
+smooth sampled properties, and pass gridded models to plotting helpers.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

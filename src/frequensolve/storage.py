@@ -17,7 +17,17 @@ __all__ = [
 
 
 def frequensolve_home(path: Optional[Union[str, Path]] = None) -> Path:
-    """Return the root FrequenSolve user configuration directory."""
+    """Return the root FrequenSolve user configuration directory.
+
+    Args:
+        path: Optional explicit directory. When omitted, the
+            ``FREQUENSOLVE_HOME`` environment variable is honored before
+            falling back to ``~/.frequensolve``.
+
+    Returns:
+        Expanded path to the directory used for SDK caches and user-level
+        configuration. The directory is not created by this helper.
+    """
 
     if path is not None:
         return Path(path).expanduser()

@@ -1,4 +1,9 @@
-"""Validation report objects."""
+"""Structured validation diagnostics and exception helpers.
+
+Validation reports collect stable issue codes, human-readable messages, object
+paths, and optional remediation hints so callers can display diagnostics or
+raise a single exception after preflight validation.
+"""
 
 from __future__ import annotations
 
@@ -51,19 +56,31 @@ class ValidationReport:
 
     @property
     def errors(self) -> list[ValidationIssue]:
-        """Return blocking validation issues."""
+        """Return blocking validation issues.
+
+        Returns:
+            Diagnostics whose severity is ``"error"``.
+        """
 
         return [issue for issue in self.issues if issue.severity == "error"]
 
     @property
     def warnings(self) -> list[ValidationIssue]:
-        """Return non-blocking validation issues."""
+        """Return non-blocking validation issues.
+
+        Returns:
+            Diagnostics whose severity is ``"warning"``.
+        """
 
         return [issue for issue in self.issues if issue.severity == "warning"]
 
     @property
     def ok(self) -> bool:
-        """Return whether the report has no blocking errors."""
+        """Return whether the report has no blocking errors.
+
+        Returns:
+            ``True`` when :attr:`errors` is empty.
+        """
 
         return not self.errors
 
@@ -104,7 +121,14 @@ class ValidationReport:
         path: str = "",
         hint: Optional[str] = None,
     ) -> None:
-        """Append a blocking validation error."""
+        """Append a blocking validation error.
+
+        Args:
+            code: Stable machine-readable issue code.
+            message: Human-readable explanation.
+            path: Optional dotted object path.
+            hint: Optional remediation guidance.
+        """
 
         self.add("error", code, message, path=path, hint=hint)
 
@@ -116,17 +140,35 @@ class ValidationReport:
         path: str = "",
         hint: Optional[str] = None,
     ) -> None:
-        """Append a non-blocking validation warning."""
+        """Append a non-blocking validation warning.
+
+        Args:
+            code: Stable machine-readable issue code.
+            message: Human-readable explanation.
+            path: Optional dotted object path.
+            hint: Optional remediation guidance.
+        """
 
         self.add("warning", code, message, path=path, hint=hint)
 
     def extend(self, other: "ValidationReport") -> None:
-        """Append diagnostics from another report."""
+        """Append diagnostics from another report.
+
+        Args:
+            other: Report whose issues should be appended in order.
+        """
 
         self.issues.extend(other.issues)
 
     def raise_for_errors(self) -> "ValidationReport":
-        """Raise ``ValidationError`` if the report contains blocking issues."""
+        """Raise ``ValidationError`` if the report contains blocking issues.
+
+        Returns:
+            This report when no blocking errors are present.
+
+        Raises:
+            ValidationError: If any diagnostic has ``"error"`` severity.
+        """
 
         if self.errors:
             raise ValidationError(self)
@@ -147,6 +189,12 @@ class ValidationError(ValueError):
     """Raised when a validation report contains blocking errors."""
 
     def __init__(self, report: ValidationReport):
+        """Create an exception from a validation report.
+
+        Args:
+            report: Report containing one or more blocking validation errors.
+        """
+
         self.report = report
         count = len(report.errors)
         plural = "" if count == 1 else "s"

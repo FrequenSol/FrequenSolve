@@ -606,6 +606,7 @@ def test_slurm_submit_reattaches_matching_inflight_run(monkeypatch, tmp_path):
 
     assert run.id == "77"
     assert run.mode == "batch"
+    assert run.check is False
     assert run.backend["reattached"] is True
     assert run.status().state == "running"
     assert job.latest_run(site="Dummy").status == "running"

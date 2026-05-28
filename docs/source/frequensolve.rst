@@ -28,6 +28,8 @@ a class by task, start here:
      - :doc:`frequensolve.geometry`
    * - Work with units and exported array stores
      - :doc:`frequensolve.util`
+   * - Validate simulations and jobs before export
+     - :doc:`frequensolve.validation`
 
 The conceptual user guide explains how these pieces fit together. Use this
 reference when you need constructor arguments, method names, or class members.
@@ -44,3 +46,4 @@ reference when you need constructor arguments, method names, or class members.
    frequensolve.seismic
    frequensolve.simulation
    frequensolve.util
+   frequensolve.validation

@@ -1,3 +1,10 @@
+"""Base job classes shared by FrequenSolve simulation workflows.
+
+``BaseJob`` and the accompanying layout/record dataclasses provide the common
+project paths, frequency metadata, output validation, serialization hooks, and
+run-state mixins used by concrete forward and imaging jobs.
+"""
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Union

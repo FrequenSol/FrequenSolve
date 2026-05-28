@@ -44,10 +44,9 @@ TraceDataset
        upscale=4,
    )
 
-``RunResult.traces()`` and ``RunResult.wavefields()`` also check the run
-status before fetching outputs. If you waited with ``check=False`` and the run
-failed, these readers raise the same run-failure error instead of failing later
-on missing output files.
+``RunResult.traces()`` and ``RunResult.wavefields()`` require successful output
+files. For failed, cancelled, or timed-out runs, inspect ``result.status`` and
+``result.logs()`` before attempting to read traces or wavefields.
 
 :term:`Trace` reads return :term:`xarray` ``DataArray`` objects. Trace files
 are :term:`HDF5`-backed and may be consolidated into a local cache with
