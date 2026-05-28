@@ -57,10 +57,22 @@ def test_expected_extras_are_available_for_non_base_workflows():
         "docs",
         "fast-fft",
         "hpc",
+        "inversion",
         "parallel",
         "seismic-io",
         "visual",
     }.issubset(extras)
+
+
+def test_cloud_extra_contains_only_cloud_client_dependencies():
+    cloud_dependencies = "\n".join(
+        load_pyproject()["project"]["optional-dependencies"]["cloud"]
+    )
+
+    assert "boto3" in cloud_dependencies
+    assert "requests" in cloud_dependencies
+    for non_cloud_dependency in ["flask", "python-dotenv", "werkzeug"]:
+        assert non_cloud_dependency not in cloud_dependencies
 
 
 def test_versioneer_uses_v_prefixed_release_tags():

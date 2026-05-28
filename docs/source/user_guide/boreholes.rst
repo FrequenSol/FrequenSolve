@@ -1,13 +1,20 @@
 Boreholes
 =========
 
-Boreholes are authored on ``LayeredModel``. Current solver support is for
-2D ``LayeredMeshGenerator`` meshes, which is the common axisymmetric borehole
-case. A borehole describes radial layers such as fluid, casing, and cement,
+:term:`Boreholes <borehole>` are authored on ``LayeredModel``. Current solver
+support is for 2D ``LayeredMeshGenerator`` meshes, which is the common
+axisymmetric borehole case. A borehole describes radial layers such as fluid,
+casing, and cement,
 plus borehole-local radial surfaces such as casing walls. The material
-properties for borehole layers are normal model subdomains, so they can use the
+properties for borehole layers are normal model :term:`subdomains <subdomain>`, so they can use the
 same property, physics, unit, and file-backed workflows as any other material
 block.
+
+.. note::
+
+   This is an advanced modeling topic. Start with
+   :doc:`velocity_models_coordinates` and the layered-model tutorials before
+   using boreholes in production models.
 
 Python API
 ----------
@@ -17,7 +24,7 @@ borehole, add a radial material layer, then close that layer with a
 cumulative-radius surface. The borehole axis at ``r = 0`` is assumed, so the
 first surface you add is normally the fluid wall rather than an explicit axis.
 Name a surface only when user code needs to refer to it later. If a layer
-includes ``physics`` and ``properties``, the SDK creates the corresponding
+includes ``physics`` and ``properties``, the :term:`SDK` creates the corresponding
 material subdomain automatically.
 
 For scalar radial intervals, pass ``width=`` to ``add_layer``. The SDK adds the
@@ -108,7 +115,7 @@ The compact solver-shaped form is also available by passing ``layers=[...]`` and
 material subdomain by ``mesh_block_id`` and each surface supplies a cumulative
 radius ``r``. Layer ``i`` occupies the radial interval from the previous surface
 to surface ``i``; the first layer starts at the borehole axis. The older
-``parts=[...]`` spelling is still accepted by the Python API for compatibility,
+``parts=[...]`` spelling is still accepted by the :term:`Python API` for compatibility,
 but new code should use ``layers`` and ``surfaces``.
 
 ``LayeredModel.plot(...)`` samples borehole material subdomains into the plotted
@@ -144,7 +151,7 @@ For a local radial cross-section, call ``draw`` on a borehole object:
 Each borehole surface gives its cumulative outer radius as ``r``. The first
 layer starts at ``r = 0``; each following layer starts at the previous surface's
 ``r``. Radius is represented internally as a ``Property``, so it accepts
-scalar, Pint, xarray, file-backed, and structured property inputs. Inline
+scalar, :term:`Pint`, :term:`xarray`, file-backed, and structured property inputs. Inline
 variable-radius profiles must be one-dimensional over ``z`` or ``depth`` so the
 layered generator can evaluate radius at cell-centroid depth.
 
@@ -222,8 +229,8 @@ are defined.
        ],
    )
 
-When exporting through a simulation, radius arrays are written to ``sim.h5`` and
-the JSON carries the HDF5 reference and content hash. Standalone
+When exporting through a :term:`simulation`, radius arrays are written to ``sim.h5`` and
+the :term:`JSON` carries the :term:`HDF5` reference and content hash. Standalone
 ``model.to_fs()`` calls emit a compact inline value with dimensions and
 coordinates.
 
@@ -291,8 +298,8 @@ exist in ``subdomains``.
 Solver Contract
 ---------------
 
-The solver-facing API keeps materials and borehole geometry separate. Borehole
-layers reference the material ``subdomains`` by ``mesh_block_id``. Borehole
+The :term:`solver contract` keeps materials and borehole geometry separate. Borehole
+layers reference the material ``subdomains`` by :term:`mesh block ID`. Borehole
 surfaces stay under their owning borehole; they are not top-level stratigraphic
 surfaces.
 

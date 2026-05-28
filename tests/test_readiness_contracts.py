@@ -73,7 +73,7 @@ def test_ci_workflow_does_not_deploy_legacy_docs_host():
 def test_readme_orients_users_to_site_config_and_tutorials():
     readme = (REPO_ROOT / "README.md").read_text()
 
-    assert "Until the first public package release is published to PyPI" in readme
+    assert "python -m pip install frequensolve" in readme
     assert "python -m pip install -e ." in readme
     assert "~/.frequensolve/site.toml" in readme
     assert "fs.Site()" in readme
@@ -204,17 +204,23 @@ def test_docs_and_examples_reference_canonical_frequensol_domains():
 
 
 def test_contributing_and_changelog_match_current_repo_workflows():
-    contributing = (REPO_ROOT / "docs/source/contributing.rst").read_text()
-    changelog = (REPO_ROOT / "docs/source/changelog.rst").read_text()
+    contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text()
+    releasing = (REPO_ROOT / "RELEASING.md").read_text()
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text()
     installation = (REPO_ROOT / "docs/source/installation.rst").read_text()
 
+    assert not (REPO_ROOT / "docs/source/contributing.rst").exists()
+    assert not (REPO_ROOT / "docs/source/changelog.rst").exists()
     assert "Python 3.10 through 3.14" in contributing
     assert "make test" in contributing
     assert "make generate_reference_images" in contributing
     assert "Publish Python Docs" in contributing
     assert "docs/host" in contributing
-    assert "Until the first public package release is published to PyPI" in installation
+    assert "python -m pip install frequensolve" in installation
     assert "python -m pip install -e ." in installation
+    assert "Publish PyPI" in releasing
+    assert "trusted publishing" in releasing
+    assert "Do not add PyPI passwords or API tokens" in releasing
     assert "0.1.1" not in changelog
     assert "0.1.0" not in changelog
     assert "0.0.1" in changelog

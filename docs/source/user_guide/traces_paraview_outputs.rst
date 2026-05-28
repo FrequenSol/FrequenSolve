@@ -1,15 +1,20 @@
-Traces, ParaView, And Imaging Outputs
+Traces, ParaView, and Imaging Outputs
 =====================================
 
-Outputs are job-owned. Trace output is enabled by default; ParaView and
-wavefield outputs are requested on jobs when needed.
+Outputs are job-owned. :term:`Trace` output is enabled by default; :term:`ParaView`
+and wavefield outputs are requested on jobs when needed.
 
-Primary tutorials:
+Related tutorials:
 
 - :download:`Traces <../../../examples/tutorials/06_outputs/01_traces.ipynb>`
+  for :term:`TraceDataset <trace dataset>` reads, :term:`HDF5`-backed data, and
+  :term:`SEG-Y` export.
 - :download:`ParaView and VTK <../../../examples/tutorials/06_outputs/02_paraview_vtk.ipynb>`
+  for :term:`VTK`/:term:`VTU` field, surface, plane, and :term:`PML` output controls.
 - :download:`Imaging <../../../examples/tutorials/06_outputs/03_imaging.ipynb>`
+  for :term:`RTM` and :term:`FWI`-gradient image requests.
 - :download:`Acoustic modeling output workflow <../../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>`
+  for the first end-to-end trace and ParaView output workflow.
 
 TraceDataset
 ------------
@@ -44,18 +49,19 @@ status before fetching outputs. If you waited with ``check=False`` and the run
 failed, these readers raise the same run-failure error instead of failing later
 on missing output files.
 
-Trace reads return ``xarray.DataArray`` objects. Trace files are HDF5-backed and
-may be consolidated into a local cache with ``traces.consolidate()``. SEGY
+:term:`Trace` reads return :term:`xarray` ``DataArray`` objects. Trace files
+are :term:`HDF5`-backed and may be consolidated into a local cache with
+``traces.consolidate()``. :term:`SEG-Y`
 export is available through the trace-record helpers when the ``seismic-io``
 extra is installed.
 
-Wavelets are applied when time-domain traces are reconstructed. For
+Wavelets are applied when :term:`time-domain` traces are reconstructed. For
 ``RickerWavelet``, the peak is placed at physical time zero while the generated
 signal still includes pre-zero-time samples. If ``center`` is not supplied,
 ``RickerWavelet(f=...)`` uses one period of center padding,
 ``1 / f``.
 
-Laplace-domain time sweeps can be requested with
+:term:`Laplace-domain` time sweeps can be requested with
 ``TimeDomainJob(..., damping_factor=...)`` or the lower-level
 ``TimeDomainJob(..., laplace=...)`` offset. ``traces.ld(...)`` reconstructs the
 damped Laplace-domain time series directly. ``traces.td(...)`` applies the
@@ -65,7 +71,7 @@ pass ``laplace_compensation="off"`` to inspect the uncompensated result.
 ParaView Output
 ---------------
 
-ParaView output is usually requested from a single-frequency job:
+:term:`ParaView output` is usually requested from a single-frequency job:
 
 .. code-block:: python
 
@@ -96,15 +102,15 @@ The public API exposes volume, surface, and grid targets:
        parts=["real", "imag", "abs"],
    )
 
-``order`` controls the polynomial order used when exporting fields for
+``order`` controls the :term:`polynomial order` used when exporting fields for
 visualization. ``upscale`` controls extra sampling inside elements. Use
-``upscale=0`` for a native, low-cost mesh QC view, and increase it when smoother
+``upscale=0`` for a native, low-cost mesh :term:`QC` view, and increase it when smoother
 field images are more important than smaller files.
 
 VTK/PyVista Helpers
 -------------------
 
-``read_vtu`` and ``plot_vtu`` provide quick Python inspection of solver VTU
+``read_vtu`` and ``plot_vtu`` provide quick Python inspection of solver :term:`VTU`
 files:
 
 .. code-block:: python
@@ -114,14 +120,14 @@ files:
    fs.vtu_fields(mesh)
    fs.plot_vtu(mesh, field="pressure", part="real", scalar_bar=True)
 
-ParaView remains the recommended application for large meshes, multiple
-datasets, and interactive analysis. PyVista is best for lightweight notebook
+:term:`ParaView` remains the recommended application for large meshes, multiple
+datasets, and interactive analysis. :term:`PyVista` is best for lightweight notebook
 figures and saved screenshots.
 
 Imaging Output
 --------------
 
-Imaging jobs use the ``RTM`` workflow and are usually created with
+Imaging jobs use the :term:`RTM` workflow and are usually created with
 ``simulation.imaging(...)``:
 
 .. code-block:: python
@@ -143,16 +149,16 @@ Imaging jobs use the ``RTM`` workflow and are usually created with
        misfit_norm="L2",
    )
 
-``parameters`` request FWI-gradient image conditions. The public names
+``parameters`` request :term:`FWI`-gradient image conditions. The public names
 ``"vp"``, ``"vs"``, and ``"rho"`` serialize to solver properties ``Vp``,
 ``Vs``, and ``Rho``. ``fields`` and ``condition`` request diagnostic image
 conditions. For exact solver-condition names, pass ``images={...}``; values of
 the form ``"FWI:Vp"`` request property-gradient images, while other strings are
 passed as image-condition names.
 
-Observed data may be supplied as a trace-producing job, a ``TraceDataset``, or a
+Observed data may be supplied as a trace-producing job, a :term:`TraceDataset <trace dataset>`, or a
 filesystem path. Receiver-group names in the observed data must match the
-simulation acquisition, because the imaging misfit pairs observed and simulated
+:term:`simulation` acquisition, because the imaging misfit pairs observed and simulated
 receiver groups by name.
 
 Successful imaging runs can be opened with ``site.fetch_image(job)`` or
@@ -164,6 +170,6 @@ Successful imaging runs can be opened with ``site.fetch_image(job)`` or
    raw = image_db.raw_images
    smoothed = image_db.smoothed_images
 
-Both properties return ``xarray.Dataset`` objects on the requested image grid.
+Both properties return :term:`xarray` ``Dataset`` objects on the requested image grid.
 The raw dataset reads the solver ``image/raw`` group; the smoothed dataset reads
 ``image/phi`` when the solver writes that group.

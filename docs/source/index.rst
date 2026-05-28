@@ -1,32 +1,37 @@
 FrequenSolve Documentation
 ==========================
 
-Welcome to FrequenSolve's documentation. FrequenSolve is the Python SDK for
-authoring, validating, launching, and reading finite-element wave simulations.
-The Python package can build and inspect projects on any development machine;
-executing jobs requires a site with the separately licensed fast solver.
+Welcome to FrequenSolve's documentation. FrequenSolve is the Python :term:`SDK`
+for authoring, validating, launching, and reading finite-element wave
+:term:`simulations <simulation>`. The Python package can build and inspect
+:term:`projects <project>` on any development machine; executing
+:term:`jobs <job>` requires a :term:`site` with the separately licensed
+:term:`fast solver`.
 
 Key Features
 ------------
 
 - High-performance finite element modeling
-- Support for time-domain and frequency-domain simulations
+- Support for :term:`time-domain` and :term:`frequency-domain` simulations
 - Flexible model building and meshing capabilities
 - Integration with popular data formats and visualization tools
-- Cloud and HPC deployment support
+- Cloud and :term:`HPC` deployment support
 
 Getting Started
 ---------------
 
-If you're new to FrequenSolve, start with the tutorial collection. The notebooks
-are the primary release examples: they build complete project-owned
-simulations, submit strict jobs, and inspect traces, logs, meshes, and
-ParaView/VTK outputs.
+If you're new to FrequenSolve, follow this path:
 
 - :doc:`installation`
-- :doc:`quickstart` for the compact current API workflow
-- :doc:`tutorials/index` for runnable notebook examples
-- :doc:`user_guide/index` for conceptual reference tables
+- :doc:`quickstart` to build the compact SDK workflow and see where site
+  execution enters
+- :download:`Acoustic modeling
+  <../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>` for the
+  first full runnable notebook
+- :doc:`tutorials/index` when you want the notebook learning path by topic
+- :doc:`user_guide/index` when you need conceptual reference tables or a
+  specific configuration detail
+- :doc:`glossary` when a solver, meshing, or imaging term is unfamiliar
 
 .. toctree::
    :maxdepth: 2
@@ -36,10 +41,11 @@ ParaView/VTK outputs.
    quickstart
    tutorials/index
    user_guide/index
+   glossary
 
 .. toctree::
    :maxdepth: 1
-   :caption: Backend Contracts
+   :caption: Solver Developer Reference
 
    fast_solver_api_updates
    fast_solver_trace_output_compaction
@@ -49,13 +55,6 @@ ParaView/VTK outputs.
    :caption: API Reference
 
    frequensolve
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Development
-
-   contributing
-   changelog
 
 Indices and Tables
 ------------------

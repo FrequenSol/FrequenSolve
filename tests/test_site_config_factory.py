@@ -56,7 +56,9 @@ def test_site_factory_reads_default_config_from_env(monkeypatch, tmp_path):
     config_path = tmp_path / "site.toml"
     config_path.write_text(
         """
-[site]
+default = "local"
+
+[sites.local]
 type = "local"
 shutdown_on_completion = true
 verbose = true
@@ -78,13 +80,23 @@ dashboard_port = 8787
 
 def test_site_factory_uses_stable_home_default_path(monkeypatch, tmp_path):
     monkeypatch.delenv("FREQUENSOLVE_SITE_CONFIG", raising=False)
+    monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
 
     assert sites.site_config_path() == tmp_path / ".frequensolve" / "site.toml"
 
 
+def test_site_factory_uses_frequensolve_home_override(monkeypatch, tmp_path):
+    storage_root = tmp_path / "fs-user-storage"
+    monkeypatch.delenv("FREQUENSOLVE_SITE_CONFIG", raising=False)
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(storage_root))
+
+    assert sites.site_config_path() == storage_root / "site.toml"
+
+
 def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tmp_path):
     monkeypatch.delenv("FREQUENSOLVE_SITE_CONFIG", raising=False)
+    monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(sites, "AWSSite", FakeSite)
 
@@ -129,10 +141,10 @@ verbose = true
     monkeypatch.setattr(sites, "LocalSite", FakeSite)
     monkeypatch.setattr(sites, "AWSSite", FakeSite)
 
-    default_site = sites.Site(config_path=config_path)
+    selected_site = sites.Site(config_path=config_path)
     local_site = sites.Site(config_path=config_path, profile="local", verbose=False)
 
-    assert default_site.kwargs == {
+    assert selected_site.kwargs == {
         "domain": "dev.frequensol.example",
         "interactive": True,
         "verbose": True,
@@ -143,12 +155,109 @@ verbose = true
     }
 
 
+def test_site_factory_rejects_single_site_table(tmp_path):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        """
+[site]
+type = "local"
+shutdown_on_completion = true
+""".strip()
+    )
+
+    with pytest.raises(ValueError, match=r"default.*\[sites\.<profile>\]"):
+        sites.Site(config_path=config_path)
+
+
+def test_site_factory_rejects_bare_site_table(tmp_path):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        """
+type = "local"
+shutdown_on_completion = true
+""".strip()
+    )
+
+    with pytest.raises(ValueError, match=r"default.*\[sites\.<profile>\]"):
+        sites.Site(config_path=config_path)
+
+
+def test_site_factory_requires_default_even_with_explicit_profile(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "sites.toml"
+    config_path.write_text(
+        """
+[sites.local]
+type = "local"
+shutdown_on_completion = true
+""".strip()
+    )
+    monkeypatch.setattr(sites, "LocalSite", FakeSite)
+
+    with pytest.raises(ValueError, match="must set default"):
+        sites.Site(config_path=config_path, profile="local")
+
+
+def test_site_factory_rejects_default_site_alias(tmp_path):
+    config_path = tmp_path / "sites.toml"
+    config_path.write_text(
+        """
+default_site = "local"
+
+[sites.local]
+type = "local"
+shutdown_on_completion = true
+""".strip()
+    )
+
+    with pytest.raises(ValueError, match="default_site.*default"):
+        sites.Site(config_path=config_path)
+
+
+@pytest.mark.parametrize("key", ["backend", "class"])
+def test_site_factory_rejects_site_type_key_aliases(key, tmp_path):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        f"""
+default = "local"
+
+[sites.local]
+{key} = "local"
+shutdown_on_completion = true
+""".strip()
+    )
+
+    with pytest.raises(ValueError, match=rf"{key}.*type"):
+        sites.Site(config_path=config_path)
+
+
+@pytest.mark.parametrize("key", ["name", "profile"])
+def test_site_factory_rejects_site_metadata_keys(key, tmp_path):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        f"""
+default = "local"
+
+[sites.local]
+type = "local"
+{key} = "local"
+shutdown_on_completion = true
+""".strip()
+    )
+
+    with pytest.raises(ValueError, match=rf"{key}.*\[sites\.local\]"):
+        sites.Site(config_path=config_path)
+
+
 def test_site_factory_builds_slurm_config_objects(monkeypatch, tmp_path):
     install_fake_hpc_module(monkeypatch)
     config_path = tmp_path / "slurm-site.toml"
     config_path.write_text(
         """
-[site]
+default = "cluster"
+
+[sites.cluster]
 type = "slurm"
 rel_path = "projects/demo"
 hostname = "login.example.edu"
@@ -186,7 +295,9 @@ def test_site_factory_normalizes_hpc_overrides(monkeypatch, tmp_path):
     config_path = tmp_path / "slurm-site.toml"
     config_path.write_text(
         """
-[site]
+default = "cluster"
+
+[sites.cluster]
 type = "slurm"
 rel_path = "projects/demo"
 hostname = "login.example.edu"
@@ -223,7 +334,9 @@ def test_site_factory_builds_stampede_run_config(monkeypatch, tmp_path):
     config_path = tmp_path / "stampede-site.toml"
     config_path.write_text(
         """
-[site]
+default = "stampede3"
+
+[sites.stampede3]
 type = "stampede3"
 rel_path = "projects/demo"
 queue = "skx-dev"

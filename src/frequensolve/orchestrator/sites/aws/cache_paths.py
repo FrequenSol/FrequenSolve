@@ -2,10 +2,7 @@
 
 from pathlib import Path
 
-
-def frequensolve_home() -> Path:
-    """Return the root FrequenSolve user configuration directory."""
-    return Path.home() / ".frequensolve"
+from frequensolve.storage import frequensolve_home
 
 
 def cloud_cache_dir() -> Path:

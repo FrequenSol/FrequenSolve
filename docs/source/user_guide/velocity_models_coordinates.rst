@@ -1,4 +1,4 @@
-Velocity Models, Units, And Coordinates
+Velocity Models, Units, and Coordinates
 =======================================
 
 FrequenSolve models are authored in Python but exported to solver contracts
@@ -6,16 +6,19 @@ with explicit units, coordinate systems, surfaces, layers, and geometry. The
 goal is to keep the model readable at authoring time while making the generated
 inputs auditable before a run.
 
-Primary tutorials:
+Related tutorials:
 
 - :download:`Variable properties and units <../../../examples/tutorials/03_velocity_model_building/01_variable_properties_units.ipynb>`
+  for :term:`Pint` quantities and sampled :term:`xarray` properties.
 - :download:`Coordinate systems <../../../examples/tutorials/03_velocity_model_building/02_coordinate_systems.ipynb>`
+  for topography and surface-relative coordinates.
 - :download:`Layered models <../../../examples/tutorials/03_velocity_model_building/03_layered_models.ipynb>`
+  for ordered surfaces, layers, local features, and sampled QC views.
 
 Property Forms
 --------------
 
-Layer properties may be constants, Pint quantities, sampled arrays, or richer
+Layer properties may be constants, :term:`Pint` quantities, sampled arrays, or richer
 property specifications. Use the simplest representation that still preserves
 the information needed to inspect the model later.
 
@@ -29,7 +32,7 @@ the information needed to inspect the model later.
    * - Number
      - Small examples in the simulation unit system.
      - Interpreted through the simulation's active unit configuration.
-   * - Pint quantity
+   * - :term:`Pint` quantity
      - Explicit dimensional values in tutorial and production scripts.
      - Serialized with ``value`` and ``units``.
    * - ``xarray.DataArray``
@@ -59,7 +62,7 @@ New examples should prefer explicit units for dimensional values:
        },
    )
 
-Simulation unit defaults are useful for compact examples, but explicit Pint
+:term:`Simulation <simulation>` unit defaults are useful for compact examples, but explicit Pint
 quantities make notebooks more robust when copied into projects with different
 unit systems.
 
@@ -115,10 +118,10 @@ separate surface flag that makes it an interface.
    * - Non-interface surface
      - Preserves geometry for meshing, output selection, or later reference
        without changing material topology.
-   * - Borehole or local feature
+   * - :term:`Borehole <borehole>` or local feature
      - Adds geometry and optional subdomains that meshing and output requests
        can reference.
-   * - Fracture
+   * - :term:`Fracture <fracture>`
      - Defines a curve that the mesh generator opens into an explicit gap, or
        can later use as the support for a reduced fracture model.
    * - Uniform sampled view
@@ -128,12 +131,12 @@ separate surface flag that makes it an interface.
 Fractures
 ---------
 
-Fractures are specialized model surfaces. They participate in the same ordered
+:term:`Fractures <fracture>` are specialized model surfaces. They participate in the same ordered
 layered workflow as ``SimpleSurface``: place a fracture after a layer to close
 that layer, or place it between two surfaces when you want the fracture geometry
 without changing the material interval. The mesh generator opens the fracture
 around its center ``depth`` using the one-dimensional ``gap`` aperture curve.
-Use an ``xarray.DataArray`` when the aperture varies along the fracture:
+Use an :term:`xarray` ``DataArray`` when the aperture varies along the fracture:
 
 .. code-block:: python
 
@@ -152,7 +155,7 @@ Use an ``xarray.DataArray`` when the aperture varies along the fracture:
        properties={"vp": 1.5, "rho": 1.0},
    )
 
-When ``properties`` are provided, the SDK assigns or uses the fracture
+When ``properties`` are provided, the :term:`SDK` assigns or uses the fracture
 ``mesh_block_id`` and creates the matching ``ModelSubdomain``. Material
 properties stay in ``subdomains``; the fracture entry in ``surfaces`` carries
 the geometry and the mesh-block reference:

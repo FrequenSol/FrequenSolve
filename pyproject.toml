@@ -56,10 +56,7 @@ fast-fft = [
 ]
 cloud = [
     "boto3>=1.36.23,<2.0.0",
-    "flask>=3.1.0,<4.0.0",
-    "python-dotenv>=1.0.1,<2.0.0",
     "requests>=2.31.0,<3.0.0",
-    "werkzeug>=3.1.3,<4.0.0",
 ]
 parallel = [
     "bokeh>=3.4.2,<4.0.0",

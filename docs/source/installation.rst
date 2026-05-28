@@ -1,39 +1,72 @@
 Installation
 ============
 
-FrequenSolve Python is the authoring, orchestration, and output-reading SDK.
-Installing the package lets you build projects, inspect exported solver inputs,
-load trace outputs, and configure execution sites. Running a job also requires
-access to a licensed fast solver through a local, cloud, or HPC site.
+FrequenSolve Python is the authoring, orchestration, and output-reading
+:term:`SDK`. Installing the package lets you build :term:`projects <project>`,
+inspect exported solver inputs, load :term:`trace` outputs, and configure
+execution :term:`sites <site>`. Running a :term:`job` also requires access to a
+licensed :term:`fast solver` through a local, cloud, or :term:`HPC` site.
 
 Basic Install
 -------------
 
-Until the first public package release is published to PyPI, install from a
-source checkout. From the repository root:
-
-.. code-block:: bash
-
-   python -m pip install -e .
-
-After the package is published, install the released SDK from PyPI with pip:
+Install the released SDK from :term:`PyPI` with pip:
 
 .. code-block:: bash
 
    python -m pip install frequensolve
 
-Optional Extras
----------------
-
-Install extras for the workflows you need:
+Because the repository is public, you can also install from a source checkout
+when you want local examples, documentation sources, or editable development.
+From the repository root:
 
 .. code-block:: bash
 
-   python -m pip install "frequensolve[visual]"      # plotting, VTK/PyVista helpers
-   python -m pip install "frequensolve[parallel]"    # Dask, SSH, and SLURM helpers
-   python -m pip install "frequensolve[cloud]"       # FrequenSol cloud backend
-   python -m pip install "frequensolve[seismic-io]"  # SEG-Y/ASDF export helpers
-   python -m pip install "frequensolve[dev,docs]"    # tests and documentation builds
+   python -m pip install -e .
+
+Optional Extras
+---------------
+
+Choose the smallest install that matches the workflow you need:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 40 30
+
+   * - Workflow
+     - Command
+     - Notes
+   * - Author and inspect projects
+     - ``python -m pip install frequensolve``
+     - Does not run the solver.
+   * - Run on FrequenSol Cloud
+     - ``python -m pip install "frequensolve[cloud]"``
+     - Requires a FrequenSol Cloud account and license.
+   * - Run with a local solver
+     - ``python -m pip install "frequensolve[parallel]"``
+     - Requires an installed :term:`fast solver` and :term:`FS_SOLVER_PATH`.
+   * - Run on an HPC cluster
+     - ``python -m pip install "frequensolve[hpc]"``
+     - Requires :term:`SSH`/:term:`SLURM` access and a solver installation on
+       the cluster.
+   * - Plot or inspect :term:`VTK`/:term:`VTU` outputs in Python
+     - ``python -m pip install "frequensolve[visual]"``
+     - For Python-based visualization workflows.
+   * - Read or write :term:`SEG-Y`/:term:`ASDF` data
+     - ``python -m pip install "frequensolve[seismic-io]"``
+     - For seismic file import and export workflows.
+
+All available user extras are:
+
+.. code-block:: bash
+
+   python -m pip install "frequensolve[visual]"
+   python -m pip install "frequensolve[parallel]"
+   python -m pip install "frequensolve[hpc]"
+   python -m pip install "frequensolve[cloud]"
+   python -m pip install "frequensolve[seismic-io]"
+   python -m pip install "frequensolve[fast-fft]"
+   python -m pip install "frequensolve[inversion]"
 
 Extras can be combined:
 
@@ -44,92 +77,10 @@ Extras can be combined:
 Solver Access
 -------------
 
-The Python package does not include the fast solver executable. To execute
-jobs, configure ``~/.frequensolve/site.toml`` and create sites with
-``fs.Site()``. On first use, ``fs.Site()`` creates a starter config at that
-path and raises an exception asking you to review it. If the cloud defaults are
-acceptable, rerun the same cell or script; otherwise edit the profiles first.
-
-.. code-block:: toml
-
-   default = "cloud"
-
-   [sites.cloud]
-   type = "aws"
-   domain = "app.frequensol.com"
-   interactive = true
-   verbose = true
-
-   [sites.local]
-   type = "local"
-   shutdown_on_completion = true
-   verbose = true
-
-   [sites.hpc]
-   type = "stampede3"
-   rel_path = "scratch/frequensolve_tutorials"
-   queue = "skx-dev"
-   nodes = 1
-   duration = "00:30:00"
-   procs_per_node = 4
-   procs_per_task = 1
-   poll_interval = 10
-   verbose = true
-
-The ``type`` can select one of the supported backends:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 24 76
-
-   * - Site
-     - Requirement
-   * - ``LocalSite``
-     - A local solver binary and environment such as ``FS_SOLVER_PATH``.
-   * - ``AWSSite``
-     - FrequenSol cloud access and the ``cloud`` extra.
-   * - ``SlurmSite`` / ``Stampede3Site``
-     - SSH/SLURM access, the ``parallel`` extra, and a solver installation on the cluster.
-
-Direct constructors remain available for code that intentionally targets a
-specific backend.
-
-The notebooks in :doc:`tutorials/index` use strict run cells. If the selected
-site is not configured or the solver is unavailable, the cell should fail and
-point you toward the relevant job/site logs.
-
-Development Install
--------------------
-
-For package development and documentation work:
-
-.. code-block:: bash
-
-   python -m pip install -e ".[dev,docs,visual]"
-
-Build the documentation locally with:
-
-.. code-block:: bash
-
-   python -m sphinx -b html docs/source docs/build/html
-
-Release And PyPI Publishing
----------------------------
-
-Release builds use the standard PyPA toolchain:
-
-.. code-block:: bash
-
-   python -m build
-   python -m twine check dist/*
-
-The repository includes a ``Publish PyPI`` GitHub Actions workflow that publishes
-with PyPI trusted publishing on release publication or manual dispatch. Before
-the first release, a PyPI project owner must configure the trusted publisher for
-the ``FrequenSol/FrequenSolve`` repository, the ``publish-pypi.yml`` workflow,
-and the ``pypi`` environment. The workflow only publishes from tag refs,
-including manual dispatches, so create the intended release tag before
-publishing. Do not add PyPI passwords or API tokens to the repository.
+The Python package does not include the solver executable. To run the solver,
+first :ref:`configure a site <site-configuration>` to run the solver on. A
+valid license is required to run the solver. Our `cloud site
+<https://frequensol.com/pricing>`__ is the quickest way to get started.
 
 Verification
 ------------
@@ -141,6 +92,20 @@ Verify that the Python package imports:
    import frequensolve as fs
 
    print(fs.__version__)
+
+Check :term:`site configuration file` setup before running a solver job:
+
+.. code-block:: python
+
+   import frequensolve as fs
+
+   site = fs.Site()
+   print(type(site).__name__)
+
+If this is the first ``fs.Site()`` call on the machine, FrequenSolve may create
+``~/.frequensolve/site.toml`` and raise an exception asking you to review it.
+Edit that file, then rerun the same check. See :doc:`user_guide/site_configuration`
+for the configuration workflow.
 
 Then run the :doc:`quickstart` or download the first tutorial notebook from
 :doc:`tutorials/index`.

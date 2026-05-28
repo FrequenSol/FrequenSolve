@@ -1,22 +1,28 @@
-Surveys, Sources, And Receivers
+Surveys, Sources, and Receivers
 ===============================
 
-Acquisition contains source groups, receiver groups, and optional sparse survey
+Acquisition contains :term:`source groups <source group>`,
+:term:`receiver groups <receiver group>`, and optional :term:`sparse survey`
 layouts. Coordinates are physical global coordinates by default, or
 ``CoordinateValue`` objects when a named coordinate system is used.
 
-Primary tutorials:
+Related tutorials:
 
 - :download:`Receivers <../../../examples/tutorials/05_surveys/01_receivers.ipynb>`
+  for multi-component :term:`receiver devices <receiver device>` and dense groups.
 - :download:`DAS <../../../examples/tutorials/05_surveys/02_das.ipynb>`
+  for fiber-style strain receivers.
 - :download:`Sources <../../../examples/tutorials/05_surveys/03_sources.ipynb>`
+  for scalar, vector, moment, and compound sources.
 - :download:`Sparse surveys <../../../examples/tutorials/05_surveys/04_sparse_surveys.ipynb>`
+  for offset windows and explicit source-receiver layouts.
 
 Survey Receivers
 ----------------
 
-A receiver device owns one or more components. Device names are optional; the
-receiver group name is the public survey identifier.
+A :term:`receiver device` owns one or more :term:`components <component>`.
+Device names are optional; the receiver group name is the public survey
+identifier.
 
 .. code-block:: python
 
@@ -49,12 +55,13 @@ DAS
 ---
 
 ``ReceiverFiber`` represents a fiber-style receiver. ``gauge_length`` is the
-physical DAS gauge length, ``channel_spacing`` is the spacing between reported
-channels and defaults to ``gauge_length``, and ``sample_spacing`` controls the
-integration samples used along the gauge. If ``sample_spacing`` is omitted,
+:term:`DAS` :term:`gauge length`, ``channel_spacing`` is the
+:term:`channel spacing` between reported channels and defaults to
+``gauge_length``, and ``sample_spacing`` controls the :term:`sample spacing`
+used along the gauge. If ``sample_spacing`` is omitted,
 ``points_per_gauge`` may be used instead. Helical fiber response adds
 ``radius`` and ``pitch``. Length-like DAS fields accept plain solver-scaled
-numbers or Pint quantities with explicit units.
+numbers or :term:`Pint` quantities with explicit units.
 
 .. code-block:: python
 
@@ -72,8 +79,9 @@ Survey Sources
 
 Point source kinds include ``scalar``, ``vector``, ``moment``, ``monopole``,
 and ``dipole``. ``CompoundSource`` combines multiple points and weights into
-one source group. When a simulation has multiple compatible sources, the solver
-chooses efficient internal source batches automatically:
+one :term:`source group`. When a simulation has multiple compatible sources,
+the solver chooses efficient internal :term:`source batches <source batching>`
+automatically:
 
 .. code-block:: python
 
@@ -86,8 +94,9 @@ chooses efficient internal source batches automatically:
 Sparse Survey Layouts
 ---------------------
 
-Dense receiver groups evaluate all source/receiver/component combinations.
-Sparse surveys select a subset or define rules such as offset windows:
+:term:`Dense surveys <dense survey>` evaluate all source/receiver/component
+combinations. :term:`Sparse surveys <sparse survey>` select a subset or define
+rules such as offset windows:
 
 .. code-block:: python
 
@@ -108,7 +117,7 @@ Sparse surveys select a subset or define rules such as offset windows:
    )
 
 Use ``SparseSurvey.from_product(...)`` or ``SparseSurvey.from_pairs(...)`` when
-explicit trace pairs are easier to define directly. Sparse survey inputs should
+explicit :term:`trace` pairs are easier to define directly. Sparse survey inputs should
 describe public trace identity: source ids, receiver ids, component names, and
 weights. Internal sample maps and point ranges are runtime details and should
 not be authored directly.

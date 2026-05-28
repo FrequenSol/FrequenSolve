@@ -76,28 +76,28 @@ AWSSite = optional_class(
     "AWSSite",
     "frequensolve.orchestrator.sites.aws.AWSSite",
     extra="cloud",
-    dependencies=("boto3", "botocore", "requests", "python-dotenv"),
+    dependencies=("boto3", "botocore", "requests"),
     module=__name__,
 )
 AWSSiteConfig = optional_class(
     "AWSSiteConfig",
     "frequensolve.orchestrator.sites.aws.AWSSiteConfig",
     extra="cloud",
-    dependencies=("boto3", "botocore", "requests", "python-dotenv"),
+    dependencies=("boto3", "botocore", "requests"),
     module=__name__,
 )
 CognitoAuth = optional_class(
     "CognitoAuth",
     "frequensolve.orchestrator.sites.aws.CognitoAuth",
     extra="cloud",
-    dependencies=("boto3", "botocore", "requests", "python-dotenv"),
+    dependencies=("boto3", "botocore", "requests"),
     module=__name__,
 )
 GraphQLClient = optional_class(
     "GraphQLClient",
     "frequensolve.orchestrator.sites.aws.GraphQLClient",
     extra="cloud",
-    dependencies=("boto3", "botocore", "requests", "python-dotenv"),
+    dependencies=("boto3", "botocore", "requests"),
     module=__name__,
 )
 

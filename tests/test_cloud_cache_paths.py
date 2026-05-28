@@ -13,6 +13,7 @@ from frequensolve.orchestrator.sites.aws.cache_paths import (
 
 
 def test_cloud_cache_paths_are_grouped_under_cloud_directory(monkeypatch, tmp_path):
+    monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
 
     assert cloud_credentials_path() == (
@@ -27,12 +28,27 @@ def test_cloud_cache_paths_are_grouped_under_cloud_directory(monkeypatch, tmp_pa
     )
 
 
+def test_cloud_cache_paths_use_frequensolve_home_override(monkeypatch, tmp_path):
+    storage_root = tmp_path / "fs-user-storage"
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(storage_root))
+
+    assert cloud_credentials_path() == storage_root / "cloud" / "credentials"
+    assert cloud_config_cache_path("localhost:5173/api") == (
+        storage_root / "cloud" / "config_localhost_5173_api.json"
+    )
+    assert legacy_credentials_path() == storage_root / "credentials"
+    assert legacy_config_cache_path("localhost:5173/api") == (
+        storage_root / "config_localhost_5173_api.json"
+    )
+
+
 def test_aws_site_config_reads_legacy_cache_and_migrates_it(monkeypatch, tmp_path):
     pytest.importorskip("boto3")
     pytest.importorskip("requests")
 
     from frequensolve.orchestrator.sites.aws import AWSSiteConfig
 
+    monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     config_data = {
         "auth": {
@@ -56,6 +72,7 @@ def test_cognito_auth_saves_tokens_in_cloud_directory(monkeypatch, tmp_path):
 
     from frequensolve.orchestrator.sites.aws import cognito
 
+    monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(cognito.boto3, "client", lambda *args, **kwargs: object())
 
@@ -85,6 +102,7 @@ def test_cognito_auth_reads_legacy_tokens_and_migrates_them(monkeypatch, tmp_pat
 
     from frequensolve.orchestrator.sites.aws import cognito
 
+    monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(cognito.boto3, "client", lambda *args, **kwargs: object())
     tokens = {"email": "user@example.com", "id_token": "token"}
@@ -107,6 +125,7 @@ def test_cognito_auth_cached_token_reads_are_debug_logs(monkeypatch, tmp_path, c
 
     from frequensolve.orchestrator.sites.aws import cognito
 
+    monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(cognito.boto3, "client", lambda *args, **kwargs: object())
     tokens = {"email": "user@example.com", "id_token": "token"}

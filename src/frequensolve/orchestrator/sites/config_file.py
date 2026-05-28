@@ -8,6 +8,8 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Mapping, Optional, Union
 
+from frequensolve.storage import frequensolve_home
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
@@ -63,7 +65,17 @@ _SITE_TYPES = {
     "tacc": "Stampede3Site",
 }
 
-_RESERVED_SITE_KEYS = {"type", "backend", "class", "name", "profile"}
+_RESERVED_SITE_KEYS = {"type"}
+_UNSUPPORTED_TOP_LEVEL_KEYS = {
+    "default_site": "use 'default'",
+    "profiles": "use [sites.<profile>] tables",
+}
+_UNSUPPORTED_SITE_KEYS = {
+    "backend": "use 'type'",
+    "class": "use 'type'",
+    "name": "profile names come from [sites.<profile>] table names",
+    "profile": "profile names come from [sites.<profile>] table names",
+}
 
 __all__ = [
     "DEFAULT_SITE_CONFIG_NAME",
@@ -82,7 +94,7 @@ def site_config_path(path: Optional[Union[str, Path]] = None) -> Path:
     env_path = os.getenv(SITE_CONFIG_ENV_VAR)
     if env_path:
         return Path(env_path).expanduser()
-    return Path.home() / ".frequensolve" / DEFAULT_SITE_CONFIG_NAME
+    return frequensolve_home() / DEFAULT_SITE_CONFIG_NAME
 
 
 def load_site_config(
@@ -102,7 +114,8 @@ def load_site_config(
             )
         raise FileNotFoundError(
             "No FrequenSolve site config found at "
-            f"{config_path}. Create ~/.frequensolve/{DEFAULT_SITE_CONFIG_NAME} "
+            f"{config_path}. Create "
+            f"{frequensolve_home() / DEFAULT_SITE_CONFIG_NAME} "
             f"or set {SITE_CONFIG_ENV_VAR}."
         )
     return tomllib.loads(config_path.read_text())
@@ -146,49 +159,73 @@ def Site(
 def _site_config_table(
     config: Mapping[str, Any], *, profile: Optional[str]
 ) -> Mapping[str, Any]:
+    _reject_unsupported_top_level_keys(config)
+
     if "site" in config:
-        site = config["site"]
-        if not isinstance(site, Mapping):
-            raise ValueError("FrequenSolve site config [site] must be a table")
-        return site
+        raise ValueError(
+            "FrequenSolve site config must use top-level default and "
+            "[sites.<profile>] tables; [site] is not supported"
+        )
 
     sites = config.get("sites")
-    if isinstance(sites, Mapping):
-        selected_profile = (
-            profile or config.get("default") or config.get("default_site")
+    if not isinstance(sites, Mapping):
+        raise ValueError(
+            "FrequenSolve site config must contain top-level default and "
+            "[sites.<profile>] tables"
         )
-        if not selected_profile:
-            raise ValueError(
-                "FrequenSolve site config with [sites] must set default or "
-                "pass profile=..."
-            )
-        try:
-            site = sites[selected_profile]
-        except KeyError as exc:
-            raise ValueError(
-                f"FrequenSolve site config profile {selected_profile!r} was not found"
-            ) from exc
-        if not isinstance(site, Mapping):
-            raise ValueError(
-                f"FrequenSolve site config profile {selected_profile!r} must be a table"
-            )
-        return site
 
-    if "type" in config or "backend" in config:
-        return config
+    default_profile = _default_profile(config)
+    if default_profile not in sites:
+        raise ValueError(
+            f"FrequenSolve site config default profile {default_profile!r} "
+            "was not found"
+        )
+    selected_profile = profile or default_profile
 
-    raise ValueError(
-        "FrequenSolve site config must contain a [site] table or [sites.<name>] profiles"
-    )
+    try:
+        site = sites[selected_profile]
+    except KeyError as exc:
+        raise ValueError(
+            f"FrequenSolve site config profile {selected_profile!r} was not found"
+        ) from exc
+    if not isinstance(site, Mapping):
+        raise ValueError(
+            f"FrequenSolve site config profile {selected_profile!r} must be a table"
+        )
+    _reject_unsupported_site_keys(site, f"[sites.{selected_profile}]")
+    return site
+
+
+def _default_profile(config: Mapping[str, Any]) -> str:
+    default = config.get("default")
+    if not isinstance(default, str) or not default.strip():
+        raise ValueError("FrequenSolve site config with [sites] must set default")
+    return default
 
 
 def _site_type(site_config: Mapping[str, Any]) -> str:
-    raw_type = site_config.get(
-        "type", site_config.get("backend", site_config.get("class"))
-    )
+    raw_type = site_config.get("type")
     if not isinstance(raw_type, str) or not raw_type.strip():
         raise ValueError("FrequenSolve site config must set site.type")
     return raw_type
+
+
+def _reject_unsupported_top_level_keys(config: Mapping[str, Any]) -> None:
+    for key, replacement in _UNSUPPORTED_TOP_LEVEL_KEYS.items():
+        if key in config:
+            raise ValueError(
+                f"FrequenSolve site config key {key!r} is not supported; "
+                f"{replacement}."
+            )
+
+
+def _reject_unsupported_site_keys(site_config: Mapping[str, Any], context: str) -> None:
+    for key, replacement in _UNSUPPORTED_SITE_KEYS.items():
+        if key in site_config:
+            raise ValueError(
+                f"FrequenSolve site config key {key!r} in {context} is not "
+                f"supported; {replacement}."
+            )
 
 
 def _site_kwargs(site_config: Mapping[str, Any], site_type: str) -> dict[str, Any]:

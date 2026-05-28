@@ -11,28 +11,29 @@ The commercial solver binaries and backend services are licensed separately. Thi
 
 FrequenSolve supports Python 3.10 through 3.14 on macOS and Linux.
 
-Until the first public package release is published to PyPI, install from a
-source checkout:
-
-```bash
-python -m pip install -e .
-```
-
-After the package is published, install the released SDK with:
+Install the released SDK with:
 
 ```bash
 python -m pip install frequensolve
 ```
 
+Because the repository is public, you can also install from a source checkout
+when you want local examples, documentation sources, or editable development:
+
+```bash
+python -m pip install -e .
+```
+
 Install optional capabilities only when needed:
 
 ```bash
-python -m pip install "frequensolve[parallel]"    # SLURM/SSH/Dask helpers
+python -m pip install "frequensolve[visual]"      # matplotlib and PyVista plotting
+python -m pip install "frequensolve[parallel]"    # local Dask execution
+python -m pip install "frequensolve[hpc]"         # SSH and SLURM site support
+python -m pip install "frequensolve[cloud]"       # FrequenSol Cloud API and S3 access
+python -m pip install "frequensolve[seismic-io]"  # SEG-Y/ASDF IO helpers
 python -m pip install "frequensolve[fast-fft]"    # pyFFTW acceleration
-python -m pip install "frequensolve[cloud]"       # FrequenSol cloud backend
-python -m pip install "frequensolve[seismic-io]"  # SEG-Y/ASDF and seismic I/O
-python -m pip install "frequensolve[visual]"      # plotting helpers
-python -m pip install "frequensolve[dev,docs]"    # development and docs
+python -m pip install "frequensolve[inversion]"   # PyLops-compatible FWI operators
 ```
 
 ## Quickstart
@@ -101,50 +102,10 @@ The tutorial notebooks live in `examples/tutorials`. The local documentation cat
 
 ## Development
 
-Create a local development environment from the repository root:
-
-```bash
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install -e ".[dev,docs,visual]"
-```
-
-Run deterministic unit tests by default:
-
-```bash
-python -m pytest
-```
-
-Run the same non-integration coverage lane used by CI:
-
-```bash
-make test
-```
-
-Release checks:
-
-```bash
-pre-commit run --all-files
-python -m build
-python -m twine check dist/*
-```
-
-PyPI publishing is handled by the `Publish PyPI` GitHub Actions workflow using
-trusted publishing. Before the first release, a PyPI project owner must create or
-approve the `frequensolve` project publisher for the
-`FrequenSol/FrequenSolve` repository, `publish-pypi.yml` workflow, and `pypi`
-environment. The workflow only publishes from tag refs, including manual
-dispatches, so create the intended release tag before publishing. No PyPI API
-token is stored in this repository.
-
-Solver, cloud, HPC, and visual tests are marked and must be selected explicitly:
-
-```bash
-python -m pytest -m integration
-python -m pytest -m cloud
-python -m pytest -m hpc
-python -m pytest -m visual
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, test commands,
+code style, and pull request expectations. See [RELEASING.md](RELEASING.md) for
+maintainer release and PyPI publishing steps, and [CHANGELOG.md](CHANGELOG.md)
+for release notes.
 
 ## Documentation
 
