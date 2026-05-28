@@ -618,9 +618,24 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         return file
 
     def check(self) -> bool:
-        """Placeholder validation hook for simulation completeness checks."""
+        """Return whether the simulation passes SDK validation."""
 
-        return True
+        return self.validate().ok
+
+    def validate(self, *, raise_errors: bool = False):
+        """Validate this simulation for common authoring mistakes.
+
+        Args:
+            raise_errors: If ``True``, raise ``ValidationError`` when blocking
+                issues are found.
+
+        Returns:
+            ``ValidationReport`` with errors and warnings.
+        """
+
+        from frequensolve.validation import validate_simulation
+
+        return validate_simulation(self, raise_errors=raise_errors)
 
     @quantize
     @memoized_func

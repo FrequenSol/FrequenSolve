@@ -623,7 +623,9 @@ class AWSSite(BaseSite):
 
         Args:
             job: The task to submit.
-            **kwargs: Additional job parameters (vcpu, memory, name, description).
+            **kwargs: Additional job parameters (vcpu, memory, name,
+                description). Pass ``validate=False`` to skip SDK pre-run
+                validation.
 
         Returns:
             Awaitable run handle.
@@ -636,15 +638,16 @@ class AWSSite(BaseSite):
             or kwargs.pop("force", False)
             or kwargs.pop("rerun", False)
         )
+        validate = kwargs.pop("validate", True)
         fetch = kwargs.pop("fetch", False)
         poll_interval = kwargs.pop("poll_interval", 10)
-        self.prepare_job(job)
+        self.prepare_job(job, validate=validate)
         if not force_run and job.is_run_current():
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
             return RunHandle.skipped(self, job)
 
-        self.prepare_job(job, sync_project=True)
+        self.prepare_job(job, sync_project=True, validate=validate)
 
         # Check if compute stack exists, create if missing
         if self.graphql_client is not None:

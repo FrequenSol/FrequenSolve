@@ -430,14 +430,16 @@ class SlurmSite(BaseSite):
             mode: Submission mode: ``"auto"``, ``"attached"``, or ``"batch"``.
             fetch: Whether to fetch outputs after completion.
             **overrides: Resource-request or site-specific submission
-                overrides.
+                overrides. Pass ``validate=False`` to skip SDK pre-run
+                validation.
 
         Returns:
             ``RunHandle`` for the submitted or attached run.
         """
 
         force_run = bool(force_run or force or overrides.pop("rerun", False))
-        self.prepare_job(job)
+        validate = overrides.pop("validate", True)
+        self.prepare_job(job, validate=validate)
         if mode not in {"auto", "attached", "batch"}:
             raise ValueError("mode must be 'auto', 'attached', or 'batch'")
 
@@ -460,7 +462,7 @@ class SlurmSite(BaseSite):
                     self.fetch_outputs(job)
                 return handle
 
-        self.prepare_job(job, sync_project=True)
+        self.prepare_job(job, sync_project=True, validate=validate)
 
         active_allocation = self.provisioned if mode in {"auto", "attached"} else False
         use_attached = mode == "attached" or (mode == "auto" and active_allocation)

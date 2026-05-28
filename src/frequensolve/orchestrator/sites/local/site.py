@@ -442,7 +442,8 @@ class LocalSite(BaseSite):
 
         Args:
             job: The simulation job to run
-            **kwargs: Additional arguments for task configuration
+            **kwargs: Additional arguments for task configuration. Pass
+                ``validate=False`` to skip SDK pre-run validation.
 
         Returns:
             RunHandle for the submitted tasks
@@ -452,11 +453,12 @@ class LocalSite(BaseSite):
             or kwargs.pop("force", False)
             or kwargs.pop("rerun", False)
         )
+        validate = kwargs.pop("validate", True)
         pack = bool(kwargs.pop("pack", True))
         shutdown_on_completion = bool(
             kwargs.pop("shutdown_on_completion", self.shutdown_on_completion)
         )
-        self.prepare_job(job)
+        self.prepare_job(job, validate=validate)
         if not force_run and job.is_run_current():
             logger.info(
                 "Skipping job %s; fingerprint matches and expected trace outputs exist.",

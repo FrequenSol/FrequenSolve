@@ -93,7 +93,7 @@ class PointSource(Source):
         name: Source name.
     """
 
-    kind: Literal["scalar", "vector", "moment", "monopole", "dipole"]
+    kind: Literal["scalar", "vector", "tensor", "monopole", "dipole"]
     coordinates: Any = field(default_factory=list)
     direction: Optional[Any] = None
     domain: Optional[int] = None

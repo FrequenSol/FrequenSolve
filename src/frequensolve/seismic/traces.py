@@ -140,10 +140,10 @@ class TraceDataset:
                 missing.
         """
 
-        packed_file = manifest.packed_file
-        if packed_file is not None:
+        packed_files = manifest.packed_files
+        if packed_files:
             packed_incomplete = not manifest.packed_complete
-            files = [packed_file]
+            files = packed_files
             frequencies = dict(manifest.frequencies)
             laplace = dict(manifest.laplace)
             packed_frequencies = manifest.packed_frequencies
@@ -186,8 +186,9 @@ class TraceDataset:
                         for key in frequencies
                     }
                     if manifest.frequencies and not frequencies:
+                        product_names = ", ".join(str(path) for path in packed_files)
                         raise ValueError(
-                            f"Packed trace product {packed_file} contains no "
+                            f"Packed trace product {product_names} contains no "
                             "frequencies requested by this job. "
                             f"{manifest.packed_incomplete_message()}"
                         )
@@ -245,6 +246,10 @@ class TraceDataset:
         if shard_dir.exists():
             candidates.extend(sorted(shard_dir.glob("*.h5")))
         candidates.extend(sorted(manifest.output_path.glob("f_*_hz.h5")))
+        for group in [*manifest.groups, *manifest.wavefields]:
+            group_dir = manifest.output_path / str(group)
+            if group_dir.exists():
+                candidates.extend(sorted(group_dir.glob("*.h5")))
 
         out = []
         seen = set()
@@ -331,11 +336,14 @@ class TraceDataset:
         groups = ", ".join(repr(group) for group in manifest.groups)
         groups = groups or "requested wavefields"
         packed_hint = manifest.output_path / "traces.h5"
+        named_packed_hint = manifest.output_path / "<wavefield>.h5"
         shard_hint = manifest.output_path / "traces_*.h5"
+        named_shard_hint = manifest.output_path / "<wavefield>" / "f_*_hz.h5"
         raise FileNotFoundError(
             f"No wavefield trace files were found for {groups} in "
             f"{manifest.output_path}. Expected a packed wavefield file such as "
-            f"{packed_hint} or per-frequency files matching {shard_hint}. "
+            f"{packed_hint} or {named_packed_hint}, or per-frequency files "
+            f"matching {shard_hint} or {named_shard_hint}. "
             "Rerun the job after enabling solver wavefield output, or fetch the "
             "wavefield output directory if it was produced remotely."
         )

@@ -148,6 +148,7 @@ class TraceStore:
     _consolidated: Optional[Path] = None
     _cache_dir: Optional[Path] = None
     _open_files: List[h5py.File]
+    _packed_group_files: Dict[str, Path]
 
     def __init__(
         self,
@@ -165,6 +166,7 @@ class TraceStore:
         self._cache_dir = Path(cache_dir) if cache_dir is not None else None
         self._consolidated = None
         self._open_files = []
+        self._packed_group_files = {}
 
     @classmethod
     def from_job(cls, job, upscale: int = 1):
@@ -272,14 +274,20 @@ class TraceStore:
         """Return receiver or wavefield groups available in the trace store."""
 
         self._ensure_consolidated()
+        if self._packed_group_files:
+            configured = [str(group) for group in self.metadata.get("groups", [])]
+            if configured:
+                return [
+                    group for group in configured if group in self._packed_group_files
+                ]
+            return list(self._packed_group_files)
         with h5py.File(self._consolidated, "r") as f:
             return self._h5_trace_groups(f, self.metadata.get("groups"))
 
     def dims(self, group) -> list[str]:
         """Return xarray dimension names for a trace group."""
 
-        self._ensure_consolidated()
-        with h5py.File(self._consolidated, "r") as f:
+        with h5py.File(self._trace_file_for_group(group), "r") as f:
             if self._is_indexed_packed_h5(f) and group not in f:
                 dset = f[self._indexed_trace_paths(f, group)[0]]
             else:
@@ -291,8 +299,7 @@ class TraceStore:
     def components(self, group) -> list[str]:
         """Return component labels available in a trace group."""
 
-        self._ensure_consolidated()
-        with h5py.File(self._consolidated, "r") as f:
+        with h5py.File(self._trace_file_for_group(group), "r") as f:
             for path in (
                 f"survey/receiver_groups/{group}/traces/component_name",
                 f"survey/receiver_groups/{group}/components/component_name",
@@ -311,8 +318,7 @@ class TraceStore:
     def sources(self, group) -> list[str]:
         """Return source ids available in a trace group."""
 
-        self._ensure_consolidated()
-        with h5py.File(self._consolidated, "r") as f:
+        with h5py.File(self._trace_file_for_group(group), "r") as f:
             path = f"survey/receiver_groups/{group}/traces/source_id"
             if path in f:
                 return _unique_preserve_order(f[path][()])
@@ -333,8 +339,7 @@ class TraceStore:
     def frequencies(self, group) -> list[str]:
         """Return frequencies available in a trace group."""
 
-        self._ensure_consolidated()
-        with h5py.File(self._consolidated, "r") as f:
+        with h5py.File(self._trace_file_for_group(group), "r") as f:
             if self._is_indexed_packed_h5(f) and group not in f:
                 values = [
                     row["frequency"]
@@ -359,8 +364,16 @@ class TraceStore:
     def laplace(self, group: Optional[str] = None) -> np.ndarray:
         """Return Laplace offsets for all traces or a specific group."""
 
-        self._ensure_consolidated()
-        with h5py.File(self._consolidated, "r") as f:
+        if group is None and self._packed_group_files:
+            return self._metadata_laplace_values(self._expected_frequencies())
+        path = (
+            self._trace_file_for_group(group)
+            if group is not None
+            else self._trace_file_for_group(self.groups[0]) if self.groups else None
+        )
+        if path is None:
+            return self._metadata_laplace_values(self._expected_frequencies())
+        with h5py.File(path, "r") as f:
             if group is not None and self._is_indexed_packed_h5(f) and group not in f:
                 rows = self._filter_expected_indexed_rows(
                     self._indexed_trace_rows(f, group)
@@ -388,8 +401,7 @@ class TraceStore:
     def receivers(self, group) -> list[str]:
         """Return receiver ids available in a trace group."""
 
-        self._ensure_consolidated()
-        with h5py.File(self._consolidated, "r") as f:
+        with h5py.File(self._trace_file_for_group(group), "r") as f:
             for path in (
                 f"survey/receiver_groups/{group}/traces/receiver_id",
                 f"survey/receiver_groups/{group}/receivers/receiver_id",
@@ -410,8 +422,7 @@ class TraceStore:
     def survey_tables(self) -> Dict[str, Any]:
         """Return embedded survey metadata tables from the trace store."""
 
-        if self._consolidated is None:
-            self.consolidate()
+        self._ensure_consolidated()
 
         def read_group(group):
             out = {}
@@ -423,6 +434,14 @@ class TraceStore:
                     out[key] = read_group(item)
             return out
 
+        if self._packed_group_files:
+            tables: Dict[str, Any] = {}
+            for path in self._packed_group_files.values():
+                with h5py.File(path, "r") as f:
+                    if "survey" not in f:
+                        continue
+                    tables.update(read_group(f["survey"]))
+            return tables
         with h5py.File(self._consolidated, "r") as f:
             if "survey" not in f:
                 return {}
@@ -497,8 +516,20 @@ class TraceStore:
         return str(self.summary)
 
     def _ensure_consolidated(self) -> None:
+        if self._packed_group_files and all(
+            path.exists() for path in self._packed_group_files.values()
+        ):
+            return
         if self._consolidated is None or not Path(self._consolidated).exists():
             self.consolidate()
+
+    def _trace_file_for_group(self, group: str) -> Path:
+        self._ensure_consolidated()
+        if group in self._packed_group_files:
+            return self._packed_group_files[group]
+        if self._consolidated is None:
+            raise FileNotFoundError("No consolidated trace file is available")
+        return Path(self._consolidated)
 
     @staticmethod
     def _consolidated_path(
@@ -880,12 +911,51 @@ class TraceStore:
             for freq in expected_values
         )
 
+    @classmethod
+    def _packed_trace_contains_groups(
+        cls,
+        path: Path,
+        groups: Iterable[str],
+    ) -> bool:
+        requested = [str(group) for group in groups]
+        if not requested:
+            return True
+        if not path.exists():
+            return False
+        try:
+            available = set(cls.discover_trace_groups(path, requested))
+        except (OSError, KeyError, ValueError):
+            return False
+        return all(group in available for group in requested)
+
     def _packed_trace_file_for_records(self, records: Iterable[Path]) -> Optional[Path]:
         expected = self._expected_frequencies()
+        groups = [str(group) for group in self.metadata.get("groups", [])]
         for candidate in self._candidate_packed_trace_files(records):
-            if self._packed_trace_covers_frequencies(candidate, expected):
+            if self._packed_trace_covers_frequencies(
+                candidate, expected
+            ) and self._packed_trace_contains_groups(candidate, groups):
                 return candidate
         return None
+
+    def _packed_group_file_map(self, records: Iterable[Path]) -> Dict[str, Path]:
+        expected = self._expected_frequencies()
+        configured = [str(group) for group in self.metadata.get("groups", [])]
+        group_files: Dict[str, Path] = {}
+        for record in records:
+            if not record.exists() or not self._is_packed_trace_file(record):
+                continue
+            if not self._packed_trace_covers_frequencies(record, expected):
+                continue
+            try:
+                groups = self.discover_trace_groups(record, configured)
+            except (OSError, KeyError, ValueError):
+                continue
+            for group in groups:
+                group_files.setdefault(str(group), record)
+        if configured and not all(group in group_files for group in configured):
+            return {}
+        return group_files
 
     def consolidate(self, cache_dir: Optional[Union[str, Path]] = None) -> Path:
         """Create or select a packed trace file with frequency as leading axis.
@@ -900,11 +970,19 @@ class TraceStore:
         records = [Path(file) for file in self.files]
         if not records:
             raise FileNotFoundError("No trace files were provided")
+        self._packed_group_files = {}
 
         packed = self._packed_trace_file_for_records(records)
         if packed is not None:
             self.close()
             self._consolidated = packed
+            return self._consolidated
+
+        group_files = self._packed_group_file_map(records)
+        if group_files:
+            self.close()
+            self._packed_group_files = group_files
+            self._consolidated = next(iter(group_files.values()))
             return self._consolidated
 
         if (
@@ -1011,8 +1089,7 @@ class TraceStore:
                 error=exc,
             ) from exc
 
-        self._ensure_consolidated()
-        h5 = h5py.File(self._consolidated, "r")
+        h5 = h5py.File(self._trace_file_for_group(group), "r")
         self._open_files.append(h5)
         indexed_paths: list[str] = []
         indexed_frequencies: list[float] = []

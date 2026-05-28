@@ -526,10 +526,23 @@ class TraceManifest:
             is recorded.
         """
 
-        packed = self._packed_manifest(self.result_path, self.output_path)
-        if packed is None or not packed[0].exists():
+        products = self._packed_products()
+        if len(products) != 1 or not products[0][0].exists():
             return None
-        return packed[0]
+        return products[0][0]
+
+    @property
+    def packed_files(self) -> List[Path]:
+        """Return existing packed trace files named by available manifests.
+
+        Returns:
+            Existing packed trace products. Wavefield outputs may produce one
+            packed file per output name.
+        """
+
+        return [
+            path for path, _freq, _laplace in self._packed_products() if path.exists()
+        ]
 
     @property
     def packed_frequencies(self) -> Dict[int, float]:
@@ -540,8 +553,8 @@ class TraceManifest:
             mapping when no packed product is recorded.
         """
 
-        packed = self._packed_manifest(self.result_path, self.output_path)
-        return {} if packed is None else packed[1]
+        products = self._packed_products()
+        return {} if not products else products[0][1]
 
     @property
     def packed_laplace(self) -> Dict[int, float]:
@@ -552,8 +565,8 @@ class TraceManifest:
             mapping when unavailable.
         """
 
-        packed = self._packed_manifest(self.result_path, self.output_path)
-        return {} if packed is None else packed[2]
+        products = self._packed_products()
+        return {} if not products else products[0][2]
 
     @property
     def missing_packed_frequencies(self) -> Dict[int, float]:
@@ -563,14 +576,17 @@ class TraceManifest:
             Mapping from expected one-based task number to missing frequency.
         """
 
-        if self.packed_file is None:
+        products = self._packed_products()
+        if not products or any(not path.exists() for path, _freq, _laplace in products):
             return dict(self.frequencies)
-        packed_frequencies = self.packed_frequencies
-        if not packed_frequencies:
+        if not any(frequencies for _path, frequencies, _laplace in products):
             return {}
         missing = {}
         for key, frequency in self.frequencies.items():
-            if not _frequency_values_contain(packed_frequencies, frequency):
+            if any(
+                frequencies and not _frequency_values_contain(frequencies, frequency)
+                for _path, frequencies, _laplace in products
+            ):
                 missing[int(key)] = _real_frequency(frequency)
         return missing
 
@@ -583,7 +599,8 @@ class TraceManifest:
             frequencies are missing.
         """
 
-        if self.packed_file is None:
+        products = self._packed_products()
+        if not products or any(not path.exists() for path, _freq, _laplace in products):
             return False
         return not self.missing_packed_frequencies
 
@@ -597,7 +614,11 @@ class TraceManifest:
 
         missing = self.missing_packed_frequencies
         detail = _compact_frequency_ranges(missing)
-        packed_file = self.packed_file or self.output_path / "traces.h5"
+        packed_files = self.packed_files
+        if packed_files:
+            packed_file = ", ".join(str(path) for path in packed_files)
+        else:
+            packed_file = str(self.output_path / "traces.h5")
         return (
             f"Packed trace product {packed_file} is missing {len(missing)} of "
             f"{len(self.frequencies)} expected frequencies: {detail}"
@@ -612,9 +633,9 @@ class TraceManifest:
             per-frequency trace shards.
         """
 
-        packed_file = self.packed_file
-        if packed_file is not None and self.packed_complete:
-            return [packed_file]
+        packed_files = self.packed_files
+        if packed_files and self.packed_complete:
+            return packed_files
         return [
             self.resolve_trace_file(file)
             for file in self.files
@@ -630,7 +651,7 @@ class TraceManifest:
             expected per-frequency trace file exists.
         """
 
-        if self.packed_file is not None:
+        if self._packed_products():
             return self.packed_complete
         return bool(self.files) and all(
             self.resolve_trace_file(file).exists() for file in self.files
@@ -723,12 +744,44 @@ class TraceManifest:
         files = outputs.get("files", []) if outputs else []
         return [OutputArtifact.from_fs(file, result_path=result_path) for file in files]
 
+    def _packed_products(self) -> List[tuple[Path, Dict[int, float], Dict[int, float]]]:
+        manifest_files = [self.output_path / "manifest.json"]
+        names = [*self.groups, *self.wavefields]
+        if names:
+            manifest_files.extend(
+                self.output_path / str(name) / "manifest.json" for name in names
+            )
+        else:
+            manifest_files.extend(sorted(self.output_path.glob("*/manifest.json")))
+
+        products: List[tuple[Path, Dict[int, float], Dict[int, float]]] = []
+        seen = set()
+        for manifest_file in manifest_files:
+            packed = self._packed_manifest_file(self.result_path, manifest_file)
+            if packed is None:
+                continue
+            key = str(packed[0].resolve(strict=False))
+            if key in seen:
+                continue
+            seen.add(key)
+            products.append(packed)
+        return products
+
     @staticmethod
     def _packed_manifest(
         result_path: Path,
         output_path: Path,
     ) -> Optional[tuple[Path, Dict[int, float], Dict[int, float]]]:
-        manifest_file = output_path / "manifest.json"
+        return TraceManifest._packed_manifest_file(
+            result_path,
+            output_path / "manifest.json",
+        )
+
+    @staticmethod
+    def _packed_manifest_file(
+        result_path: Path,
+        manifest_file: Path,
+    ) -> Optional[tuple[Path, Dict[int, float], Dict[int, float]]]:
         if not manifest_file.exists():
             return None
         try:
@@ -964,7 +1017,7 @@ class JobArtifactMixin:
         """
 
         manifest = self.trace_manifest
-        if manifest.packed_file is not None and not manifest.packed_complete:
+        if manifest.packed_files and not manifest.packed_complete:
             warnings.warn(
                 manifest.packed_incomplete_message(),
                 RuntimeWarning,
@@ -1015,9 +1068,13 @@ class JobArtifactMixin:
 
         for manifest in manifests:
             candidates = [
-                manifest.packed_file,
+                *manifest.packed_files,
                 manifest.output_path / "traces.h5",
                 manifest.output_path / "manifest.json",
+                *[
+                    manifest.output_path / str(name) / "manifest.json"
+                    for name in [*manifest.groups, *manifest.wavefields]
+                ],
             ]
             for path in candidates:
                 if path is None:
@@ -1059,6 +1116,7 @@ class JobArtifactMixin:
         Returns:
             Mapping from ParaView output name to output path.
         """
+        self.outputs.ensure_unique_names()
         return {out.name: out.path for out in self.outputs.paraview}
 
     @property
@@ -1127,6 +1185,7 @@ class JobArtifactMixin:
         wavefields = {}
         output_paths = set()
 
+        self.outputs.ensure_unique_names()
         for out in self.outputs.wavefields:
             if out.grid is None:
                 raise ValueError("WavefieldOutput requires a grid")
@@ -1210,6 +1269,7 @@ class JobArtifactMixin:
             ValueError: If any wavefield output is missing a grid.
         """
         wave_out = {}
+        self.outputs.ensure_unique_names()
         for out in self.outputs.wavefields:
             if out.grid is None:
                 raise ValueError("WavefieldOutput requires a grid")
@@ -1259,7 +1319,7 @@ class JobArtifactMixin:
         manifest: Optional[TraceManifest] = None,
     ) -> bool:
         manifest = self.trace_manifest if manifest is None else manifest
-        if manifest.packed_file is None:
+        if not manifest.packed_files:
             return False
         if task < 1 or task > self.n_tasks:
             return False
@@ -1281,7 +1341,7 @@ class JobArtifactMixin:
         manifest: Optional[TraceManifest] = None,
     ) -> List[Path]:
         manifest = self.trace_manifest if manifest is None else manifest
-        files = self.expected_trace_files()
+        files = list(manifest.files)
         candidates: List[Path] = []
         if 1 <= task <= len(files):
             path = Path(files[task - 1])
@@ -1290,6 +1350,10 @@ class JobArtifactMixin:
         if shard_dir.exists():
             candidates.extend(sorted(shard_dir.glob("*.h5")))
         candidates.extend(sorted(manifest.output_path.glob("f_*_hz.h5")))
+        for group in [*manifest.groups, *manifest.wavefields]:
+            group_dir = manifest.output_path / str(group)
+            if group_dir.exists():
+                candidates.extend(sorted(group_dir.glob("*.h5")))
 
         out: List[Path] = []
         seen = set()
@@ -1340,7 +1404,7 @@ class JobArtifactMixin:
         manifest: Optional[TraceManifest] = None,
     ) -> tuple[Path, bool]:
         manifest = self.trace_manifest if manifest is None else manifest
-        files = self.expected_trace_files()
+        files = list(manifest.files)
         path = Path(files[task - 1])
         existing = path if path.exists() else self._legacy_trace_file(path)
         if existing.exists():
@@ -1348,13 +1412,13 @@ class JobArtifactMixin:
         shard = self._matching_frequency_trace_file(task, manifest=manifest)
         if shard is not None:
             return shard, True
-        packed_file = manifest.packed_file
         if manifest.packed_complete and self._packed_trace_has_current_task(
             task,
             manifest=manifest,
         ):
-            if packed_file is not None:
-                return packed_file, True
+            packed_files = manifest.packed_files
+            if packed_files:
+                return packed_files[0], True
         return path, False
 
     def _stored_trace_path(self, path: Path) -> str:

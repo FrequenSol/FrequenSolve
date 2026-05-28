@@ -1399,7 +1399,7 @@ class JobOutputs:
             self.paraview.extend(output.paraview)
             self.wavefields.extend(output.wavefields)
             self.units = output.units
-            return self
+            return self.ensure_unique_names()
         if isinstance(output, OutputUnits):
             self.units = output
             return self
@@ -1413,7 +1413,7 @@ class JobOutputs:
         if isinstance(output, Iterable) and not isinstance(output, (str, bytes)):
             for item in output:
                 self.add(item)
-            return self
+            return self.ensure_unique_names()
         if isinstance(output, TraceOutput):
             self.traces = output
         elif isinstance(output, ParaviewOutput):
@@ -1422,6 +1422,24 @@ class JobOutputs:
             self.wavefields.append(output)
         else:
             raise TypeError(f"Unsupported output type: {type(output).__name__}")
+        return self.ensure_unique_names()
+
+    def ensure_unique_names(self) -> "JobOutputs":
+        """Ensure all named output requests have solver-unique names.
+
+        ParaView and wavefield outputs use their names as solver-side output
+        identifiers, artifact keys, and file-name bases. When duplicate names
+        are present, this method keeps the first output unchanged and appends a
+        numeric suffix such as ``"_1"`` to later duplicates.
+
+        Returns:
+            This ``JobOutputs`` instance after any duplicate names have been
+            normalized in place.
+        """
+
+        used: set[str] = set()
+        for output in self._named_outputs():
+            output.name = _unique_output_name(output.name, used)
         return self
 
     def to_fs(self, ctx=None) -> Dict:
@@ -1434,6 +1452,7 @@ class JobOutputs:
             Solver-compatible output configuration with empty sections omitted.
         """
 
+        self.ensure_unique_names()
         payload = {
             "Units": self.units.to_fs(ctx) if self.units is not None else None,
             "traces": self.traces.to_fs(ctx),
@@ -1469,6 +1488,22 @@ class JobOutputs:
             wavefields=wavefields,
             units=OutputUnits.from_fs(data["Units"]) if "Units" in data else None,
         )
+
+    def _named_outputs(self) -> List[Union[ParaviewOutput, WavefieldOutput]]:
+        return [*self.paraview, *self.wavefields]
+
+
+def _unique_output_name(name: Any, used: set[str]) -> str:
+    base = str(name) if name is not None else "output"
+    if not base:
+        base = "output"
+    candidate = base
+    suffix = 1
+    while candidate in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
 
 
 def _output_units(

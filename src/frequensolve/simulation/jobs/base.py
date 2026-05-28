@@ -450,6 +450,21 @@ class BaseJob(
         self += wavefield(*args, **kwargs)
         return self
 
+    def validate(self, *, raise_errors: bool = False):
+        """Validate this job for common pre-run authoring mistakes.
+
+        Args:
+            raise_errors: If ``True``, raise ``ValidationError`` when blocking
+                issues are found.
+
+        Returns:
+            ``ValidationReport`` with errors and warnings.
+        """
+
+        from frequensolve.validation import validate_job
+
+        return validate_job(self, raise_errors=raise_errors)
+
     def validate_outputs(self) -> None:
         """Validate output requests before saving or executing the job.
 

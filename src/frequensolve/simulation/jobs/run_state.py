@@ -1213,7 +1213,7 @@ class JobRunStateMixin:
             source = self._resolve_stored_trace_path(
                 record.get("path") or record.get("trace_file")
             )
-            if source is not None and source == self.trace_manifest.packed_file:
+            if source is not None and source in self.trace_manifest.packed_files:
                 continue
             if fingerprint and source is not None and self._trace_file_exists(source):
                 source_by_fingerprint.setdefault(fingerprint, source)

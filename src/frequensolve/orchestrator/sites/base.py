@@ -543,7 +543,13 @@ class BaseSite:
             message = f"{message} - {status.message}"
         self._emit(message, force=force)
 
-    def prepare_job(self, job, *, sync_project: bool = False):
+    def prepare_job(
+        self,
+        job,
+        *,
+        sync_project: bool = False,
+        validate: bool = True,
+    ):
         """Persist local job inputs before a run is submitted.
 
         Site implementations call this before checking run fingerprints or
@@ -554,6 +560,7 @@ class BaseSite:
             job: Job object with an optional ``save`` method.
             sync_project: Whether to synchronize the owning project after the
                 job is saved.
+            validate: Whether to run job validation before submission.
 
         Returns:
             The same job object, for fluent site implementations.
@@ -561,6 +568,8 @@ class BaseSite:
 
         if hasattr(job, "save"):
             job.save()
+        if validate and hasattr(job, "validate"):
+            job.validate(raise_errors=True)
         project = getattr(getattr(job, "simulation", None), "_project", None)
         if sync_project and project is not None and hasattr(self, "sync"):
             self.sync(project)
