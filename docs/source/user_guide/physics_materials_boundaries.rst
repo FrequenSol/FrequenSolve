@@ -1,4 +1,4 @@
-Physics, Materials, And Boundaries
+Physics, Materials, and Boundaries
 ==================================
 
 FrequenSolve simulations select a top-level physics formulation with
@@ -7,12 +7,16 @@ declare ``physics=`` when a coupled model contains more than one material
 family. Layer properties are authored as a dictionary and are exported with
 canonical lowercase names.
 
-Primary tutorials:
+Related tutorials:
 
 - :download:`Acoustic modeling <../../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>`
+  for the simplest complete material and boundary workflow.
 - :download:`Elastic modeling <../../../examples/tutorials/01_modeling_basics/02_elastic.ipynb>`
+  for shear-wave properties, :term:`attenuation`, and elastic receivers.
 - :download:`Poroelastic modeling <../../../examples/tutorials/01_modeling_basics/03_poroelastic.ipynb>`
+  for :term:`Biot`-frame and pore-fluid properties.
 - :download:`Coupled modeling <../../../examples/tutorials/01_modeling_basics/04_coupled.ipynb>`
+  for mixed material families in one model.
 
 Model Material Properties
 -------------------------
@@ -28,11 +32,11 @@ Model Material Properties
    * - ``Vp``
      - ``L/T``
      - Acoustic, elastic, poroelastic elastic-frame modes
-     - Compressional or P-wave speed.
+     - Compressional or :term:`P-wave` speed.
    * - ``Vs``
      - ``L/T``
      - Elastic and poroelastic elastic-frame modes
-     - Shear or S-wave speed.
+     - Shear or :term:`S-wave` speed.
    * - ``Rho``
      - ``M/L^3``
      - Acoustic, elastic, poroelastic elastic-frame modes
@@ -40,15 +44,15 @@ Model Material Properties
    * - ``Qp``
      - ``1``
      - Acoustic, elastic, poroelastic elastic-frame modes
-     - Compressional quality factor for attenuation.
+     - Compressional :term:`quality factor` for attenuation.
    * - ``Qs``
      - ``1``
      - Elastic and poroelastic elastic-frame modes
-     - Shear quality factor for attenuation.
+     - Shear :term:`quality factor` for attenuation.
    * - ``epsilon``
      - ``1``
      - ``elastic:vti``, ``elastic:tti``, ``poroelastic:vti``, ``poroelastic:tti``
-     - Thomsen-style P-wave anisotropy parameter.
+     - Thomsen-style P-wave :term:`anisotropy` parameter.
    * - ``gamma``
      - ``1``
      - ``elastic:vti``, ``elastic:tti``, ``poroelastic:vti``, ``poroelastic:tti``
@@ -116,22 +120,22 @@ Model Material Properties
    * - ``viscous_length``
      - ``L``
      - JKD poroelastic modes
-     - Dynamic permeability length scale used by the JKD hydraulic model.
+     - Dynamic permeability length scale used by the :term:`JKD` hydraulic model.
    * - ``biot_frequency``
      - ``1/T``
      - JKD poroelastic modes
      - Optional transition frequency for dynamic hydraulic response.
 
 The Dimension column is unit-system independent. Values may be plain numbers
-in the simulation's configured unit system or Pint quantities with compatible
+in the simulation's configured unit system or :term:`Pint` quantities with compatible
 units.
 
 Required fields depend on the selected physics. ``acoustic`` requires
 ``Vp`` and ``Rho``. ``elastic:iso`` requires ``Vp``, ``Vs``, and ``Rho``;
 ``elastic:vti`` and ``elastic:tti`` also require ``epsilon``. Direct
-poroelastic modes require ``k_dry``, ``mu_dry``, and the shared Biot
-solid/fluid/transport properties. Elastic-frame poroelastic modes require
-``Vp``, ``Vs``, ``Rho``, and the shared Biot properties. JKD modes also
+:term:`poroelastic` modes require ``k_dry``, ``mu_dry``, and the shared
+:term:`Biot` solid/fluid/transport properties. Elastic-frame poroelastic modes require
+``Vp``, ``Vs``, ``Rho``, and the shared Biot properties. :term:`JKD` modes also
 require ``viscous_length``.
 
 For basic modeling tutorials, adaptivity-only properties are intentionally
@@ -141,7 +145,7 @@ omitted. Mesh-specific properties such as ``epw_mult``, ``hmin``, and ``hmax`` a
 Attenuation
 -----------
 
-Elastic attenuation is controlled by ``Qp`` and ``Qs``. Poroelastic direct-Biot
+Elastic :term:`attenuation` is controlled by ``Qp`` and ``Qs``. Poroelastic direct-Biot
 attenuation uses ``qk`` and ``qmu`` where supported. There is no separate
 "viscous physics" switch in the Python API; providing attenuation properties is
 the user-facing way to request attenuative material behavior.
@@ -167,7 +171,7 @@ Common boundary names for generated 2D meshes are ``x_min``, ``x_max``,
 ``z_min``, and ``z_max``. For generated 3D meshes, ``y_min`` and ``y_max`` are
 also available. Labeled external meshes may use mesh boundary labels instead.
 
-PML is not authored as an extra material layer. When a boundary is marked
+:term:`PML` is not authored as an extra material layer. When a boundary is marked
 ``pml``, the solver auto-extrudes an absorbing layer outside that
 boundary. ``pml_wavelengths`` specifies the width in wavelengths, so the
 physical PML thickness is frequency-dependent: lower frequencies produce wider

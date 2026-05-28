@@ -16,3 +16,11 @@ Mesh Manager
    :members:
    :show-inheritance:
    :noindex:
+
+Mesh Generators
+---------------
+
+.. automodule:: frequensolve.mesh.mesh_generators
+   :members:
+   :show-inheritance:
+   :noindex:

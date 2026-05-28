@@ -1,4 +1,9 @@
-"""Public validation entry points."""
+"""Public preflight validation entry points.
+
+Use these helpers before saving, submitting, or debugging simulations and jobs
+when you want SDK-level diagnostics without invoking the solver or a JSON
+Schema validation step.
+"""
 
 from __future__ import annotations
 

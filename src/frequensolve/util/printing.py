@@ -1,3 +1,5 @@
+"""Terminal color helpers for FrequenSolve status messages."""
+
 __all__ = ["ANSIColorCodes"]
 
 

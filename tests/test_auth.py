@@ -43,9 +43,9 @@ def test_login():
     except ValueError as e:
         print(f"\n❌ Configuration error: {e}")
         print("\nPlease provide a domain or set FREQUENSOL_DOMAIN:")
-        print("  export FREQUENSOL_DOMAIN='frequensolve.app'")
+        print("  export FREQUENSOL_DOMAIN='app.frequensol.com'")
         print("\nOr simply use:")
-        print("  site = AWSSite(domain='frequensolve.app')")
+        print("  site = AWSSite(domain='app.frequensol.com')")
         return False
 
     # Initialize authentication

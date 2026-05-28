@@ -1,3 +1,5 @@
+"""Frequency-dependent material-property dispersion models."""
+
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
@@ -69,6 +71,13 @@ class PowerLawDispersion(DispersionRelation):
     """
 
     def __init__(self, f0: float, alpha: float):
+        """Create a power-law dispersion model.
+
+        Args:
+            f0: Reference frequency.
+            alpha: Power-law exponent.
+        """
+
         self.f0 = f0
         self.alpha = alpha
 
@@ -116,6 +125,15 @@ class TablulatedDispersion(DispersionRelation):
         interpolation: str = "linear",
         extrapolation: str = "nearest",
     ):
+        """Create a table-based dispersion relation.
+
+        Args:
+            frequencies: Frequency samples for the table.
+            values: Dispersion scale values at ``frequencies``.
+            interpolation: Interpolation method between samples.
+            extrapolation: Extrapolation policy outside the sampled range.
+        """
+
         self.frequencies = frequencies
         self.values = values
         self.interpolation = interpolation
@@ -163,5 +181,7 @@ class DispersionScaling:
     """
 
     def __init__(self, property: Any, dispersion: DispersionRelation):
+        """Create a property/dispersion pair."""
+
         self.property = property
         self.dispersion = dispersion

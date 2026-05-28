@@ -1,3 +1,5 @@
+"""High-level accessors for solver trace output datasets."""
+
 from __future__ import annotations
 
 import warnings
@@ -29,6 +31,8 @@ class TraceDataset:
     _store: Optional[TraceStore] = None
 
     def __post_init__(self) -> None:
+        """Validate manifest coverage before any files are opened."""
+
         if self.upscale < 1:
             raise ValueError("TraceDataset upscale must be >= 1")
         if not self.manifest.files:

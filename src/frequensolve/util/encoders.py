@@ -1,3 +1,5 @@
+"""JSON and TOML encoders for FrequenSolve objects."""
+
 import json
 from pathlib import Path
 

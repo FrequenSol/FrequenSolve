@@ -12,10 +12,10 @@ furnished to do so, subject to the following conditions:
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
 
-This repository contains the open-source Python SDK for composing input files,
+This repository contains the open-source FrequenSolve Python API for composing input files,
 validating models, launching licensed solver runs, and reading solver results.
 
-The SDK does not include, license, or grant rights to the fast solver,
+The FrequenSolve Python API does not include, license, or grant rights to the fast solver,
 FEM source code, binaries, license server, proprietary algorithms,
 or trademarks. Use of the solver requires a separate commercial license.
 

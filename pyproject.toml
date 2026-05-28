@@ -1,6 +1,6 @@
 [build-system]
 requires = [
-    "setuptools>=69",
+    "setuptools>=77.0.3",
     "wheel",
     "versioneer[toml]>=0.29",
 ]
@@ -9,14 +9,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "frequensolve"
 dynamic = ["version"]
-description = "Python SDK for authoring and running FrequenSolve finite-element simulations"
+description = "FrequenSolve Python API for authoring and running FrequenSolve finite-element simulations"
 authors = [{ name = "FrequenSol", email = "support@frequensol.com" }]
 maintainers = [{ name = "FrequenSol", email = "support@frequensol.com" }]
 keywords = ["finite-elements", "seismic", "wave-propagation", "modeling"]
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.10,<3.15"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
@@ -27,10 +27,13 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
     "blake3>=1.0.5,<2.0.0",
+    "bottleneck>=1.3.6,<2.0.0",
     "click>=8.1.8,<9.0.0",
     "h5py>=3.12.1,<4.0.0",
     "jinja2>=3.1.5,<4.0.0",
@@ -38,12 +41,13 @@ dependencies = [
     "pint>=0.24.4,<1.0",
     "scipy>=1.13,<2.0",
     "toml>=0.10.2,<0.11.0",
+    "tqdm>=4.66.4,<5.0.0",
     "xarray>=2025.1.1,<2026.0.0",
 ]
 
 [project.urls]
 Homepage = "https://frequensol.com"
-Documentation = "https://frequensol.com/docs"
+Documentation = "https://docs.frequensol.com"
 Support = "https://frequensol.com/support"
 
 [project.optional-dependencies]
@@ -52,10 +56,7 @@ fast-fft = [
 ]
 cloud = [
     "boto3>=1.36.23,<2.0.0",
-    "flask>=3.1.0,<4.0.0",
-    "python-dotenv>=1.0.1,<2.0.0",
     "requests>=2.31.0,<3.0.0",
-    "werkzeug>=3.1.3,<4.0.0",
 ]
 parallel = [
     "bokeh>=3.4.2,<4.0.0",
@@ -124,7 +125,7 @@ VCS = "git"
 style = "pep440"
 versionfile_source = "src/frequensolve/_version.py"
 versionfile_build = "frequensolve/_version.py"
-tag_prefix = ""
+tag_prefix = "v"
 parentdir_prefix = "frequensolve-"
 
 [tool.pytest.ini_options]

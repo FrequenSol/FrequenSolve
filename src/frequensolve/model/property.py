@@ -1,3 +1,5 @@
+"""Material-property containers, expressions, file references, and unit metadata."""
+
 from __future__ import annotations
 
 import copy
@@ -148,6 +150,8 @@ class PropertyExpression:
     """
 
     def __init__(self, node: Mapping[str, Any]):
+        """Create an expression from an already-normalized expression node."""
+
         self.node = copy.deepcopy(dict(node))
 
     @classmethod
@@ -388,6 +392,17 @@ class PropertyMap(MutableMapping):
         units: Optional[Any] = None,
         system: Optional[str] = None,
     ):
+        """Create a mapping from property names to :class:`Property` objects.
+
+        Args:
+            values: Initial property mapping. Values are normalized with
+                :meth:`Property.from_value`.
+            grid: Optional grid metadata inherited by array-like values.
+            units: Default units applied to values that do not specify units.
+            system: Default coordinate-system name applied to values that do
+                not specify one.
+        """
+
         self._store: Dict[str, Property] = {}
         self.grid = grid
         self.units = unit_expression(units) if units is not None else None
@@ -396,6 +411,15 @@ class PropertyMap(MutableMapping):
             self.update(values)
 
     def __getitem__(self, key: str) -> "Property":
+        """Return a property by canonical or alias name.
+
+        Args:
+            key: Property name or supported alias.
+
+        Returns:
+            Stored :class:`Property` instance.
+        """
+
         return self._store[canonical_property_name(key)]
 
     def __setitem__(self, key: str, value: Any) -> None:
@@ -414,9 +438,13 @@ class PropertyMap(MutableMapping):
         del self._store[canonical_property_name(key)]
 
     def __iter__(self) -> Iterator[str]:
+        """Iterate over canonical property names in insertion order."""
+
         return iter(self._store)
 
     def __len__(self) -> int:
+        """Return the number of stored properties."""
+
         return len(self._store)
 
     def __contains__(self, key: object) -> bool:
@@ -510,6 +538,14 @@ class Property:
         read: bool = True,
         **kwargs,
     ):
+        """Normalize user property input into one solver-facing representation.
+
+        ``data`` may be a scalar, Pint quantity, numpy array, xarray
+        ``DataArray``, local/remote file path, HDF5 locator, expression, or
+        dispersion-scaled value. Set ``read=False`` through :meth:`file` when a
+        file should be referenced without loading it locally.
+        """
+
         if "xarr" in kwargs:
             grid = kwargs.pop("xarr")
         system = _resolve_system_alias(system, kwargs.pop("coordinate_system", None))

@@ -1,3 +1,5 @@
+"""Simulation-level metadata shared by jobs, signals, and solver contracts."""
+
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -39,6 +41,8 @@ class SimulationConfig:
     }
 
     def __post_init__(self, axisymmetric: bool) -> None:
+        """Normalize physics and dimension aliases after dataclass initialization."""
+
         self.dimension = canonical_dimension(self.dimension)
         self.physics, self._axisymmetric = normalize_simulation_physics(
             self.physics,

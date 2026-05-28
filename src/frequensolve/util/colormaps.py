@@ -1,3 +1,5 @@
+"""FrequenSolve color maps and matplotlib conversion helpers."""
+
 import json
 
 import numpy as np

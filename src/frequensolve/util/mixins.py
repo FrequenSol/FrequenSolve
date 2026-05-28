@@ -1,3 +1,5 @@
+"""Shared mixins for serialization, extra fields, paths, and change tracking."""
+
 import copy
 import json
 import warnings

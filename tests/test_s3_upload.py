@@ -12,7 +12,7 @@ Usage:
     python tests/test_s3_upload.py
 
     # Using custom domain
-    python tests/test_s3_upload.py --domain frequensolve.app
+    python tests/test_s3_upload.py --domain app.frequensol.com
 """
 
 import getpass

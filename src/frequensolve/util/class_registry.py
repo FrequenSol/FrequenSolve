@@ -1,3 +1,5 @@
+"""Simple class registry used for solver ``_type`` dispatch."""
+
 class_registry = {}
 
 

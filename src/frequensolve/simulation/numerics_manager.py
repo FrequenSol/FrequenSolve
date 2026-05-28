@@ -1,3 +1,5 @@
+"""Numerical discretization and solver-configuration objects."""
+
 import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Union
@@ -29,6 +31,12 @@ class Discretization(ExtraFieldsMixin):
         method: str = "DPG",
         **kwargs,
     ):
+        """Create discretization settings.
+
+        Solver order is now configured through mesh adaptivity, so legacy
+        ``order`` values are rejected with an actionable error.
+        """
+
         if "order" in kwargs:
             raise ValueError(
                 "'order' has moved from Discretization to mesh adaptivity; "
@@ -118,6 +126,12 @@ class SuperPatch(ExtraFieldsMixin):
         warning_acknowledged: bool = False,
         **kwargs,
     ):
+        """Create an advanced super-patch definition.
+
+        ``warning_acknowledged`` must be set explicitly to avoid accidental use
+        of a very expensive solver mode.
+        """
+
         if not warning_acknowledged:
             raise ValueError(
                 "Super patches are an advanced feature that can slow down your simulation by > 100x; they "
@@ -193,6 +207,8 @@ class SolverConfig(ExtraFieldsMixin):
         grids: int = 3,
         **kwargs,
     ):
+        """Create iterative solver settings."""
+
         self.solve_on = solve_on
         self.max_iter = max_iter
         self.tolerance = tolerance

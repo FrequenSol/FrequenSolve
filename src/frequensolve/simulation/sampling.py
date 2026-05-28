@@ -1,3 +1,5 @@
+"""Frequency and time sampling helpers for seismic simulations."""
+
 from abc import ABC
 from dataclasses import dataclass
 from typing import Optional

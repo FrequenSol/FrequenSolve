@@ -419,6 +419,7 @@ class SlurmSite(BaseSite):
         force_run: bool = False,
         mode: Literal["auto", "attached", "batch"] = "auto",
         fetch: bool = False,
+        check: bool = False,
         **overrides,
     ) -> RunHandle:
         """Submit a job and return an awaitable run handle.
@@ -429,6 +430,8 @@ class SlurmSite(BaseSite):
             force_run: Alias for ``force``.
             mode: Submission mode: ``"auto"``, ``"attached"``, or ``"batch"``.
             fetch: Whether to fetch outputs after completion.
+            check: Whether the returned handle raises by default when waited
+                and the run reaches an unsuccessful terminal status.
             **overrides: Resource-request or site-specific submission
                 overrides. Pass ``validate=False`` to skip SDK pre-run
                 validation.
@@ -450,6 +453,7 @@ class SlurmSite(BaseSite):
                 job,
                 poll_interval=run_config.poll_interval,
                 fetch=fetch,
+                check=check,
             )
             if handle is not None:
                 return handle
@@ -487,6 +491,7 @@ class SlurmSite(BaseSite):
                 id=getattr(job, "_job_id", None),
                 mode="attached",
                 poll_interval=run_config.poll_interval,
+                check=check,
                 _status_fn=self._poll_attached_run,
                 _wait_fn=self._wait_attached_run,
                 _wait_async_fn=self._wait_attached_run_async,
@@ -502,6 +507,7 @@ class SlurmSite(BaseSite):
         )
         handle = self.handle(job, job_id=job_id, mode="batch")
         handle.poll_interval = run_config.poll_interval or self.config.poll_interval
+        handle.check = check
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
         return handle
 
@@ -965,6 +971,7 @@ class SlurmSite(BaseSite):
         *,
         poll_interval: Optional[float] = None,
         fetch: bool = False,
+        check: bool = False,
     ) -> Optional[RunHandle]:
         """Return a handle for a matching active scheduler job, if one exists."""
 
@@ -984,6 +991,7 @@ class SlurmSite(BaseSite):
         )
         handle = self.handle(job, job_id=record.scheduler_id, mode="batch")
         handle.poll_interval = poll_interval or self.config.poll_interval
+        handle.check = check
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
         handle.backend["reattached"] = True
         return handle
@@ -1632,7 +1640,7 @@ class SlurmSite(BaseSite):
         """Get the local FrequenSolve repository path used for script templates."""
         load_dotenv()
         env_path = os.getenv(self.python_path_env)
-        path = Path(env_path) if env_path else Path(__file__).resolve().parents[4]
+        path = Path(env_path) if env_path else Path(__file__).resolve().parents[5]
         if not path.exists():
             raise FileNotFoundError(
                 f"env var {self.python_path_env}:{path} does not exist"
@@ -1694,7 +1702,7 @@ class SlurmSite(BaseSite):
     def _select_job(self):
         """Select a queued job when exactly one is available.
 
-        Interactive prompts are intentionally avoided in the SDK core. Callers
+        Interactive prompts are intentionally avoided in the FrequenSolve Python API core. Callers
         should pass a job id explicitly when more than one allocation exists.
         """
         jobs = self._list_jobs()

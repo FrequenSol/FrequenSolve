@@ -1,0 +1,367 @@
+"""Config-file driven site factory."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import fields
+from importlib import import_module
+from pathlib import Path
+from typing import Any, Mapping, Optional, Union
+
+from frequensolve.storage import frequensolve_home
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import toml
+
+    class _TomllibCompat:
+        @staticmethod
+        def loads(text: str) -> dict[str, Any]:
+            return toml.loads(text)
+
+    tomllib = _TomllibCompat()
+
+SITE_CONFIG_ENV_VAR = "FREQUENSOLVE_SITE_CONFIG"
+DEFAULT_SITE_CONFIG_NAME = "site.toml"
+STARTER_SITE_CONFIG = """# FrequenSolve execution site configuration.
+# Review these profiles, keep the ones you use, then rerun your script or notebook.
+
+default = "cloud"
+
+[sites.cloud]
+type = "aws"
+domain = "app.frequensol.com"
+interactive = true
+verbose = true
+
+[sites.local]
+type = "local"
+shutdown_on_completion = true
+verbose = true
+
+[sites.hpc]
+type = "stampede3"
+rel_path = "scratch/frequensolve_tutorials"
+queue = "skx-dev"
+nodes = 1
+duration = "00:30:00"
+procs_per_node = 4
+procs_per_task = 1
+poll_interval = 10
+verbose = true
+"""
+
+_SITE_TYPES = {
+    "aws": "AWSSite",
+    "awssite": "AWSSite",
+    "cloud": "AWSSite",
+    "local": "LocalSite",
+    "localsite": "LocalSite",
+    "slurm": "SlurmSite",
+    "slurmsite": "SlurmSite",
+    "stampede3": "Stampede3Site",
+    "stampede3site": "Stampede3Site",
+    "tacc": "Stampede3Site",
+}
+
+_RESERVED_SITE_KEYS = {"type"}
+_UNSUPPORTED_TOP_LEVEL_KEYS = {
+    "default_site": "use 'default'",
+    "profiles": "use [sites.<profile>] tables",
+}
+_UNSUPPORTED_SITE_KEYS = {
+    "backend": "use 'type'",
+    "class": "use 'type'",
+    "name": "profile names come from [sites.<profile>] table names",
+    "profile": "profile names come from [sites.<profile>] table names",
+}
+
+__all__ = [
+    "DEFAULT_SITE_CONFIG_NAME",
+    "SITE_CONFIG_ENV_VAR",
+    "Site",
+    "load_site_config",
+    "site_config_path",
+]
+
+
+def site_config_path(path: Optional[Union[str, Path]] = None) -> Path:
+    """Return the active FrequenSolve site config path."""
+
+    if path is not None:
+        return Path(path).expanduser()
+    env_path = os.getenv(SITE_CONFIG_ENV_VAR)
+    if env_path:
+        return Path(env_path).expanduser()
+    return frequensolve_home() / DEFAULT_SITE_CONFIG_NAME
+
+
+def load_site_config(
+    path: Optional[Union[str, Path]] = None,
+) -> Mapping[str, Any]:
+    """Load the active site config TOML document."""
+
+    config_path = site_config_path(path)
+    if not config_path.exists():
+        if _should_create_starter_config(path):
+            _write_starter_site_config(config_path)
+            raise FileNotFoundError(
+                "Created starter FrequenSolve site config at "
+                f"{config_path}. Review the profiles, modify them for your "
+                "environment if needed, then rerun. The default profile is "
+                "cloud and uses app.frequensol.com."
+            )
+        raise FileNotFoundError(
+            "No FrequenSolve site config found at "
+            f"{config_path}. Create "
+            f"{frequensolve_home() / DEFAULT_SITE_CONFIG_NAME} "
+            f"or set {SITE_CONFIG_ENV_VAR}."
+        )
+    return tomllib.loads(config_path.read_text())
+
+
+def _should_create_starter_config(path: Optional[Union[str, Path]]) -> bool:
+    return path is None and not os.getenv(SITE_CONFIG_ENV_VAR)
+
+
+def _write_starter_site_config(config_path: Path) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with config_path.open("x") as file:
+            file.write(STARTER_SITE_CONFIG)
+    except FileExistsError:  # pragma: no cover - defensive for concurrent first runs
+        return
+
+
+def Site(
+    *,
+    config_path: Optional[Union[str, Path]] = None,
+    profile: Optional[str] = None,
+    **overrides: Any,
+):
+    """Create the configured execution site.
+
+    The default config location is ``~/.frequensolve/site.toml``. Tests and
+    isolated tools can redirect it with ``FREQUENSOLVE_SITE_CONFIG`` or the
+    explicit ``config_path`` argument.
+    """
+
+    config = load_site_config(config_path)
+    site_config = dict(_site_config_table(config, profile=profile))
+    site_config.update(overrides)
+    site_type = _site_type(site_config)
+    kwargs = _site_kwargs(site_config, site_type)
+    site_class = _resolve_site_class(site_type)
+    return site_class(**kwargs)
+
+
+def _site_config_table(
+    config: Mapping[str, Any], *, profile: Optional[str]
+) -> Mapping[str, Any]:
+    _reject_unsupported_top_level_keys(config)
+
+    if "site" in config:
+        raise ValueError(
+            "FrequenSolve site config must use top-level default and "
+            "[sites.<profile>] tables; [site] is not supported"
+        )
+
+    sites = config.get("sites")
+    if not isinstance(sites, Mapping):
+        raise ValueError(
+            "FrequenSolve site config must contain top-level default and "
+            "[sites.<profile>] tables"
+        )
+
+    default_profile = _default_profile(config)
+    if default_profile not in sites:
+        raise ValueError(
+            f"FrequenSolve site config default profile {default_profile!r} "
+            "was not found"
+        )
+    selected_profile = profile or default_profile
+
+    try:
+        site = sites[selected_profile]
+    except KeyError as exc:
+        raise ValueError(
+            f"FrequenSolve site config profile {selected_profile!r} was not found"
+        ) from exc
+    if not isinstance(site, Mapping):
+        raise ValueError(
+            f"FrequenSolve site config profile {selected_profile!r} must be a table"
+        )
+    _reject_unsupported_site_keys(site, f"[sites.{selected_profile}]")
+    return site
+
+
+def _default_profile(config: Mapping[str, Any]) -> str:
+    default = config.get("default")
+    if not isinstance(default, str) or not default.strip():
+        raise ValueError("FrequenSolve site config with [sites] must set default")
+    return default
+
+
+def _site_type(site_config: Mapping[str, Any]) -> str:
+    raw_type = site_config.get("type")
+    if not isinstance(raw_type, str) or not raw_type.strip():
+        raise ValueError("FrequenSolve site config must set site.type")
+    return raw_type
+
+
+def _reject_unsupported_top_level_keys(config: Mapping[str, Any]) -> None:
+    for key, replacement in _UNSUPPORTED_TOP_LEVEL_KEYS.items():
+        if key in config:
+            raise ValueError(
+                f"FrequenSolve site config key {key!r} is not supported; "
+                f"{replacement}."
+            )
+
+
+def _reject_unsupported_site_keys(site_config: Mapping[str, Any], context: str) -> None:
+    for key, replacement in _UNSUPPORTED_SITE_KEYS.items():
+        if key in site_config:
+            raise ValueError(
+                f"FrequenSolve site config key {key!r} in {context} is not "
+                f"supported; {replacement}."
+            )
+
+
+def _site_kwargs(site_config: Mapping[str, Any], site_type: str) -> dict[str, Any]:
+    kwargs = {
+        key: value
+        for key, value in site_config.items()
+        if key not in _RESERVED_SITE_KEYS
+    }
+    nested_kwargs = kwargs.pop("kwargs", None)
+    if nested_kwargs is not None:
+        if not isinstance(nested_kwargs, Mapping):
+            raise ValueError("FrequenSolve site config site.kwargs must be a table")
+        kwargs.update(nested_kwargs)
+    normalized_type = _normalize_site_type(site_type)
+    if normalized_type in {"slurm", "slurmsite"}:
+        return _slurm_site_kwargs(kwargs)
+    if normalized_type in {"stampede3", "stampede3site", "tacc"}:
+        return _stampede3_site_kwargs(kwargs)
+    return kwargs
+
+
+def _normalize_site_type(site_type: str) -> str:
+    return site_type.replace("_", "").replace("-", "").lower()
+
+
+def _resolve_site_class(site_type: str):
+    normalized = _normalize_site_type(site_type)
+    class_name = _SITE_TYPES.get(normalized, site_type)
+
+    from frequensolve.orchestrator import sites
+
+    try:
+        return getattr(sites, class_name)
+    except AttributeError as exc:
+        known = ", ".join(sorted(_SITE_TYPES))
+        raise ValueError(
+            f"Unknown FrequenSolve site type {site_type!r}. Known types: {known}"
+        ) from exc
+
+
+def _slurm_site_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    hpc = import_module("frequensolve.orchestrator.sites.hpc")
+    config_cls = hpc.SlurmSiteConfig
+    run_config_cls = hpc.SlurmRunConfig
+
+    source = dict(kwargs)
+    site_kwargs = dict(kwargs)
+    config_value = site_kwargs.pop("config", None)
+    run_config_value = site_kwargs.pop("run_config", None)
+
+    config_values = _matching_values(source, _dataclass_field_names(config_cls))
+    run_config_values = _matching_values(
+        source, _run_config_field_names(run_config_cls)
+    )
+    for key in set(config_values) | set(run_config_values):
+        site_kwargs.pop(key, None)
+
+    if "default_queue" not in site_kwargs and "queue" in source:
+        site_kwargs["default_queue"] = source["queue"]
+
+    site_kwargs["config"] = _coerce_dataclass_config(
+        config_cls,
+        config_value,
+        config_values,
+        "SlurmSiteConfig",
+    )
+    if run_config_value is not None or run_config_values:
+        site_kwargs["run_config"] = _coerce_dataclass_config(
+            run_config_cls,
+            run_config_value,
+            run_config_values,
+            "SlurmRunConfig",
+        )
+    return site_kwargs
+
+
+def _stampede3_site_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    hpc = import_module("frequensolve.orchestrator.sites.hpc")
+    run_config_cls = hpc.SlurmRunConfig
+
+    source = dict(kwargs)
+    site_kwargs = dict(kwargs)
+    run_config_value = site_kwargs.pop("run_config", None)
+    config_value = site_kwargs.pop("config", None)
+    if config_value is not None:
+        raise ValueError("Stampede3 site config does not accept a config table")
+
+    run_config_values = _matching_values(
+        source, _run_config_field_names(run_config_cls)
+    )
+    for key in run_config_values:
+        site_kwargs.pop(key, None)
+
+    if "default_queue" not in site_kwargs and "queue" in source:
+        site_kwargs["default_queue"] = source["queue"]
+
+    if run_config_value is not None or run_config_values:
+        site_kwargs["run_config"] = _coerce_dataclass_config(
+            run_config_cls,
+            run_config_value,
+            run_config_values,
+            "SlurmRunConfig",
+        )
+    return site_kwargs
+
+
+def _matching_values(source: Mapping[str, Any], names: set[str]) -> dict[str, Any]:
+    return {key: value for key, value in source.items() if key in names}
+
+
+def _dataclass_field_names(config_cls: type) -> set[str]:
+    return {field.name for field in fields(config_cls)}
+
+
+def _run_config_field_names(run_config_cls: type) -> set[str]:
+    field_names = getattr(run_config_cls, "field_names", None)
+    if callable(field_names):
+        return set(field_names())
+    return _dataclass_field_names(run_config_cls)
+
+
+def _coerce_dataclass_config(
+    config_cls: type,
+    value: Any,
+    values: Mapping[str, Any],
+    name: str,
+):
+    if value is None:
+        config_values = dict(values)
+    elif isinstance(value, Mapping):
+        config_values = {**values, **value}
+    else:
+        return value
+    try:
+        return config_cls(**config_values)
+    except TypeError as exc:
+        raise ValueError(
+            f"Invalid FrequenSolve {name} settings in site config: {exc}"
+        ) from exc

@@ -1,3 +1,5 @@
+"""Source objects for seismic acquisition definitions."""
+
 import copy
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field

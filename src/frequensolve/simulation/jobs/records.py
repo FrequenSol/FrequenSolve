@@ -1,3 +1,10 @@
+"""Run-record helpers mixed into FrequenSolve jobs.
+
+These methods keep local metadata about where a job was staged or submitted,
+including scheduler ids and site reconstruction hints, so later sessions can
+inspect status and fetch outputs without rebuilding the job context manually.
+"""
+
 from __future__ import annotations
 
 import importlib

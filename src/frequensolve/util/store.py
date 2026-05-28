@@ -1,3 +1,5 @@
+"""HDF5 backing store for arrays materialized during solver export."""
+
 from __future__ import annotations
 
 import json

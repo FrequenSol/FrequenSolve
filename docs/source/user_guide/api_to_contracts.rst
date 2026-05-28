@@ -1,17 +1,22 @@
-Python API And Solver Contracts
+Python API and Solver Contracts
 ===============================
 
 FrequenSolve notebooks are written with Python objects, but jobs run from
-versioned solver contracts. The Python API is the authoring layer; the exported
-JSON/HDF5 files are the auditable interface consumed by launchers and the fast
-solver.
+versioned :term:`solver contracts <solver contract>`. The :term:`Python API` is
+the authoring layer; the exported :term:`JSON`/:term:`HDF5` files are the
+auditable interface consumed by launchers and the :term:`fast solver`.
 
-Primary tutorials:
+Related tutorials:
 
 - :download:`Acoustic modeling <../../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>`
+  for the first :term:`project`, :term:`simulation`, :term:`job`, and result
+  artifacts.
 - :download:`Layered models <../../../examples/tutorials/03_velocity_model_building/03_layered_models.ipynb>`
+  for exported material and geometry contracts.
 - :download:`Traces <../../../examples/tutorials/06_outputs/01_traces.ipynb>`
+  for :term:`HDF5` trace output and :term:`TraceDataset <trace dataset>` reads.
 - :download:`ParaView and VTK <../../../examples/tutorials/06_outputs/02_paraview_vtk.ipynb>`
+  for job-owned visualization output contracts.
 
 Authoring Flow
 --------------
@@ -33,25 +38,26 @@ The core workflow is intentionally repetitive across tutorials:
      - ``physics``, ``dimension``, units, coordinate systems, model, mesh, BCs, acquisition, solver settings.
    * - ``LayeredModel``
      - ``fs-material-model-1``
-     - Surfaces, material subdomains, mesh block ids, layer physics, and canonical property names.
+     - Surfaces, material :term:`subdomains <subdomain>`, :term:`mesh block IDs <mesh block ID>`, layer physics, and canonical property names.
    * - ``MeshManager`` / mesh generator
      - ``Mesh`` and ``Mesh/adapt``
      - Generator bounds/counts, ``elems_per_wave``, ``order``, frequency bounds, ``hmin``/``hmax``.
    * - ``BoundaryCondition``
      - ``BCs``
-     - ``conditions``, ``boundaries``, and PML settings.
+     - ``conditions``, ``boundaries``, and :term:`PML` settings.
    * - ``Acquisition``
      - ``fs-acquisition-1``
-     - Source groups, receiver groups, devices/components, batching, dense/sparse sampling, coordinate units/systems.
+     - :term:`Source groups <source group>`, :term:`receiver groups <receiver group>`, devices/components, batching, dense/sparse sampling, coordinate units/systems.
    * - ``TimeDomainJob`` / ``FrequencyDomainJob``
      - ``fs-job-1`` plus job-owned outputs
      - Frequency list or band, result path, logs, traces, and visualization requests.
    * - ``ParaviewOutput``
      - ``fs-output-config-1``
-     - Output target, fields, properties, sources, PML visibility, upscaling, and VTK files.
+     - Output target, fields, properties, sources, :term:`PML` visibility, :term:`upscaling`, and :term:`VTK` files.
    * - ``TraceDataset``
      - ``fs_seismic_trace_store_v1`` HDF5 trace output
-     - Groups, components, source ids, dense/sparse layout, frequency and time-domain reads.
+     - Groups, :term:`components <component>`, source ids, dense/sparse layout,
+       frequency and :term:`time-domain` reads.
 
 Material Names
 --------------
@@ -61,31 +67,32 @@ capitalization such as ``"Vp"`` and ``"Rho"`` and normalizes those names for the
 solver, but the underlying contract uses canonical names such as ``vp``,
 ``rho``, ``k_solid``, ``rho_fluid``, and ``kappa``.
 
-For poroelastic models, use the contract names shown in the tutorials:
+For :term:`poroelastic` models, use the contract names shown in the tutorials:
 ``k_dry``, ``mu_dry``, ``k_solid``, ``k_fluid``, ``rho_solid``,
 ``rho_fluid``, ``porosity``, ``tortuosity``, ``kappa``, and ``viscosity``.
 Do not use descriptive aliases such as ``permeability`` or
 ``fluid_viscosity`` for poroelastic hydraulic properties; ``permeability`` is
 reserved for EM magnetic permeability in the material catalog.
 
-Units And Coordinates
+Units and Coordinates
 ---------------------
 
-Numeric values are interpreted in the simulation's configured unit system.
-Pint quantities, xarray metadata, and coordinate-aware objects make those units
-explicit and are recommended in release-quality notebooks.
+Numeric values are interpreted in the :term:`simulation`'s configured unit
+system. :term:`Pint` quantities, :term:`xarray` metadata, and coordinate-aware
+objects make those units explicit and are recommended in release-quality
+notebooks.
 
 Coordinate-aware values may carry ``value``, ``units``, and ``system``. Raw
 arrays remain useful for flat introductory models, but explicit coordinate
 systems are safer when working with topography, reduced 2D slices of 3D
 coordinates, axisymmetric models, or mixed coordinate conventions.
 
-Dense And Sparse Traces
+Dense and Sparse Traces
 -----------------------
 
-Dense receiver groups define trace identity by dataset shape, source ids,
-receiver group metadata, and component catalogs. Sparse receiver groups write
-trace identity tables with ``trace_id``, ``source_id``, ``receiver_id``,
+Dense receiver groups define :term:`trace` identity by dataset shape, source
+ids, receiver group metadata, and component catalogs. Sparse receiver groups
+write trace identity tables with ``trace_id``, ``source_id``, ``receiver_id``,
 ``component``, and ``weight``. Internal sample maps and point ranges are not
 public trace metadata.
 
