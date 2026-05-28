@@ -3,6 +3,16 @@ Changelog
 
 All notable changes to FrequenSolve will be documented in this file.
 
+Unreleased
+----------
+
+Changed
+~~~~~~~
+- Switched CI and release documentation to the ``pyproject.toml``/setuptools
+  build path.
+- Added GitHub Actions release publishing for TestPyPI and PyPI via Trusted
+  Publishing.
+
 [0.1.1] - 2024-03-21
 --------------------
 

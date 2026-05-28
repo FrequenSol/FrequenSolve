@@ -18,7 +18,9 @@ Development Setup
 
    .. code-block:: bash
 
-      poetry install --with=dev
+      python -m venv .venv
+      . .venv/bin/activate
+      python -m pip install -e ".[dev,docs,parallel]"
 
 Code Style
 ----------
@@ -35,7 +37,7 @@ Run the test suite:
 
 .. code-block:: bash
 
-   poetry run pytest
+   python -m pytest
 
 Pull Request Process
 --------------------
@@ -53,5 +55,24 @@ Build the documentation locally:
 
 .. code-block:: bash
 
+   python -m pip install -e ".[docs]"
    cd docs
    make html
+
+Release Process
+---------------
+
+Releases are built with the PEP 517 backend declared in ``pyproject.toml``.
+Create a clean release tag, build and check the distributions, then publish via
+the GitHub release workflow:
+
+.. code-block:: bash
+
+   git status --short
+   git tag 0.2.0
+   python -m build
+   python -m twine check dist/*
+
+Use plain PEP 440 tags such as ``0.2.0`` because Versioneer is configured with
+an empty tag prefix. The release workflow requires a clean tagged version before
+uploading to TestPyPI or PyPI.

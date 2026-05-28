@@ -1,6 +1,8 @@
 import datetime
 import os
 import sys
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 
 # Configuration file for the Sphinx documentation builder.
 #
@@ -11,10 +13,14 @@ import sys
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "FrequenSolve"
-copyright = f"{datetime.datetime.now().year}, Jacob Badger"
-author = "Jacob Badger"
-version = "0.1"  # Major + Minor version number
-release = "0.1.1"  # Full version number
+copyright = f"{datetime.datetime.now().year}, FrequenSol"
+author = "FrequenSol"
+
+try:
+    release = package_version("frequensolve")
+except PackageNotFoundError:
+    release = "0+unknown"
+version = ".".join(release.split("+", 1)[0].split(".")[:2])
 
 # -- Path setup --------------------------------------------------------------
 # If your modules are in src/frequensolve, for example:

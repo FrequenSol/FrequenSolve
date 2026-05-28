@@ -90,9 +90,6 @@ Modeling Basics
    * - Laplace And Time-Domain
      - Laplace-domain damping, compensated time-domain reads, and wrap-around control.
      - :download:`06_laplace_time_domain.ipynb <../../../examples/tutorials/01_modeling_basics/06_laplace_time_domain.ipynb>`
-   * - Axisymmetric Borehole
-     - Coupled 2D axisymmetric borehole model with fluid, casing, cement, formation, radial-depth receivers, and VTK QC.
-     - :download:`07_axisymmetric_borehole.ipynb <../../../examples/tutorials/01_modeling_basics/07_axisymmetric_borehole.ipynb>`
 
 Site Tutorials
 --------------
