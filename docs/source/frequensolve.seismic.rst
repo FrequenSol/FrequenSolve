@@ -26,14 +26,6 @@ Sources
    :show-inheritance:
    :noindex:
 
-Signals
--------
-
-.. automodule:: frequensolve.seismic.signals
-   :members:
-   :show-inheritance:
-   :noindex:
-
 Surveys
 -------
 

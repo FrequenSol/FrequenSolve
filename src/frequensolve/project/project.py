@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
 
+from frequensolve._version import get_versions
 from frequensolve.orchestrator.sites.base import BaseSite
-from frequensolve.project.migrate_version import Version
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
 from frequensolve.units import UnitConfig
 from frequensolve.util.encoders import CustomJSONEncoder
@@ -22,6 +22,10 @@ from frequensolve.util.setup_logger import (
 )
 
 __all__ = ["Project", "BaseProjectComponent"]
+
+
+def _current_sdk_version() -> str:
+    return str(get_versions().get("version", "0+unknown"))
 
 
 class BaseProjectComponent(ABC):
@@ -49,7 +53,7 @@ class Project:
         pretty_name: Optional display name for user interfaces.
         path: Project root directory. ``~`` is expanded and the result is
             resolved during initialization.
-        version: Project file format version.
+        version: FrequenSolve SDK version that saved the project.
         log_level: FrequenSolve logger level.
         log_file: Optional file path for FrequenSolve logs.
         log_to_console: Whether to emit FrequenSolve logs to the console.
@@ -58,8 +62,6 @@ class Project:
         jupyter_logging: Whether to keep notebook display logging enabled.
         load_if_exists: Load an existing project JSON from ``path`` instead of
             creating a new project when possible.
-        auto_migrate: Whether compatible future migrations may run
-            automatically.
         simulations: Initial simulations to attach to this project.
         extras: Additional project components keyed by name.
     """
@@ -67,29 +69,26 @@ class Project:
     name: str
     pretty_name: Optional[str] = None
     path: Union[str, Path]
-    version: Version = field(default_factory=Version)
+    version: str = field(default_factory=_current_sdk_version)
     log_level: Union[int, str] = logging.INFO
     log_file: Optional[Union[str, Path]] = None
     log_to_console: bool = False
     dependency_log_level: Optional[Union[int, str]] = logging.WARNING
     jupyter_logging: bool = True
     load_if_exists: bool = False
-    auto_migrate: bool = False
     simulations: NamedList[BaseSimulation] = field(default_factory=NamedList)
     extras: Dict[str, BaseProjectComponent] = field(default_factory=dict)
     _active_jobs: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.path = Path(self.path).expanduser().resolve()
+        self.version = str(self.version)
         logging_options = self._logging_options()
 
         if self.load_if_exists:
             project_file = self._project_file(self.path, self.name)
             if project_file.exists():
-                loaded = type(self).load(
-                    project_file,
-                    auto_migrate=self.auto_migrate,
-                )
+                loaded = type(self).load(project_file)
                 self.__dict__.update(loaded.__dict__)
                 self._restore_logging_options(logging_options)
                 self._configure_logging()
@@ -100,14 +99,12 @@ class Project:
         self._bind_simulations_to_project()
 
     @classmethod
-    def load(cls, file: Union[str, Path], auto_migrate: bool = False) -> "Project":
+    def load(cls, file: Union[str, Path]) -> "Project":
         """Load a project from a JSON file or project directory.
 
         Args:
             file: Project JSON file, or a project directory containing exactly
                 one project JSON file.
-            auto_migrate: Whether compatible migrations may be run
-                automatically after loading.
 
         Returns:
             Loaded ``Project`` instance with simulations rebound to the project
@@ -129,7 +126,7 @@ class Project:
         try:
             data = cls._read_json_file(project_file)
             name = data.get("name")
-            version = Version.from_string(data.get("version"))
+            version = data.get("version")
             if name is None or version is None:
                 raise ValueError("Project JSON must include 'name' and 'version'.")
 
@@ -138,7 +135,7 @@ class Project:
                 name=name,
                 pretty_name=data.get("pretty_name"),
                 path=project_file.parent,
-                version=version,
+                version=str(version),
                 log_level=logging_config.get("level", logging.INFO),
                 log_file=logging_config.get("file"),
                 log_to_console=logging_config.get("console", False),
@@ -147,7 +144,6 @@ class Project:
                 ),
                 jupyter_logging=logging_config.get("jupyter", True),
                 load_if_exists=False,
-                auto_migrate=auto_migrate,
             )
             for sim_file in data.get("simulations", []):
                 project.simulations.append(
@@ -276,29 +272,14 @@ class Project:
         }
 
     def check_version(self) -> None:
-        """Check the project version against the installed SDK version.
+        """Warn when a project was saved by a different SDK version."""
 
-        Raises:
-            NotImplementedError: If the project is older than the SDK and
-                ``auto_migrate`` is enabled for a release without implemented
-                migrations.
-        """
-
-        try:
-            current_version = Version.current()
-        except Exception:
-            logging.debug("Skipping project version check for non-release SDK version")
+        current_version = _current_sdk_version()
+        if self.version == current_version:
             return
-
-        if self.version >= current_version:
-            return
-        if self.auto_migrate:
-            raise NotImplementedError(
-                "Project migrations are not implemented for this SDK release; "
-                f"project version is {self.version}, current version is {current_version}."
-            )
         logging.warning(
-            "Project %s was created with version %s; current SDK version is %s.",
+            "Project %s was saved with FrequenSolve version %s; current SDK "
+            "version is %s. Automatic project migrations are not supported.",
             self.name,
             self.version,
             current_version,

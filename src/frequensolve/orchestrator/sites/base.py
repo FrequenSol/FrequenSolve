@@ -371,7 +371,7 @@ class RunHandle:
         if not self._generic_wait and self._wait_fn is not None:
             self._result = self._wait_fn(self, timeout, poll_interval)
             return self._result
-        from frequensolve.orchestrator.progress import wait
+        from frequensolve.orchestrator.utils.progress import wait
 
         self._result = wait(self, timeout=timeout, poll_interval=poll_interval)
         return self._result
@@ -845,7 +845,7 @@ class BaseSite:
             Final results in input order.
         """
 
-        from frequensolve.orchestrator.progress import wait_all
+        from frequensolve.orchestrator.utils.progress import wait_all
 
         return wait_all(
             runs,

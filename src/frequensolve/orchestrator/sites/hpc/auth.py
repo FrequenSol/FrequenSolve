@@ -21,7 +21,7 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
-from frequensolve.orchestrator.ssh import SSHProxy
+from frequensolve.orchestrator.utils.ssh import SSHProxy
 from frequensolve.util.setup_logger import init_logger
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")

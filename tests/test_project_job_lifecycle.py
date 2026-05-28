@@ -42,6 +42,16 @@ def test_project_save_load_uses_relative_simulation_paths(tmp_path):
     assert loaded.simulations["simple"]._project is loaded
 
 
+def test_project_api_rejects_auto_migrate_option(tmp_path):
+    project, _ = _project_with_trace_simulation(tmp_path)
+    project_file = project.save()
+
+    with pytest.raises(TypeError):
+        Project.load(project_file, auto_migrate=True)
+    with pytest.raises(TypeError):
+        Project(name="project", path=tmp_path / "other", auto_migrate=True)
+
+
 def test_loaded_copied_job_uses_explicit_project_override(tmp_path):
     original = Project(name="project", path=tmp_path / "original")
     sim = original.new_simulation(name="simple", physics="acoustic", dimension=2)

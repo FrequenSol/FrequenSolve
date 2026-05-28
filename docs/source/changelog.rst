@@ -12,6 +12,11 @@ Changed
   build path.
 - Added GitHub Actions release publishing for TestPyPI and PyPI via Trusted
   Publishing.
+- Moved orchestration helper modules into ``frequensolve.orchestrator.utils``.
+
+Removed
+~~~~~~~
+- Removed the unused utility modules for legacy inputs and unused functionality.
 
 [0.1.1] - 2024-03-21
 --------------------

@@ -37,8 +37,6 @@ except ModuleNotFoundError as exc:
 
 from jinja2 import Environment, FileSystemLoader
 
-from frequensolve.orchestrator.credentials import Credentials
-from frequensolve.orchestrator.pool import PoolInfo
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
@@ -68,7 +66,9 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     temporary_text_file as _temporary_text_file,
 )
 from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
-from frequensolve.orchestrator.ssh import SSHClientClass
+from frequensolve.orchestrator.utils.credentials import Credentials
+from frequensolve.orchestrator.utils.pool import PoolInfo
+from frequensolve.orchestrator.utils.ssh import SSHClientClass
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import BaseJob
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob

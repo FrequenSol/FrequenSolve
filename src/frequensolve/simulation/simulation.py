@@ -18,7 +18,6 @@ from frequensolve.simulation.numerics_manager import Discretization, SolverConfi
 from frequensolve.units import UnitConfig
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.encoders import CustomJSONEncoder
-from frequensolve.util.memoization import memoized_func, quantize
 from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
@@ -636,12 +635,6 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         from frequensolve.validation import validate_simulation
 
         return validate_simulation(self, raise_errors=raise_errors)
-
-    @quantize
-    @memoized_func
-    def _estimate_memory(self, f) -> int:
-        """Estimate memory required for the simulation."""
-        pass
 
     def _attach_project_path(self, proj_path: Path, rel_path: Path) -> None:
         """Attach this simulation to a project-relative export root."""
