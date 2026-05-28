@@ -52,7 +52,7 @@ directories visible, then fix Python/API errors at the source.
 
 | Folder | Focus |
 | --- | --- |
-| `01_modeling_basics` | Acoustic, elastic, poroelastic, coupled, dimensionality, Laplace/time-domain, axisymmetric borehole, and dipping-fracture basics. |
+| `01_modeling_basics` | Acoustic, elastic, poroelastic, coupled, dimensionality, axisymmetric, and Laplace/time-domain basics. |
 | `02_sites` | AWS, HPC, local execution, and saved project/job loading. |
 | `03_velocity_model_building` | Units, coordinate systems, surface-relative properties, and layered model tools. |
 | `04_meshing` | Mesh generators, supplied meshes, adaptivity fields, and gradings. |
