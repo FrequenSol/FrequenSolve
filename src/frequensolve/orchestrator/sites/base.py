@@ -221,6 +221,23 @@ class RunResult:
         metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
         if metadata is None:
             return []
+        files = metadata.output_files(
+            kind=kind,
+            suffix=suffix,
+            base=base,
+            existing=existing,
+        )
+        if files or not existing or self.site is None:
+            return files
+
+        fetch_output_files = getattr(self.site, "fetch_output_files", None)
+        if not callable(fetch_output_files):
+            return files
+
+        fetch_output_files(self.job)
+        metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
+        if metadata is None:
+            return []
         return metadata.output_files(
             kind=kind,
             suffix=suffix,

@@ -307,6 +307,33 @@ def test_run_metadata_discovers_unregistered_vtu_files(tmp_path):
     ]
 
 
+def test_run_result_fetches_remote_output_files_when_existing_files_are_requested(
+    tmp_path,
+):
+    result_path = tmp_path / "results"
+    expected = result_path / "ParaView" / "pv_00000.vtu"
+
+    class FetchingSite:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_output_files(self, job):
+            self.calls += 1
+            expected.parent.mkdir(parents=True)
+            expected.write_text("<VTKFile></VTKFile>")
+
+    site = FetchingSite()
+    result = RunResult(
+        job=object(),
+        status=JobStatus(state="completed", return_code=0),
+        site=site,
+        run_metadata=RunMetadata(result_path=result_path),
+    )
+
+    assert result.output_files(suffix=".vtu", existing=True) == [expected]
+    assert site.calls == 1
+
+
 def test_run_metadata_deduplicates_existing_output_file_aliases(tmp_path):
     result_path = tmp_path / "results"
     paraview = result_path / "ParaView"

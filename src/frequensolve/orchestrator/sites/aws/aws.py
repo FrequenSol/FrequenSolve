@@ -1170,6 +1170,20 @@ class AWSSite(BaseSite):
             return traces
         return {"traces": traces, "wavefields": wavefields}
 
+    def fetch_output_files(self, job: BaseJob) -> Path:
+        """Fetch filesystem-backed AWS output files for result discovery.
+
+        Args:
+            job: Completed job whose file artifacts should be downloaded.
+
+        Returns:
+            Local job result directory.
+        """
+
+        if getattr(job.outputs, "paraview", None):
+            self.fetch_paraview(job)
+        return job._result_path
+
     def fetch_logs(
         self,
         job: Union[BaseJob, List[BaseJob]],

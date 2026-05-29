@@ -109,3 +109,20 @@ def test_fetch_paraview_reraises_download_failures(tmp_path):
 
     with pytest.raises(RuntimeError, match="download failed"):
         site.fetch_paraview(job)
+
+
+def test_fetch_output_files_downloads_paraview_outputs(tmp_path):
+    site = AWSSite.__new__(AWSSite)
+    calls = []
+
+    def fetch_paraview(job):
+        calls.append(job)
+
+    site.fetch_paraview = fetch_paraview
+    job = SimpleNamespace(
+        _result_path=tmp_path / "results",
+        outputs=SimpleNamespace(paraview=[object()]),
+    )
+
+    assert site.fetch_output_files(job) == job._result_path
+    assert calls == [job]
