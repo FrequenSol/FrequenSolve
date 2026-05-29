@@ -614,18 +614,20 @@ class AWSSite(BaseSite):
         simulation_name = job.simulation.name
         job_name = job.name
         results_paraview_path = f"jobs/{simulation_name}/{job_name}/results/ParaView"
-        s3_results_path = (
-            f"s3://{self.config.s3_bucket}/{project_name}/{results_paraview_path}"
-        )
         local_results_path = path / results_paraview_path
 
         try:
-            logger.info(
-                "Fetching ParaView outputs from %s to %s",
-                s3_results_path,
+            s3_results_path, downloaded = self._get_result_prefix(
+                project_name,
+                results_paraview_path,
                 local_results_path,
             )
-            self.get(s3_results_path, local_results_path)
+            logger.info(
+                "Fetched ParaView outputs from %s to %s (%s files)",
+                s3_results_path,
+                local_results_path,
+                downloaded,
+            )
         except Exception as e:
             logger.exception("Error downloading ParaView outputs: %s", str(e))
             raise
@@ -1064,12 +1066,15 @@ class AWSSite(BaseSite):
                 results_traces_path = (
                     f"jobs/{simulation_name}/{job_name}/results/{trace_dir_name}"
                 )
-                s3_results_path = (
-                    f"s3://{self.config.s3_bucket}/{project_name}/{results_traces_path}"
+                s3_results_path, downloaded = self._get_result_prefix(
+                    project_name,
+                    results_traces_path,
+                    path / results_traces_path,
                 )
-                local_results_path = path / results_traces_path
-                self.get(s3_results_path, local_results_path)
-                self._emit(f"Fetched AWS traces from {s3_results_path}")
+                self._emit(
+                    f"Fetched AWS traces from {s3_results_path}"
+                    + (f" ({downloaded} files)" if downloaded is not None else "")
+                )
 
                 # TODO: Copy job, simulation file to database so that it can be read independently.
 
@@ -1084,6 +1089,36 @@ class AWSSite(BaseSite):
             return db_map[jobs[0].name]
         else:
             return db_map
+
+    def _result_prefix_candidates(
+        self,
+        project_name: str,
+        results_path: str,
+    ) -> List[str]:
+        canonical = f"s3://{self.config.s3_bucket}/{project_name}/{results_path}"
+        nested = (
+            f"s3://{self.config.s3_bucket}/{project_name}/{project_name}/"
+            f"{results_path}"
+        )
+        return list(dict.fromkeys([canonical, nested]))
+
+    def _get_result_prefix(
+        self,
+        project_name: str,
+        results_path: str,
+        local_path: Union[str, Path],
+    ) -> tuple[str, Optional[int]]:
+        candidates = self._result_prefix_candidates(project_name, results_path)
+        selected = candidates[0]
+        downloaded = self.get(selected, local_path)
+        if downloaded:
+            return selected, downloaded
+
+        for candidate in candidates[1:]:
+            fallback_downloaded = self.get(candidate, local_path)
+            if fallback_downloaded:
+                return candidate, fallback_downloaded
+        return selected, downloaded
 
     def fetch_wavefields(
         self,
@@ -1364,7 +1399,7 @@ class AWSSite(BaseSite):
         s3_path: Union[str, Path],
         local_path: Union[str, Path],
         overwrite: bool = False,
-    ):
+    ) -> int:
         """Transfer files from S3 path to local path using boto3.
 
         Uses the site's Cognito-backed S3 client so Identity Pool temporary
@@ -1376,13 +1411,16 @@ class AWSSite(BaseSite):
             s3_path: S3 path to transfer from (e.g., 's3://bucket/key' or 's3://bucket/key/')
             local_path: Local path to transfer to
             overwrite: Overwrite existing files (not used; always overwrites)
+
+        Returns:
+            Number of downloaded files.
         """
         logger.debug("Attempting to transfer from %s to %s", s3_path, local_path)
 
         local_path = Path(local_path)
         s3_path_str = str(s3_path)
 
-        def _do_get() -> None:
+        def _do_get() -> int:
             # Parse s3://bucket/key/ format
             if not s3_path_str.startswith("s3://"):
                 raise ValueError(f"Invalid S3 path: {s3_path_str}")
@@ -1418,7 +1456,7 @@ class AWSSite(BaseSite):
                     logger.debug(
                         "Transfer completed successfully (%d files)", downloaded
                     )
-                    return
+                    return downloaded
 
             prefix = key.rstrip("/") + "/" if key else ""
 
@@ -1441,9 +1479,10 @@ class AWSSite(BaseSite):
                     downloaded += 1
 
             logger.debug("Transfer completed successfully (%d files)", downloaded)
+            return downloaded
 
         try:
-            _do_get()
+            return _do_get()
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "")
             if error_code in ("ExpiredToken", "InvalidToken") and hasattr(
@@ -1451,7 +1490,7 @@ class AWSSite(BaseSite):
             ):
                 logger.info("Credentials expired, refreshing from Identity Pool...")
                 self._refresh_s3_credentials()
-                _do_get()
+                return _do_get()
             else:
                 logger.error("S3 transfer failed: %s", e)
                 raise RuntimeError(f"S3 transfer failed: {e}") from e
