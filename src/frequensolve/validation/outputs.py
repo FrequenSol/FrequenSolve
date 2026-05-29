@@ -17,6 +17,7 @@ from frequensolve.simulation.physics import components_for_physics
 from frequensolve.util.fields import FIELD_PASSTHROUGH, canonical_field
 
 from .geometry import (
+    _active_axes,
     _model_property_names,
     _validate_direction,
     _validate_grid_like,
@@ -206,6 +207,8 @@ def _validate_field(field: Any, path: str, ctx: _ValidationContext) -> None:
     except Exception:
         return
     allowed = set(registry.allowed_components())
+    if value in allowed or _is_axis_component_field(value, allowed, ctx):
+        return
     if value not in allowed:
         ctx.report.error(
             "field.unsupported",
@@ -214,6 +217,23 @@ def _validate_field(field: Any, path: str, ctx: _ValidationContext) -> None:
             path=path,
             hint=f"Allowed fields are: {', '.join(sorted(allowed))}.",
         )
+
+
+def _is_axis_component_field(
+    value: str,
+    allowed_components: set[str],
+    ctx: _ValidationContext,
+) -> bool:
+    axes = {axis for axis in _active_axes(ctx, None) if len(axis) == 1}
+    if not axes:
+        return False
+    for component in sorted(allowed_components, key=len, reverse=True):
+        prefix = f"{component}_"
+        if not value.startswith(prefix):
+            continue
+        suffix = value[len(prefix) :]
+        return bool(suffix) and all(axis in axes for axis in suffix)
+    return False
 
 
 def _is_advanced_field(value: str) -> bool:

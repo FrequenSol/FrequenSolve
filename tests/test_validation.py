@@ -7,8 +7,9 @@ from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverNode
 from frequensolve.simulation.jobs import FrequencyDomainJob
-from frequensolve.simulation.outputs import WavefieldOutput
+from frequensolve.simulation.outputs import ParaviewOutput, WavefieldOutput
 from frequensolve.simulation.simulation import SeismicSimulation
+from frequensolve.units import Q_
 from frequensolve.validation import ValidationError
 
 
@@ -21,8 +22,10 @@ def _simple_job(
     receiver_coords=None,
     receiver_field="pressure",
 ):
-    source_coords = source_coords or [[0.5, 0.25]]
-    receiver_coords = receiver_coords or [[0.25, 0.75], [0.75, 0.75]]
+    if source_coords is None:
+        source_coords = [[0.5, 0.25]]
+    if receiver_coords is None:
+        receiver_coords = [[0.25, 0.75], [0.75, 0.75]]
     acquisition = Acquisition()
     acquisition.add_source_group(kind=source_kind, coords=source_coords)
     device = ReceiverNode()
@@ -77,6 +80,27 @@ def test_validation_uses_default_length_units_for_coordinate_domain_checks(tmp_p
 
     assert not report.ok
     assert "coordinates.domain.outside" in _codes(report)
+
+
+def test_validation_converts_pint_receiver_units_for_domain_checks(tmp_path):
+    job = _simple_job(
+        tmp_path,
+        receiver_coords=Q_([[250.0, 750.0], [750.0, 750.0]], "m"),
+    )
+    job.simulation.units.defaults["length"] = "km"
+
+    report = job.validate()
+
+    assert report.ok
+
+
+def test_validation_accepts_axis_suffixed_paraview_fields(tmp_path):
+    job = _simple_job(tmp_path)
+    job += ParaviewOutput(name="pv", fields=["pressure", "velocity_z"])
+
+    report = job.validate()
+
+    assert report.ok
 
 
 def test_validation_catches_receiver_field_typos(tmp_path):

@@ -935,9 +935,12 @@ def _convert_units_array(
     from_units: Optional[str],
     to_units: Optional[str],
 ) -> np.ndarray:
-    if from_units is None or to_units is None or from_units == to_units:
+    source_units = unit_expression(from_units) if from_units is not None else None
+    target_units = unit_expression(to_units) if to_units is not None else None
+    if not source_units or not target_units or source_units == target_units:
         return np.asarray(values, dtype=float)
-    return np.asarray((values * ureg(from_units)).to(to_units).magnitude, dtype=float)
+    converted = (values * ureg(source_units)).to(target_units).magnitude
+    return np.asarray(converted, dtype=float)
 
 
 def _coords_array_axes(coords: CoordsArray) -> Optional[list[str]]:
