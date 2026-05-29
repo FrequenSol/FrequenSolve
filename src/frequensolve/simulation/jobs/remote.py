@@ -44,12 +44,22 @@ class JobRemoteMixin:
         self._write_json_file(file, data)
         return file
 
-    def save_for_remote(self, site: str, remote_project: Union[Path, str]):
+    def save_for_remote(
+        self,
+        site: str,
+        remote_project: Union[Path, str],
+        *,
+        result_path_relative_to_project: bool = False,
+    ):
         """Stage a remote job JSON without replacing the local definition.
 
         Args:
             site: Site name used to choose the local staging directory.
             remote_project: Project root visible on the remote site.
+            result_path_relative_to_project: If True, write the staged
+                ``result_path`` relative to ``project_path`` instead of as the
+                full remote result directory. This is used by object-store
+                layouts where the job file key is already project-prefixed.
 
         Returns:
             Tuple ``(staged_file, remote_job_file)`` where ``staged_file`` is
@@ -73,6 +83,7 @@ class JobRemoteMixin:
             source=local_layout,
             target=remote_layout,
             source_projects=source_projects,
+            result_path_relative_to_project=result_path_relative_to_project,
         )
         self._assert_remote_payload_has_no_local_roots(
             data,
@@ -395,6 +406,7 @@ class JobRemoteMixin:
         source: JobLayout,
         target: JobLayout,
         source_projects: Iterable[Path] = (),
+        result_path_relative_to_project: bool = False,
     ) -> Dict[str, Any]:
         data = JobRemoteMixin._map_payload_project_roots(
             payload,
@@ -403,7 +415,13 @@ class JobRemoteMixin:
         )
         data["project_path"] = str(target.project)
         data["simulation"] = str(target.simulation_file)
-        data["result_path"] = str(target.result_dir)
+        if result_path_relative_to_project:
+            try:
+                data["result_path"] = str(target.result_dir.relative_to(target.project))
+            except ValueError:
+                data["result_path"] = str(target.result_dir)
+        else:
+            data["result_path"] = str(target.result_dir)
         return data
 
     def _saved_layout(self) -> JobLayout:

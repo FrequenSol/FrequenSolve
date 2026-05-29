@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -5,8 +6,12 @@ import pytest
 
 pytest.importorskip("boto3")
 
+from frequensolve.mesh.mesh_generators import HexMeshGenerator
+from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.orchestrator.sites.aws import aws as aws_module
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
+from frequensolve.project.project import Project
+from frequensolve.simulation.jobs import FrequencyDomainJob
 
 
 class FakeGraphQLClient:
@@ -32,9 +37,12 @@ class FakeJob:
     def is_run_current(self):
         return False
 
-    def save_for_remote(self, site_name, project):
+    def save_for_remote(
+        self, site_name, project, *, result_path_relative_to_project=False
+    ):
         assert site_name == "AWSSite"
         assert project == "project-a"
+        assert result_path_relative_to_project is True
         return "local-job.json", "project-a/jobs/job.json"
 
 
@@ -84,6 +92,35 @@ def test_graphql_submit_sends_explicit_resource_overrides():
 
     assert site.graphql_client.submit_calls[0]["vcpu"] == 8
     assert site.graphql_client.submit_calls[0]["memory"] == 16384
+
+
+def test_graphql_submit_stages_cloud_result_path_relative_to_project(tmp_path):
+    project = Project(name="project", path=tmp_path / "ex_1_1")
+    sim = project.new_simulation(
+        name="simple_acoustic", physics="acoustic", dimension=2
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="time", simulation=sim, f_list=[1.0])
+    site = make_graphql_site()
+    synced = {}
+
+    def fake_sync(local, remote):
+        synced[str(remote)] = Path(local)
+        return remote
+
+    site.sync_s3 = fake_sync
+
+    site.submit(job, force_run=True)
+
+    s3_job_key = "ex_1_1/jobs/simple_acoustic/time/time.json"
+    assert site.graphql_client.submit_calls[0]["job_file_s3_key"] == s3_job_key
+    payload = json.loads(synced[s3_job_key].read_text())
+    assert payload["project_path"] == "ex_1_1"
+    assert payload["simulation"] == (
+        "ex_1_1/simulations/simple_acoustic/simple_acoustic.json"
+    )
+    assert payload["result_path"] == "jobs/simple_acoustic/time/results"
+    assert "ex_1_1/ex_1_1" not in json.dumps(payload)
 
 
 def test_rest_submit_preserves_backend_resource_defaults_when_omitted(monkeypatch):

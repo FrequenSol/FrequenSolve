@@ -202,6 +202,31 @@ binaries, network access, credentials, schedulers, or production data.
 └── Makefile                # common test/reference-image entrypoints
 ```
 
+## Cross-Repository Runtime Contracts
+
+Cloud and solver execution flows span multiple repositories. When debugging
+S3 keys, job payload paths, solver manifests, Batch behavior, Docker image
+contents, or tutorial results, trace the contract across the components before
+adding compatibility behavior in this repository:
+
+- FrequenSolve stages project, simulation, job, and result paths in JSON
+  payloads and uploads project files.
+- `cloud-amplify` owns AppSync/Step Functions submission, `JOB_FILE_S3_KEY`,
+  Batch scripts, S3 sync direction, status updates, and dispatcher output.
+- `FrequenSolveDockerImage` owns the runtime image contents, installed SDK,
+  solver binary/source checkout, environment variables, and entrypoints.
+- Sauce/`FS_Solver` owns how the solver resolves `project_path`, `simulation`,
+  `result_path`, `--work-directory`, and generated output paths.
+
+Do not add FrequenSolve fallbacks that hide duplicated path prefixes, missing
+uploads, or stale runtime behavior until the producing component is identified.
+For cloud result-path issues, inspect the staged job JSON fields
+`project_path`, `simulation`, and `result_path`; the submitted
+`JOB_FILE_S3_KEY`; the Batch worker command and `--work-directory`; the solver
+run manifest; and the actual S3 object keys. Fix the producer-side contract
+when that is where the inconsistency originates, and document any intentional
+cross-repo compatibility behavior in the relevant repo.
+
 ## PR Review Follow-Up
 
 When you create or update a PR, keep the review loop active until the
