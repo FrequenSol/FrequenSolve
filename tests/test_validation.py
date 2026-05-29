@@ -103,6 +103,17 @@ def test_validation_accepts_axis_suffixed_paraview_fields(tmp_path):
     assert report.ok
 
 
+@pytest.mark.parametrize("field", ["pressure_z", "velocity_zz"])
+def test_validation_rejects_invalid_axis_suffixed_paraview_fields(tmp_path, field):
+    job = _simple_job(tmp_path)
+    job += ParaviewOutput(name="pv", fields=[field])
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "field.unsupported" in _codes(report)
+
+
 def test_validation_catches_receiver_field_typos(tmp_path):
     job = _simple_job(tmp_path, receiver_field="presure")
 

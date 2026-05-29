@@ -30,6 +30,16 @@ from .geometry import (
 from .report import ValidationReport
 
 _ADVANCED_FIELD_PREFIXES = {"acoustic", "elastic", "poroelastic", "em", "EM"}
+_AXIS_COMPONENT_RANKS: Mapping[str, int] = {
+    "velocity": 1,
+    "fluid_flux": 1,
+    "displacement": 1,
+    "fluid_displacement": 1,
+    "electric": 1,
+    "magnetic": 1,
+    "stress": 2,
+    "strain": 2,
+}
 
 
 def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) -> None:
@@ -228,11 +238,14 @@ def _is_axis_component_field(
     if not axes:
         return False
     for component in sorted(allowed_components, key=len, reverse=True):
+        rank = _AXIS_COMPONENT_RANKS.get(component)
+        if rank is None:
+            continue
         prefix = f"{component}_"
         if not value.startswith(prefix):
             continue
         suffix = value[len(prefix) :]
-        return bool(suffix) and all(axis in axes for axis in suffix)
+        return len(suffix) == rank and all(axis in axes for axis in suffix)
     return False
 
 
