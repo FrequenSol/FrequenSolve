@@ -298,21 +298,15 @@ class AWSSite(BaseSite):
                 self._emit("Using cached AWS credentials")
                 auth_successful = True
                 break
-            except ValueError:
+            except ValueError as exc:
                 # No cached tokens - need to login
                 if not email:
                     if not interactive:
-                        raise RuntimeError(
-                            "No cached AWS/Cognito credentials are available. "
-                            "Pass email and password, or use interactive=True."
-                        )
+                        raise RuntimeError(str(exc)) from exc
                     email = input("FrequenSol Email: ")
                 if not password:
                     if not interactive:
-                        raise RuntimeError(
-                            "No cached AWS/Cognito credentials are available. "
-                            "Pass email and password, or use interactive=True."
-                        )
+                        raise RuntimeError(str(exc)) from exc
                     password = getpass.getpass("Password: ")
 
                 self._emit(f"Authenticating as {email}...")

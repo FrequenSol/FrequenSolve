@@ -92,6 +92,25 @@ def _expired_refresh_auth_class(tmp_path):
     return ExpiredRefreshAuth
 
 
+def _missing_cache_auth_class(tmp_path):
+    class MissingCacheAuth:
+        instances = []
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.credentials_path = tmp_path / "credentials_cloud"
+            self.instances.append(self)
+
+        def get_cached_tokens(self):
+            raise ValueError(
+                "No cached FrequenSol cloud credentials found.\n"
+                f"Credentials cache: {self.credentials_path}\n"
+                '  fs.Site(profile="cloud", interactive=True)'
+            )
+
+    return MissingCacheAuth
+
+
 def test_aws_site_reauthenticates_with_passed_credentials_without_deleting_cache(
     monkeypatch, tmp_path
 ):
@@ -110,6 +129,20 @@ def test_aws_site_reauthenticates_with_passed_credentials_without_deleting_cache
     assert auth.credentials_path.read_text() == "fresh-cache:fresh@example.com"
     assert auth.get_aws_credentials_calls == 2
     assert site.config.s3_bucket == "bucket"
+
+
+def test_aws_site_noninteractive_missing_cache_preserves_cache_path(
+    monkeypatch, tmp_path
+):
+    auth_cls = _missing_cache_auth_class(tmp_path)
+    aws = _install_awssite_fakes(monkeypatch, auth_cls)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        aws.AWSSite(domain="app.example")
+
+    message = str(exc_info.value)
+    assert str(tmp_path / "credentials_cloud") in message
+    assert 'fs.Site(profile="cloud", interactive=True)' in message
 
 
 def test_aws_site_interactive_reauthenticates_without_deleting_cache(

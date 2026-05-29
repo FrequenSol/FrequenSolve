@@ -97,6 +97,7 @@ class CognitoAuth:
 
         # Path to credentials file
         self.credentials_path = cloud_credentials_path(credential_cache_name)
+        self.shared_credentials_path = cloud_credentials_path()
         self.legacy_credentials_path = legacy_credentials_path()
 
     def login(self, email: str, password: str) -> Dict[str, str]:
@@ -315,19 +316,10 @@ class CognitoAuth:
             ValueError: If credentials file not found or invalid
         """
         if not self.credentials_path.exists():
-            if self.legacy_credentials_path.exists():
-                try:
-                    with open(self.legacy_credentials_path, "r") as f:
-                        tokens = json.load(f)
-                    self.save_tokens(tokens)
-                    logger.info("Migrated cached credentials to cloud cache directory")
-                    return tokens
-                except (json.JSONDecodeError, IOError) as e:
-                    raise ValueError(f"Failed to read credentials file: {e}") from e
-            raise ValueError(
-                "No cached credentials found. Please login first.\n"
-                'Run: site = AWSSite.from_cognito(email="your@email.com", password="...")'
-            )
+            tokens = self._migrate_existing_tokens()
+            if tokens is not None:
+                return tokens
+            raise ValueError(self._missing_credentials_message())
 
         try:
             with open(self.credentials_path, "r") as f:
@@ -336,6 +328,62 @@ class CognitoAuth:
             return tokens
         except (json.JSONDecodeError, IOError) as e:
             raise ValueError(f"Failed to read credentials file: {e}") from e
+
+    def _migrate_existing_tokens(self) -> Optional[Dict[str, str]]:
+        """Migrate compatible pre-profile token caches into this cache."""
+
+        candidates = []
+        if self.credential_cache_name and self.shared_credentials_path.exists():
+            candidates.append(self.shared_credentials_path)
+        if self.legacy_credentials_path.exists():
+            candidates.append(self.legacy_credentials_path)
+
+        for path in candidates:
+            try:
+                with open(path, "r") as f:
+                    tokens = json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                raise ValueError(f"Failed to read credentials file: {e}") from e
+            if not self._tokens_match_user_pool(tokens):
+                logger.debug(
+                    "Ignoring cached credentials at %s because they do not "
+                    "match user pool %s",
+                    path,
+                    self.user_pool_id,
+                )
+                continue
+            self.save_tokens(tokens)
+            logger.info(
+                "Migrated cached credentials from %s to %s",
+                path,
+                self.credentials_path,
+            )
+            return tokens
+        return None
+
+    def _tokens_match_user_pool(self, tokens: Dict[str, str]) -> bool:
+        if not self.credential_cache_name:
+            return True
+        id_token = tokens.get("id_token")
+        if not id_token:
+            return False
+        try:
+            payload = _decode_jwt_payload(id_token)
+        except ValueError:
+            return False
+        issuer = str(payload.get("iss", "")).rstrip("/")
+        return issuer.rsplit("/", 1)[-1] == self.user_pool_id
+
+    def _missing_credentials_message(self) -> str:
+        profile = self.credential_cache_name or "cloud"
+        return (
+            "No cached FrequenSol cloud credentials found.\n"
+            f"Credentials cache: {self.credentials_path}\n"
+            "Re-run with interactive login enabled:\n"
+            f'  fs.Site(profile="{profile}", interactive=True)\n\n'
+            "Or pass credentials explicitly:\n"
+            f'  fs.Site(profile="{profile}", email="your@email.com", password="...")'
+        )
 
     def save_tokens(self, tokens: Dict[str, str]) -> None:
         """Save tokens to local cache file.
