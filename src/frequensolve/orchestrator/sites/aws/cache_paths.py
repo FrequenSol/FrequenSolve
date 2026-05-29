@@ -16,13 +16,18 @@ def _safe_domain(domain: str) -> str:
     return domain.replace(":", "_").replace("/", "_")
 
 
-def cloud_credentials_path() -> Path:
+def cloud_credentials_path(cache_name: str | None = None) -> Path:
     """Return the current cloud credentials cache path.
+
+    Args:
+        cache_name: Optional profile or domain name used to isolate credentials.
 
     Returns:
         Path to the credentials file under the cloud-specific cache directory.
     """
 
+    if cache_name:
+        return cloud_cache_dir() / f"credentials_{_safe_domain(cache_name)}"
     return cloud_cache_dir() / "credentials"
 
 

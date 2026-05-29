@@ -83,18 +83,20 @@ class CognitoAuth:
         client_id: str,
         identity_pool_id: str,
         region: str = "us-east-1",
+        credential_cache_name: Optional[str] = None,
     ):
         self.user_pool_id = user_pool_id
         self.client_id = client_id
         self.identity_pool_id = identity_pool_id
         self.region = region
+        self.credential_cache_name = credential_cache_name
 
         # Initialize AWS clients
         self.cognito_client = boto3.client("cognito-idp", region_name=region)
         self.identity_client = boto3.client("cognito-identity", region_name=region)
 
         # Path to credentials file
-        self.credentials_path = cloud_credentials_path()
+        self.credentials_path = cloud_credentials_path(credential_cache_name)
         self.legacy_credentials_path = legacy_credentials_path()
 
     def login(self, email: str, password: str) -> Dict[str, str]:

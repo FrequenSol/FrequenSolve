@@ -116,6 +116,7 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
 
     assert site.kwargs == {
         "domain": "app.frequensol.com",
+        "credential_cache_name": "cloud",
         "interactive": True,
         "verbose": True,
     }
@@ -146,6 +147,7 @@ verbose = true
 
     assert selected_site.kwargs == {
         "domain": "dev.frequensol.example",
+        "credential_cache_name": "cloud",
         "interactive": True,
         "verbose": True,
     }

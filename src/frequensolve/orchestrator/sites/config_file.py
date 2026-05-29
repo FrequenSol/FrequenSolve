@@ -148,10 +148,12 @@ def Site(
     """
 
     config = load_site_config(config_path)
-    site_config = dict(_site_config_table(config, profile=profile))
+    selected_profile, site_table = _site_config_selection(config, profile=profile)
+    site_config = dict(site_table)
     site_config.update(overrides)
     site_type = _site_type(site_config)
     kwargs = _site_kwargs(site_config, site_type)
+    _add_factory_context_kwargs(kwargs, site_type, selected_profile)
     site_class = _resolve_site_class(site_type)
     return site_class(**kwargs)
 
@@ -159,6 +161,12 @@ def Site(
 def _site_config_table(
     config: Mapping[str, Any], *, profile: Optional[str]
 ) -> Mapping[str, Any]:
+    return _site_config_selection(config, profile=profile)[1]
+
+
+def _site_config_selection(
+    config: Mapping[str, Any], *, profile: Optional[str]
+) -> tuple[str, Mapping[str, Any]]:
     _reject_unsupported_top_level_keys(config)
 
     if "site" in config:
@@ -193,7 +201,7 @@ def _site_config_table(
             f"FrequenSolve site config profile {selected_profile!r} must be a table"
         )
     _reject_unsupported_site_keys(site, f"[sites.{selected_profile}]")
-    return site
+    return selected_profile, site
 
 
 def _default_profile(config: Mapping[str, Any]) -> str:
@@ -245,6 +253,14 @@ def _site_kwargs(site_config: Mapping[str, Any], site_type: str) -> dict[str, An
     if normalized_type in {"stampede3", "stampede3site", "tacc"}:
         return _stampede3_site_kwargs(kwargs)
     return kwargs
+
+
+def _add_factory_context_kwargs(
+    kwargs: dict[str, Any], site_type: str, selected_profile: str
+) -> None:
+    normalized_type = _normalize_site_type(site_type)
+    if normalized_type in {"aws", "awssite", "cloud"}:
+        kwargs.setdefault("credential_cache_name", selected_profile)
 
 
 def _normalize_site_type(site_type: str) -> str:

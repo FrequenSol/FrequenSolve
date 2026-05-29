@@ -19,6 +19,12 @@ def test_cloud_cache_paths_are_grouped_under_cloud_directory(monkeypatch, tmp_pa
     assert cloud_credentials_path() == (
         tmp_path / ".frequensolve" / "cloud" / "credentials"
     )
+    assert cloud_credentials_path("sandbox") == (
+        tmp_path / ".frequensolve" / "cloud" / "credentials_sandbox"
+    )
+    assert cloud_credentials_path("localhost:5173") == (
+        tmp_path / ".frequensolve" / "cloud" / "credentials_localhost_5173"
+    )
     assert cloud_config_cache_path("localhost:5173/api") == (
         tmp_path / ".frequensolve" / "cloud" / "config_localhost_5173_api.json"
     )
@@ -95,6 +101,37 @@ def test_cognito_auth_saves_tokens_in_cloud_directory(monkeypatch, tmp_path):
     assert cloud_credentials_path().exists()
     assert not legacy_credentials_path().exists()
     assert (cloud_credentials_path().stat().st_mode & 0o777) == 0o600
+
+
+def test_cognito_auth_saves_named_tokens_in_profile_cache(monkeypatch, tmp_path):
+    pytest.importorskip("boto3")
+
+    from frequensolve.orchestrator.sites.aws import cognito
+
+    monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cognito.boto3, "client", lambda *args, **kwargs: object())
+
+    auth = cognito.CognitoAuth(
+        user_pool_id="pool",
+        client_id="client",
+        identity_pool_id="identity",
+        credential_cache_name="sandbox",
+    )
+    tokens = {
+        "email": "user@example.com",
+        "id_token": "token",
+        "access_token": "access",
+        "refresh_token": "refresh",
+        "expires_at": (datetime.now() + timedelta(hours=1)).isoformat(),
+    }
+
+    auth.save_tokens(tokens)
+
+    assert auth.credentials_path == cloud_credentials_path("sandbox")
+    assert cloud_credentials_path("sandbox").exists()
+    assert not cloud_credentials_path().exists()
+    assert (cloud_credentials_path("sandbox").stat().st_mode & 0o777) == 0o600
 
 
 def test_cognito_auth_reads_legacy_tokens_and_migrates_them(monkeypatch, tmp_path):

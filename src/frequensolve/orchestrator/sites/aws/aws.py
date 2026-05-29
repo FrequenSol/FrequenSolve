@@ -242,6 +242,7 @@ class AWSSite(BaseSite):
         password: Optional[str] = None,
         interactive: bool = False,
         verbose: bool = False,
+        credential_cache_name: Optional[str] = None,
     ):
         """Initialize AWS site with domain-based authentication.
 
@@ -255,6 +256,8 @@ class AWSSite(BaseSite):
             interactive: If True, prompt for missing credentials. Defaults to False so
                 library code never blocks unexpectedly.
             verbose: If True, print user-facing status messages in addition to logs.
+            credential_cache_name: Optional cache namespace for stored Cognito
+                tokens. The site factory sets this to the selected profile name.
 
         Raises:
             ValueError: If domain cannot be determined or authentication fails.
@@ -274,6 +277,7 @@ class AWSSite(BaseSite):
         # Store domain for potential config refresh
         if domain is None:
             domain = os.getenv("FREQUENSOL_DOMAIN") or config.domain
+        credential_cache_name = credential_cache_name or domain or config.domain
 
         # Initialize authentication
         auth = CognitoAuth(
@@ -281,6 +285,7 @@ class AWSSite(BaseSite):
             client_id=config.client_id,
             identity_pool_id=config.identity_pool_id,
             region=config.region,
+            credential_cache_name=credential_cache_name,
         )
 
         # Try to use cached tokens first
@@ -350,6 +355,7 @@ class AWSSite(BaseSite):
                         client_id=config.client_id,
                         identity_pool_id=config.identity_pool_id,
                         region=config.region,
+                        credential_cache_name=credential_cache_name,
                     )
 
                     # Clear old credentials since they're for wrong User Pool
