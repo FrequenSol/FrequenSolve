@@ -30,6 +30,7 @@ from .geometry import (
 from .report import ValidationReport
 
 _ADVANCED_FIELD_PREFIXES = {"acoustic", "elastic", "poroelastic", "em", "EM"}
+_SOLVER_PARAVIEW_PROPERTIES = {"subdomain"}
 _AXIS_COMPONENT_RANKS: Mapping[str, int] = {
     "velocity": 1,
     "fluid_flux": 1,
@@ -262,6 +263,7 @@ def _validate_requested_properties(
     ctx: _ValidationContext,
 ) -> None:
     requested = [canonical_property_name(str(item)) for item in properties or []]
+    requested = [name for name in requested if name not in _SOLVER_PARAVIEW_PROPERTIES]
     if not requested:
         return
     available = _model_property_names(ctx.simulation)

@@ -3,6 +3,7 @@ import pytest
 from frequensolve.geometry.frame import Axis, CoordinateSystem
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
+from frequensolve.model.layered import LayeredModel
 from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverNode
@@ -101,6 +102,25 @@ def test_validation_accepts_axis_suffixed_paraview_fields(tmp_path):
     report = job.validate()
 
     assert report.ok
+
+
+def test_validation_accepts_solver_builtin_paraview_subdomain_property(tmp_path):
+    job = _simple_job(tmp_path)
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="layer", properties={"vp": 1.5, "rho": 1.0})
+    model.add_surface(name="bottom", depth=1.0)
+    job.simulation += model
+    job += ParaviewOutput(
+        name="pv",
+        fields=["pressure"],
+        properties=["vp", "Subdomain"],
+    )
+
+    report = job.validate()
+
+    assert report.ok
+    assert "outputs.property.unknown" not in _codes(report)
 
 
 @pytest.mark.parametrize("field", ["pressure_z", "velocity_zz"])
