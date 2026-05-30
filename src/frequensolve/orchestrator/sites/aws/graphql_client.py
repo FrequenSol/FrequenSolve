@@ -449,7 +449,9 @@ class GraphQLClient:
             memory: Memory in MB for the job (optional)
             job_name: Custom name for the job (optional)
             send_simulation_status_email: If True/False, overrides cloud communication preferences for this run only
-            force_run: Force a fresh solver run when the backend supports it
+            force_run: Accepted for compatibility with site-level rerun
+                controls. The current GraphQL schema does not expose this
+                argument, so it is not sent to the API.
 
         Returns:
             Dict containing:
@@ -460,30 +462,26 @@ class GraphQLClient:
         Raises:
             RuntimeError: If job submission fails
         """
-        force_var = "$forceRun: Boolean" if force_run else ""
-        force_arg = "forceRun: $forceRun" if force_run else ""
-        mutation = f"""
+        mutation = """
             mutation SubmitJob(
                 $jobFileS3Key: String!
                 $vcpu: Int
                 $memory: Int
                 $jobName: String
                 $sendSimulationStatusEmail: Boolean
-                {force_var}
-            ) {{
+            ) {
                 submitJob(
                     jobFileS3Key: $jobFileS3Key
                     vcpu: $vcpu
                     memory: $memory
                     jobName: $jobName
                     sendSimulationStatusEmail: $sendSimulationStatusEmail
-                    {force_arg}
-                ) {{
+                ) {
                     simulationId
                     batchJobId
                     status
-                }}
-            }}
+                }
+            }
         """
 
         variables: Dict[str, Any] = {
@@ -497,8 +495,6 @@ class GraphQLClient:
             variables["memory"] = memory
         if job_name is not None:
             variables["jobName"] = job_name
-        if force_run:
-            variables["forceRun"] = True
 
         result = self.execute(mutation, variables)
 

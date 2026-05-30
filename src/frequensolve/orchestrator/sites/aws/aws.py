@@ -7,7 +7,7 @@ import subprocess
 import uuid
 import warnings
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Union
 
 from frequensolve._optional import optional_dependency_error
@@ -613,22 +613,37 @@ class AWSSite(BaseSite):
         project_name = job.simulation._remote_path.parts[0]
         simulation_name = job.simulation.name
         job_name = job.name
-        results_paraview_path = f"jobs/{simulation_name}/{job_name}/results/ParaView"
-        s3_results_path = (
-            f"s3://{self.config.s3_bucket}/{project_name}/{results_paraview_path}"
-        )
-        local_results_path = path / results_paraview_path
+        paraview_paths: List[str] = []
+        outputs = getattr(getattr(job, "outputs", None), "paraview", None) or []
+        for output in outputs:
+            output_path = getattr(output, "path", None)
+            if output_path is None:
+                continue
+            normalized = PurePosixPath(str(output_path)).as_posix().strip("/")
+            if normalized and normalized != "." and normalized not in paraview_paths:
+                paraview_paths.append(normalized)
+        if "ParaView" not in paraview_paths:
+            paraview_paths.append("ParaView")
 
-        try:
-            logger.info(
-                "Fetching ParaView outputs from %s to %s",
-                s3_results_path,
-                local_results_path,
+        for paraview_path in paraview_paths:
+            results_paraview_path = (
+                f"jobs/{simulation_name}/{job_name}/results/{paraview_path}"
             )
-            self.get(s3_results_path, local_results_path)
-        except Exception as e:
-            logger.exception("Error downloading ParaView outputs: %s", str(e))
-            raise
+            s3_results_path = (
+                f"s3://{self.config.s3_bucket}/{project_name}/{results_paraview_path}"
+            )
+            local_results_path = path / results_paraview_path
+
+            try:
+                logger.info(
+                    "Fetching ParaView outputs from %s to %s",
+                    s3_results_path,
+                    local_results_path,
+                )
+                self.get(s3_results_path, local_results_path)
+            except Exception as e:
+                logger.exception("Error downloading ParaView outputs: %s", str(e))
+                raise
 
     def _validate_config(self):
         """Validate AWS configuration."""

@@ -354,6 +354,9 @@ class BaseJob(
         f_list: One frequency per solver task. Complex values encode Laplace
             damping in their imaginary component.
         outputs: Output configuration or output requests for this job.
+        k_list: Optional signed physical Fourier wavenumbers for 2.5D jobs.
+        k_weights: Optional quadrature weights paired with ``k_list``.
+        k_units: Optional units for ``k_list`` and ``k_weights``.
 
     Raises:
         ValueError: If the name, simulation, or frequency list is invalid.
@@ -364,6 +367,9 @@ class BaseJob(
     workflow: str
     f_list: List[Union[float, complex]]
     outputs: JobOutputs = field(default_factory=JobOutputs)
+    k_list: Optional[List[float]] = None
+    k_weights: Optional[List[float]] = None
+    k_units: Optional[str] = None
     _file: Optional[Path] = None
     _job_id: Optional[str] = None
 
@@ -376,8 +382,30 @@ class BaseJob(
         if frequencies.size == 0:
             raise ValueError("BaseJob requires at least one frequency")
         self.f_list = frequencies.tolist()
+        self.k_list = self._normalize_optional_real_list(self.k_list, "k_list")
+        self.k_weights = self._normalize_optional_real_list(self.k_weights, "k_weights")
+        if self.k_weights is not None:
+            if self.k_list is None:
+                raise ValueError("BaseJob k_weights requires k_list")
+            if len(self.k_weights) != len(self.k_list):
+                raise ValueError("BaseJob k_weights must match k_list length")
+        if self.k_units is not None:
+            self.k_units = str(self.k_units)
         if not isinstance(self.outputs, JobOutputs):
             self.outputs = JobOutputs(self.outputs)
+
+    @staticmethod
+    def _normalize_optional_real_list(
+        values: Optional[Iterable[float]], field_name: str
+    ) -> Optional[List[float]]:
+        if values is None:
+            return None
+        array = np.asarray(values, dtype=float)
+        if array.size == 0:
+            raise ValueError(f"BaseJob {field_name} must contain at least one value")
+        if array.ndim != 1:
+            raise ValueError(f"BaseJob {field_name} must be a 1D list")
+        return array.tolist()
 
     def __iadd__(self, output: Union[Output, Iterable[Output]]) -> "BaseJob":
         self.outputs += output

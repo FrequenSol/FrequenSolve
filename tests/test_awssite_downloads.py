@@ -111,6 +111,40 @@ def test_fetch_paraview_reraises_download_failures(tmp_path):
         site.fetch_paraview(job)
 
 
+def test_fetch_paraview_downloads_configured_output_paths(tmp_path):
+    paraview_key = (
+        "project-a/jobs/simulation-a/job-a/results/paraview/" "pv_elastic_00000.vtu"
+    )
+    s3_client = FakeS3Client({paraview_key: "mesh"})
+    site = make_site(s3_client)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    job = SimpleNamespace(
+        project_path=tmp_path,
+        name="job-a",
+        outputs=SimpleNamespace(paraview=[SimpleNamespace(path="paraview")]),
+        simulation=SimpleNamespace(
+            name="simulation-a",
+            _remote_path=Path("project-a/simulation-a"),
+        ),
+    )
+
+    site.fetch_paraview(job)
+
+    assert (
+        tmp_path
+        / "jobs"
+        / "simulation-a"
+        / "job-a"
+        / "results"
+        / "paraview"
+        / "pv_elastic_00000.vtu"
+    ).read_text() == "mesh"
+    assert {
+        "Bucket": "bucket",
+        "Prefix": "project-a/jobs/simulation-a/job-a/results/paraview/",
+    } in s3_client.paginate_calls
+
+
 def test_fetch_output_files_downloads_paraview_outputs(tmp_path):
     site = AWSSite.__new__(AWSSite)
     calls = []

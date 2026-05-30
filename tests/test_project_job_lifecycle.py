@@ -580,6 +580,33 @@ def test_time_domain_job_supports_damping_factor_and_direct_laplace(tmp_path):
     assert [freq.imag for freq in direct.f_list] == pytest.approx([-0.25, -0.25])
 
 
+def test_time_domain_job_exports_half_dimension_wavenumber_contract(tmp_path):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="acoustic_25d", physics="acoustic", dimension=2.5)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+    job = TimeDomainJob(
+        name="time",
+        simulation=sim,
+        f_min=0.0,
+        f_max=1.0,
+        T_max=2.0,
+        k_list=[-0.01, 0.0, 0.01],
+        k_weights=[0.5, 1.0, 0.5],
+        k_units="1/km",
+    )
+
+    payload = job.to_fs(project_relative=True)
+    loaded = BaseJob.from_fs(payload, project_path=project.path)
+
+    assert payload["k_list"] == [-0.01, 0.0, 0.01]
+    assert payload["k_weights"] == [0.5, 1.0, 0.5]
+    assert payload["k_units"] == "1/km"
+    assert loaded.k_list == [-0.01, 0.0, 0.01]
+    assert loaded.k_weights == [0.5, 1.0, 0.5]
+    assert loaded.k_units == "1/km"
+
+
 def test_local_submit_autosaves_job_and_simulation(monkeypatch, tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
