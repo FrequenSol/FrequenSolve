@@ -227,7 +227,7 @@ class RunResult:
             base=base,
             existing=existing,
         )
-        if files or not existing or self.site is None:
+        if files or self.site is None:
             return files
 
         fetch_output_files = getattr(self.site, "fetch_output_files", None)
