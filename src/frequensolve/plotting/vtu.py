@@ -912,7 +912,7 @@ def plot_vtu(
         plotter.show()
     if return_mesh:
         return plotter, display_mesh
-    else:
+    if not show:
         plotter.close()
     return
 

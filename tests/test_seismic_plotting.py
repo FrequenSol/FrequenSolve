@@ -536,6 +536,38 @@ def test_vtu_helpers_read_fields_and_plot(tmp_path):
     plotter.close()
 
 
+def test_vtu_plot_keeps_displayed_notebook_plotter_open(tmp_path, monkeypatch):
+    pv = pytest.importorskip("pyvista")
+    path = _write_sample_vtu(tmp_path)
+    shown = []
+    closed = []
+    original_close = pv.Plotter.close
+
+    def fake_show(self, *args, **kwargs):
+        shown.append(self)
+        return None
+
+    def tracked_close(self, *args, **kwargs):
+        closed.append(self)
+        return original_close(self, *args, **kwargs)
+
+    monkeypatch.setattr(pv.Plotter, "show", fake_show)
+    monkeypatch.setattr(pv.Plotter, "close", tracked_close)
+
+    try:
+        plot_vtu(path, "pressure", part="abs")
+
+        assert len(shown) == 1
+        assert closed == []
+        interactor = shown[0].render_window.GetInteractor()
+        assert interactor.GetInteractorStyle() is not None
+    finally:
+        monkeypatch.setattr(pv.Plotter, "close", original_close)
+        for plotter in shown:
+            if not getattr(plotter, "_closed", False):
+                plotter.close()
+
+
 def test_vtu_base_field_alias_accepts_unique_source_indexed_pressure(tmp_path):
     path = _write_source_indexed_pressure_vtu(tmp_path)
 
