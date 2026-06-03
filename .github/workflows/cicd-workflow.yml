@@ -23,9 +23,6 @@ jobs:
   # This job runs basic Python unit tests only - it does not test Docker functionality
   # or integration with other services. For full integration testing, see the integration-test job.
   unit-test:
-    # Temporary PR #50 pause: keep iterating on tutorial fixes without spending
-    # Actions minutes on every synchronize event. Revert before final review.
-    if: github.event_name != 'pull_request' || github.head_ref != 'codex/tutorial-bug-fixes'
     runs-on: ubuntu-latest
     strategy:
       matrix:
