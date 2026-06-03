@@ -622,7 +622,7 @@ class AWSSite(BaseSite):
             normalized = PurePosixPath(str(output_path)).as_posix().strip("/")
             if normalized and normalized != "." and normalized not in paraview_paths:
                 paraview_paths.append(normalized)
-        if "ParaView" not in paraview_paths:
+        if not paraview_paths:
             paraview_paths.append("ParaView")
 
         for paraview_path in paraview_paths:

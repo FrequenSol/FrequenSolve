@@ -143,6 +143,10 @@ def test_fetch_paraview_downloads_configured_output_paths(tmp_path):
         "Bucket": "bucket",
         "Prefix": "project-a/jobs/simulation-a/job-a/results/paraview/",
     } in s3_client.paginate_calls
+    assert {
+        "Bucket": "bucket",
+        "Prefix": "project-a/jobs/simulation-a/job-a/results/ParaView/",
+    } not in s3_client.paginate_calls
 
 
 def test_fetch_output_files_downloads_paraview_outputs(tmp_path):

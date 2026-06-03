@@ -361,6 +361,28 @@ def test_run_result_fetches_remote_output_files_when_matching_files_are_missing(
     assert site.calls == 1
 
 
+def test_run_result_can_skip_remote_output_file_fetch(tmp_path):
+    result_path = tmp_path / "results"
+
+    class FetchingSite:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_output_files(self, job):
+            self.calls += 1
+
+    site = FetchingSite()
+    result = RunResult(
+        job=object(),
+        status=JobStatus(state="completed", return_code=0),
+        site=site,
+        run_metadata=RunMetadata(result_path=result_path),
+    )
+
+    assert result.output_files(suffix=".vtu", fetch_missing=False) == []
+    assert site.calls == 0
+
+
 def test_run_metadata_deduplicates_existing_output_file_aliases(tmp_path):
     result_path = tmp_path / "results"
     paraview = result_path / "ParaView"
