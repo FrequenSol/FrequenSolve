@@ -16,18 +16,16 @@ jobs:
       name: pypi
     steps:
       - uses: actions/checkout@v6
-
-      - name: Require release tag
-        run: |
-          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
-            echo "PyPI publishing must run from a version tag ref." >&2
-            exit 1
-          fi
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - name: Require release tag
+        run: python scripts/validate_release_version.py
 
       - name: Install packaging tools
         run: |
