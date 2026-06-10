@@ -5,7 +5,7 @@ publishing through GitHub Actions.
 
 ## Prerequisites
 
-- A version tag for the release.
+- A `v`-prefixed version tag for the release, for example `v0.2.0`.
 - The `Release` workflow in `.github/workflows/release.yml` for release
   candidates, TestPyPI publishes, and published GitHub releases.
 - The `Publish PyPI` workflow in `.github/workflows/publish-pypi.yml` for the
@@ -47,5 +47,10 @@ Use the `Release` workflow for the normal maintainer flow:
 
 The `Publish PyPI` workflow is a narrower PyPI-only path. It publishes with
 PyPI trusted publishing on release publication or manual dispatch, but it
-rejects non-tag refs. Create and select the intended version tag before using
-either PyPI publishing path.
+rejects non-tag refs. Create and select the intended `v`-prefixed version tag
+before using either PyPI publishing path.
+
+Both workflows run `scripts/validate_release_version.py` before publishing. The
+validator requires a tag ref named `v<Versioneer version>` and rejects dirty,
+untagged, branch-derived, or local-version builds such as
+`0.0.1+278.gccbbd6f`.

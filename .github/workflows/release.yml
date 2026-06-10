@@ -46,12 +46,7 @@ jobs:
           version="$(python -c 'import versioneer; print(versioneer.get_version())')"
           echo "Building FrequenSolve ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          case "${version}" in
-            *dirty*|*untagged*)
-              echo "::error::Release builds must run from a clean, tagged commit. Versioneer returned ${version}."
-              exit 1
-              ;;
-          esac
+          python scripts/validate_release_version.py --version "${version}"
 
       - name: Build distributions
         run: python -m build
