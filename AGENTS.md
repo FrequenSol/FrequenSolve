@@ -204,20 +204,39 @@ binaries, network access, credentials, schedulers, or production data.
 
 ## PR Review Follow-Up
 
-When you create or update a PR, keep the review loop active until the
-`chatgpt-codex-connector` review is settled.
+When you create or update a PR, handle only the first
+`chatgpt-codex-connector` review round unless the user explicitly asks for a
+deeper review cycle. The first round is the first connector review, top-level
+connector comment, or clean connector result that appears after the PR is opened,
+marked ready, or manually requested with `@codex review`.
 
-1. After opening the PR, or after pushing review-follow-up changes, wait for the
-   `chatgpt-codex-connector` bot to review or comment.
+1. After opening the PR or marking it ready, wait for the first
+   `chatgpt-codex-connector` review or comment. If no result appears within 30
+   minutes, do a final thread-aware readback and document the timeout instead of
+   assuming the PR is settled.
 2. Inspect unresolved review threads and top-level PR comments. Treat comments
    from `chatgpt-codex-connector` as review feedback that must be evaluated
    against the codebase, not accepted blindly.
-3. If a code or docs change is warranted, patch the existing PR branch, run the
-   relevant verification, push, and comment `@codex review` on the PR.
-4. If the suggestion should not be implemented, leave a concise PR comment
-   explaining the technical reason and resolve the thread when appropriate.
-5. Continue until no actionable Codex feedback remains. Do not mark the PR
-   handoff complete while bot feedback remains unaddressed.
+3. For each first-round review comment, choose one of two outcomes:
+   - If a code or docs change is warranted, patch the existing PR branch, run
+     the relevant verification, push, and reply in the review thread when
+     appropriate.
+   - If the suggestion should not be implemented, leave a concise PR comment
+     explaining the technical reason and resolve the thread when appropriate.
+4. After pushing first-round fixes, comment `@codex review` once and wait until
+   the bot reacts with the eyes emoji so you know the review request was picked
+   up. Allow up to 30 minutes for pickup before treating the follow-up request
+   as timed out.
+5. Do not enter a second implementation cycle by default. If the connector
+   leaves more feedback after first-round fixes, summarize the new feedback in
+   the PR or worklog and hand it off unless the user explicitly asks you to keep
+   going. For obvious security, data-loss, billing, or tenant-isolation risks,
+   flag the risk prominently in the handoff.
+6. Do not mark the PR handoff complete while first-round bot feedback remains
+   unaddressed. "Addressed" means either implemented with verification, or
+   explicitly answered with a technical reason for not changing the code. Later
+   connector feedback is follow-up work unless the user opts into another review
+   round.
 
 ## Safety Rules
 
