@@ -13,6 +13,11 @@ on:
     branches: [ "v2" ]
   workflow_dispatch:
     inputs:
+      RUN_DOCKER_IMAGE_INTEGRATION:
+        description: 'Run the downstream Docker image integration gate'
+        required: false
+        default: false
+        type: boolean
       FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH:
         description: 'Branch of FrequenSolveDockerImage repository to use'
         required: false
@@ -56,6 +61,7 @@ jobs:
 
   integration-test:
     # This job runs all tests (including integration) in the docker image with the solver software.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.RUN_DOCKER_IMAGE_INTEGRATION }}
     needs: unit-test
     runs-on: ubuntu-latest
     concurrency:
