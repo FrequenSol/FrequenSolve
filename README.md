@@ -116,6 +116,11 @@ Run deterministic unit tests by default:
 python -m pytest
 ```
 
+GitHub CI runs unit tests, docs, and package checks on normal PRs and pushes.
+The downstream Docker image integration gate is intentionally opt-in because it
+spends Docker/GitHub Actions minutes. To run it, manually dispatch the `CI`
+workflow with `RUN_DOCKER_IMAGE_INTEGRATION=true`.
+
 Release checks:
 
 ```bash
