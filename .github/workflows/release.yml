@@ -1,7 +1,7 @@
-name: Release
+name: Publish Package
 
 permissions:
-  contents: read
+  contents: write
 
 on:
   release:
@@ -63,7 +63,9 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     needs: build
-    if: github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi'
+    if: |
+      (github.event_name == 'release' && github.event.release.prerelease) ||
+      (github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi')
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:
@@ -84,7 +86,9 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: build
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.repository == 'pypi')
+    if: |
+      (github.event_name == 'release' && !github.event.release.prerelease) ||
+      (github.event_name == 'workflow_dispatch' && inputs.repository == 'pypi')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -99,3 +103,22 @@ jobs:
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  attach-release-assets:
+    name: Attach distributions to GitHub release
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Attach package distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber

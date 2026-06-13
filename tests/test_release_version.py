@@ -30,6 +30,30 @@ def test_accepts_matching_v_prefixed_release_tag() -> None:
     assert errors == []
 
 
+def test_accepts_matching_pep_440_release_candidate_tag() -> None:
+    validator = load_release_validator()
+
+    errors = validator.validate_release_version(
+        version="0.2.0rc1",
+        ref_type="tag",
+        ref_name="v0.2.0rc1",
+    )
+
+    assert errors == []
+
+
+def test_rejects_semver_style_release_candidate_version() -> None:
+    validator = load_release_validator()
+
+    errors = validator.validate_release_version(
+        version="0.2.0-rc.1",
+        ref_type="tag",
+        ref_name="v0.2.0-rc.1",
+    )
+
+    assert "version must be a clean PEP 440 release such as 0.2.0 or 0.2.0rc1" in errors
+
+
 def test_rejects_plain_version_tags_because_versioneer_uses_v_prefix() -> None:
     validator = load_release_validator()
 

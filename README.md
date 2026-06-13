@@ -131,12 +131,22 @@ python -m twine check dist/*
 ```
 
 For a release, build from a clean tagged commit. Versioneer is configured with
-the `v` tag prefix, so tag releases as `v0.2.0`, `v0.2.1`, and so on. The
-`Release` workflow builds the sdist and wheel, rejects branch-derived, dirty,
-untagged, or mismatched versions, and can publish to TestPyPI from
-`workflow_dispatch` or PyPI from a published GitHub Release after Trusted
-Publishing is configured for the `testpypi` and `pypi` environments. See
-`RELEASING.md` for the narrower `Publish PyPI` tag-ref path.
+the `v` tag prefix and PEP 440 package versions:
+
+- Release candidates use tags such as `v0.2.0rc1`, producing package version
+  `0.2.0rc1`.
+- Final releases use tags such as `v0.2.0`, producing package version `0.2.0`.
+
+Use `Create Release Candidate` to create the next `rcN` tag and GitHub
+prerelease from a selected source ref. The resulting prerelease triggers
+`Publish Package`, which builds the sdist and wheel, attaches them to the
+GitHub Release, and publishes to TestPyPI.
+
+Use `Create Release` to promote an existing release candidate tag to the final
+tag. The final GitHub Release triggers `Publish Package`, which rebuilds the
+sdist and wheel from the final tag, attaches them to the GitHub Release, and
+publishes to PyPI. TestPyPI and PyPI publishing require Trusted Publishing to
+be configured for the `testpypi` and `pypi` environments.
 
 Solver, cloud, HPC, and visual tests are marked and must be selected explicitly:
 

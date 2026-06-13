@@ -27,7 +27,6 @@ def test_ci_workflow_avoids_duplicate_pr_and_push_runs():
 
 def test_ci_workflow_runs_supported_python_matrix_on_node24_actions():
     workflow = (REPO_ROOT / ".github/workflows/cicd-workflow.yml").read_text()
-    publish_workflow = (REPO_ROOT / ".github/workflows/publish-pypi.yml").read_text()
 
     assert 'python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]' in workflow
     assert "actions/checkout@v6" in workflow
@@ -57,8 +56,6 @@ def test_ci_workflow_runs_supported_python_matrix_on_node24_actions():
     assert "Expected exactly one downstream workflow run" not in workflow
     assert "gh run watch" in workflow
     assert "gh run download" in workflow
-    assert "actions/checkout@v6" in publish_workflow
-    assert "actions/setup-python@v6" in publish_workflow
 
 
 def test_ci_workflow_does_not_deploy_legacy_docs_host():
@@ -205,7 +202,6 @@ def test_docs_and_examples_reference_canonical_frequensol_domains():
 
 def test_contributing_and_changelog_match_current_repo_workflows():
     contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text()
-    releasing = (REPO_ROOT / "RELEASING.md").read_text()
     changelog = (REPO_ROOT / "CHANGELOG.md").read_text()
     installation = (REPO_ROOT / "docs/source/installation.rst").read_text()
 
@@ -218,9 +214,6 @@ def test_contributing_and_changelog_match_current_repo_workflows():
     assert "docs/host" in contributing
     assert "python -m pip install frequensolve" in installation
     assert "python -m pip install -e ." in installation
-    assert "Publish PyPI" in releasing
-    assert "trusted publishing" in releasing
-    assert "Do not add PyPI passwords or API tokens" in releasing
     assert "0.1.1" not in changelog
     assert "0.1.0" not in changelog
     assert "0.0.1" in changelog
