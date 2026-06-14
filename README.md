@@ -130,13 +130,9 @@ python -m build
 python -m twine check dist/*
 ```
 
-For a release, build from a clean tagged commit. Versioneer is configured with
-the `v` tag prefix, so tag releases as `v0.2.0`, `v0.2.1`, and so on. The
-`Release` workflow builds the sdist and wheel, rejects branch-derived, dirty,
-untagged, or mismatched versions, and can publish to TestPyPI from
-`workflow_dispatch` or PyPI from a published GitHub Release after Trusted
-Publishing is configured for the `testpypi` and `pypi` environments. See
-`RELEASING.md` for the narrower `Publish PyPI` tag-ref path.
+For releases, use PEP 440 package versions and `v`-prefixed tags. Release
+candidates are published to TestPyPI, and final releases are published to PyPI.
+See [RELEASING.md](RELEASING.md) for the maintainer workflow.
 
 Solver, cloud, HPC, and visual tests are marked and must be selected explicitly:
 
