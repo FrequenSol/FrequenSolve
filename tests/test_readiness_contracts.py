@@ -27,13 +27,16 @@ def test_ci_workflow_avoids_duplicate_pr_and_push_runs():
 
 def test_ci_workflow_runs_supported_python_matrix_on_node24_actions():
     workflow = (REPO_ROOT / ".github/workflows/cicd-workflow.yml").read_text()
+    deprecated_app_id_secret = "_".join(["FREQUENSOLVER", "BUILDER", "APP", "ID"])
 
     assert 'python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]' in workflow
     assert "actions/checkout@v6" in workflow
     assert "actions/setup-python@v6" in workflow
     assert "codecov/codecov-action@v6" in workflow
     assert "actions/upload-artifact@v7" in workflow
-    assert "actions/create-github-app-token@v3" in workflow
+    assert "actions/create-github-app-token@v3.2.0" in workflow
+    assert "client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}" in workflow
+    assert deprecated_app_id_secret not in workflow
     assert "pre-commit/action@" not in workflow
     assert "tibdex/github-app-token" not in workflow
     assert "the-actions-org/workflow-dispatch" not in workflow

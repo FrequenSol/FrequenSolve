@@ -71,9 +71,9 @@ jobs:
       # Generate GitHub App Token
       - name: Generate GitHub App Token
         id: generate-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
-          app-id: ${{ secrets.FREQUENSOLVER_BUILDER_APP_ID }}
+          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolveDockerImage
