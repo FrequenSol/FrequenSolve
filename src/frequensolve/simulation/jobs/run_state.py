@@ -1,6 +1,9 @@
+import hashlib
 import json
 import os
+import shlex
 import shutil
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
@@ -8,6 +11,148 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from frequensolve.simulation.simulation import CustomJSONEncoder
 
 SOLVER_RESIDUAL_FAILURE_THRESHOLD = 1.0e-3
+
+
+@dataclass(frozen=True)
+class SkipPolicy:
+    """Policy controlling which existing task outputs may be skipped.
+
+    Args:
+        mode: Human-readable policy name.
+        reuse: Whether matching outputs from other task slots may be reused.
+        ignore_solver_options: Ignore solver-only simulation JSON keys when
+            comparing task compatibility.
+        accept_failed: Accept failed/max-iter task records when quality checks
+            pass.
+        residual: Maximum residual accepted for failed/max-iter records.
+        force: Ignore all existing outputs and rerun every task.
+        ignored_simulation_keys: Top-level simulation JSON keys ignored by the
+            compatibility fingerprint when ``ignore_solver_options`` is true.
+    """
+
+    mode: str = "strict"
+    reuse: bool = True
+    ignore_solver_options: bool = False
+    accept_failed: bool = False
+    residual: Optional[float] = None
+    force: bool = False
+    ignored_simulation_keys: tuple[str, ...] = ("Solver",)
+
+    @classmethod
+    def strict(cls) -> "SkipPolicy":
+        """Require exact task fingerprints and successful/current outputs."""
+
+        return cls(mode="strict")
+
+    @classmethod
+    def compatible(cls) -> "SkipPolicy":
+        """Reuse compatible successful outputs while ignoring solver options."""
+
+        return cls(mode="compatible", ignore_solver_options=True)
+
+    @classmethod
+    def tolerant(
+        cls,
+        *,
+        residual: float = SOLVER_RESIDUAL_FAILURE_THRESHOLD,
+        ignore_solver_options: bool = True,
+    ) -> "SkipPolicy":
+        """Reuse compatible outputs and accept failed records below residual."""
+
+        return cls(
+            mode="tolerant",
+            ignore_solver_options=ignore_solver_options,
+            accept_failed=True,
+            residual=float(residual),
+        )
+
+    @classmethod
+    def none(cls) -> "SkipPolicy":
+        """Rerun all tasks."""
+
+        return cls(mode="none", reuse=False, force=True)
+
+    @classmethod
+    def from_value(
+        cls,
+        value: Optional[Any] = None,
+        *,
+        residual: Optional[float] = None,
+        ignore_solver_options: Optional[bool] = None,
+        reuse: Optional[bool] = None,
+    ) -> "SkipPolicy":
+        """Normalize strings, booleans, or policies into ``SkipPolicy``."""
+
+        if isinstance(value, SkipPolicy):
+            policy = value
+        elif value is None or value is True:
+            policy = cls.strict()
+        elif value is False:
+            policy = cls.none()
+        else:
+            name = str(value).strip().lower().replace("-", "_")
+            if name in {"strict", "current"}:
+                policy = cls.strict()
+            elif name in {"compatible", "compat"}:
+                policy = cls.compatible()
+            elif name in {"tolerant", "tolerance", "residual"}:
+                policy = cls.tolerant(
+                    residual=(
+                        SOLVER_RESIDUAL_FAILURE_THRESHOLD
+                        if residual is None
+                        else float(residual)
+                    ),
+                    ignore_solver_options=(
+                        True
+                        if ignore_solver_options is None
+                        else bool(ignore_solver_options)
+                    ),
+                )
+            elif name in {"none", "force", "rerun", "all"}:
+                policy = cls.none()
+            else:
+                raise ValueError(
+                    "skip policy must be 'strict', 'compatible', 'tolerant', "
+                    "or 'none'"
+                )
+
+        if residual is not None:
+            policy = replace(
+                policy,
+                residual=float(residual),
+                accept_failed=policy.accept_failed or not policy.force,
+            )
+            if policy.mode in {"strict", "compatible"}:
+                policy = replace(
+                    policy,
+                    mode="tolerant",
+                    ignore_solver_options=(
+                        True
+                        if ignore_solver_options is None
+                        else bool(ignore_solver_options)
+                    ),
+                )
+        if ignore_solver_options is not None:
+            policy = replace(
+                policy,
+                ignore_solver_options=bool(ignore_solver_options),
+            )
+        if reuse is not None:
+            policy = replace(policy, reuse=bool(reuse))
+        return policy
+
+
+class TaskRunPlan(dict):
+    """Dictionary task plan with backward-compatible equality."""
+
+    _legacy_keys = {"pending_indices", "current_tasks", "reused_tasks"}
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Mapping):
+            other_keys = set(other.keys())
+            if other_keys <= self._legacy_keys:
+                return {key: self.get(key) for key in other_keys} == dict(other)
+        return super().__eq__(other)
 
 
 class JobRunStateMixin:
@@ -68,6 +213,12 @@ class JobRunStateMixin:
         residuals = [
             solve["residual"] for solve in solves if solve.get("residual") is not None
         ]
+        if not residuals:
+            top_level_residual = cls._rounded_solver_float(
+                convergence.get("residual", convergence.get("final_residual"))
+            )
+            if top_level_residual is not None:
+                residuals.append(top_level_residual)
         iterations = [
             solve["iterations"]
             for solve in solves
@@ -156,7 +307,8 @@ class JobRunStateMixin:
                 row["duration_seconds"] = duration
             status = self._normalized_task_status(record.get("status"))
             if status == "failed" or self._record_solver_failed(record):
-                row["status"] = "failed"
+                if not row["current"]:
+                    row["status"] = "failed"
             elif status == "succeeded" and row["current"] and row["status"] != "failed":
                 row["status"] = "succeeded"
 
@@ -367,6 +519,8 @@ class JobRunStateMixin:
             status = self._normalized_task_status(record.get("status"))
             if status != "succeeded":
                 continue
+            if self._record_solver_not_run(record):
+                continue
             stored_path = self._resolve_stored_trace_path(
                 record.get("path") or record.get("trace_file")
             )
@@ -382,6 +536,13 @@ class JobRunStateMixin:
                 or stored_matches_trace
                 or packed_task_reusable
             )
+        if self._task_run_manifest_is_current(
+            task,
+            trace_file=trace_file,
+            trace_exists=expected_exists or packed_task_reusable,
+            state=state,
+        ):
+            return True
         return packed_task_reusable and full_run_matches
 
     def current_tasks(self) -> List[int]:
@@ -398,8 +559,428 @@ class JobRunStateMixin:
             if self.is_task_current(task, state=state)
         ]
 
+    def _simulation_hash_for_policy(self, policy: SkipPolicy) -> str:
+        if self.simulation._file is None:
+            raise ValueError("Simulation must be saved before fingerprinting a task")
+        if not policy.ignore_solver_options:
+            return self._hash_json_file(self.simulation._file)
+        with open(self.simulation._file, "r") as f:
+            payload = json.load(f)
+        if isinstance(payload, Mapping):
+            payload = dict(payload)
+            for key in policy.ignored_simulation_keys:
+                payload.pop(key, None)
+        return self._hash_payload(payload)
+
+    def task_policy_fingerprint_payload(
+        self,
+        task: int,
+        skip_policy: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Return the task compatibility payload for a skip policy."""
+
+        policy = SkipPolicy.from_value(skip_policy)
+        if not policy.ignore_solver_options:
+            return self.task_fingerprint_payload(task)
+        if task < 1 or task > self.n_tasks:
+            raise IndexError(f"Task {task} is outside 1..{self.n_tasks}")
+        job_data = self.to_fs()
+        return {
+            "schema": "frequensolve-job-task-compatibility-fingerprint-1",
+            "job": {
+                "_type": job_data["_type"],
+                "workflow": job_data["workflow"],
+                "Outputs": job_data["Outputs"],
+            },
+            "simulation": {
+                "hash": self._simulation_hash_for_policy(policy),
+                "ignored_keys": list(policy.ignored_simulation_keys),
+            },
+            "frequency": self._canonical_frequency_value(self.f_list[task - 1]),
+        }
+
+    def task_policy_fingerprint(
+        self,
+        task: int,
+        skip_policy: Optional[Any] = None,
+    ) -> str:
+        """Return the task fingerprint used by a skip policy."""
+
+        return self._hash_payload(
+            self.task_policy_fingerprint_payload(task, skip_policy)
+        )
+
+    def _task_policy_fingerprint_keys(
+        self,
+        task: int,
+        policy: SkipPolicy,
+    ) -> tuple[str, ...]:
+        keys = [self.task_policy_fingerprint(task, policy)]
+        if policy.ignore_solver_options:
+            keys.append(self.task_fingerprint(task))
+        return tuple(dict.fromkeys(keys))
+
+    @staticmethod
+    def _record_policy_fingerprint_keys(
+        record: Mapping[str, Any],
+        policy: SkipPolicy,
+    ) -> tuple[str, ...]:
+        keys = []
+        if policy.ignore_solver_options:
+            key = record.get("compatibility_fingerprint")
+            if key:
+                keys.append(str(key))
+        key = record.get("fingerprint")
+        if key:
+            keys.append(str(key))
+        return tuple(dict.fromkeys(keys))
+
+    def _record_trace_source(self, record: Mapping[str, Any]) -> Optional[Path]:
+        source = self._resolve_stored_trace_path(
+            record.get("path") or record.get("trace_file")
+        )
+        if source is None or source in self.trace_manifest.packed_files:
+            return None
+        return source if self._trace_file_exists(source) else None
+
+    def _record_policy_acceptance(
+        self,
+        record: Mapping[str, Any],
+        policy: SkipPolicy,
+    ) -> tuple[bool, bool]:
+        status = self._normalized_task_status(record.get("status"))
+        if status == "succeeded" and not self._record_solver_not_run(record):
+            return True, False
+
+        failed = status == "failed" or self._record_solver_failed(record)
+        if not failed or not policy.accept_failed:
+            return False, False
+
+        convergence = self._record_solver_convergence(record)
+        if not isinstance(convergence, Mapping):
+            return False, False
+        residual = convergence.get("residual", convergence.get("final_residual"))
+        if residual is None:
+            return False, False
+        threshold = (
+            SOLVER_RESIDUAL_FAILURE_THRESHOLD
+            if policy.residual is None
+            else float(policy.residual)
+        )
+        try:
+            return float(residual) <= threshold, True
+        except (TypeError, ValueError):
+            return False, False
+
+    def _current_task_record(
+        self,
+        task: int,
+        path: Path,
+    ) -> Dict[str, Any]:
+        return {
+            "task": task,
+            "status": "current",
+            "duration_seconds": 0.0,
+            "fingerprint": self.task_fingerprint(task),
+            "compatibility_fingerprint": self.task_policy_fingerprint(
+                task,
+                SkipPolicy.compatible(),
+            ),
+            "path": self._stored_trace_path(path),
+        }
+
+    def _planned_reusable_task_outputs_from_state(
+        self,
+        state: Mapping[str, Any],
+        policy: SkipPolicy,
+        *,
+        reuse: bool,
+        skip_tasks: Iterable[int] = (),
+    ) -> List[Dict[str, Any]]:
+        records = self._state_task_records(state)
+        source_by_key: Dict[str, Dict[str, Any]] = {}
+        for record in records:
+            accepted, accepted_failed = self._record_policy_acceptance(record, policy)
+            if not accepted:
+                continue
+            source = self._record_trace_source(record)
+            if source is None:
+                continue
+            keys = self._record_policy_fingerprint_keys(record, policy)
+            if not keys:
+                continue
+            entry = {
+                "record": record,
+                "source": source,
+                "task": self._task_number_from_record(record),
+                "accepted_failed": accepted_failed,
+            }
+            for key in keys:
+                existing = source_by_key.get(key)
+                if existing is None or (
+                    existing.get("accepted_failed") and not accepted_failed
+                ):
+                    source_by_key[key] = entry
+
+        if not source_by_key:
+            return []
+
+        files = self.expected_trace_files()
+        manifest = self.trace_manifest
+        skipped = {int(task) for task in skip_tasks}
+        planned = []
+        for task in range(1, self.n_tasks + 1):
+            if task in skipped:
+                continue
+            entry = None
+            for key in self._task_policy_fingerprint_keys(task, policy):
+                entry = source_by_key.get(key)
+                if entry is not None:
+                    break
+            if entry is None:
+                continue
+
+            source = Path(entry["source"])
+            source_task = entry.get("task")
+            trace_path, trace_exists = self._trace_output_path_for_task(
+                task,
+                manifest=manifest,
+            )
+            target = Path(files[task - 1])
+            if trace_exists and source.resolve(strict=False) == Path(
+                trace_path
+            ).resolve(strict=False):
+                target = Path(trace_path)
+            source_matches_target = source.resolve(strict=False) == target.resolve(
+                strict=False
+            )
+            if not source_matches_target and not reuse:
+                continue
+
+            accepted_failed = bool(entry.get("accepted_failed"))
+            if accepted_failed:
+                status = "accepted_failed"
+            elif source_matches_target:
+                status = "accepted"
+            else:
+                status = "reused"
+            planned.append(
+                {
+                    "task": task,
+                    "status": status,
+                    "duration_seconds": 0.0,
+                    "fingerprint": self.task_fingerprint(task),
+                    "compatibility_fingerprint": self.task_policy_fingerprint(
+                        task,
+                        SkipPolicy.compatible(),
+                    ),
+                    "path": self._stored_trace_path(target),
+                    "source_path": str(source),
+                    "target_path": str(target),
+                    "source_task": source_task,
+                    **({"accepted_failed": True} if accepted_failed else {}),
+                    **(
+                        {"accepted": True}
+                        if status in {"accepted", "accepted_failed"}
+                        else {}
+                    ),
+                }
+            )
+        return planned
+
+    def _apply_planned_task_records(
+        self,
+        records: Iterable[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        pending = []
+        applied = []
+        stage_dir = self._result_path / "_fs_run" / "reuse"
+        for record in records:
+            out = dict(record)
+            source = out.pop("source_path", None)
+            target = out.pop("target_path", None)
+            if source is not None and target is not None:
+                source_path = Path(source)
+                target_path = Path(target)
+                if source_path.resolve(strict=False) != target_path.resolve(
+                    strict=False
+                ):
+                    pending.append((source_path, target_path))
+            applied.append(out)
+        if not pending:
+            return applied
+
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        staged = []
+        try:
+            for index, (source_path, target_path) in enumerate(pending, start=1):
+                stage = stage_dir / f"planned_{index}{source_path.suffix}"
+                shutil.copy2(source_path, stage)
+                staged.append((stage, target_path))
+            for stage, target_path in staged:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(stage, target_path)
+        finally:
+            for stage, _target_path in staged:
+                try:
+                    stage.unlink()
+                except FileNotFoundError:
+                    pass
+        return applied
+
+    def plan_tasks(
+        self,
+        *,
+        skip_policy: Optional[Any] = None,
+        reuse: bool = False,
+        force: bool = False,
+        apply: bool = False,
+        residual: Optional[float] = None,
+        ignore_solver_options: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Plan frequency tasks under a skip policy.
+
+        Args:
+            skip_policy: ``SkipPolicy`` or policy name.
+            reuse: Allow matching outputs from other task slots.
+            force: Rerun every task.
+            apply: Copy reusable outputs, update run state, and remove stale
+                pending outputs. ``False`` is a read-only preview.
+            residual: Optional residual threshold for tolerant policies.
+            ignore_solver_options: Override whether solver JSON keys are
+                included in compatibility fingerprints.
+
+        Returns:
+            Mapping with pending indices and skipped/reused/accepted records.
+        """
+
+        policy = SkipPolicy.from_value(
+            skip_policy,
+            residual=residual,
+            ignore_solver_options=ignore_solver_options,
+            reuse=reuse,
+        )
+        force = bool(force or policy.force)
+        if force:
+            pending = list(range(self.n_tasks))
+            if apply:
+                removed_stale_outputs = self._remove_trace_outputs_for_tasks(
+                    range(1, self.n_tasks + 1),
+                    remove_matching_shards=True,
+                )
+                removed_stale_outputs = (
+                    self.remove_packed_trace_products() or removed_stale_outputs
+                )
+                if removed_stale_outputs:
+                    self.invalidate_trace_cache()
+            return TaskRunPlan(
+                {
+                    "pending_indices": pending,
+                    "strict_current_tasks": [],
+                    "current_tasks": [],
+                    "reused_tasks": [],
+                    "accepted_tasks": [],
+                    "accepted_failed_tasks": [],
+                    "skipped_task_records": [],
+                    "skip_policy": policy,
+                    "removed_stale_outputs": False,
+                }
+            )
+
+        state = self.run_state()
+        current_records = []
+        manifest = self.trace_manifest
+        for task, _path in enumerate(self.expected_trace_files(), start=1):
+            if not self.is_task_current(task, state=state):
+                continue
+            file_path, _exists = self._trace_output_path_for_task(
+                task,
+                manifest=manifest,
+            )
+            current_records.append(self._current_task_record(task, file_path))
+
+        current_task_numbers = {
+            int(record["task"])
+            for record in current_records
+            if record.get("task") is not None
+        }
+        planned_records = (
+            self._planned_reusable_task_outputs_from_state(
+                state,
+                policy,
+                reuse=policy.reuse,
+                skip_tasks=current_task_numbers,
+            )
+            if state
+            else []
+        )
+        applied_records = (
+            self._apply_planned_task_records(planned_records)
+            if apply
+            else [dict(record) for record in planned_records]
+        )
+
+        skipped_tasks = {
+            *current_task_numbers,
+            *(
+                int(record["task"])
+                for record in planned_records
+                if record.get("task") is not None
+            ),
+        }
+        pending = [
+            task - 1 for task in range(1, self.n_tasks + 1) if task not in skipped_tasks
+        ]
+
+        if apply and applied_records:
+            self.write_run_state(
+                status="partial",
+                tasks=[*current_records, *applied_records],
+            )
+        removed_stale_outputs = False
+        if apply:
+            removed_stale_outputs = self._remove_trace_outputs_for_tasks(
+                index + 1 for index in pending
+            )
+            if applied_records or removed_stale_outputs:
+                self.invalidate_trace_cache()
+
+        reused_records = [
+            record for record in applied_records if record.get("status") == "reused"
+        ]
+        accepted_failed = [
+            int(record["task"])
+            for record in applied_records
+            if record.get("accepted_failed")
+        ]
+        accepted_tasks = [
+            int(record["task"])
+            for record in applied_records
+            if record.get("status") == "accepted"
+        ]
+        skipped_records = [*current_records, *applied_records]
+        return TaskRunPlan(
+            {
+                "pending_indices": pending,
+                "strict_current_tasks": sorted(current_task_numbers),
+                "current_tasks": sorted(skipped_tasks),
+                "reused_tasks": reused_records,
+                "accepted_tasks": accepted_tasks,
+                "accepted_failed_tasks": accepted_failed,
+                "skipped_task_records": skipped_records,
+                "skip_policy": policy,
+                "removed_stale_outputs": removed_stale_outputs,
+            }
+        )
+
     def task_run_plan(
-        self, *, reuse: bool = False, force: bool = False
+        self,
+        *,
+        reuse: bool = False,
+        force: bool = False,
+        skip_policy: Optional[Any] = None,
+        residual: Optional[float] = None,
+        ignore_solver_options: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Plan which zero-based solver task indices still need to run.
 
@@ -417,63 +998,14 @@ class JobRunStateMixin:
             ``current_tasks``, and records for any ``reused_tasks``.
         """
 
-        if force:
-            pending = list(range(self.n_tasks))
-            removed_stale_outputs = self._remove_trace_outputs_for_tasks(
-                range(1, self.n_tasks + 1)
-            )
-            removed_stale_outputs = (
-                self.remove_packed_trace_products() or removed_stale_outputs
-            )
-            if removed_stale_outputs:
-                self.invalidate_trace_cache()
-            return {
-                "pending_indices": pending,
-                "current_tasks": [],
-                "reused_tasks": [],
-            }
-
-        state = self.run_state()
-        current_records = []
-        manifest = self.trace_manifest
-        for task, path in enumerate(self.expected_trace_files(), start=1):
-            if not self.is_task_current(task, state=state):
-                continue
-            file_path, _exists = self._trace_output_path_for_task(
-                task,
-                manifest=manifest,
-            )
-            current_records.append(
-                {
-                    "task": task,
-                    "status": "current",
-                    "duration_seconds": 0.0,
-                    "fingerprint": self.task_fingerprint(task),
-                    "path": self._stored_trace_path(file_path),
-                }
-            )
-        reused = self._reuse_task_outputs_from_state(state) if reuse and state else []
-        if reused:
-            self.write_run_state(status="partial", tasks=[*current_records, *reused])
-            state = self.run_state()
-        reused_tasks = {self._task_number_from_record(record) for record in reused}
-        pending = []
-        current = []
-        for task in range(1, self.n_tasks + 1):
-            if self.is_task_current(task, state=state) or task in reused_tasks:
-                current.append(task)
-            else:
-                pending.append(task - 1)
-        removed_stale_outputs = self._remove_trace_outputs_for_tasks(
-            index + 1 for index in pending
+        return self.plan_tasks(
+            skip_policy=skip_policy,
+            reuse=reuse,
+            force=force,
+            apply=True,
+            residual=residual,
+            ignore_solver_options=ignore_solver_options,
         )
-        if reused or removed_stale_outputs:
-            self.invalidate_trace_cache()
-        return {
-            "pending_indices": pending,
-            "current_tasks": current,
-            "reused_tasks": reused,
-        }
 
     def is_run_current(self) -> bool:
         """Return whether all expected outputs match the saved job inputs.
@@ -558,10 +1090,17 @@ class JobRunStateMixin:
             files.append({"path": stored_path, "exists": exists})
 
             result = dict(result_by_task.get(task, {}))
+            raw_status = str(result.get("status", "")).strip().lower().replace(" ", "_")
+            accepted_by_policy = raw_status in {"accepted", "accepted_failed"}
             task_status = self._normalized_task_status(result.get("status"))
             previously_current = self.is_task_current(task, state=previous_state)
             if not result and previously_current:
                 result = dict(previous_by_task.get(task, {}))
+                raw_status = (
+                    str(result.get("status", "")).strip().lower().replace(" ", "_")
+                )
+                accepted_by_policy = raw_status in {"accepted", "accepted_failed"}
+                task_status = self._normalized_task_status(result.get("status"))
             if task_status is None and previously_current:
                 task_status = "current"
             elif task_status is None and exists and bootstrap_existing_outputs:
@@ -569,8 +1108,14 @@ class JobRunStateMixin:
             if task_status is None:
                 task_status = "not_run"
             solver_convergence = self._record_solver_convergence(result)
-            if solver_convergence is not None and solver_convergence.get("failed"):
+            if (
+                solver_convergence is not None
+                and solver_convergence.get("failed")
+                and not accepted_by_policy
+            ):
                 task_status = "failed"
+            elif accepted_by_policy:
+                task_status = raw_status
 
             duration = self._record_duration_seconds(result)
             row = {
@@ -579,11 +1124,19 @@ class JobRunStateMixin:
                 "status": task_status,
                 "complete": self._task_is_complete(result, task_status),
                 "fingerprint": self.task_fingerprint(task),
+                "compatibility_fingerprint": self.task_policy_fingerprint(
+                    task,
+                    SkipPolicy.compatible(),
+                ),
                 "path": stored_path,
                 "exists": exists,
             }
             if solver_convergence is not None:
                 row["solver"] = {"convergence": solver_convergence}
+            if accepted_by_policy:
+                row["accepted"] = True
+            if raw_status == "accepted_failed":
+                row["accepted_failed"] = True
             if duration is not None:
                 row["duration_seconds"] = duration
             core_count = self._record_core_count(result)
@@ -718,6 +1271,8 @@ class JobRunStateMixin:
                 manifest = json.loads(manifest_path.read_text())
             except (OSError, json.JSONDecodeError):
                 continue
+            if not self._run_manifest_represents_task(manifest, task):
+                continue
             convergence = self.solver_convergence_summary(manifest)
             solver_failed = bool(convergence and convergence.get("failed"))
             exit_status = manifest.get("exit_status")
@@ -753,6 +1308,11 @@ class JobRunStateMixin:
                     else ("error" if solver_failed or exit_failed else "success")
                 ),
                 "complete": True,
+                "fingerprint": self.task_fingerprint(task),
+                "compatibility_fingerprint": self.task_policy_fingerprint(
+                    task,
+                    SkipPolicy.compatible(),
+                ),
                 "run_manifest": str(manifest_path),
             }
             if returncode is not None:
@@ -771,6 +1331,210 @@ class JobRunStateMixin:
         if not task_records:
             return None
         return self.write_run_state(status=status, tasks=task_records)
+
+    def _task_run_manifest_is_current(
+        self,
+        task: int,
+        *,
+        trace_file: Path,
+        trace_exists: bool,
+        state: Optional[Mapping[str, Any]] = None,
+    ) -> bool:
+        if not trace_exists:
+            return False
+        if isinstance(state, Mapping) and state:
+            state_fingerprint = state.get("fingerprint")
+            if (
+                state_fingerprint is not None
+                and state_fingerprint != self.fingerprint()
+            ):
+                return False
+
+        manifest_path = self.task_run_manifest_path(task)
+        if not manifest_path.exists():
+            return False
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not self._run_manifest_represents_task(manifest, task):
+            return False
+        if not self._run_manifest_successful(manifest):
+            return False
+        if not self._run_manifest_outputs_match_task(manifest, task):
+            return False
+        return self._run_manifest_outputs_include_trace(manifest_path, trace_file)
+
+    def _run_manifest_represents_task(
+        self,
+        manifest: Mapping[str, Any],
+        task: int,
+    ) -> bool:
+        execution = manifest.get("execution")
+        if isinstance(execution, Mapping):
+            args = self._run_manifest_command_line(execution)
+            if "--init" in args:
+                return False
+            command_task = self._command_line_task_number(args)
+            if command_task is not None and command_task != task:
+                return False
+        return self._run_manifest_frequency_matches_task(manifest, task)
+
+    @staticmethod
+    def _run_manifest_command_line(execution: Mapping[str, Any]) -> List[str]:
+        command_line = execution.get("command_line")
+        if isinstance(command_line, str):
+            try:
+                return shlex.split(command_line)
+            except ValueError:
+                return command_line.split()
+        if isinstance(command_line, Sequence) and not isinstance(
+            command_line, (bytes, bytearray)
+        ):
+            return [str(part) for part in command_line]
+        return []
+
+    @classmethod
+    def _command_line_task_number(cls, args: Sequence[str]) -> Optional[int]:
+        for index, arg in enumerate(args):
+            if arg in {"-i", "--task"}:
+                if index + 1 >= len(args):
+                    return None
+                return cls._task_number_from_value(args[index + 1], zero_based=False)
+        return None
+
+    def _run_manifest_frequency_matches_task(
+        self,
+        manifest: Mapping[str, Any],
+        task: int,
+    ) -> bool:
+        inputs = manifest.get("inputs")
+        task_inputs = inputs.get("task") if isinstance(inputs, Mapping) else None
+        if not isinstance(task_inputs, Mapping) or "frequency" not in task_inputs:
+            return True
+        frequency = self._frequency_parts(task_inputs.get("frequency"))
+        if frequency is None:
+            return True
+        expected = self._frequency_parts(self.f_list[task - 1])
+        if expected is None:
+            return False
+        return (
+            abs(frequency[0] - expected[0]) <= 1.0e-9
+            and abs(frequency[1] - expected[1]) <= 1.0e-9
+        )
+
+    def _run_manifest_outputs_match_task(
+        self,
+        manifest: Mapping[str, Any],
+        task: int,
+    ) -> bool:
+        inputs = manifest.get("inputs")
+        task_inputs = inputs.get("task") if isinstance(inputs, Mapping) else None
+        if not isinstance(task_inputs, Mapping):
+            return True
+        outputs_hash = task_inputs.get("outputs_hash")
+        if outputs_hash is None:
+            return True
+        return str(outputs_hash) == self._task_outputs_hash(task)
+
+    def _task_outputs_hash(self, task: int) -> str:
+        payload = self.task_fingerprint_payload(task)["job"]["Outputs"]
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+    @staticmethod
+    def _frequency_parts(value: Any) -> Optional[tuple[float, float]]:
+        if isinstance(value, Mapping):
+            real = value.get("real", value.get("value"))
+            imag = value.get("imag", 0.0)
+        elif isinstance(value, complex):
+            real = value.real
+            imag = value.imag
+        else:
+            real = value
+            imag = 0.0
+        try:
+            return float(real), float(imag)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _run_manifest_successful(cls, manifest: Mapping[str, Any]) -> bool:
+        execution = manifest.get("execution")
+        skipped = False
+        if isinstance(execution, Mapping):
+            skipped = bool(execution.get("skipped"))
+
+        exit_status = manifest.get("exit_status")
+        if isinstance(exit_status, Mapping):
+            try:
+                code = int(exit_status.get("code", 0))
+            except (TypeError, ValueError):
+                code = None
+            status = str(exit_status.get("status", "")).lower()
+            skipped = skipped or status == "skipped"
+            if (code is not None and code != 0) or status in {
+                "failed",
+                "failure",
+                "error",
+                "timeout",
+                "cancelled",
+                "killed",
+            }:
+                return False
+        elif exit_status is not None:
+            status = str(exit_status).lower()
+            skipped = skipped or status == "skipped"
+            if status in {
+                "failed",
+                "failure",
+                "error",
+                "timeout",
+                "cancelled",
+                "killed",
+            }:
+                return False
+
+        if skipped:
+            return True
+        convergence = cls.solver_convergence_summary(manifest)
+        return not bool(convergence and convergence.get("failed"))
+
+    def _run_manifest_outputs_include_trace(
+        self,
+        manifest_path: Path,
+        trace_file: Path,
+    ) -> bool:
+        if self._is_modern_frequency_trace_shard(trace_file):
+            return True
+        outputs_path = manifest_path.parent / "outputs.json"
+        if not outputs_path.exists():
+            return True
+        try:
+            outputs = json.loads(outputs_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return True
+        files = self._as_records(
+            outputs.get("files") if isinstance(outputs, Mapping) else None
+        )
+        if not files:
+            return True
+        trace_key = str(Path(trace_file).resolve(strict=False))
+        for record in files:
+            raw_path = record.get("path") or record.get("relative_path")
+            if not raw_path:
+                continue
+            path = Path(str(raw_path))
+            if not path.is_absolute():
+                path = self._result_path / path
+            if str(path.resolve(strict=False)) == trace_key:
+                return True
+        return False
+
+    @staticmethod
+    def _is_modern_frequency_trace_shard(path: Path) -> bool:
+        path = Path(path)
+        return path.parent.name == "shards" and path.name.startswith("f_")
 
     def _task_record_by_task(
         self, records: Iterable[Mapping[str, Any]]
@@ -853,6 +1617,8 @@ class JobRunStateMixin:
             "current",
             "reused",
             "skipped",
+            "accepted",
+            "accepted_failed",
         }:
             return "succeeded"
         if status in {"failed", "failure", "error", "timeout", "cancelled", "killed"}:
@@ -877,6 +1643,8 @@ class JobRunStateMixin:
             "skipped",
             "current",
             "reused",
+            "accepted",
+            "accepted_failed",
         }:
             return None
         solver = record.get("solver")
@@ -899,6 +1667,22 @@ class JobRunStateMixin:
     def _record_solver_failed(cls, record: Mapping[str, Any]) -> bool:
         summary = cls._record_solver_convergence(record)
         return bool(summary and summary.get("failed"))
+
+    @classmethod
+    def _record_solver_not_run(cls, record: Mapping[str, Any]) -> bool:
+        summary = cls._record_solver_convergence(record)
+        if not isinstance(summary, Mapping):
+            return False
+        try:
+            solve_count = int(summary.get("solve_count", 0))
+        except (TypeError, ValueError):
+            solve_count = 0
+        has_solves = bool(cls._as_records(summary.get("solves")))
+        return (
+            str(summary.get("status", "")).strip().lower() == "not_run"
+            and solve_count == 0
+            and not has_solves
+        )
 
     @staticmethod
     def _failure_text(value: Any) -> Optional[str]:
@@ -1204,6 +1988,41 @@ class JobRunStateMixin:
     def _reuse_task_outputs_from_state(
         self, state: Mapping[str, Any]
     ) -> List[Dict[str, Any]]:
+        reusable = self._reusable_task_outputs_from_state(state)
+        if not reusable:
+            return []
+
+        stage_dir = self._result_path / "_fs_run" / "reuse"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        staged = []
+        try:
+            for record in reusable:
+                task = int(record["task"])
+                source = Path(record["source_path"])
+                target = Path(record.get("target_path", record["path"]))
+                stage = stage_dir / f"task_{task}{source.suffix}"
+                shutil.copy2(source, stage)
+                staged.append((task, stage, target, record))
+
+            reused = []
+            for task, stage, target, record in staged:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(stage, target)
+                reused_record = {
+                    key: value for key, value in record.items() if key != "source_path"
+                }
+                reused.append(reused_record)
+            return reused
+        finally:
+            for _task, stage, _target, _record in staged:
+                try:
+                    stage.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _reusable_task_outputs_from_state(
+        self, state: Mapping[str, Any]
+    ) -> List[Dict[str, Any]]:
         records = self._state_task_records(state)
         source_by_fingerprint: Dict[str, Path] = {}
         for record in records:
@@ -1233,44 +2052,46 @@ class JobRunStateMixin:
         if not copies:
             return []
 
-        stage_dir = self._result_path / "_fs_run" / "reuse"
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        staged = []
-        try:
-            for task, source, _target in copies:
-                stage = stage_dir / f"task_{task}{source.suffix}"
-                shutil.copy2(source, stage)
-                staged.append((task, stage, _target))
+        return [
+            {
+                "task": task,
+                "status": "reused",
+                "duration_seconds": 0.0,
+                "fingerprint": self.task_fingerprint(task),
+                "path": self._stored_trace_path(target),
+                "source_path": str(source),
+                "target_path": str(target),
+            }
+            for task, source, target in copies
+        ]
 
-            reused = []
-            for task, stage, target in staged:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(stage, target)
-                reused.append(
-                    {
-                        "task": task,
-                        "status": "reused",
-                        "duration_seconds": 0.0,
-                        "fingerprint": self.task_fingerprint(task),
-                        "path": self._stored_trace_path(target),
-                    }
-                )
-            return reused
-        finally:
-            for _task, stage, _target in staged:
-                try:
-                    stage.unlink()
-                except FileNotFoundError:
-                    pass
+    def reusable_task_outputs(self) -> List[Dict[str, Any]]:
+        """Return read-only records for prior outputs reusable by this job.
 
-    def _remove_trace_outputs_for_tasks(self, tasks: Iterable[int]) -> bool:
+        Unlike :meth:`task_run_plan`, this method does not copy files, write run
+        state, or remove stale outputs. It is intended for submission previews.
+        """
+
+        state = self.run_state()
+        return self._reusable_task_outputs_from_state(state) if state else []
+
+    def _remove_trace_outputs_for_tasks(
+        self,
+        tasks: Iterable[int],
+        *,
+        remove_matching_shards: bool = False,
+    ) -> bool:
         removed = False
         files = self.expected_trace_files()
         for task in tasks:
             if task < 1 or task > len(files):
                 continue
-            shard = self._matching_frequency_trace_file(task)
             paths = {files[task - 1], self._legacy_trace_file(files[task - 1])}
+            shard = (
+                self._matching_frequency_trace_file(task)
+                if remove_matching_shards
+                else None
+            )
             if shard is not None:
                 paths.add(shard)
             for path in paths:

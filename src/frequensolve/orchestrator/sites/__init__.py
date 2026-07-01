@@ -11,12 +11,13 @@ from frequensolve.orchestrator.sites.base import (
     JobStatus,
     RunHandle,
     RunResult,
+    SubmitPlan,
 )
 
 LocalSite = optional_class(
     "LocalSite",
     "frequensolve.orchestrator.sites.local.LocalSite",
-    extra="parallel",
+    extra="hpc",
     dependencies=("dask", "distributed", "python-dotenv"),
     module=__name__,
 )
@@ -108,5 +109,6 @@ __all__ = [
     "SlurmSite",
     "SlurmSiteConfig",
     "Stampede3Site",
+    "SubmitPlan",
     "TACCLoginCredentials",
 ]

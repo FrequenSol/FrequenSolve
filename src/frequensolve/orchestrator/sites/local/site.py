@@ -24,7 +24,7 @@ try:
 except ModuleNotFoundError as exc:
     raise optional_dependency_error(
         "LocalSite",
-        extra="parallel",
+        extra="hpc",
         dependencies=("dask", "distributed", "python-dotenv"),
         error=exc,
     ) from exc
@@ -36,6 +36,7 @@ from frequensolve.orchestrator.sites.base import (
     JobStatus,
     RunHandle,
     RunResult,
+    _merge_task_status_with_plan,
     _wait_for_path,
 )
 from frequensolve.orchestrator.sites.local.config import LocalSiteConfig
@@ -43,7 +44,7 @@ from frequensolve.orchestrator.sites.local.dask_logging import (
     configure_dependency_logging,
 )
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.jobs import BaseJob
+from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
 
 logger = logging.getLogger(__name__)
@@ -236,6 +237,36 @@ def _summary_task_status(summary: Mapping[str, int]) -> Dict[str, int]:
     }
 
 
+def _normalize_failure_tolerance(value: Any, *, default: Optional[int] = 4):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return default if value else 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"", "default"}:
+            return default
+        if text in {"none", "unlimited", "inf", "infinite"}:
+            return None
+        if text in {"false", "off", "no"}:
+            return 0
+        if text in {"true", "on", "yes"}:
+            return default
+    count = int(value)
+    if count < 0:
+        return None
+    return count
+
+
+def _failure_tolerance_exceeded(
+    summary: Mapping[str, int],
+    tolerate_failures: Optional[int],
+) -> bool:
+    return tolerate_failures is not None and int(summary.get("failed", 0)) > int(
+        tolerate_failures
+    )
+
+
 def run_task(
     job_file: str,
     task_id: int,
@@ -279,7 +310,7 @@ def run_task(
         executable,
         "-nthreads",
         f"{threads_per_rank}",
-        "-j",
+        "--job",
         f"{job_file}",
     ]
     if fresh:
@@ -289,9 +320,9 @@ def run_task(
     elif task_id == SMOOTH_TASK_ID:
         args += ["--smooth"]
     elif task_id == MESH_TASK_ID:
-        args += ["--mesh"]
+        args += ["--init"]
     else:
-        args += ["-i", f"{task_id + 1}"]
+        args += ["--task", f"{task_id + 1}"]
     command = shlex.join(args)
     logger.info("Executing: %s", command)
 
@@ -453,8 +484,32 @@ class LocalSite(BaseSite):
             or kwargs.pop("force", False)
             or kwargs.pop("rerun", False)
         )
+        skip_policy_value = kwargs.pop("skip", kwargs.pop("skip_policy", None))
+        residual = kwargs.pop("residual", None)
+        ignore_solver_options = kwargs.pop("ignore_solver_options", None)
+        reuse = bool(kwargs.pop("reuse", True))
+        skip_policy = SkipPolicy.from_value(
+            skip_policy_value,
+            residual=residual,
+            ignore_solver_options=ignore_solver_options,
+            reuse=reuse and not force_run,
+        )
+        plan_skip_policy = (
+            skip_policy
+            if (
+                skip_policy_value is not None
+                or residual is not None
+                or ignore_solver_options is not None
+            )
+            else None
+        )
+        force_run = bool(force_run or skip_policy.force)
         validate = kwargs.pop("validate", True)
         pack = bool(kwargs.pop("pack", True))
+        tolerate_failures = _normalize_failure_tolerance(
+            kwargs.pop("tolerate_failures", 4),
+            default=4,
+        )
         shutdown_on_completion = bool(
             kwargs.pop("shutdown_on_completion", self.shutdown_on_completion)
         )
@@ -468,7 +523,13 @@ class LocalSite(BaseSite):
             return RunHandle.skipped(self, job)
 
         try:
-            submission = self._submit_local_tasks(job, force_run=force_run, **kwargs)
+            submission = self._submit_local_tasks(
+                job,
+                force_run=force_run,
+                skip_policy=plan_skip_policy,
+                reuse=reuse,
+                **kwargs,
+            )
         except Exception:
             if shutdown_on_completion:
                 self.close(wait=False, retire=False)
@@ -480,8 +541,11 @@ class LocalSite(BaseSite):
             futures = submission
             task_plan = {}
         if not futures and task_plan:
-            reused = task_plan.get("reused_tasks", [])
-            job.write_run_state(status="skipped", tasks=reused)
+            skipped = task_plan.get(
+                "skipped_task_records",
+                task_plan.get("reused_tasks", []),
+            )
+            job.write_run_state(status="skipped", tasks=skipped)
             return RunHandle.skipped(self, job, "No frequency tasks need to run")
         handle = RunHandle(
             site=self,
@@ -499,6 +563,7 @@ class LocalSite(BaseSite):
         handle.backend["task_plan"] = task_plan
         handle.backend["pack_after_tasks"] = pack
         handle.backend["fresh"] = force_run
+        handle.backend["tolerate_failures"] = tolerate_failures
         handle.backend["shutdown_on_completion"] = shutdown_on_completion
         return handle
 
@@ -508,7 +573,11 @@ class LocalSite(BaseSite):
             return JobStatus(state="skipped", return_code=0, job_id=run.id)
         statuses = [getattr(future, "status", "unknown") for future in futures]
         states = [_local_task_state(status) for status in statuses]
-        task_status = _local_task_status(statuses)
+        task_status = _merge_task_status_with_plan(
+            _local_task_status(statuses),
+            run.backend.get("task_plan"),
+            job=run.job,
+        )
         terminal = {"successful", "failed"}
         if all(state in terminal for state in states) and any(
             state == "failed" for state in states
@@ -555,9 +624,12 @@ class LocalSite(BaseSite):
     ) -> RunResult:
         futures = run.backend.get("futures", [])
         if not futures:
-            reused = run.backend.get("task_plan", {}).get("reused_tasks", [])
-            if reused:
-                run.job.write_run_state(status="skipped", tasks=reused)
+            skipped = run.backend.get("task_plan", {}).get(
+                "skipped_task_records",
+                run.backend.get("task_plan", {}).get("reused_tasks", []),
+            )
+            if skipped:
+                run.job.write_run_state(status="skipped", tasks=skipped)
             status = JobStatus(state="skipped", return_code=0, job_id=run.id)
             self._emit_status(status)
             return run._make_result(status)
@@ -582,8 +654,11 @@ class LocalSite(BaseSite):
                 return run._make_result(status)
 
             task_results = [future.result() for future in futures]
-            reused_tasks = run.backend.get("task_plan", {}).get("reused_tasks", [])
-            state_tasks = [*task_results, *reused_tasks]
+            skipped_tasks = run.backend.get("task_plan", {}).get(
+                "skipped_task_records",
+                run.backend.get("task_plan", {}).get("reused_tasks", []),
+            )
+            state_tasks = [*task_results, *skipped_tasks]
             if hasattr(run.job, "invalidate_trace_cache"):
                 run.job.invalidate_trace_cache()
             task_errors = [
@@ -694,6 +769,36 @@ class LocalSite(BaseSite):
                 **({"pack": pack_result} if pack_result is not None else {}),
             )
             task_summary = _job_task_summary(run.job, state_tasks)
+            tolerate_failures = run.backend.get("tolerate_failures", 4)
+            if _failure_tolerance_exceeded(task_summary, tolerate_failures):
+                run.job.write_run_state(
+                    status="failed",
+                    tasks=state_tasks,
+                    **({"errors": task_errors} if task_errors else {}),
+                    **({"pack": pack_result} if pack_result is not None else {}),
+                    failure_tolerance=tolerate_failures,
+                )
+                task_summary = _job_task_summary(run.job, state_tasks)
+                failed = int(task_summary.get("failed", 0))
+                status = JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message=(
+                        f"{_task_summary_message(task_summary)}; failure tolerance "
+                        f"exceeded ({failed} failed, tolerate_failures="
+                        f"{tolerate_failures})"
+                    ),
+                    raw={
+                        "tasks": task_results,
+                        "task_summary": task_summary,
+                        "task_status": _summary_task_status(task_summary),
+                        "tolerate_failures": tolerate_failures,
+                        **({"errors": task_errors} if task_errors else {}),
+                        **({"pack": pack_result} if pack_result is not None else {}),
+                    },
+                )
+                return run._make_result(status)
             status = JobStatus(
                 state="completed",
                 return_code=0,
@@ -748,7 +853,15 @@ class LocalSite(BaseSite):
             self.close(wait=False, retire=False)
 
     def _submit_local_tasks(
-        self, job: BaseJob, force_run: bool = False, **kwargs
+        self,
+        job: BaseJob,
+        force_run: bool = False,
+        *,
+        skip_policy: Optional[Any] = None,
+        reuse: bool = True,
+        residual: Optional[float] = None,
+        ignore_solver_options: Optional[bool] = None,
+        **kwargs,
     ) -> LocalTaskSubmission:
         """Submit job tasks to the local Dask executor.
 
@@ -763,12 +876,23 @@ class LocalSite(BaseSite):
             raise RuntimeError("Solver executable not found, cannot submit job")
 
         job_file = job.save()
-        task_plan = job.task_run_plan(reuse=not force_run, force=force_run)
+        plan_kwargs = {}
+        if skip_policy is not None:
+            plan_kwargs["skip_policy"] = skip_policy
+        if residual is not None:
+            plan_kwargs["residual"] = residual
+        if ignore_solver_options is not None:
+            plan_kwargs["ignore_solver_options"] = ignore_solver_options
+        task_plan = job.task_run_plan(
+            reuse=bool(reuse) and not force_run,
+            force=force_run,
+            **plan_kwargs,
+        )
         pending_indices = list(task_plan["pending_indices"])
         if not pending_indices:
             return LocalTaskSubmission(futures=[], task_plan=task_plan)
 
-        self._ensure_dask_for_tasks(len(pending_indices))
+        self._ensure_dask_for_tasks(1)
 
         n_ranks = kwargs.get("procs_per_job", 1)
 
@@ -788,6 +912,7 @@ class LocalSite(BaseSite):
         futures = []
 
         # Mesh and size first
+        init_threads = self._current_threads_per_worker()
         future = self._dask_client.submit(
             run_task,
             job_file,
@@ -795,10 +920,10 @@ class LocalSite(BaseSite):
             self.executable,
             self.env,
             n_ranks=1,
-            n_threads=1,
+            n_threads=init_threads,
             stdout_dir=stdout_dir,
             fresh=force_run,
-            resources={"CPU": 1},
+            resources={"CPU": init_threads},
         )
         try:
             mesh_result = future.result()
@@ -818,6 +943,8 @@ class LocalSite(BaseSite):
                 raise RuntimeError(message)
         finally:
             self._release_futures([future])
+
+        self._ensure_dask_for_tasks(len(pending_indices))
 
         # Loop tasks in reverse order for improved load balancing.
         for i in sorted(pending_indices, reverse=True):
@@ -1179,7 +1306,10 @@ class LocalSite(BaseSite):
         self._initialize_dask(n_workers)
 
     def _worker_count_for_task_count(self, task_count: int) -> int:
-        n_workers = self.n_workers if self.n_workers is not None else self.config.cores
+        if self.n_workers is not None:
+            return max(1, int(self.n_workers))
+
+        n_workers = self.config.cores
         n_workers = max(1, int(n_workers))
         if task_count < n_workers:
             while n_workers > task_count and n_workers > 1:

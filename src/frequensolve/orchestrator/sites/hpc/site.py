@@ -43,6 +43,7 @@ from frequensolve.orchestrator.sites.base import (
     RunHandle,
     RunResult,
     _check_if_notebook,
+    _merge_task_status_with_plan,
 )
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
@@ -70,7 +71,7 @@ from frequensolve.orchestrator.utils.credentials import Credentials
 from frequensolve.orchestrator.utils.pool import PoolInfo
 from frequensolve.orchestrator.utils.ssh import SSHClientClass
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.jobs import BaseJob
+from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
 from frequensolve.util.setup_logger import init_logger
 
@@ -138,7 +139,53 @@ class SlurmLoginCredentials(Credentials):
     ssh_key_env: str = "SSH_PASSPHRASE"
 
 
-@dataclass
+_RANK_ALIASES = {
+    "procs_per_node": "ranks_per_node",
+    "procs_per_task": "ranks_per_task",
+}
+
+
+def _normalize_rank_aliases(values: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return keyword values with legacy process names normalized to ranks."""
+
+    normalized = dict(values)
+    for old, new in _RANK_ALIASES.items():
+        if old not in normalized:
+            continue
+        old_value = normalized.pop(old)
+        if old_value is None:
+            continue
+        new_value = normalized.get(new)
+        if new_value is not None and new_value != old_value:
+            raise ValueError(f"Pass either {new!r} or {old!r}, not both")
+        normalized[new] = old_value
+    return normalized
+
+
+def _normalize_failure_tolerance(value: Any, *, default: Optional[int] = 4):
+    """Normalize failure-tolerance inputs accepted by submit/run helpers."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return default if value else 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"", "default"}:
+            return default
+        if text in {"none", "unlimited", "inf", "infinite"}:
+            return None
+        if text in {"false", "off", "no"}:
+            return 0
+        if text in {"true", "on", "yes"}:
+            return default
+    count = int(value)
+    if count < 0:
+        return None
+    return count
+
+
+@dataclass(init=False)
 class SlurmRunConfig:
     """Default resource request for SLURM job submissions.
 
@@ -146,8 +193,10 @@ class SlurmRunConfig:
         queue: Queue/partition name.
         nodes: Requested node count.
         duration: Requested wall time.
-        procs_per_node: MPI ranks per node.
-        procs_per_task: MPI ranks used by each FrequenSolve task.
+        ranks_per_node: MPI ranks per node.
+        ranks_per_task: MPI ranks used by each FrequenSolve task.
+        tolerate_failures: Number of failed tasks tolerated before the adaptive
+            scheduler aborts. ``None`` disables early aborts.
         account: Allocation account.
         notify_on: Optional SLURM mail notification trigger.
         notify_email: Optional notification email address.
@@ -159,14 +208,79 @@ class SlurmRunConfig:
     queue: Optional[str] = None
     nodes: int = 1
     duration: Optional[str] = None
-    procs_per_node: Optional[int] = None
-    procs_per_task: Optional[int] = None
+    ranks_per_node: Optional[int] = None
+    ranks_per_task: Optional[int] = None
+    tolerate_failures: Optional[int] = 4
     account: Optional[str] = None
     notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None
     notify_email: Optional[str] = None
     poll_interval: Optional[int] = None
     run_path: Optional[Union[str, Path]] = None
     slurm_args: List[str] = field(default_factory=list)
+
+    def __init__(
+        self,
+        queue: Optional[str] = None,
+        nodes: int = 1,
+        duration: Optional[str] = None,
+        ranks_per_node: Optional[int] = None,
+        ranks_per_task: Optional[int] = None,
+        tolerate_failures: Optional[int] = 4,
+        account: Optional[str] = None,
+        notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
+        notify_email: Optional[str] = None,
+        poll_interval: Optional[int] = None,
+        run_path: Optional[Union[str, Path]] = None,
+        slurm_args: Optional[List[str]] = None,
+        **aliases,
+    ):
+        values = _normalize_rank_aliases(
+            {
+                "ranks_per_node": ranks_per_node,
+                "ranks_per_task": ranks_per_task,
+                **aliases,
+            }
+        )
+        unexpected = sorted(set(values) - {"ranks_per_node", "ranks_per_task"})
+        if unexpected:
+            names = ", ".join(unexpected)
+            raise TypeError(f"Unexpected SlurmRunConfig option(s): {names}")
+
+        self.queue = queue
+        self.nodes = nodes
+        self.duration = duration
+        self.ranks_per_node = values.get("ranks_per_node")
+        self.ranks_per_task = values.get("ranks_per_task")
+        self.tolerate_failures = _normalize_failure_tolerance(
+            tolerate_failures,
+            default=4,
+        )
+        self.account = account
+        self.notify_on = notify_on
+        self.notify_email = notify_email
+        self.poll_interval = poll_interval
+        self.run_path = run_path
+        self.slurm_args = list(slurm_args or [])
+
+    @property
+    def procs_per_node(self) -> Optional[int]:
+        """Compatibility alias for ``ranks_per_node``."""
+
+        return self.ranks_per_node
+
+    @procs_per_node.setter
+    def procs_per_node(self, value: Optional[int]) -> None:
+        self.ranks_per_node = value
+
+    @property
+    def procs_per_task(self) -> Optional[int]:
+        """Compatibility alias for ``ranks_per_task``."""
+
+        return self.ranks_per_task
+
+    @procs_per_task.setter
+    def procs_per_task(self, value: Optional[int]) -> None:
+        self.ranks_per_task = value
 
     @classmethod
     def field_names(cls) -> set[str]:
@@ -184,12 +298,14 @@ class SlurmRunConfig:
             New ``SlurmRunConfig`` instance.
         """
 
+        overrides = _normalize_rank_aliases(overrides)
         values = {
             "queue": self.queue,
             "nodes": self.nodes,
             "duration": self.duration,
-            "procs_per_node": self.procs_per_node,
-            "procs_per_task": self.procs_per_task,
+            "ranks_per_node": self.ranks_per_node,
+            "ranks_per_task": self.ranks_per_task,
+            "tolerate_failures": self.tolerate_failures,
             "account": self.account,
             "notify_on": self.notify_on,
             "notify_email": self.notify_email,
@@ -218,6 +334,7 @@ class SlurmRunConfig:
             as run-config fields.
         """
 
+        overrides = _normalize_rank_aliases(overrides)
         run_keys = self.field_names()
         config = self.merged(**{k: v for k, v in overrides.items() if k in run_keys})
         if config.queue is None:
@@ -438,6 +555,26 @@ class SlurmSite(BaseSite):
         """
 
         force_run = bool(force_run or force or overrides.pop("rerun", False))
+        skip_policy_value = overrides.pop("skip", overrides.pop("skip_policy", None))
+        residual = overrides.pop("residual", None)
+        ignore_solver_options = overrides.pop("ignore_solver_options", None)
+        reuse = bool(overrides.pop("reuse", True))
+        skip_policy = SkipPolicy.from_value(
+            skip_policy_value,
+            residual=residual,
+            ignore_solver_options=ignore_solver_options,
+            reuse=reuse and not force_run,
+        )
+        plan_skip_policy = (
+            skip_policy
+            if (
+                skip_policy_value is not None
+                or residual is not None
+                or ignore_solver_options is not None
+            )
+            else None
+        )
+        force_run = bool(force_run or skip_policy.force)
         validate = overrides.pop("validate", True)
         self.prepare_job(job, validate=validate)
         if mode not in {"auto", "attached", "batch"}:
@@ -475,7 +612,7 @@ class SlurmSite(BaseSite):
             pack = bool(extra_kwargs.pop("pack", True))
             future = self._submit_attached(
                 job,
-                procs_per_task=run_config.procs_per_task or 2,
+                ranks_per_task=run_config.ranks_per_task or 2,
                 fresh=force_run,
                 **({"pack": pack} if not pack else {}),
             )
@@ -497,12 +634,52 @@ class SlurmSite(BaseSite):
             handle.backend["future"] = future
             return handle
 
+        task_plan = None
+        if hasattr(job, "task_run_plan"):
+            task_plan = job.task_run_plan(
+                reuse=reuse and not force_run,
+                force=force_run,
+                skip_policy=plan_skip_policy,
+            )
+            pending_indices = list(task_plan["pending_indices"])
+        else:
+            pending_indices = list(range(int(getattr(job, "n_tasks", 0))))
+        if task_plan is not None and not pending_indices:
+            job.write_run_state(
+                status="skipped",
+                tasks=task_plan.get(
+                    "skipped_task_records",
+                    task_plan.get("reused_tasks", []),
+                ),
+            )
+            self._emit(f"Skipping {job.name}; no frequency tasks need to run")
+            handle = RunHandle.skipped(
+                self,
+                job,
+                "No frequency tasks need to run",
+            )
+            if fetch:
+                self.fetch_outputs(job)
+            return handle
+
         job_id = self._submit_slurm_batch(
-            job, run_config, fresh=force_run, **extra_kwargs
+            job,
+            run_config,
+            fresh=force_run,
+            **({"task_plan": task_plan} if task_plan is not None else {}),
+            **(
+                {"skip_policy": plan_skip_policy}
+                if plan_skip_policy is not None
+                else {}
+            ),
+            reuse=reuse,
+            **extra_kwargs,
         )
         handle = self.handle(job, job_id=job_id, mode="batch")
         handle.poll_interval = run_config.poll_interval or self.config.poll_interval
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
+        if task_plan is not None:
+            handle.backend["task_plan"] = task_plan
         return handle
 
     def handle(
@@ -751,6 +928,16 @@ class SlurmSite(BaseSite):
                     exc,
                 )
 
+        if getattr(job.outputs, "paraview", None):
+            try:
+                self.fetch_paraview(job)
+            except Exception as exc:
+                logger.debug(
+                    "Could not fetch ParaView outputs for job %s: %s",
+                    job.name,
+                    exc,
+                )
+
         return local_results
 
     def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
@@ -772,14 +959,23 @@ class SlurmSite(BaseSite):
             job: A BaseJob object.
         """
 
-        try:
-            remote_dir = self._remote_result_dir(job) / "ParaView/"
-            local_dir = job._local_path / "results" / "ParaView/"
-            self._emit(f"Fetching ParaView outputs from {remote_dir} to {local_dir}")
+        self.fetch_run_metadata(job)
+        job.outputs.ensure_unique_names()
+        seen = set()
+        for output in job.outputs.paraview:
+            path = Path(output.path)
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            remote_dir = self._remote_result_dir(job) / path
+            local_dir = job._local_path / "results" / path
+            local_dir.mkdir(parents=True, exist_ok=True)
+            self._emit(
+                f"Fetching ParaView outputs\n\tFrom: {remote_dir}\n\tTo: {local_dir}"
+            )
             self.get(remote_dir, local_dir)
-
-        except Exception as e:
-            logger.exception("Error downloading ParaView outputs: %s", str(e))
+        return job.paraview_outputs
 
     def fetch_image(
         self,
@@ -1206,7 +1402,9 @@ class SlurmSite(BaseSite):
 
     def _poll_run(self, run: RunHandle) -> JobStatus:
         status = self.update_status(str(run.id))
-        scheduler_status = self._read_scheduler_status(run)
+        scheduler_status = (
+            None if status == "pending" else self._read_scheduler_status(run)
+        )
         return_code = (
             0
             if status == "complete"
@@ -1215,6 +1413,11 @@ class SlurmSite(BaseSite):
         message = ""
         raw: Dict[str, Any] = {"scheduler": "slurm"}
         if scheduler_status is not None:
+            scheduler_status = _merge_task_status_with_plan(
+                scheduler_status,
+                run.backend.get("task_plan"),
+                job=run.job,
+            )
             raw["task_status"] = scheduler_status
             message = self._format_scheduler_status(scheduler_status)
         job_status = JobStatus(
@@ -1387,26 +1590,50 @@ class SlurmSite(BaseSite):
         self,
         job: BaseJob,
         config: SlurmRunConfig,
+        *,
+        task_plan: Optional[Mapping[str, Any]] = None,
         **kwargs,
     ) -> str:
         duration = config.duration or getattr(
             self.config, "max_duration", "00-02:00:00"
         )
+        skip_policy = kwargs.pop("skip_policy", kwargs.pop("skip", None))
+        residual = kwargs.pop("residual", None)
+        ignore_solver_options = kwargs.pop("ignore_solver_options", None)
+        reuse = bool(kwargs.pop("reuse", True))
+        if task_plan is None:
+            fresh = bool(kwargs.get("fresh", False))
+            task_plan = job.task_run_plan(
+                reuse=reuse and not fresh,
+                force=fresh,
+                skip_policy=skip_policy,
+                residual=residual,
+                ignore_solver_options=ignore_solver_options,
+            )
+        task_indices = [int(index) + 1 for index in task_plan["pending_indices"]]
+        kwargs.setdefault("skip_sizing", len(task_indices) == 1)
         run_path = self._remote_run_path(config.run_path, job=job)
         script = self._sweep_SLURM_script(
-            n_tasks=job.n_tasks,
+            n_tasks=len(task_indices),
+            n_job_tasks=job.n_tasks,
+            task_indices=task_indices,
             n_nodes=config.nodes,
             stdout=str(job._remote_path(self.work_dir) / "logs"),
             duration=duration,
             imaging_job=isinstance(job, ImagingJob),
             **(
-                {"procs_per_task": config.procs_per_task}
-                if config.procs_per_task is not None
+                {"ranks_per_task": config.ranks_per_task}
+                if config.ranks_per_task is not None
                 else {}
             ),
             **(
-                {"procs_per_node": config.procs_per_node}
-                if config.procs_per_node is not None
+                {"ranks_per_node": config.ranks_per_node}
+                if config.ranks_per_node is not None
+                else {}
+            ),
+            **(
+                {"tolerate_failures": config.tolerate_failures}
+                if config.tolerate_failures is not None
                 else {}
             ),
             **({"queue": config.queue} if config.queue is not None else {}),
@@ -1423,7 +1650,9 @@ class SlurmSite(BaseSite):
 
         remote_script, remote_job = self._transfer_SLURM_job(script, job)
 
-        cmd = f"mkdir -p {run_path}/jobs/batch && "
+        logs_path = job._remote_path(self.work_dir) / "logs"
+        cmd = f"mkdir -p {run_path}/jobs/batch {logs_path} && "
+        cmd += f"rm -f {logs_path}/scheduler_status.json && "
         cmd += "sbatch "
         if config.slurm_args:
             for arg in config.slurm_args:
@@ -1517,12 +1746,18 @@ class SlurmSite(BaseSite):
     def _submit_attached(
         self,
         job: BaseJob,
-        procs_per_task: int = 2,
+        ranks_per_task: int = 2,
         *,
         pack: bool = True,
         fresh: bool = False,
+        **aliases,
     ) -> Future:
         """Submit a job into an already attached compute allocation."""
+
+        alias_values = _normalize_rank_aliases(
+            {"ranks_per_task": ranks_per_task, **aliases}
+        )
+        ranks_per_task = int(alias_values.get("ranks_per_task") or 2)
 
         loop = self._get_or_create_event_loop()
         future = loop.create_future()
@@ -1530,7 +1765,7 @@ class SlurmSite(BaseSite):
             self._attach_compute_client()
 
         remote_script, remote_job = self._transfer_job(job, pack=pack, fresh=fresh)
-        ntasks_per_item = max(procs_per_task, self.pool.nproc // job.n_tasks)
+        ntasks_per_item = max(ranks_per_task, self.pool.nproc // job.n_tasks)
 
         if self._compute_client.is_proxy():
             interactive = self.compute_client.invoke_shell()
@@ -1828,10 +2063,12 @@ class SlurmSite(BaseSite):
         stdout: str,
         name: str = "FrequenSolve",
         duration: str = "00-02:00:00",
-        procs_per_node: int = 8,
+        ranks_per_node: Optional[int] = None,
         notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
         notify_email: Optional[str] = None,
         imaging_job: bool = False,
+        n_job_tasks: Optional[int] = None,
+        task_indices: Optional[List[int]] = None,
         **kwargs,
     ) -> str:
         """Generate a SLURM sweep script.
@@ -1840,8 +2077,8 @@ class SlurmSite(BaseSite):
             n_tasks:        Number of tasks (frequencies) to run
             duration:       Duration of the job (DD-HH:MM:SS)
             n_nodes:        Number of nodes to run on
-            procs_per_node: Number of processes per node
-            procs_per_task: Number of processes per task
+            ranks_per_node: Number of MPI ranks per node
+            ranks_per_task: Number of MPI ranks per task
             queue:          Queue/partition to run on (optional, defaults to site queue)
             account:        Account/allocation to run on
             notify_on:      Notify on event (optional)
@@ -1854,16 +2091,37 @@ class SlurmSite(BaseSite):
         config = self.config_for_queue(queue)
         account = str(kwargs.pop("account", self.config.account))
         run_path = str(kwargs.pop("run_path", self.work_dir))
+        rank_values = _normalize_rank_aliases(
+            {
+                "ranks_per_node": ranks_per_node,
+                **{
+                    key: kwargs.pop(key)
+                    for key in tuple(_RANK_ALIASES)
+                    if key in kwargs
+                },
+            }
+        )
+        ranks_per_node = int(rank_values.get("ranks_per_node") or 8)
         mem_cushion = float(kwargs.pop("mem_cushion", 1.5))
         min_ranks = int(kwargs.pop("min_ranks", 1))
         round_to = int(kwargs.pop("round_to", 1))
         cap_fraction = float(kwargs.pop("cap_fraction", 1.0))
         tail_threshold = int(kwargs.pop("tail_threshold", 8))
         boost_max_factor = float(kwargs.pop("boost_max_factor", 8.0))
+        tolerate_failures = _normalize_failure_tolerance(
+            kwargs.pop("tolerate_failures", 4),
+            default=4,
+        )
         sizing_json = kwargs.pop("sizing_json", None)
         pack_job = bool(kwargs.pop("pack", True))
-        proc_memory = (config.memory_per_node / procs_per_node) / 1024.0
-        duration = config.validate_request(n_nodes, n_nodes * procs_per_node, duration)
+        n_job_tasks = int(n_tasks if n_job_tasks is None else n_job_tasks)
+        if task_indices is None:
+            task_indices = list(range(1, n_job_tasks + 1))
+        else:
+            task_indices = [int(index) for index in task_indices]
+        skip_sizing = bool(kwargs.pop("skip_sizing", n_tasks == 1))
+        proc_memory = (config.memory_per_node / ranks_per_node) / 1024.0
+        duration = config.validate_request(n_nodes, n_nodes * ranks_per_node, duration)
 
         return self._render_template(
             "sweep/adaptive_sweep.sh",
@@ -1877,10 +2135,16 @@ class SlurmSite(BaseSite):
             cap_fraction=cap_fraction,
             tail_threshold=tail_threshold,
             boost_max_factor=boost_max_factor,
+            tolerate_failures=(
+                "none" if tolerate_failures is None else int(tolerate_failures)
+            ),
+            skip_sizing=1 if skip_sizing else 0,
             n_nodes=n_nodes,
-            n_procs=n_nodes * procs_per_node,
-            n_threads=config.cores_per_node // procs_per_node,
+            n_procs=n_nodes * ranks_per_node,
+            n_threads=config.cores_per_node // ranks_per_node,
             n_tasks=n_tasks,
+            n_job_tasks=n_job_tasks,
+            task_indices_json=json.dumps(task_indices),
             duration=duration,
             queue=queue,
             account=account,
@@ -1899,7 +2163,7 @@ class SlurmSite(BaseSite):
     def _generate_provision_script(
         self,
         n_nodes: int,
-        procs_per_node: int,
+        ranks_per_node: int,
         duration: str = "00-02:00:00",
         queue: Optional[str] = None,
         account: Optional[str] = None,
@@ -1910,12 +2174,20 @@ class SlurmSite(BaseSite):
 
         Args:
             n_nodes:        Number of nodes to provision
-            procs_per_node: Number of processes per node
+            ranks_per_node: Number of MPI ranks per node
             duration:       Duration of the job (DD-HH:MM:SS)
             queue:          Queue/partition to run on (optional, defaults to site queue)
             account:        Account/allocation to run on
             notify_email:   Email address to notify (optional)
         """
+        if "procs_per_node" in kwargs:
+            values = _normalize_rank_aliases(
+                {
+                    "ranks_per_node": ranks_per_node,
+                    "procs_per_node": kwargs.pop("procs_per_node"),
+                }
+            )
+            ranks_per_node = int(values["ranks_per_node"])
         name = kwargs.get("name", "FS_cluster")
 
         return self._render_template(
@@ -1923,7 +2195,9 @@ class SlurmSite(BaseSite):
             keep_trailing_newline=True,
             name=name,
             n_nodes=n_nodes,
-            procs_per_node=procs_per_node,
+            nhost=n_nodes,
+            nproc=n_nodes * ranks_per_node,
+            ranks_per_node=ranks_per_node,
             queue=queue,
             account=account,
             duration=duration,

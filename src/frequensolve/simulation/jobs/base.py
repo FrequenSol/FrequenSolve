@@ -7,7 +7,7 @@ import numpy as np
 from frequensolve.simulation.jobs.artifacts import JobArtifactMixin
 from frequensolve.simulation.jobs.records import JobRecordMixin
 from frequensolve.simulation.jobs.remote import JobRemoteMixin
-from frequensolve.simulation.jobs.run_state import JobRunStateMixin
+from frequensolve.simulation.jobs.run_state import JobRunStateMixin, SkipPolicy
 from frequensolve.simulation.jobs.serialization import JobSerializationMixin
 from frequensolve.simulation.jobs.timings import JobTimingMixin
 from frequensolve.simulation.outputs import (
@@ -22,6 +22,7 @@ __all__ = [
     "JobLayout",
     "JobRecord",
     "BaseJob",
+    "SkipPolicy",
 ]
 
 

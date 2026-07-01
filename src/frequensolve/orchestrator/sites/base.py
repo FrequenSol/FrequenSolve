@@ -1,10 +1,11 @@
 import asyncio
+import html
 import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Union
 
 TERMINAL_STATES = {
     "completed",
@@ -41,8 +42,92 @@ __all__ = [
     "JobStatus",
     "RunHandle",
     "RunResult",
+    "SubmitPlan",
     "_check_if_notebook",
 ]
+
+
+def _merge_task_status_with_plan(
+    payload: Mapping[str, Any],
+    task_plan: Optional[Mapping[str, Any]],
+    *,
+    job: Any = None,
+) -> Dict[str, Any]:
+    """Fold already-current task-plan rows into submitted-task status counts."""
+
+    out = dict(payload)
+    if not isinstance(task_plan, Mapping) or out.get("includes_current_tasks"):
+        return out
+
+    current_tasks = _task_plan_current_tasks(task_plan)
+    if not current_tasks:
+        return out
+
+    submitted_total = _int_count(out.get("total"))
+    job_total = _int_count(getattr(job, "n_tasks", None))
+    if job_total and submitted_total >= job_total:
+        return out
+
+    succeeded = _int_count(out.get("successful", out.get("succeeded")))
+    failed = _int_count(out.get("failed"))
+    running = _int_count(out.get("running"))
+    pending = _int_count(out.get("pending"))
+    current_count = len(current_tasks)
+    total = job_total or submitted_total + current_count
+    missing = max(0, total - (submitted_total + current_count))
+
+    out["successful"] = succeeded + current_count
+    out["succeeded"] = out["successful"]
+    out["failed"] = failed
+    out["running"] = running
+    out["pending"] = pending + missing
+    out["total"] = total
+    out["current"] = current_count
+    out["submitted_total"] = submitted_total
+    out["includes_current_tasks"] = True
+    return out
+
+
+def _task_plan_current_tasks(task_plan: Mapping[str, Any]) -> set[int]:
+    current = set()
+    for value in task_plan.get("current_tasks", []) or []:
+        try:
+            current.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    for record in task_plan.get("reused_tasks", []) or []:
+        if not isinstance(record, Mapping):
+            continue
+        task = record.get("task")
+        if task is None and "task_id" in record:
+            try:
+                task = int(record["task_id"]) + 1
+            except (TypeError, ValueError):
+                task = None
+        try:
+            current.add(int(task))
+        except (TypeError, ValueError):
+            continue
+    return current
+
+
+def _int_count(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _task_numbers(values: Iterable[Any], total: int) -> tuple[int, ...]:
+    tasks = []
+    for value in values:
+        try:
+            task = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= task <= total:
+            tasks.append(task)
+    return tuple(sorted(set(tasks)))
 
 
 def _wait_for_path(
@@ -133,6 +218,246 @@ class JobStatus:
         """Return whether the terminal state and return code indicate success."""
 
         return self.state in SUCCESS_STATES and self.return_code in {0, -1}
+
+
+@dataclass(frozen=True)
+class SubmitPlan:
+    """Read-only preview of the frequency tasks a submit call would run.
+
+    Args:
+        job: Job being inspected.
+        site: Site used to build the preview.
+        total_tasks: Total number of frequency tasks in the job.
+        pending_tasks: One-based tasks that would be submitted.
+        current_tasks: One-based tasks already current locally.
+        reused_tasks: One-based tasks whose prior outputs can be reused.
+        accepted_tasks: One-based tasks accepted by compatibility policy.
+        accepted_failed_tasks: One-based failed tasks accepted by policy.
+        failed_existing_tasks: One-based tasks with traces that exist but are
+            marked failed and would rerun.
+        skip_policy: Policy used to classify existing outputs.
+        force: Whether reusable/current outputs are being ignored.
+    """
+
+    job: Any
+    site: Optional["BaseSite"]
+    total_tasks: int
+    pending_tasks: tuple[int, ...]
+    current_tasks: tuple[int, ...]
+    reused_tasks: tuple[int, ...] = ()
+    accepted_tasks: tuple[int, ...] = ()
+    accepted_failed_tasks: tuple[int, ...] = ()
+    failed_existing_tasks: tuple[int, ...] = ()
+    skip_policy: Any = None
+    force: bool = False
+
+    @property
+    def n_tasks_to_run(self) -> int:
+        """Return the number of tasks that would run."""
+
+        return len(self.pending_tasks)
+
+    @property
+    def n_current_tasks(self) -> int:
+        """Return the number of tasks already current."""
+
+        return len(self.current_tasks)
+
+    @property
+    def n_tasks_to_skip(self) -> int:
+        """Return the number of tasks that would be skipped as current."""
+
+        return len(self.skipped_tasks)
+
+    @property
+    def n_reused_tasks(self) -> int:
+        """Return the number of tasks reusable from earlier outputs."""
+
+        return len(self.reused_tasks)
+
+    @property
+    def n_accepted_tasks(self) -> int:
+        """Return the number of tasks skipped by compatibility policy."""
+
+        return len(self.accepted_tasks)
+
+    @property
+    def n_accepted_failed_tasks(self) -> int:
+        """Return the number of failed tasks accepted by policy."""
+
+        return len(self.accepted_failed_tasks)
+
+    @property
+    def n_failed_existing_tasks(self) -> int:
+        """Return the number of existing trace outputs marked failed."""
+
+        return len(self.failed_existing_tasks)
+
+    @property
+    def skipped_tasks(self) -> tuple[int, ...]:
+        """Return one-based tasks that would be skipped."""
+
+        return tuple(
+            sorted(
+                {
+                    *self.current_tasks,
+                    *self.reused_tasks,
+                    *self.accepted_tasks,
+                    *self.accepted_failed_tasks,
+                }
+            )
+        )
+
+    @property
+    def pending_indices(self) -> tuple[int, ...]:
+        """Return zero-based solver task indices that would be submitted."""
+
+        return tuple(task - 1 for task in self.pending_tasks)
+
+    @property
+    def pending_frequencies(self) -> tuple[Any, ...]:
+        """Return frequencies for the tasks that would be submitted."""
+
+        f_list = list(getattr(self.job, "f_list", []) or [])
+        frequencies = []
+        for task in self.pending_tasks:
+            try:
+                frequencies.append(f_list[task - 1])
+            except IndexError:
+                continue
+        return tuple(frequencies)
+
+    @property
+    def all_current(self) -> bool:
+        """Return whether no frequency tasks need to run."""
+
+        return self.n_tasks_to_run == 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a dictionary representation of the plan."""
+
+        return {
+            "job": getattr(self.job, "name", None),
+            "site": self.site.__class__.__name__ if self.site is not None else None,
+            "total_tasks": self.total_tasks,
+            "n_tasks_to_run": self.n_tasks_to_run,
+            "n_tasks_to_skip": self.n_tasks_to_skip,
+            "pending_tasks": list(self.pending_tasks),
+            "pending_indices": list(self.pending_indices),
+            "pending_frequencies": list(self.pending_frequencies),
+            "skipped_tasks": list(self.skipped_tasks),
+            "current_tasks": list(self.current_tasks),
+            "reused_tasks": list(self.reused_tasks),
+            "accepted_tasks": list(self.accepted_tasks),
+            "accepted_failed_tasks": list(self.accepted_failed_tasks),
+            "failed_existing_tasks": list(self.failed_existing_tasks),
+            "skip_policy": getattr(self.skip_policy, "mode", self.skip_policy),
+            "force": self.force,
+        }
+
+    def _task_ranges(self, tasks: Iterable[int]) -> str:
+        values = sorted({int(task) for task in tasks})
+        if not values:
+            return "-"
+        ranges = []
+        start = previous = values[0]
+        for value in values[1:]:
+            if value == previous + 1:
+                previous = value
+                continue
+            ranges.append((start, previous))
+            start = previous = value
+        ranges.append((start, previous))
+        return ", ".join(
+            str(start) if start == end else f"{start}-{end}" for start, end in ranges
+        )
+
+    def summary(self) -> str:
+        """Return a concise human-readable plan summary."""
+
+        name = getattr(self.job, "name", "job")
+        message = (
+            f"{name}: {self.n_tasks_to_run} / {self.total_tasks} "
+            "frequency tasks would run"
+        )
+        if self.force:
+            message += " (force=True; current outputs ignored)"
+        else:
+            categories = []
+            if self.n_current_tasks:
+                categories.append(f"{self.n_current_tasks} current")
+            if self.n_reused_tasks:
+                categories.append(f"{self.n_reused_tasks} reusable")
+            if self.n_accepted_tasks:
+                categories.append(f"{self.n_accepted_tasks} compatible")
+            if self.n_accepted_failed_tasks:
+                categories.append(f"{self.n_accepted_failed_tasks} accepted failed")
+            category_text = ", ".join(categories) if categories else "0 current"
+            message += f"; {self.n_tasks_to_skip} would skip " f"({category_text})"
+        if self.pending_tasks:
+            message += f"\nPending tasks: {self._task_ranges(self.pending_tasks)}"
+        if self.skipped_tasks:
+            message += f"\nSkipped tasks: {self._task_ranges(self.skipped_tasks)}"
+        if self.reused_tasks:
+            message += f"\nReusable tasks: {self._task_ranges(self.reused_tasks)}"
+        if self.accepted_tasks:
+            message += (
+                "\nCompatible tasks accepted by policy: "
+                f"{self._task_ranges(self.accepted_tasks)}"
+            )
+        if self.accepted_failed_tasks:
+            message += (
+                "\nFailed tasks accepted by policy: "
+                f"{self._task_ranges(self.accepted_failed_tasks)}"
+            )
+        if self.failed_existing_tasks:
+            message += (
+                "\nExisting traces marked failed; would rerun: "
+                f"{self._task_ranges(self.failed_existing_tasks)}"
+            )
+        return message
+
+    def __str__(self) -> str:
+        return self.summary()
+
+    def __repr__(self) -> str:
+        return self.summary()
+
+    def _repr_html_(self) -> str:
+        name = html.escape(str(getattr(self.job, "name", "job")))
+        site = (
+            html.escape(self.site.__class__.__name__) if self.site is not None else "-"
+        )
+        pending = html.escape(self._task_ranges(self.pending_tasks))
+        current = html.escape(self._task_ranges(self.current_tasks))
+        reused = html.escape(self._task_ranges(self.reused_tasks))
+        accepted = html.escape(self._task_ranges(self.accepted_tasks))
+        accepted_failed = html.escape(self._task_ranges(self.accepted_failed_tasks))
+        failed_existing = html.escape(self._task_ranges(self.failed_existing_tasks))
+        skip_policy = html.escape(str(getattr(self.skip_policy, "mode", "-") or "-"))
+        force = "yes" if self.force else "no"
+        rows = [
+            ("Job", name),
+            ("Site", site),
+            ("Skip policy", skip_policy),
+            ("Tasks that would run", f"{self.n_tasks_to_run} / {self.total_tasks}"),
+            ("Tasks that would skip", f"{self.n_tasks_to_skip} / {self.total_tasks}"),
+            ("Pending tasks", pending),
+            ("Current tasks", current),
+            ("Reusable tasks", reused),
+            ("Compatible tasks", accepted),
+            ("Accepted failed tasks", accepted_failed),
+            ("Existing failed traces", failed_existing),
+            ("Force", force),
+        ]
+        body = "".join(
+            "<tr>"
+            f"<th style='text-align:left;padding:2px 10px 2px 0'>{label}</th>"
+            f"<td style='text-align:left;padding:2px 0'>{value}</td>"
+            "</tr>"
+            for label, value in rows
+        )
+        return f"<table>{body}</table>"
 
 
 @dataclass
@@ -764,6 +1089,187 @@ class BaseSite:
         if single:
             return out[jobs[0].name]
         return out
+
+    def dry_run(
+        self,
+        job,
+        *,
+        skip: Optional[Any] = None,
+        skip_policy: Optional[Any] = None,
+        residual: Optional[float] = None,
+        ignore_solver_options: Optional[bool] = None,
+        force: bool = False,
+        force_run: bool = False,
+        rerun: bool = False,
+        reuse: bool = True,
+        validate: bool = True,
+        refresh_metadata: bool = False,
+    ) -> SubmitPlan:
+        """Preview which frequency tasks would be submitted.
+
+        This is a lightweight counterpart to :meth:`submit`: it persists and
+        optionally validates local job inputs so fingerprints match a real
+        submit call, but it does not sync, submit, write run state, call
+        ``task_run_plan``, copy reusable outputs, or remove stale outputs.
+
+        Args:
+            job: Job object to inspect.
+            skip: Skip policy name or object. Supported names include
+                ``"strict"``, ``"compatible"``, ``"tolerant"``, and ``"none"``.
+            skip_policy: Alias for ``skip``.
+            residual: Residual threshold for tolerant failed-task acceptance.
+            ignore_solver_options: Ignore solver-only simulation settings when
+                comparing task compatibility.
+            force: Ignore reusable/current outputs and count all tasks.
+            force_run: Alias for ``force``.
+            rerun: Alias for ``force``.
+            reuse: Include prior matching frequency outputs that submit would
+                reuse. Defaults to ``True`` to mirror normal submission.
+            validate: Whether to run job validation before checking outputs.
+            refresh_metadata: If ``True`` and the site supports it, fetch remote
+                ``_fs_run`` metadata before counting current tasks.
+
+        Returns:
+            ``SubmitPlan`` with one-based pending/current task numbers and
+            zero-based ``pending_indices`` for solver submission.
+        """
+
+        force_run = bool(force or force_run or rerun)
+        self.prepare_job(job, validate=validate)
+        if refresh_metadata:
+            fetch_metadata = getattr(self, "fetch_run_metadata", None)
+            if not callable(fetch_metadata):
+                raise NotImplementedError(
+                    f"{self.__class__.__name__} does not support refresh_metadata"
+                )
+            fetch_metadata(job)
+
+        total = _int_count(getattr(job, "n_tasks", None))
+        if total == 0:
+            try:
+                total = len(getattr(job, "f_list", []) or [])
+            except TypeError:
+                total = 0
+
+        policy_value = skip if skip is not None else skip_policy
+        if hasattr(job, "plan_tasks"):
+            task_plan = job.plan_tasks(
+                skip_policy=policy_value,
+                reuse=reuse,
+                force=force_run,
+                apply=False,
+                residual=residual,
+                ignore_solver_options=ignore_solver_options,
+            )
+            pending = tuple(int(index) + 1 for index in task_plan["pending_indices"])
+            current = _task_numbers(task_plan.get("strict_current_tasks", ()), total)
+            reused = _task_numbers(
+                (
+                    record.get("task")
+                    for record in task_plan.get("reused_tasks", [])
+                    if isinstance(record, Mapping)
+                ),
+                total,
+            )
+            accepted = _task_numbers(task_plan.get("accepted_tasks", ()), total)
+            accepted_failed = _task_numbers(
+                task_plan.get("accepted_failed_tasks", ()),
+                total,
+            )
+            skipped = {*current, *reused, *accepted, *accepted_failed}
+            failed_existing = (
+                () if force_run else self._failed_existing_tasks(job, total, skipped)
+            )
+            return SubmitPlan(
+                job=job,
+                site=self,
+                total_tasks=total,
+                pending_tasks=pending,
+                current_tasks=current,
+                reused_tasks=reused,
+                accepted_tasks=accepted,
+                accepted_failed_tasks=accepted_failed,
+                failed_existing_tasks=failed_existing,
+                skip_policy=task_plan.get("skip_policy"),
+                force=force_run,
+            )
+
+        if force_run:
+            current: tuple[int, ...] = ()
+        elif hasattr(job, "current_tasks"):
+            current_values = []
+            for task in job.current_tasks():
+                try:
+                    task_number = int(task)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= task_number <= total:
+                    current_values.append(task_number)
+            current = tuple(sorted(set(current_values)))
+        elif hasattr(job, "is_run_current") and job.is_run_current():
+            current = tuple(range(1, total + 1))
+        else:
+            current = ()
+
+        reused: tuple[int, ...] = ()
+        if not force_run and reuse and hasattr(job, "reusable_task_outputs"):
+            reused_values = []
+            current_set = set(current)
+            for record in job.reusable_task_outputs():
+                if not isinstance(record, Mapping):
+                    continue
+                try:
+                    task_number = int(record.get("task"))
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= task_number <= total and task_number not in current_set:
+                    reused_values.append(task_number)
+            reused = tuple(sorted(set(reused_values)))
+
+        skipped = {*current, *reused}
+        pending = tuple(
+            task for task in range(1, total + 1) if force_run or task not in skipped
+        )
+        failed_existing = (
+            () if force_run else self._failed_existing_tasks(job, total, skipped)
+        )
+        return SubmitPlan(
+            job=job,
+            site=self,
+            total_tasks=total,
+            pending_tasks=pending,
+            current_tasks=current,
+            reused_tasks=reused,
+            failed_existing_tasks=failed_existing,
+            skip_policy=policy_value,
+            force=force_run,
+        )
+
+    @staticmethod
+    def _failed_existing_tasks(
+        job: Any,
+        total: int,
+        skipped: Iterable[int] = (),
+    ) -> tuple[int, ...]:
+        if not hasattr(job, "frequency_status"):
+            return ()
+        skipped_set = {int(task) for task in skipped}
+        failed_values = []
+        for row in job.frequency_status():
+            if not isinstance(row, Mapping):
+                continue
+            try:
+                task_number = int(row.get("task"))
+            except (TypeError, ValueError):
+                continue
+            if (
+                1 <= task_number <= total
+                and task_number not in skipped_set
+                and row.get("status") == "failed"
+                and bool(row.get("trace_exists"))
+            ):
+                failed_values.append(task_number)
+        return tuple(sorted(set(failed_values)))
 
     def submit(self, job, **kwargs) -> RunHandle:
         """Submit a job and return an awaitable run handle.
