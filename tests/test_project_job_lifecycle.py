@@ -7,7 +7,9 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pytest
+import sympy as sp
 
+import frequensolve as fs
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.orchestrator.sites.base import JobStatus, RunResult
@@ -20,6 +22,7 @@ from frequensolve.simulation.jobs import (
     TimeDomainJob,
 )
 from frequensolve.simulation.jobs.artifacts import RunMetadata
+from frequensolve.simulation.numerics_manager import SolverConfig
 
 
 def _project_with_trace_simulation(tmp_path):
@@ -40,6 +43,88 @@ def test_project_save_load_uses_relative_simulation_paths(tmp_path):
     assert loaded.path == project.path
     assert loaded.simulations["simple"].name == sim.name
     assert loaded.simulations["simple"]._project is loaded
+
+
+def test_generic_load_dispatches_saved_project_job_and_simulation(tmp_path):
+    project, sim = _project_with_trace_simulation(tmp_path)
+    project_file = project.save()
+    sim_file = sim.save()
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job_file = job.save()
+
+    loaded_project = fs.load(project_file)
+    loaded_sim = fs.load(sim_file)
+    loaded_job = fs.load(job_file)
+
+    assert isinstance(loaded_project, Project)
+    assert loaded_project.path == project.path
+    assert loaded_sim.name == sim.name
+    assert isinstance(loaded_job, FrequencyDomainJob)
+    assert loaded_job.name == job.name
+    assert loaded_job.simulation.name == sim.name
+
+
+def test_project_save_serializes_solver_hp_sympy_policy(tmp_path):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    epw = sp.Symbol("epw")
+    sim += SolverConfig(
+        refinements=["h", "h", "h", "a"],
+        hp={
+            "order": sp.Piecewise(
+                (4, epw < 2.0),
+                (3, True),
+            ),
+            "overrides": [
+                {
+                    "classifier": "physics",
+                    "value": "acoustic",
+                    "order": sp.Piecewise(
+                        (5, epw < 1.5),
+                        (4, True),
+                    ),
+                },
+            ],
+            "order_x": {"min": 2, "max": 4},
+        },
+    )
+
+    project_file = project.save()
+    payload = json.loads(project_file.read_text())
+    sim_payload = json.loads((project.path / payload["simulations"][0]).read_text())
+
+    assert sim_payload["Solver"]["hp"] == {
+        "order": {
+            "op": "case",
+            "branches": [
+                {
+                    "if": {"op": "<", "args": [{"var": "epw"}, {"value": 2.0}]},
+                    "then": 4,
+                }
+            ],
+            "else": 3,
+        },
+        "overrides": [
+            {
+                "classifier": "physics",
+                "value": "acoustic",
+                "order": {
+                    "op": "case",
+                    "branches": [
+                        {
+                            "if": {
+                                "op": "<",
+                                "args": [{"var": "epw"}, {"value": 1.5}],
+                            },
+                            "then": 5,
+                        }
+                    ],
+                    "else": 4,
+                },
+            },
+        ],
+        "order_x": {"min": 2, "max": 4},
+    }
 
 
 def test_project_api_rejects_auto_migrate_option(tmp_path):
@@ -339,6 +424,15 @@ def test_run_metadata_deduplicates_existing_output_file_aliases(tmp_path):
     )
 
     assert metadata.output_files(base="pv", suffix=".vtu", existing=True) == [canonical]
+
+
+def test_job_paraview_outputs_resolve_under_result_directory(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.paraview("quicklook", path="paraview/qc", fields="pressure")
+    job.save()
+
+    assert job.paraview_outputs == {"quicklook": job._result_path / "paraview/qc"}
 
 
 def test_job_save_load_persists_required_simulation_inputs(tmp_path):
@@ -1372,7 +1466,7 @@ def test_frequency_named_trace_shard_counts_as_current_when_pack_is_stale(tmp_pa
     trace_dir = job.trace_outputs.path
     shard_dir = trace_dir / "shards"
     shard_dir.mkdir(parents=True, exist_ok=True)
-    shard = shard_dir / "f_50.00000_hz.h5"
+    shard = shard_dir / "trace_frequency_50.00000_hz.h5"
     with h5py.File(shard, "w") as h5:
         h5.create_dataset("frequency", data=50.0)
         h5.create_dataset("laplace", data=-0.5)
@@ -1408,7 +1502,9 @@ def test_frequency_named_trace_shard_counts_as_current_when_pack_is_stale(tmp_pa
         "failed": 0,
         "not_run": 0,
     }
-    assert state["tasks"][0]["path"].endswith("traces/shards/f_50.00000_hz.h5")
+    assert state["tasks"][0]["path"].endswith(
+        "traces/shards/trace_frequency_50.00000_hz.h5"
+    )
     assert job.current_tasks() == [1]
     assert job.frequency_summary() == {
         "total": 1,
@@ -1417,6 +1513,251 @@ def test_frequency_named_trace_shard_counts_as_current_when_pack_is_stale(tmp_pa
         "not_run": 0,
     }
     assert job.task_run_plan()["pending_indices"] == []
+
+
+def test_task_manifest_recovers_current_frequency_shard_when_state_is_stale(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[100.0 + 0.1j])
+    job.save()
+    trace_dir = job.trace_outputs.path
+    shard = trace_dir / "shards" / "f_100.00000_hz.h5"
+    shard.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(shard, "w") as h5:
+        h5.create_dataset("frequency", data=100.0)
+        h5.create_dataset("laplace", data=0.1)
+
+    job.run_state_file.parent.mkdir(parents=True, exist_ok=True)
+    job.run_state_file.write_text(
+        json.dumps(
+            {
+                "schema": "frequensolve-python-run-1",
+                "status": "partial",
+                "fingerprint": job.fingerprint(),
+                "tasks": [
+                    {
+                        "task_id": 0,
+                        "status": "error",
+                        "fingerprint": job.task_fingerprint(1),
+                        "path": "traces/shards/f_100.00000_hz.h5",
+                    }
+                ],
+                "task_summary": {
+                    "total": 1,
+                    "complete": 1,
+                    "succeeded": 0,
+                    "failed": 1,
+                    "not_run": 0,
+                },
+            }
+        )
+    )
+
+    task_manifest = job.task_run_manifest_path(1)
+    task_manifest.parent.mkdir(parents=True, exist_ok=True)
+    task_manifest.write_text(
+        json.dumps(
+            {
+                "exit_status": {"code": 0, "status": "success"},
+                "execution": {
+                    "command_line": ["fs3d", "-j", str(job._file), "-i", "1"],
+                },
+                "inputs": {
+                    "task": {
+                        "schema": "fs-run-task-fingerprint-1",
+                        "frequency": {"real": 100.0, "imag": -0.1},
+                        "outputs_hash": job._task_outputs_hash(1),
+                    }
+                },
+                "solver": {
+                    "convergence": {
+                        "converged": True,
+                        "status": "converged",
+                        "solve_count": 1,
+                        "failure_count": 0,
+                        "worst_code": 0,
+                        "solves": [
+                            {
+                                "converged": True,
+                                "iterations": 7,
+                                "residual": 1.0e-8,
+                                "status": "converged",
+                            }
+                        ],
+                    }
+                },
+            }
+        )
+    )
+    (task_manifest.parent / "outputs.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-outputs-1",
+                "files": [
+                    {
+                        "kind": "hdf5",
+                        "path": "traces/shards/f_100.00000_hz.h5",
+                        "schema": "fs_seismic_trace_store_v1",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert job.current_tasks() == [1]
+    assert job.frequency_summary() == {
+        "total": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "not_run": 0,
+    }
+    assert job.task_run_plan()["pending_indices"] == []
+
+
+def test_task_manifest_accepts_frequency_shard_omitted_from_outputs(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[100.0])
+    job.save()
+    shard = job.trace_outputs.path / "shards" / "f_100.00000_hz.h5"
+    shard.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(shard, "w") as h5:
+        h5.create_dataset("frequency", data=100.0)
+
+    task_manifest = job.task_run_manifest_path(1)
+    task_manifest.parent.mkdir(parents=True, exist_ok=True)
+    task_manifest.write_text(
+        json.dumps(
+            {
+                "exit_status": {"code": 0, "status": "success"},
+                "execution": {
+                    "command_line": ["fs3d", "-j", str(job._file), "-i", "1"],
+                },
+                "inputs": {
+                    "task": {
+                        "schema": "fs-run-task-fingerprint-1",
+                        "frequency": {"real": 100.0, "imag": 0.0},
+                        "outputs_hash": job._task_outputs_hash(1),
+                    }
+                },
+            }
+        )
+    )
+    (task_manifest.parent / "outputs.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-outputs-1",
+                "files": [
+                    {
+                        "kind": "hdf5",
+                        "path": "traces/trace_metadata.h5",
+                        "schema": "fs_trace_metadata_v1",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert job.current_tasks() == [1]
+    assert job.task_run_plan()["pending_indices"] == []
+
+
+def test_init_manifest_does_not_mark_frequency_task_current(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+    shard = job.trace_outputs.path / "shards" / "f_1.00000_hz.h5"
+    shard.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(shard, "w") as h5:
+        h5.create_dataset("frequency", data=1.0)
+
+    task_manifest = job.task_run_manifest_path(1)
+    task_manifest.parent.mkdir(parents=True, exist_ok=True)
+    task_manifest.write_text(
+        json.dumps(
+            {
+                "exit_status": {"code": 0, "status": "success"},
+                "execution": {
+                    "command_line": ["fs3d", "-j", str(job._file), "--init"],
+                },
+                "inputs": {
+                    "task": {
+                        "schema": "fs-run-task-fingerprint-1",
+                        "frequency": {"real": 1.0, "imag": 0.0},
+                        "outputs_hash": job._task_outputs_hash(1),
+                    }
+                },
+                "solver": {
+                    "convergence": {
+                        "converged": True,
+                        "status": "not_run",
+                        "solve_count": 0,
+                        "failure_count": 0,
+                    }
+                },
+            }
+        )
+    )
+
+    assert job.current_tasks() == []
+    assert job.task_run_plan()["pending_indices"] == [0]
+    assert shard.exists()
+
+
+def test_not_run_solver_state_does_not_mark_frequency_task_current(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+    shard = job.trace_outputs.path / "shards" / "f_1.00000_hz.h5"
+    shard.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(shard, "w") as h5:
+        h5.create_dataset("frequency", data=1.0)
+    job.write_run_state(
+        status="partial",
+        tasks=[
+            {
+                "task_id": 0,
+                "status": "success",
+                "fingerprint": job.task_fingerprint(1),
+                "path": "traces/shards/f_1.00000_hz.h5",
+                "solver": {
+                    "convergence": {
+                        "converged": True,
+                        "status": "not_run",
+                        "solve_count": 0,
+                        "failure_count": 0,
+                    }
+                },
+            }
+        ],
+    )
+
+    assert job.current_tasks() == []
+    assert job.task_run_plan()["pending_indices"] == [0]
+
+
+def test_task_plan_preserves_frequency_named_shards_for_pending_resume(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[2.0])
+    job.save()
+    shard = job.trace_outputs.path / "shards" / "f_2.00000_hz.h5"
+    shard.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(shard, "w") as h5:
+        h5.create_dataset("frequency", data=2.0)
+    job.write_run_state(
+        status="partial",
+        tasks=[
+            {
+                "task_id": 0,
+                "status": "error",
+                "fingerprint": job.task_fingerprint(1),
+                "path": "traces/shards/f_2.00000_hz.h5",
+            }
+        ],
+    )
+
+    plan = job.task_run_plan()
+
+    assert plan["pending_indices"] == [0]
+    assert shard.exists()
 
 
 def test_job_task_plan_reruns_packed_product_when_fingerprint_changes(tmp_path):

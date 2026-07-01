@@ -8,7 +8,12 @@ import pytest
 
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
-from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
+from frequensolve.orchestrator.sites.base import (
+    BaseSite,
+    JobStatus,
+    RunHandle,
+    SubmitPlan,
+)
 from frequensolve.orchestrator.sites.hpc import (
     SlurmLoginCredentials,
     SlurmRunConfig,
@@ -26,7 +31,7 @@ from frequensolve.orchestrator.sites.hpc.stampede3 import (
 from frequensolve.orchestrator.utils.pool import PoolStatus
 from frequensolve.orchestrator.utils.progress import status_table_html, wait_all
 from frequensolve.project.project import Project
-from frequensolve.simulation.jobs import FrequencyDomainJob
+from frequensolve.simulation.jobs import FrequencyDomainJob, SkipPolicy
 from frequensolve.simulation.outputs import WavefieldOutput
 
 
@@ -123,6 +128,244 @@ class DummyBaseSite(BaseSite):
 
     def cancel_job(self, job_id: str) -> None:
         self.cancelled = job_id
+
+
+def test_site_dry_run_reports_run_and_skip_counts_without_task_plan():
+    class DryRunJob(DummyJob):
+        name = "dry"
+        n_tasks = 4
+        f_list = [10.0, 20.0, 30.0, 40.0]
+
+        def __init__(self):
+            self.saved = False
+            self.validated = False
+            self.task_plan_called = False
+
+        def save(self):
+            self.saved = True
+
+        def validate(self, raise_errors=True):
+            self.validated = raise_errors
+
+        def current_tasks(self):
+            return [2, 4]
+
+        def task_run_plan(self, reuse=True, force=False):
+            self.task_plan_called = True
+            raise AssertionError("dry_run must not call task_run_plan")
+
+    site = DummyBaseSite()
+    job = DryRunJob()
+
+    plan = site.dry_run(job)
+
+    assert isinstance(plan, SubmitPlan)
+    assert plan.n_tasks_to_run == 2
+    assert plan.n_tasks_to_skip == 2
+    assert plan.pending_tasks == (1, 3)
+    assert plan.skipped_tasks == (2, 4)
+    assert plan.pending_indices == (0, 2)
+    assert plan.pending_frequencies == (10.0, 30.0)
+    assert "2 / 4 frequency tasks would run; 2 would skip" in str(plan)
+    assert "Pending tasks: 1, 3" in str(plan)
+    assert "Skipped tasks: 2, 4" in str(plan)
+    assert job.saved is True
+    assert job.validated is True
+    assert job.task_plan_called is False
+
+    force_plan = site.dry_run(job, force=True)
+
+    assert force_plan.n_tasks_to_run == 4
+    assert force_plan.n_tasks_to_skip == 0
+    assert force_plan.pending_tasks == (1, 2, 3, 4)
+    assert force_plan.skipped_tasks == ()
+
+
+def test_site_dry_run_reports_reusable_frequency_outputs(tmp_path):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 3.0])
+    job.save()
+    old_files = job.expected_trace_files()
+    old_files[0].parent.mkdir(parents=True, exist_ok=True)
+    old_files[0].write_text("1 Hz")
+    old_files[1].write_text("3 Hz")
+    job.write_run_state(status="completed")
+
+    expanded = FrequencyDomainJob(
+        name="freq",
+        simulation=sim,
+        f_list=[1.0, 2.0, 3.0],
+    )
+    expanded.save()
+    new_files = expanded.expected_trace_files()
+
+    plan = DummyBaseSite().dry_run(expanded)
+
+    assert plan.n_tasks_to_run == 1
+    assert plan.n_tasks_to_skip == 2
+    assert plan.current_tasks == (1,)
+    assert plan.reused_tasks == (3,)
+    assert plan.skipped_tasks == (1, 3)
+    assert plan.pending_tasks == (2,)
+    assert plan.pending_indices == (1,)
+    assert "1 current, 1 reusable" in str(plan)
+    assert not new_files[2].exists()
+
+    no_reuse = DummyBaseSite().dry_run(expanded, reuse=False)
+
+    assert no_reuse.pending_tasks == (2, 3)
+    assert no_reuse.current_tasks == (1,)
+    assert no_reuse.reused_tasks == ()
+
+
+def test_site_dry_run_reports_existing_failed_traces_that_would_rerun(tmp_path):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+    trace_file = job.expected_trace_files()[0]
+    trace_file.parent.mkdir(parents=True, exist_ok=True)
+    trace_file.write_text("trace exists")
+    job.write_run_state(
+        status="partial",
+        tasks=[
+            {
+                "task": 1,
+                "status": "failed",
+                "fingerprint": job.task_fingerprint(1),
+            }
+        ],
+    )
+
+    plan = DummyBaseSite().dry_run(job)
+
+    assert plan.n_tasks_to_run == 1
+    assert plan.n_tasks_to_skip == 0
+    assert plan.failed_existing_tasks == (1,)
+    assert "Existing traces marked failed; would rerun: 1" in str(plan)
+
+
+def test_site_dry_run_tolerant_policy_accepts_failed_trace_below_residual(tmp_path):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+    trace_file = job.expected_trace_files()[0]
+    trace_file.parent.mkdir(parents=True, exist_ok=True)
+    trace_file.write_text("trace exists")
+    job.write_run_state(
+        status="partial",
+        tasks=[
+            {
+                "task": 1,
+                "status": "failed",
+                "fingerprint": job.task_fingerprint(1),
+                "path": job._stored_trace_path(trace_file),
+                "solver": {
+                    "convergence": {
+                        "converged": False,
+                        "status": "failed",
+                        "solve_count": 1,
+                        "failure_count": 1,
+                        "residual": 5.0e-4,
+                    }
+                },
+            }
+        ],
+    )
+
+    strict = DummyBaseSite().dry_run(job)
+    tolerant = DummyBaseSite().dry_run(job, skip="tolerant", residual=1.0e-3)
+    compatible_with_residual = DummyBaseSite().dry_run(
+        job,
+        skip="compatible",
+        residual=1.0e-3,
+    )
+
+    assert strict.pending_tasks == (1,)
+    assert strict.failed_existing_tasks == (1,)
+    assert tolerant.pending_tasks == ()
+    assert tolerant.accepted_failed_tasks == (1,)
+    assert tolerant.failed_existing_tasks == ()
+    assert "1 accepted failed" in str(tolerant)
+    assert compatible_with_residual.pending_tasks == ()
+    assert compatible_with_residual.accepted_failed_tasks == (1,)
+    assert compatible_with_residual.failed_existing_tasks == ()
+
+
+def test_task_run_plan_tolerant_policy_marks_accepted_failed_current(tmp_path):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+    trace_file = job.expected_trace_files()[0]
+    trace_file.parent.mkdir(parents=True, exist_ok=True)
+    trace_file.write_text("trace exists")
+    job.write_run_state(
+        status="partial",
+        tasks=[
+            {
+                "task": 1,
+                "status": "failed",
+                "fingerprint": job.task_fingerprint(1),
+                "path": job._stored_trace_path(trace_file),
+                "solver": {
+                    "convergence": {
+                        "converged": False,
+                        "status": "failed",
+                        "solve_count": 1,
+                        "failure_count": 1,
+                        "residual": 5.0e-4,
+                    }
+                },
+            }
+        ],
+    )
+
+    plan = job.task_run_plan(skip_policy=SkipPolicy.tolerant(residual=1.0e-3))
+    state = job.run_state()
+
+    assert plan["pending_indices"] == []
+    assert plan["accepted_failed_tasks"] == [1]
+    assert state["tasks"][0]["status"] == "accepted_failed"
+    assert state["task_summary"] == {
+        "total": 1,
+        "complete": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "not_run": 0,
+    }
+
+
+def test_dry_run_compatible_policy_ignores_solver_option_changes(tmp_path):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.solver.tolerance = 1.0e-6
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+    trace_file = job.expected_trace_files()[0]
+    trace_file.parent.mkdir(parents=True, exist_ok=True)
+    trace_file.write_text("trace exists")
+    job.write_run_state(status="completed")
+
+    sim.solver.tolerance = 1.0e-3
+    sim.save()
+    changed = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    changed.save()
+
+    strict = DummyBaseSite().dry_run(changed)
+    compatible = DummyBaseSite().dry_run(changed, skip="compatible")
+
+    assert strict.pending_tasks == (1,)
+    assert compatible.pending_tasks == ()
+    assert compatible.accepted_tasks == (1,)
+    assert "1 compatible" in str(compatible)
 
 
 def test_generic_slurm_site_can_be_instantiated_without_site_specific_class(
@@ -407,6 +650,23 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
     assert seen["config"].duration == "00-00:45:00"
 
 
+def test_slurm_run_config_normalizes_rank_aliases():
+    config = SlurmRunConfig(procs_per_node=4, procs_per_task=2)
+
+    assert config.ranks_per_node == 4
+    assert config.ranks_per_task == 2
+    assert config.procs_per_node == 4
+    assert config.procs_per_task == 2
+    assert SlurmRunConfig(tolerate_failures=None).tolerate_failures is None
+
+    merged = config.merged(ranks_per_node=8, procs_per_task=3)
+
+    assert merged.ranks_per_node == 8
+    assert merged.ranks_per_task == 3
+    with pytest.raises(ValueError, match="Pass either"):
+        config.merged(ranks_per_node=8, procs_per_node=4)
+
+
 def test_job_save_for_remote_writes_remote_absolute_result_path(tmp_path):
     project = Project(name="project", path=tmp_path / "project")
     sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
@@ -514,6 +774,7 @@ def test_slurm_batch_maps_local_project_run_path_to_remote(
     sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
     sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
     seen = {}
 
     def fake_script(**kwargs):
@@ -546,10 +807,107 @@ def test_slurm_batch_maps_local_project_run_path_to_remote(
 
     assert seen["script_kwargs"]["run_path"] == site.work_dir
     assert seen["cmd"].startswith(f"mkdir -p {site.work_dir}/jobs/batch")
+    assert (
+        f"rm -f {site.work_dir}/jobs/simple/freq/logs/scheduler_status.json"
+        in seen["cmd"]
+    )
     record = job.latest_run(site="Dummy")
     assert record is not None
     assert record.scheduler_id == "88"
     assert record.job_file == site.work_dir / "jobs" / "simple" / "freq" / "freq.json"
+
+
+def test_slurm_batch_submits_only_pending_frequency_tasks(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0, 20.0, 30.0])
+    job.save()
+    for task in (1, 3):
+        file = job.expected_trace_files()[task - 1]
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(f"task {task}")
+    job.write_run_state(
+        status="partial",
+        tasks=[
+            {"task": 1, "status": "success", "fingerprint": job.task_fingerprint(1)},
+            {"task": 2, "status": "timeout", "fingerprint": job.task_fingerprint(2)},
+            {"task": 3, "status": "success", "fingerprint": job.task_fingerprint(3)},
+        ],
+    )
+    seen = {}
+
+    def fake_script(**kwargs):
+        seen["script_kwargs"] = kwargs
+        return "script"
+
+    monkeypatch.setattr(site, "_sweep_SLURM_script", fake_script)
+    monkeypatch.setattr(
+        site,
+        "_transfer_SLURM_job",
+        lambda script, job: (
+            Path("/scratch/user/project/run/sweep.slurm"),
+            Path("job"),
+        ),
+    )
+    monkeypatch.setattr(site, "_submit_sbatch", lambda cmd: "89")
+    monkeypatch.setattr(
+        site, "_store_remote_run_records", lambda job, record=None: None
+    )
+
+    site._submit_slurm_batch(job, SlurmRunConfig(queue="debug"))
+
+    assert seen["script_kwargs"]["n_tasks"] == 1
+    assert seen["script_kwargs"]["n_job_tasks"] == 3
+    assert seen["script_kwargs"]["task_indices"] == [2]
+    assert seen["script_kwargs"]["skip_sizing"] is True
+
+
+def test_adaptive_slurm_script_renders_pending_task_indices(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+
+    script = site._sweep_SLURM_script(
+        n_tasks=2,
+        n_job_tasks=5,
+        task_indices=[2, 5],
+        n_nodes=1,
+        stdout="/scratch/user/jobs/simple/freq/logs",
+        duration="00-00:10:00",
+    )
+
+    assert "n_tasks=2" in script
+    assert "n_job_tasks=5" in script
+    assert "task_indices_json='[2, 5]'" in script
+    assert 'FS_TASK_INDICES="$task_indices_json"' in script
+    assert "FS_SKIP_SIZING=0" in script
+
+
+def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_job_tasks=5,
+        task_indices=[4],
+        n_nodes=2,
+        ranks_per_node=4,
+        stdout="/scratch/user/jobs/simple/freq/logs",
+        duration="00-00:10:00",
+    )
+
+    assert "FS_SKIP_SIZING=1" in script
+    assert "--init-no-size" in script
+    assert "TOTAL_RANKS=8" in script
+    assert "task_indices_json='[4]'" in script
+    assert "return [0.0] * count" in script
+    assert "--init-no-size scheduling requires exactly one submitted task" in script
 
 
 def test_slurm_submit_ignores_local_current_without_remote_record(
@@ -745,7 +1103,18 @@ def test_slurm_submit_skips_when_recorded_remote_run_is_current(monkeypatch, tmp
         if "find " in cmd:
             return "/scratch/user/project/run/jobs/simple/freq/logs/task_1.log"
         return json.dumps(
-            {"task_summary": {"total": 1, "complete": 1, "succeeded": 1, "failed": 0}}
+            {
+                "execution": {
+                    "mpi": {"ranks": 64},
+                    "openmp": {"threads": 7},
+                },
+                "task_summary": {
+                    "total": 1,
+                    "complete": 1,
+                    "succeeded": 1,
+                    "failed": 0,
+                },
+            }
         )
 
     monkeypatch.setattr(site, "run_login", fake_run_login)
@@ -1057,6 +1426,33 @@ def test_slurm_fetch_wavefields_downloads_wavefield_output(monkeypatch, tmp_path
     }
 
 
+def test_slurm_fetch_paraview_downloads_configured_output_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.paraview("qc", path="paraview/qc", fields="pressure")
+    job.save()
+    calls = []
+
+    def fake_get(remote, local, overwrite=False):
+        calls.append((Path(remote), Path(local)))
+        Path(local).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(site, "get", fake_get)
+    monkeypatch.setattr(job, "collect_task_run_manifests", lambda: None)
+
+    assert site.fetch_paraview(job) == {"qc": job._result_path / "paraview/qc"}
+    assert (
+        site.work_dir / "jobs" / "simple" / "freq" / "results" / "paraview/qc",
+        job._result_path / "paraview/qc",
+    ) in calls
+
+
 def test_slurm_batch_poll_reads_scheduler_status(monkeypatch, capsys):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
@@ -1084,6 +1480,74 @@ def test_slurm_batch_poll_reads_scheduler_status(monkeypatch, capsys):
     assert captured.out == ""
 
 
+def test_slurm_batch_poll_includes_already_current_tasks(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+    job = DummyJob()
+    job.n_tasks = 90
+
+    monkeypatch.setattr(site, "update_status", lambda job_id: "running")
+    monkeypatch.setattr(
+        site,
+        "_read_scheduler_status",
+        lambda run: {
+            "successful": 1,
+            "failed": 0,
+            "running": 50,
+            "pending": 20,
+            "total": 71,
+        },
+    )
+
+    run = RunHandle(site=site, job=job, id="77", mode="batch")
+    run.backend["task_plan"] = {
+        "current_tasks": list(range(1, 20)),
+        "pending_indices": list(range(19, 90)),
+        "reused_tasks": [],
+    }
+
+    status = site._poll_run(run)
+    panel = status_table_html([run], {0: status})
+
+    assert status.message == (
+        "tasks: 20 successful, 0 failed, 50 running, 20 pending, 90 total"
+    )
+    assert status.raw["task_status"] == {
+        "successful": 20,
+        "succeeded": 20,
+        "failed": 0,
+        "running": 50,
+        "pending": 20,
+        "total": 90,
+        "current": 19,
+        "submitted_total": 71,
+        "includes_current_tasks": True,
+    }
+    assert ">20</td>" in panel
+    assert ">90</td>" in panel
+
+
+def test_slurm_batch_poll_ignores_scheduler_status_while_pending(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+
+    monkeypatch.setattr(site, "update_status", lambda job_id: "pending")
+    monkeypatch.setattr(
+        site,
+        "run_login",
+        lambda cmd: pytest.fail("pending batch polls should not read task counts"),
+    )
+
+    run = RunHandle(site=site, job=DummyJob(), id="77", mode="batch")
+    status = site._poll_run(run)
+
+    assert status.state == "pending"
+    assert status.message == ""
+    assert "task_status" not in status.raw
+
+
 def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
@@ -1096,14 +1560,15 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
         n_nodes=1,
         stdout="/scratch/user/project/run/jobs/dummy/logs",
         duration="00-00:30:00",
-        procs_per_node=4,
+        ranks_per_node=4,
+        tolerate_failures=2,
     )
     fresh_batch_script = site._sweep_SLURM_script(
         n_tasks=4,
         n_nodes=1,
         stdout="/scratch/user/project/run/jobs/dummy/logs",
         duration="00-00:30:00",
-        procs_per_node=4,
+        ranks_per_node=4,
         fresh=True,
     )
     attached_script = site._sweep_script(DummyJob())
@@ -1114,13 +1579,15 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
         n_nodes=1,
         stdout="/scratch/user/project/run/jobs/dummy/logs",
         duration="00-00:30:00",
-        procs_per_node=4,
+        ranks_per_node=4,
         pack=False,
     )
 
     assert '$fresh_flag --pack >> "$dir_out/pack.log" 2>&1' in batch_script
     assert "scheduler_status.json" in batch_script
     assert "FS_SCHEDULER_STATUS" in batch_script
+    assert "FAILURE_TOLERANCE=2" in batch_script
+    assert "failure tolerance exceeded" in batch_script
     assert '"successful"' in batch_script
     assert '"pending"' in batch_script
     assert "$fresh_flag --pack >> $dir_out/pack.log 2>&1" in attached_script
@@ -1151,7 +1618,7 @@ def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
             return False
 
     monkeypatch.setattr(
-        site, "_submit_attached", lambda job, procs_per_task=2, **kwargs: DummyFuture()
+        site, "_submit_attached", lambda job, ranks_per_task=2, **kwargs: DummyFuture()
     )
 
     run = site.submit(DummyJob())
@@ -1171,7 +1638,7 @@ def test_slurm_submit_attached_can_disable_pack(monkeypatch):
         def done(self):
             return False
 
-    def fake_submit(job, procs_per_task=2, *, pack=True, fresh=False):
+    def fake_submit(job, ranks_per_task=2, *, pack=True, fresh=False):
         seen["pack"] = pack
         seen["fresh"] = fresh
         return DummyFuture()
@@ -1258,7 +1725,7 @@ def test_slurm_attached_run_is_awaitable(monkeypatch):
         future = asyncio.get_running_loop().create_future()
         future.set_result(None)
         monkeypatch.setattr(
-            site, "_submit_attached", lambda job, procs_per_task=2, **kwargs: future
+            site, "_submit_attached", lambda job, ranks_per_task=2, **kwargs: future
         )
         run = site.submit(DummyJob())
         return await run

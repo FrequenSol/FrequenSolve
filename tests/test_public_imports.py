@@ -2,6 +2,9 @@ import importlib
 import importlib.util
 import subprocess
 import sys
+from pathlib import Path
+
+import toml
 
 from frequensolve._optional import missing_optional_class, optional_class
 
@@ -46,16 +49,24 @@ def test_top_level_authoring_exports_are_available():
         "Project",
         "SeismicSimulation",
         "LayeredModel",
+        "BoreholeAnnularPadding",
         "Fracture",
         "ModelSubdomain",
         "Property",
+        "coord",
         "prop",
+        "ref",
+        "remap",
+        "var",
         "CartesianGrid",
         "CoordinateSystem",
         "MeshManager",
         "HexMeshGenerator",
         "Acquisition",
         "PointSource",
+        "SourceGeometry",
+        "SourceEncoding",
+        "DistributedSource",
         "ReceiverNode",
         "SparseSurvey",
         "RickerWavelet",
@@ -63,6 +74,7 @@ def test_top_level_authoring_exports_are_available():
         "KlauderWavelet",
         "JobOutputs",
         "OutputUnits",
+        "AxisAlignedPlane",
         "ParaViewOutput",
         "ParaviewOutput",
         "outputs",
@@ -80,6 +92,7 @@ def test_top_level_authoring_exports_are_available():
         "vtu_fields",
         "plot_vtu",
         "configure_fft",
+        "load",
     ]
 
     for name in expected:
@@ -122,7 +135,7 @@ def test_optional_backend_exports_are_part_of_public_sdk_surface():
 def test_optional_dependency_placeholder_raises_install_hint():
     Missing = missing_optional_class(
         "MissingBackend",
-        extra="parallel",
+        extra="hpc",
         error=ModuleNotFoundError("No module named 'distributed'"),
         module=__name__,
     )
@@ -134,14 +147,14 @@ def test_optional_dependency_placeholder_raises_install_hint():
     else:
         raise AssertionError("optional placeholder did not raise")
 
-    assert "pip install frequensolve[parallel]" in message
+    assert "pip install frequensolve[hpc]" in message
 
 
 def test_lazy_optional_class_raises_install_hint():
     Missing = optional_class(
         "MissingBackend",
         "frequensolve.missing_backend.MissingBackend",
-        extra="parallel",
+        extra="hpc",
         dependencies=("missing-backend",),
         module=__name__,
     )
@@ -153,8 +166,16 @@ def test_lazy_optional_class_raises_install_hint():
     else:
         raise AssertionError("lazy optional class did not raise")
 
-    assert "pip install frequensolve[parallel]" in message
+    assert "pip install frequensolve[hpc]" in message
     assert "missing-backend" in message
+
+
+def test_parallel_extra_remains_hpc_alias():
+    project_root = Path(__file__).resolve().parents[1]
+    pyproject = toml.load(project_root / "pyproject.toml")
+    extras = pyproject["project"]["optional-dependencies"]
+
+    assert set(extras["parallel"]) == set(extras["hpc"])
 
 
 def test_units_registry_is_lazy_but_usable():
@@ -177,6 +198,7 @@ def test_public_package_imports_smoke():
         "frequensolve.geometry",
         "frequensolve.mesh",
         "frequensolve.model",
+        "frequensolve.expr",
         "frequensolve.model.layered",
         "frequensolve.plotting",
         "frequensolve.plotting.analysis",

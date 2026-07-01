@@ -28,9 +28,7 @@ def _elastic_simulation(tmp_path):
     )
 
     acq = Acquisition()
-    acq.add_source_group(
-        kind="vector", coords=np.array([[0.5, 0.1]]), direction=[0.0, 1.0]
-    )
+    acq.add_sources(kind="vector", coords=np.array([[0.5, 0.1]]), direction=[0.0, 1.0])
     device = ReceiverNode(
         name="geophone",
         components=[ReceiverComponent(name="vz", field="velocity")],

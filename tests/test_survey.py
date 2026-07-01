@@ -266,9 +266,9 @@ def test_dense_survey_populates_dense_acquisition():
 
     payload = survey.to_acquisition(_device()).to_fs()
 
-    assert len(payload["source_groups"]) == 2
+    assert len(payload["source_geometry"]["sources"]) == 2
     assert len(payload["receiver_groups"]) == 1
-    assert "frame" not in payload["source_groups"][0]["source"]
+    assert "frame" not in payload["source_geometry"]["sources"][0]
     assert "frame" not in payload["receiver_groups"][0]
     assert "sampling" not in payload["receiver_groups"][0]
     assert "surveys" not in payload
@@ -289,7 +289,7 @@ def test_dense_survey_preserves_units_and_coordinate_systems():
 
     payload = survey.to_acquisition(_device()).to_fs()
 
-    assert payload["source_groups"][0]["source"]["coordinates"] == {
+    assert payload["source_geometry"]["sources"][0]["coordinates"] == {
         "value": [0.5, 0.0],
         "units": "km",
         "system": "source_depth",

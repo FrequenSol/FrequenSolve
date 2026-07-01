@@ -354,7 +354,7 @@ def setup_complete_simulation(simulation):
 
     # Add acquisition
     acq = Acquisition()
-    acq.add_source_group(**ACQUISITION_PARAMS["source"])
+    acq.add_sources(**ACQUISITION_PARAMS["source"])
 
     # Set up receiver
     hydrophone = ReceiverNode(name=ACQUISITION_PARAMS["receivers"]["device"])
@@ -635,7 +635,7 @@ def test_acquisition_setup(simulation):
     acq = Acquisition()
 
     # Add source
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
 
     # Add receivers
     hydrophone = ReceiverNode(name="hydrophone")
@@ -647,7 +647,7 @@ def test_acquisition_setup(simulation):
     simulation += acq
 
     # Test acquisition setup
-    assert len(acq.source_groups) == 1
+    assert acq.source_field_count() == 1
     assert len(acq.receiver_groups) == 1
     assert acq.receiver_groups[0].name == "surface_hydrophones"
     assert len(acq.receiver_groups[0].device.components) == 1
@@ -655,7 +655,7 @@ def test_acquisition_setup(simulation):
     assert acq.receiver_groups[0].device.components[0].direction is None
 
     # Test source and receiver locations
-    source_coords = acq.source_groups[0].get_coordinates()
+    source_coords = acq.source_point_coords()
     receiver_coords = acq.receiver_groups[0].coordinates.get()
     assert source_coords.shape == (1, 2)
     assert receiver_coords.shape == (1001, 2)

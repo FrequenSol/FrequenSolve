@@ -9,6 +9,7 @@ from frequensolve.seismic.receivers import ReceiverNode
 from frequensolve.simulation.jobs import FrequencyDomainJob
 from frequensolve.simulation.outputs import WavefieldOutput
 from frequensolve.simulation.simulation import SeismicSimulation
+from frequensolve.units import ureg
 from frequensolve.validation import ValidationError
 
 
@@ -24,7 +25,7 @@ def _simple_job(
     source_coords = source_coords or [[0.5, 0.25]]
     receiver_coords = receiver_coords or [[0.25, 0.75], [0.75, 0.75]]
     acquisition = Acquisition()
-    acquisition.add_source_group(kind=source_kind, coords=source_coords)
+    acquisition.add_sources(kind=source_kind, coords=source_coords)
     device = ReceiverNode()
     device.add_component(name="component", field=receiver_field)
     acquisition.add_receiver_group("receivers", device, receiver_coords)
@@ -48,6 +49,44 @@ def _codes(report):
 
 def test_valid_job_has_clean_validation_report(tmp_path):
     job = _simple_job(tmp_path)
+
+    report = job.validate()
+
+    assert report.ok
+    assert report.issues == []
+
+
+def test_surface_carpet_on_surface_coordinates_validate_in_3d(tmp_path):
+    simulation = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=3,
+        project_path=tmp_path,
+    )
+    simulation.mesh = MeshManager(
+        HexMeshGenerator(
+            l_bound=[0.0, 0.0, -1.0],
+            u_bound=[1.0, 1.0, 1.0],
+            n=[1, 1, 1],
+        )
+    )
+    surface = simulation.model_surface("top")
+    device = ReceiverNode()
+    device.add_component(name="component", field="pressure")
+    acquisition = Acquisition()
+    acquisition.add_sources(
+        kind="scalar",
+        coords=surface.points_grid(x=[0.25, 0.75], y=[0.5]),
+    )
+    acquisition.add_receiver_carpet(
+        "surface",
+        device,
+        surface=surface,
+        x=[0.25, 0.75],
+        y=[0.5],
+    )
+    simulation.acquisition = acquisition
+    job = FrequencyDomainJob(name="freq", simulation=simulation, f_list=[10.0])
 
     report = job.validate()
 
@@ -90,15 +129,22 @@ def test_validation_catches_receiver_field_typos(tmp_path):
         job.validate(raise_errors=True)
 
 
-def test_validation_catches_bad_source_kind(tmp_path):
-    job = _simple_job(tmp_path, source_kind="moment")
+def test_validation_accepts_component_and_derived_field_selectors(tmp_path):
+    job = _simple_job(tmp_path, physics="elastic", receiver_field="velocity_z")
+    job += WavefieldOutput(
+        fields=["velocity_div", "velocity_curl", "strain_zz"],
+        dims=("z", "x"),
+        coords={"z": [0.0, 1.0], "x": [0.0, 1.0]},
+    )
 
     report = job.validate()
 
-    assert not report.ok
-    assert "acquisition.source.kind.unsupported" in _codes(report)
-    with pytest.raises(ValidationError, match="Use 'tensor'"):
-        job.validate(raise_errors=True)
+    assert report.ok
+
+
+def test_validation_catches_bad_source_kind(tmp_path):
+    with pytest.raises(ValueError, match="Unsupported source kind"):
+        _simple_job(tmp_path, source_kind="moment")
 
 
 def test_validation_catches_wavefield_grid_outside_domain(tmp_path):
@@ -150,6 +196,55 @@ def test_validation_accepts_grid_dimensions_from_registered_frame(tmp_path):
     assert report.ok
 
 
+def test_validation_accepts_fixed_axis_wavefield_plane_in_3d(tmp_path):
+    acquisition = Acquisition()
+    acquisition.add_sources(kind="scalar", coords=[[0.5, 0.5, 0.5]])
+    device = ReceiverNode()
+    device.add_component(name="component", field="pressure")
+    acquisition.add_receiver_group(
+        "receivers",
+        device,
+        [[0.25, 0.5, 0.75], [0.75, 0.5, 0.75]],
+    )
+
+    simulation = SeismicSimulation(
+        name="simple_3d",
+        physics="acoustic",
+        dimension=3,
+        project_path=tmp_path,
+    )
+    simulation.acquisition = acquisition
+    simulation.mesh = MeshManager(
+        HexMeshGenerator(
+            l_bound=[0.0, 0.0, 0.0],
+            u_bound=[1.0, 1.0, 1.0],
+            n=[1, 1, 1],
+            units="m",
+        )
+    )
+    simulation.add_coordinate_system(
+        CoordinateSystem.cartesian(
+            name="x0_plane",
+            axes=[Axis("z", "z"), Axis("y", "y")],
+            ndim=2,
+            fixed_axis="x",
+            fixed_value=0.5 * ureg.m,
+        )
+    )
+    job = FrequencyDomainJob(name="freq", simulation=simulation, f_list=[10.0])
+    job += WavefieldOutput(
+        field="pressure",
+        dims=("z", "y"),
+        coords={"z": [0.0, 1.0], "y": [0.0, 1.0]},
+        units="m",
+        system="x0_plane",
+    )
+
+    report = job.validate()
+
+    assert report.ok
+
+
 def test_validation_catches_invalid_coordinate_units(tmp_path):
     job = _simple_job(tmp_path)
     group = job.simulation.acquisition.receiver_groups[0]
@@ -159,6 +254,19 @@ def test_validation_catches_invalid_coordinate_units(tmp_path):
 
     assert not report.ok
     assert "acquisition.receiver_coordinates.units.invalid" in _codes(report)
+
+
+def test_validation_accepts_pint_unit_objects_in_coordinate_metadata(tmp_path):
+    job = _simple_job(tmp_path)
+    job.simulation.mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0.0, 0.0], u_bound=[1.0, 1.0], n=[1, 1], units="m")
+    )
+    group = job.simulation.acquisition.receiver_groups[0]
+    group.coordinates.units = ureg.meter
+
+    report = job.validate()
+
+    assert report.ok
 
 
 def test_validation_catches_wavefield_source_id_range(tmp_path):

@@ -107,6 +107,38 @@ def test_local_poll_reports_dask_pending_futures_as_running(monkeypatch):
     assert "pending" not in panel
 
 
+def test_local_poll_includes_already_current_tasks_in_progress(monkeypatch):
+    site, _closed = make_site(monkeypatch)
+    job = DummyJob()
+    job.n_tasks = 90
+    futures = [DummyFuture(), *[DummyFuture() for _ in range(70)]]
+    for future in futures[1:]:
+        future.status = "pending"
+    run = make_run(site, job, futures, shutdown_on_completion=False)
+    run.backend["task_plan"] = {
+        "current_tasks": list(range(1, 20)),
+        "pending_indices": list(range(19, 90)),
+        "reused_tasks": [],
+    }
+
+    status = site._poll_local_run(run)
+
+    assert status.message == (
+        "tasks: 20 successful, 0 failed, 70 running, 0 pending, 90 total"
+    )
+    assert status.raw["task_status"] == {
+        "successful": 20,
+        "succeeded": 20,
+        "failed": 0,
+        "running": 70,
+        "pending": 0,
+        "total": 90,
+        "current": 19,
+        "submitted_total": 71,
+        "includes_current_tasks": True,
+    }
+
+
 def test_local_poll_reports_finished_futures_without_failed_count(monkeypatch):
     site, _closed = make_site(monkeypatch)
     job = DummyJob()
@@ -206,13 +238,13 @@ def test_run_task_supports_solver_pack_mode(monkeypatch, tmp_path):
         "/solver",
         "-nthreads",
         "2",
-        "-j",
+        "--job",
         str(job_file),
         "--pack",
     ]
     assert (tmp_path / "logs" / "pack.log").read_text() == (
         f"[INFO] {local_module.logger.name}: Executing: "
-        f"/solver -nthreads 2 -j {job_file} --pack\n"
+        f"/solver -nthreads 2 --job {job_file} --pack\n"
         "solver output\n"
     )
 
@@ -239,10 +271,10 @@ def test_run_task_adds_fresh_flag(monkeypatch, tmp_path):
         "/solver",
         "-nthreads",
         "1",
-        "-j",
+        "--job",
         str(job_file),
         "--fresh",
-        "-i",
+        "--task",
         "1",
     ]
 
@@ -357,10 +389,132 @@ def test_submit_local_tasks_captures_mesh_log(monkeypatch, tmp_path):
 
     assert isinstance(submission, local_module.LocalTaskSubmission)
     assert submissions[0]["task_id"] == local_module.MESH_TASK_ID
+    assert submissions[0]["kwargs"]["n_threads"] == 2
+    assert submissions[0]["kwargs"]["resources"] == {"CPU": 2}
     assert submissions[0]["kwargs"]["stdout_dir"] == str(tmp_path / "logs")
     assert submissions[1]["task_id"] == 0
     assert submissions[1]["kwargs"]["stdout_dir"] == str(tmp_path / "logs")
     assert not (tmp_path / "logs" / "mesh.log").exists()
+
+
+def test_submit_local_tasks_runs_init_with_all_auto_threads(monkeypatch, tmp_path):
+    site, _closed = make_site(monkeypatch)
+    site.executable = "/solver"
+    site.config.cores = 8
+    site.config.memory = 8000
+    submissions = []
+    initialized = []
+    closed = []
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            submissions.append({"task_id": task_id, "kwargs": kwargs})
+            return DummyFuture({"task_id": task_id, "status": "success"})
+
+    def fake_initialize(n_workers=None):
+        initialized.append(n_workers)
+        (
+            site._active_n_workers,
+            site._active_threads_per_worker,
+            site._active_memory_per_worker,
+        ) = site._cluster_settings(n_workers)
+        site._dask_client = FakeClient()
+
+    def fake_close(**kwargs):
+        closed.append(kwargs)
+        site._dask_client = None
+        site._active_n_workers = None
+        site._active_threads_per_worker = None
+        site._active_memory_per_worker = None
+
+    class FakeJob(DummyJob):
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def save(self):
+            return self._file
+
+        def task_run_plan(self, reuse=True, force=False):
+            return {
+                "pending_indices": [0, 1, 2, 3],
+                "current_tasks": [],
+                "reused_tasks": [],
+            }
+
+    site.close = fake_close
+    monkeypatch.setattr(site, "_initialize_dask", fake_initialize)
+
+    site._submit_local_tasks(FakeJob())
+
+    assert initialized == [1, 4]
+    assert closed == [{"wait": True, "retire": True}]
+    assert submissions[0]["task_id"] == local_module.MESH_TASK_ID
+    assert submissions[0]["kwargs"]["n_threads"] == 8
+    assert submissions[0]["kwargs"]["resources"] == {"CPU": 8}
+    assert [item["kwargs"]["n_threads"] for item in submissions[1:]] == [2, 2, 2, 2]
+
+
+def test_submit_local_tasks_preserves_explicit_n_workers(monkeypatch, tmp_path):
+    site, _closed = make_site(monkeypatch)
+    site.executable = "/solver"
+    site.n_workers = 4
+    site.config.cores = 8
+    submissions = []
+    initialized = []
+    closed = []
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            submissions.append({"task_id": task_id, "kwargs": kwargs})
+            return DummyFuture({"task_id": task_id, "status": "success"})
+
+    def fake_initialize(n_workers=None):
+        initialized.append(n_workers)
+        (
+            site._active_n_workers,
+            site._active_threads_per_worker,
+            site._active_memory_per_worker,
+        ) = site._cluster_settings(n_workers)
+        site._dask_client = FakeClient()
+
+    def fake_close(**kwargs):
+        closed.append(kwargs)
+        site._dask_client = None
+        site._active_n_workers = None
+        site._active_threads_per_worker = None
+        site._active_memory_per_worker = None
+
+    class FakeJob(DummyJob):
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def save(self):
+            return self._file
+
+        def task_run_plan(self, reuse=True, force=False):
+            return {
+                "pending_indices": [0, 1],
+                "current_tasks": [],
+                "reused_tasks": [],
+            }
+
+    site.close = fake_close
+    monkeypatch.setattr(site, "_initialize_dask", fake_initialize)
+
+    site._submit_local_tasks(FakeJob())
+
+    assert initialized == [4]
+    assert closed == []
+    assert site._active_n_workers == 4
+    assert submissions[0]["task_id"] == local_module.MESH_TASK_ID
+    assert submissions[0]["kwargs"]["n_threads"] == 2
+    assert [item["kwargs"]["n_threads"] for item in submissions[1:]] == [2, 2]
 
 
 def test_submit_local_tasks_force_run_disables_reuse_and_passes_fresh(
@@ -728,6 +882,33 @@ def test_local_wait_reports_failed_frequency_tasks_without_failing_run(
         {"task_id": 1, "status": "error", "complete": True}
     ]
     assert closed == [{"wait": True, "retire": True}]
+
+
+def test_local_wait_fails_when_frequency_failures_exceed_tolerance(
+    monkeypatch, tmp_path
+):
+    site, _closed = make_site(monkeypatch)
+    job = DummyJob()
+    job._file = tmp_path / "job.json"
+    job._stdout_path = tmp_path / "logs"
+    futures = [
+        DummyFuture({"task_id": 0, "status": "success", "complete": True}),
+        DummyFuture({"task_id": 1, "status": "error", "complete": True}),
+    ]
+    run = make_run(site, job, futures)
+    run.backend["pack_after_tasks"] = False
+    run.backend["tolerate_failures"] = 0
+
+    monkeypatch.setattr(
+        local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
+    )
+
+    result = site._wait_local_run(run)
+
+    assert result.status.state == "failed"
+    assert "failure tolerance exceeded" in result.status.message
+    assert result.status.raw["tolerate_failures"] == 0
+    assert job.states[-1][0] == "failed"
 
 
 def test_local_wait_keeps_successful_solve_completed_when_pack_fails(

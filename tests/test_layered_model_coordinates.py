@@ -13,16 +13,52 @@ from frequensolve.mesh.mesh_generators import LayeredMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.model.layered import (
     Borehole,
+    BoreholeAnnularPadding,
     BoreholeLayer,
     BoreholePart,
     BoreholePlug,
     BoreholeSurface,
     Fracture,
     LayeredModel,
+    dipping_plane_2d,
+    dipping_plane_3d,
 )
 from frequensolve.model.model import ModelSubdomain
 from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.units import ureg as u
+
+
+def test_dipping_plane_2d_samples_depth_along_dip():
+    plane = dipping_plane_2d(
+        point={"x": 0.0, "z": 10.0},
+        dip=45.0,
+        x=[0.0, 1.0],
+        units="m",
+        name="interface",
+    )
+
+    assert plane.name == "interface"
+    assert plane.dims == ("x",)
+    assert plane.attrs["units"] == "m"
+    assert plane.coords["x"].attrs["units"] == "m"
+    np.testing.assert_allclose(plane.values, [10.0, 11.0])
+
+
+def test_dipping_plane_3d_samples_depth_from_strike_and_dip():
+    plane = dipping_plane_3d(
+        point=(0.0, 0.0, 10.0),
+        dip=45.0,
+        strike=0.0,
+        x=[0.0, 1.0],
+        y=[0.0, 2.0],
+        units="m",
+    )
+
+    assert plane.dims == ("x", "y")
+    assert plane.attrs["units"] == "m"
+    assert plane.coords["x"].attrs["units"] == "m"
+    assert plane.coords["y"].attrs["units"] == "m"
+    np.testing.assert_allclose(plane.values, [[10.0, 10.0], [11.0, 11.0]])
 
 
 def test_layered_model_exports_units_and_coordinate_systems():
@@ -832,17 +868,176 @@ def test_borehole_builder_requires_closing_pending_layer():
         model.to_fs()
 
 
-def test_layered_model_rejects_boreholes_outside_current_2d_contract():
+def test_layered_model_requires_y_for_3d_boreholes():
     model = LayeredModel(dimension=3, x_limits=[0.0, 1.0], y_limits=[0.0, 1.0])
     model.add_surface(name="top", depth=0.0)
     model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
     model.add_surface(name="bottom", depth=0.5)
 
-    with pytest.raises(ValueError, match="2D"):
+    with pytest.raises(ValueError, match="axis/y"):
         model.add_borehole(
             name="bh1",
             x=0.45,
             parts=[{"mesh_block_id": 20, "r": 0.035}],
+        )
+
+
+def test_layered_model_exports_3d_borehole_meshing_contract():
+    model = LayeredModel(
+        dimension=3,
+        x_limits=[0.0, 1.0],
+        y_limits=[0.0, 1.0],
+    )
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+
+    model.add_borehole(
+        name="bh1",
+        x=0.45,
+        y=0.55,
+        surfaces=[
+            BoreholeSurface("fluid_refine", r=0.025),
+            BoreholeSurface("fluid_wall", r=0.035),
+        ],
+        layers=[
+            {
+                "name": "fluid",
+                "outer_surface": "fluid_wall",
+                "physics": "acoustic",
+                "properties": {"Vp": 1.48},
+            }
+        ],
+        annular_padding={
+            "n": 3,
+            "outer_radius": 0.2 * u.m,
+            "power": 1.5,
+        },
+    )
+
+    payload = model.to_fs()
+
+    assert payload["boreholes"] == [
+        {
+            "name": "bh1",
+            "axis": {"x": 0.45, "y": 0.55},
+            "extent": {
+                "top": {"surface": "top"},
+                "bottom": {"surface": "bottom"},
+            },
+            "layers": [
+                {
+                    "name": "fluid",
+                    "mesh_block_id": 2,
+                    "outer_surface": "fluid_wall",
+                }
+            ],
+            "surfaces": [
+                {
+                    "name": "fluid_refine",
+                    "r": {"value": 0.025},
+                },
+                {
+                    "name": "fluid_wall",
+                    "r": {"value": 0.035},
+                },
+            ],
+            "annular_padding": {
+                "n": 3,
+                "outer_radius": {"value": 0.2, "units": "m"},
+                "power": 1.5,
+            },
+        }
+    ]
+    assert LayeredModel.from_fs(payload).to_fs()["boreholes"] == payload["boreholes"]
+
+
+def test_borehole_annular_padding_validates_and_serializes_units():
+    padding = BoreholeAnnularPadding(
+        n=2,
+        outer_radius={"value": 20.0, "units": u.cm},
+    )
+
+    assert padding.to_fs() == {
+        "n": 2,
+        "outer_radius": {"value": 20.0, "units": "cm"},
+        "power": 1.0,
+    }
+
+
+def test_layered_model_rejects_invalid_annular_padding():
+    model = LayeredModel(
+        dimension=3,
+        x_limits=[0.0, 1.0],
+        y_limits=[0.0, 1.0],
+    )
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+
+    with pytest.raises(
+        ValueError,
+        match="annular_padding/outer_radius must be positive",
+    ):
+        model.add_borehole(
+            name="bh1",
+            x=0.45,
+            y=0.55,
+            parts=[
+                {
+                    "mesh_block_id": 1,
+                    "r": 0.035,
+                }
+            ],
+            annular_padding={"n": 2},
+        )
+
+
+def test_layered_model_rejects_2d_annular_padding():
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+
+    with pytest.raises(ValueError, match="3D boreholes only"):
+        model.add_borehole(
+            name="bh1",
+            x=0.45,
+            parts=[
+                {
+                    "mesh_block_id": 1,
+                    "r": 0.035,
+                }
+            ],
+            annular_padding={"n": 1, "outer_radius": 0.08},
+        )
+
+
+def test_layered_model_rejects_plugs_for_3d_boreholes():
+    model = LayeredModel(dimension=3, x_limits=[0.0, 1.0], y_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+
+    with pytest.raises(ValueError, match="does not support plugs"):
+        model.add_borehole(
+            name="bh1",
+            x=0.45,
+            y=0.55,
+            parts=[
+                {
+                    "mesh_block_id": 1,
+                    "r": 0.035,
+                }
+            ],
+            plugs=[
+                {
+                    "top": 0.1,
+                    "bottom": 0.2,
+                    "mesh_block_id": 1,
+                    "r": 0.01,
+                }
+            ],
         )
 
 
@@ -898,9 +1093,9 @@ def test_borehole_part_exports_variable_radius_profile():
     part = BoreholePart(name="fluid", mesh_block_id=20, r=radius)
 
     assert part.to_fs()["r"] == {
-        "value": [0.035, 0.04],
+        "data": [0.035, 0.04],
         "dims": ["z"],
-        "coords": {"z": {"value": [0.0, 0.5], "units": "km"}},
+        "coords": {"z": {"data": [0.0, 0.5], "units": "km"}},
         "units": "m",
     }
 
@@ -989,6 +1184,20 @@ def test_layered_mesh_generator_exports_borehole_spacing_controls():
         LayeredMeshGenerator.from_fs(payload).to_fs()["horizontal_spacing"]
         == payload["horizontal_spacing"]
     )
+
+
+def test_layered_mesh_generator_accepts_unit_bearing_bounds():
+    mesh = LayeredMeshGenerator(
+        l_bound=[0.0 * u.m, 0.0 * u.m],
+        u_bound=[100.0 * u.cm, 2.0 * u.m],
+        n=[4, 8],
+    )
+
+    payload = mesh.to_fs()
+
+    assert payload["l_bound"] == [0.0, 0.0]
+    assert payload["u_bound"] == [1.0, 2.0]
+    assert payload["units"] == "m"
 
 
 def test_layered_model_samples_physical_grid_without_reference_remap():
