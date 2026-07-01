@@ -6,6 +6,10 @@ All notable changes to FrequenSolve will be documented in this file.
 Unreleased
 ----------
 
+Added
+~~~~~
+- Added Python authoring support for borehole-level 3D annular padding.
+
 Changed
 ~~~~~~~
 - Switched CI and release documentation to the ``pyproject.toml``/setuptools
@@ -13,6 +17,8 @@ Changed
 - Added GitHub Actions release publishing for TestPyPI and PyPI via Trusted
   Publishing.
 - Moved orchestration helper modules into ``frequensolve.orchestrator.utils``.
+- Renamed the documented Dask/SLURM optional extra from ``parallel`` to
+  ``hpc`` while keeping ``parallel`` as an install alias.
 
 Removed
 ~~~~~~~

@@ -29,7 +29,7 @@ Install extras for the workflows you need:
 .. code-block:: bash
 
    python -m pip install "frequensolve[visual]"      # plotting, VTK/PyVista helpers
-   python -m pip install "frequensolve[parallel]"    # Dask, SSH, and SLURM helpers
+   python -m pip install "frequensolve[hpc]"         # Dask, SSH, and SLURM helpers
    python -m pip install "frequensolve[cloud]"       # FrequenSol cloud backend
    python -m pip install "frequensolve[seismic-io]"  # SEG-Y/ASDF export helpers
    python -m pip install "frequensolve[dev,docs]"    # tests and documentation builds
@@ -57,7 +57,7 @@ jobs, configure one of the supported sites:
    * - ``AWSSite``
      - FrequenSol cloud access and the ``cloud`` extra.
    * - ``SlurmSite`` / ``Stampede3Site``
-     - SSH/SLURM access, the ``parallel`` extra, and a solver installation on the cluster.
+     - SSH/SLURM access, the ``hpc`` extra, and a solver installation on the cluster.
 
 The notebooks in :doc:`tutorials/index` use strict run cells. If the selected
 site is not configured or the solver is unavailable, the cell should fail and

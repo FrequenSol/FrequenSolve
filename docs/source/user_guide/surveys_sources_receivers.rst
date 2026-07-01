@@ -78,7 +78,7 @@ chooses efficient internal source batches automatically:
 .. code-block:: python
 
    acq = fs.Acquisition()
-   acq.add_source_group(
+   acq.add_sources(
        kind="scalar",
        coords=[[0.25, 0.05], [0.5, 0.05], [0.75, 0.05]],
    )
@@ -99,7 +99,7 @@ Sparse surveys select a subset or define rules such as offset windows:
    )
 
    acq = fs.Acquisition()
-   acq.add_source_group(kind="scalar", coords=sources)
+   acq.add_sources(kind="scalar", coords=sources)
    acq.add_sparse_receiver_group(
        "near_offsets",
        node,

@@ -15,7 +15,7 @@ python -m pip install frequensolve
 Install optional capabilities only when needed:
 
 ```bash
-python -m pip install "frequensolve[parallel]"    # SLURM/SSH/Dask helpers
+python -m pip install "frequensolve[hpc]"         # SLURM/SSH/Dask helpers
 python -m pip install "frequensolve[fast-fft]"    # pyFFTW acceleration
 python -m pip install "frequensolve[cloud]"       # FrequenSol cloud backend
 python -m pip install "frequensolve[seismic-io]"  # SEG-Y/ASDF and seismic I/O

@@ -20,7 +20,7 @@ Development Setup
 
       python -m venv .venv
       . .venv/bin/activate
-      python -m pip install -e ".[dev,docs,parallel]"
+      python -m pip install -e ".[dev,docs,hpc]"
 
 Code Style
 ----------

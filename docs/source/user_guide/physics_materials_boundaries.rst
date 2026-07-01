@@ -172,7 +172,7 @@ PML is not authored as an extra material layer. When a boundary is marked
 boundary. ``pml_wavelengths`` specifies the width in wavelengths, so the
 physical PML thickness is frequency-dependent: lower frequencies produce wider
 physical PMLs for the same setting, and higher frequencies produce thinner
-ones. ``pml_reflection`` defaults to ``1e-3`` unless supplied explicitly. For
+ones. ``pml_reflectivity`` defaults to ``1e-2`` unless supplied explicitly. For
 conditioning, prefer increasing ``pml_wavelengths`` before making the
 reflection target extremely small.
 
