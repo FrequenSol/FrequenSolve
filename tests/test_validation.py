@@ -6,6 +6,7 @@ from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverNode
+from frequensolve.seismic.sources import SourceGeometry
 from frequensolve.simulation.jobs import FrequencyDomainJob
 from frequensolve.simulation.outputs import WavefieldOutput
 from frequensolve.simulation.simulation import SeismicSimulation
@@ -282,6 +283,26 @@ def test_validation_catches_wavefield_source_id_range(tmp_path):
 
     assert not report.ok
     assert "outputs.source_id.out_of_range" in _codes(report)
+
+
+def test_validation_skips_source_range_when_external_count_unknown(tmp_path):
+    job = _simple_job(tmp_path)
+    job.simulation.acquisition.sources = SourceGeometry.hdf5(
+        "sources.h5",
+        dataset="source_points",
+        kind="scalar",
+    )
+    job += WavefieldOutput(
+        field="pressure",
+        dims=("z", "r"),
+        coords={"z": [0.0, 1.0], "r": [0.0, 1.0]},
+        sources=[2],
+    )
+
+    report = job.validate()
+
+    assert report.ok
+    assert "outputs.source_id.out_of_range" not in _codes(report)
 
 
 def test_site_prepare_job_blocks_invalid_jobs_before_submit(tmp_path):

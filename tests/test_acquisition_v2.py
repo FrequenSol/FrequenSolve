@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 import frequensolve as fs
 
@@ -80,6 +81,67 @@ def test_named_source_encoding_exports_sparse_complex_terms():
     assert acq.source_field_ids() == [1]
     assert acq.source_field_names() == ["distributed_001"]
     assert acq.source_coords().tolist() == [[0.05, 0.1]]
+
+
+def test_hdf5_source_geometry_count_is_optional_and_roundtrips():
+    unknown = fs.Acquisition(
+        sources=fs.SourceGeometry.hdf5(
+            "sources.h5",
+            dataset="source_points",
+            kind="scalar",
+        )
+    )
+
+    assert unknown.known_source_field_count() is None
+    assert unknown.source_field_count() == 0
+    assert unknown.source_field_ids() == []
+
+    counted = fs.Acquisition(
+        sources=fs.SourceGeometry.hdf5(
+            "sources.h5",
+            dataset="source_points",
+            kind="scalar",
+            count=3,
+        )
+    )
+
+    payload = counted.to_fs()
+    loaded = fs.Acquisition.from_fs(payload)
+
+    assert payload["source_geometry"]["count"] == 3
+    assert loaded.known_source_field_count() == 3
+    assert loaded.source_field_ids() == [1, 2, 3]
+
+
+def test_hdf5_source_encoding_count_is_optional_and_roundtrips():
+    acq = fs.Acquisition(
+        sources=fs.SourceGeometry.points(kind="scalar", coords=[[0.0, 0.0]]),
+        source_encoding=fs.SourceEncoding.hdf5(
+            "rhs.h5",
+            dataset="encoded_sources",
+            count=2,
+        ),
+    )
+
+    payload = acq.to_fs()
+    loaded = fs.Acquisition.from_fs(payload)
+
+    assert payload["source_encoding"]["count"] == 2
+    assert loaded.known_source_field_count() == 2
+    assert loaded.source_field_ids() == [1, 2]
+
+
+def test_external_source_counts_must_be_positive():
+    with pytest.raises(ValueError, match="source geometry count must be >= 1"):
+        fs.SourceGeometry.hdf5(
+            "sources.h5",
+            dataset="source_points",
+            kind="scalar",
+            count=0,
+        )
+
+    with pytest.raises(ValueError, match="source encoding count must be >= 1"):
+        fs.SourceEncoding.hdf5("rhs.h5", dataset="encoded_sources", count=0)
 
 
 def test_dense_source_encoding_accepts_source_major_matrix():

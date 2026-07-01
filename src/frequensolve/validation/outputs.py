@@ -63,8 +63,8 @@ def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) ->
         )
     acquisition = getattr(ctx.simulation, "acquisition", None)
     source_count = (
-        acquisition.source_field_count()
-        if acquisition is not None and hasattr(acquisition, "source_field_count")
+        acquisition.known_source_field_count()
+        if acquisition is not None and hasattr(acquisition, "known_source_field_count")
         else 0
     )
     for index, output in enumerate(outputs.paraview):
@@ -88,7 +88,7 @@ def _validate_output_units(units: Any, report: ValidationReport) -> None:
 def _validate_paraview_output(
     output: ParaviewOutput,
     index: int,
-    source_count: int,
+    source_count: Optional[int],
     ctx: _ValidationContext,
 ) -> None:
     path = f"outputs.paraview[{index}]"
@@ -174,7 +174,7 @@ def _validate_paraview_item(
 def _validate_wavefield_output(
     output: WavefieldOutput,
     index: int,
-    source_count: int,
+    source_count: Optional[int],
     ctx: _ValidationContext,
 ) -> None:
     path = f"outputs.wavefields[{index}]"
@@ -283,7 +283,7 @@ def _validate_requested_properties(
 
 def _validate_source_id(
     source_id: Any,
-    source_count: int,
+    source_count: Optional[int],
     path: str,
     report: ValidationReport,
 ) -> None:
@@ -303,7 +303,7 @@ def _validate_source_id(
             path=path,
         )
         return
-    if source_count and value > source_count:
+    if source_count is not None and value > source_count:
         report.error(
             "outputs.source_id.out_of_range",
             f"Source id {value} is outside the available source range 1.."

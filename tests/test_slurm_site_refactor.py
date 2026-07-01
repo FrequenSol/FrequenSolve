@@ -885,6 +885,8 @@ def test_adaptive_slurm_script_renders_pending_task_indices(monkeypatch):
     assert "task_indices_json='[2, 5]'" in script
     assert 'FS_TASK_INDICES="$task_indices_json"' in script
     assert "FS_SKIP_SIZING=0" in script
+    assert "--job $job_file" in script
+    assert '"--task", str(task_id)' in script
 
 
 def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):

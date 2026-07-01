@@ -8,6 +8,7 @@ from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
+from frequensolve.seismic.sources import SourceGeometry
 from frequensolve.simulation.jobs import BaseJob
 from frequensolve.simulation.jobs.fwi import DataSpace, ModelSpace
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
@@ -96,6 +97,29 @@ def test_data_space_packs_trace_groups_in_frequency_source_component_receiver_or
         "receiver",
     )
     assert roundtrip["surface"].coords["component"].values.tolist() == ["vz"]
+
+
+def test_data_space_requires_known_external_source_count(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    sim.acquisition.sources = SourceGeometry.hdf5(
+        "sources.h5",
+        dataset="source_points",
+        kind="vector",
+    )
+
+    with pytest.raises(ValueError, match="known source field count"):
+        DataSpace.from_simulation(sim, frequencies=[5.0])
+
+    sim.acquisition.sources = SourceGeometry.hdf5(
+        "sources.h5",
+        dataset="source_points",
+        kind="vector",
+        count=2,
+    )
+
+    space = DataSpace.from_simulation(sim, frequencies=[5.0])
+
+    assert space.segments[0].sources == (1, 2)
 
 
 def test_natural_imaging_syntax_serializes_to_legacy_solver_contract(tmp_path):

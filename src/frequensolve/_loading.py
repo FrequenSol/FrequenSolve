@@ -30,7 +30,11 @@ def load(source: Any, *, kind: Optional[str] = None, **kwargs) -> Any:
 
         return BaseJob.load(source, **kwargs)
 
-    path = _json_file_from_source(source)
+    path = Path(source).expanduser().resolve()
+    if _is_trace_store_path(path):
+        return _load_with_kind(path, "traces", **kwargs)
+
+    path = _json_file_from_source(path)
     data = _read_json(path)
 
     if _is_job_payload(data):
@@ -112,6 +116,18 @@ def _json_file_from_source(source: Union[str, Path]) -> Path:
             f"Multiple JSON files found in {path}; specify one explicitly: {names}"
         )
     return path
+
+
+def _is_trace_store_path(path: Path) -> bool:
+    if not path.is_file() or path.suffix.lower() not in {".h5", ".hdf5", ".hdf"}:
+        return False
+    try:
+        from frequensolve.seismic.trace_store import TraceStore
+
+        TraceStore._read_trace_frequencies(path)
+        return bool(TraceStore.discover_trace_groups(path))
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
 
 
 def _read_json(path: Path) -> dict[str, Any]:

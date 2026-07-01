@@ -418,20 +418,28 @@ class Acquisition(ExtraFieldsMixin):
                 field_list.append(f"{group.name}:{field_obj.name}")
         return field_list
 
-    def source_field_count(self) -> int:
-        """Return the number of addressable RHS/source fields, when known."""
+    def known_source_field_count(self) -> Optional[int]:
+        """Return known addressable RHS/source-field count, or ``None``."""
 
         if self.source_encoding is not None:
-            count = self.source_encoding.field_count
-            return int(count or 0)
+            return self.source_encoding.field_count
         if self.sources is None:
             return 0
-        return int(self.sources.point_count or 0)
+        return self.sources.point_count
+
+    def source_field_count(self) -> int:
+        """Return source-field count, using 0 when external metadata is unknown."""
+
+        count = self.known_source_field_count()
+        return int(count or 0)
 
     def source_field_ids(self) -> List[int]:
-        """Return one-based source-field ids."""
+        """Return one-based source-field ids when the count is known."""
 
-        return list(range(1, self.source_field_count() + 1))
+        count = self.known_source_field_count()
+        if count is None:
+            return []
+        return list(range(1, int(count) + 1))
 
     def source_field_names(self) -> List[str]:
         """Return source-field names when known."""

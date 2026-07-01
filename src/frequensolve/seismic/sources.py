@@ -282,6 +282,7 @@ class SourceGeometry(ExtraFieldsMixin):
     source_file: Optional[Union[str, Path]]
     system: Optional[str]
     units: Optional[Any]
+    count: Optional[int]
     defaults: Dict[str, Any]
     extra: Dict[str, Any]
 
@@ -298,6 +299,7 @@ class SourceGeometry(ExtraFieldsMixin):
         source_file: Optional[Union[str, Path]] = None,
         system: Optional[str] = None,
         units: Optional[Any] = None,
+        count: Optional[int] = None,
         defaults: Optional[Mapping[str, Any]] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
@@ -312,6 +314,7 @@ class SourceGeometry(ExtraFieldsMixin):
         self.source_file = source_file
         self.system = system
         self.units = units
+        self.count = None if count is None else int(count)
         self.defaults = copy.deepcopy(dict(defaults or {}))
         self._init_extra(extra, **kwargs)
         self._validate()
@@ -391,6 +394,7 @@ class SourceGeometry(ExtraFieldsMixin):
         domain: Optional[int] = None,
         system: Optional[str] = None,
         units: Optional[Any] = None,
+        count: Optional[int] = None,
         defaults: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> "SourceGeometry":
@@ -405,6 +409,7 @@ class SourceGeometry(ExtraFieldsMixin):
             dataset=dataset,
             system=system,
             units=units,
+            count=count,
             defaults=defaults,
             **kwargs,
         )
@@ -419,6 +424,7 @@ class SourceGeometry(ExtraFieldsMixin):
         domain: Optional[int] = None,
         system: Optional[str] = None,
         units: Optional[Any] = None,
+        count: Optional[int] = None,
         defaults: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> "SourceGeometry":
@@ -432,6 +438,7 @@ class SourceGeometry(ExtraFieldsMixin):
             source_file=source_file,
             system=system,
             units=units,
+            count=count,
             defaults=defaults,
             **kwargs,
         )
@@ -452,6 +459,7 @@ class SourceGeometry(ExtraFieldsMixin):
             source_file=payload.pop("source_file", None),
             system=payload.pop("system", None),
             units=payload.pop("units", None),
+            count=payload.pop("count", payload.pop("source_count", None)),
             defaults=payload.pop("defaults", None),
             extra=payload,
         )
@@ -471,6 +479,8 @@ class SourceGeometry(ExtraFieldsMixin):
                 raise ValueError("HDF5 source geometry requires file and dataset")
         elif not self.source_file:
             raise ValueError("SPS source geometry requires source_file")
+        if self.count is not None and self.count < 1:
+            raise ValueError("source geometry count must be >= 1")
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -490,18 +500,22 @@ class SourceGeometry(ExtraFieldsMixin):
                 payload["system"] = self.system
             if self.units is not None:
                 payload["units"] = unit_expression(self.units)
+            if self.count is not None:
+                payload["count"] = self.count
         else:
             payload["source_file"] = _path_to_fs(self.source_file, ctx)
             if self.system is not None:
                 payload["system"] = self.system
             if self.units is not None:
                 payload["units"] = unit_expression(self.units)
+            if self.count is not None:
+                payload["count"] = self.count
         return merge_extra(payload, self.extra, "SourceGeometry")
 
     @property
     def point_count(self) -> Optional[int]:
         if self.geometry_type != "Inline":
-            return None
+            return self.count
         return len(self.sources)
 
     def point_names(self) -> List[str]:
@@ -622,6 +636,7 @@ class SourceEncoding(ExtraFieldsMixin):
     dataset: Optional[str]
     field_names_dataset: Optional[str]
     reference_coordinates_dataset: Optional[str]
+    count: Optional[int]
     extra: Dict[str, Any]
 
     def __init__(
@@ -634,6 +649,7 @@ class SourceEncoding(ExtraFieldsMixin):
         dataset: Optional[str] = None,
         field_names_dataset: Optional[str] = None,
         reference_coordinates_dataset: Optional[str] = None,
+        count: Optional[int] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
@@ -644,6 +660,7 @@ class SourceEncoding(ExtraFieldsMixin):
         self.dataset = dataset
         self.field_names_dataset = field_names_dataset
         self.reference_coordinates_dataset = reference_coordinates_dataset
+        self.count = None if count is None else int(count)
         self._init_extra(extra, **kwargs)
         self._validate()
 
@@ -729,6 +746,7 @@ class SourceEncoding(ExtraFieldsMixin):
         name: Optional[str] = None,
         field_names_dataset: Optional[str] = None,
         reference_coordinates_dataset: Optional[str] = None,
+        count: Optional[int] = None,
         **kwargs: Any,
     ) -> "SourceEncoding":
         """Create HDF5 dense source encoding."""
@@ -740,13 +758,16 @@ class SourceEncoding(ExtraFieldsMixin):
             dataset=dataset,
             field_names_dataset=field_names_dataset,
             reference_coordinates_dataset=reference_coordinates_dataset,
+            count=count,
             **kwargs,
         )
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "SourceEncoding":
         payload = copy.deepcopy(dict(data))
-        encoding_type = payload.pop("_type", payload.pop("encoding_type"))
+        encoding_type = payload.pop("_type", payload.pop("encoding_type", None))
+        if encoding_type is None:
+            raise ValueError("SourceEncoding payload requires _type or encoding_type")
         if encoding_type == "Named":
             fields = [
                 DistributedSource.from_named_fs(field)
@@ -769,6 +790,7 @@ class SourceEncoding(ExtraFieldsMixin):
             reference_coordinates_dataset=payload.pop(
                 "reference_coordinates_dataset", None
             ),
+            count=payload.pop("count", payload.pop("field_count", None)),
             extra=payload,
         )
 
@@ -783,6 +805,8 @@ class SourceEncoding(ExtraFieldsMixin):
             self.file is None or not self.dataset
         ):
             raise ValueError("HDF5Dense source encoding requires file and dataset")
+        if self.count is not None and self.count < 1:
+            raise ValueError("source encoding count must be >= 1")
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -802,12 +826,14 @@ class SourceEncoding(ExtraFieldsMixin):
                 payload["reference_coordinates_dataset"] = (
                     self.reference_coordinates_dataset
                 )
+            if self.count is not None:
+                payload["count"] = self.count
         return merge_extra(payload, self.extra, "SourceEncoding")
 
     @property
     def field_count(self) -> Optional[int]:
         if self.encoding_type == "HDF5Dense":
-            return None
+            return self.count
         return len(self.fields)
 
     def field_names(self) -> List[str]:

@@ -64,6 +64,28 @@ def test_generic_load_dispatches_saved_project_job_and_simulation(tmp_path):
     assert loaded_job.simulation.name == sim.name
 
 
+def test_generic_load_infers_trace_store(tmp_path):
+    trace_file = tmp_path / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(trace_file, "w") as h5:
+        h5.create_dataset("frequency", data=np.array([10.0]))
+        dset = h5.create_dataset(
+            "surface",
+            data=np.zeros((1, 1, 1, 1), dtype=np.float32),
+        )
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.array([101], dtype=np.int32)
+        dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([1], dtype=np.int32)
+
+    traces = fs.load(trace_file)
+
+    assert isinstance(traces, TraceDataset)
+    assert traces.manifest.groups == ["surface"]
+    assert traces.manifest.frequencies == {1: 10.0}
+
+
 def test_project_save_serializes_solver_hp_sympy_policy(tmp_path):
     project = Project(name="project", path=tmp_path / "project")
     sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)

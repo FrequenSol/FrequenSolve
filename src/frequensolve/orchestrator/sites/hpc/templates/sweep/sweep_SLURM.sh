@@ -70,12 +70,12 @@ n_workers=$((n_procs / procs_per_task))
 
 start_time=$(date +%s)
 
-$mpi_exec -n $n_procs $executable $n_threads -j $input_file $fresh_flag --init
+$mpi_exec -n $n_procs $executable $n_threads --job $input_file $fresh_flag --init
 
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
-   echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file $fresh_flag -i $i"
-   $mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file $fresh_flag -i $i >> $dir_out/task_${i}.log 2>&1 &
+   echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads --job $input_file $fresh_flag --task $i"
+   $mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads --job $input_file $fresh_flag --task $i >> $dir_out/task_${i}.log 2>&1 &
    if [[ $((($i - 1) % n_workers)) -eq $((n_workers - 1)) ]]; then
       wait
       echo "Group done"
@@ -84,12 +84,12 @@ done
 wait
 
 {% if imaging_job %}
-$executable -j $input_file $fresh_flag --smooth
+$executable --job $input_file $fresh_flag --smooth
 {% endif %}
 
 {% if pack_job %}
-echo "$executable -nthreads $n_threads -j $input_file $fresh_flag --pack"
-$executable -nthreads $n_threads -j $input_file $fresh_flag --pack >> $dir_out/pack.log 2>&1 || {
+echo "$executable -nthreads $n_threads --job $input_file $fresh_flag --pack"
+$executable -nthreads $n_threads --job $input_file $fresh_flag --pack >> $dir_out/pack.log 2>&1 || {
    rc=$?
    echo "Packing step failed with exit code $rc"
    exit $rc
@@ -120,9 +120,9 @@ $executable -nthreads $n_threads -j $input_file $fresh_flag --pack >> $dir_out/p
 #    slot=${allowed[$(( launched % n_active ))]}
 #    off=$(( procs_per_task * slot ))
 
-#    echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads -j $input_file -i $i"
+#    echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads --job $input_file --task $i"
 #    $mpi_exec -n "$procs_per_task" -o "$off" task_affinity "$executable" \
-#       -nthreads "$n_threads" -j "$input_file" -i "$i" >> "$dir_out/task_${i}.txt" 2>&1 &
+#       -nthreads "$n_threads" --job "$input_file" --task "$i" >> "$dir_out/task_${i}.txt" 2>&1 &
 
 #    ((launched++))
 #    if (( launched % n_active == 0 )); then

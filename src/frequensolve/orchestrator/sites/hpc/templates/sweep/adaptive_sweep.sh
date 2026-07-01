@@ -138,11 +138,11 @@ start_time=$(date +%s)
 rm -f "$FS_SIZING_JSON"
 set +e
 if [ "$FS_SKIP_SIZING" = "1" ]; then
-    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads -j $job_file $fresh_flag --init-no-size"
-    $mpi_exec -n $n_procs $executable -nthreads $n_threads -j $job_file $fresh_flag --init-no-size
+    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size"
+    $mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size
 else
-    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads -j $job_file $fresh_flag --init"
-    $mpi_exec -n $n_procs $executable -nthreads $n_threads -j $job_file $fresh_flag --init
+    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init"
+    $mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init
 fi
 sizing_rc=$?
 set -e
@@ -433,9 +433,9 @@ def launch(task_id: int, offset: int, ranks: int):
         "task_affinity",
         exe,
         "-nthreads", str(omp_threads),
-        "-j", job_file,
+        "--job", job_file,
         *fresh_flag,
-        "-i", str(task_id),
+        "--task", str(task_id),
     ]
     out = open(out_path, "ab", buffering=0)
     try:
@@ -635,12 +635,12 @@ PY
 
 {% if imaging_job %}
 echo "Running imaging step..."
-"$executable" -j "$job_file" $fresh_flag --smooth
+"$executable" --job "$job_file" $fresh_flag --smooth
 {% endif %}
 
 {% if pack_job %}
 echo "Running packing step..."
-"$executable" -nthreads "$n_threads" -j "$job_file" $fresh_flag --pack >> "$dir_out/pack.log" 2>&1
+"$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --pack >> "$dir_out/pack.log" 2>&1
 {% endif %}
 
 end_time=$(date +%s)
