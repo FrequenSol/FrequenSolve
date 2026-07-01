@@ -1117,7 +1117,7 @@ class JobArtifactMixin:
             Mapping from ParaView output name to output path.
         """
         self.outputs.ensure_unique_names()
-        return {out.name: out.path for out in self.outputs.paraview}
+        return {out.name: self._result_path / out.path for out in self.outputs.paraview}
 
     @property
     def trace_path(self) -> Path:
@@ -1146,8 +1146,8 @@ class JobArtifactMixin:
             for component in group.device.components:
                 components.append(f"{group.name}:{component.name}")
 
-        for isrc, _sgroup in enumerate(sim.acquisition.source_groups):
-            sources.append(f"{isrc + 1}")
+        for source_id in sim.acquisition.source_field_ids():
+            sources.append(str(source_id))
 
         return TraceOutputSpec(
             path=self._result_path / self.outputs.traces.path,
@@ -1200,10 +1200,8 @@ class JobArtifactMixin:
                 [str(source) for source in out.sources]
                 if out.sources is not None
                 else [
-                    f"{isrc + 1}"
-                    for isrc, _sgroup in enumerate(
-                        self.simulation.acquisition.source_groups
-                    )
+                    str(source_id)
+                    for source_id in self.simulation.acquisition.source_field_ids()
                 ]
             )
             groups.append(out.name)
@@ -1283,10 +1281,8 @@ class JobArtifactMixin:
                 [str(source) for source in out.sources]
                 if out.sources is not None
                 else [
-                    f"{isrc + 1}"
-                    for isrc, _source_group in enumerate(
-                        self.simulation.acquisition.source_groups
-                    )
+                    str(source_id)
+                    for source_id in self.simulation.acquisition.source_field_ids()
                 ]
             )
             wave_out[out.name] = {
@@ -1346,14 +1342,46 @@ class JobArtifactMixin:
         if 1 <= task <= len(files):
             path = Path(files[task - 1])
             candidates.extend([path, self._legacy_trace_file(path)])
-        shard_dir = manifest.output_path / "shards"
-        if shard_dir.exists():
-            candidates.extend(sorted(shard_dir.glob("*.h5")))
-        candidates.extend(sorted(manifest.output_path.glob("f_*_hz.h5")))
+
+        def add_shard_dir(shard_dir: Path) -> None:
+            if not shard_dir.exists():
+                return
+            modern = sorted(shard_dir.glob("f_*.h5"))
+            files = modern
+            if not files:
+                files = [
+                    path
+                    for pattern in (
+                        "traces_*.h5",
+                        "receivers_*.h5",
+                        "trace_frequency_*.h5",
+                    )
+                    for path in sorted(shard_dir.glob(pattern))
+                ]
+            candidates.extend(files)
+
+        def add_root(root: Path) -> None:
+            for shard_dir in (
+                root / "shards",
+                root / "traces" / "shards",
+                root / "wavefields" / "shards",
+            ):
+                add_shard_dir(shard_dir)
+            if root.exists():
+                for pattern in (
+                    "f_*.h5",
+                    "traces_*.h5",
+                    "receivers_*.h5",
+                    "trace_frequency_*.h5",
+                ):
+                    candidates.extend(sorted(root.glob(pattern)))
+
+        roots = [manifest.output_path, manifest.result_path]
+        for root in roots:
+            add_root(root)
         for group in [*manifest.groups, *manifest.wavefields]:
             group_dir = manifest.output_path / str(group)
-            if group_dir.exists():
-                candidates.extend(sorted(group_dir.glob("*.h5")))
+            add_shard_dir(group_dir)
 
         out: List[Path] = []
         seen = set()

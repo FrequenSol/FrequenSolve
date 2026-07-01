@@ -771,7 +771,7 @@ class Survey:
 
             raise optional_dependency_error(
                 "Survey trace-store loading",
-                extra="parallel",
+                extra="hpc",
                 dependencies=("h5py",),
                 error=exc,
             ) from exc
@@ -1635,7 +1635,7 @@ class Survey:
 
         _reject_frame_kwargs(receiver_kwargs)
         group_name = receiver_group_name or self.name
-        acq.add_source_group(
+        acq.add_sources(
             kind=source_kind,
             coords=_coordinate_value_or_array(
                 self.sources, units=self.source_units, system=self.source_system

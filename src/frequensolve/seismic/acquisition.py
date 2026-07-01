@@ -1,19 +1,22 @@
-"""Seismic source, receiver, and sparse-survey acquisition geometry."""
+"""Seismic source geometry, source encoding, and receiver acquisition."""
+
+from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
 from frequensolve.geometry.frame import CoordinateValue
-from frequensolve.seismic.receivers import (
-    ReceiverDevice,
-    ReceiverGroup,
-    coordinate_array_metadata,
+from frequensolve.seismic.receivers import ReceiverDevice, ReceiverGroup
+from frequensolve.seismic.sources import (
+    DistributedSource,
+    PointSource,
+    SourceEncoding,
+    SourceGeometry,
 )
-from frequensolve.seismic.sources import CompoundSource, PointSource, SourceGroup
 from frequensolve.seismic.sparse_survey import ReceiverSampling, SparseSurvey
 from frequensolve.util.mixins import (
     ExportContext,
@@ -26,70 +29,155 @@ from frequensolve.util.named_list import NamedList
 __all__ = ["Acquisition"]
 
 
-@dataclass
+def _coerce_source_geometry(value: Any) -> Optional[SourceGeometry]:
+    if value is None:
+        return None
+    if isinstance(value, SourceGeometry):
+        return value
+    if isinstance(value, Mapping):
+        return SourceGeometry.from_fs(value)
+    raise TypeError(f"Cannot convert {type(value).__name__} to SourceGeometry")
+
+
+def _coerce_source_encoding(value: Any) -> Optional[SourceEncoding]:
+    if value is None:
+        return None
+    if isinstance(value, SourceEncoding):
+        return value
+    if isinstance(value, Mapping):
+        return SourceEncoding.from_fs(value)
+    raise TypeError(f"Cannot convert {type(value).__name__} to SourceEncoding")
+
+
+def _encoded_terms(terms: Mapping[Any, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for source, coefficient in terms.items():
+        if isinstance(source, PointSource):
+            if not source.name:
+                raise ValueError("PointSource terms require named source points")
+            key = source.name
+        else:
+            key = str(source)
+        out[key] = coefficient
+    return out
+
+
+@dataclass(init=False)
 class Acquisition(ExtraFieldsMixin):
-    """Seismic source, receiver, and survey configuration.
+    """Source geometry, optional source encoding, and receiver configuration."""
 
-    Args:
-        source_groups: Source groups describing shots.
-        receiver_groups: Receiver groups describing stations, geophones, fibers,
-            or wavefield sample devices.
-        surveys: Sparse surveys that define trace-level source/receiver
-            sampling.
-        extra: Additional solver-facing acquisition fields.
-    """
-
-    source_groups: NamedList = field(default_factory=NamedList)
+    sources: Optional[SourceGeometry] = None
+    source_encoding: Optional[SourceEncoding] = None
     receiver_groups: NamedList = field(default_factory=NamedList)
     surveys: NamedList = field(default_factory=NamedList)
-    extra: Dict = field(default_factory=dict)
+    max_batch: Optional[int] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
 
+    def __init__(
+        self,
+        *,
+        sources: Optional[Any] = None,
+        source_encoding: Optional[Any] = None,
+        receivers: Optional[Any] = None,
+        receiver_groups: Optional[Any] = None,
+        surveys: Optional[Any] = None,
+        max_batch: Optional[int] = None,
+        extra: Optional[Mapping[str, Any]] = None,
+        **kwargs: Any,
+    ) -> None:
+        if receivers is not None and receiver_groups is not None:
+            raise TypeError("Use either receivers or receiver_groups, not both")
+        self.sources = sources
+        self.source_encoding = source_encoding
+        self.receiver_groups = NamedList(
+            receiver_groups if receiver_groups is not None else receivers or []
+        )
+        self.surveys = NamedList(surveys or [])
+        self.max_batch = max_batch
+        self._init_extra(extra, **kwargs)
+        self._proj_path = None
+        self._rel_path = None
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        self.sources = _coerce_source_geometry(self.sources)
+        self.source_encoding = _coerce_source_encoding(self.source_encoding)
+        self.receiver_groups = NamedList(
+            [
+                (
+                    group
+                    if isinstance(group, ReceiverGroup)
+                    else ReceiverGroup.from_fs(group)
+                )
+                for group in self.receiver_groups
+            ]
+        )
+        self.surveys = NamedList(
+            [
+                (
+                    survey
+                    if isinstance(survey, SparseSurvey)
+                    else SparseSurvey.from_fs(survey)
+                )
+                for survey in self.surveys
+            ]
+        )
+        if self.max_batch is not None:
+            self.max_batch = int(self.max_batch)
+
+    @property
+    def source_geometry(self) -> Optional[SourceGeometry]:
+        """Contract-name alias for physical source geometry."""
+
+        return self.sources
+
+    @source_geometry.setter
+    def source_geometry(self, value: Any) -> None:
+        self.sources = _coerce_source_geometry(value)
+
+    @property
+    def receivers(self) -> NamedList:
+        """Friendly alias for receiver groups."""
+
+        return self.receiver_groups
+
+    @receivers.setter
+    def receivers(self, value: Any) -> None:
+        self.receiver_groups = NamedList(value or [])
+        self.__post_init__()
+
     @classmethod
-    def from_fs(cls, data: Dict) -> "Acquisition":
-        """Deserialize acquisition geometry from solver JSON.
+    def from_fs(cls, data: Mapping[str, Any]) -> "Acquisition":
+        """Deserialize acquisition geometry from solver JSON."""
 
-        Args:
-            data: Serialized acquisition mapping.
-
-        Returns:
-            ``Acquisition`` instance.
-        """
-
-        data = copy.deepcopy(data)
+        payload = copy.deepcopy(dict(data))
+        payload.pop("schema", None)
+        source_geometry = payload.pop("source_geometry", payload.pop("sources", None))
         return cls(
-            source_groups=NamedList(
-                [SourceGroup.from_fs(group) for group in data.pop("source_groups", [])]
-            ),
+            sources=source_geometry,
+            source_encoding=payload.pop("source_encoding", None),
             receiver_groups=NamedList(
                 [
                     ReceiverGroup.from_fs(group)
-                    for group in data.pop("receiver_groups", [])
+                    for group in payload.pop("receiver_groups", [])
                 ]
             ),
             surveys=NamedList(
-                [SparseSurvey.from_fs(survey) for survey in data.pop("surveys", [])]
+                [SparseSurvey.from_fs(survey) for survey in payload.pop("surveys", [])]
             ),
-            extra=data,
+            max_batch=payload.pop("max_batch", None),
+            extra=payload,
         )
 
-    def to_fs(self, ctx=None) -> Dict:
-        """Serialize acquisition geometry for solver input.
-
-        Args:
-            ctx: Optional export context used by source, receiver, and survey
-                serializers.
-
-        Returns:
-            JSON-compatible acquisition block.
-        """
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
+        """Serialize acquisition geometry for the v2 solver contract."""
 
         from ..util.printing import print_warn
 
         ctx = ctx or ExportContext(self._proj_path, self._rel_path)
 
-        # Ensure receiver groups have unique names
         names = {}
         for group in self.receiver_groups:
             name = group.name
@@ -105,93 +193,102 @@ class Acquisition(ExtraFieldsMixin):
 
         survey_component_maps = self._survey_component_maps()
 
-        payload = {
-            "source_groups": [group.to_fs(ctx) for group in self.source_groups],
-            "receiver_groups": [group.to_fs(ctx) for group in self.receiver_groups],
-        }
+        payload: Dict[str, Any] = {"schema": "fs-acquisition-2"}
+        if self.max_batch is not None:
+            payload["max_batch"] = self.max_batch
+        if self.sources is not None:
+            payload["source_geometry"] = self.sources.to_fs(ctx)
+        if self.source_encoding is not None:
+            payload["source_encoding"] = self.source_encoding.to_fs(ctx)
+        payload["receiver_groups"] = [
+            group.to_fs(ctx) for group in self.receiver_groups
+        ]
         if self.surveys:
             payload["surveys"] = [
-                (
-                    survey.to_fs(
-                        ctx, component_map=survey_component_maps.get(survey.name)
-                    )
-                )
+                survey.to_fs(ctx, component_map=survey_component_maps.get(survey.name))
                 for survey in self.surveys
             ]
         return merge_extra(payload, self.extra, "Acquisition")
 
-    def add_source_group(
+    def set_sources(self, sources: Any) -> SourceGeometry:
+        """Set physical source geometry and return it."""
+
+        self.sources = _coerce_source_geometry(sources)
+        return self.sources
+
+    def add_sources(
         self,
+        *,
         kind: str,
-        coords: np.ndarray,
-        direction: Optional[np.ndarray] = None,
+        coords: Any,
+        names: Optional[Sequence[str]] = None,
+        units: Optional[Any] = None,
+        system: Optional[str] = None,
         domain: Optional[int] = None,
-    ):
-        """Add one point-source group for each coordinate row.
+        direction: Optional[Any] = None,
+        amplitude: Optional[Any] = None,
+        mechanism: Optional[Any] = None,
+        defaults: Optional[Mapping[str, Any]] = None,
+    ) -> List[str]:
+        """Append inline physical source points and return their names."""
 
-        Args:
-            kind: Source kind understood by the solver.
-            coords: Coordinate array with one source per row.
-            direction: Optional source direction shared by all created sources.
-            domain: Optional domain where each source is evaluated.
-        """
-
-        for row in _source_coordinate_rows(coords):
-            isrc = len(self.source_groups)
-            source = PointSource(
-                kind=kind,
-                coordinates=row,
-                direction=direction,
-                domain=domain,
-                name=f"source_{isrc}",
-            )
-            self.source_groups.append(SourceGroup(source=source))
-
-    def add_compound_source(
-        self,
-        kind: str,
-        coords: np.ndarray,
-        weights: np.ndarray,
-        direction: Optional[np.ndarray] = None,
-        domain: Optional[int] = None,
-    ):
-        """Add a compound source with weighted points.
-
-        Args:
-            kind: Source kind understood by the solver.
-            coords: Coordinate array with one source point per row.
-            weights: Scalar weights applied to each point direction.
-            direction: Optional direction vector or per-point direction array.
-            domain: Optional domain where the source is evaluated.
-
-        Raises:
-            ValueError: If ``direction`` does not have one row per coordinate.
-        """
-
-        coords = np.asarray(coords, dtype=np.float64)
-        weights = np.asarray(weights, dtype=float)
-        if direction is not None:
-            direction = np.asarray(direction, dtype=float)
-        isrc = len(self.source_groups)
-        if direction is None:
-            direction = np.ones((len(coords), 1))
-        elif direction.ndim == 1:
-            direction = np.tile(direction, (len(coords), 1))
-        elif direction.ndim != 2:
-            raise ValueError("direction must be a 1D vector or one row per coordinate")
-        if len(direction) != len(coords):
-            raise ValueError("direction must have one row per coordinate")
-        direction = direction.copy()
-        for i, row in enumerate(direction):
-            direction[i, :] *= weights[i]
-        source = CompoundSource(
+        geometry = SourceGeometry.points(
             kind=kind,
-            coordinates=coords,
-            direction=direction,
+            coords=coords,
+            names=names,
+            units=units,
+            system=system,
             domain=domain,
-            name=f"source_{isrc}",
+            direction=direction,
+            amplitude=amplitude,
+            mechanism=mechanism,
+            defaults=defaults,
         )
-        self.source_groups.append(SourceGroup(source=source))
+        return self._append_inline_sources(geometry)
+
+    add_source_points = add_sources
+
+    def _append_inline_sources(self, geometry: SourceGeometry) -> List[str]:
+        if self.sources is None:
+            self.sources = geometry
+            return geometry.point_names()
+        if self.sources.geometry_type != "Inline" or geometry.geometry_type != "Inline":
+            raise ValueError("Cannot append inline sources to file-backed geometry")
+        if self.sources.kind != geometry.kind:
+            raise ValueError("All source points in one geometry must share a kind")
+        if self.sources.domain != geometry.domain:
+            raise ValueError("All source points in one geometry must share a domain")
+        if self.sources.defaults != geometry.defaults:
+            raise ValueError(
+                "All appended source points must share source-geometry defaults"
+            )
+        existing_names = set(self.sources.point_names())
+        new_names = geometry.point_names()
+        duplicates = existing_names.intersection(new_names)
+        if duplicates:
+            names = ", ".join(sorted(duplicates))
+            raise ValueError(f"Duplicate source names: {names}")
+        self.sources.sources.extend(geometry.sources)
+        return new_names
+
+    def add_distributed_source(
+        self, name: str, terms: Mapping[Any, Any]
+    ) -> DistributedSource:
+        """Append one distributed source field."""
+
+        field_obj = DistributedSource.named(name, _encoded_terms(terms))
+        if self.source_encoding is None:
+            self.source_encoding = SourceEncoding.named([field_obj])
+        elif self.source_encoding.encoding_type != "Named":
+            raise ValueError(
+                "add_distributed_source can only append to Named source encoding"
+            )
+        else:
+            known = set(self.source_encoding.field_names())
+            if name in known:
+                raise ValueError(f"Distributed source {name!r} already exists")
+            self.source_encoding.fields.append(field_obj)
+        return field_obj
 
     def add_receiver_group(
         self,
@@ -199,23 +296,10 @@ class Acquisition(ExtraFieldsMixin):
         device: ReceiverDevice,
         coords: np.ndarray,
         domain: Optional[int] = None,
-        **kwargs,
-    ):
-        """Add a receiver group with common device and coordinates.
+        **kwargs: Any,
+    ) -> ReceiverGroup:
+        """Add a receiver group with common device and coordinates."""
 
-        Args:
-            name: Receiver group name.
-            device: Device defining receiver type and components.
-            coords: Receiver coordinate array or coordinate object.
-            domain: Optional domain where the receiver group is evaluated.
-            **kwargs: Additional solver-facing receiver group fields.
-
-        Returns:
-            Newly added ``ReceiverGroup``.
-
-        Raises:
-            TypeError: If deprecated frame arguments are supplied.
-        """
         deprecated_frame_keys = {"frame", "source_frame", "receiver_frame"} & set(
             kwargs
         )
@@ -234,15 +318,40 @@ class Acquisition(ExtraFieldsMixin):
         self.receiver_groups.append(group)
         return group
 
+    def add_receiver_carpet(
+        self,
+        name: str,
+        device: ReceiverDevice,
+        *,
+        surface: Any,
+        x: Any,
+        y: Optional[Any] = None,
+        units: Optional[Any] = None,
+        above: Optional[Any] = None,
+        below: Optional[Any] = None,
+        domain: Optional[int] = None,
+        **kwargs: Any,
+    ) -> ReceiverGroup:
+        """Add a receiver group on a tensor-product carpet."""
+
+        coords = _carpet_coordinates(
+            x=x,
+            y=y,
+            surface=surface,
+            units=units,
+            above=above,
+            below=below,
+        )
+        return self.add_receiver_group(
+            name=name,
+            device=device,
+            coords=coords,
+            domain=domain,
+            **kwargs,
+        )
+
     def add_survey(self, survey: SparseSurvey) -> SparseSurvey:
-        """Add or replace a named sparse survey layout.
-
-        Args:
-            survey: Sparse survey instance or serialized survey mapping.
-
-        Returns:
-            Stored ``SparseSurvey`` instance.
-        """
+        """Add or replace a named sparse survey layout."""
 
         if isinstance(survey, dict):
             survey = SparseSurvey.from_fs(survey)
@@ -252,17 +361,8 @@ class Acquisition(ExtraFieldsMixin):
             self.surveys.append(survey)
         return survey
 
-    def add_sparse_survey(self, name: str, traces=None, **kwargs) -> SparseSurvey:
-        """Create and add a named inline sparse survey.
-
-        Args:
-            name: Survey name.
-            traces: Optional initial trace samples.
-            **kwargs: Additional ``SparseSurvey`` constructor arguments.
-
-        Returns:
-            Newly added ``SparseSurvey`` instance.
-        """
+    def add_sparse_survey(self, name: str, traces=None, **kwargs: Any) -> SparseSurvey:
+        """Create and add a named inline sparse survey."""
 
         return self.add_survey(SparseSurvey(name=name, traces=traces, **kwargs))
 
@@ -273,25 +373,10 @@ class Acquisition(ExtraFieldsMixin):
         coords: np.ndarray,
         survey: Optional[Union[str, SparseSurvey, Dict]] = None,
         domain: Optional[int] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> ReceiverGroup:
-        """Add a receiver group that samples traces from a named sparse survey.
+        """Add a receiver group that samples traces from a named sparse survey."""
 
-        ``survey`` can be a survey name, a ``SparseSurvey`` object, or a survey
-        dictionary loaded from JSON. Survey objects are added to
-        ``Acquisition.surveys`` automatically.
-
-        Args:
-            name: Receiver group name.
-            device: Receiver device for the sparse samples.
-            coords: Receiver coordinate array or coordinate object.
-            survey: Sparse survey name, object, or serialized mapping.
-            domain: Optional receiver domain.
-            **kwargs: Additional solver-facing receiver group fields.
-
-        Returns:
-            Newly added ``ReceiverGroup``.
-        """
         deprecated_frame_keys = {"frame", "source_frame", "receiver_frame"} & set(
             kwargs
         )
@@ -324,90 +409,91 @@ class Acquisition(ExtraFieldsMixin):
         return group
 
     def list_fields(self, recv_name: str = "") -> List[str]:
-        """List receiver output field selectors.
+        """List receiver output field selectors."""
 
-        Args:
-            recv_name: Optional receiver group name. When omitted, all receiver
-                groups are included.
-
-        Returns:
-            Field selectors of the form ``"<group>:<component>"``.
-        """
         field_list = []
-
-        if recv_name:
-            group = self.receiver_group(recv_name)
-            for field in group.components:
-                file = f"{group.name}:{field.name}"
-                field_list.append(file)
-        else:
-            for group in self.receiver_groups:
-                for field in group.components:
-                    file = f"{group.name}:{field.name}"
-                    field_list.append(file)
+        groups = [self.receiver_group(recv_name)] if recv_name else self.receiver_groups
+        for group in groups:
+            for field_obj in group.device.components:
+                field_list.append(f"{group.name}:{field_obj.name}")
         return field_list
 
-    def list_sources(self) -> List[int]:
-        """Return valid one-based source numbers."""
+    def source_field_count(self) -> int:
+        """Return the number of addressable RHS/source fields, when known."""
 
-        return list(range(1, len(self.source_groups) + 1))
+        if self.source_encoding is not None:
+            count = self.source_encoding.field_count
+            return int(count or 0)
+        if self.sources is None:
+            return 0
+        return int(self.sources.point_count or 0)
 
-    def source(self, isrc: int) -> SourceGroup:
-        """Return a source group by one-based index.
+    def source_field_ids(self) -> List[int]:
+        """Return one-based source-field ids."""
 
-        Args:
-            isrc: One-based source index.
+        return list(range(1, self.source_field_count() + 1))
 
-        Returns:
-            Matching ``SourceGroup``.
-        """
-        try:
-            return self.source_groups[isrc - 1]
-        except IndexError:
-            raise IndexError(f"Source index {isrc} is out of range.")
+    def source_field_names(self) -> List[str]:
+        """Return source-field names when known."""
 
-    def _set_path(self, proj_path: Path, rel_path: Path):
+        if self.source_encoding is not None:
+            return self.source_encoding.field_names()
+        if self.sources is None:
+            return []
+        return self.sources.point_names()
+
+    def source_point_names(self) -> List[str]:
+        """Return physical source-point names when known."""
+
+        if self.sources is None:
+            return []
+        return self.sources.point_names()
+
+    def receiver_group(self, name: str) -> ReceiverGroup:
+        """Return a receiver group by name."""
+
+        return self.receiver_groups[name]
+
+    def _set_path(self, proj_path: Path, rel_path: Path) -> None:
         warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
         self._proj_path = Path(proj_path).expanduser().resolve()
         self._rel_path = Path(rel_path)
 
     def receiver_coords(self, group: Optional[str] = None):
-        """Return receiver coordinates.
+        """Return receiver coordinates."""
 
-        Args:
-            group: Optional receiver group name. When omitted, all groups are
-                returned as a mapping.
-        """
         if group is None:
             group_locations = {}
-            for group in self.receiver_groups:
-                group_locations[group.name] = group.coordinates.get()
+            for receiver_group in self.receiver_groups:
+                group_locations[receiver_group.name] = receiver_group.coordinates.get()
             return group_locations
-        else:
-            return self.receiver_groups[group].coordinates.get()
+        return self.receiver_groups[group].coordinates.get()
+
+    def source_point_coords(self) -> np.ndarray:
+        """Return physical source-point coordinates."""
+
+        if self.sources is None:
+            return np.empty((0, 0), dtype=float)
+        return self.sources.coordinates()
 
     def source_coords(self, src: Optional[int] = None):
-        """Return source coordinates.
+        """Return source-field reference coordinates."""
 
-        Args:
-            src: Optional one-based source index.
-        """
-        if src is None:
-            return np.array([src.coordinates()[0] for src in self.source_groups])
+        if self.sources is None:
+            coords = np.empty((0, 0), dtype=float)
+        elif self.source_encoding is None:
+            coords = self.sources.coordinates()
         else:
-            isrc = int(src - 1)
-            return self.source_groups[isrc].coordinates()[0]
+            coords = self.source_encoding.reference_coordinates(self.sources)
+        if src is None:
+            return coords
+        return coords[int(src) - 1]
 
     def offsets(self, src: int, group: str) -> Dict:
-        """Return horizontal source-receiver offsets.
+        """Return horizontal source-field/receiver offsets."""
 
-        Args:
-            src: One-based source index.
-            group: Receiver group name.
-        """
         diff = self.receiver_coords(group) - self.source_coords(src)
-        offsets = np.hypot(diff[:, 0], diff[:, 1])
-        return offsets
+        return np.hypot(diff[:, 0], diff[:, 1])
 
     def _survey_component_maps(self) -> Dict[str, Dict[str, int]]:
         maps: Dict[str, Dict[str, int]] = {}
@@ -430,26 +516,24 @@ class Acquisition(ExtraFieldsMixin):
         return self._proj_path / self._rel_path
 
 
-def _source_coordinate_rows(coords):
-    extra = {}
-    if isinstance(coords, CoordinateValue):
-        extra = copy.deepcopy(coords.extra)
-
-    values, units, system = coordinate_array_metadata(coords)
-    if values.ndim == 1:
-        values = values.reshape(1, -1)
-    if values.ndim != 2:
-        raise ValueError("source coordinates must be a 2D array")
-
-    if units is not None or system is not None:
-        return [
-            CoordinateValue(
-                row.tolist(),
-                units=units,
-                system=system,
-                extra=copy.deepcopy(extra),
-            )
-            for row in values
-        ]
-
-    return values
+def _carpet_coordinates(
+    *,
+    surface: Any,
+    x: Any,
+    y: Optional[Any],
+    units: Optional[Any],
+    above: Optional[Any],
+    below: Optional[Any],
+) -> CoordinateValue:
+    points_grid = getattr(surface, "points_grid", None)
+    if not callable(points_grid):
+        raise TypeError(
+            "surface must provide points_grid(...), such as sim.model_surface(...)"
+        )
+    return points_grid(
+        x,
+        y,
+        units=units,
+        above=above,
+        below=below,
+    )

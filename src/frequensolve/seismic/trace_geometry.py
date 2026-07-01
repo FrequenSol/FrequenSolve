@@ -265,7 +265,7 @@ def source_coordinate(trace: xr.DataArray, axis: int | None) -> float | None:
     if axis is None:
         return None
     try:
-        coords = np.asarray(trace.fs.source_group.source.coordinates, dtype=float)
+        coords = np.asarray(trace.fs.source_coordinates, dtype=float)
     except Exception:
         return None
     if coords.ndim == 0 or axis >= coords.size:
@@ -428,8 +428,8 @@ def wavefield_grid_display(
 
     payload = _wavefield_grid_payload(trace)
     if payload is not None:
-        dims = list(payload["dims"])
-        if len(dims) < 2:
+        dims = _wavefield_grid_display_dims(payload)
+        if dims is None:
             return None
         y_dim, x_dim = dims[0], dims[1]
         x = _coord_payload_values(payload, x_dim) * L_scale
@@ -473,14 +473,15 @@ def _receiver_grid_display_shape(
     require_dims(trace, "receiver")
     payload = _wavefield_grid_payload(trace)
     if payload is not None:
-        dims = list(payload["dims"])
-        if len(dims) != 2:
-            raise ValueError(f"{caller} requires a 2D wavefield grid")
+        dims = _wavefield_grid_display_dims(payload, caller=caller)
         shape = tuple(_coord_payload_values(payload, dim).size for dim in dims)
-        if int(np.prod(shape)) != trace.sizes["receiver"]:
+        full_shape = tuple(
+            _coord_payload_values(payload, dim).size for dim in payload["dims"]
+        )
+        if int(np.prod(full_shape)) != trace.sizes["receiver"]:
             raise ValueError(
                 f"{caller} receiver grid does not match receiver count "
-                f"({shape} vs {trace.sizes['receiver']})"
+                f"({full_shape} vs {trace.sizes['receiver']})"
             )
         return shape
 
@@ -494,3 +495,20 @@ def _receiver_grid_display_shape(
             f"({shape[:2]} vs {trace.sizes['receiver']})"
         )
     return shape[1], shape[0]
+
+
+def _wavefield_grid_display_dims(
+    payload: Mapping[str, Any],
+    *,
+    caller: str | None = None,
+) -> list[str] | None:
+    dims = list(payload["dims"])
+    if len(dims) == 2:
+        return dims
+    sizes = {dim: _coord_payload_values(payload, dim).size for dim in dims}
+    display_dims = [dim for dim in dims if sizes[dim] > 1]
+    if len(display_dims) == 2:
+        return display_dims
+    if caller is not None:
+        raise ValueError(f"{caller} requires a 2D wavefield grid")
+    return None

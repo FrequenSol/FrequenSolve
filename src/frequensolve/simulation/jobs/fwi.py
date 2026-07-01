@@ -595,8 +595,8 @@ class DataSpace:
         """Build a data space from a simulation's sources and receivers.
 
         Args:
-            simulation: Simulation containing acquisition source and receiver
-                groups.
+            simulation: Simulation containing acquisition source fields and
+                receiver groups.
             frequencies: Frequencies packed into the data vector.
             dtype: NumPy dtype for packed vectors.
 
@@ -604,13 +604,13 @@ class DataSpace:
             ``DataSpace`` matching the simulation acquisition layout.
 
         Raises:
-            ValueError: If there are no source groups or a receiver group has
+            ValueError: If there are no source fields or a receiver group has
                 no components.
         """
 
-        sources = tuple(range(1, len(simulation.acquisition.source_groups) + 1))
+        sources = tuple(simulation.acquisition.source_field_ids())
         if not sources:
-            raise ValueError("FWI DataSpace requires at least one source group")
+            raise ValueError("FWI DataSpace requires at least one source field")
 
         segments = []
         for group in simulation.acquisition.receiver_groups:

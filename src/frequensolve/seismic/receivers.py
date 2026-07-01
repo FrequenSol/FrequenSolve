@@ -44,6 +44,11 @@ __all__ = [
 ]
 
 
+def _is_remote_file_reference(value: Any) -> bool:
+    text = str(value)
+    return text.startswith("remote:") or "://" in text
+
+
 @dataclass(kw_only=True)
 class ReceiverComponent:
     """Defines a single component/measurement type for a receiver.
@@ -426,6 +431,11 @@ class CoordsFromFile(ReceiverCoords):
     ):
         if file is None and "path" in kwargs:
             file = kwargs.pop("path")
+        if kwargs.pop("remote", False) or _is_remote_file_reference(file):
+            raise ValueError(
+                "CoordsFromFile does not support remote coordinate files yet; "
+                "provide a local file or inline/materialized coordinates."
+            )
         self.file = Path(file).expanduser()
         if self.file.is_absolute():
             self.file = self.file.resolve()
@@ -441,6 +451,11 @@ class CoordsFromFile(ReceiverCoords):
 
         file = data["file"]
         format = data["format"]
+        if data.get("remote", False) or _is_remote_file_reference(file):
+            raise ValueError(
+                "CoordsFromFile does not support remote coordinate files yet; "
+                "provide a local file or inline/materialized coordinates."
+            )
         if format == "HDF5":
             if ":" in file:
                 file, dset = file.split(":", 1)
