@@ -568,6 +568,49 @@ class CoordinateSystem:
             return self._signed_surface_points(values, sign=sign, units=units)
         return self.on_surface(values, units=units, offset=sign * distance)
 
+    def points_grid(
+        self,
+        x: Any,
+        y: Optional[Any] = None,
+        *,
+        units: Optional[Any] = None,
+        above: Optional[Any] = None,
+        below: Optional[Any] = None,
+    ) -> CoordinateValue:
+        """Create coordinate-aware points on a lateral tensor grid.
+
+        Args:
+            x: Lateral x-axis coordinates.
+            y: Optional lateral y-axis coordinates for 3D carpets. When omitted,
+                the grid is a 2D line of surface points.
+            units: Optional coordinate units for the lateral axes.
+            above: Optional distance above the surface.
+            below: Optional distance below the surface.
+
+        Returns:
+            ``CoordinateValue`` tagged with this coordinate-system name.
+
+        Raises:
+            ValueError: If both ``above`` and ``below`` are supplied, or if the
+                lateral axes cannot define a grid.
+        """
+
+        if above is not None and below is not None:
+            raise ValueError("Specify only one of above or below")
+
+        lateral, grid_units = _surface_points_grid_lateral(
+            x,
+            y,
+            units=units,
+        )
+        if above is not None:
+            return self.above(lateral, above, units=grid_units)
+        if below is not None:
+            return self.below(lateral, below, units=grid_units)
+        if self.type == "surface":
+            return self.on_surface(lateral, units=grid_units, offset=0.0)
+        return self.points(lateral, units=grid_units)
+
     def _above_sign(self) -> int:
         return -1 if str(self.normal or "up").strip().lower() == "down" else 1
 
@@ -750,7 +793,71 @@ def _split_quantity(
     if is_quantity(value):
         target_units = units or value.units
         return value.to(target_units).magnitude, target_units
+    quantity_units = _first_quantity_units(value)
+    if quantity_units is not None:
+        target_units = units or quantity_units
+        return _strip_coordinate_quantities(value, target_units), target_units
     return value, units
+
+
+def _first_quantity_units(value: Any) -> Optional[Any]:
+    if is_quantity(value):
+        return value.units
+    if isinstance(value, np.ndarray) and value.dtype == object:
+        for item in value.flat:
+            units = _first_quantity_units(item)
+            if units is not None:
+                return units
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            units = _first_quantity_units(item)
+            if units is not None:
+                return units
+    return None
+
+
+def _strip_coordinate_quantities(value: Any, units: Any) -> Any:
+    if is_quantity(value):
+        return value.to(units).magnitude
+    if isinstance(value, np.ndarray):
+        if value.dtype == object:
+            values = [_strip_coordinate_quantities(item, units) for item in value.flat]
+            return np.asarray(values, dtype=float).reshape(value.shape)
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_strip_coordinate_quantities(item, units) for item in value]
+    return value
+
+
+def _surface_points_grid_lateral(
+    x: Any,
+    y: Optional[Any],
+    *,
+    units: Optional[Any] = None,
+) -> tuple[np.ndarray, Optional[Any]]:
+    grid_units = units or _first_quantity_units(x)
+    if grid_units is None and y is not None:
+        grid_units = _first_quantity_units(y)
+
+    x_values, _ = _split_quantity(x, grid_units)
+    x_axis = _grid_coordinate_axis("x", x_values)
+
+    if y is None:
+        return x_axis.reshape(-1, 1), grid_units
+
+    y_values, _ = _split_quantity(y, grid_units)
+    y_axis = _grid_coordinate_axis("y", y_values)
+    xx, yy = np.meshgrid(x_axis, y_axis, indexing="xy")
+    return np.column_stack([xx.ravel(), yy.ravel()]), grid_units
+
+
+def _grid_coordinate_axis(name: str, values: Any) -> np.ndarray:
+    axis = np.asarray(values, dtype=float).reshape(-1)
+    if axis.size == 0:
+        raise ValueError(f"{name} must contain at least one coordinate")
+    if not np.isfinite(axis).all():
+        raise ValueError(f"{name} coordinates must be finite")
+    return axis
 
 
 def _coordinate_plain_value(value: Any) -> Any:

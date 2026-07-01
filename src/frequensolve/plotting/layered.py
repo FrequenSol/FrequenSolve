@@ -471,15 +471,14 @@ def _plot_acquisition(model: Any, acquisition: Any, ax, **kwargs) -> None:
     if not plot_sources:
         return
 
-    for igrp, group in enumerate(acquisition.source_groups):
-        coords = group.coordinates()
-
+    coords = acquisition.source_coords()
+    if len(coords):
         ax.scatter(
             coords[:, 0],
             coords[:, -1],
             marker="*",
             s=120,
-            label="Sources" if igrp == 0 else None,
+            label="Sources",
             zorder=7,
             facecolors="#fff700",
             edgecolors="r",

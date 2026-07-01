@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Union
 
-from frequensolve.units import value_and_units_to_fs
+from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
 
 from ..util.class_registry import class_registry, register_class
 from ..util.mixins import TypeTaggedMixin, merge_extra, warn_deprecated_path_api
@@ -18,6 +18,56 @@ __all__ = [
     "LayeredMeshGenerator",
     "TetMeshGenerator",
 ]
+
+
+def _first_quantity_units(value: Any) -> Optional[Any]:
+    if is_quantity(value):
+        return value.units
+    if isinstance(value, Mapping):
+        return None
+    if isinstance(value, (str, bytes)):
+        return None
+    try:
+        iterator = iter(value)
+    except TypeError:
+        return None
+    for item in iterator:
+        units = _first_quantity_units(item)
+        if units is not None:
+            return units
+    return None
+
+
+def _strip_bound_quantities(value: Any, units: Any) -> Any:
+    if is_quantity(value):
+        return value.to(units).magnitude
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, (str, bytes)):
+        return value
+    try:
+        iterator = iter(value)
+    except TypeError:
+        return value
+    return [_strip_bound_quantities(item, units) for item in iterator]
+
+
+def _mesh_bounds_and_units(
+    l_bound: Any,
+    u_bound: Any,
+    units: Optional[Any],
+) -> tuple[Any, Any, Optional[str]]:
+    target_units = (
+        units or _first_quantity_units(l_bound) or _first_quantity_units(u_bound)
+    )
+    if target_units is None:
+        return l_bound, u_bound, None
+    units_expr = unit_expression(target_units)
+    return (
+        _strip_bound_quantities(l_bound, target_units),
+        _strip_bound_quantities(u_bound, target_units),
+        units_expr,
+    )
 
 
 @register_class
@@ -256,8 +306,13 @@ class HexMeshGenerator(BaseMeshGenerator):
         rel_path = getattr(ctx, "rel_path", self._rel_path)
         if self.l_bound is not None:
             assert self.u_bound is not None
-            l_bound = self.l_bound
-            u_bound = self.u_bound
+            l_bound, u_bound, units = _mesh_bounds_and_units(
+                self.l_bound,
+                self.u_bound,
+                self.units,
+            )
+        else:
+            units = self.units
 
         if self.n is None:
             self.n = [8] * len(self.l_bound)
@@ -272,7 +327,7 @@ class HexMeshGenerator(BaseMeshGenerator):
             "n": self.n,
             "l_bound": l_bound,
             "u_bound": u_bound,
-            **({"units": self.units} if self.units is not None else {}),
+            **({"units": units} if units is not None else {}),
             **({"system": self.system} if self.system is not None else {}),
             **(
                 {"clip_to_envelope": self.clip_to_envelope}

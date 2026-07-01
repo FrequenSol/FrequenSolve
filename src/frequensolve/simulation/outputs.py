@@ -23,6 +23,7 @@ from frequensolve.util.mixins import (
 )
 
 __all__ = [
+    "AxisAlignedPlane",
     "Output",
     "OutputUnits",
     "JobOutputs",
@@ -125,6 +126,84 @@ def _as_output_sequence(value: Any) -> List[Any]:
 
 def _canonical_field_list(fields: Iterable[str]) -> List[str]:
     return canonical_fields(_as_list(fields))
+
+
+def _paraview_sources(
+    sources: Optional[Union[int, str, Iterable[int]]],
+) -> Optional[List[int]]:
+    if sources is None:
+        return None
+    if isinstance(sources, str):
+        if sources.strip().lower() == "all":
+            return None
+        raise ValueError(
+            "ParaviewOutput.sources must be an integer, iterable of integers, "
+            "or 'all'"
+        )
+    if isinstance(sources, (int, np.integer)):
+        return [int(sources)]
+    return [int(source_id) for source_id in sources]
+
+
+@dataclass(frozen=True, init=False)
+class AxisAlignedPlane:
+    """Axis-aligned ParaView surface-selection plane.
+
+    Pass exactly one coordinate keyword, such as ``AxisAlignedPlane(x=0.5*u.km)``,
+    or pass an explicit axis name with a value, such as
+    ``AxisAlignedPlane("offset", 0.5*u.km)``.
+    """
+
+    axis: str
+    value: Any
+    system: str = "global"
+    units: Optional[Any] = None
+    tolerance: Optional[Any] = None
+    tolerance_units: Optional[Any] = None
+
+    def __init__(
+        self,
+        axis: Optional[str] = None,
+        value: Any = None,
+        *,
+        system: str = "global",
+        units: Optional[Any] = None,
+        tolerance: Optional[Any] = None,
+        tolerance_units: Optional[Any] = None,
+        **coordinates,
+    ):
+        if axis is None and value is None:
+            if len(coordinates) != 1:
+                raise ValueError("AxisAlignedPlane requires exactly one axis value")
+            axis, value = next(iter(coordinates.items()))
+        elif axis is None or value is None or coordinates:
+            raise ValueError(
+                "Pass either AxisAlignedPlane(x=value) or "
+                "AxisAlignedPlane(axis, value)"
+            )
+
+        object.__setattr__(self, "axis", str(axis))
+        object.__setattr__(self, "value", value)
+        object.__setattr__(self, "system", str(system))
+        object.__setattr__(self, "units", units)
+        object.__setattr__(self, "tolerance", tolerance)
+        object.__setattr__(self, "tolerance_units", tolerance_units)
+
+    def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize to the solver surface-selection payload."""
+
+        payload = {
+            "kind": "plane",
+            "system": self.system,
+            "axis": self.axis,
+            "value": value_and_units_to_fs(self.value, self.units),
+        }
+        if self.tolerance is not None:
+            payload["tolerance"] = value_and_units_to_fs(
+                self.tolerance,
+                self.tolerance_units,
+            )
+        return payload
 
 
 @dataclass(kw_only=True)
@@ -510,7 +589,8 @@ class ParaviewOutput(Output):
         fields: Solution fields to output.
         properties: Material properties to output.
         items: Explicit ``ParaViewItem`` objects or serialized item mappings.
-        sources: Source ids to output.
+        sources: Source ids to output. Omit or pass ``"all"`` to let the
+            solver output every source.
         upscale: Mesh upscaling factor.
         show_pml: Whether to include PML regions.
         format: Writer format, one of ``"vtu"``, ``"xdmf"``, ``"xmf"``, or
@@ -522,11 +602,11 @@ class ParaviewOutput(Output):
         target: Output target: ``"volume"``, ``"surface"``, ``"grid"``, or a
             target mapping.
         grid: Grid specification for grid-target output.
-        surfaces: Optional model-surface selections.
+        surfaces: Optional model-surface selections or surface-selection objects.
         boundaries: Optional boundary-label selections.
         shell: Whether to output the model shell surface.
-        plane: Optional plane-selection mapping.
-        planes: Optional collection of plane-selection mappings.
+        plane: Optional plane selection.
+        planes: Optional collection of plane selections.
         coordinates: Optional coordinate-system name for output coordinates.
         target_coordinates: Optional coordinate-system name for target
             selection coordinates.
@@ -554,10 +634,12 @@ class ParaviewOutput(Output):
     parts: Optional[List[str]] = None
     target: Optional[Union[str, Mapping[str, Any]]] = None
     grid_spec: Optional[Any] = None
-    surfaces: Optional[List[Union[str, int]]] = None
+    surfaces: Optional[List[Union[str, int, AxisAlignedPlane, Mapping[str, Any]]]] = (
+        None
+    )
     boundaries: Optional[List[str]] = None
     shell: bool = False
-    plane: Optional[Mapping[str, Any]] = None
+    plane: Optional[Union[AxisAlignedPlane, Mapping[str, Any]]] = None
     coordinates: Optional[str] = None
     target_coordinates: Optional[str] = None
     writer: Optional[Mapping[str, Any]] = None
@@ -575,7 +657,7 @@ class ParaviewOutput(Output):
         fields: Optional[Iterable[str]] = None,
         properties: Optional[Iterable[str]] = None,
         items: Optional[Iterable[Union[ParaViewItem, Mapping[str, Any]]]] = None,
-        sources: Optional[Iterable[int]] = None,
+        sources: Optional[Union[int, str, Iterable[int]]] = None,
         upscale: int = 1,
         show_pml: bool = True,
         format: str = "vtu",
@@ -585,19 +667,25 @@ class ParaviewOutput(Output):
         parts: Optional[Union[str, Iterable[str]]] = None,
         target: Optional[Union[str, Mapping[str, Any]]] = None,
         grid: Optional[Any] = None,
-        surfaces: Optional[Union[str, int, Iterable[Union[str, int]]]] = None,
+        surfaces: Optional[
+            Union[
+                str,
+                int,
+                AxisAlignedPlane,
+                Mapping[str, Any],
+                Iterable[Union[str, int, AxisAlignedPlane, Mapping[str, Any]]],
+            ]
+        ] = None,
         boundaries: Optional[Union[str, Iterable[str]]] = None,
         shell: bool = False,
-        plane: Optional[Mapping[str, Any]] = None,
-        planes: Optional[Iterable[Mapping[str, Any]]] = None,
+        plane: Optional[Union[AxisAlignedPlane, Mapping[str, Any]]] = None,
+        planes: Optional[Iterable[Union[AxisAlignedPlane, Mapping[str, Any]]]] = None,
         coordinates: Optional[str] = None,
         target_coordinates: Optional[str] = None,
         writer: Optional[Mapping[str, Any]] = None,
         source: Optional[Mapping[str, Any]] = None,
         **kwargs,
     ):
-        if sources is None:
-            sources = [1]
         if upscale < 0:
             raise ValueError("ParaviewOutput upscale must be >= 0")
         writer_payload = copy.deepcopy(dict(writer or {}))
@@ -628,7 +716,7 @@ class ParaviewOutput(Output):
         self.fields = _canonical_field_list(fields) if fields is not None else None
         self.properties = [str(prop) for prop in _as_list(properties)] or None
         self.items = _paraview_items(items)
-        self.sources = [int(source_id) for source_id in sources]
+        self.sources = _paraview_sources(sources)
         self.upscale = int(upscale)
         self.show_pml = bool(show_pml)
         self.format = _choice(format, self._FORMATS, "ParaviewOutput.format")
@@ -677,22 +765,30 @@ class ParaviewOutput(Output):
     @classmethod
     def surface(
         cls,
-        surfaces: Optional[Union[str, int, Iterable[Union[str, int]]]] = None,
+        surfaces: Optional[
+            Union[
+                str,
+                int,
+                AxisAlignedPlane,
+                Mapping[str, Any],
+                Iterable[Union[str, int, AxisAlignedPlane, Mapping[str, Any]]],
+            ]
+        ] = None,
         *,
         boundaries: Optional[Union[str, Iterable[str]]] = None,
         shell: bool = False,
-        plane: Optional[Mapping[str, Any]] = None,
-        planes: Optional[Iterable[Mapping[str, Any]]] = None,
+        plane: Optional[Union[AxisAlignedPlane, Mapping[str, Any]]] = None,
+        planes: Optional[Iterable[Union[AxisAlignedPlane, Mapping[str, Any]]]] = None,
         **kwargs,
     ) -> "ParaviewOutput":
         """Create a ParaView surface output request.
 
         Args:
-            surfaces: Optional model surface names or indices to output.
+            surfaces: Optional model surface names, indices, or selections to output.
             boundaries: Optional mesh boundary labels to output.
             shell: Whether to output the model shell.
-            plane: Optional plane-selection mapping.
-            planes: Optional collection of plane-selection mappings.
+            plane: Optional plane selection.
+            planes: Optional collection of plane selections.
             **kwargs: Arguments forwarded to ``ParaviewOutput``.
 
         Returns:
@@ -741,7 +837,6 @@ class ParaviewOutput(Output):
             "name": self.name,
             "path": self.path,
             "properties": self.properties,
-            "sources": self.sources,
             "upscale": self.upscale,
             "show_pml": self.show_pml,
             "writer": self._writer_payload(),
@@ -749,6 +844,8 @@ class ParaviewOutput(Output):
         extra = copy.deepcopy(self.extra)
         if self.fields is not None:
             payload["fields"] = _canonical_field_list(self.fields)
+        if self.sources is not None:
+            payload["sources"] = self.sources
         if self.source is not None:
             payload["source"] = copy.deepcopy(self.source)
 
@@ -849,15 +946,37 @@ class ParaviewOutput(Output):
         if self.boundaries:
             selections.append({"kind": "boundary", "labels": self.boundaries})
         for surface in self.surfaces or []:
-            if isinstance(surface, int):
-                selections.append({"kind": "model_surface", "index": surface})
-            else:
-                selections.append({"kind": "model_surface", "name": str(surface)})
+            selections.append(self._surface_selection(surface))
         for plane in self._planes:
             selections.append(self._plane_selection(plane))
         return selections
 
-    def _plane_selection(self, plane: Mapping[str, Any]) -> Dict[str, Any]:
+    def _surface_selection(self, surface: Any) -> Dict[str, Any]:
+        if isinstance(surface, AxisAlignedPlane):
+            return surface.to_fs()
+        if isinstance(surface, Mapping):
+            payload = copy.deepcopy(dict(surface))
+            if payload.get("kind") == "plane" or (
+                "axis" in payload and "value" in payload
+            ):
+                return self._plane_selection(payload)
+            if "kind" in payload:
+                return payload
+            if "index" in payload:
+                return {"kind": "model_surface", "index": int(payload["index"])}
+            if "name" in payload:
+                return {"kind": "model_surface", "name": str(payload["name"])}
+            raise ValueError(
+                "surface selection mappings must include kind, axis/value, "
+                "index, or name"
+            )
+        if isinstance(surface, int):
+            return {"kind": "model_surface", "index": surface}
+        return {"kind": "model_surface", "name": str(surface)}
+
+    def _plane_selection(self, plane: Any) -> Dict[str, Any]:
+        if isinstance(plane, AxisAlignedPlane):
+            return plane.to_fs()
         payload = {
             "kind": "plane",
             "system": plane.get("system", "global"),

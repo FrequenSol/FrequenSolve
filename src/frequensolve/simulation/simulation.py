@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
 
+import numpy as np
+
 from frequensolve.geometry.frame import CoordinateSystem
 from frequensolve.mesh.boundary_conditions import BoundaryCondition, BoundaryConditions
 from frequensolve.mesh.mesh_generators import BaseMeshGenerator
@@ -703,9 +705,36 @@ class _SimulationSurface:
     ):
         """Return points on this model surface."""
 
+        if (
+            offset is None
+            and self._simulation.dimension == 3
+            and self._surface_lateral_dimension(values) == 2
+        ):
+            offset = 0.0
         return self._system.points(values, units=units, offset=offset)
 
     on = points
+
+    def points_grid(
+        self,
+        x: Any,
+        y: Optional[Any] = None,
+        *,
+        units: Optional[Any] = None,
+        above: Optional[Any] = None,
+        below: Optional[Any] = None,
+    ):
+        """Return points on a lateral tensor grid tied to this surface."""
+
+        if self._simulation.dimension == 3 and y is None:
+            raise ValueError("3D surface points_grid requires x and y axes")
+        return self._system.points_grid(
+            x,
+            y,
+            units=units,
+            above=above,
+            below=below,
+        )
 
     def above(
         self,
@@ -728,6 +757,18 @@ class _SimulationSurface:
         """Return points offset below this model surface."""
 
         return self._system.below(values, distance=distance, units=units)
+
+    @staticmethod
+    def _surface_lateral_dimension(values: Any) -> Optional[int]:
+        if hasattr(values, "magnitude"):
+            values = values.magnitude
+        try:
+            array = np.asarray(values)
+        except Exception:
+            return None
+        if array.ndim == 2:
+            return int(array.shape[1])
+        return None
 
 
 def _model_surface_name(surface: Union[str, int]) -> str:

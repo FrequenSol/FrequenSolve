@@ -10,10 +10,14 @@ import xarray as xr
 from frequensolve.model.model import ModelSubdomain
 from frequensolve.model.property import Property
 from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
-from frequensolve.util.mixins import merge_extra
+from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
 from frequensolve.util.named_list import NamedList
 
-from ._utils import _convert_units
+from ._utils import (
+    _convert_units,
+    _dataarray_with_property_metadata,
+    _inline_dataarray_to_fs,
+)
 from .surfaces import SimpleSurface
 
 if TYPE_CHECKING:
@@ -22,6 +26,7 @@ if TYPE_CHECKING:
     from .model import LayeredModel
 
 __all__ = [
+    "BoreholeAnnularPadding",
     "BoreholeSurface",
     "BoreholeLayer",
     "BoreholePart",
@@ -49,15 +54,26 @@ def _validate_borehole_radius_profile(radius: Property) -> None:
     value = radius.darr
     if value is None or radius.is_constant or radius.file_path is not None:
         return
-    if value.ndim != 1:
-        raise ValueError("Borehole radius profiles must be one-dimensional")
-    dim = str(value.dims[0])
-    if dim not in {"z", "depth"}:
-        raise ValueError("Borehole radius profile dimension must be 'z' or 'depth'")
-    if dim not in value.coords:
-        raise ValueError(
-            "Borehole radius profiles require a coordinate for their dimension"
-        )
+    dims = [str(dim) for dim in value.dims]
+    if value.ndim == 1:
+        if dims[0] not in {"z", "depth"}:
+            raise ValueError("Borehole radius profile dimension must be 'z' or 'depth'")
+    elif value.ndim == 2:
+        theta_dims = {"theta", "azimuth", "angle"}
+        depth_dims = {"z", "depth"}
+        if not any(dim in theta_dims for dim in dims) or not any(
+            dim in depth_dims for dim in dims
+        ):
+            raise ValueError(
+                "2D borehole radius profiles must include theta/azimuth and z/depth dimensions"
+            )
+    else:
+        raise ValueError("Borehole radius profiles must be one- or two-dimensional")
+    for dim in dims:
+        if dim not in value.coords:
+            raise ValueError(
+                "Borehole radius profiles require coordinates for every dimension"
+            )
 
 
 def _borehole_radius_to_fs(
@@ -103,34 +119,132 @@ def _borehole_radius_to_fs(
     if radius.darr is None or radius.is_constant or radius.file_path is not None:
         return radius.to_fs(ctx=ctx)
 
-    value = radius.darr
-    payload: Dict[str, Any] = {
-        "value": value.values.tolist(),
-        "dims": list(value.dims),
-        "coords": {},
-    }
-    for dim in value.dims:
-        coord = value.coords[dim]
-        coord_payload = {"value": coord.values.tolist()}
-        if coord.attrs.get("units"):
-            coord_payload["units"] = unit_expression(coord.attrs["units"])
-        payload["coords"][dim] = coord_payload
-    units = radius.units or value.attrs.get("units")
-    if units:
-        payload["units"] = unit_expression(units)
-    if radius.system is not None:
-        payload["system"] = radius.system
+    return _inline_dataarray_to_fs(_dataarray_with_property_metadata(radius))
+
+
+def _scalar_number(value: Any, field_name: str) -> float:
+    if is_quantity(value):
+        raw = value.magnitude
+    elif isinstance(value, Mapping):
+        if "value" not in value:
+            raise ValueError(f"{field_name} mappings require a value")
+        raw = value["value"]
+    else:
+        raw = value
+
+    if isinstance(raw, (str, bytes)):
+        raise TypeError(f"{field_name} must be a scalar number")
+    values = np.asarray(raw, dtype=float)
+    if values.size != 1:
+        raise TypeError(f"{field_name} must be a scalar number")
+    return float(values.item())
+
+
+def _padding_count(value: Any) -> int:
+    if isinstance(value, bool):
+        raise TypeError("annular_padding/n must be an integer")
+    if not isinstance(value, (int, np.integer)):
+        raise TypeError("annular_padding/n must be an integer")
+    count = int(value)
+    if count < 0:
+        raise ValueError("annular_padding/n must be non-negative")
+    return count
+
+
+def _length_to_fs(value: Any) -> Any:
+    payload = value_and_units_to_fs(value)
+    if isinstance(payload, Mapping):
+        payload = copy.deepcopy(dict(payload))
+        if "units" in payload:
+            payload["units"] = unit_expression(payload["units"])
     return payload
 
 
 @dataclass(kw_only=True)
-class BoreholeSurface:
-    """Cumulative-radius boundary in a 2D borehole.
+class BoreholeAnnularPadding(ExtraFieldsMixin):
+    """Formation-domain annular padding around a 3D borehole.
+
+    Args:
+        n: Number of annular padding cells. ``0`` disables padding.
+        outer_radius: Outer radius of the padded annulus. Required when
+            ``n > 0``.
+        power: Positive radial spacing exponent. Defaults to uniform spacing.
+        extra: Additional solver-facing fields preserved on export.
+
+    Raises:
+        TypeError: If ``n`` is not an integer or scalar fields are not scalar.
+        ValueError: If ``n`` is negative, ``outer_radius`` is missing or
+            non-positive when padding is active, or ``power`` is non-positive.
+    """
+
+    n: int = 0
+    outer_radius: Optional[Any] = None
+    power: float = 1.0
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        *,
+        n: int = 0,
+        outer_radius: Optional[Any] = None,
+        power: float = 1.0,
+        extra: Optional[Mapping[str, Any]] = None,
+        **kwargs,
+    ):
+        self.n = _padding_count(n)
+        self.outer_radius = (
+            copy.deepcopy(dict(outer_radius))
+            if isinstance(outer_radius, Mapping)
+            else outer_radius
+        )
+        self.power = _scalar_number(power, "annular_padding/power")
+        if self.power <= 0.0:
+            raise ValueError("annular_padding/power must be positive")
+        if self.n == 0:
+            if self.outer_radius is not None:
+                raise ValueError(
+                    "annular_padding/n must be positive when outer_radius is supplied"
+                )
+        elif self.outer_radius is None:
+            raise ValueError("annular_padding/outer_radius must be positive when n > 0")
+        elif (
+            _scalar_number(
+                self.outer_radius,
+                "annular_padding/outer_radius",
+            )
+            <= 0.0
+        ):
+            raise ValueError("annular_padding/outer_radius must be positive when n > 0")
+        self._init_extra(extra, **kwargs)
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "BoreholeAnnularPadding":
+        """Deserialize annular padding from a borehole payload."""
+
+        if not isinstance(data, Mapping):
+            raise TypeError(
+                "annular_padding must be a BoreholeAnnularPadding or mapping"
+            )
+        return cls(**copy.deepcopy(dict(data)))
+
+    def to_fs(self, ctx=None) -> Dict[str, Any]:
+        """Serialize annular padding for the solver borehole contract."""
+
+        payload: Dict[str, Any] = {"n": self.n}
+        if self.n > 0:
+            payload["outer_radius"] = _length_to_fs(self.outer_radius)
+            payload["power"] = self.power
+        return merge_extra(payload, self.extra, "BoreholeAnnularPadding")
+
+
+@dataclass(kw_only=True)
+class BoreholeSurface(ExtraFieldsMixin):
+    """Cumulative-radius boundary in a layered-model borehole.
 
     Args:
         name: Optional surface name used by borehole layer references.
         r: Cumulative radius as a scalar, Pint quantity, property payload, file
-            reference, or one-dimensional ``xarray.DataArray``.
+            reference, or one-/two-dimensional ``xarray.DataArray``.
         grid: Optional grid metadata for file-backed or ungridded radius
             profiles.
         scale: Multiplicative scale applied to loaded radius values.
@@ -139,12 +253,13 @@ class BoreholeSurface:
             coordinates.
 
     Raises:
-        ValueError: If ``r`` is missing or a radius profile is not
-            one-dimensional.
+        ValueError: If ``r`` is missing or a radius profile does not use
+            supported borehole coordinates.
     """
 
     name: Optional[str]
     r: Property = field(default_factory=Property)
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
         self,
@@ -155,6 +270,8 @@ class BoreholeSurface:
         scale: float = 1.0,
         units: Optional[Any] = None,
         system: Optional[str] = None,
+        extra: Optional[Mapping[str, Any]] = None,
+        **kwargs,
     ):
         if r is None and name is not None and not isinstance(name, str):
             r = name
@@ -174,6 +291,7 @@ class BoreholeSurface:
             )
         )
         _validate_borehole_radius_profile(self.r)
+        self._init_extra(extra, **kwargs)
 
     def is_axis(self) -> bool:
         """Return whether this surface is the implicit borehole axis.
@@ -192,6 +310,28 @@ class BoreholeSurface:
             return float(np.asarray(value).item()) == 0.0
         except Exception:
             return False
+
+    def to_fs(
+        self,
+        ctx=None,
+        *,
+        borehole_name: Optional[str] = None,
+        radius_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Serialize this borehole wall for the solver contract."""
+
+        name = self.name or radius_name
+        if name is None:
+            raise ValueError("BoreholeSurface requires a name for serialization")
+        payload: Dict[str, Any] = {"name": name}
+        payload["r"] = _borehole_radius_to_fs(
+            self.r,
+            ctx,
+            borehole_name=borehole_name,
+            radius_name=name,
+        )
+        payload.update(self.merged_extra(payload))
+        return payload
 
 
 @dataclass(kw_only=True)
@@ -230,6 +370,8 @@ class BoreholeLayer:
     units: Optional[Any] = None
     system: Optional[str] = None
     subdomain_name: Optional[str] = None
+    inner_surface: Optional[str] = None
+    outer_surface: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
@@ -244,6 +386,8 @@ class BoreholeLayer:
         units: Optional[Any] = None,
         system: Optional[str] = None,
         subdomain_name: Optional[str] = None,
+        inner_surface: Optional[str] = None,
+        outer_surface: Optional[str] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs,
     ):
@@ -266,6 +410,8 @@ class BoreholeLayer:
         self.units = units
         self.system = system
         self.subdomain_name = subdomain_name
+        self.inner_surface = inner_surface
+        self.outer_surface = outer_surface
         self.extra = dict(extra or {})
         self.extra.update(kwargs)
 
@@ -570,17 +716,18 @@ class BoreholePlug:
 
 @dataclass(kw_only=True)
 class Borehole:
-    """Vertical 2D borehole geometry for a layered model.
+    """Vertical borehole geometry for a layered model.
 
     Args:
         name: Borehole name used for references and serialized paths.
-        axis: Axis mapping, currently ``{"x": value}`` for 2D vertical
-            boreholes.
+        axis: Axis mapping, such as ``{"x": value}`` for 2D models or
+            ``{"x": value, "y": value}`` for 3D models.
         extent: Mapping containing ``top`` and ``bottom`` extent references.
         parts: Optional closed radial material parts.
         layers: Alias for ``parts`` in serialized payloads.
         surfaces: Optional cumulative-radius surfaces.
         plugs: Optional axial plug/tool-body intervals.
+        annular_padding: Optional 3D formation-domain annular padding.
         model: Optional parent ``LayeredModel``. When present, layer and plug
             authoring can create material subdomains automatically.
         extra: Additional serialized borehole fields.
@@ -596,6 +743,7 @@ class Borehole:
     surfaces: NamedList = field(default_factory=NamedList)
     parts: NamedList = field(default_factory=NamedList)
     plugs: NamedList = field(default_factory=NamedList)
+    annular_padding: Optional[BoreholeAnnularPadding] = None
     extra: Dict[str, Any] = field(default_factory=dict)
     _model: Optional["LayeredModel"] = field(default=None, repr=False)
     _pending_layer: Optional[Dict[str, Any]] = field(default=None, repr=False)
@@ -610,6 +758,9 @@ class Borehole:
         layers: Optional[List[Union[BoreholePart, Mapping[str, Any]]]] = None,
         surfaces: Optional[List[Union[BoreholeSurface, Mapping[str, Any]]]] = None,
         plugs: Optional[List[Union[BoreholePlug, Mapping[str, Any]]]] = None,
+        annular_padding: Optional[
+            Union[BoreholeAnnularPadding, Mapping[str, Any]]
+        ] = None,
         model: Optional["LayeredModel"] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs,
@@ -638,6 +789,15 @@ class Borehole:
             self.plugs.append(
                 plug if isinstance(plug, BoreholePlug) else BoreholePlug.from_fs(plug)
             )
+        self.annular_padding = (
+            annular_padding
+            if isinstance(annular_padding, BoreholeAnnularPadding)
+            else (
+                BoreholeAnnularPadding.from_fs(annular_padding)
+                if annular_padding is not None
+                else None
+            )
+        )
         self._model = model
         self._pending_layer = None
         self._part_outer_surface_indices = self._resolve_part_outer_surface_indices()
@@ -683,6 +843,7 @@ class Borehole:
         surfaces = payload.pop("surfaces", [])
         parts = payload.pop("layers", payload.pop("parts", []))
         plugs = payload.pop("plugs", [])
+        annular_padding = payload.pop("annular_padding", None)
         surface_specs: List[BoreholeSurface] = []
         if surfaces:
             surface_specs = [
@@ -729,6 +890,7 @@ class Borehole:
             layers=parts,
             surfaces=surface_specs,
             plugs=plugs,
+            annular_padding=annular_padding,
             extra=payload,
         )
         return borehole
@@ -785,6 +947,11 @@ class Borehole:
                     ]
                 }
                 if self.plugs
+                else {}
+            ),
+            **(
+                {"annular_padding": self.annular_padding.to_fs(ctx)}
+                if self.annular_padding is not None
                 else {}
             ),
         }
@@ -844,10 +1011,25 @@ class Borehole:
         indices: List[int] = []
         for index, part in enumerate(self.parts):
             outer = part.extra.get("outer_surface")
-            if outer is not None and outer in surface_by_name:
-                indices.append(surface_by_name[outer])
+            if outer is not None:
+                if outer not in surface_by_name:
+                    raise ValueError(
+                        f"Borehole layer '{part.name}' references unknown "
+                        f"outer_surface '{outer}'"
+                    )
+                outer_index = surface_by_name[outer]
             else:
-                indices.append(self._default_outer_surface_index(index))
+                outer_index = self._default_outer_surface_index(index)
+            if outer_index >= len(self.surfaces):
+                raise ValueError(
+                    "Borehole layers require ordered outer surfaces; layer "
+                    f"'{part.name}' has no matching surface"
+                )
+            if indices and outer_index <= indices[-1]:
+                raise ValueError(
+                    "Borehole layer outer surfaces must increase in radial order"
+                )
+            indices.append(outer_index)
         return indices
 
     def _outer_surface_index(self, part_index: int) -> int:
@@ -883,15 +1065,11 @@ class Borehole:
         ctx=None,
     ) -> Dict[str, Any]:
         name = self._surface_name(index)
-        return {
-            "name": name,
-            "r": _borehole_radius_to_fs(
-                surface.r,
-                ctx,
-                borehole_name=self.name,
-                radius_name=name,
-            ),
-        }
+        return surface.to_fs(
+            ctx,
+            borehole_name=self.name,
+            radius_name=name,
+        )
 
     def _part_to_fs(self, part: BoreholePart, index: int, ctx=None) -> Dict[str, Any]:
         payload = self._layer_to_fs(part, index, ctx)
@@ -1055,6 +1233,16 @@ class Borehole:
             units=layer.units,
             system=layer.system,
             subdomain_name=layer.subdomain_name,
+            **(
+                {"inner_surface": layer.inner_surface}
+                if layer.inner_surface is not None
+                else {}
+            ),
+            **(
+                {"outer_surface": layer.outer_surface}
+                if layer.outer_surface is not None
+                else {}
+            ),
             **layer.extra,
         )
 
@@ -1335,6 +1523,23 @@ class Borehole:
             raise ValueError("Borehole requires axis/x")
         return self._length_value(self.axis["x"], units)
 
+    def axis_y(self, units: Optional[Any] = None) -> float:
+        """Return the borehole axis y-coordinate for 3D models.
+
+        Args:
+            units: Optional target units for the returned coordinate.
+
+        Returns:
+            Axis coordinate as a float.
+
+        Raises:
+            ValueError: If the borehole has no y-axis coordinate.
+        """
+
+        if "y" not in self.axis:
+            raise ValueError("Borehole requires axis/y")
+        return self._length_value(self.axis["y"], units)
+
     def radius_profile(
         self,
         part: BoreholePart,
@@ -1382,6 +1587,11 @@ class Borehole:
 
         _validate_borehole_radius_profile(radius)
         values = radius.darr
+        if values.ndim != 1:
+            raise ValueError(
+                "Borehole.radius_profile supports scalar and depth-varying "
+                "circular radii only"
+            )
         dim = values.dims[0]
         coord = values.coords[dim]
         z_values = np.asarray(coord.values, dtype=float)

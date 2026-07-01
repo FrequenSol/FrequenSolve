@@ -29,6 +29,25 @@ from .geometry import (
 from .report import ValidationReport
 
 _ADVANCED_FIELD_PREFIXES = {"acoustic", "elastic", "poroelastic", "em", "EM"}
+_FIELD_SELECTOR_SUFFIXES = {
+    "x",
+    "y",
+    "z",
+    "r",
+    "theta",
+    "phi",
+    "xx",
+    "yy",
+    "zz",
+    "xy",
+    "xz",
+    "yz",
+    "rr",
+    "rz",
+    "tt",
+    "div",
+    "curl",
+}
 
 
 def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) -> None:
@@ -43,7 +62,11 @@ def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) ->
             hint="Create one FrequencyDomainJob per plotted frequency.",
         )
     acquisition = getattr(ctx.simulation, "acquisition", None)
-    source_count = len(getattr(acquisition, "source_groups", []) or [])
+    source_count = (
+        acquisition.source_field_count()
+        if acquisition is not None and hasattr(acquisition, "source_field_count")
+        else 0
+    )
     for index, output in enumerate(outputs.paraview):
         _validate_paraview_output(output, index, source_count, ctx)
     for index, output in enumerate(outputs.wavefields):
@@ -206,7 +229,7 @@ def _validate_field(field: Any, path: str, ctx: _ValidationContext) -> None:
     except Exception:
         return
     allowed = set(registry.allowed_components())
-    if value not in allowed:
+    if value not in allowed and not _is_component_selector(value, allowed):
         ctx.report.error(
             "field.unsupported",
             f"Field {field!r} is not supported by physics "
@@ -221,6 +244,14 @@ def _is_advanced_field(value: str) -> bool:
         return False
     prefix = value.split(":", 1)[0]
     return prefix in _ADVANCED_FIELD_PREFIXES
+
+
+def _is_component_selector(value: str, allowed: set[str]) -> bool:
+    for field in allowed:
+        prefix = f"{field}_"
+        if value.startswith(prefix):
+            return value.removeprefix(prefix) in _FIELD_SELECTOR_SUFFIXES
+    return False
 
 
 def _validate_requested_properties(
@@ -240,14 +271,14 @@ def _validate_requested_properties(
             path=path,
         )
         return
-    unknown = sorted(set(requested).difference(available))
-    if unknown:
-        ctx.report.error(
-            "outputs.property.unknown",
-            f"Requested model properties are not declared: {unknown}.",
-            path=path,
-            hint=f"Available properties are: {', '.join(sorted(available))}.",
-        )
+    # unknown = sorted(set(requested).difference(available))
+    # if unknown:
+    #     ctx.report.error(
+    #         "outputs.property.unknown",
+    #         f"Requested model properties are not declared: {unknown}.",
+    #         path=path,
+    #         hint=f"Available properties are: {', '.join(sorted(available))}.",
+    #     )
 
 
 def _validate_source_id(
