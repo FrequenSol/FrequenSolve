@@ -7,6 +7,8 @@ always importable, but missing extras fail with an install hint when used.
 """
 
 from frequensolve._exports import unique_exports
+from frequensolve._loading import *  # noqa: F403
+from frequensolve._loading import __all__ as _loading_all
 from frequensolve._version import get_versions
 from frequensolve.geometry import *  # noqa: F403
 from frequensolve.geometry import __all__ as _geometry_all
@@ -49,6 +51,7 @@ __all__ = [
         _orchestrator_all,
         _util_all,
         _validation_all,
+        _loading_all,
         _colormap_all,
     ),
 ]

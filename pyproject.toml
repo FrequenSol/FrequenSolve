@@ -37,6 +37,7 @@ dependencies = [
     "numpy>=1.24,<3.0",
     "pint>=0.24.4,<1.0",
     "scipy>=1.13,<2.0",
+    "sympy>=1.13,<2.0",
     "toml>=0.10.2,<0.11.0",
     "xarray>=2025.1.1,<2026.0.0",
 ]
@@ -57,7 +58,7 @@ cloud = [
     "requests>=2.31.0,<3.0.0",
     "werkzeug>=3.1.3,<4.0.0",
 ]
-parallel = [
+hpc = [
     "bokeh>=3.4.2,<4.0.0",
     "dask>=2025.1.0,<2026.0.0",
     "dask-jobqueue>=0.9.0,<0.10.0",
@@ -66,8 +67,14 @@ parallel = [
     "pyfftw>=0.14,<0.16",
     "python-dotenv>=1.0.1,<2.0.0",
 ]
-hpc = [
+# Backward-compatible alias for existing install commands.
+parallel = [
+    "bokeh>=3.4.2,<4.0.0",
+    "dask>=2025.1.0,<2026.0.0",
+    "dask-jobqueue>=0.9.0,<0.10.0",
+    "distributed>=2024.12.0,<2026.0.0",
     "paramiko>=3.5.0,<4.0.0",
+    "pyfftw>=0.14,<0.16",
     "python-dotenv>=1.0.1,<2.0.0",
 ]
 inversion = [

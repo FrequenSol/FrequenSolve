@@ -1,6 +1,7 @@
 """Mesh manager and mesh adaptivity configuration objects."""
 
 import copy
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import copy2
@@ -10,6 +11,7 @@ from frequensolve.units import value_and_units_to_fs
 from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
+    fs_serialize,
     merge_extra,
     warn_deprecated_path_api,
 )
@@ -77,6 +79,7 @@ class MeshParallelism:
 
 _GRADE_MODES = {"none", "inside", "outside", "band", "abs_band"}
 GradingValue = Union[float, Mapping[str, float]]
+_HP_AXIS_KEYS = {"order_x", "order_y", "order_z"}
 
 
 def _pop_alias(
@@ -119,6 +122,132 @@ def _pop_elems_per_wave(payload: Dict[str, Any]) -> Any:
         epw=payload.pop("epw", None),
         min_epw=payload.pop("min_epw", None),
     )
+
+
+def _serialize_adapt_value(value: Any, ctx=None) -> Any:
+    if type(value).__module__.startswith("sympy."):
+        from frequensolve.model.property import PropertyExpression
+
+        return PropertyExpression.from_value(value, default_symbol="var").to_fs(ctx)
+    if isinstance(value, Mapping):
+        return {key: _serialize_adapt_value(item, ctx) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_adapt_value(item, ctx) for item in value]
+    return fs_serialize(value, ctx)
+
+
+def _serialize_adapt_extra(extra: Mapping[str, Any], ctx=None) -> Dict[str, Any]:
+    payload = {}
+    for key, value in extra.items():
+        if key == "hp":
+            payload[key] = _serialize_hp_payload(value, ctx)
+        else:
+            payload[key] = _serialize_adapt_value(value, ctx)
+    return payload
+
+
+def _serialize_hp_payload(value: Any, ctx=None) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            "hp adaptivity settings must be a mapping, " f"got {type(value).__name__}"
+        )
+    payload = copy.deepcopy(dict(value))
+    if "order" in payload and "p_order" in payload:
+        raise ValueError("Specify only one of hp.order or hp.p_order")
+    if "p_order" in payload:
+        warnings.warn(
+            "hp.p_order is deprecated; use hp.order instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        payload["order"] = payload.pop("p_order")
+
+    out = {}
+    for key, item in payload.items():
+        if key == "order":
+            out[key] = _serialize_hp_policy(item, ctx)
+        elif key == "overrides":
+            out[key] = _serialize_hp_overrides(item, ctx)
+        elif key in _HP_AXIS_KEYS:
+            out[key] = _serialize_hp_axis_policy(item, ctx)
+        else:
+            out[key] = _serialize_adapt_value(item, ctx)
+    return out
+
+
+def _serialize_hp_overrides(value: Any, ctx=None) -> List[Dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(
+            "hp.overrides must be a list of mappings, " f"got {type(value).__name__}"
+        )
+
+    out = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise TypeError(
+                "hp.overrides entries must be mappings, "
+                f"got {type(item).__name__} at index {index}"
+            )
+        override = copy.deepcopy(dict(item))
+        classifier = override.pop("classifier", None)
+        if classifier != "physics":
+            raise ValueError(
+                "Only hp.overrides classifier 'physics' is supported "
+                f"(got {classifier!r} at index {index})"
+            )
+        if "value" not in override:
+            raise ValueError(f"hp.overrides[{index}] requires value")
+        if "order" not in override:
+            raise ValueError(f"hp.overrides[{index}] requires order")
+
+        payload = {
+            "classifier": "physics",
+            "value": _serialize_adapt_value(override.pop("value"), ctx),
+            "order": _serialize_hp_policy(override.pop("order"), ctx),
+        }
+        for key, extra_value in override.items():
+            payload[key] = _serialize_adapt_value(extra_value, ctx)
+        out.append(payload)
+    return out
+
+
+def _serialize_hp_axis_policy(value: Any, ctx=None) -> Any:
+    if not isinstance(value, Mapping):
+        return _serialize_hp_policy(value, ctx)
+    out = {}
+    for key, item in value.items():
+        out[key] = (
+            _serialize_hp_policy(item, ctx)
+            if key == "policy"
+            else _serialize_adapt_value(item, ctx)
+        )
+    return out
+
+
+def _serialize_hp_policy(value: Any, ctx=None) -> Any:
+    return _unwrap_hp_policy_literals(_serialize_adapt_value(value, ctx))
+
+
+def _unwrap_hp_policy_literals(value: Any) -> Any:
+    if isinstance(value, Mapping) and value.get("op") == "case":
+        payload = copy.deepcopy(dict(value))
+        payload["branches"] = [
+            {
+                **copy.deepcopy(dict(branch)),
+                "then": _unwrap_hp_policy_literal(branch["then"]),
+            }
+            for branch in payload.get("branches", [])
+        ]
+        if "else" in payload:
+            payload["else"] = _unwrap_hp_policy_literal(payload["else"])
+        return payload
+    return _unwrap_hp_policy_literal(value)
+
+
+def _unwrap_hp_policy_literal(value: Any) -> Any:
+    if isinstance(value, Mapping) and set(value) == {"value"}:
+        return value["value"]
+    return value
 
 
 def _resolve_f_low(
@@ -427,7 +556,8 @@ class MeshAdaptor(ExtraFieldsMixin):
             or axis-keyed mapping.
         epw: Alias for ``elems_per_wave``.
         min_epw: Alias for ``elems_per_wave``.
-        order: Element order used during mesh adaptivity.
+        order: Element order used during mesh adaptivity. May be a scalar,
+            axis-keyed mapping, or branch expression.
         jump_tolerance: Relative material-property jump threshold used for
             interface refinement.
         jump_factor: Multiplicative adaptation factor on jump elements.
@@ -450,7 +580,7 @@ class MeshAdaptor(ExtraFieldsMixin):
     """
 
     elems_per_wave: Union[float, Dict[str, float]]
-    order: Union[int, Dict[str, int]] = 3
+    order: Any = 3
     jump_tolerance: Optional[float] = None  # 0.2
     jump_factor: Optional[float] = None  # 1.0
     smooth_refs: Optional[bool] = None  # False
@@ -468,7 +598,7 @@ class MeshAdaptor(ExtraFieldsMixin):
         *,
         epw: Optional[Union[float, Dict[str, float]]] = None,
         min_epw: Optional[Union[float, Dict[str, float]]] = None,
-        order: Union[int, Dict[str, int]] = 3,
+        order: Any = 3,
         jump_tolerance: Optional[float] = None,
         jump_factor: Optional[float] = None,
         smooth_refs: Optional[bool] = None,
@@ -558,8 +688,8 @@ class MeshAdaptor(ExtraFieldsMixin):
         """
 
         payload = {
-            "elems_per_wave": self.elems_per_wave,
-            "order": self.order,
+            "elems_per_wave": _serialize_adapt_value(self.elems_per_wave, ctx),
+            "order": _serialize_adapt_value(self.order, ctx),
             **({"jump_tolerance": self.jump_tolerance} if self.jump_tolerance else {}),
             **({"jump_factor": self.jump_factor} if self.jump_factor else {}),
             **({"smooth_refs": self.smooth_refs} if self.smooth_refs else {}),
@@ -586,7 +716,11 @@ class MeshAdaptor(ExtraFieldsMixin):
                 else {}
             ),
         }
-        return merge_extra(payload, self.extra, "MeshAdaptor")
+        return merge_extra(
+            payload,
+            _serialize_adapt_extra(self.extra, ctx),
+            "MeshAdaptor",
+        )
 
     @classmethod
     def from_fs(cls, data: Dict) -> "MeshAdaptor":
@@ -719,7 +853,8 @@ class MeshManager:
 
     Args:
         mesh: Mesh generator configuration. If omitted, ``file`` and ``format``
-            must identify an existing mesh file.
+            may identify an existing mesh file, otherwise the solver may infer
+            default mesh generation from the model.
         file: Mesh file path, relative to the project when possible.
         format: Mesh file format understood by the solver.
         parallel: Optional mesh distribution settings.
@@ -740,7 +875,7 @@ class MeshManager:
         *,
         epw: Optional[Union[float, Dict[str, float]]] = None,
         min_epw: Optional[Union[float, Dict[str, float]]] = None,
-        order: Union[int, Dict[str, int]] = 3,
+        order: Any = 3,
         jump_tolerance: Optional[float] = None,
         jump_factor: Optional[float] = None,
         smooth_refs: Optional[bool] = None,
@@ -764,7 +899,8 @@ class MeshManager:
             elems_per_wave: Target minimum elements per wavelength.
             epw: Alias for ``elems_per_wave``.
             min_epw: Alias for ``elems_per_wave``.
-            order: Element order used during mesh adaptivity.
+            order: Element order used during mesh adaptivity. May be a scalar,
+                axis-keyed mapping, or branch expression.
             jump_tolerance: Relative material-property jump threshold used for
                 interface refinement.
             jump_factor: Multiplicative adaptation factor on jump elements.
@@ -987,8 +1123,7 @@ class MeshManager:
             JSON-compatible mesh block.
 
         Raises:
-            AssertionError: If neither a mesh generator nor a mesh file/format
-                pair has been configured.
+            ValueError: If only one of ``file`` and ``format`` is configured.
         """
 
         ctx = ctx or ExportContext(self._proj_path, self._rel_path)
@@ -1008,10 +1143,10 @@ class MeshManager:
 
         # Mesh determined by file
         if self.mesh is None:
-            assert self.file is not None and self.format is not None, (
-                "if a mesh or mesh generator has not been provided, "
-                "'file' and 'format' must be provided"
-            )
+            if self.file is None and self.format is None:
+                return mesh_dict
+            if self.file is None or self.format is None:
+                raise ValueError("Mesh file input requires both 'file' and 'format'.")
             mesh_file = Path(self.file)
             if mesh_file.is_absolute():
                 source = mesh_file
