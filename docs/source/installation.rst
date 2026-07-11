@@ -100,6 +100,9 @@ Site paths, hosts, usernames, accounts, and scheduler defaults belong in
 ``~/.frequensolve/site.toml``. HPC passwords and SSH-key passphrases are
 prompted securely and saved to the operating system keyring only after a
 successful login. A project ``.env`` file is not required.
+Scheduler resources are included in the Python package, so neither
+``PYTHONPATH`` nor a source-checkout path is part of installation. Supported
+solver builds contain their own compiled-in resources.
 
 The notebooks in :doc:`tutorials/index` use strict run cells. If the selected
 site is not configured or the solver is unavailable, the cell should fail and

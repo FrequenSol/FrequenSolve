@@ -66,6 +66,35 @@ def make_rest_site():
     return site
 
 
+def test_aws_cli_environment_replaces_credentials_and_removes_profiles(
+    monkeypatch,
+):
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "inherited-access")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "inherited-secret")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "inherited-token")
+    monkeypatch.setenv("AWS_PROFILE", "inherited-profile")
+    monkeypatch.setenv("HPC_PASSWORD", "hpc-secret")
+    credentials = SimpleNamespace(
+        get_frozen_credentials=lambda: SimpleNamespace(
+            access_key="temporary-access",
+            secret_key="temporary-secret",
+            token="temporary-token",
+        )
+    )
+    site = AWSSite.__new__(AWSSite)
+    site.session = SimpleNamespace(get_credentials=lambda: credentials)
+    site.config = SimpleNamespace(region="us-test-1")
+
+    environment = site._aws_cli_env()
+
+    assert environment["AWS_ACCESS_KEY_ID"] == "temporary-access"
+    assert environment["AWS_SECRET_ACCESS_KEY"] == "temporary-secret"
+    assert environment["AWS_SESSION_TOKEN"] == "temporary-token"
+    assert environment["AWS_DEFAULT_REGION"] == "us-test-1"
+    assert "AWS_PROFILE" not in environment
+    assert "HPC_PASSWORD" not in environment
+
+
 def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
     site = make_graphql_site()
     job = FakeJob()

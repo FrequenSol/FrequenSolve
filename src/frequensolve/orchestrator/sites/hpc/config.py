@@ -1,7 +1,6 @@
 """Configuration objects for SLURM-backed HPC sites."""
 
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.util.printing import print_warn
@@ -102,7 +101,7 @@ class _Stampede3SPRConfig(BaseSiteConfig):
     _gpus_per_node: int = 0
     _cores_per_socket: int = 56
     _memory_per_node: int = 128000
-    _account: str = field(default_factory=lambda: os.getenv("TACC_ACCOUNT", ""))
+    _account: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,7 +114,7 @@ class _Stampede3SKXConfig(BaseSiteConfig):
     _gpus_per_node: int = 0
     _cores_per_socket: int = 24
     _memory_per_node: int = 198000
-    _account: str = field(default_factory=lambda: os.getenv("TACC_ACCOUNT", ""))
+    _account: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,7 +127,7 @@ class _Stampede3ICXConfig(BaseSiteConfig):
     _gpus_per_node: int = 0
     _cores_per_socket: int = 40
     _memory_per_node: int = 198000
-    _account: str = field(default_factory=lambda: os.getenv("TACC_ACCOUNT", ""))
+    _account: str = ""
 
 
 @dataclass

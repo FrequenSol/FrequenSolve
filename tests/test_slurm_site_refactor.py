@@ -48,7 +48,7 @@ class DummyStream:
 class DummyRawClient:
     def exec_command(self, command, environment=None):
         if command == "echo $WORK":
-            return None, DummyStream("/remote/work\n"), DummyStream("")
+            return None, DummyStream("/scratch/user\n"), DummyStream("")
         if command == "echo $HOSTNAME":
             return None, DummyStream("login\n"), DummyStream("")
         return None, DummyStream(""), DummyStream("")
@@ -95,7 +95,6 @@ class DummySlurmSite(SlurmSite):
     credentials_cls = DummyCredentials
     config_cls = DummyConfig
     default_queue = "debug"
-    work_dir_env = "DUMMY_HPC_WORK_DIR"
     default_solver_executable = "/remote/bin/FS"
 
     def authenticate(self, host=None):
@@ -374,7 +373,6 @@ def test_generic_slurm_site_can_be_instantiated_without_site_specific_class(
     monkeypatch,
 ):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
 
     site = DummySlurmSite("project/run", default_queue="normal")
 
@@ -385,30 +383,52 @@ def test_generic_slurm_site_can_be_instantiated_without_site_specific_class(
     assert site.config_for_queue("debug").queue == "debug"
 
 
-def test_slurm_site_configured_paths_precede_environment(monkeypatch, tmp_path):
+def test_slurm_site_uses_configured_paths_and_runtime(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/environment/work")
-    monkeypatch.setenv("FS_SOLVER_EXECUTABLE", "/environment/bin/FS")
-    monkeypatch.setenv("FS_PYTHON_PATH", "/missing/environment/path")
 
     site = DummySlurmSite(
         "project/run",
         solver="/configured/bin/FS",
         work_dir="/configured/work",
-        python_path=tmp_path,
+        modules=["compiler/1.0", "mpi"],
+        environment={"OMP_NUM_THREADS": 2},
         username="configured-user",
         credential_store=object(),
     )
 
     assert site.work_dir == Path("/configured/work/project/run")
     assert site.executable == "/configured/bin/FS"
-    assert site._FS_dir == tmp_path
+    assert site._runtime_setup_lines() == [
+        "module load compiler/1.0",
+        "module load mpi",
+        "module list",
+        "export OMP_NUM_THREADS=2",
+    ]
+    assert site._render_template("sweep/sweep_SLURM.sh", runtime_setup=[]).startswith(
+        "#!/bin/bash"
+    )
     assert site.credentials.username == "configured-user"
+
+
+def test_slurm_site_rejects_string_modules_and_secret_environment(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+
+    with pytest.raises(ValueError, match="modules must be an array"):
+        DummySlurmSite(
+            "project/run",
+            work_dir="/scratch/user",
+            modules="compiler mpi",
+        )
+    with pytest.raises(ValueError, match="Credential variable"):
+        DummySlurmSite(
+            "project/run",
+            work_dir="/scratch/user",
+            environment={"SERVICE_PASSWORD": "secret"},
+        )
 
 
 def test_slurm_site_handles_missing_job_id_without_remote_cancel(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
 
     site = DummySlurmSite("project/run")
 
@@ -429,7 +449,6 @@ def test_slurm_state_and_sbatch_parsing_helpers():
 
 def test_sbatch_stderr_with_job_id_is_not_logged_as_error(monkeypatch, caplog):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
     monkeypatch.setattr(
         site,
@@ -583,7 +602,6 @@ def test_base_handle_requires_polling_support():
 
 def test_slurm_site_accepts_run_config(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
 
     run_config = SlurmRunConfig(queue="normal", nodes=2, duration="00-00:30:00")
     site = DummySlurmSite("project/run", run_config=run_config)
@@ -592,9 +610,25 @@ def test_slurm_site_accepts_run_config(monkeypatch):
     assert site.run_config.nodes == 2
 
 
+def test_slurm_provision_uses_profile_account(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite(
+        "project/run",
+        run_config=SlurmRunConfig(account="allocation-from-profile"),
+    )
+
+    script = site._generate_provision_script(
+        n_nodes=1,
+        ranks_per_node=2,
+        duration="00-00:30:00",
+        queue="debug",
+    )
+
+    assert "#SBATCH -A allocation-from-profile" in script
+
+
 def test_slurm_site_verbose_initialization(monkeypatch, capsys):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
 
     DummySlurmSite("project/run", verbose=True)
 
@@ -604,7 +638,6 @@ def test_slurm_site_verbose_initialization(monkeypatch, capsys):
 
 def test_slurm_submit_auto_uses_batch_when_not_attached(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite(
         "project/run",
@@ -629,7 +662,6 @@ def test_slurm_submit_auto_uses_batch_when_not_attached(monkeypatch):
 
 def test_slurm_submit_force_run_passes_fresh_to_batch(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
     seen = {}
@@ -655,7 +687,6 @@ def test_slurm_submit_runs_smooth_only_for_current_imaging_shards(
     tmp_path,
 ):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
@@ -698,7 +729,6 @@ def test_slurm_submit_runs_smooth_only_for_current_imaging_shards(
 
 def test_slurm_submit_overrides_site_run_config(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite(
         "project/run",
@@ -799,7 +829,6 @@ def test_slurm_job_transfer_overwrites_remote_simulation_and_mesh(
     tmp_path,
 ):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
     sim = project.new_simulation(name="axisym", physics="acoustic", dimension=2)
@@ -827,6 +856,11 @@ def test_slurm_job_transfer_overwrites_remote_simulation_and_mesh(
     assert site.work_dir / "simulations" / "axisym" / "axisym.json" in remote_paths
     assert site.work_dir / "simulations" / "axisym" / "mesh.gmp" in remote_paths
     assert site.work_dir / "jobs" / "axisym" / "freq" / "freq.json" in remote_paths
+    assert site.work_dir / "adaptive_scheduler.py" in remote_paths
+    runner = next(
+        local for local, remote in puts if remote.name == "adaptive_scheduler.py"
+    )
+    assert runner.name == "adaptive_scheduler.py"
     assert captured["simulation"]["project_path"] == str(site.work_dir)
     assert captured["simulation"]["Mesh"]["file"] == "simulations/axisym/mesh.gmp"
     assert str(tmp_path) not in json.dumps(captured["simulation"])
@@ -837,7 +871,6 @@ def test_slurm_batch_maps_local_project_run_path_to_remote(
     tmp_path,
 ):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
     sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
@@ -888,7 +921,6 @@ def test_slurm_batch_maps_local_project_run_path_to_remote(
 
 def test_slurm_batch_submits_only_pending_frequency_tasks(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
     sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
@@ -937,7 +969,6 @@ def test_slurm_batch_submits_only_pending_frequency_tasks(monkeypatch, tmp_path)
 
 def test_adaptive_slurm_script_renders_pending_task_indices(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
     script = site._sweep_SLURM_script(
@@ -951,16 +982,39 @@ def test_adaptive_slurm_script_renders_pending_task_indices(monkeypatch):
 
     assert "n_tasks=2" in script
     assert "n_job_tasks=5" in script
-    assert "task_indices_json='[2, 5]'" in script
-    assert 'FS_TASK_INDICES="$task_indices_json"' in script
-    assert "FS_SKIP_SIZING=0" in script
+    assert '"task_indices": [' in script
+    assert "    2," in script
+    assert "    5" in script
+    assert '"skip_sizing": false' in script
     assert "--job $job_file" in script
-    assert '"--task", str(task_id)' in script
+    assert "adaptive_scheduler.py" in script
+
+
+def test_slurm_scripts_use_only_profile_runtime_setup(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite(
+        "project/run",
+        work_dir="/scratch/user",
+        modules=["compiler suite", "mpi/5"],
+        environment={"OMP_NUM_THREADS": "3", "VALUE": "two words"},
+    )
+
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        stdout="/scratch/user/jobs/simple/freq/logs",
+        duration="00-00:10:00",
+    )
+
+    assert "module load 'compiler suite'" in script
+    assert "module load mpi/5" in script
+    assert "export OMP_NUM_THREADS=3" in script
+    assert "export VALUE='two words'" in script
+    assert "intel/25.1" not in script
 
 
 def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
     script = site._sweep_SLURM_script(
@@ -973,17 +1027,15 @@ def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):
         duration="00-00:10:00",
     )
 
-    assert "FS_SKIP_SIZING=1" in script
+    assert '"skip_sizing": true' in script
     assert "--init-no-size" in script
-    assert "TOTAL_RANKS=8" in script
-    assert "task_indices_json='[4]'" in script
-    assert "return [0.0] * count" in script
-    assert "--init-no-size scheduling requires exactly one submitted task" in script
+    assert '"total_ranks": 8' in script
+    assert '"task_indices": [' in script
+    assert "    4" in script
 
 
 def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
     script = site._sweep_SLURM_script(
@@ -1007,7 +1059,6 @@ def test_slurm_submit_ignores_local_current_without_remote_record(
     monkeypatch, tmp_path
 ):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
@@ -1025,7 +1076,6 @@ def test_slurm_submit_ignores_local_current_without_remote_record(
 
 def test_slurm_submit_reattaches_matching_inflight_run(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
@@ -1065,7 +1115,6 @@ def test_slurm_submit_reattaches_matching_inflight_run(monkeypatch, tmp_path):
 
 def test_slurm_submit_reattach_compares_numpy_payload_values(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
@@ -1105,7 +1154,6 @@ def test_slurm_submit_reattach_compares_numpy_payload_values(monkeypatch, tmp_pa
 
 def test_slurm_submit_does_not_reattach_mismatched_inflight_run(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
@@ -1141,7 +1189,6 @@ def test_slurm_submit_does_not_reattach_mismatched_simulation_hash(
     monkeypatch, tmp_path
 ):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
@@ -1177,7 +1224,6 @@ def test_slurm_submit_does_not_reattach_mismatched_simulation_hash(
 
 def test_slurm_submit_skips_when_recorded_remote_run_is_current(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
@@ -1231,7 +1277,6 @@ def test_slurm_submit_skips_when_recorded_remote_run_is_current(monkeypatch, tmp
 
 def test_slurm_submit_does_not_skip_submitted_record(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
@@ -1255,7 +1300,6 @@ def test_slurm_submit_does_not_skip_manifest_without_task_summary(
     monkeypatch, tmp_path
 ):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
@@ -1287,7 +1331,6 @@ def test_slurm_submit_does_not_skip_manifest_without_task_summary(
 
 def test_slurm_submit_does_not_skip_without_remote_logs(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
@@ -1323,7 +1366,6 @@ def test_slurm_wait_all_polls_batch_runs_with_combined_status(
     monkeypatch, tmp_path, capsys
 ):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
     project = Project(name="project", path=tmp_path / "project")
     sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
@@ -1440,7 +1482,6 @@ def test_global_wait_all_accepts_runs_from_multiple_sites(capsys):
 
 def test_slurm_fetch_logs_also_fetches_run_metadata(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
     project = Project(name="project", path=tmp_path / "project")
@@ -1472,7 +1513,6 @@ def test_slurm_fetch_logs_also_fetches_run_metadata(monkeypatch, tmp_path):
 
 def test_slurm_fetch_wavefields_downloads_wavefield_output(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
     project = Project(name="project", path=tmp_path / "project")
@@ -1522,7 +1562,6 @@ def test_slurm_fetch_wavefields_downloads_wavefield_output(monkeypatch, tmp_path
 
 def test_slurm_fetch_paraview_downloads_configured_output_path(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
     project = Project(name="project", path=tmp_path / "project")
@@ -1549,7 +1588,6 @@ def test_slurm_fetch_paraview_downloads_configured_output_path(monkeypatch, tmp_
 
 def test_slurm_batch_poll_reads_scheduler_status(monkeypatch, capsys):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
     monkeypatch.setattr(site, "update_status", lambda job_id: "running")
@@ -1576,7 +1614,6 @@ def test_slurm_batch_poll_reads_scheduler_status(monkeypatch, capsys):
 
 def test_slurm_batch_poll_includes_already_current_tasks(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
     job = DummyJob()
     job.n_tasks = 90
@@ -1624,7 +1661,6 @@ def test_slurm_batch_poll_includes_already_current_tasks(monkeypatch):
 
 def test_slurm_batch_poll_ignores_scheduler_status_while_pending(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
     monkeypatch.setattr(site, "update_status", lambda job_id: "pending")
@@ -1644,7 +1680,6 @@ def test_slurm_batch_poll_ignores_scheduler_status_while_pending(monkeypatch):
 
 def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
     site.pool.nproc = 4
     site.pool.ncore = 8
@@ -1679,9 +1714,9 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
 
     assert '$fresh_flag --pack >> "$dir_out/pack.log" 2>&1' in batch_script
     assert "scheduler_status.json" in batch_script
-    assert "FS_SCHEDULER_STATUS" in batch_script
-    assert "FAILURE_TOLERANCE=2" in batch_script
-    assert "failure tolerance exceeded" in batch_script
+    assert "scheduler_config.json" in batch_script
+    assert '"failure_tolerance": 2' in batch_script
+    assert "FS_SCHEDULER_STATUS" not in batch_script
     assert '"successful"' in batch_script
     assert '"pending"' in batch_script
     assert "$fresh_flag --pack >> $dir_out/pack.log 2>&1" in attached_script
@@ -1693,7 +1728,6 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
 
 def test_slurm_submit_attached_requires_active_allocation(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
 
@@ -1703,7 +1737,6 @@ def test_slurm_submit_attached_requires_active_allocation(monkeypatch):
 
 def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
 
@@ -1723,7 +1756,6 @@ def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
 
 def test_slurm_submit_attached_can_disable_pack(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
     seen = {}
@@ -1747,7 +1779,6 @@ def test_slurm_submit_attached_can_disable_pack(monkeypatch):
 
 def test_slurm_allocation_attach_returns_awaitable_handle(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
     states = iter(["pending", "running"])
     attached = {}
@@ -1768,7 +1799,6 @@ def test_slurm_allocation_attach_returns_awaitable_handle(monkeypatch):
 
 def test_slurm_attach_allocation_requires_explicit_id_when_multiple_jobs(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
     monkeypatch.setattr(
         site,
@@ -1782,7 +1812,6 @@ def test_slurm_attach_allocation_requires_explicit_id_when_multiple_jobs(monkeyp
 
 def test_slurm_context_manager_closes_clients(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
     site.close()
@@ -1793,7 +1822,6 @@ def test_slurm_context_manager_closes_clients(monkeypatch):
 
 def test_slurm_provision_returns_allocation_handle(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
     monkeypatch.setattr(site, "put", lambda local, remote: None)
@@ -1811,7 +1839,6 @@ def test_slurm_provision_returns_allocation_handle(monkeypatch):
 
 def test_slurm_attached_run_is_awaitable(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
 
@@ -1832,7 +1859,6 @@ def test_slurm_attached_run_is_awaitable(monkeypatch):
 
 def test_slurm_attached_sync_wait_inside_event_loop_has_clear_error(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
     site = DummySlurmSite("project/run")
 
     async def call_sync_wait():
@@ -1868,5 +1894,4 @@ def test_stampede3_site_is_specific_slurm_subclass():
     assert issubclass(Stampede3Site, SlurmSite)
     assert Stampede3Site.config_cls is Stampede3Config
     assert Stampede3Site.credentials_cls is TACCLoginCredentials
-    assert Stampede3Site.work_dir_env == "STAMPEDE3_WORK_DIR"
     assert Stampede3Site.default_solver_executable is None

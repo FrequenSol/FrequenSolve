@@ -30,6 +30,7 @@ except ModuleNotFoundError as exc:
 
 from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
+from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import BaseJob
 from frequensolve.util.setup_logger import init_logger
@@ -540,10 +541,9 @@ class AWSSite(BaseSite):
     def _aws_cli_env(self) -> Dict[str, str]:
         """Build a process environment so the AWS CLI uses Cognito Identity Pool credentials.
 
-        Copies the current process environment, sets ``AWS_ACCESS_KEY_ID``,
-        ``AWS_SECRET_ACCESS_KEY``, ``AWS_SESSION_TOKEN``, and ``AWS_DEFAULT_REGION``
-        from this site's session, and clears ``AWS_PROFILE`` / ``AWS_DEFAULT_PROFILE``
-        so the CLI does not fall back to ``~/.aws/credentials``.
+        Starts from a sanitized process environment, sets temporary AWS
+        credentials and the region from this site's session, and clears AWS
+        profile selection so the CLI does not fall back to shared credentials.
         """
         creds = self.session.get_credentials()
         if creds is None:
@@ -552,7 +552,7 @@ class AWSSite(BaseSite):
                 "Re-authenticate with AWSSite (Cognito login)."
             )
         frozen = creds.get_frozen_credentials()
-        env = os.environ.copy()
+        env = build_subprocess_environment()
         env["AWS_ACCESS_KEY_ID"] = frozen.access_key
         env["AWS_SECRET_ACCESS_KEY"] = frozen.secret_key
         if frozen.token:

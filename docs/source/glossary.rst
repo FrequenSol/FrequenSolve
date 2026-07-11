@@ -94,10 +94,6 @@ standard capitalization.
       A discontinuity or surface feature that can be represented in model or
       borehole geometry.
 
-   LOCAL_SOLVER_EXECUTABLE
-      Compatibility environment-variable fallback for the local solver path.
-      Normal user setup should use ``solver`` in ``site.toml``.
-
    FWI
       Full waveform inversion workflow. FWI-gradient image requests produce
       property-gradient imaging outputs.

@@ -99,7 +99,11 @@ rel_path = "frequensolve/tutorials"
 queue = "debug"
 account = "allocation"
 transfer_method = "rsync"
+modules = []
 verbose = true
+
+[sites.hpc.environment]
+# OMP_NUM_THREADS = "1"
 
 [sites.hpc.run_config]
 nodes = 1
@@ -111,6 +115,9 @@ poll_interval = 10
 
 HPC passwords and SSH-key passphrases are stored in the operating system
 keyring only after a successful login. Two-factor codes are never stored.
+Scheduler templates and the adaptive runner are installed with FrequenSolve,
+so `PYTHONPATH` is not required for site setup. Supported solver builds own
+their compiled-in data resources.
 
 The tutorial notebooks live in `examples/tutorials`. The local documentation catalog is `docs/source/tutorials/index.rst`, with site-specific examples under `examples/tutorials/02_sites`.
 

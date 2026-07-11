@@ -125,7 +125,7 @@ where = ["src"]
 include = ["frequensolve*"]
 
 [tool.setuptools.package-data]
-"frequensolve.orchestrator.sites.hpc" = ["templates/**/*.sh"]
+"frequensolve.orchestrator.sites.hpc" = ["templates/**/*.sh", "templates/**/*.py"]
 
 [tool.versioneer]
 VCS = "git"

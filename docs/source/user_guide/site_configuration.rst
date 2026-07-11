@@ -223,9 +223,13 @@ extra.
 
    [sites.local]
    type = "local"
+   solver = "/opt/frequensol/bin/fs3d_s"
    shutdown_on_completion = true
    n_workers = 2
    dashboard_port = 8787
+
+   [sites.local.environment]
+   OMP_NUM_THREADS = "1"
 
 .. list-table::
    :header-rows: 1
@@ -244,6 +248,10 @@ extra.
      - Threads per local Dask worker.
    * - ``memory_per_worker``
      - Memory per local worker in megabytes.
+   * - ``environment``
+     - Non-secret environment variables added to worker and solver processes.
+       Known credential variables are removed from inherited subprocess
+       environments and rejected here.
    * - ``dashboard_host``
      - Hostname for the Dask dashboard. Defaults to ``localhost``.
    * - ``dashboard_port``
@@ -267,11 +275,14 @@ extra.
    ssh_key = "~/.ssh/id_ed25519"
    solver = "/work/shared/frequensol/fs3d_s"
    work_dir = "/scratch/jsmith"
-   python_path = "/home/jsmith/FrequenSolve"
    rel_path = "frequensolve/tutorials"
    queue = "debug"
    account = "allocation"
    transfer_method = "rsync"
+   modules = []
+
+   [sites.cluster.environment]
+   # OMP_NUM_THREADS = "1"
 
    [sites.cluster.run_config]
    nodes = 2
@@ -323,8 +334,12 @@ Stampede3 profiles create ``Stampede3Site`` instances:
      - Solver executable path on the remote system.
    * - ``work_dir``
      - Remote work-directory root. ``rel_path`` is appended to this value.
-   * - ``python_path``
-     - Optional local FrequenSolve source path used for scheduler templates.
+   * - ``modules``
+     - Environment modules loaded before the solver starts. Module names are
+       site-specific; generic profiles do not load a TACC module stack.
+   * - ``environment``
+     - Non-secret environment variables exported for solver runs. Credential
+       variables are rejected and must use the credential mechanisms below.
    * - ``mpi_wrapper``
      - MPI launcher such as ``srun`` or ``ibrun``.
    * - ``poll_interval``
@@ -371,14 +386,18 @@ saved.
 On a headless system without a usable keyring, authentication continues for the
 current session and prompts again next time. SSH agents are preferred for these
 systems. Process environment variables such as ``HPC_USERNAME``,
-``HPC_PASSWORD``, ``TACC_USERNAME``, ``TACC_PASSWORD``, ``SSH_PASSPHRASE``,
-``LOCAL_SOLVER_EXECUTABLE``, ``FS_SOLVER_EXECUTABLE``,
-``STAMPEDE3_SOLVER_EXECUTABLE``, ``FS_HPC_WORK_DIR``,
-``STAMPEDE3_WORK_DIR``, and ``FS_PYTHON_PATH`` remain compatibility fallbacks
-for direct constructors and automation. FrequenSolve no longer loads a project
-``.env`` file automatically.
+``HPC_PASSWORD``, and ``SSH_PASSPHRASE`` remain available for headless
+credential automation. Non-secret site settings, including usernames,
+allocation accounts, solver paths, and work directories, belong in
+``site.toml``. FrequenSolve no longer loads a project ``.env`` file
+automatically.
 
-Values are selected in this order: an explicit constructor argument, the
-selected ``site.toml`` profile, a process environment fallback, then the
-backend default. Unknown SSH host keys are rejected; connect once with the
-system ``ssh`` client to verify and save a site's key before first use.
+FrequenSolve loads its scheduler templates and adaptive runner from installed
+package resources. It does not read ``PYTHONPATH`` or require a source-checkout
+path for site setup. Supported solver builds own their compiled-in data
+resources.
+
+Site settings are selected in this order: an explicit constructor argument,
+the selected ``site.toml`` profile, then the backend default. Unknown SSH host
+keys are rejected; connect once with the system ``ssh`` client to verify and
+save a site's key before first use.

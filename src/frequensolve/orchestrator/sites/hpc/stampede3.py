@@ -15,16 +15,7 @@ __all__ = ["TACCLoginCredentials", "Stampede3Site"]
 
 
 class TACCLoginCredentials(Credentials):
-    """TACC credentials used by Stampede3.
-
-    Environment variables named by ``user_env``, ``pw_env``, and
-    ``ssh_key_env`` are read by the shared credential helper when explicit
-    values are not supplied.
-    """
-
-    user_env: str = "TACC_USERNAME"
-    pw_env: str = "TACC_PASSWORD"
-    ssh_key_env: str = "SSH_PASSPHRASE"
+    """TACC credentials used by Stampede3."""
 
 
 @dataclass(kw_only=True, init=False)
@@ -48,7 +39,9 @@ class Stampede3Site(SlurmSite):
         ssh_key: Optional SSH private-key path.
         solver: Remote solver executable path.
         work_dir: Remote work-directory root.
-        python_path: Local FrequenSolve source path used for templates.
+        modules: Environment modules loaded before solver execution.
+        environment: Non-secret environment values exported before solver
+            execution.
         verbose: Whether to enable verbose site logging.
     """
 
@@ -60,15 +53,12 @@ class Stampede3Site(SlurmSite):
     _compute_client: SSHClientClass
     _work_dir: Path
     _executable: str
-    _FS_dir: Path
 
     site_name = "Stampede3"
     credentials_cls = TACCLoginCredentials
     config_cls = Stampede3Config
     default_queue = "skx-dev"
     default_host = "stampede3.tacc.utexas.edu"
-    work_dir_env = "STAMPEDE3_WORK_DIR"
-    solver_executable_env = "STAMPEDE3_SOLVER_EXECUTABLE"
     default_solver_executable = None
 
     def __init__(
@@ -83,7 +73,8 @@ class Stampede3Site(SlurmSite):
         credential_store: Optional[CredentialStore] = None,
         solver: Optional[Union[str, Path]] = None,
         work_dir: Optional[Union[str, Path]] = None,
-        python_path: Optional[Union[str, Path]] = None,
+        modules: Optional[list[str]] = None,
+        environment: Optional[dict[str, object]] = None,
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
     ):
@@ -98,7 +89,8 @@ class Stampede3Site(SlurmSite):
             credential_store=credential_store,
             solver=solver,
             work_dir=work_dir,
-            python_path=python_path,
+            modules=modules,
+            environment=environment,
             run_config=run_config,
             verbose=verbose,
         )

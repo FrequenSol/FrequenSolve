@@ -113,6 +113,8 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
     assert "[sites.hpc]" in starter
     assert 'type = "slurm"' in starter
     assert 'solver = "/path/to/local/solver"' in starter
+    assert "modules = []" in starter
+    assert "[sites.hpc.environment]" in starter
     assert "[sites.hpc.run_config]" in starter
 
     site = sites.Site()
@@ -285,13 +287,16 @@ credential = "primary-cluster"
 ssh_key = "~/.ssh/id_ed25519"
 solver = "/remote/bin/solver"
 work_dir = "/scratch/user"
-python_path = "/local/FrequenSolve"
+modules = ["gcc", "openmpi"]
 queue = "debug"
 account = "acct123"
 nodes = 2
 duration = "00:30:00"
 procs_per_node = 4
 verbose = true
+
+[sites.cluster.environment]
+OMP_NUM_THREADS = "2"
 """.strip()
     )
     monkeypatch.setattr(sites, "SlurmSite", FakeSite)
@@ -306,7 +311,8 @@ verbose = true
     assert site.kwargs["ssh_key"] == "~/.ssh/id_ed25519"
     assert site.kwargs["solver"] == "/remote/bin/solver"
     assert site.kwargs["work_dir"] == "/scratch/user"
-    assert site.kwargs["python_path"] == "/local/FrequenSolve"
+    assert site.kwargs["modules"] == ["gcc", "openmpi"]
+    assert site.kwargs["environment"] == {"OMP_NUM_THREADS": "2"}
     assert site.kwargs["config"] == FakeSlurmSiteConfig(
         hostname="login.example.edu",
         queue="debug",

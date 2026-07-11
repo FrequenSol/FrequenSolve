@@ -44,17 +44,10 @@ cd {{run_path}}
 dir_out={{dir_out}}
 rm -rf $dir_out
 mkdir -p $dir_out
-mkdir -p $dir_out
 
-ml intel/25.1 phdf5 petsc/3.23 fftw3
-module list
-
-{% if n_tasks > 1 %}
-export FS_DISABLE_PARAVIEW=1
-{% endif %}
-export FS_SOLVER_PATH={{fs_dir}}
-
-export KMP_STACKSIZE=80M
+{% for line in runtime_setup %}
+{{ line }}
+{% endfor %}
 
 mpi_exec={{mpi}}
 executable={{executable}}

@@ -53,7 +53,11 @@ rel_path = "frequensolve/tutorials"
 queue = "debug"
 account = "allocation"
 transfer_method = "rsync"
+modules = []
 verbose = true
+
+[sites.hpc.environment]
+# OMP_NUM_THREADS = "1"
 
 [sites.hpc.run_config]
 nodes = 1

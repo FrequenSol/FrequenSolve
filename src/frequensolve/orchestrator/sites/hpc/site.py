@@ -18,6 +18,7 @@ from asyncio import Future
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from datetime import datetime, timezone
+from importlib.resources import as_file, files
 from pathlib import Path
 from select import select
 from typing import Any, Dict, List, Literal, Mapping, Optional, Type, Union
@@ -34,7 +35,7 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, PackageLoader
 
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
@@ -68,6 +69,7 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
 from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
 from frequensolve.orchestrator.utils.credential_store import CredentialStore
 from frequensolve.orchestrator.utils.credentials import Credentials
+from frequensolve.orchestrator.utils.environment import validate_environment
 from frequensolve.orchestrator.utils.pool import PoolInfo
 from frequensolve.orchestrator.utils.ssh import SSHClientClass
 from frequensolve.seismic.traces import TraceDataset
@@ -368,7 +370,9 @@ class SlurmSite(BaseSite):
         ssh_key: Optional private-key path.
         solver: Remote solver executable path.
         work_dir: Remote work-directory root.
-        python_path: Local FrequenSolve source path used for scheduler templates.
+        modules: Environment modules loaded before remote solver execution.
+        environment: Non-secret environment values exported before remote
+            solver execution.
         run_config: Default SLURM resource request.
         verbose: Whether to print site status messages in addition to logging.
     """
@@ -382,20 +386,17 @@ class SlurmSite(BaseSite):
     _login_client: SSHClientClass
     _compute_client: Optional[SSHClientClass] = None
     _work_dir: Path
-    _FS_dir: Path
     solver: Optional[Union[str, Path]]
     _configured_work_dir: Optional[Union[str, Path]]
-    python_path: Optional[Union[str, Path]]
+    modules: List[str]
+    environment: Dict[str, str]
 
     site_name: str = "SLURM"
     credentials_cls: Type["SlurmLoginCredentials"] = None
     config_cls: Optional[Type[Any]] = None
     default_queue: Optional[str] = None
     default_host: Optional[str] = None
-    work_dir_env: str = "FS_HPC_WORK_DIR"
-    solver_executable_env: str = "FS_SOLVER_EXECUTABLE"
     default_solver_executable: Optional[str] = None
-    python_path_env: str = "FS_PYTHON_PATH"
 
     def __init__(
         self,
@@ -410,7 +411,8 @@ class SlurmSite(BaseSite):
         credential_store: Optional[CredentialStore] = None,
         solver: Optional[Union[str, Path]] = None,
         work_dir: Optional[Union[str, Path]] = None,
-        python_path: Optional[Union[str, Path]] = None,
+        modules: Optional[List[str]] = None,
+        environment: Optional[Mapping[str, object]] = None,
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
     ):
@@ -442,7 +444,10 @@ class SlurmSite(BaseSite):
         )
         self.solver = solver
         self._configured_work_dir = work_dir
-        self.python_path = python_path
+        if isinstance(modules, str):
+            raise ValueError("modules must be an array of module names")
+        self.modules = [str(module) for module in (modules or [])]
+        self.environment = validate_environment(environment)
         self.transfer_method = transfer_method
         self.run_config = run_config or SlurmRunConfig(queue=queue)
         self._rel_proj_path = Path(rel_path)
@@ -454,7 +459,6 @@ class SlurmSite(BaseSite):
 
         self._work_dir = self._get_work_dir(self._rel_proj_path)
         self._executable = self._get_solver_path()
-        self._FS_dir = self._get_FS_path()
 
         self.pool = PoolInfo()
         self._is_notebook = _check_if_notebook()
@@ -468,8 +472,8 @@ class SlurmSite(BaseSite):
 
         if self._executable is None:
             raise ValueError(
-                "Solver executable not specified; configure solver in site.toml "
-                f"or set {self.solver_executable_env}."
+                "Solver executable not specified; configure solver in "
+                "site.toml or pass solver= explicitly."
             )
         return self._executable
 
@@ -789,16 +793,11 @@ class SlurmSite(BaseSite):
         return self._allocation_handle(str(job_id))
 
     def run_cmd(self, client, cmd: str):
-        """Run a command using exec_command, passing the captured environment if available."""
+        """Run a command using the connected SSH client."""
         if client is None:
             raise RuntimeError("SSH client is not connected")
-        env = getattr(client, "environ", None)
         logger.debug("Executing on %s: %s", client.hostname, cmd)
-        return (
-            client.client.exec_command(cmd, environment=env)
-            if env
-            else client.client.exec_command(cmd)
-        )
+        return client.client.exec_command(cmd)
 
     def run_compute_cmd(self, cmd: str):
         """Run a command on compute node using exec_command."""
@@ -1892,9 +1891,7 @@ class SlurmSite(BaseSite):
         """Return the Jinja environment used for remote execution scripts."""
 
         return Environment(
-            loader=FileSystemLoader(
-                self._FS_dir / "src/frequensolve/orchestrator/sites/hpc/templates"
-            ),
+            loader=PackageLoader("frequensolve.orchestrator.sites.hpc", "templates"),
             keep_trailing_newline=keep_trailing_newline,
         )
 
@@ -1912,6 +1909,18 @@ class SlurmSite(BaseSite):
             .get_template(template_name)
             .render(**context)
         )
+
+    def _runtime_setup_lines(self) -> List[str]:
+        """Return safely quoted module and environment setup commands."""
+
+        lines = [f"module load {shlex.quote(module)}" for module in self.modules]
+        if self.modules:
+            lines.append("module list")
+        lines.extend(
+            f"export {name}={shlex.quote(value)}"
+            for name, value in self.environment.items()
+        )
+        return lines
 
     def _attach_compute_client(self):
         """Connect to the current pool's compute host and populate pool metadata."""
@@ -1939,29 +1948,15 @@ class SlurmSite(BaseSite):
 
     def _get_solver_path(self) -> str:
         """Get the solver executable path on the remote system."""
-        executable = self.solver or os.getenv(self.solver_executable_env)
+        executable = self.solver
         if executable is None or executable == "":
             executable = self.default_solver_executable
         if executable is None or executable == "":
             raise ValueError(
-                f"Solver executable not specified; set {self.solver_executable_env} "
-                "or configure solver in site.toml."
+                "Solver executable not specified; configure solver in "
+                "site.toml or pass solver= explicitly."
             )
         return executable
-
-    def _get_FS_path(self) -> Path:
-        """Get the local FrequenSolve repository path used for script templates."""
-        configured_path = self.python_path or os.getenv(self.python_path_env)
-        path = (
-            Path(configured_path).expanduser()
-            if configured_path
-            else Path(__file__).resolve().parents[5]
-        )
-        if not path.exists():
-            raise FileNotFoundError(
-                f"Configured FrequenSolve Python path does not exist: {path}"
-            )
-        return path
 
     def _set_pool_info(self):
         """Get information about the pool."""
@@ -2037,6 +2032,7 @@ class SlurmSite(BaseSite):
     def _transfer_SLURM_job(self, script: str, job: BaseJob):
         """Transfer a SLURM job to the remote site."""
         remote_script = (self.work_dir / "sweep").with_suffix(".slurm")
+        remote_runner = self._adaptive_scheduler_remote_path()
         with _temporary_text_file(
             script, suffix=".slurm", prefix="sweep"
         ) as script_path:
@@ -2050,9 +2046,25 @@ class SlurmSite(BaseSite):
         self._transfer_remote_simulation_inputs(job)
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(local_job), Path(remote_job))
-        self.run_login(f"chmod 700 {remote_script}")
+        runner_resource = (
+            files("frequensolve.orchestrator.sites.hpc")
+            .joinpath("templates")
+            .joinpath("sweep")
+            .joinpath("adaptive_scheduler.py")
+        )
+        with as_file(runner_resource) as local_runner:
+            self.put(local_runner, remote_runner)
+        self.run_login(
+            f"chmod 700 {shlex.quote(str(remote_script))} "
+            f"{shlex.quote(str(remote_runner))}"
+        )
 
         return remote_script, remote_job
+
+    def _adaptive_scheduler_remote_path(self) -> Path:
+        """Return the remote path for the transferred adaptive scheduler."""
+
+        return self.work_dir / "adaptive_scheduler.py"
 
     def _remote_run_path(
         self,
@@ -2141,7 +2153,7 @@ class SlurmSite(BaseSite):
             executable=self.executable,
             imaging_job=isinstance(job, ImagingJob),
             pack_job=bool(pack_job),
-            fs_dir=str(Path(self.executable).parent),
+            runtime_setup=self._runtime_setup_lines(),
             **kwargs,
         )
 
@@ -2195,13 +2207,14 @@ class SlurmSite(BaseSite):
         min_ranks = int(kwargs.pop("min_ranks", 1))
         round_to = int(kwargs.pop("round_to", 1))
         cap_fraction = float(kwargs.pop("cap_fraction", 1.0))
-        tail_threshold = int(kwargs.pop("tail_threshold", 8))
+        kwargs.pop("tail_threshold", None)
         boost_max_factor = float(kwargs.pop("boost_max_factor", 8.0))
         tolerate_failures = _normalize_failure_tolerance(
             kwargs.pop("tolerate_failures", 4),
             default=4,
         )
         sizing_json = kwargs.pop("sizing_json", None)
+        launch_delay_seconds = float(kwargs.pop("launch_delay_seconds", 0.25))
         pack_job = bool(kwargs.pop("pack", True))
         n_job_tasks = int(n_tasks if n_job_tasks is None else n_job_tasks)
         if task_indices is None:
@@ -2211,6 +2224,25 @@ class SlurmSite(BaseSite):
         skip_sizing = bool(kwargs.pop("skip_sizing", n_tasks == 1))
         proc_memory = (config.memory_per_node / ranks_per_node) / 1024.0
         duration = config.validate_request(n_nodes, n_nodes * ranks_per_node, duration)
+        scheduler_config = {
+            "executable": str(self.executable),
+            "mpi": str(self.mpi_cmd),
+            "fresh": bool(kwargs.get("fresh", False)),
+            "total_ranks": n_nodes * ranks_per_node,
+            "omp_threads": config.cores_per_node // ranks_per_node,
+            "mem_per_rank_gib": proc_memory,
+            "job_task_count": n_job_tasks,
+            "task_indices": task_indices,
+            "skip_sizing": skip_sizing,
+            "min_ranks": min_ranks,
+            "round_to": round_to,
+            "cap_fraction": cap_fraction,
+            "mem_cushion": mem_cushion,
+            "boost_max_factor": boost_max_factor,
+            "failure_tolerance": tolerate_failures,
+            "sizing_json": str(sizing_json or "FS_sizing.json"),
+            "launch_delay_seconds": launch_delay_seconds,
+        }
 
         return self._render_template(
             "sweep/adaptive_sweep.sh",
@@ -2222,7 +2254,6 @@ class SlurmSite(BaseSite):
             min_ranks=min_ranks,
             round_to=round_to,
             cap_fraction=cap_fraction,
-            tail_threshold=tail_threshold,
             boost_max_factor=boost_max_factor,
             tolerate_failures=(
                 "none" if tolerate_failures is None else int(tolerate_failures)
@@ -2233,7 +2264,6 @@ class SlurmSite(BaseSite):
             n_threads=config.cores_per_node // ranks_per_node,
             n_tasks=n_tasks,
             n_job_tasks=n_job_tasks,
-            task_indices_json=json.dumps(task_indices),
             smooth_only=bool(kwargs.pop("smooth_only", False)),
             duration=duration,
             queue=queue,
@@ -2242,7 +2272,10 @@ class SlurmSite(BaseSite):
             pack_job=pack_job,
             mpi=self.mpi_cmd,
             executable=self.executable,
-            fs_dir=str(Path(self.executable).parent),
+            runtime_setup=self._runtime_setup_lines(),
+            scheduler_config_shell=shlex.quote(json.dumps(scheduler_config, indent=2)),
+            sizing_json_shell=shlex.quote(str(sizing_json or "FS_sizing.json")),
+            scheduler_runner=shlex.quote(str(self._adaptive_scheduler_remote_path())),
             **({"sizing_json": sizing_json} if sizing_json is not None else {}),
             **({"run_path": run_path} if run_path is not None else {}),
             **({"notify_on": notify_on.upper()} if notify_on is not None else {}),
@@ -2279,6 +2312,7 @@ class SlurmSite(BaseSite):
             )
             ranks_per_node = int(values["ranks_per_node"])
         name = kwargs.get("name", "FS_cluster")
+        account = account or self.run_config.account or self.config.account
 
         return self._render_template(
             "provision/provision_SLURM.sh",
@@ -2343,7 +2377,7 @@ class SlurmSite(BaseSite):
 
     def _get_work_dir(self, rel_proj_path: Union[str, Path]) -> Path:
         """Gets the remote work directory path."""
-        work_dir = self._configured_work_dir or os.getenv(self.work_dir_env)
+        work_dir = self._configured_work_dir
 
         # If the configured variable is not set, try $WORK on the login node.
         if not work_dir or work_dir == "":
@@ -2352,7 +2386,7 @@ class SlurmSite(BaseSite):
             if not work_dir:
                 raise RuntimeError(
                     f"Failed to get remote work directory for {self.site_name}; "
-                    f"configure work_dir in site.toml or set {self.work_dir_env}"
+                    "configure work_dir in site.toml or pass work_dir= explicitly"
                 )
 
         self._work_dir = Path(work_dir) / rel_proj_path

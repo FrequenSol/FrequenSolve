@@ -44,6 +44,10 @@ from frequensolve.orchestrator.sites.local.config import LocalSiteConfig
 from frequensolve.orchestrator.sites.local.dask_logging import (
     configure_dependency_logging,
 )
+from frequensolve.orchestrator.utils.environment import (
+    build_subprocess_environment,
+    validate_environment,
+)
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
@@ -462,8 +466,9 @@ class LocalSite(BaseSite):
         n_workers: Optional Dask worker count.
         threads_per_worker: Optional thread count per Dask worker.
         memory_per_worker: Optional worker memory limit.
-        solver: Path to the local solver executable. The
-            ``LOCAL_SOLVER_EXECUTABLE`` environment variable remains a fallback.
+        solver: Path to the local solver executable.
+        environment: Non-secret environment values added to worker and solver
+            subprocesses.
         shutdown_on_completion: Whether to close the Dask cluster after a run
             completes.
         dashboard_host: Hostname used for the Dask dashboard.
@@ -474,6 +479,7 @@ class LocalSite(BaseSite):
     executable: str = field(init=False)
     env: dict = field(default_factory=dict)
     solver: Optional[Union[str, Path]] = None
+    environment: Mapping[str, object] = field(default_factory=dict)
     n_workers: Optional[int] = None
     threads_per_worker: Optional[int] = None
     memory_per_worker: Optional[int] = None
@@ -496,12 +502,13 @@ class LocalSite(BaseSite):
     def __post_init__(self):
         self.config = LocalSiteConfig()
         self.executable = self._get_solver_path()
-        self.env = os.environ.copy()
-        solver_path = os.getenv("FS_SOLVER_PATH")
-        if solver_path:
-            self.env["FS_SOLVER_PATH"] = solver_path
-        self.env["VECLIB_MAXIMUM_THREADS"] = (
-            "1"  # Fixes occational crash when linking to Accelerate framework
+        explicit_environment = {
+            **self.env,
+            **validate_environment(self.environment),
+        }
+        self.env = build_subprocess_environment(
+            defaults={"VECLIB_MAXIMUM_THREADS": "1"},
+            overrides=explicit_environment,
         )
         self._quiet_dependency_loggers()
 
@@ -1841,11 +1848,11 @@ class LocalSite(BaseSite):
 
     def _get_solver_path(self) -> str:
         """Get the solver path."""
-        executable = self.solver or os.getenv("LOCAL_SOLVER_EXECUTABLE")
+        executable = self.solver
         if not executable:
             warnings.warn(
-                "Solver executable not configured; set solver in site.toml or "
-                "LOCAL_SOLVER_EXECUTABLE in the process environment",
+                "Solver executable not configured; set solver in site.toml "
+                "or pass solver= explicitly",
                 stacklevel=2,
             )
             return None

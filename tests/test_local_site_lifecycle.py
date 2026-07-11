@@ -3,6 +3,8 @@ import json
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from frequensolve.orchestrator.sites.base import JobStatus, RunHandle
 from frequensolve.orchestrator.sites.local import LocalSite, run_task
 from frequensolve.orchestrator.sites.local import site as local_module
@@ -83,26 +85,33 @@ def make_run(site, job, futures, shutdown_on_completion=True):
     return run
 
 
-def test_local_solver_config_precedes_environment(monkeypatch, tmp_path):
+def test_local_solver_uses_configured_path(tmp_path):
     configured_solver = tmp_path / "configured-solver"
-    environment_solver = tmp_path / "environment-solver"
     configured_solver.touch()
-    environment_solver.touch()
-    monkeypatch.setenv("LOCAL_SOLVER_EXECUTABLE", str(environment_solver))
     site = object.__new__(LocalSite)
     site.solver = configured_solver
 
     assert LocalSite._get_solver_path(site) == str(configured_solver)
 
 
-def test_local_solver_environment_remains_a_fallback(monkeypatch, tmp_path):
-    environment_solver = tmp_path / "environment-solver"
-    environment_solver.touch()
-    monkeypatch.setenv("LOCAL_SOLVER_EXECUTABLE", str(environment_solver))
-    site = object.__new__(LocalSite)
-    site.solver = None
+def test_local_site_uses_profile_environment_without_forwarding_credentials(
+    monkeypatch,
+):
+    monkeypatch.setattr(LocalSite, "_get_solver_path", lambda self: "/bin/echo")
+    monkeypatch.setenv("HPC_PASSWORD", "secret")
 
-    assert LocalSite._get_solver_path(site) == str(environment_solver)
+    site = LocalSite(environment={"OMP_NUM_THREADS": 2})
+
+    assert site.env["OMP_NUM_THREADS"] == "2"
+    assert site.env["VECLIB_MAXIMUM_THREADS"] == "1"
+    assert "HPC_PASSWORD" not in site.env
+
+
+def test_local_site_rejects_credentials_in_profile_environment(monkeypatch):
+    monkeypatch.setattr(LocalSite, "_get_solver_path", lambda self: "/bin/echo")
+
+    with pytest.raises(ValueError, match="Credential variable"):
+        LocalSite(environment={"HPC_PASSWORD": "secret"})
 
 
 def test_local_task_status_counts_submitted_futures_as_running():
