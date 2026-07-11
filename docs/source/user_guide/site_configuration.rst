@@ -229,7 +229,7 @@ extra.
    dashboard_port = 8787
 
    [sites.local.environment]
-   OMP_NUM_THREADS = "1"
+   # OMP_NUM_THREADS = "1"
 
 .. list-table::
    :header-rows: 1
@@ -371,6 +371,14 @@ For generic ``slurm`` profiles, config fields and run fields may be written
 flat as shown above, or grouped under nested ``config`` and ``run_config``
 tables. ``stampede3`` profiles use Stampede3's built-in machine config and
 therefore do not accept a nested ``config`` table.
+
+FrequenSolve sets ``MKL_NUM_THREADS=1`` and ``MKL_DYNAMIC=FALSE`` for local and
+SLURM solver processes so MKL does not add nested threading underneath the
+solver's own thread controls. Explicit profile ``environment`` values override
+these defaults. FrequenSolve does not set ``OMP_NUM_THREADS``; users may set it
+under the selected profile's ``environment`` table when appropriate.
+``KMP_STACKSIZE`` is likewise profile-controlled because its appropriate value
+depends on the solver launch and HPC runtime.
 
 Credentials, Compatibility, And Precedence
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -7,7 +7,16 @@ import re
 from collections.abc import Mapping
 from typing import Optional
 
-__all__ = ["build_subprocess_environment", "validate_environment"]
+__all__ = [
+    "NUMERIC_RUNTIME_DEFAULTS",
+    "build_subprocess_environment",
+    "validate_environment",
+]
+
+NUMERIC_RUNTIME_DEFAULTS = {
+    "MKL_DYNAMIC": "FALSE",
+    "MKL_NUM_THREADS": "1",
+}
 
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SENSITIVE_VARIABLES = {

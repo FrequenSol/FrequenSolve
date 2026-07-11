@@ -391,7 +391,7 @@ def test_slurm_site_uses_configured_paths_and_runtime(monkeypatch):
         solver="/configured/bin/FS",
         work_dir="/configured/work",
         modules=["compiler/1.0", "mpi"],
-        environment={"OMP_NUM_THREADS": 2},
+        environment={"MKL_NUM_THREADS": 4, "OMP_NUM_THREADS": 2},
         username="configured-user",
         credential_store=object(),
     )
@@ -402,6 +402,8 @@ def test_slurm_site_uses_configured_paths_and_runtime(monkeypatch):
         "module load compiler/1.0",
         "module load mpi",
         "module list",
+        "export MKL_DYNAMIC=FALSE",
+        "export MKL_NUM_THREADS=4",
         "export OMP_NUM_THREADS=2",
     ]
     assert site._render_template("sweep/sweep_SLURM.sh", runtime_setup=[]).startswith(
@@ -1008,6 +1010,8 @@ def test_slurm_scripts_use_only_profile_runtime_setup(monkeypatch):
 
     assert "module load 'compiler suite'" in script
     assert "module load mpi/5" in script
+    assert "export MKL_DYNAMIC=FALSE" in script
+    assert "export MKL_NUM_THREADS=1" in script
     assert "export OMP_NUM_THREADS=3" in script
     assert "export VALUE='two words'" in script
     assert "intel/25.1" not in script

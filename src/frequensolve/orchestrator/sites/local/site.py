@@ -45,6 +45,7 @@ from frequensolve.orchestrator.sites.local.dask_logging import (
     configure_dependency_logging,
 )
 from frequensolve.orchestrator.utils.environment import (
+    NUMERIC_RUNTIME_DEFAULTS,
     build_subprocess_environment,
     validate_environment,
 )
@@ -507,8 +508,11 @@ class LocalSite(BaseSite):
             **validate_environment(self.environment),
         }
         self.env = build_subprocess_environment(
-            defaults={"VECLIB_MAXIMUM_THREADS": "1"},
-            overrides=explicit_environment,
+            overrides={
+                **NUMERIC_RUNTIME_DEFAULTS,
+                "VECLIB_MAXIMUM_THREADS": "1",
+                **explicit_environment,
+            }
         )
         self._quiet_dependency_loggers()
 

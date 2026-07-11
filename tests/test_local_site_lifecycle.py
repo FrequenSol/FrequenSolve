@@ -103,6 +103,8 @@ def test_local_site_uses_profile_environment_without_forwarding_credentials(
     site = LocalSite(environment={"OMP_NUM_THREADS": 2})
 
     assert site.env["OMP_NUM_THREADS"] == "2"
+    assert site.env["MKL_DYNAMIC"] == "FALSE"
+    assert site.env["MKL_NUM_THREADS"] == "1"
     assert site.env["VECLIB_MAXIMUM_THREADS"] == "1"
     assert "HPC_PASSWORD" not in site.env
 
@@ -112,6 +114,15 @@ def test_local_site_rejects_credentials_in_profile_environment(monkeypatch):
 
     with pytest.raises(ValueError, match="Credential variable"):
         LocalSite(environment={"HPC_PASSWORD": "secret"})
+
+
+def test_local_site_profile_can_override_numeric_runtime_defaults(monkeypatch):
+    monkeypatch.setattr(LocalSite, "_get_solver_path", lambda self: "/bin/echo")
+    monkeypatch.setenv("MKL_NUM_THREADS", "8")
+
+    site = LocalSite(environment={"MKL_NUM_THREADS": 2})
+
+    assert site.env["MKL_NUM_THREADS"] == "2"
 
 
 def test_local_task_status_counts_submitted_futures_as_running():

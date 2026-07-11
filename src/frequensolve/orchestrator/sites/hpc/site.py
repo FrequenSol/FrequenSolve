@@ -69,7 +69,10 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
 from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
 from frequensolve.orchestrator.utils.credential_store import CredentialStore
 from frequensolve.orchestrator.utils.credentials import Credentials
-from frequensolve.orchestrator.utils.environment import validate_environment
+from frequensolve.orchestrator.utils.environment import (
+    NUMERIC_RUNTIME_DEFAULTS,
+    validate_environment,
+)
 from frequensolve.orchestrator.utils.pool import PoolInfo
 from frequensolve.orchestrator.utils.ssh import SSHClientClass
 from frequensolve.seismic.traces import TraceDataset
@@ -1916,9 +1919,13 @@ class SlurmSite(BaseSite):
         lines = [f"module load {shlex.quote(module)}" for module in self.modules]
         if self.modules:
             lines.append("module list")
+        runtime_environment = {
+            **NUMERIC_RUNTIME_DEFAULTS,
+            **self.environment,
+        }
         lines.extend(
             f"export {name}={shlex.quote(value)}"
-            for name, value in self.environment.items()
+            for name, value in runtime_environment.items()
         )
         return lines
 
