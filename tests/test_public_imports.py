@@ -27,6 +27,7 @@ forbidden = {
     'dask',
     'distributed',
     'dotenv',
+    'keyring',
     'matplotlib',
     'paramiko',
     'pint',

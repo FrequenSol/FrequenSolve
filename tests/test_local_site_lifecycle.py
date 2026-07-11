@@ -83,6 +83,28 @@ def make_run(site, job, futures, shutdown_on_completion=True):
     return run
 
 
+def test_local_solver_config_precedes_environment(monkeypatch, tmp_path):
+    configured_solver = tmp_path / "configured-solver"
+    environment_solver = tmp_path / "environment-solver"
+    configured_solver.touch()
+    environment_solver.touch()
+    monkeypatch.setenv("LOCAL_SOLVER_EXECUTABLE", str(environment_solver))
+    site = object.__new__(LocalSite)
+    site.solver = configured_solver
+
+    assert LocalSite._get_solver_path(site) == str(configured_solver)
+
+
+def test_local_solver_environment_remains_a_fallback(monkeypatch, tmp_path):
+    environment_solver = tmp_path / "environment-solver"
+    environment_solver.touch()
+    monkeypatch.setenv("LOCAL_SOLVER_EXECUTABLE", str(environment_solver))
+    site = object.__new__(LocalSite)
+    site.solver = None
+
+    assert LocalSite._get_solver_path(site) == str(environment_solver)
+
+
 def test_local_task_status_counts_submitted_futures_as_running():
     assert local_module._local_task_status(["pending", "lost", "finished"]) == {
         "successful": 1,

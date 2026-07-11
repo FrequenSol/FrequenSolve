@@ -94,9 +94,9 @@ standard capitalization.
       A discontinuity or surface feature that can be represented in model or
       borehole geometry.
 
-   FS_SOLVER_PATH
-      Environment variable used by local execution paths to locate the fast
-      solver executable.
+   LOCAL_SOLVER_EXECUTABLE
+      Compatibility environment-variable fallback for the local solver path.
+      Normal user setup should use ``solver`` in ``site.toml``.
 
    FWI
       Full waveform inversion workflow. FWI-gradient image requests produce

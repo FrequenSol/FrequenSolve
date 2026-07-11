@@ -385,6 +385,27 @@ def test_generic_slurm_site_can_be_instantiated_without_site_specific_class(
     assert site.config_for_queue("debug").queue == "debug"
 
 
+def test_slurm_site_configured_paths_precede_environment(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/environment/work")
+    monkeypatch.setenv("FS_SOLVER_EXECUTABLE", "/environment/bin/FS")
+    monkeypatch.setenv("FS_PYTHON_PATH", "/missing/environment/path")
+
+    site = DummySlurmSite(
+        "project/run",
+        solver="/configured/bin/FS",
+        work_dir="/configured/work",
+        python_path=tmp_path,
+        username="configured-user",
+        credential_store=object(),
+    )
+
+    assert site.work_dir == Path("/configured/work/project/run")
+    assert site.executable == "/configured/bin/FS"
+    assert site._FS_dir == tmp_path
+    assert site.credentials.username == "configured-user"
+
+
 def test_slurm_site_handles_missing_job_id_without_remote_cancel(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
@@ -1848,3 +1869,4 @@ def test_stampede3_site_is_specific_slurm_subclass():
     assert Stampede3Site.config_cls is Stampede3Config
     assert Stampede3Site.credentials_cls is TACCLoginCredentials
     assert Stampede3Site.work_dir_env == "STAMPEDE3_WORK_DIR"
+    assert Stampede3Site.default_solver_executable is None

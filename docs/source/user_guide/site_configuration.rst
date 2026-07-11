@@ -61,7 +61,7 @@ Choosing a Site Type
      - FrequenSol Cloud account, license, and network access.
    * - ``local``
      - ``frequensolve[parallel]``
-     - Local :term:`fast solver` installation and :term:`FS_SOLVER_PATH`.
+     - Local :term:`fast solver` installation configured in the profile.
    * - ``slurm``
      - ``frequensolve[hpc]``
      - Generic :term:`SSH`/:term:`SLURM` access, allocation details, and a
@@ -88,6 +88,7 @@ Most users should keep multiple named profiles:
 
    [sites.local]
    type = "local"
+   solver = "/opt/frequensol/bin/fs3d_s"
    shutdown_on_completion = true
 
    [sites.hpc]
@@ -142,6 +143,7 @@ named profiles:
 
    [sites.local]
    type = "local"
+   solver = "/opt/frequensol/bin/fs3d_s"
    shutdown_on_completion = true
 
 Top-Level Keys
@@ -233,6 +235,8 @@ extra.
      - Meaning
    * - ``shutdown_on_completion``
      - Close local :term:`Dask` resources after a run completes.
+   * - ``solver``
+     - Path to the installed local solver executable.
    * - ``n_workers``
      - Number of local Dask workers. If omitted, FrequenSolve chooses from
        system resources.
@@ -258,14 +262,22 @@ extra.
    [sites.cluster]
    type = "slurm"
    hostname = "login.example.edu"
+   username = "jsmith"
+   credential = "example-primary"
+   ssh_key = "~/.ssh/id_ed25519"
+   solver = "/work/shared/frequensol/fs3d_s"
+   work_dir = "/scratch/jsmith"
+   python_path = "/home/jsmith/FrequenSolve"
    rel_path = "frequensolve/tutorials"
    queue = "debug"
    account = "allocation"
+   transfer_method = "rsync"
+
+   [sites.cluster.run_config]
    nodes = 2
    duration = "00:30:00"
-   procs_per_node = 4
-   procs_per_task = 1
-   transfer_method = "rsync"
+   ranks_per_node = 4
+   ranks_per_task = 1
 
 Stampede3 profiles create ``Stampede3Site`` instances:
 
@@ -273,8 +285,15 @@ Stampede3 profiles create ``Stampede3Site`` instances:
 
    [sites.stampede3]
    type = "stampede3"
+   username = "jsmith"
+   credential = "tacc-primary"
+   ssh_key = "~/.ssh/id_ed25519"
+   solver = "/work/shared/frequensol/fs3d_s"
+   work_dir = "/scratch/jsmith"
    rel_path = "scratch/frequensolve_tutorials"
    queue = "skx-dev"
+
+   [sites.stampede3.run_config]
    nodes = 1
    duration = "00:30:00"
 
@@ -293,6 +312,19 @@ Stampede3 profiles create ``Stampede3Site`` instances:
        overridden.
    * - ``hostname``
      - Login host for generic ``slurm`` profiles.
+   * - ``username``
+     - SSH login name. This is not a secret and belongs in the profile.
+   * - ``credential``
+     - Stable lookup name that separates this profile's secrets in the OS
+       keyring.
+   * - ``ssh_key``
+     - Optional local private-key path. SSH agent keys are attempted first.
+   * - ``solver``
+     - Solver executable path on the remote system.
+   * - ``work_dir``
+     - Remote work-directory root. ``rel_path`` is appended to this value.
+   * - ``python_path``
+     - Optional local FrequenSolve source path used for scheduler templates.
    * - ``mpi_wrapper``
      - MPI launcher such as ``srun`` or ``ibrun``.
    * - ``poll_interval``
@@ -324,3 +356,29 @@ For generic ``slurm`` profiles, config fields and run fields may be written
 flat as shown above, or grouped under nested ``config`` and ``run_config``
 tables. ``stampede3`` profiles use Stampede3's built-in machine config and
 therefore do not accept a nested ``config`` table.
+
+Credentials, Compatibility, And Precedence
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Passwords and SSH-key passphrases must not be written to ``site.toml``.
+FrequenSolve first tries an existing SSH control socket, the SSH agent, and the
+configured private key. When a password or key passphrase must be entered, the
+prompt is hidden. After authentication succeeds, the value is saved through
+``keyring`` to macOS Keychain, Windows Credential Manager, or a supported Linux
+Secret Service. Two-factor codes are prompted for every login and are never
+saved.
+
+On a headless system without a usable keyring, authentication continues for the
+current session and prompts again next time. SSH agents are preferred for these
+systems. Process environment variables such as ``HPC_USERNAME``,
+``HPC_PASSWORD``, ``TACC_USERNAME``, ``TACC_PASSWORD``, ``SSH_PASSPHRASE``,
+``LOCAL_SOLVER_EXECUTABLE``, ``FS_SOLVER_EXECUTABLE``,
+``STAMPEDE3_SOLVER_EXECUTABLE``, ``FS_HPC_WORK_DIR``,
+``STAMPEDE3_WORK_DIR``, and ``FS_PYTHON_PATH`` remain compatibility fallbacks
+for direct constructors and automation. FrequenSolve no longer loads a project
+``.env`` file automatically.
+
+Values are selected in this order: an explicit constructor argument, the
+selected ``site.toml`` profile, a process environment fallback, then the
+backend default. Unknown SSH host keys are rejected; connect once with the
+system ``ssh`` client to verify and save a site's key before first use.

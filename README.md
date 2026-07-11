@@ -83,20 +83,34 @@ verbose = true
 
 [sites.local]
 type = "local"
+solver = "/path/to/local/solver"
 shutdown_on_completion = true
 verbose = true
 
 [sites.hpc]
-type = "stampede3"
-rel_path = "scratch/frequensolve_tutorials"
-queue = "skx-dev"
+type = "slurm"
+hostname = "login.example.edu"
+username = "your-username"
+credential = "example-hpc"
+ssh_key = "~/.ssh/id_ed25519"
+solver = "/remote/path/to/solver"
+work_dir = "/remote/work/directory"
+rel_path = "frequensolve/tutorials"
+queue = "debug"
+account = "allocation"
+transfer_method = "rsync"
+verbose = true
+
+[sites.hpc.run_config]
 nodes = 1
 duration = "00:30:00"
-procs_per_node = 4
-procs_per_task = 1
+ranks_per_node = 4
+ranks_per_task = 1
 poll_interval = 10
-verbose = true
 ```
+
+HPC passwords and SSH-key passphrases are stored in the operating system
+keyring only after a successful login. Two-factor codes are never stored.
 
 The tutorial notebooks live in `examples/tutorials`. The local documentation catalog is `docs/source/tutorials/index.rst`, with site-specific examples under `examples/tutorials/02_sites`.
 

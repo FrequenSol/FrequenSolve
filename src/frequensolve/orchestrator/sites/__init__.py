@@ -26,7 +26,7 @@ LocalSite = optional_class(
     "LocalSite",
     "frequensolve.orchestrator.sites.local.LocalSite",
     extra="parallel",
-    dependencies=("dask", "distributed", "python-dotenv"),
+    dependencies=("dask", "distributed"),
     module=__name__,
 )
 
@@ -34,42 +34,42 @@ SlurmLoginCredentials = optional_class(
     "SlurmLoginCredentials",
     "frequensolve.orchestrator.sites.hpc.SlurmLoginCredentials",
     extra="hpc",
-    dependencies=("paramiko", "python-dotenv"),
+    dependencies=("paramiko", "keyring"),
     module=__name__,
 )
 SlurmRunConfig = optional_class(
     "SlurmRunConfig",
     "frequensolve.orchestrator.sites.hpc.SlurmRunConfig",
     extra="hpc",
-    dependencies=("paramiko", "python-dotenv"),
+    dependencies=("paramiko", "keyring"),
     module=__name__,
 )
 SlurmSite = optional_class(
     "SlurmSite",
     "frequensolve.orchestrator.sites.hpc.SlurmSite",
     extra="hpc",
-    dependencies=("paramiko", "python-dotenv"),
+    dependencies=("paramiko", "keyring"),
     module=__name__,
 )
 SlurmSiteConfig = optional_class(
     "SlurmSiteConfig",
     "frequensolve.orchestrator.sites.hpc.SlurmSiteConfig",
     extra="hpc",
-    dependencies=("paramiko", "python-dotenv"),
+    dependencies=("paramiko", "keyring"),
     module=__name__,
 )
 Stampede3Site = optional_class(
     "Stampede3Site",
     "frequensolve.orchestrator.sites.hpc.Stampede3Site",
     extra="hpc",
-    dependencies=("paramiko", "python-dotenv"),
+    dependencies=("paramiko", "keyring"),
     module=__name__,
 )
 TACCLoginCredentials = optional_class(
     "TACCLoginCredentials",
     "frequensolve.orchestrator.sites.hpc.TACCLoginCredentials",
     extra="hpc",
-    dependencies=("paramiko", "python-dotenv"),
+    dependencies=("paramiko", "keyring"),
     module=__name__,
 )
 

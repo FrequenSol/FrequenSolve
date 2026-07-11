@@ -111,6 +111,9 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
     assert 'type = "aws"' in starter
     assert "[sites.local]" in starter
     assert "[sites.hpc]" in starter
+    assert 'type = "slurm"' in starter
+    assert 'solver = "/path/to/local/solver"' in starter
+    assert "[sites.hpc.run_config]" in starter
 
     site = sites.Site()
 
@@ -250,6 +253,22 @@ shutdown_on_completion = true
         sites.Site(config_path=config_path)
 
 
+def test_site_factory_rejects_solver_executable_alias(tmp_path):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        """
+default = "local"
+
+[sites.local]
+type = "local"
+solver_executable = "/path/to/solver"
+""".strip()
+    )
+
+    with pytest.raises(ValueError, match="solver_executable.*solver"):
+        sites.Site(config_path=config_path)
+
+
 def test_site_factory_builds_slurm_config_objects(monkeypatch, tmp_path):
     install_fake_hpc_module(monkeypatch)
     config_path = tmp_path / "slurm-site.toml"
@@ -261,6 +280,12 @@ default = "cluster"
 type = "slurm"
 rel_path = "projects/demo"
 hostname = "login.example.edu"
+username = "user"
+credential = "primary-cluster"
+ssh_key = "~/.ssh/id_ed25519"
+solver = "/remote/bin/solver"
+work_dir = "/scratch/user"
+python_path = "/local/FrequenSolve"
 queue = "debug"
 account = "acct123"
 nodes = 2
@@ -276,6 +301,12 @@ verbose = true
     assert site.kwargs["rel_path"] == "projects/demo"
     assert site.kwargs["default_queue"] == "debug"
     assert site.kwargs["verbose"] is True
+    assert site.kwargs["username"] == "user"
+    assert site.kwargs["credential"] == "primary-cluster"
+    assert site.kwargs["ssh_key"] == "~/.ssh/id_ed25519"
+    assert site.kwargs["solver"] == "/remote/bin/solver"
+    assert site.kwargs["work_dir"] == "/scratch/user"
+    assert site.kwargs["python_path"] == "/local/FrequenSolve"
     assert site.kwargs["config"] == FakeSlurmSiteConfig(
         hostname="login.example.edu",
         queue="debug",
@@ -343,6 +374,10 @@ queue = "skx-dev"
 nodes = 1
 duration = "00:20:00"
 transfer_method = "sftp"
+username = "user"
+credential = "tacc-primary"
+solver = "/remote/bin/solver"
+work_dir = "/scratch/user"
 """.strip()
     )
     monkeypatch.setattr(sites, "Stampede3Site", FakeSite)
@@ -352,6 +387,10 @@ transfer_method = "sftp"
     assert site.kwargs["rel_path"] == "projects/demo"
     assert site.kwargs["default_queue"] == "skx-dev"
     assert site.kwargs["transfer_method"] == "sftp"
+    assert site.kwargs["username"] == "user"
+    assert site.kwargs["credential"] == "tacc-primary"
+    assert site.kwargs["solver"] == "/remote/bin/solver"
+    assert site.kwargs["work_dir"] == "/scratch/user"
     assert site.kwargs["run_config"] == FakeSlurmRunConfig(
         queue="skx-dev",
         nodes=1,

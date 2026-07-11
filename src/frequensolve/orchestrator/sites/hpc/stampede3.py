@@ -6,6 +6,7 @@ from typing import Literal, Optional, Union
 
 from frequensolve.orchestrator.sites.hpc.config import Stampede3Config
 from frequensolve.orchestrator.sites.hpc.site import SlurmRunConfig, SlurmSite
+from frequensolve.orchestrator.utils.credential_store import CredentialStore
 from frequensolve.orchestrator.utils.credentials import Credentials
 from frequensolve.orchestrator.utils.pool import PoolInfo
 from frequensolve.orchestrator.utils.ssh import SSHClientClass
@@ -42,6 +43,12 @@ class Stampede3Site(SlurmSite):
         default_queue: SLURM queue/partition used when no run config supplies
             one.
         run_config: Optional per-run SLURM settings.
+        username: TACC username.
+        credential: Keyring lookup name.
+        ssh_key: Optional SSH private-key path.
+        solver: Remote solver executable path.
+        work_dir: Remote work-directory root.
+        python_path: Local FrequenSolve source path used for templates.
         verbose: Whether to enable verbose site logging.
     """
 
@@ -62,15 +69,21 @@ class Stampede3Site(SlurmSite):
     default_host = "stampede3.tacc.utexas.edu"
     work_dir_env = "STAMPEDE3_WORK_DIR"
     solver_executable_env = "STAMPEDE3_SOLVER_EXECUTABLE"
-    default_solver_executable = (
-        "/work2/06472/jbadger/shared/stampede3/FS_stable/FS_seismic"
-    )
+    default_solver_executable = None
 
     def __init__(
         self,
         rel_path: Union[str, Path],
         transfer_method: Literal["rsync", "sftp"] = "rsync",
         default_queue: str = "skx-dev",
+        credentials: Optional[TACCLoginCredentials] = None,
+        username: Optional[str] = None,
+        credential: Optional[str] = None,
+        ssh_key: Optional[Union[str, Path]] = None,
+        credential_store: Optional[CredentialStore] = None,
+        solver: Optional[Union[str, Path]] = None,
+        work_dir: Optional[Union[str, Path]] = None,
+        python_path: Optional[Union[str, Path]] = None,
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
     ):
@@ -78,6 +91,14 @@ class Stampede3Site(SlurmSite):
             rel_path=rel_path,
             transfer_method=transfer_method,
             default_queue=default_queue,
+            credentials=credentials,
+            username=username,
+            credential=credential,
+            ssh_key=ssh_key,
+            credential_store=credential_store,
+            solver=solver,
+            work_dir=work_dir,
+            python_path=python_path,
             run_config=run_config,
             verbose=verbose,
         )

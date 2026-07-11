@@ -87,7 +87,7 @@ class SSHProxy:
         cmd = [
             "ssh",
             "-o",
-            "StrictHostKeyChecking=no",
+            "StrictHostKeyChecking=yes",
             "-q",  # Add quiet flag
             f"{self.username}@{self.host}",
         ]
@@ -105,7 +105,9 @@ class SSHProxy:
         master_file = os.fdopen(master, "rb+", buffering=0)
 
         if self.compute_host is not None:
-            master_file.write(f"ssh {self.compute_host}\n".encode())
+            master_file.write(
+                f"ssh -o StrictHostKeyChecking=yes {self.compute_host}\n".encode()
+            )
             master_file.flush()
             time.sleep(1)
 
@@ -182,7 +184,7 @@ class SSHProxy:
         return (stdin, stdout, stderr)
 
     def _exec_on_login(self, command, term=False):
-        cmd = ["ssh", "-o", "StrictHostKeyChecking=no"]
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=yes"]
         if term:
             cmd.append("-t")
         cmd.extend(
@@ -198,7 +200,7 @@ class SSHProxy:
         cmd = [
             "ssh",
             "-o",
-            "StrictHostKeyChecking=no",
+            "StrictHostKeyChecking=yes",
             "-J",
             f"{self.username}@{self.host}",
             f"{self.username}@{self.compute_host}",

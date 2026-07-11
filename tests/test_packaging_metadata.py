@@ -75,6 +75,15 @@ def test_cloud_extra_contains_only_cloud_client_dependencies():
         assert non_cloud_dependency not in cloud_dependencies
 
 
+def test_hpc_extras_use_keyring_without_requiring_dotenv():
+    extras = load_pyproject()["project"]["optional-dependencies"]
+
+    for extra_name in ("hpc", "parallel"):
+        dependencies = "\n".join(extras[extra_name])
+        assert "keyring" in dependencies
+        assert "python-dotenv" not in dependencies
+
+
 def test_versioneer_uses_v_prefixed_release_tags():
     pyproject = load_pyproject()
     setup_cfg = (ROOT / "setup.cfg").read_text(encoding="utf-8")

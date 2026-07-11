@@ -25,13 +25,12 @@ from typing import Any, Dict, List, Literal, Mapping, Optional, Type, Union
 from frequensolve._optional import optional_dependency_error
 
 try:
-    from dotenv import load_dotenv
     from paramiko import SSHClient
 except ModuleNotFoundError as exc:
     raise optional_dependency_error(
         "SlurmSite",
         extra="hpc",
-        dependencies=("paramiko", "python-dotenv"),
+        dependencies=("paramiko",),
         error=exc,
     ) from exc
 
@@ -67,6 +66,7 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     temporary_text_file as _temporary_text_file,
 )
 from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
+from frequensolve.orchestrator.utils.credential_store import CredentialStore
 from frequensolve.orchestrator.utils.credentials import Credentials
 from frequensolve.orchestrator.utils.pool import PoolInfo
 from frequensolve.orchestrator.utils.ssh import SSHClientClass
@@ -361,6 +361,14 @@ class SlurmSite(BaseSite):
         default_queue: Optional queue override.
         config: Optional site configuration object.
         credentials: Optional login credentials object.
+        username: SSH username. The configured environment variable remains a
+            fallback for direct-constructor compatibility.
+        credential: Keyring lookup name used to keep credentials for different
+            sites separate.
+        ssh_key: Optional private-key path.
+        solver: Remote solver executable path.
+        work_dir: Remote work-directory root.
+        python_path: Local FrequenSolve source path used for scheduler templates.
         run_config: Default SLURM resource request.
         verbose: Whether to print site status messages in addition to logging.
     """
@@ -375,6 +383,9 @@ class SlurmSite(BaseSite):
     _compute_client: Optional[SSHClientClass] = None
     _work_dir: Path
     _FS_dir: Path
+    solver: Optional[Union[str, Path]]
+    _configured_work_dir: Optional[Union[str, Path]]
+    python_path: Optional[Union[str, Path]]
 
     site_name: str = "SLURM"
     credentials_cls: Type["SlurmLoginCredentials"] = None
@@ -393,6 +404,13 @@ class SlurmSite(BaseSite):
         default_queue: Optional[str] = None,
         config: Optional[Any] = None,
         credentials: Optional["SlurmLoginCredentials"] = None,
+        username: Optional[str] = None,
+        credential: Optional[str] = None,
+        ssh_key: Optional[Union[str, Path]] = None,
+        credential_store: Optional[CredentialStore] = None,
+        solver: Optional[Union[str, Path]] = None,
+        work_dir: Optional[Union[str, Path]] = None,
+        python_path: Optional[Union[str, Path]] = None,
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
     ):
@@ -405,9 +423,6 @@ class SlurmSite(BaseSite):
             queue,
         )
 
-        if self.credentials_cls is None:
-            self.credentials_cls = SlurmLoginCredentials
-        self.credentials = credentials or self.credentials_cls()
         if config is not None:
             self.config = config
         elif self.config_cls is not None:
@@ -416,6 +431,18 @@ class SlurmSite(BaseSite):
             )
         else:
             raise ValueError("SlurmSite requires either a config object or config_cls")
+        if self.credentials_cls is None:
+            self.credentials_cls = SlurmLoginCredentials
+        host = getattr(self.config, "hostname", None) or self.default_host
+        self.credentials = credentials or self.credentials_cls(
+            username=username,
+            credential=credential or host or self.site_name,
+            ssh_key=ssh_key,
+            credential_store=credential_store,
+        )
+        self.solver = solver
+        self._configured_work_dir = work_dir
+        self.python_path = python_path
         self.transfer_method = transfer_method
         self.run_config = run_config or SlurmRunConfig(queue=queue)
         self._rel_proj_path = Path(rel_path)
@@ -441,8 +468,8 @@ class SlurmSite(BaseSite):
 
         if self._executable is None:
             raise ValueError(
-                "Solver executable not specified; set "
-                f"{self.solver_executable_env} or override default_solver_executable."
+                "Solver executable not specified; configure solver in site.toml "
+                f"or set {self.solver_executable_env}."
             )
         return self._executable
 
@@ -526,7 +553,11 @@ class SlurmSite(BaseSite):
             Paramiko SSH client or local SSH control-socket proxy.
         """
 
-        return self._authenticator.authenticate(host)
+        client = self._authenticator.authenticate(host)
+        persist_pending = getattr(self.credentials, "persist_pending", None)
+        if callable(persist_pending):
+            persist_pending()
+        return client
 
     def submit(
         self,
@@ -1908,25 +1939,27 @@ class SlurmSite(BaseSite):
 
     def _get_solver_path(self) -> str:
         """Get the solver executable path on the remote system."""
-        load_dotenv()
-        executable = os.getenv(self.solver_executable_env)
+        executable = self.solver or os.getenv(self.solver_executable_env)
         if executable is None or executable == "":
             executable = self.default_solver_executable
         if executable is None or executable == "":
             raise ValueError(
                 f"Solver executable not specified; set {self.solver_executable_env} "
-                "or override default_solver_executable."
+                "or configure solver in site.toml."
             )
         return executable
 
     def _get_FS_path(self) -> Path:
         """Get the local FrequenSolve repository path used for script templates."""
-        load_dotenv()
-        env_path = os.getenv(self.python_path_env)
-        path = Path(env_path) if env_path else Path(__file__).resolve().parents[5]
+        configured_path = self.python_path or os.getenv(self.python_path_env)
+        path = (
+            Path(configured_path).expanduser()
+            if configured_path
+            else Path(__file__).resolve().parents[5]
+        )
         if not path.exists():
             raise FileNotFoundError(
-                f"env var {self.python_path_env}:{path} does not exist"
+                f"Configured FrequenSolve Python path does not exist: {path}"
             )
         return path
 
@@ -2310,7 +2343,7 @@ class SlurmSite(BaseSite):
 
     def _get_work_dir(self, rel_proj_path: Union[str, Path]) -> Path:
         """Gets the remote work directory path."""
-        work_dir = os.getenv(self.work_dir_env)
+        work_dir = self._configured_work_dir or os.getenv(self.work_dir_env)
 
         # If the configured variable is not set, try $WORK on the login node.
         if not work_dir or work_dir == "":
@@ -2319,7 +2352,7 @@ class SlurmSite(BaseSite):
             if not work_dir:
                 raise RuntimeError(
                     f"Failed to get remote work directory for {self.site_name}; "
-                    f"set {self.work_dir_env} in your environment or .env file"
+                    f"configure work_dir in site.toml or set {self.work_dir_env}"
                 )
 
         self._work_dir = Path(work_dir) / rel_proj_path

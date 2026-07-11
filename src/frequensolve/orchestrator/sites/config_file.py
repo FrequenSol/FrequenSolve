@@ -37,19 +37,30 @@ verbose = true
 
 [sites.local]
 type = "local"
+solver = "/path/to/local/solver"
 shutdown_on_completion = true
 verbose = true
 
 [sites.hpc]
-type = "stampede3"
-rel_path = "scratch/frequensolve_tutorials"
-queue = "skx-dev"
+type = "slurm"
+hostname = "login.example.edu"
+username = "your-username"
+credential = "example-hpc"
+ssh_key = "~/.ssh/id_ed25519"
+solver = "/remote/path/to/solver"
+work_dir = "/remote/work/directory"
+rel_path = "frequensolve/tutorials"
+queue = "debug"
+account = "allocation"
+transfer_method = "rsync"
+verbose = true
+
+[sites.hpc.run_config]
 nodes = 1
 duration = "00:30:00"
-procs_per_node = 4
-procs_per_task = 1
+ranks_per_node = 4
+ranks_per_task = 1
 poll_interval = 10
-verbose = true
 """
 
 _SITE_TYPES = {
@@ -75,6 +86,7 @@ _UNSUPPORTED_SITE_KEYS = {
     "class": "use 'type'",
     "name": "profile names come from [sites.<profile>] table names",
     "profile": "profile names come from [sites.<profile>] table names",
+    "solver_executable": "use 'solver'",
 }
 
 __all__ = [

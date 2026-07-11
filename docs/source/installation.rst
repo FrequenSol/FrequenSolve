@@ -44,7 +44,7 @@ Choose the smallest install that matches the workflow you need:
      - Requires a FrequenSol Cloud account and license.
    * - Run with a local solver
      - ``python -m pip install "frequensolve[parallel]"``
-     - Requires an installed :term:`fast solver` and :term:`FS_SOLVER_PATH`.
+     - Requires an installed :term:`fast solver` configured in ``site.toml``.
    * - Run on an HPC cluster
      - ``python -m pip install "frequensolve[hpc]"``
      - Requires :term:`SSH`/:term:`SLURM` access and a solver installation on
@@ -90,11 +90,16 @@ path to solver access.
    * - Site
      - Requirement
    * - ``LocalSite``
-     - A local solver binary and environment such as ``FS_SOLVER_PATH``.
+     - A local solver binary configured with the profile's ``solver`` key.
    * - ``AWSSite``
      - FrequenSol cloud access and the ``cloud`` extra.
    * - ``SlurmSite`` / ``Stampede3Site``
      - SSH/SLURM access, the ``hpc`` extra, and a solver installation on the cluster.
+
+Site paths, hosts, usernames, accounts, and scheduler defaults belong in
+``~/.frequensolve/site.toml``. HPC passwords and SSH-key passphrases are
+prompted securely and saved to the operating system keyring only after a
+successful login. A project ``.env`` file is not required.
 
 The notebooks in :doc:`tutorials/index` use strict run cells. If the selected
 site is not configured or the solver is unavailable, the cell should fail and

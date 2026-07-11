@@ -186,7 +186,7 @@ disabled too.
      - Use
    * - ``LocalSite``
      - Runs through local :term:`Dask` workers. Requires an installed
-       :term:`fast solver` and :term:`FS_SOLVER_PATH`.
+       :term:`fast solver` configured in the local site profile.
    * - ``AWSSite``
      - Runs on FrequenSol cloud infrastructure. Most users use this because solver installation is managed remotely.
    * - ``SlurmSite`` / ``Stampede3Site``

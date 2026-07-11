@@ -64,9 +64,9 @@ hpc = [
     "dask>=2025.1.0,<2026.0.0",
     "dask-jobqueue>=0.9.0,<0.10.0",
     "distributed>=2024.12.0,<2026.0.0",
+    "keyring>=25.0.0,<26.0.0",
     "paramiko>=3.5.0,<4.0.0",
     "pyfftw>=0.14,<0.16",
-    "python-dotenv>=1.0.1,<2.0.0",
 ]
 # Backward-compatible alias for existing install commands.
 parallel = [
@@ -74,9 +74,9 @@ parallel = [
     "dask>=2025.1.0,<2026.0.0",
     "dask-jobqueue>=0.9.0,<0.10.0",
     "distributed>=2024.12.0,<2026.0.0",
+    "keyring>=25.0.0,<26.0.0",
     "paramiko>=3.5.0,<4.0.0",
     "pyfftw>=0.14,<0.16",
-    "python-dotenv>=1.0.1,<2.0.0",
 ]
 inversion = [
     "pylops>=2.4.0,<3.0",

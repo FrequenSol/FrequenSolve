@@ -150,7 +150,7 @@ Site Tutorials
      - :download:`02_hpc_sites.ipynb <../../../examples/tutorials/02_sites/02_hpc_sites.ipynb>`
    * - Local Site
      - Local :term:`Dask`-backed trace/QC execution with an installed solver.
-     - ``parallel``, local solver, and :term:`FS_SOLVER_PATH`.
+     - ``parallel`` and a local solver configured in ``site.toml``.
      - :download:`03_local_site.ipynb <../../../examples/tutorials/02_sites/03_local_site.ipynb>`
    * - Save and Load Projects
      - Persisting and reopening projects, simulations, and job JSON files.

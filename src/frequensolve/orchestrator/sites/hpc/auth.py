@@ -7,17 +7,24 @@ import os
 import socket
 import subprocess
 import threading
+from pathlib import Path
 from typing import Optional
 
 from frequensolve._optional import optional_dependency_error
 
 try:
-    from paramiko import AuthenticationException, AutoAddPolicy, SSHClient, Transport
+    from paramiko import (
+        AuthenticationException,
+        HostKeys,
+        SSHClient,
+        SSHException,
+        Transport,
+    )
 except ModuleNotFoundError as exc:
     raise optional_dependency_error(
         "SlurmSite",
         extra="hpc",
-        dependencies=("paramiko", "python-dotenv"),
+        dependencies=("paramiko",),
         error=exc,
     ) from exc
 
@@ -25,6 +32,29 @@ from frequensolve.orchestrator.utils.ssh import SSHProxy
 from frequensolve.util.setup_logger import init_logger
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
+
+
+def _verify_server_host_key(transport: Transport, host: str) -> None:
+    """Verify *host* against the user's or system's known-hosts files."""
+
+    known_hosts = HostKeys()
+    for path in (
+        Path("~/.ssh/known_hosts").expanduser(),
+        Path("/etc/ssh/ssh_known_hosts"),
+    ):
+        try:
+            known_hosts.load(str(path))
+        except OSError:
+            continue
+
+    server_key = transport.get_remote_server_key()
+    host_keys = known_hosts.lookup(host)
+    expected_key = host_keys.get(server_key.get_name()) if host_keys else None
+    if expected_key != server_key:
+        raise SSHException(
+            f"SSH host key for {host!r} is unknown or does not match known_hosts. "
+            f"Connect once with your system SSH client to verify and save the host key."
+        )
 
 
 class SlurmAuthenticator:
@@ -71,7 +101,7 @@ class SlurmAuthenticator:
                             "ssh",
                             "-q",
                             "-o",
-                            "StrictHostKeyChecking=no",
+                            "StrictHostKeyChecking=yes",
                             "-o",
                             f"ControlPath={control_path}",
                             f"{site.credentials.username}@{host}",
@@ -152,7 +182,7 @@ class SlurmAuthenticator:
 
         channel = transport.open_channel("direct-tcpip", (job_host, 22), ("", 0))
         job_client = SSHClient()
-        job_client.set_missing_host_key_policy(AutoAddPolicy())
+        job_client.load_system_host_keys()
 
         try:
             job_client.connect(
@@ -174,11 +204,15 @@ class SlurmAuthenticator:
 
         site = self.site
         login_client = SSHClient()
-        login_client.set_missing_host_key_policy(AutoAddPolicy())
 
         sock = socket.create_connection((host, 22))
         transport = Transport(sock)
-        transport.start_client()
+        try:
+            transport.start_client()
+            _verify_server_host_key(transport, host)
+        except Exception:
+            transport.close()
+            raise
 
         authenticated = False
         try:
@@ -199,14 +233,27 @@ class SlurmAuthenticator:
             logger.debug("Agent-based authentication exception: %s", exc)
 
         if not authenticated:
+            logger.debug("Attempting configured private-key authentication.")
+            try:
+                key = site.credentials.ssh_key
+                transport.auth_publickey(site.credentials.username, key)
+                authenticated = transport.is_authenticated()
+            except (FileNotFoundError, OSError, SSHException) as exc:
+                logger.debug("Private-key authentication unavailable: %s", exc)
+
+        if not authenticated:
             logger.debug("Attempting keyboard-interactive authentication.")
 
             def handler(title, instructions, prompt_list):
                 responses = []
                 for prompt, echo in prompt_list:
-                    if "Password" in prompt:
+                    normalized_prompt = prompt.lower()
+                    if "password" in normalized_prompt:
                         responses.append(site.credentials.password)
-                    elif "Token" in prompt or "2FA" in prompt or "Code" in prompt:
+                    elif any(
+                        marker in normalized_prompt
+                        for marker in ("token", "2fa", "code", "passcode")
+                    ):
                         responses.append(site.credentials.duo_code)
                     else:
                         responses.append("")

@@ -22,12 +22,11 @@ from frequensolve._optional import optional_dependency_error
 try:
     from dask import config as dask_config
     from dask.distributed import Client, Future, LocalCluster, wait
-    from dotenv import load_dotenv
 except ModuleNotFoundError as exc:
     raise optional_dependency_error(
         "LocalSite",
         extra="parallel",
-        dependencies=("dask", "distributed", "python-dotenv"),
+        dependencies=("dask", "distributed"),
         error=exc,
     ) from exc
 
@@ -463,6 +462,8 @@ class LocalSite(BaseSite):
         n_workers: Optional Dask worker count.
         threads_per_worker: Optional thread count per Dask worker.
         memory_per_worker: Optional worker memory limit.
+        solver: Path to the local solver executable. The
+            ``LOCAL_SOLVER_EXECUTABLE`` environment variable remains a fallback.
         shutdown_on_completion: Whether to close the Dask cluster after a run
             completes.
         dashboard_host: Hostname used for the Dask dashboard.
@@ -472,6 +473,7 @@ class LocalSite(BaseSite):
     config: LocalSiteConfig = field(init=False)
     executable: str = field(init=False)
     env: dict = field(default_factory=dict)
+    solver: Optional[Union[str, Path]] = None
     n_workers: Optional[int] = None
     threads_per_worker: Optional[int] = None
     memory_per_worker: Optional[int] = None
@@ -495,7 +497,9 @@ class LocalSite(BaseSite):
         self.config = LocalSiteConfig()
         self.executable = self._get_solver_path()
         self.env = os.environ.copy()
-        self.env["FS_SOLVER_PATH"] = os.getenv("FS_SOLVER_PATH")
+        solver_path = os.getenv("FS_SOLVER_PATH")
+        if solver_path:
+            self.env["FS_SOLVER_PATH"] = solver_path
         self.env["VECLIB_MAXIMUM_THREADS"] = (
             "1"  # Fixes occational crash when linking to Accelerate framework
         )
@@ -1837,14 +1841,15 @@ class LocalSite(BaseSite):
 
     def _get_solver_path(self) -> str:
         """Get the solver path."""
-        load_dotenv()
-        executable = os.getenv("LOCAL_SOLVER_EXECUTABLE")
+        executable = self.solver or os.getenv("LOCAL_SOLVER_EXECUTABLE")
         if not executable:
             warnings.warn(
-                "LOCAL_SOLVER_EXECUTABLE not set in environment",
+                "Solver executable not configured; set solver in site.toml or "
+                "LOCAL_SOLVER_EXECUTABLE in the process environment",
                 stacklevel=2,
             )
             return None
+        executable = str(Path(executable).expanduser())
         if not Path(executable).exists():
             warnings.warn(f"Solver executable not found at {executable}", stacklevel=2)
             return None
