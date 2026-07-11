@@ -388,9 +388,9 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             **kwargs,
         )
 
-    def imaging(
+    def imaging_job(
         self,
-        observed,
+        observed=None,
         frequencies=None,
         parameters=None,
         grid=None,
@@ -402,7 +402,8 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         """Create an imaging job using natural parameter/field specifications.
 
         Args:
-            observed: Observed data used by the imaging condition.
+            observed: Optional observed data used by the imaging condition. When
+                omitted, the solver uses zero data for sensitivity kernels.
             frequencies: Optional modeled frequencies.
             parameters: Optional image parameters.
             grid: Optional imaging grid.
@@ -425,6 +426,16 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             images=images,
             **kwargs,
         )
+
+    def imaging(self, *args, **kwargs):
+        """Create an imaging job using the legacy method name.
+
+        ``imaging_job`` is the clearer public spelling, but keeping this alias
+        avoids breaking existing scripts and documentation that use
+        ``simulation.imaging(...)``.
+        """
+
+        return self.imaging_job(*args, **kwargs)
 
     def add_coordinate_system(
         self, system: Union[CoordinateSystem, Mapping[str, Any]]

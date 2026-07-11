@@ -66,7 +66,7 @@ def _task_log_name(task_id: int) -> str:
     if task_id == SMOOTH_TASK_ID:
         return "smooth.log"
     if task_id == MESH_TASK_ID:
-        return "mesh.log"
+        return "init.log"
     return f"task_{task_id + 1}.log"
 
 
@@ -173,6 +173,8 @@ def _task_summary_message(summary: Mapping[str, int]) -> str:
 def _local_task_state(status: Any) -> str:
     status = str(status).strip().lower().replace(" ", "_")
     if status in {
+        "accepted",
+        "accepted_failed",
         "finished",
         "success",
         "successful",
@@ -198,6 +200,35 @@ def _local_task_state(status: Any) -> str:
     if status in {"not_run", "not-run", "created"}:
         return "pending"
     return "running"
+
+
+def _task_result_successful(result: Mapping[str, Any]) -> bool:
+    return _local_task_state(result.get("status")) == "successful"
+
+
+def _collect_future_results(
+    futures: Iterable[Future],
+) -> tuple[List[Mapping[str, Any]], List[Dict[str, Any]]]:
+    results: List[Mapping[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    for index, future in enumerate(futures):
+        try:
+            result = future.result()
+        except Exception as exc:
+            errors.append(
+                {
+                    "future_index": index,
+                    "status": getattr(future, "status", None),
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+            )
+        else:
+            if isinstance(result, Mapping):
+                results.append(dict(result))
+            else:
+                results.append({"status": "success", "result": result})
+    return results, errors
 
 
 def _local_task_status(statuses: Iterable[Any]) -> Dict[str, int]:
@@ -320,7 +351,7 @@ def run_task(
     elif task_id == SMOOTH_TASK_ID:
         args += ["--smooth"]
     elif task_id == MESH_TASK_ID:
-        args += ["--init"]
+        args += ["--init", "--map"]
     else:
         args += ["--task", f"{task_id + 1}"]
     command = shlex.join(args)
@@ -540,7 +571,13 @@ class LocalSite(BaseSite):
         else:
             futures = submission
             task_plan = {}
-        if not futures and task_plan:
+        smooth_only = (
+            isinstance(job, ImagingJob)
+            and not futures
+            and task_plan
+            and job.needs_image_smoothing()
+        )
+        if not futures and task_plan and not smooth_only:
             skipped = task_plan.get(
                 "skipped_task_records",
                 task_plan.get("reused_tasks", []),
@@ -563,13 +600,107 @@ class LocalSite(BaseSite):
         handle.backend["task_plan"] = task_plan
         handle.backend["pack_after_tasks"] = pack
         handle.backend["fresh"] = force_run
+        handle.backend["smooth_only"] = smooth_only
         handle.backend["tolerate_failures"] = tolerate_failures
         handle.backend["shutdown_on_completion"] = shutdown_on_completion
         return handle
 
+    def _submit_local_smooth_task(
+        self,
+        run: RunHandle,
+        all_futures: Optional[List[Future]] = None,
+    ) -> Future:
+        """Submit the imaging smooth/stack task once and return its future."""
+
+        smooth_future = run.backend.get("smooth_future")
+        if smooth_future is not None:
+            if all_futures is not None and smooth_future not in all_futures:
+                all_futures.append(smooth_future)
+            return smooth_future
+
+        if self._dask_client is None:
+            self._ensure_dask_for_tasks(1)
+        smooth_future = self._dask_client.submit(
+            run_task,
+            run.job._file,
+            SMOOTH_TASK_ID,
+            self.executable,
+            self.env,
+            n_ranks=1,
+            n_threads=self._current_threads_per_worker(),
+            stdout_dir=str(run.job._stdout_path),
+            fresh=bool(run.backend.get("fresh", False)),
+            resources={"CPU": self._current_threads_per_worker()},
+        )
+        run.backend["smooth_future"] = smooth_future
+        self._futures.append(smooth_future)
+        if all_futures is not None:
+            all_futures.append(smooth_future)
+        return smooth_future
+
+    def _poll_local_smooth_task(
+        self,
+        run: RunHandle,
+        smooth_future: Future,
+        *,
+        raw: Optional[Dict[str, Any]] = None,
+    ) -> JobStatus:
+        """Poll an imaging smooth/stack task as part of local run status."""
+
+        raw = dict(raw or {})
+        smooth_state = _local_task_state(getattr(smooth_future, "status", "unknown"))
+        if smooth_state == "successful":
+            smooth_result = smooth_future.result()
+            if isinstance(smooth_result, Mapping):
+                smooth_result = dict(smooth_result)
+            else:
+                smooth_result = {"status": "success", "result": smooth_result}
+            run.backend["smooth_result"] = smooth_result
+            raw["smooth"] = smooth_result
+            if not _task_result_successful(smooth_result):
+                return JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message="Image smoothing task failed",
+                    raw=raw,
+                )
+            return JobStatus(
+                state="completed",
+                return_code=0,
+                job_id=run.id,
+                message="Image smoothing task completed",
+                raw=raw,
+            )
+        if smooth_state == "failed":
+            try:
+                raw["smooth"] = smooth_future.result()
+            except Exception as exc:
+                raw["smooth_error"] = str(exc)
+                run.backend["smooth_error"] = {
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+            return JobStatus(
+                state="failed",
+                return_code=1,
+                job_id=run.id,
+                message="Image smoothing task failed",
+                raw=raw,
+            )
+        return JobStatus(
+            state="running",
+            job_id=run.id,
+            message="Image smoothing task running",
+            raw=raw,
+        )
+
     def _poll_local_run(self, run: RunHandle) -> JobStatus:
         futures = run.backend.get("futures", [])
         if not futures:
+            if run.backend.get("smooth_only", False):
+                smooth_future = self._submit_local_smooth_task(run)
+                return self._poll_local_smooth_task(run, smooth_future)
             return JobStatus(state="skipped", return_code=0, job_id=run.id)
         statuses = [getattr(future, "status", "unknown") for future in futures]
         states = [_local_task_state(status) for status in statuses]
@@ -579,9 +710,45 @@ class LocalSite(BaseSite):
             job=run.job,
         )
         terminal = {"successful", "failed"}
+        if all(state in terminal for state in states) and isinstance(
+            run.job, ImagingJob
+        ):
+            task_results, task_result_errors = _collect_future_results(futures)
+            run.backend["task_results"] = task_results
+            if task_result_errors:
+                run.backend["task_result_errors"] = task_result_errors
+                raw = {
+                    "statuses": statuses,
+                    "task_states": states,
+                    "task_status": task_status,
+                    "tasks": task_results,
+                    "task_result_errors": task_result_errors,
+                }
+                return JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message="One or more local task results could not be read",
+                    raw=raw,
+                )
+            smooth_future = self._submit_local_smooth_task(run)
+            return self._poll_local_smooth_task(
+                run,
+                smooth_future,
+                raw={
+                    "statuses": statuses,
+                    "task_states": states,
+                    "task_status": task_status,
+                    "tasks": task_results,
+                },
+            )
         if all(state in terminal for state in states) and any(
             state == "failed" for state in states
         ):
+            task_results, task_result_errors = _collect_future_results(futures)
+            run.backend["task_results"] = task_results
+            if task_result_errors:
+                run.backend["task_result_errors"] = task_result_errors
             return JobStatus(
                 state="failed",
                 return_code=1,
@@ -591,9 +758,32 @@ class LocalSite(BaseSite):
                     "statuses": statuses,
                     "task_states": states,
                     "task_status": task_status,
+                    "tasks": task_results,
+                    **(
+                        {"task_result_errors": task_result_errors}
+                        if task_result_errors
+                        else {}
+                    ),
                 },
             )
         if all(state == "successful" for state in states):
+            task_results, task_result_errors = _collect_future_results(futures)
+            run.backend["task_results"] = task_results
+            if task_result_errors:
+                run.backend["task_result_errors"] = task_result_errors
+                return JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message="One or more local task results could not be read",
+                    raw={
+                        "statuses": statuses,
+                        "task_states": states,
+                        "task_status": task_status,
+                        "tasks": task_results,
+                        "task_result_errors": task_result_errors,
+                    },
+                )
             return JobStatus(
                 state="completed",
                 return_code=0,
@@ -603,6 +793,7 @@ class LocalSite(BaseSite):
                     "statuses": statuses,
                     "task_states": states,
                     "task_status": task_status,
+                    "tasks": task_results,
                 },
             )
         return JobStatus(
@@ -624,6 +815,8 @@ class LocalSite(BaseSite):
     ) -> RunResult:
         futures = run.backend.get("futures", [])
         if not futures:
+            if run.backend.get("smooth_only", False):
+                return self._wait_local_smooth_only(run)
             skipped = run.backend.get("task_plan", {}).get(
                 "skipped_task_records",
                 run.backend.get("task_plan", {}).get("reused_tasks", []),
@@ -639,21 +832,64 @@ class LocalSite(BaseSite):
         all_futures = list(futures)
 
         try:
-            wait_result = wait(futures, timeout=timeout)
-            not_done = list(getattr(wait_result, "not_done", []))
-            if not_done:
-                self._cancel_futures(not_done)
-                status = JobStatus(
-                    state="timeout",
-                    return_code=1,
-                    job_id=run.id,
-                    message=f"Timed out waiting for local run after {timeout} seconds",
-                    raw={"unfinished": len(not_done)},
-                )
-                run.job.write_run_state(status="timeout")
-                return run._make_result(status)
+            cached_task_results = run.backend.get("task_results")
+            if cached_task_results is None:
+                wait_result = wait(futures, timeout=timeout)
+                not_done = list(getattr(wait_result, "not_done", []))
+                if not_done:
+                    self._cancel_futures(not_done)
+                    status = JobStatus(
+                        state="timeout",
+                        return_code=1,
+                        job_id=run.id,
+                        message=(
+                            f"Timed out waiting for local run after {timeout} seconds"
+                        ),
+                        raw={"unfinished": len(not_done)},
+                    )
+                    run.job.write_run_state(status="timeout")
+                    return run._make_result(status)
 
-            task_results = [future.result() for future in futures]
+                task_results, task_result_errors = _collect_future_results(futures)
+                run.backend["task_results"] = task_results
+                if task_result_errors:
+                    run.backend["task_result_errors"] = task_result_errors
+                    status = JobStatus(
+                        state="failed",
+                        return_code=1,
+                        job_id=run.id,
+                        message="One or more local task results could not be read",
+                        raw={
+                            "tasks": task_results,
+                            "task_result_errors": task_result_errors,
+                        },
+                    )
+                    run.job.write_run_state(
+                        status="failed",
+                        tasks=task_results,
+                        errors=task_result_errors,
+                    )
+                    return run._make_result(status)
+            else:
+                task_results = [dict(result) for result in cached_task_results]
+                task_result_errors = list(run.backend.get("task_result_errors", []))
+                if task_result_errors:
+                    status = JobStatus(
+                        state="failed",
+                        return_code=1,
+                        job_id=run.id,
+                        message="One or more local task results could not be read",
+                        raw={
+                            "tasks": task_results,
+                            "task_result_errors": task_result_errors,
+                        },
+                    )
+                    run.job.write_run_state(
+                        status="failed",
+                        tasks=task_results,
+                        errors=task_result_errors,
+                    )
+                    return run._make_result(status)
             skipped_tasks = run.backend.get("task_plan", {}).get(
                 "skipped_task_records",
                 run.backend.get("task_plan", {}).get("reused_tasks", []),
@@ -662,25 +898,23 @@ class LocalSite(BaseSite):
             if hasattr(run.job, "invalidate_trace_cache"):
                 run.job.invalidate_trace_cache()
             task_errors = [
-                result for result in task_results if result.get("status") != "success"
+                result for result in task_results if not _task_result_successful(result)
             ]
 
+            smooth_result = None
             if isinstance(run.job, ImagingJob):
-                smooth_future = self._dask_client.submit(
-                    run_task,
-                    run.job._file,
-                    SMOOTH_TASK_ID,
-                    self.executable,
-                    self.env,
-                    n_ranks=1,
-                    n_threads=self._current_threads_per_worker(),
-                    stdout_dir=str(run.job._stdout_path),
-                    fresh=bool(run.backend.get("fresh", False)),
-                    resources={"CPU": self._current_threads_per_worker()},
-                )
-                all_futures.append(smooth_future)
-                smooth_result = smooth_future.result()
-                if smooth_result.get("status") != "success":
+                smooth_future = self._submit_local_smooth_task(run, all_futures)
+                cached_smooth_result = run.backend.get("smooth_result")
+                if cached_smooth_result is None:
+                    smooth_result = smooth_future.result()
+                    if isinstance(smooth_result, Mapping):
+                        smooth_result = dict(smooth_result)
+                    else:
+                        smooth_result = {"status": "success", "result": smooth_result}
+                    run.backend["smooth_result"] = smooth_result
+                else:
+                    smooth_result = dict(cached_smooth_result)
+                if not _task_result_successful(smooth_result):
                     status = JobStatus(
                         state="failed",
                         return_code=1,
@@ -713,7 +947,11 @@ class LocalSite(BaseSite):
                 )
                 all_futures.append(pack_future)
                 pack_result = pack_future.result()
-                if pack_result.get("status") != "success":
+                if isinstance(pack_result, Mapping):
+                    pack_result = dict(pack_result)
+                else:
+                    pack_result = {"status": "success", "result": pack_result}
+                if not _task_result_successful(pack_result):
                     outputs_exist = False
                     if hasattr(run.job, "trace_outputs_exist"):
                         try:
@@ -736,29 +974,42 @@ class LocalSite(BaseSite):
                             message = f"{message}; packing failed: {pack_error}"
                         else:
                             message = f"{message}; packing failed"
+                        raw = {
+                            "tasks": task_results,
+                            "task_summary": task_summary,
+                            "task_status": _summary_task_status(task_summary),
+                            "pack": pack_result,
+                            "pack_error": pack_result,
+                        }
+                        if smooth_result is not None:
+                            raw["smooth"] = smooth_result
                         status = JobStatus(
                             state="completed",
                             return_code=0,
                             job_id=run.id,
                             message=message,
-                            raw={
-                                "tasks": task_results,
-                                "task_summary": task_summary,
-                                "task_status": _summary_task_status(task_summary),
-                                "pack": pack_result,
-                                "pack_error": pack_result,
-                            },
+                            raw=raw,
                         )
                         return run._make_result(status)
+                    raw = {"pack": pack_result, "tasks": task_results}
+                    if smooth_result is not None:
+                        raw["smooth"] = smooth_result
                     status = JobStatus(
                         state="failed",
                         return_code=1,
                         job_id=run.id,
                         message="Packing task failed",
-                        raw={"pack": pack_result, "tasks": task_results},
+                        raw=raw,
                     )
                     run.job.write_run_state(
-                        status="failed", tasks=state_tasks, pack=pack_result
+                        status="failed",
+                        tasks=state_tasks,
+                        pack=pack_result,
+                        **(
+                            {"smooth": smooth_result}
+                            if smooth_result is not None
+                            else {}
+                        ),
                     )
                     return run._make_result(status)
 
@@ -766,6 +1017,7 @@ class LocalSite(BaseSite):
                 status="completed",
                 tasks=state_tasks,
                 **({"errors": task_errors} if task_errors else {}),
+                **({"smooth": smooth_result} if smooth_result is not None else {}),
                 **({"pack": pack_result} if pack_result is not None else {}),
             )
             task_summary = _job_task_summary(run.job, state_tasks)
@@ -775,6 +1027,7 @@ class LocalSite(BaseSite):
                     status="failed",
                     tasks=state_tasks,
                     **({"errors": task_errors} if task_errors else {}),
+                    **({"smooth": smooth_result} if smooth_result is not None else {}),
                     **({"pack": pack_result} if pack_result is not None else {}),
                     failure_tolerance=tolerate_failures,
                 )
@@ -795,28 +1048,42 @@ class LocalSite(BaseSite):
                         "task_status": _summary_task_status(task_summary),
                         "tolerate_failures": tolerate_failures,
                         **({"errors": task_errors} if task_errors else {}),
+                        **(
+                            {"smooth": smooth_result}
+                            if smooth_result is not None
+                            else {}
+                        ),
                         **({"pack": pack_result} if pack_result is not None else {}),
                     },
                 )
                 return run._make_result(status)
+            raw = {
+                "tasks": task_results,
+                "task_summary": task_summary,
+                "task_status": _summary_task_status(task_summary),
+                **({"errors": task_errors} if task_errors else {}),
+                **({"pack": pack_result} if pack_result is not None else {}),
+            }
+            if smooth_result is not None:
+                raw["smooth"] = smooth_result
             status = JobStatus(
                 state="completed",
                 return_code=0,
                 job_id=run.id,
                 message=_task_summary_message(task_summary),
-                raw={
-                    "tasks": task_results,
-                    "task_summary": task_summary,
-                    "task_status": _summary_task_status(task_summary),
-                    **({"errors": task_errors} if task_errors else {}),
-                    **({"pack": pack_result} if pack_result is not None else {}),
-                },
+                raw=raw,
             )
             return run._make_result(status)
         except Exception as exc:
             self._cancel_futures(all_futures)
             try:
-                run.job.write_run_state(status="failed", error=str(exc))
+                cached_tasks = run.backend.get("task_results")
+                run.job.write_run_state(
+                    status="failed",
+                    **({"tasks": cached_tasks} if cached_tasks is not None else {}),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
             except Exception:
                 logger.debug("Could not write failed run state", exc_info=True)
             status = JobStatus(
@@ -824,6 +1091,78 @@ class LocalSite(BaseSite):
                 return_code=1,
                 job_id=run.id,
                 message=str(exc),
+                raw={"error_type": type(exc).__name__},
+            )
+            return run._make_result(status)
+        finally:
+            self._release_futures(all_futures)
+            if run.backend.get("shutdown_on_completion", self.shutdown_on_completion):
+                self.close(wait=True, retire=True)
+
+    def _wait_local_smooth_only(self, run: RunHandle) -> RunResult:
+        """Run only the imaging smooth/stack postprocess for current shards."""
+
+        all_futures = []
+        try:
+            smooth_future = self._submit_local_smooth_task(run, all_futures)
+            cached_smooth_result = run.backend.get("smooth_result")
+            if cached_smooth_result is None:
+                smooth_result = smooth_future.result()
+                if isinstance(smooth_result, Mapping):
+                    smooth_result = dict(smooth_result)
+                else:
+                    smooth_result = {"status": "success", "result": smooth_result}
+                run.backend["smooth_result"] = smooth_result
+            else:
+                smooth_result = dict(cached_smooth_result)
+            skipped = run.backend.get("task_plan", {}).get(
+                "skipped_task_records",
+                run.backend.get("task_plan", {}).get("reused_tasks", []),
+            )
+            if not _task_result_successful(smooth_result):
+                status = JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message="Image smoothing task failed",
+                    raw={"smooth": smooth_result},
+                )
+                run.job.write_run_state(
+                    status="failed",
+                    tasks=skipped,
+                    smooth=smooth_result,
+                )
+                return run._make_result(status)
+
+            run.job.write_run_state(
+                status="completed",
+                tasks=skipped,
+                smooth=smooth_result,
+            )
+            status = JobStatus(
+                state="completed",
+                return_code=0,
+                job_id=run.id,
+                message="Image smoothing task completed",
+                raw={"smooth": smooth_result},
+            )
+            return run._make_result(status)
+        except Exception as exc:
+            self._cancel_futures(all_futures)
+            try:
+                run.job.write_run_state(
+                    status="failed",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            except Exception:
+                logger.debug("Could not write failed smooth run state", exc_info=True)
+            status = JobStatus(
+                state="failed",
+                return_code=1,
+                job_id=run.id,
+                message=str(exc),
+                raw={"error_type": type(exc).__name__},
             )
             return run._make_result(status)
         finally:
@@ -832,7 +1171,7 @@ class LocalSite(BaseSite):
                 self.close(wait=True, retire=True)
 
     def _finalize_local_run(self, run: RunHandle, status: JobStatus) -> RunResult:
-        return self._wait_local_run(run, timeout=0, poll_interval=0)
+        return self._wait_local_run(run, timeout=None, poll_interval=0)
 
     def _timeout_local_run(self, run: RunHandle, status: JobStatus) -> RunResult:
         futures = run.backend.get("futures", [])
@@ -927,7 +1266,7 @@ class LocalSite(BaseSite):
         )
         try:
             mesh_result = future.result()
-            if mesh_result.get("status") != "success":
+            if not _task_result_successful(mesh_result):
                 log_path = mesh_result.get("stdout")
                 message = f"Mesh task failed: {mesh_result.get('error')}"
                 if log_path:
@@ -1059,6 +1398,7 @@ class LocalSite(BaseSite):
                 shape=job.grid.shape,
                 parts=job.n_tasks,
             )
+            image.require_aggregate()
             images[job.name] = image
 
         if len(images) == 1:

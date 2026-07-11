@@ -135,14 +135,15 @@ PY
 }
 
 start_time=$(date +%s)
+{% if not smooth_only %}
 rm -f "$FS_SIZING_JSON"
 set +e
 if [ "$FS_SKIP_SIZING" = "1" ]; then
-    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size"
-    $mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size
+    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size --map"
+    $mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size --map
 else
-    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init"
-    $mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init
+    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init --map"
+    $mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init --map
 fi
 sizing_rc=$?
 set -e
@@ -632,10 +633,18 @@ write_status(
 )
 print("[scheduler] all tasks done", flush=True)
 PY
+{% else %}
+echo "Skipping frequency sweep; running imaging postprocess only."
+{% endif %}
 
 {% if imaging_job %}
 echo "Running imaging step..."
-"$executable" --job "$job_file" $fresh_flag --smooth
+"$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1
+{% if smooth_only %}
+cat > "$scheduler_status" <<EOF
+{"state":"complete","total":0,"successful":0,"failed":0,"running":0,"pending":0,"complete":0}
+EOF
+{% endif %}
 {% endif %}
 
 {% if pack_job %}

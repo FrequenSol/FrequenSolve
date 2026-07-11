@@ -13,6 +13,7 @@ from frequensolve.seismic.receivers import (
     CoordsArray,
     CoordsFromFile,
     CoordsGrid,
+    CoordsSurfaceCarpet,
     ReceiverGroup,
 )
 from frequensolve.util.physics import canonical_dimension, canonical_physics
@@ -481,6 +482,30 @@ def _validate_receiver_coordinates(
             units=units or _default_length_units(ctx),
             system=system,
             axes=axes or None,
+        )
+        return
+
+    if isinstance(coords, CoordsSurfaceCarpet):
+        units = coords.units
+        system = coords.system
+        if units is not None:
+            _validate_units(
+                units,
+                f"{path}.units",
+                ctx.report,
+                code="acquisition.receiver_coordinates.units.invalid",
+            )
+        if system is not None:
+            _validate_system_reference(system, f"{path}.system", ctx)
+        lower, upper = coords.bounds
+        _validate_bounds(
+            np.asarray(lower, dtype=float),
+            np.asarray(upper, dtype=float),
+            path=path,
+            ctx=ctx,
+            units=units or _default_length_units(ctx),
+            system=system,
+            axes=coords.axes,
         )
         return
 

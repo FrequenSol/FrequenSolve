@@ -549,12 +549,16 @@ class TraceManifest:
         """Return packed trace frequencies keyed by one-based task number.
 
         Returns:
-            Frequency mapping from the packed trace manifest, or an empty
-            mapping when no packed product is recorded.
+            Frequency mapping from the packed trace manifest, or from the packed
+            HDF5 file when the manifest omits frequency rows. Returns an empty
+            mapping when no usable frequency index is recorded.
         """
 
         products = self._packed_products()
-        return {} if not products else products[0][1]
+        if not products:
+            return {}
+        path, frequencies, _laplace = products[0]
+        return frequencies or self._packed_file_frequency_map(path)
 
     @property
     def packed_laplace(self) -> Dict[int, float]:
@@ -579,13 +583,15 @@ class TraceManifest:
         products = self._packed_products()
         if not products or any(not path.exists() for path, _freq, _laplace in products):
             return dict(self.frequencies)
-        if not any(frequencies for _path, frequencies, _laplace in products):
-            return {}
+        product_frequencies = [
+            frequencies or self._packed_file_frequency_map(path)
+            for path, frequencies, _laplace in products
+        ]
         missing = {}
         for key, frequency in self.frequencies.items():
             if any(
-                frequencies and not _frequency_values_contain(frequencies, frequency)
-                for _path, frequencies, _laplace in products
+                not frequencies or not _frequency_values_contain(frequencies, frequency)
+                for frequencies in product_frequencies
             ):
                 missing[int(key)] = _real_frequency(frequency)
         return missing
@@ -819,6 +825,19 @@ class TraceManifest:
                     row.get("laplace", _laplace_frequency(row["frequency"]))
                 )
         return path, frequencies, laplace
+
+    @staticmethod
+    def _packed_file_frequency_map(path: Path) -> Dict[int, float]:
+        try:
+            from frequensolve.seismic.trace_store import TraceStore
+
+            frequencies = TraceStore._read_trace_frequencies(path)
+        except (OSError, KeyError, ValueError):
+            return {}
+        return {
+            index: _real_frequency(frequency)
+            for index, frequency in enumerate(frequencies, start=1)
+        }
 
 
 @dataclass(frozen=True)
@@ -1321,7 +1340,7 @@ class JobArtifactMixin:
             return False
         packed_frequencies = manifest.packed_frequencies
         if not packed_frequencies:
-            return True
+            return False
         expected_frequency = self._real_frequency_value(self.f_list[task - 1])
         return np.isclose(
             list(packed_frequencies.values()),

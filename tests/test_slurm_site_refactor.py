@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.orchestrator.sites.base import (
@@ -32,6 +33,7 @@ from frequensolve.orchestrator.utils.pool import PoolStatus
 from frequensolve.orchestrator.utils.progress import status_table_html, wait_all
 from frequensolve.project.project import Project
 from frequensolve.simulation.jobs import FrequencyDomainJob, SkipPolicy
+from frequensolve.simulation.jobs.imaging import ImagingJob
 from frequensolve.simulation.outputs import WavefieldOutput
 
 
@@ -627,6 +629,52 @@ def test_slurm_submit_force_run_passes_fresh_to_batch(monkeypatch):
     assert seen["fresh"] is True
 
 
+def test_slurm_submit_runs_smooth_only_for_current_imaging_shards(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="smooth", physics="elastic", dimension=2)
+    sim.mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0.0, 0.0], u_bound=[1.0, 1.0], n=[1, 1])
+    )
+    observed = project.path / "observed" / "traces"
+    observed.mkdir(parents=True)
+    job = ImagingJob(
+        name="rtm",
+        simulation=sim,
+        data_path=observed,
+        f_list=[5.0],
+        grid=CartesianGrid(n=[2, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+    )
+    job.save()
+    trace_file = job.expected_trace_files()[0]
+    trace_file.parent.mkdir(parents=True, exist_ok=True)
+    trace_file.touch()
+    job.write_run_state(status="completed")
+    seen = {}
+
+    monkeypatch.setattr(site, "_remote_image_part_outputs_exist", lambda job: True)
+    monkeypatch.setattr(site, "_remote_image_output_exists", lambda job: False)
+    monkeypatch.setattr(site, "_sync_project", lambda project: None)
+
+    def fake_submit(job, config, **kwargs):
+        seen.update(kwargs)
+        return "80"
+
+    monkeypatch.setattr(site, "_submit_slurm_batch", fake_submit)
+
+    run = site.submit(job, validate=False)
+
+    assert run.id == "80"
+    assert seen["smooth_only"] is True
+    assert seen["task_plan"]["pending_indices"] == []
+
+
 def test_slurm_submit_overrides_site_run_config(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
@@ -910,6 +958,28 @@ def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):
     assert "task_indices_json='[4]'" in script
     assert "return [0.0] * count" in script
     assert "--init-no-size scheduling requires exactly one submitted task" in script
+
+
+def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setenv("DUMMY_HPC_WORK_DIR", "/scratch/user")
+    site = DummySlurmSite("project/run")
+
+    script = site._sweep_SLURM_script(
+        n_tasks=0,
+        n_job_tasks=1,
+        task_indices=[],
+        n_nodes=1,
+        stdout="/scratch/user/jobs/simple/rtm/logs",
+        duration="00-00:10:00",
+        imaging_job=True,
+        smooth_only=True,
+    )
+
+    assert "Skipping frequency sweep; running imaging postprocess only." in script
+    assert '--smooth >> "$dir_out/smooth.log" 2>&1' in script
+    assert "--init" not in script
+    assert '"--task", str(task_id)' not in script
 
 
 def test_slurm_submit_ignores_local_current_without_remote_record(

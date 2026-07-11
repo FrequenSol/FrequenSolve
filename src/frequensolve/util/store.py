@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 import blake3
 import h5py
@@ -214,6 +214,94 @@ class SimulationStore:
             if any(axis_units):
                 dset.attrs["axis_units"] = _h5_attr_value(axis_units)
 
+            for key, value in attrs.items():
+                if value is None:
+                    continue
+                dset.attrs[key] = _h5_attr_value(_json_default(value))
+
+        return HDF5Reference(self.path, dataset, digest, self.project_path)
+
+    def put_array_chunks(
+        self,
+        dataset: str,
+        shape: Sequence[int],
+        chunk_iter: Iterable[np.ndarray],
+        *,
+        attrs: Optional[Mapping[str, Any]] = None,
+        dims: Optional[Sequence[str]] = None,
+        coords: Optional[Mapping[str, Any]] = None,
+        compression: Optional[str] = None,
+        dtype: Optional[Any] = np.float64,
+    ) -> HDF5Reference:
+        """Write an array from row chunks and return its store reference.
+
+        This is intended for generated arrays that are too large to first
+        materialize as a single NumPy or xarray object.
+        """
+
+        dataset = dataset.strip("/")
+        attrs = dict(attrs or {})
+        dims = list(dims or [])
+        coords = dict(coords or {})
+        shape = tuple(int(value) for value in shape)
+        dtype = np.dtype(dtype) if dtype is not None else np.dtype(np.float64)
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        hasher = blake3.blake3()
+        _hash_update_json(hasher, {"dtype": str(dtype), "shape": shape})
+
+        with h5py.File(self.path, "a") as h5:
+            if dataset in h5:
+                del h5[dataset]
+
+            dset = h5.create_dataset(
+                dataset,
+                shape=shape,
+                dtype=dtype,
+                compression=compression,
+            )
+            offset = 0
+            for chunk in chunk_iter:
+                values = np.ascontiguousarray(chunk, dtype=dtype)
+                if values.ndim != len(shape) or values.shape[1:] != shape[1:]:
+                    raise ValueError(
+                        f"Chunk shape {values.shape} is incompatible with {shape}"
+                    )
+                stop = offset + values.shape[0]
+                if stop > shape[0]:
+                    raise ValueError("Chunk iterator produced too many rows")
+                dset[offset:stop, ...] = values
+                hasher.update(memoryview(values).cast("B"))
+                offset = stop
+            if offset != shape[0]:
+                raise ValueError(
+                    f"Chunk iterator produced {offset} rows, expected {shape[0]}"
+                )
+
+            _hash_update_json(hasher, {"dims": dims})
+            for dim in dims:
+                if dim not in coords:
+                    continue
+                coord = np.ascontiguousarray(coords[dim])
+                _hash_update_json(
+                    hasher,
+                    {
+                        "coord": dim,
+                        "dtype": str(coord.dtype),
+                        "shape": coord.shape,
+                        "attrs": {},
+                    },
+                )
+                hasher.update(memoryview(coord).cast("B"))
+            _hash_update_json(hasher, {"attrs": {}, "extra_attrs": attrs})
+            digest = hasher.hexdigest()
+
+            dset.attrs["fs_hash"] = f"blake3:{digest}"
+            dset.attrs["fs_hash_algorithm"] = "blake3"
+            if dims:
+                dset.attrs["dims"] = _h5_attr_value(dims)
+            for dim, coord in coords.items():
+                dset.attrs[dim] = _h5_attr_value(np.asarray(coord))
             for key, value in attrs.items():
                 if value is None:
                     continue

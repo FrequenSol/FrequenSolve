@@ -140,9 +140,9 @@ def _infer_frequencies(
     )
 
 
-def _observed_data_path(observed: Any) -> Path:
+def _observed_data_path(observed: Any) -> Optional[Path]:
     if observed is None:
-        raise ValueError("observed data must be provided")
+        return None
     if hasattr(observed, "trace_path"):
         return Path(observed.trace_path)
     if isinstance(observed, TraceDataset):
@@ -1112,7 +1112,7 @@ class FWIProblem:
 def build_imaging_job(
     simulation: Any,
     *,
-    observed: Any,
+    observed: Any = None,
     frequencies: Optional[Iterable[Any]] = None,
     parameters: Optional[Iterable[str]] = None,
     grid: Union[
@@ -1131,7 +1131,9 @@ def build_imaging_job(
 
     Args:
         simulation: Simulation used for imaging.
-        observed: Observed data as a job, trace dataset, or filesystem path.
+        observed: Optional observed data as a job, trace dataset, or filesystem
+            path. When omitted, the solver receives ``null`` data paths and uses
+            zero data to compute sensitivity kernels.
         frequencies: Optional frequencies. Inferred from ``observed`` when
             possible.
         parameters: Optional FWI parameters to image.

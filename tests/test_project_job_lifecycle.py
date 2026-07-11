@@ -1387,6 +1387,56 @@ def test_job_task_plan_skips_current_packed_trace_product(tmp_path):
     }
 
 
+def test_job_task_plan_rejects_packed_trace_without_frequency_index(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
+    job.save()
+    trace_dir = job.trace_outputs.path
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    packed = trace_dir / "traces.h5"
+    packed.touch()
+    (trace_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-trace-manifest-1",
+                "packed": {
+                    "format": "hdf5",
+                    "schema": "fs-traces-packed-1",
+                    "relative_path": "traces/traces.h5",
+                },
+            }
+        )
+    )
+
+    job.write_run_state(
+        status="completed",
+        tasks=[
+            {
+                "task_id": 0,
+                "status": "success",
+                "path": "traces/traces.h5",
+            },
+            {
+                "task_id": 1,
+                "status": "success",
+                "path": "traces/traces.h5",
+            },
+        ],
+    )
+
+    assert job.trace_manifest.packed_file == packed
+    assert job.trace_manifest.missing_packed_frequencies == {1: 1.0, 2: 2.0}
+    assert not job.trace_manifest.packed_complete
+    with pytest.warns(RuntimeWarning, match="missing 2 of 2 expected frequencies"):
+        assert not job.is_run_current()
+    assert job.current_tasks() == []
+    assert job.task_run_plan() == {
+        "pending_indices": [0, 1],
+        "current_tasks": [],
+        "reused_tasks": [],
+    }
+
+
 def test_failed_frequency_prevents_local_skip_with_packed_trace(tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
@@ -1698,7 +1748,13 @@ def test_init_manifest_does_not_mark_frequency_task_current(tmp_path):
             {
                 "exit_status": {"code": 0, "status": "success"},
                 "execution": {
-                    "command_line": ["fs3d", "-j", str(job._file), "--init"],
+                    "command_line": [
+                        "fs3d",
+                        "--job",
+                        str(job._file),
+                        "--init",
+                        "--map",
+                    ],
                 },
                 "inputs": {
                     "task": {

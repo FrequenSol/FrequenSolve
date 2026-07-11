@@ -70,7 +70,7 @@ n_workers=$((n_procs / procs_per_task))
 
 start_time=$(date +%s)
 
-$mpi_exec -n $n_procs $executable $n_threads --job $input_file $fresh_flag --init
+$mpi_exec -n $n_procs $executable $n_threads --job $input_file $fresh_flag --init --map
 
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
@@ -84,7 +84,8 @@ done
 wait
 
 {% if imaging_job %}
-$executable --job $input_file $fresh_flag --smooth
+echo "$executable -nthreads $n_threads --job $input_file $fresh_flag --smooth"
+$executable -nthreads $n_threads --job $input_file $fresh_flag --smooth >> $dir_out/smooth.log 2>&1
 {% endif %}
 
 {% if pack_job %}

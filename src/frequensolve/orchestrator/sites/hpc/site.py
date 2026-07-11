@@ -644,7 +644,12 @@ class SlurmSite(BaseSite):
             pending_indices = list(task_plan["pending_indices"])
         else:
             pending_indices = list(range(int(getattr(job, "n_tasks", 0))))
-        if task_plan is not None and not pending_indices:
+        smooth_only = (
+            isinstance(job, ImagingJob)
+            and not pending_indices
+            and self._remote_image_smoothing_needed(job)
+        )
+        if task_plan is not None and not pending_indices and not smooth_only:
             job.write_run_state(
                 status="skipped",
                 tasks=task_plan.get(
@@ -673,6 +678,7 @@ class SlurmSite(BaseSite):
                 else {}
             ),
             reuse=reuse,
+            **({"smooth_only": smooth_only} if smooth_only else {}),
             **extra_kwargs,
         )
         handle = self.handle(job, job_id=job_id, mode="batch")
@@ -789,7 +795,47 @@ class SlurmSite(BaseSite):
         except Exception as exc:
             logger.debug("Could not fingerprint job %s: %s", job.name, exc)
             return False
-        return self._remote_run_successful(record)
+        if not self._remote_run_successful(record):
+            return False
+        if isinstance(job, ImagingJob):
+            return self._remote_image_output_exists(job)
+        return True
+
+    def _remote_file_exists(self, path: Union[str, Path]) -> bool:
+        """Return whether a regular file exists on the remote login node."""
+
+        quoted = shlex.quote(str(path))
+        try:
+            return self.run_login(f"test -f {quoted} && printf 1 || printf 0") == "1"
+        except Exception as exc:
+            logger.debug("Could not stat remote file %s: %s", path, exc)
+            return False
+
+    def _remote_image_file(self, job: ImagingJob, part: Optional[int] = None) -> Path:
+        image_dir = job._remote_image_path(self.work_dir)
+        if part is None:
+            return image_dir / "image.h5"
+        return image_dir / f"image_{part}.h5"
+
+    def _remote_image_output_exists(self, job: ImagingJob) -> bool:
+        """Return whether the remote aggregate image file exists."""
+
+        return self._remote_file_exists(self._remote_image_file(job))
+
+    def _remote_image_part_outputs_exist(self, job: ImagingJob) -> bool:
+        """Return whether all remote per-frequency image shards exist."""
+
+        return all(
+            self._remote_file_exists(self._remote_image_file(job, part))
+            for part in range(1, job.n_tasks + 1)
+        )
+
+    def _remote_image_smoothing_needed(self, job: ImagingJob) -> bool:
+        """Return whether remote image shards need the final smooth/stack step."""
+
+        return self._remote_image_part_outputs_exist(
+            job
+        ) and not self._remote_image_output_exists(job)
 
     def update_status(self, job_id: Optional[str] = None):
         """Check the status of the resource request."""
@@ -995,11 +1041,13 @@ class SlurmSite(BaseSite):
                 local = job._local_image_path
                 self.get(remote, local)
 
-                images[job.name] = ImageDatabase(
+                image_data = ImageDatabase(
                     path=local,
                     shape=job.grid.shape,
                     parts=job.n_tasks,
                 )
+                image_data.require_aggregate()
+                images[job.name] = image_data
 
             except Exception as e:
                 logger.exception("Error retrieving payload: %s", str(e))
@@ -2145,6 +2193,7 @@ class SlurmSite(BaseSite):
             n_tasks=n_tasks,
             n_job_tasks=n_job_tasks,
             task_indices_json=json.dumps(task_indices),
+            smooth_only=bool(kwargs.pop("smooth_only", False)),
             duration=duration,
             queue=queue,
             account=account,

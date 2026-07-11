@@ -33,6 +33,18 @@ class DummyFuture:
         self.released = True
 
 
+class OneShotFuture(DummyFuture):
+    def __init__(self, result=None):
+        super().__init__(result)
+        self.result_calls = 0
+
+    def result(self):
+        self.result_calls += 1
+        if self.result_calls > 1:
+            raise RuntimeError("future result requested after terminal poll")
+        return self._result
+
+
 class DummyJob:
     name = "local-job"
     trace_manifest = None
@@ -337,7 +349,7 @@ def test_run_task_reports_solver_convergence_failure(monkeypatch, tmp_path):
     assert convergence["residual"] == 0.0022
 
 
-def test_submit_local_tasks_captures_mesh_log(monkeypatch, tmp_path):
+def test_submit_local_tasks_captures_init_log(monkeypatch, tmp_path):
     site, _closed = make_site(monkeypatch)
     site.executable = "/solver"
     site.threads_per_worker = 2
@@ -382,7 +394,7 @@ def test_submit_local_tasks_captures_mesh_log(monkeypatch, tmp_path):
             }
 
     (tmp_path / "logs").mkdir()
-    (tmp_path / "logs" / "mesh.log").write_text("stale mesh log")
+    (tmp_path / "logs" / "init.log").write_text("stale init log")
     site._dask_client = FakeClient()
 
     submission = site._submit_local_tasks(FakeJob())
@@ -394,7 +406,7 @@ def test_submit_local_tasks_captures_mesh_log(monkeypatch, tmp_path):
     assert submissions[0]["kwargs"]["stdout_dir"] == str(tmp_path / "logs")
     assert submissions[1]["task_id"] == 0
     assert submissions[1]["kwargs"]["stdout_dir"] == str(tmp_path / "logs")
-    assert not (tmp_path / "logs" / "mesh.log").exists()
+    assert not (tmp_path / "logs" / "init.log").exists()
 
 
 def test_submit_local_tasks_runs_init_with_all_auto_threads(monkeypatch, tmp_path):
@@ -710,11 +722,11 @@ def test_local_submit_force_run_bypasses_current_skip(monkeypatch):
     assert run.backend["fresh"] is True
 
 
-def test_submit_local_tasks_reports_mesh_log_on_failure(monkeypatch, tmp_path):
+def test_submit_local_tasks_reports_init_log_on_failure(monkeypatch, tmp_path):
     site, _closed = make_site(monkeypatch)
     site.executable = "/solver"
     site.threads_per_worker = 2
-    mesh_log = tmp_path / "logs" / "mesh.log"
+    init_log = tmp_path / "logs" / "init.log"
 
     class FakeClient:
         def submit(self, func, job_file, task_id, *args, **kwargs):
@@ -723,7 +735,7 @@ def test_submit_local_tasks_reports_mesh_log_on_failure(monkeypatch, tmp_path):
                     "task_id": task_id,
                     "status": "error",
                     "error": "bad mesh",
-                    "stdout": str(mesh_log),
+                    "stdout": str(init_log),
                 }
             )
 
@@ -751,11 +763,11 @@ def test_submit_local_tasks_reports_mesh_log_on_failure(monkeypatch, tmp_path):
         site._submit_local_tasks(job)
     except RuntimeError as exc:
         assert "Mesh task failed: bad mesh" in str(exc)
-        assert str(mesh_log) in str(exc)
+        assert str(init_log) in str(exc)
     else:
         raise AssertionError("Expected mesh failure")
     assert job.states[-1][0] == "failed"
-    assert job.states[-1][1]["mesh"]["stdout"] == str(mesh_log)
+    assert job.states[-1][1]["mesh"]["stdout"] == str(init_log)
 
 
 def test_local_wait_runs_pack_after_frequency_tasks(monkeypatch, tmp_path):
@@ -800,6 +812,238 @@ def test_local_wait_runs_pack_after_frequency_tasks(monkeypatch, tmp_path):
     assert closed == [{"wait": True, "retire": True}]
 
 
+def test_local_wait_smooth_only_runs_imaging_postprocess(monkeypatch, tmp_path):
+    site, closed = make_site(monkeypatch)
+    submissions = []
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            submissions.append({"task_id": task_id, "kwargs": kwargs})
+            return DummyFuture({"task_id": task_id, "status": "success"})
+
+    def fake_ensure(task_count):
+        site._active_threads_per_worker = 3
+        site._dask_client = FakeClient()
+
+    class FakeJob(DummyJob):
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+    monkeypatch.setattr(site, "_ensure_dask_for_tasks", fake_ensure)
+    job = FakeJob()
+    run = make_run(site, job, futures=[])
+    run.backend["smooth_only"] = True
+    run.backend["task_plan"] = {
+        "skipped_task_records": [{"task": 1, "status": "succeeded"}]
+    }
+
+    result = site._wait_local_run(run)
+
+    assert result.status.state == "completed"
+    assert submissions[0]["task_id"] == local_module.SMOOTH_TASK_ID
+    assert submissions[0]["kwargs"]["n_threads"] == 3
+    assert job.states[-1][0] == "completed"
+    assert job.states[-1][1]["smooth"]["status"] == "success"
+    assert closed == [{"wait": True, "retire": True}]
+
+
+def test_local_watch_reuses_terminal_smooth_only_result(monkeypatch, tmp_path):
+    site, _closed = make_site(monkeypatch)
+    smooth_future = OneShotFuture(
+        {"task_id": local_module.SMOOTH_TASK_ID, "status": "success"}
+    )
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            return smooth_future
+
+    def fake_ensure(task_count):
+        site._active_threads_per_worker = 3
+        site._dask_client = FakeClient()
+
+    class FakeJob(DummyJob):
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._stdout_path = tmp_path / "logs"
+
+    monkeypatch.setattr(site, "_ensure_dask_for_tasks", fake_ensure)
+    job = FakeJob()
+    run = RunHandle(
+        site=site,
+        job=job,
+        id="local:test",
+        poll_interval=0.0,
+        _status_fn=site._poll_local_run,
+        _wait_fn=site._wait_local_run,
+        _finalize_fn=site._finalize_local_run,
+    )
+    run.backend["futures"] = []
+    run.backend["smooth_only"] = True
+    run.backend["task_plan"] = {
+        "skipped_task_records": [{"task": 1, "status": "succeeded"}]
+    }
+    run.backend["shutdown_on_completion"] = False
+
+    statuses = list(run.watch(timeout=1.0, poll_interval=0.0))
+
+    assert [status.state for status in statuses] == ["completed"]
+    assert smooth_future.result_calls == 1
+    assert job.states[-1][0] == "completed"
+    assert job.states[-1][1]["tasks"] == [{"task": 1, "status": "succeeded"}]
+    assert job.states[-1][1]["smooth"] == {
+        "task_id": local_module.SMOOTH_TASK_ID,
+        "status": "success",
+    }
+
+
+def test_local_wait_runs_smooth_after_imaging_frequency_tasks(monkeypatch, tmp_path):
+    site, closed = make_site(monkeypatch)
+    site.threads_per_worker = 2
+    submissions = []
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            submissions.append(
+                {
+                    "func": func,
+                    "job_file": job_file,
+                    "task_id": task_id,
+                    "args": args,
+                    "kwargs": kwargs,
+                }
+            )
+            return DummyFuture({"task_id": task_id, "status": "success"})
+
+    class FakeImagingJob(DummyJob):
+        pass
+
+    monkeypatch.setattr(local_module, "ImagingJob", FakeImagingJob)
+    monkeypatch.setattr(
+        local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
+    )
+    site._dask_client = FakeClient()
+    job = FakeImagingJob()
+    job._file = tmp_path / "job.json"
+    job._stdout_path = tmp_path / "logs"
+    futures = [DummyFuture({"task_id": 0, "status": "success"})]
+    run = make_run(site, job, futures)
+    run.backend["pack_after_tasks"] = False
+
+    result = site._wait_local_run(run)
+
+    assert result.successful
+    assert submissions[-1]["func"] is run_task
+    assert submissions[-1]["task_id"] == local_module.SMOOTH_TASK_ID
+    assert submissions[-1]["kwargs"]["stdout_dir"] == str(job._stdout_path)
+    assert job.states[-1][0] == "completed"
+    assert job.states[-1][1]["smooth"]["task_id"] == local_module.SMOOTH_TASK_ID
+    assert result.status.raw["smooth"]["task_id"] == local_module.SMOOTH_TASK_ID
+    assert closed == [{"wait": True, "retire": True}]
+
+
+def test_local_watch_runs_smooth_before_yielding_imaging_completion(
+    monkeypatch, tmp_path
+):
+    site, _closed = make_site(monkeypatch)
+    site.threads_per_worker = 2
+    submissions = []
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            submissions.append({"func": func, "task_id": task_id, "kwargs": kwargs})
+            return DummyFuture({"task_id": task_id, "status": "success"})
+
+    class FakeImagingJob(DummyJob):
+        pass
+
+    monkeypatch.setattr(local_module, "ImagingJob", FakeImagingJob)
+    monkeypatch.setattr(
+        local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
+    )
+    site._dask_client = FakeClient()
+    job = FakeImagingJob()
+    job._file = tmp_path / "job.json"
+    job._stdout_path = tmp_path / "logs"
+    futures = [DummyFuture({"task_id": 0, "status": "success"})]
+    run = RunHandle(
+        site=site,
+        job=job,
+        id="local:test",
+        poll_interval=0.0,
+        _status_fn=site._poll_local_run,
+        _wait_fn=site._wait_local_run,
+        _finalize_fn=site._finalize_local_run,
+    )
+    run.backend["futures"] = futures
+    run.backend["pack_after_tasks"] = False
+    run.backend["shutdown_on_completion"] = False
+    site._futures.extend(futures)
+
+    statuses = list(run.watch(timeout=1.0, poll_interval=0.0))
+
+    assert [status.state for status in statuses] == ["completed"]
+    assert [item["task_id"] for item in submissions] == [local_module.SMOOTH_TASK_ID]
+    assert statuses[-1].raw["smooth"]["task_id"] == local_module.SMOOTH_TASK_ID
+    assert job.states[-1][0] == "completed"
+    assert job.states[-1][1]["smooth"]["task_id"] == local_module.SMOOTH_TASK_ID
+
+
+def test_local_watch_reuses_terminal_poll_results_when_finalizing_imaging(
+    monkeypatch, tmp_path
+):
+    site, _closed = make_site(monkeypatch)
+    site.threads_per_worker = 2
+    submissions = []
+    smooth_future = OneShotFuture(
+        {"task_id": local_module.SMOOTH_TASK_ID, "status": "success"}
+    )
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            submissions.append({"func": func, "task_id": task_id, "kwargs": kwargs})
+            return smooth_future
+
+    class FakeImagingJob(DummyJob):
+        pass
+
+    monkeypatch.setattr(local_module, "ImagingJob", FakeImagingJob)
+    site._dask_client = FakeClient()
+    job = FakeImagingJob()
+    job._file = tmp_path / "job.json"
+    job._stdout_path = tmp_path / "logs"
+    frequency_future = OneShotFuture({"task_id": 0, "status": "success"})
+    run = RunHandle(
+        site=site,
+        job=job,
+        id="local:test",
+        poll_interval=0.0,
+        _status_fn=site._poll_local_run,
+        _wait_fn=site._wait_local_run,
+        _finalize_fn=site._finalize_local_run,
+    )
+    run.backend["futures"] = [frequency_future]
+    run.backend["pack_after_tasks"] = False
+    run.backend["shutdown_on_completion"] = False
+    site._futures.append(frequency_future)
+
+    statuses = list(run.watch(timeout=1.0, poll_interval=0.0))
+
+    assert [status.state for status in statuses] == ["completed"]
+    assert frequency_future.result_calls == 1
+    assert smooth_future.result_calls == 1
+    assert [item["task_id"] for item in submissions] == [local_module.SMOOTH_TASK_ID]
+    assert job.states[-1][0] == "completed"
+    assert job.states[-1][1]["tasks"] == [{"task_id": 0, "status": "success"}]
+    assert job.states[-1][1]["smooth"] == {
+        "task_id": local_module.SMOOTH_TASK_ID,
+        "status": "success",
+    }
+
+
 def test_local_watch_runs_pack_before_yielding_completed_status(monkeypatch, tmp_path):
     site, _closed = make_site(monkeypatch)
     site.threads_per_worker = 2
@@ -841,6 +1085,27 @@ def test_local_watch_runs_pack_before_yielding_completed_status(monkeypatch, tmp
     assert job.removed_packed
     assert statuses[-1].raw["pack"]["task_id"] == local_module.PACK_TASK_ID
     assert job.states[-1][0] == "completed"
+
+
+def test_local_finalize_does_not_zero_timeout_dask_wait(monkeypatch):
+    site, _closed = make_site(monkeypatch)
+    job = DummyJob()
+    run = make_run(site, job, [DummyFuture()])
+    seen = []
+
+    def fake_wait(futures, timeout=None):
+        seen.append(timeout)
+        return SimpleNamespace(not_done=[])
+
+    monkeypatch.setattr(local_module, "wait", fake_wait)
+
+    result = site._finalize_local_run(
+        run,
+        JobStatus(state="completed", return_code=0, job_id=run.id),
+    )
+
+    assert result.successful
+    assert seen == [None]
 
 
 def test_local_wait_reports_failed_frequency_tasks_without_failing_run(

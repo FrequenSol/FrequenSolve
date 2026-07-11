@@ -9,8 +9,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
-from frequensolve.geometry.frame import CoordinateValue
-from frequensolve.seismic.receivers import ReceiverDevice, ReceiverGroup
+from frequensolve.seismic.receivers import (
+    CoordsSurfaceCarpet,
+    ReceiverDevice,
+    ReceiverGroup,
+)
 from frequensolve.seismic.sources import (
     DistributedSource,
     PointSource,
@@ -532,12 +535,22 @@ def _carpet_coordinates(
     units: Optional[Any],
     above: Optional[Any],
     below: Optional[Any],
-) -> CoordinateValue:
+) -> Any:
     points_grid = getattr(surface, "points_grid", None)
     if not callable(points_grid):
         raise TypeError(
             "surface must provide points_grid(...), such as sim.model_surface(...)"
         )
+    compact = CoordsSurfaceCarpet.try_from_surface(
+        surface,
+        x=x,
+        y=y,
+        units=units,
+        above=above,
+        below=below,
+    )
+    if compact is not None and compact.size > 200:
+        return compact
     return points_grid(
         x,
         y,

@@ -38,6 +38,7 @@ from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import (
     CoordsArray,
     CoordsFromFile,
+    CoordsSurfaceCarpet,
     ReceiverComponent,
     ReceiverFiber,
     ReceiverNode,
@@ -1104,6 +1105,70 @@ def test_acquisition_carpet_helpers_place_dim_minus_one_coords_on_surface(tmp_pa
         "units": "km",
         "system": "top",
     }
+
+
+def test_large_receiver_carpet_stays_lazy_until_hdf5_export(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=3,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0, 0, -1], u_bound=[1, 1, 1], n=[1, 1, 1])
+    )
+
+    top = sim.model_surface("top")
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq = Acquisition()
+    acq.add_sources(kind="scalar", coords=top.points([[0.5, 0.5]], units="km"))
+    receiver_group = acq.add_receiver_carpet(
+        name="surface",
+        device=hydrophone,
+        surface=top,
+        x=np.linspace(0.0, 1.0, 21) * u.km,
+        y=np.linspace(0.0, 1.0, 11) * u.km,
+        below=25.0 * u.m,
+    )
+    sim.acquisition = acq
+
+    assert isinstance(receiver_group.coordinates, CoordsSurfaceCarpet)
+    assert receiver_group.size == 231
+    assert sim.validate().ok
+    np.testing.assert_allclose(
+        receiver_group.coordinates.get(0),
+        [0.0, 0.0, -0.025],
+    )
+    np.testing.assert_allclose(
+        receiver_group.coordinates.get([0, 20, 21, -1]),
+        [
+            [0.0, 0.0, -0.025],
+            [1.0, 0.0, -0.025],
+            [0.0, 0.1, -0.025],
+            [1.0, 1.0, -0.025],
+        ],
+    )
+
+    payload = sim.to_fs()
+    coords = payload["Acquisition"]["receiver_groups"][0]["coordinates"]
+
+    assert coords["_type"] == "CoordsFromFile"
+    assert (
+        coords["file"]
+        == "simulations/simple/simple.h5:inputs/acquisition/receivers/surface/coordinates"
+    )
+    assert coords["units"] == "km"
+    assert coords["system"] == "top"
+    with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
+        dset = h5["inputs/acquisition/receivers/surface/coordinates"]
+        assert dset.shape == (231, 3)
+        assert dset.attrs["units"] == "km"
+        assert dset.attrs["system"] == "top"
+        np.testing.assert_allclose(
+            dset[[0, 20, 21, 230]],
+            receiver_group.coordinates.get([0, 20, 21, -1]),
+        )
 
 
 def test_solver_frame_key_is_not_exported_and_legacy_input_is_ignored():
@@ -3709,7 +3774,8 @@ def test_trace_manifest_accepts_solver_packed_trace_product(tmp_path):
     trace_dir = tmp_path / "results" / "traces"
     trace_dir.mkdir(parents=True)
     packed = trace_dir / "traces.h5"
-    packed.touch()
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=np.array([10.0, 20.0]))
     (trace_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -4423,7 +4489,8 @@ def test_job_run_current_accepts_solver_packed_trace_product(tmp_path):
 
     trace_dir = tmp_path / "jobs/simple/freq/results/traces"
     trace_dir.mkdir(parents=True)
-    (trace_dir / "traces.h5").touch()
+    with h5py.File(trace_dir / "traces.h5", "w") as h5:
+        h5.create_dataset("frequency", data=np.array([1.0, 2.0]))
     (trace_dir / "manifest.json").write_text(
         json.dumps(
             {
