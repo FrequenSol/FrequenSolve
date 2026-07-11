@@ -48,6 +48,11 @@ external services, credentials, schedulers, manual input, or visual baselines:
 python -m pytest
 ```
 
+Tests must demonstrate observable behavior or validate a structured contract.
+Do not add pytest checks that only read tracked files and search for expected
+strings. Workflow syntax and expressions are validated by the `actionlint`
+pre-commit hook; documentation is validated by the Sphinx build.
+
 Select marked lanes explicitly when you have the required environment:
 
 ```bash

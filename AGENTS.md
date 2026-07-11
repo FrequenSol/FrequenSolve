@@ -188,6 +188,10 @@ make generate_reference_images
 Keep test additions focused on the behavior being changed. Prefer deterministic
 unit tests for Python modules that can be exercised locally without solver
 binaries, network access, credentials, schedulers, or production data.
+Do not add pytest tests that read tracked workflow, documentation, source, or
+style files and merely assert that expected strings are present. Use executable
+behavior tests or the owning validator such as `actionlint`, Sphinx, or a schema
+validator.
 
 ## Repository Layout
 

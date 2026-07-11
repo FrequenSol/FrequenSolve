@@ -130,7 +130,7 @@ parentdir_prefix = "frequensolve-"
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-ra -q -m 'not integration and not cloud and not hpc and not interactive and not visual'"
+addopts = "-ra -q --strict-markers -m 'not integration and not cloud and not hpc and not interactive and not visual'"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]

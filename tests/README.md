@@ -14,6 +14,21 @@ use explicit pytest markers.
 
 Test files can contain both unit tests and opt-in marked tests.
 
+## Quality Bar
+
+Tests must exercise behavior or a real contract boundary. Good tests call the
+public API, execute a parser or validator, round-trip an artifact, or run an
+integration boundary with controlled dependencies. A pytest test that only
+reads a tracked workflow, documentation, source, or style file and asserts that
+literal strings are present does not meet this bar. Use the tool that owns the
+format instead: Sphinx for documentation, `actionlint` for GitHub Actions,
+pre-commit for repository policy, and a schema validator for structured
+contracts.
+
+Marker names are strict. An unknown marker fails collection so a misspelled
+`integration`, `cloud`, `hpc`, `interactive`, or `visual` marker cannot put a
+resource-dependent test into the default lane.
+
 ## Writing Tests
 
 ### Test Framework
@@ -97,7 +112,8 @@ pushes, and can also be started manually. It includes:
 1. **Test Job**:
    - Runs on Python 3.10 through 3.14
    - Installs the package with pip using `.[dev,parallel,cloud]`
-   - Runs pre-commit hooks once on Python 3.10
+   - Runs pre-commit hooks once on Python 3.10, including `actionlint` against
+     the GitHub Actions workflows
    - Executes the deterministic non-integration test lane with `make test`
    - Uploads coverage reports to Codecov
 
