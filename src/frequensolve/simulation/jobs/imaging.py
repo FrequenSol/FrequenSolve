@@ -1,3 +1,5 @@
+"""Imaging-job definitions and readers for solver imaging products."""
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple, Union
@@ -38,6 +40,8 @@ class ImageDatabase:
     shape: Tuple[int, ...]
 
     def __post_init__(self):
+        """Normalize and validate the image output directory."""
+
         self.path = Path(self.path)
         if not self.path.exists():
             raise FileNotFoundError(f"Image path {self.path} does not exist")
@@ -376,6 +380,13 @@ class ImagingJob(BaseJob):
         reassemble_adjoint: bool = False,
         **kwargs,
     ) -> None:
+        """Create an imaging job.
+
+        The job compares simulated traces against observed data at
+        ``data_path`` and writes image products to ``save_path`` or the job
+        result directory.
+        """
+
         if "misfit_type" in kwargs:
             misfit_norm = kwargs.pop("misfit_type")
         if f_list is None:
@@ -638,6 +649,8 @@ class ImagingJob(BaseJob):
         """
 
         data = dict(data)
+        stored_project_path = data.get("project_path")
+        resolved_project_path = project_path or stored_project_path
         image_data = data.pop("Image", data.pop("Imaging", None))
         if image_data is None:
             raise KeyError("ImagingJob data must include an 'Image' section")
@@ -667,19 +680,23 @@ class ImagingJob(BaseJob):
         data_path = cls._resolve_saved_path(
             image_data.pop("data_path", None),
             base_path=base_path,
-            project_path=project_path,
+            project_path=resolved_project_path,
         )
         save_path = cls._resolve_saved_path(
             image_data.pop("save_path", None),
             base_path=base_path,
-            project_path=project_path,
+            project_path=resolved_project_path,
         )
         for group in misfit.receiver_groups:
             group.observed = cls._resolve_saved_path(
-                group.observed, base_path=base_path, project_path=project_path
+                group.observed,
+                base_path=base_path,
+                project_path=resolved_project_path,
             )
             group.simulated = cls._resolve_saved_path(
-                group.simulated, base_path=base_path, project_path=project_path
+                group.simulated,
+                base_path=base_path,
+                project_path=resolved_project_path,
             )
 
         job = cls(

@@ -1,11 +1,11 @@
 Quickstart
 ==========
 
-This page gives a compact, current FrequenSolve workflow. The tutorial
-collection in :doc:`tutorials/index` is the canonical place to learn the API in
-depth; start with the :download:`acoustic modeling tutorial
-<../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>` when you want
-the full walkthrough with plots and output inspection.
+This page shows the compact FrequenSolve :term:`Python API` workflow: create a
+:term:`project`, define a :term:`simulation`, submit a :term:`job`, and inspect
+outputs. For deeper runnable examples with plots and output inspection, see the
+:doc:`tutorial collection
+<tutorials/index>`.
 
 Core Workflow
 -------------
@@ -13,28 +13,25 @@ Core Workflow
 FrequenSolve scripts usually follow the same authoring pattern:
 
 1. Create a :class:`frequensolve.Project` to own paths, logs, and simulations.
-2. Create a project-owned simulation with ``project.new_simulation(...)``.
+2. Create a project-owned :term:`simulation` with ``project.new_simulation(...)``.
 3. Add a model, mesh generator, boundary conditions, acquisition geometry, and
    solver settings.
-4. Create a time-domain or frequency-domain job.
-5. Submit the job to a site and read outputs from the returned result.
+4. Create a :term:`time-domain` or :term:`frequency-domain` job.
+5. Submit the job to a :term:`site` and read outputs from the returned result.
 
-The local site can only run on machines where the fast solver is installed.
-Cloud and HPC sites use the same job lifecycle but different site
-configuration; see :doc:`user_guide/projects_jobs_sites` and the site
-tutorials for deployment details.
+See :doc:`user_guide/site_configuration` and the site tutorials for deployment
+details.
 
 Minimal Acoustic Model
 ----------------------
 
 The example below builds a two-layer acoustic model. Lengths are authored in
 kilometers, velocities in kilometers per second, and density in grams per cubic
-centimeter. Pint quantities make those choices explicit in the script while the
-simulation unit system controls how values are exported to the solver.
+centimeter. :term:`Pint` quantities make those choices explicit in the script,
+while the :term:`simulation` unit system controls how values are exported to the
+solver.
 
 .. code-block:: python
-
-   from pathlib import Path
 
    import numpy as np
    import frequensolve as fs
@@ -80,17 +77,18 @@ simulation unit system controls how values are exported to the solver.
    model.add_surface(name="bottom", depth=0.5 * u.km)
    sim += model
 
-Meshes, Boundaries, And Acquisition
+Meshes, Boundaries, and Acquisition
 -----------------------------------
 
 The mesh generator preserves the model geometry, while adaptivity settings
-control the element sizing used for the job. ``order`` is the polynomial order
-of the finite-element basis. ``elems_per_wave`` is the target number of
-elements per shortest wavelength; the corresponding nodal points per wavelength
-is approximately ``order * elems_per_wave + 1``.
+control the element sizing used for the job. ``order`` is the :term:`polynomial order`
+of the finite-element basis. ``elems_per_wave`` is the :term:`EPW` target; the
+corresponding nodal points per wavelength is approximately
+``order * elems_per_wave + 1``.
 
 Boundary conditions are attached by named exterior boundaries. In this acoustic
-example, the top is pressure-free and the sides/bottom use PML absorption.
+example, the top is pressure-free and the sides/bottom use :term:`PML`
+absorption.
 
 .. code-block:: python
 
@@ -121,16 +119,38 @@ example, the top is pressure-free and the sides/bottom use PML absorption.
    sim += fs.Discretization()
    sim += fs.SolverConfig(tolerance=1.0e-4, grids=3)
 
-Run A Time-Domain Job
----------------------
+Build and Inspect Before Running
+--------------------------------
 
-Jobs are strict: ``site.submit(job).wait()`` raises if Python validation fails
-or if the solver reports a failure. Result paths, logs, trace files, and other
-outputs are written under the project directory.
+Everything above can be authored and saved without access to the :term:`fast solver`.
+Saving the project writes inspectable project and simulation files under
+``./scratch/quickstart_acoustic``:
 
 .. code-block:: python
 
-   site = fs.LocalSite(shutdown_on_completion=True, verbose=True)
+   project.save()
+
+At this point you should see ``project.json`` plus a saved simulation
+:term:`JSON`/:term:`HDF5`
+pair under the project directory. Use this checkpoint when you want to inspect
+generated inputs before spending time or cloud/:term:`HPC` resources on a solver run.
+
+The next sections submit jobs to a configured :term:`site`. If ``fs.Site()``
+creates ``~/.frequensolve/site.toml`` and asks you to review it, follow
+:doc:`user_guide/site_configuration` and rerun the same code after the profile
+is configured.
+
+Run a Time-Domain Job
+---------------------
+
+``site.submit(job)`` returns a run handle. Calling ``wait()`` blocks until the
+site reaches a terminal state and returns a ``RunResult`` with status, logs, and
+output helpers. Result paths, logs, trace files, and other outputs are written
+under the project directory.
+
+.. code-block:: python
+
+   site = fs.Site()
    job = fs.TimeDomainJob(
        name="time",
        simulation=sim,
@@ -143,9 +163,14 @@ outputs are written under the project directory.
    traces = result.traces(upscale=4)
    traces.summary
 
-The trace reader returns a :class:`frequensolve.TraceDataset`, backed by the
-HDF5 trace output written by the job. Wavelets are applied when traces are read
-so that the same frequency-domain solve can be inspected with different source
+Expected output: ``traces.summary`` lists receiver groups, components, source
+ids, frequency samples, and time-domain sampling metadata. The project
+directory should now contain a saved job, logs, and result files under
+``jobs/quickstart_acoustic/time/``.
+
+The trace reader returns a :term:`trace dataset <trace dataset>`, backed by the
+:term:`HDF5` trace output written by the job. Wavelets are applied when traces are read
+so that the same :term:`frequency-domain` solve can be inspected with different source
 time functions.
 
 .. code-block:: python
@@ -158,18 +183,23 @@ time functions.
 
    gather.plot(x="time", hue="receiver", add_legend=False)
 
-Run A Frequency-Domain ParaView Job
+Expected output: the plot call draws one time series per receiver for the
+selected component and source. If the notebook backend is non-interactive, save
+the figure with matplotlib after the plot is created.
+
+Run a Frequency-Domain ParaView Job
 -----------------------------------
 
-Frequency-domain jobs can request additional outputs, including ParaView/VTK
-files for inspecting the mesh, fields, PML, material properties, and source
-locations. These files can be opened in ParaView directly. Python visualization
-with PyVista is useful for screenshots and quality control, but ParaView has
-the richer interactive feature set.
+:term:`Frequency-domain` jobs can request additional outputs, including
+:term:`ParaView`/:term:`VTK` files for inspecting the mesh, fields, :term:`PML`,
+material properties, and source locations. These files can be opened in
+ParaView directly. Python visualization with :term:`PyVista` is useful for
+screenshots and quality control, but ParaView has the richer interactive
+feature set.
 
 .. code-block:: python
 
-   site_fd = fs.LocalSite(shutdown_on_completion=True, verbose=True)
+   site_fd = fs.Site()
    pv_job = fs.FrequencyDomainJob(
        name="freq_25hz",
        simulation=sim,
@@ -190,15 +220,17 @@ the richer interactive feature set.
    pv_result = site_fd.submit(pv_job).wait()
    pv_result.output_files(base="pv", suffix=".vtu", existing=True)
 
+Expected output: ``output_files(...)`` returns the generated ``.vtu`` files for
+the ``pv`` :term:`output request`. Open those files in ParaView for interactive
+inspection, or use the ``visual`` extra for lightweight PyVista checks in
+Python.
+
 Next Steps
 ----------
 
-- :download:`01 Acoustic Modeling <../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>`
-  expands this quickstart with diagrams, trace plots, logs, and project layout.
-- :doc:`user_guide/physics_materials_boundaries` lists supported physics,
-  material properties, and boundary conditions.
-- :doc:`user_guide/api_to_contracts` explains how Python objects map to saved
-  solver contracts and result artifacts.
-- :doc:`user_guide/velocity_models_coordinates` explains units, coordinate
-  systems, and layered model geometry.
-- :doc:`user_guide/projects_jobs_sites` covers local, AWS, and HPC execution.
+- Continue with :doc:`tutorials/index` for runnable notebooks organized by
+  modeling, sites, meshing, surveys, outputs, and performance.
+- Use :doc:`user_guide/site_configuration` when you are ready to configure
+  ``fs.Site()`` for cloud, local, or HPC execution.
+- Use :doc:`user_guide/index` when you need a reference for a specific topic
+  from this page, such as units, mesh adaptivity, surveys, or output readers.

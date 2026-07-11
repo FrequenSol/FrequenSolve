@@ -86,6 +86,7 @@ def test_top_level_authoring_exports_are_available():
         "BaseJob",
         "FrequencyDomainJob",
         "TimeDomainJob",
+        "RunFailedError",
         "TraceDataset",
         "plot_gather",
         "read_vtu",

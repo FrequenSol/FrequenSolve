@@ -104,6 +104,15 @@ class ModelSubdomain(ExtraFieldsMixin):
         self.properties[key] = value
 
     def __getitem__(self, key: str):
+        """Return the materialized value for one subdomain property.
+
+        Args:
+            key: Property name or alias.
+
+        Returns:
+            The value returned by the underlying :class:`Property`.
+        """
+
         return self.properties[key].get()
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:

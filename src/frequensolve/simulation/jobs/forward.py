@@ -1,3 +1,10 @@
+"""Forward simulation job classes.
+
+Frequency-domain jobs run an explicit list of frequency or Laplace samples.
+Time-domain jobs derive a uniform frequency sweep from ``f_min``/``f_max`` and
+either ``df`` or ``T_max`` so the solver can reconstruct time traces.
+"""
+
 from pathlib import Path
 from typing import Iterable, List, Optional, Union
 

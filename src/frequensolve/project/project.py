@@ -1,3 +1,11 @@
+"""Project container APIs for saving simulations, jobs, and run artifacts.
+
+``Project`` is the top-level filesystem container for FrequenSolve authoring
+work. It creates a project directory, writes project and simulation JSON,
+rebinds loaded simulations to the project root, and configures package logging
+for local or notebook workflows.
+"""
+
 from __future__ import annotations
 
 import json

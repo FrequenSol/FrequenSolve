@@ -1,3 +1,5 @@
+"""Output request objects for traces, ParaView files, wavefields, and units."""
+
 from __future__ import annotations
 
 import copy
@@ -274,6 +276,8 @@ class TraceOutput(Output):
     path: Optional[Union[str, Path]] = None
 
     def __init__(self, path: Union[str, Path] = "traces", **kwargs):
+        """Create a trace output request with a job-relative path."""
+
         self.path = _relative_output_path(path)
         self._init_extra(None, **kwargs)
 
@@ -342,6 +346,16 @@ class OutputUnits(ExtraFieldsMixin):
         extra: Optional[Mapping[str, Any]] = None,
         **dimension_defaults,
     ):
+        """Create output-unit defaults.
+
+        Args:
+            geometry: Default coordinate/geometry units.
+            dimensions: Units keyed by physical dimension, such as ``length``.
+            defaults: Legacy alias for ``dimensions``.
+            fields: Units keyed by output field name.
+            properties: Units keyed by material-property name.
+        """
+
         self.geometry = unit_expression(geometry) if geometry is not None else None
         merged_dimensions: Dict[str, str] = {}
         for source in (defaults, dimensions, dimension_defaults):
@@ -453,6 +467,8 @@ class ParaViewItem(ExtraFieldsMixin):
         system: str = "global",
         **kwargs,
     ):
+        """Create a structured ParaView output selector."""
+
         normalized = str(kind).lower()
         if normalized not in {"field", "property", "info"}:
             raise ValueError("ParaViewItem kind must be field, property, or info")
@@ -686,6 +702,12 @@ class ParaviewOutput(Output):
         source: Optional[Mapping[str, Any]] = None,
         **kwargs,
     ):
+        """Create a ParaView output request.
+
+        Use ``fields`` and ``properties`` for common volume output, ``items``
+        when you need per-item units/parts/basis metadata, and class helpers
+        such as :meth:`surface` or :meth:`grid` for non-volume targets.
+        """
         if upscale < 0:
             raise ValueError("ParaviewOutput upscale must be >= 0")
         writer_payload = copy.deepcopy(dict(writer or {}))
@@ -1108,6 +1130,12 @@ class WavefieldOutput(Output):
         sources: Optional[Iterable[int]] = None,
         **kwargs,
     ):
+        """Create a grid-backed wavefield output request.
+
+        Provide either a receiver-like ``device`` or one or more field names,
+        plus grid coordinates through ``grid`` or ``dims``/``coords``.
+        """
+
         if field is not None and fields is not None:
             raise ValueError("Pass only one of field or fields")
         if device is not None and (field is not None or fields is not None):
@@ -1474,6 +1502,12 @@ class JobOutputs:
         wavefields: Optional[Iterable[WavefieldOutput]] = None,
         units: Optional[Union[OutputUnits, Mapping[str, Any]]] = None,
     ):
+        """Create a collection of job output requests.
+
+        The collection always contains trace output and may also include any
+        number of ParaView and wavefield outputs.
+        """
+
         self.traces = traces or TraceOutput()
         self.paraview = []
         self.wavefields = []

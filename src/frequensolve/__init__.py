@@ -1,4 +1,4 @@
-"""Public package entrypoint for the FrequenSolve Python SDK.
+"""Public package entrypoint for the FrequenSolve Python API.
 
 The root namespace re-exports the stable authoring API from the main
 subpackages so users can write ``import frequensolve as fs``. Optional execution

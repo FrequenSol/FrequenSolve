@@ -18,7 +18,7 @@ Each notebook should read as a short modeling lesson:
 1. State the physical or workflow goal in plain language.
 2. Define the relevant vocabulary before using it in code.
 3. Build a small model that can be visually inspected.
-4. Run strict jobs without hiding solver failures.
+4. Run jobs directly and leave logs/results visible for inspection.
 5. Plot or list results and explain what the reader should look for.
 6. Connect the Python object back to the exported solver contract when that
    helps users debug or scale the workflow.
@@ -44,16 +44,15 @@ Every notebook should answer the same reader questions: What am I modeling?
 Which object owns this decision? What file or result proves it worked? What
 should I inspect before scaling this pattern to a larger job?
 
-Solver execution cells are intentionally strict. If the local, cloud, or HPC
-solver fails, the notebook should fail at the run cell so the job logs and
-result directory remain visible. Tutorial code should fix Python/API errors,
-not hide solver-side failures behind broad exception handlers.
+Solver execution cells should not hide local, cloud, or HPC failures behind
+broad exception handlers. Tutorial code should leave job logs and result
+directories visible, then fix Python/API errors at the source.
 
 ## Layout
 
 | Folder | Focus |
 | --- | --- |
-| `01_modeling_basics` | Acoustic, elastic, poroelastic, coupled, dimensionality, Laplace/time-domain, axisymmetric borehole, and dipping-fracture basics. |
+| `01_modeling_basics` | Acoustic, elastic, poroelastic, coupled, dimensionality, axisymmetric, and Laplace/time-domain basics. |
 | `02_sites` | AWS, HPC, local execution, and saved project/job loading. |
 | `03_velocity_model_building` | Units, coordinate systems, surface-relative properties, and layered model tools. |
 | `04_meshing` | Mesh generators, supplied meshes, adaptivity fields, and gradings. |

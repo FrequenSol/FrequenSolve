@@ -9,15 +9,23 @@ from frequensolve._optional import optional_class
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
+    RunFailedError,
     RunHandle,
     RunResult,
     SubmitPlan,
+)
+from frequensolve.orchestrator.sites.config_file import (
+    DEFAULT_SITE_CONFIG_NAME,
+    SITE_CONFIG_ENV_VAR,
+    Site,
+    load_site_config,
+    site_config_path,
 )
 
 LocalSite = optional_class(
     "LocalSite",
     "frequensolve.orchestrator.sites.local.LocalSite",
-    extra="hpc",
+    extra="parallel",
     dependencies=("dask", "distributed", "python-dotenv"),
     module=__name__,
 )
@@ -69,28 +77,28 @@ AWSSite = optional_class(
     "AWSSite",
     "frequensolve.orchestrator.sites.aws.AWSSite",
     extra="cloud",
-    dependencies=("boto3", "botocore", "requests", "python-dotenv"),
+    dependencies=("boto3", "botocore", "requests"),
     module=__name__,
 )
 AWSSiteConfig = optional_class(
     "AWSSiteConfig",
     "frequensolve.orchestrator.sites.aws.AWSSiteConfig",
     extra="cloud",
-    dependencies=("boto3", "botocore", "requests", "python-dotenv"),
+    dependencies=("boto3", "botocore", "requests"),
     module=__name__,
 )
 CognitoAuth = optional_class(
     "CognitoAuth",
     "frequensolve.orchestrator.sites.aws.CognitoAuth",
     extra="cloud",
-    dependencies=("boto3", "botocore", "requests", "python-dotenv"),
+    dependencies=("boto3", "botocore", "requests"),
     module=__name__,
 )
 GraphQLClient = optional_class(
     "GraphQLClient",
     "frequensolve.orchestrator.sites.aws.GraphQLClient",
     extra="cloud",
-    dependencies=("boto3", "botocore", "requests", "python-dotenv"),
+    dependencies=("boto3", "botocore", "requests"),
     module=__name__,
 )
 
@@ -102,8 +110,12 @@ __all__ = [
     "GraphQLClient",
     "JobStatus",
     "LocalSite",
+    "RunFailedError",
     "RunHandle",
     "RunResult",
+    "DEFAULT_SITE_CONFIG_NAME",
+    "SITE_CONFIG_ENV_VAR",
+    "Site",
     "SlurmLoginCredentials",
     "SlurmRunConfig",
     "SlurmSite",
@@ -111,4 +123,6 @@ __all__ = [
     "Stampede3Site",
     "SubmitPlan",
     "TACCLoginCredentials",
+    "load_site_config",
+    "site_config_path",
 ]

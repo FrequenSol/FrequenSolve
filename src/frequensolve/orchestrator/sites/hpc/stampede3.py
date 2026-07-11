@@ -14,7 +14,12 @@ __all__ = ["TACCLoginCredentials", "Stampede3Site"]
 
 
 class TACCLoginCredentials(Credentials):
-    """TACC credentials used by Stampede3."""
+    """TACC credentials used by Stampede3.
+
+    Environment variables named by ``user_env``, ``pw_env``, and
+    ``ssh_key_env`` are read by the shared credential helper when explicit
+    values are not supplied.
+    """
 
     user_env: str = "TACC_USERNAME"
     pw_env: str = "TACC_PASSWORD"
@@ -28,6 +33,16 @@ class Stampede3Site(SlurmSite):
     This class only supplies Stampede3-specific defaults. SSH, transfer,
     provisioning, SLURM submission, status polling, and result fetching are
     implemented by :class:`frequensolve.orchestrator.sites.hpc.SlurmSite`.
+
+    Args:
+        rel_path: Site configuration path or name used to load Stampede3
+            credentials and defaults.
+        transfer_method: File-transfer backend, either ``"rsync"`` or
+            ``"sftp"``.
+        default_queue: SLURM queue/partition used when no run config supplies
+            one.
+        run_config: Optional per-run SLURM settings.
+        verbose: Whether to enable verbose site logging.
     """
 
     credentials: TACCLoginCredentials

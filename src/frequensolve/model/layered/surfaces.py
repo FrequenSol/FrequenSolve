@@ -1,3 +1,10 @@
+"""Surface, layer, and fracture objects used by layered models.
+
+These classes are the user-visible building blocks that bound stratigraphic
+intervals, attach material properties to those intervals, and represent thin
+fracture subdomains in the serialized solver model.
+"""
+
 from __future__ import annotations
 
 import copy

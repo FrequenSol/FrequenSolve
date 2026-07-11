@@ -1,3 +1,10 @@
+"""Internal coercion helpers for layered-model units and inline arrays.
+
+These functions support the public layered-model authoring API by normalizing
+domain limits, surface depths, property units, and small ``xarray.DataArray``
+payloads before they are serialized into FrequenSolve's solver contracts.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Tuple

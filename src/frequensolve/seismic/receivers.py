@@ -643,6 +643,16 @@ class CoordsFromFile(ReceiverCoords):
             raise NotImplementedError(f"Format {self.format} not implemented")
 
     def __getitem__(self, key: Union[tuple, slice]):
+        """Return receiver coordinates selected from the backing file.
+
+        Args:
+            key: Slice, integer index, tuple, or boolean mask accepted by the
+                HDF5 coordinate dataset.
+
+        Returns:
+            Coordinate array for the selected receivers.
+        """
+
         return self.get(key)
 
     def get(self, indices: Optional[Union[Tuple, slice]] = None) -> np.ndarray:

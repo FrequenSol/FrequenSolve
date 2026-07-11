@@ -1,3 +1,5 @@
+"""Configuration objects for SLURM-backed HPC sites."""
+
 import os
 from dataclasses import dataclass, field
 

@@ -1,7 +1,7 @@
 # Fast Solver Trace Finalization Contract
 
 This note describes the solver-side trace-output changes expected by the
-Python SDK. The goal is to keep parallel frequency solves simple while giving
+FrequenSolve Python API. The goal is to keep parallel frequency solves simple while giving
 users one convenient trace product by default.
 
 ## Default Behavior
@@ -28,7 +28,7 @@ results/
     timings.json
 ```
 
-The public SDK should usually read `results/traces/traces.h5`, not individual
+The public Python API should usually read `results/traces/traces.h5`, not individual
 frequency shards.
 
 ## Packed Trace File
@@ -51,7 +51,7 @@ group names, shapes, dtypes, and trace layout before packing.
 
 ## Separate Storage Mode
 
-The SDK may expose an opt-in mode such as `store_separate=True` for users who
+The FrequenSolve Python API may expose an opt-in mode such as `store_separate=True` for users who
 want to keep per-frequency trace files instead of a packed file. In that mode,
 each frequency file should be self-contained and should include the trace
 metadata listed above, because there may be no consolidated metadata authority.
@@ -114,11 +114,11 @@ metadata. At minimum:
 - MPI ranks, threads per rank, or core count;
 - log path.
 
-The SDK uses these fields for job summaries, timing plots, core-hour plots, and
-targeted log retrieval.
+The FrequenSolve Python API uses these fields for job summaries, timing plots,
+core-hour plots, and targeted log retrieval.
 
 Raw logs may remain as `logs/task_<task>.log`. Task numbers are one-based in the
-SDK.
+FrequenSolve Python API.
 
 ## Frequency-Safe File Names
 
@@ -136,11 +136,11 @@ trace_10.00000.h5
 The solver pathlib module should only treat the last suffix (`.h5`, `.json`,
 `.vtu`, etc.) as the extension and should preserve decimal points in the stem.
 
-## Python SDK Expectations
+## FrequenSolve Python API Expectations
 
-The SDK will treat packed storage as the normal result. Fetching traces should
-download or locate `traces/traces.h5` and its manifest. Fetching logs should
-support:
+The FrequenSolve Python API will treat packed storage as the normal result.
+Fetching traces should download or locate `traces/traces.h5` and its manifest.
+Fetching logs should support:
 
 ```python
 site.fetch_logs(job)

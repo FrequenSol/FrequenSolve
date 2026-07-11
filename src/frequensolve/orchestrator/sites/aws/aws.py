@@ -1,3 +1,5 @@
+"""FrequenSol cloud execution site backed by Cognito, AppSync, S3, and Batch."""
+
 import getpass
 import json
 import os
@@ -9,6 +11,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from frequensolve._optional import optional_dependency_error
+from frequensolve.orchestrator.sites.aws.cache_paths import (
+    cloud_config_cache_path,
+    legacy_config_cache_path,
+)
 
 try:
     import boto3
@@ -43,27 +49,22 @@ class AWSSiteConfig(BaseSiteConfig):
 
     Usage:
         # Fetch config from domain
-        config = AWSSiteConfig.from_domain('frequensolve.app')
+        config = AWSSiteConfig.from_domain('app.frequensol.com')
 
         # Or use FREQUENSOL_DOMAIN environment variable
-        export FREQUENSOL_DOMAIN='frequensolve.app'
+        export FREQUENSOL_DOMAIN='app.frequensol.com'
         config = AWSSiteConfig.from_domain()
 
     Attributes:
-        # Cognito/API settings (auto-populated from domain)
-        user_pool_id: Cognito User Pool ID
-        client_id: Cognito App Client ID
-        identity_pool_id: Cognito Identity Pool ID
-        api_url: GraphQL API endpoint URL
-        domain: Frontend domain
-
-        # AWS settings (auto-populated from stack info after auth)
-        s3_bucket: S3 bucket for simulation data
-
-        # Shared settings
-        region: AWS region
-        s3_prefix: S3 prefix for organizing data
-        max_duration: Maximum time resources can be requested
+        user_pool_id: Cognito user pool ID populated from the cloud domain.
+        client_id: Cognito app client ID populated from the cloud domain.
+        identity_pool_id: Cognito identity pool ID populated from the cloud domain.
+        api_url: GraphQL API endpoint URL.
+        domain: Frontend domain used to discover public configuration.
+        s3_bucket: S3 bucket for simulation data, populated after authentication.
+        region: AWS region used for Cognito, S3, and Batch resources.
+        s3_prefix: Prefix for organizing simulation data inside the S3 bucket.
+        max_duration: Maximum duration users may request for cloud resources.
     """
 
     # Cognito/API configuration (from domain or env vars)
@@ -86,7 +87,7 @@ class AWSSiteConfig(BaseSiteConfig):
         """Create configuration by fetching from a domain.
 
         Args:
-            domain: Frontend domain (e.g., 'frequensolve.app', 'localhost:5173')
+            domain: Frontend domain (e.g., 'app.frequensol.com', 'localhost:5173')
                    If not provided, will try FREQUENSOL_DOMAIN environment variable.
 
         Returns:
@@ -121,11 +122,31 @@ class AWSSiteConfig(BaseSiteConfig):
     @staticmethod
     def _get_config_cache_path(domain: str) -> Path:
         """Get path to cached configuration file for a domain."""
-        config_dir = Path.home() / ".frequensolve"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        # Sanitize domain for filename
-        safe_domain = domain.replace(":", "_").replace("/", "_")
-        return config_dir / f"config_{safe_domain}.json"
+        return cloud_config_cache_path(domain)
+
+    @staticmethod
+    def _read_cached_config(domain: str) -> Optional[dict]:
+        """Read cached domain config, migrating the legacy path when present."""
+        cache_path = AWSSiteConfig._get_config_cache_path(domain)
+        candidates = [cache_path]
+        legacy_path = legacy_config_cache_path(domain)
+        if legacy_path != cache_path:
+            candidates.append(legacy_path)
+
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            try:
+                with open(candidate, "r") as f:
+                    cached_config = json.load(f)
+                logger.debug(f"Using cached configuration for {domain}")
+                logger.debug(f"Cache path: {candidate}")
+                if candidate == legacy_path:
+                    AWSSiteConfig._cache_config(domain, cached_config)
+                return cached_config
+            except (json.JSONDecodeError, IOError) as e:
+                logger.debug(f"Failed to read cached config, fetching fresh: {e}")
+        return None
 
     @staticmethod
     def _fetch_config_from_domain(domain: str, force_refresh: bool = False) -> dict:
@@ -142,19 +163,13 @@ class AWSSiteConfig(BaseSiteConfig):
             requests.RequestException: If fetch fails
         """
         # First check cache (unless force_refresh is True)
-        cache_path = AWSSiteConfig._get_config_cache_path(domain)
-        if not force_refresh and cache_path.exists():
-            try:
-                with open(cache_path, "r") as f:
-                    cached_config = json.load(f)
-                    logger.info(f"Using cached configuration for {domain}")
-                    logger.debug(f"Cache path: {cache_path}")
-                    return cached_config
-            except (json.JSONDecodeError, IOError) as e:
-                logger.debug(f"Failed to read cached config, fetching fresh: {e}")
+        if not force_refresh:
+            cached_config = AWSSiteConfig._read_cached_config(domain)
+            if cached_config is not None:
+                return cached_config
 
         # Try both HTTPS and HTTP (for local development)
-        logger.info(f"Fetching configuration from {domain}...")
+        logger.debug(f"Fetching configuration from {domain}...")
         for protocol in ["https", "http"]:
             url = f"{protocol}://{domain}/api/config.json"
             try:
@@ -162,7 +177,7 @@ class AWSSiteConfig(BaseSiteConfig):
                 response = requests.get(url, timeout=10)
                 response.raise_for_status()
                 config_data = response.json()
-                logger.info(f"✓ Configuration loaded from {domain}")
+                logger.debug(f"✓ Configuration loaded from {domain}")
                 return config_data
             except requests.RequestException as e:
                 if protocol == "http":  # Last attempt failed
@@ -204,14 +219,14 @@ class AWSSite(BaseSite):
 
     Usage:
         # Just provide your domain - everything else is automatic
-        site = AWSSite(domain='frequensolve.app')
+        site = AWSSite(domain='app.frequensol.com')
 
         # Or set FREQUENSOL_DOMAIN environment variable once
-        export FREQUENSOL_DOMAIN='frequensolve.app'
+        export FREQUENSOL_DOMAIN='app.frequensol.com'
         site = AWSSite()
 
         # Provide credentials to skip interactive prompt
-        site = AWSSite(domain='frequensolve.app', email='user@example.com', password='...')
+        site = AWSSite(domain='app.frequensol.com', email='user@example.com', password='...')
 
     What happens automatically:
         1. Fetches configuration from domain (User Pool ID, API URL, etc.)
@@ -231,7 +246,7 @@ class AWSSite(BaseSite):
         """Initialize AWS site with domain-based authentication.
 
         Args:
-            domain: Frontend domain (e.g., 'frequensolve.app', 'localhost:5173').
+            domain: Frontend domain (e.g., 'app.frequensol.com', 'localhost:5173').
                    If not provided, will try FREQUENSOL_DOMAIN environment variable.
             email: User email. Required when cached tokens are unavailable unless
                 interactive is True.
@@ -338,9 +353,8 @@ class AWSSite(BaseSite):
                     )
 
                     # Clear old credentials since they're for wrong User Pool
-                    if auth.credentials_path.exists():
-                        auth.credentials_path.unlink()
-                        self._emit("Cleared outdated cached AWS credentials")
+                    auth.clear_cached_tokens()
+                    self._emit("Cleared outdated cached AWS credentials")
 
                     # Continue to next iteration to try again with new config
                     continue
@@ -357,7 +371,12 @@ class AWSSite(BaseSite):
         self.cognito_auth = auth
 
         # Get AWS credentials from Identity Pool
-        credentials = auth.get_aws_credentials()
+        credentials = self._get_aws_credentials_with_relogin(
+            auth,
+            email=email,
+            password=password,
+            interactive=interactive,
+        )
         self.session = boto3.Session(
             aws_access_key_id=credentials["AccessKeyId"],
             aws_secret_access_key=credentials["SecretKey"],
@@ -397,8 +416,117 @@ class AWSSite(BaseSite):
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
 
+    def _get_aws_credentials_with_relogin(
+        self,
+        auth,
+        *,
+        email: Optional[str],
+        password: Optional[str],
+        interactive: bool,
+    ) -> Dict[str, str]:
+        try:
+            return auth.get_aws_credentials()
+        except ValueError as exc:
+            if not self._requires_cloud_relogin(exc):
+                raise
+
+            email, password = self._relogin_to_cloud(
+                auth,
+                email=email,
+                password=password,
+                interactive=interactive,
+                reason=str(exc),
+            )
+            try:
+                return auth.get_aws_credentials()
+            except ValueError as retry_exc:
+                credentials_path = getattr(auth, "credentials_path", "unknown")
+                raise RuntimeError(
+                    "FrequenSol cloud authentication failed after re-login. "
+                    f"Credentials cache remains at: {credentials_path}. "
+                    f"Original error: {retry_exc}"
+                ) from retry_exc
+
+    @staticmethod
+    def _requires_cloud_relogin(error: ValueError) -> bool:
+        message = str(error)
+        return any(
+            phrase in message
+            for phrase in (
+                "Please login again",
+                "No refresh token found",
+                "Refresh token expired",
+            )
+        )
+
+    def _relogin_to_cloud(
+        self,
+        auth,
+        *,
+        email: Optional[str],
+        password: Optional[str],
+        interactive: bool,
+        reason: str,
+    ) -> tuple[str, str]:
+        credentials_path = getattr(auth, "credentials_path", "unknown")
+        if not email:
+            if not interactive:
+                raise RuntimeError(
+                    self._cloud_relogin_required_message(
+                        credentials_path=credentials_path,
+                        reason=reason,
+                    )
+                )
+            email = input("FrequenSol Email: ")
+        if not password:
+            if not interactive:
+                raise RuntimeError(
+                    self._cloud_relogin_required_message(
+                        credentials_path=credentials_path,
+                        reason=reason,
+                    )
+                )
+            password = getpass.getpass("Password: ")
+
+        self._emit("Cached FrequenSol cloud login expired; authenticating again")
+        self._emit(f"Authenticating as {email}...")
+        try:
+            auth.login(email, password)
+        except ValueError as exc:
+            raise RuntimeError(
+                "Cached FrequenSol cloud credentials could not be refreshed, "
+                "and re-login did not complete. "
+                f"Credentials cache remains at: {credentials_path}. "
+                f"Login error: {exc}"
+            ) from exc
+        self._emit("AWS authentication successful")
+        return email, password
+
+    @staticmethod
+    def _cloud_relogin_required_message(
+        *, credentials_path: Union[str, Path], reason: str
+    ) -> str:
+        return (
+            "Your cached FrequenSol cloud login expired. "
+            f"Reason: {reason}\n"
+            f"Credentials cache: {credentials_path}\n"
+            "The credentials file was left unchanged and will be overwritten "
+            "after a successful login.\n\n"
+            "Re-run with interactive login enabled:\n"
+            '  fs.Site(profile="cloud", interactive=True)\n\n'
+            "Or pass credentials explicitly:\n"
+            '  fs.Site(profile="cloud", email="you@example.com", password="...")'
+        )
+
     def _refresh_s3_credentials(self) -> None:
-        """Reload boto3 session and S3 client from the Identity Pool (same keys as CLI env)."""
+        """Reload boto3 session and S3 client from the Identity Pool.
+
+        Call when credentials may have expired (e.g. after a long simulation).
+        No-op when not using Cognito authentication. Refreshed keys match what
+        :meth:`_aws_cli_env` would pass to the AWS CLI.
+        """
+        if not hasattr(self, "cognito_auth") or self.cognito_auth is None:
+            return
         credentials = self.cognito_auth.get_aws_credentials()
         self.session = boto3.Session(
             aws_access_key_id=credentials["AccessKeyId"],
@@ -407,7 +535,7 @@ class AWSSite(BaseSite):
             region_name=self.config.region,
         )
         self.s3_client = self.session.client("s3", region_name=self.config.region)
-        logger.debug("Refreshed AWS session from Identity Pool")
+        logger.debug("Refreshed AWS session and S3 client from Identity Pool")
 
     def _aws_cli_env(self) -> Dict[str, str]:
         """Build a process environment so the AWS CLI uses Cognito Identity Pool credentials.
@@ -452,6 +580,55 @@ class AWSSite(BaseSite):
         # Return a Path object that represents the S3 prefix
         # This is used by project._transfer() to construct remote paths
         return Path(self.config.s3_prefix)
+
+    @property
+    def provisioned(self) -> bool:
+        """Check if the site is provisioned.
+
+        AWS provisions compute resources automatically on demand when jobs are
+        submitted. This property always returns True to maintain interface
+        compatibility with other sites (e.g. HPC sites that require explicit
+        provisioning before job submission).
+        """
+        return True
+
+    def fetch_paraview(
+        self, job: BaseJob, path: Optional[Union[str, Path]] = None
+    ) -> None:
+        """Get ParaView files from S3.
+
+        Downloads the results/ParaView/ directory for the job from the
+        project's S3 bucket to the local project path.
+
+        Args:
+            job: A BaseJob object.
+            path: Optional local path to save results. If None, uses
+                job.project_path.
+        """
+        if path is None:
+            path = job.project_path
+        else:
+            path = Path(path)
+
+        project_name = job.simulation._remote_path.parts[0]
+        simulation_name = job.simulation.name
+        job_name = job.name
+        results_paraview_path = f"jobs/{simulation_name}/{job_name}/results/ParaView"
+        s3_results_path = (
+            f"s3://{self.config.s3_bucket}/{project_name}/{results_paraview_path}"
+        )
+        local_results_path = path / results_paraview_path
+
+        try:
+            logger.info(
+                "Fetching ParaView outputs from %s to %s",
+                s3_results_path,
+                local_results_path,
+            )
+            self.get(s3_results_path, local_results_path)
+        except Exception as e:
+            logger.exception("Error downloading ParaView outputs: %s", str(e))
+            raise
 
     def _validate_config(self):
         """Validate AWS configuration."""
@@ -580,23 +757,24 @@ class AWSSite(BaseSite):
                 try:
                     storage_info = self.graphql_client.get_storage_stack_info()
                     self.config.s3_bucket = storage_info["bucketName"]
-                    logger.info(
+                    logger.debug(
                         f"Using existing storage stack: bucket={self.config.s3_bucket}"
                     )
                 except RuntimeError:
                     # Storage stack doesn't exist, create it
-                    logger.info(
+                    logger.debug(
                         "Storage stack not found. Creating storage infrastructure..."
                     )
                     try:
-                        environment = getattr(self.config, "environment", "dev")
-
                         # Deploy storage stack (userId extracted automatically from auth context)
-                        self.graphql_client.deploy_storage_stack(environment)
+                        deploy_result = self.graphql_client.deploy_storage_stack()
 
-                        # Wait for stack to be ready
-                        logger.info("Waiting for storage stack to be ready...")
-                        self.graphql_client.wait_for_stack_ready("storage")
+                        # Wait for stack to be ready (pass stackId so we wait for the one we just created)
+                        logger.debug("Waiting for storage stack to be ready...")
+                        expected_stack_id = deploy_result.get("stackId")
+                        self.graphql_client.wait_for_stack_ready(
+                            "storage", expected_stack_id=expected_stack_id
+                        )
 
                         # Get storage stack info to update bucket name
                         storage_info = self.graphql_client.get_storage_stack_info()
@@ -624,8 +802,9 @@ class AWSSite(BaseSite):
         Args:
             job: The task to submit.
             **kwargs: Additional job parameters (vcpu, memory, name,
-                description). Pass ``validate=False`` to skip SDK pre-run
-                validation.
+                description). Pass ``check=True`` to make ``wait()`` raise by
+                default for failed runs, or ``validate=False`` to skip SDK
+                pre-run validation.
 
         Returns:
             Awaitable run handle.
@@ -638,9 +817,12 @@ class AWSSite(BaseSite):
             or kwargs.pop("force", False)
             or kwargs.pop("rerun", False)
         )
+        check = bool(kwargs.pop("check", False))
         validate = kwargs.pop("validate", True)
         fetch = kwargs.pop("fetch", False)
         poll_interval = kwargs.pop("poll_interval", 10)
+        vcpu = kwargs.pop("vcpu", None)
+        memory = kwargs.pop("memory", None)
         self.prepare_job(job, validate=validate)
         if not force_run and job.is_run_current():
             job.write_run_state(status="skipped")
@@ -657,13 +839,9 @@ class AWSSite(BaseSite):
                     "AWS compute stack not found; creating compute infrastructure."
                 )
                 try:
-                    environment = getattr(self.config, "environment", "dev")
-
                     # Deploy compute stack - backend will automatically fetch and use user's compute settings
                     # (userId extracted automatically from auth context)
-                    deploy_result = self.graphql_client.deploy_compute_stack(
-                        environment
-                    )
+                    deploy_result = self.graphql_client.deploy_compute_stack()
 
                     # Wait for stack to be ready, passing the stackId from deployment for accurate matching
                     self._emit("Waiting for AWS compute stack to be ready")
@@ -696,9 +874,12 @@ class AWSSite(BaseSite):
 
                 result = self.graphql_client.submit_job(
                     job_file_s3_key=str(s3_job_key),
-                    vcpu=kwargs.get("vcpu"),
-                    memory=kwargs.get("memory"),
+                    vcpu=vcpu,
+                    memory=memory,
                     job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
+                    send_simulation_status_email=kwargs.get(
+                        "send_simulation_status_email"
+                    ),
                     force_run=force_run,
                 )
 
@@ -713,6 +894,7 @@ class AWSSite(BaseSite):
                     simulation_id,
                     poll_interval=poll_interval,
                     fetch=fetch,
+                    check=check,
                 )
 
             else:
@@ -726,10 +908,10 @@ class AWSSite(BaseSite):
                     "job_s3_key": str(s3_job_key),
                 }
 
-                if "vcpu" in kwargs:
-                    api_data["vcpu"] = kwargs["vcpu"]
-                if "memory" in kwargs:
-                    api_data["memory"] = kwargs["memory"]
+                if vcpu is not None:
+                    api_data["vcpu"] = vcpu
+                if memory is not None:
+                    api_data["memory"] = memory
                 if force_run:
                     api_data["force_run"] = True
 
@@ -768,6 +950,7 @@ class AWSSite(BaseSite):
                         simulation_id,
                         poll_interval=poll_interval,
                         fetch=fetch,
+                        check=check,
                     )
 
                 # Fallback to job_id for backwards compatibility
@@ -788,6 +971,7 @@ class AWSSite(BaseSite):
                     job_id,
                     poll_interval=poll_interval,
                     fetch=fetch,
+                    check=check,
                 )
 
         except Exception as e:
@@ -799,6 +983,7 @@ class AWSSite(BaseSite):
         job_id: str,
         poll_interval: float = 10,
         fetch: bool = False,
+        check: bool = False,
     ) -> RunHandle:
         return RunHandle(
             site=self,
@@ -806,6 +991,7 @@ class AWSSite(BaseSite):
             id=str(job_id),
             mode="aws",
             poll_interval=poll_interval,
+            check=check,
             _status_fn=self._poll_run,
             _cancel_fn=lambda run: self.cancel_job(str(run.id)),
             _fetch_fn=(lambda run: self.fetch_outputs(run.job)) if fetch else None,
@@ -1179,74 +1365,96 @@ class AWSSite(BaseSite):
         local_path: Union[str, Path],
         overwrite: bool = False,
     ):
-        """Transfer files from S3 path to local path using ``aws s3 sync``.
+        """Transfer files from S3 path to local path using boto3.
 
-        The CLI is run with **Cognito Identity Pool** credentials in the process
-        environment (same principal as boto3), not ``~/.aws/credentials``.
+        Uses the site's Cognito-backed S3 client so Identity Pool temporary
+        credentials apply (same principal as :meth:`_run_aws_cli`). Refreshes
+        credentials on expiry (e.g. after a long simulation wait; typical
+        lifetime ~1 hour).
 
         Args:
             s3_path: S3 path to transfer from (e.g., 's3://bucket/key' or 's3://bucket/key/')
             local_path: Local path to transfer to
-            overwrite: Overwrite existing files (not used with aws s3 sync as it always overwrites)
+            overwrite: Overwrite existing files (not used; always overwrites)
         """
         logger.debug("Attempting to transfer from %s to %s", s3_path, local_path)
 
         local_path = Path(local_path)
-        s3_path = str(s3_path)
+        s3_path_str = str(s3_path)
 
-        sync_cmd = [
-            "aws",
-            "s3",
-            "sync",
-            s3_path,
-            str(local_path),
-            "--region",
-            self.config.region,
-        ]
+        def _do_get() -> None:
+            # Parse s3://bucket/key/ format
+            if not s3_path_str.startswith("s3://"):
+                raise ValueError(f"Invalid S3 path: {s3_path_str}")
+            path_parts = s3_path_str[5:].split("/", 1)  # Remove 's3://'
+            bucket = path_parts[0]
+            key = path_parts[1] if len(path_parts) > 1 else ""
+
+            def _download_object(object_key: str) -> int:
+                if local_path.exists() and local_path.is_dir():
+                    local_file = local_path / Path(object_key).name
+                elif local_path.exists():
+                    local_file = local_path
+                elif local_path.suffix:
+                    local_file = local_path
+                else:
+                    local_file = local_path / Path(object_key).name
+                local_file.parent.mkdir(parents=True, exist_ok=True)
+                self.s3_client.download_file(bucket, object_key, str(local_file))
+                return 1
+
+            def _missing_object(error: ClientError) -> bool:
+                error_code = error.response.get("Error", {}).get("Code", "")
+                return error_code in ("404", "NoSuchKey", "NotFound")
+
+            if key and not s3_path_str.endswith("/"):
+                try:
+                    self.s3_client.head_object(Bucket=bucket, Key=key)
+                except ClientError as e:
+                    if not _missing_object(e):
+                        raise
+                else:
+                    downloaded = _download_object(key)
+                    logger.debug(
+                        "Transfer completed successfully (%d files)", downloaded
+                    )
+                    return
+
+            prefix = key.rstrip("/") + "/" if key else ""
+
+            # Create local directory
+            local_path.mkdir(parents=True, exist_ok=True)
+
+            # List and download objects using Cognito-backed s3_client
+            paginator = self.s3_client.get_paginator("list_objects_v2")
+            downloaded = 0
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    if key.endswith("/"):
+                        continue
+                    # Preserve relative path under prefix
+                    rel_key = key[len(prefix) :] if prefix else key
+                    local_file = local_path / rel_key
+                    local_file.parent.mkdir(parents=True, exist_ok=True)
+                    self.s3_client.download_file(bucket, key, str(local_file))
+                    downloaded += 1
+
+            logger.debug("Transfer completed successfully (%d files)", downloaded)
 
         try:
-            parent_path = str(local_path.parent)
-            os.makedirs(parent_path, exist_ok=True)
-
-            logger.debug("aws s3 sync command: %s", " ".join(sync_cmd))
-
-            for attempt in range(2):
-                try:
-                    result = self._run_aws_cli(
-                        sync_cmd,
-                        capture_output=True,
-                        text=True,
-                        check=True,
-                    )
-                    break
-                except subprocess.CalledProcessError as e:
-                    combined = ((e.stderr or "") + (e.stdout or "")).lower()
-                    if attempt == 0 and (
-                        "expiredtoken" in combined
-                        or "request expired" in combined
-                        or "invalidtoken" in combined
-                        or "security token included in the request is invalid"
-                        in combined
-                    ):
-                        logger.info(
-                            "AWS CLI reported expired credentials; refreshing from "
-                            "Identity Pool and retrying sync..."
-                        )
-                        self._refresh_s3_credentials()
-                        continue
-                    logger.error(
-                        "aws s3 sync failed with return code %d: %s",
-                        e.returncode,
-                        e.stderr,
-                    )
-                    raise RuntimeError(f"aws s3 sync failed: {e.stderr}") from e
-
-            if result.stdout:
-                logger.debug("aws s3 sync output: %s", result.stdout.strip())
-            logger.debug("Transfer completed successfully")
-
-        except RuntimeError:
-            raise
+            _do_get()
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code in ("ExpiredToken", "InvalidToken") and hasattr(
+                self, "cognito_auth"
+            ):
+                logger.info("Credentials expired, refreshing from Identity Pool...")
+                self._refresh_s3_credentials()
+                _do_get()
+            else:
+                logger.error("S3 transfer failed: %s", e)
+                raise RuntimeError(f"S3 transfer failed: {e}") from e
         except Exception as e:
             logger.exception("Error during S3 file transfer: %s", str(e))
             raise
@@ -1254,5 +1462,5 @@ class AWSSite(BaseSite):
 
 # if __name__ == "__main__":
 #     # Example usage
-#     config = AWSSiteConfig.from_domain('frequensolve.app')
-#     site = AWSSite(domain='frequensolve.app')
+#     config = AWSSiteConfig.from_domain('app.frequensol.com')
+#     site = AWSSite(domain='app.frequensol.com')

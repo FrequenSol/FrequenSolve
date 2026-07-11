@@ -65,7 +65,7 @@ if __name__ == "__main__":
         print("✅ Test passed!")
         print()
         print("Users can now authenticate with just:")
-        print("  site = AWSSite(domain='frequensolve.app')")
+        print("  site = AWSSite(domain='app.frequensol.com')")
     else:
         print("❌ Test failed")
     print("=" * 60)

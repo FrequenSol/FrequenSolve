@@ -1,3 +1,5 @@
+"""Local execution site using Dask workers and local filesystem artifacts."""
+
 from __future__ import annotations
 
 import json
@@ -24,7 +26,7 @@ try:
 except ModuleNotFoundError as exc:
     raise optional_dependency_error(
         "LocalSite",
-        extra="hpc",
+        extra="parallel",
         dependencies=("dask", "distributed", "python-dotenv"),
         error=exc,
     ) from exc
@@ -505,11 +507,13 @@ class LocalSite(BaseSite):
         Args:
             job: The simulation job to run
             **kwargs: Additional arguments for task configuration. Pass
-                ``validate=False`` to skip SDK pre-run validation.
+                ``check=True`` to make ``wait()`` raise by default for failed
+                runs, or ``validate=False`` to skip SDK pre-run validation.
 
         Returns:
             RunHandle for the submitted tasks
         """
+        check = bool(kwargs.pop("check", False))
         force_run = bool(
             kwargs.pop("force_run", False)
             or kwargs.pop("force", False)
@@ -590,6 +594,7 @@ class LocalSite(BaseSite):
             id=f"local:{job.name}",
             mode="local",
             poll_interval=0.5,
+            check=check,
             _status_fn=self._poll_local_run,
             _wait_fn=self._wait_local_run,
             _finalize_fn=self._finalize_local_run,

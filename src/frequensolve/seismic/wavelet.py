@@ -1,3 +1,5 @@
+"""Analytical wavelet and taper utilities for seismic source signals."""
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Callable, List, Literal, Optional, Tuple, Union
@@ -173,11 +175,14 @@ def _trapezoid_spectrum(
 # ----------------------------------------------------------------------
 @dataclass(init=False)
 class Wavelet:
-    """Data container for wavelets in time and frequency domains.
+    """Base analytical wavelet with cached time- and frequency-domain samples.
 
     Attributes:
-       times (np.ndarray): The time samples.
-       signal (np.ndarray): The wavelet signal.
+        f: Wavelet frequency parameter or parameter list.
+        window: Optional taper specification.
+        center: Center time for zero-phase placement.
+        causal: Whether generated samples are placed causally.
+        scale: Amplitude multiplier applied to generated samples.
     """
 
     f: Union[float, List[float]]
@@ -199,6 +204,12 @@ class Wavelet:
         causal: bool = False,
         scale: float = 1.0,
     ):
+        """Create a wavelet definition.
+
+        Subclasses provide the actual sample-generation formula through
+        ``_generate`` and set ``f_max`` during post-initialization.
+        """
+
         self.f = f
         self._center = float(center)
         self.window = window
@@ -512,6 +523,17 @@ class RickerWavelet(Wavelet):
         causal: bool = False,
         scale: float = 1.0,
     ):
+        """Create a Ricker wavelet.
+
+        Args:
+            f: Central frequency. A one-item sequence is accepted for
+                compatibility with analytical-signal frequency lists.
+            center: Peak center time. Defaults to one period, ``1 / f``.
+            window: Optional taper specification.
+            causal: Whether to generate causal placement.
+            scale: Amplitude multiplier.
+        """
+
         f0 = f[0] if isinstance(f, (list, tuple, np.ndarray)) else f
         f0 = float(f0)
         if f0 <= 0.0:
@@ -529,6 +551,8 @@ class RickerWavelet(Wavelet):
         self.__post_init__()
 
     def __post_init__(self):
+        """Set a conservative maximum display frequency for the wavelet."""
+
         self.f_max = 3 * self.f
 
     def _generate(self, times: np.ndarray, taper: Callable[[int], np.ndarray]) -> None:
@@ -563,6 +587,8 @@ class OrmsbyWavelet(Wavelet):
         causal: bool = False,
         scale: float = 1.0,
     ):
+        """Create an Ormsby wavelet from ``[f1, f2, f3, f4]`` corners."""
+
         super().__init__(
             f=f,
             center=center,
@@ -616,6 +642,8 @@ class KlauderWavelet(Wavelet):
         causal: bool = False,
         scale: float = 1.0,
     ):
+        """Create a Klauder wavelet from lower and upper sweep frequencies."""
+
         super().__init__(
             f=f,
             center=center,

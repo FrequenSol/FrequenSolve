@@ -1,4 +1,4 @@
-Mesh Generation And Adaptivity
+Mesh Generation and Adaptivity
 ==============================
 
 Meshes can be supplied from a file or generated from model geometry. For layered
@@ -6,13 +6,16 @@ models, generated meshes are recommended because the solver can preserve
 geometry and adapt relative to surfaces, sources, receivers, and material
 properties.
 
-Primary tutorials:
+Related tutorials:
 
 - :download:`Meshes versus generators <../../../examples/tutorials/04_meshing/01_mesh_vs_generators.ipynb>`
+  for generated meshes, supplied meshes, and mesh QC screenshots.
 - :download:`Adaptivity fields <../../../examples/tutorials/04_meshing/02_adaptivity_fields.ipynb>`
+  for ``vadapt``, ``epw_mult``, ``hmin``, and ``hmax``.
 - :download:`Gradings <../../../examples/tutorials/04_meshing/03_gradings.ipynb>`
+  for source, receiver, and surface refinement controls.
 
-Generators And Supplied Meshes
+Generators and Supplied Meshes
 ------------------------------
 
 Generated meshes use a ``BaseMeshGenerator`` subclass wrapped by
@@ -23,7 +26,7 @@ Generated meshes use a ``BaseMeshGenerator`` subclass wrapped by
    sim += model.hex_mesh_generator([8, 4])
    sim.mesh.set_adapt(elems_per_wave=2.0, order=4)
 
-The current external mesh path supports FrequenSolve's GMP mesh format. Public
+The current external mesh path supports FrequenSolve's :term:`GMP` mesh format. Public
 support for other mesh formats can be added as needed.
 
 Adaptivity
@@ -42,7 +45,7 @@ Adaptivity
        hmax=0.08,
    )
 
-``order`` is the initial polynomial order assigned to the root mesh.
+``order`` is the initial :term:`polynomial order` assigned to the root mesh.
 ``elems_per_wave`` is the requested minimum element count per wavelength after
 adaptation. The practical points per wavelength are roughly
 ``order * elems_per_wave`` before details of element family and field basis are
@@ -60,7 +63,7 @@ Material Sizing Fields
    * - ``vadapt``
      - Overrides the material wavespeed used for local wavelength sizing.
    * - ``epw_mult``
-     - Multiplies the requested EPW target locally. Values are clamped to at least ``1.0``.
+     - Multiplies the requested :term:`EPW` target locally. Values are clamped to at least ``1.0``.
    * - ``hmin``
      - Local minimum element size in length units.
    * - ``hmax``
@@ -76,7 +79,7 @@ Distance gradings refine around acquisition geometry:
    sim.mesh.set_source_grading(d0=0.01, d1=0.08, factor=2.0, power=2.0)
    sim.mesh.set_receiver_grading(d0=0.01, d1=0.05, factor=1.5)
 
-Surface gradings refine around named model surfaces:
+:term:`Surface gradings <surface grading>` refine around named model surfaces:
 
 .. code-block:: python
 
@@ -97,4 +100,5 @@ coordinate-system axis names, such as ``{"offset": 2.0, "depth": 1.5}``.
 This matches the style used by ``elems_per_wave`` and ``order``.
 
 Initial meshes do not need to resolve the final wavefield. A coarse generated
-mesh plus adaptivity is the preferred starting point for most tutorials.
+mesh plus :term:`mesh adaptivity` is the preferred starting point for most
+tutorials.

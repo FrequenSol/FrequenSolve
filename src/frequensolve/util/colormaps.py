@@ -1,3 +1,5 @@
+"""FrequenSolve color maps and matplotlib conversion helpers."""
+
 import json
 
 import numpy as np
@@ -174,12 +176,18 @@ def get_colormap(data, reverse=False):
         positions = 1 - positions[::-1]
         rgb_values = rgb_values[::-1]
 
-    # Normalize the positions
-    positions = np.array(positions)
-    rgb_values = np.array(rgb_values)
-    cmap = mcolors.LinearSegmentedColormap.from_list(
-        "yellow_gray_blue", list(zip(positions, rgb_values))
-    )
+    # Matplotlib expects Python scalars and strictly increasing color-stop
+    # positions. Some bundled ParaView maps contain duplicate stops.
+    stops = []
+    previous_position = None
+    for position, rgb in zip(positions, rgb_values):
+        position = float(position)
+        if previous_position is not None and position <= previous_position:
+            continue
+        stops.append((position, tuple(float(channel) for channel in rgb)))
+        previous_position = position
+
+    cmap = mcolors.LinearSegmentedColormap.from_list("yellow_gray_blue", stops)
     return cmap
 
 

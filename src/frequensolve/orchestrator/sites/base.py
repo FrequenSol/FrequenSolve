@@ -1,3 +1,5 @@
+"""Shared run-handle and site abstractions for local, cloud, and HPC execution."""
+
 import asyncio
 import html
 import logging
@@ -40,6 +42,7 @@ STATUS_RESET = "\033[0m"
 __all__ = [
     "BaseSite",
     "JobStatus",
+    "RunFailedError",
     "RunHandle",
     "RunResult",
     "SubmitPlan",
@@ -164,25 +167,17 @@ class JobStatus:
     and ongoing job status information for batch/queued jobs.
 
     Attributes:
-       state (str):
-          Current status of the execution:
-             "pending":   Job is queued/waiting to start
-             "running":   Job is currently executing
-             "completed": Job finished successfully
-             "failed":    Job failed or was cancelled
-             "unknown":   Status cannot be determined
-       return_code (int):
-          Exit code from the command (0 typically indicates success)
-       stdout (str):
-          Standard output captured from the command
-       stderr (str):
-          Standard error output from the command
-       job_id (Optional[str]):
-          Job identifier for batch/queued jobs
-       start_time (Optional[float]):
-          Unix timestamp when job started
+        state: Current lifecycle state, such as ``"pending"``, ``"running"``,
+            ``"completed"``, ``"failed"``, or ``"unknown"``.
+        return_code: Exit code from the command. ``0`` typically indicates
+            success.
+        stdout: Standard output captured from the command.
+        stderr: Standard error output captured from the command.
+        job_id: Identifier for batch or queued jobs.
+        start_time: Timestamp when the job started, when the site reports it.
     """
 
+    #: Current lifecycle state for the run.
     state: str = "unknown"
     return_code: int = -1
     stdout: str = ""
@@ -488,6 +483,12 @@ class RunResult:
 
         return self.status.is_successful
 
+    def raise_for_status(self) -> None:
+        """Raise ``RunFailedError`` if the run did not succeed."""
+
+        if not self.successful:
+            raise RunFailedError(self)
+
     def traces(self, upscale: int = 1):
         """Open receiver trace outputs for this run.
 
@@ -499,6 +500,7 @@ class RunResult:
             dataset for remote results.
         """
 
+        self.raise_for_status()
         if self.site is not None:
             return self.site.fetch_traces(self.job, upscale=upscale)
         from frequensolve.seismic.traces import TraceDataset
@@ -515,6 +517,7 @@ class RunResult:
             Wavefield trace dataset from the site or job artifact handle.
         """
 
+        self.raise_for_status()
         if self.site is not None:
             return self.site.fetch_wavefields(self.job, upscale=upscale)
         return self.job.wavefields.open(upscale=upscale)
@@ -568,6 +571,31 @@ class RunResult:
         return None
 
 
+class RunFailedError(RuntimeError):
+    """Raised when a run reaches an unsuccessful terminal status."""
+
+    def __init__(self, result: RunResult):
+        """Create an error that keeps the failed run result attached."""
+
+        self.result = result
+        super().__init__(self._message(result))
+
+    @staticmethod
+    def _message(result: RunResult) -> str:
+        job_name = getattr(result.job, "name", "<unknown>")
+        status = result.status
+        parts = [
+            f"FrequenSolve run failed: job={job_name}",
+            f"state={status.state}",
+        ]
+        if status.job_id:
+            parts.append(f"job_id={status.job_id}")
+        if status.message:
+            parts.append(status.message)
+        parts.append("The failed RunResult is attached to this exception.")
+        return "; ".join(parts)
+
+
 @dataclass
 class RunHandle:
     """Awaitable handle for a submitted or skipped run.
@@ -579,6 +607,9 @@ class RunHandle:
         mode: Submission mode such as ``"batch"``, ``"local"``, or
             ``"skipped"``.
         poll_interval: Default polling interval in seconds.
+        check: Whether ``wait()`` and ``wait_async()`` raise when this run
+            reaches an unsuccessful terminal status and the caller does not
+            pass an explicit ``check`` value.
         backend: Site-specific run metadata.
     """
 
@@ -587,6 +618,7 @@ class RunHandle:
     id: Optional[str] = None
     mode: str = "unknown"
     poll_interval: float = 5.0
+    check: bool = True
     backend: Dict[str, Any] = field(default_factory=dict)
     _status_fn: Optional[Callable[["RunHandle"], JobStatus]] = None
     _wait_fn: Optional[
@@ -680,48 +712,78 @@ class RunHandle:
         self,
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
+        *,
+        check: Optional[bool] = None,
     ) -> RunResult:
         """Block until the run reaches a terminal state.
 
         Args:
             timeout: Optional maximum wait time in seconds.
             poll_interval: Optional polling interval in seconds.
+            check: Whether to raise ``RunFailedError`` for failed, cancelled,
+                or timed-out runs. Defaults to the handle's submit-time
+                ``check`` value.
 
         Returns:
             Final ``RunResult``.
         """
 
+        effective_check = self.check if check is None else check
         if self._result is not None:
+            if effective_check:
+                self._result.raise_for_status()
             return self._result
         if not self._generic_wait and self._wait_fn is not None:
             self._result = self._wait_fn(self, timeout, poll_interval)
+            if effective_check:
+                self._result.raise_for_status()
             return self._result
         from frequensolve.orchestrator.utils.progress import wait
 
-        self._result = wait(self, timeout=timeout, poll_interval=poll_interval)
+        self._result = wait(
+            self,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            check=effective_check,
+        )
         return self._result
 
     async def wait_async(
         self,
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
+        *,
+        check: Optional[bool] = None,
     ) -> RunResult:
         """Asynchronously wait for the run to finish.
 
         Args:
             timeout: Optional maximum wait time in seconds.
             poll_interval: Optional polling interval in seconds.
+            check: Whether to raise ``RunFailedError`` for failed, cancelled,
+                or timed-out runs. Defaults to the handle's submit-time
+                ``check`` value.
 
         Returns:
             Final ``RunResult``.
         """
 
+        effective_check = self.check if check is None else check
         if self._result is not None:
+            if effective_check:
+                self._result.raise_for_status()
             return self._result
         if not self._generic_wait and self._wait_async_fn is not None:
             self._result = await self._wait_async_fn(self, timeout, poll_interval)
+            if effective_check:
+                self._result.raise_for_status()
             return self._result
-        return await asyncio.to_thread(self.wait, timeout, poll_interval)
+        return await asyncio.to_thread(
+            self.wait,
+            timeout,
+            poll_interval,
+            check=effective_check,
+        )
 
     def watch(
         self,
@@ -850,8 +912,10 @@ class BaseSite:
     ) -> None:
         """Log a site message and optionally print it for interactive users."""
 
-        logging.getLogger(self.__class__.__module__).log(level, message)
-        if force or getattr(self, "verbose", False):
+        should_print = force or getattr(self, "verbose", False)
+        log_level = logging.DEBUG if should_print and level <= logging.INFO else level
+        logging.getLogger(self.__class__.__module__).log(log_level, message)
+        if should_print:
             print(message)
 
     def _emit_status(self, status: JobStatus, *, force: bool = True) -> None:
@@ -1271,11 +1335,13 @@ class BaseSite:
                 failed_values.append(task_number)
         return tuple(sorted(set(failed_values)))
 
-    def submit(self, job, **kwargs) -> RunHandle:
+    def submit(self, job, *, check: bool = False, **kwargs) -> RunHandle:
         """Submit a job and return an awaitable run handle.
 
         Args:
             job: Job object to submit.
+            check: Whether the returned handle raises by default when waited
+                and the run reaches an unsuccessful terminal status.
             **kwargs: Site-specific submission options.
 
         Returns:
@@ -1289,6 +1355,7 @@ class BaseSite:
         *,
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
+        check: bool = False,
         **submit_kwargs,
     ) -> RunResult:
         """Submit a job and block until completion.
@@ -1297,12 +1364,18 @@ class BaseSite:
             job: Job object to submit.
             timeout: Optional maximum wait time in seconds.
             poll_interval: Optional polling interval in seconds.
+            check: Whether to raise ``RunFailedError`` for failed, cancelled,
+                or timed-out runs.
             **submit_kwargs: Site-specific submission options.
 
         Returns:
             Final ``RunResult``.
         """
-        return self.submit(job, **submit_kwargs).wait(timeout, poll_interval)
+        return self.submit(job, **submit_kwargs).wait(
+            timeout,
+            poll_interval,
+            check=check,
+        )
 
     def wait(
         self,
@@ -1311,6 +1384,7 @@ class BaseSite:
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
         fetch: bool = False,
+        check: bool = True,
     ) -> list[RunResult]:
         """Wait for multiple run handles while rendering one combined status.
 
@@ -1329,6 +1403,7 @@ class BaseSite:
             timeout=timeout,
             poll_interval=poll_interval,
             fetch=fetch,
+            check=check,
         )
 
     def wait_all(
@@ -1338,6 +1413,7 @@ class BaseSite:
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
         fetch: bool = False,
+        check: bool = True,
     ) -> list[RunResult]:
         """Wait for many submitted runs and return results in input order.
 
@@ -1358,6 +1434,7 @@ class BaseSite:
             timeout=timeout,
             poll_interval=poll_interval,
             fetch=fetch,
+            check=check,
         )
 
     def handle(

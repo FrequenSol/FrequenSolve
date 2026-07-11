@@ -1,3 +1,5 @@
+"""Grid definitions for regular coordinate sampling and wavefield outputs."""
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Generator, List, Optional, Tuple
@@ -99,6 +101,8 @@ class CartesianGrid(Grid):
     system: Optional[str] = None
 
     def __post_init__(self):
+        """Derive missing spacing, endpoint, count, and default dimension names."""
+
         if len(self.x1) == 0:
             self.x1 = [x0 + (n - 1) * dx for x0, n, dx in zip(self.x0, self.n, self.dx)]
         elif len(self.dx) == 0:

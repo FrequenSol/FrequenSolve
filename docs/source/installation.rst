@@ -1,21 +1,24 @@
 Installation
 ============
 
-FrequenSolve Python is the authoring, orchestration, and output-reading SDK.
-Installing the package lets you build projects, inspect exported solver inputs,
-load trace outputs, and configure execution sites. Running a job also requires
-access to a licensed fast solver through a local, cloud, or HPC site.
+FrequenSolve Python is the authoring, orchestration, and output-reading
+:term:`Python API`. Installing the package lets you build :term:`projects <project>`,
+inspect exported solver inputs, load :term:`trace` outputs, and configure
+execution :term:`sites <site>`. Running a :term:`job` also requires access to a
+licensed :term:`fast solver` through a local, cloud, or :term:`HPC` site.
 
 Basic Install
 -------------
 
-Install the core SDK with pip:
+Install the released FrequenSolve Python API from :term:`PyPI` with pip:
 
 .. code-block:: bash
 
    python -m pip install frequensolve
 
-For local source checkouts, install from the repository root:
+Because the repository is public, you can also install from a source checkout
+when you want local examples, documentation sources, or editable development.
+From the repository root:
 
 .. code-block:: bash
 
@@ -24,14 +27,46 @@ For local source checkouts, install from the repository root:
 Optional Extras
 ---------------
 
-Install extras for the workflows you need:
+Choose the smallest install that matches the workflow you need:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 40 30
+
+   * - Workflow
+     - Command
+     - Notes
+   * - Author and inspect projects
+     - ``python -m pip install frequensolve``
+     - Does not run the solver.
+   * - Run on FrequenSol Cloud
+     - ``python -m pip install "frequensolve[cloud]"``
+     - Requires a FrequenSol Cloud account and license.
+   * - Run with a local solver
+     - ``python -m pip install "frequensolve[parallel]"``
+     - Requires an installed :term:`fast solver` and :term:`FS_SOLVER_PATH`.
+   * - Run on an HPC cluster
+     - ``python -m pip install "frequensolve[hpc]"``
+     - Requires :term:`SSH`/:term:`SLURM` access and a solver installation on
+       the cluster.
+   * - Plot or inspect :term:`VTK`/:term:`VTU` outputs in Python
+     - ``python -m pip install "frequensolve[visual]"``
+     - For Python-based visualization workflows.
+   * - Read or write :term:`SEG-Y`/:term:`ASDF` data
+     - ``python -m pip install "frequensolve[seismic-io]"``
+     - For seismic file import and export workflows.
+
+All available user extras are:
 
 .. code-block:: bash
 
    python -m pip install "frequensolve[visual]"      # plotting, VTK/PyVista helpers
-   python -m pip install "frequensolve[hpc]"         # Dask, SSH, and SLURM helpers
+   python -m pip install "frequensolve[parallel]"    # local Dask execution
+   python -m pip install "frequensolve[hpc]"         # SSH and SLURM site support
    python -m pip install "frequensolve[cloud]"       # FrequenSol cloud backend
    python -m pip install "frequensolve[seismic-io]"  # SEG-Y/ASDF export helpers
+   python -m pip install "frequensolve[fast-fft]"     # pyFFTW acceleration
+   python -m pip install "frequensolve[inversion]"    # PyLops-compatible operators
    python -m pip install "frequensolve[dev,docs]"    # tests and documentation builds
 
 Extras can be combined:
@@ -44,7 +79,9 @@ Solver Access
 -------------
 
 The Python package does not include the fast solver executable. To execute
-jobs, configure one of the supported sites:
+jobs, :ref:`configure a site <site-configuration>` using one of the supported
+backends. A valid license is required; the cloud site is the quickest managed
+path to solver access.
 
 .. list-table::
    :header-rows: 1
@@ -88,6 +125,20 @@ Verify that the Python package imports:
    import frequensolve as fs
 
    print(fs.__version__)
+
+Check :term:`site configuration file` setup before running a solver job:
+
+.. code-block:: python
+
+   import frequensolve as fs
+
+   site = fs.Site()
+   print(type(site).__name__)
+
+If this is the first ``fs.Site()`` call on the machine, FrequenSolve may create
+``~/.frequensolve/site.toml`` and raise an exception asking you to review it.
+Edit that file, then rerun the same check. See :doc:`user_guide/site_configuration`
+for the configuration workflow.
 
 Then run the :doc:`quickstart` or download the first tutorial notebook from
 :doc:`tutorials/index`.

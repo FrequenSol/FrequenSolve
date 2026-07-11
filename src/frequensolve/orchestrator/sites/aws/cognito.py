@@ -7,14 +7,18 @@ This module handles:
 - AWS credential exchange via Cognito Identity Pool
 """
 
+import base64
 import json
 import logging
 import os
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 from frequensolve._optional import optional_dependency_error
+from frequensolve.orchestrator.sites.aws.cache_paths import (
+    cloud_credentials_path,
+    legacy_credentials_path,
+)
 
 try:
     import boto3
@@ -30,12 +34,39 @@ except ModuleNotFoundError as exc:
 logger = logging.getLogger(__name__)
 
 
+def _decode_jwt_payload(token: str) -> dict:
+    """Decode JWT payload without verification (for reading our own token claims).
+
+    Args:
+        token: JWT string (header.payload.signature)
+
+    Returns:
+        Decoded payload dict
+
+    Raises:
+        ValueError: If token is invalid
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise ValueError("Invalid JWT format")
+        payload_b64 = parts[1]
+        # Add padding if needed for base64
+        padding = 4 - len(payload_b64) % 4
+        if padding != 4:
+            payload_b64 += "=" * padding
+        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+        return json.loads(payload_bytes.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"Failed to decode JWT payload: {e}") from e
+
+
 class CognitoAuth:
     """Handle Cognito authentication and AWS credential management.
 
     This class manages the complete authentication flow:
     1. Authenticate with Cognito User Pool (email/password)
-    2. Store tokens locally (~/.frequensolve/credentials)
+    2. Store tokens locally (~/.frequensolve/cloud/credentials)
     3. Automatically refresh expired tokens
     4. Exchange ID token for AWS credentials via Identity Pool
 
@@ -63,8 +94,8 @@ class CognitoAuth:
         self.identity_client = boto3.client("cognito-identity", region_name=region)
 
         # Path to credentials file
-        self.credentials_path = Path.home() / ".frequensolve" / "credentials"
-        self.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        self.credentials_path = cloud_credentials_path()
+        self.legacy_credentials_path = legacy_credentials_path()
 
     def login(self, email: str, password: str) -> Dict[str, str]:
         """Authenticate user with Cognito User Pool.
@@ -79,7 +110,7 @@ class CognitoAuth:
         Raises:
             ClientError: If authentication fails
         """
-        logger.info(f"Authenticating with Cognito as {email}...")
+        logger.debug(f"Authenticating with Cognito as {email}...")
         try:
             response = self.cognito_client.initiate_auth(
                 ClientId=self.client_id,
@@ -105,7 +136,7 @@ class CognitoAuth:
             # Save tokens to file
             self.save_tokens(tokens)
 
-            logger.info("✓ Authentication successful")
+            logger.debug("✓ Authentication successful")
 
             return tokens
 
@@ -207,7 +238,7 @@ class CognitoAuth:
         # Construct the login provider key
         provider_name = f"cognito-idp.{self.region}.amazonaws.com/{self.user_pool_id}"
 
-        logger.info("Fetching AWS credentials from Identity Pool...")
+        logger.debug("Fetching AWS credentials from Identity Pool...")
         logger.debug("Getting Identity ID...")
         logger.debug(f"  Identity Pool ID: {self.identity_pool_id}")
         logger.debug(f"  Provider: {provider_name}")
@@ -250,7 +281,7 @@ class CognitoAuth:
 
             logger.debug(f"Final credential dict keys: {list(result.keys())}")
 
-            logger.info("✓ AWS credentials obtained successfully")
+            logger.debug("✓ AWS credentials obtained successfully")
 
             return result
 
@@ -282,6 +313,15 @@ class CognitoAuth:
             ValueError: If credentials file not found or invalid
         """
         if not self.credentials_path.exists():
+            if self.legacy_credentials_path.exists():
+                try:
+                    with open(self.legacy_credentials_path, "r") as f:
+                        tokens = json.load(f)
+                    self.save_tokens(tokens)
+                    logger.info("Migrated cached credentials to cloud cache directory")
+                    return tokens
+                except (json.JSONDecodeError, IOError) as e:
+                    raise ValueError(f"Failed to read credentials file: {e}") from e
             raise ValueError(
                 "No cached credentials found. Please login first.\n"
                 'Run: site = AWSSite.from_cognito(email="your@email.com", password="...")'
@@ -290,7 +330,7 @@ class CognitoAuth:
         try:
             with open(self.credentials_path, "r") as f:
                 tokens = json.load(f)
-            logger.info("Using cached credentials")
+            logger.debug("Using cached credentials")
             return tokens
         except (json.JSONDecodeError, IOError) as e:
             raise ValueError(f"Failed to read credentials file: {e}") from e
@@ -328,5 +368,29 @@ class CognitoAuth:
 
     def clear_cached_tokens(self) -> None:
         """Remove cached credentials file."""
-        if self.credentials_path.exists():
-            self.credentials_path.unlink()
+        for path in (self.credentials_path, self.legacy_credentials_path):
+            if path.exists():
+                path.unlink()
+
+    def get_account_id(self) -> Optional[str]:
+        """Get account ID from the current ID token's custom claims.
+
+        Required for multi-tenant operations; the backend filters stacks by
+        userId + accountId. Without accountId, the Python client may see stacks
+        that submitJob cannot use.
+
+        Returns:
+            The custom:accountId claim value, or None if not present
+        """
+        try:
+            tokens = self.get_cached_tokens()
+        except (ValueError, OSError):
+            return None
+        try:
+            id_token = tokens.get("id_token")
+            if not id_token:
+                return None
+            payload = _decode_jwt_payload(id_token)
+            return payload.get("custom:accountId")
+        except (ValueError, KeyError):
+            return None

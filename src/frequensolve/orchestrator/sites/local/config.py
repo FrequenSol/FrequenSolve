@@ -1,3 +1,5 @@
+"""Configuration for executing FrequenSolve jobs on the local machine."""
+
 from dataclasses import dataclass
 
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
@@ -21,6 +23,8 @@ class LocalSiteConfig(BaseSiteConfig):
     mpi_wrapper: str = "mpirun"
 
     def __init__(self):
+        """Detect local CPU and memory defaults for local execution."""
+
         system_info = SystemInfo()
         info = system_info.gather_all_info()
         self.cores = info["cpu"]["physical_cores"]

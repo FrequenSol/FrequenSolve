@@ -1,8 +1,8 @@
 import datetime
-import os
+import importlib.util
+import re
 import sys
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as package_version
+from pathlib import Path
 
 # Configuration file for the Sphinx documentation builder.
 #
@@ -16,15 +16,32 @@ project = "FrequenSolve"
 copyright = f"{datetime.datetime.now().year}, FrequenSol"
 author = "FrequenSol"
 
-try:
-    release = package_version("frequensolve")
-except PackageNotFoundError:
-    release = "0+unknown"
-version = ".".join(release.split("+", 1)[0].split(".")[:2])
-
 # -- Path setup --------------------------------------------------------------
 # If your modules are in src/frequensolve, for example:
-sys.path.insert(0, os.path.abspath("../../src"))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = REPO_ROOT / "src"
+sys.path.insert(0, str(SRC_ROOT))
+
+
+def _package_release():
+    """Load the Versioneer release without importing the full package."""
+    version_file = SRC_ROOT / "frequensolve/_version.py"
+    spec = importlib.util.spec_from_file_location("frequensolve_version", version_file)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load FrequenSolve version from {version_file}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.get_versions()["version"]
+
+
+def _short_version(release):
+    match = re.match(r"^(\d+\.\d+)", release)
+    return match.group(1) if match else release
+
+
+release = _package_release()
+version = _short_version(release)
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -44,6 +61,7 @@ extensions = [
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False  # or True if you prefer NumPy-style
 napoleon_include_init_with_doc = True
+napoleon_attr_annotations = False
 
 templates_path = ["_templates"]
 
@@ -52,7 +70,36 @@ exclude_patterns = []
 autodoc_typehints = (
     "description"  # Show types in the parameter description instead of inline
 )
+autodoc_typehints_description_target = "documented"
 autodoc_typehints_format = "short"  # Use short names for type annotations
+autodoc_member_order = "bysource"
+
+
+def _strip_private_signature_params(
+    app, what, name, obj, options, signature, return_annotation
+):
+    """Hide implementation-only constructor parameters from rendered signatures."""
+
+    if not signature or what not in {"class", "function", "method"}:
+        return None
+    import inspect
+
+    try:
+        sig = inspect.signature(obj)
+    except (TypeError, ValueError):
+        return None
+
+    params = [
+        param for param in sig.parameters.values() if not param.name.startswith("_")
+    ]
+    if len(params) == len(sig.parameters):
+        return None
+    return str(sig.replace(parameters=params)), return_annotation
+
+
+def setup(app):
+    app.connect("autodoc-process-signature", _strip_private_signature_params)
+
 
 # Intersphinx configuration
 intersphinx_mapping = {
@@ -78,10 +125,10 @@ html_js_files = [
 
 # HTML options
 html_theme_options = {
-    "logo_only": False,
+    "logo_only": True,
     "prev_next_buttons_location": "bottom",
     "style_external_links": True,
-    "style_nav_header_background": "#2980B9",
+    "style_nav_header_background": "#0a090c",
     # Theme options
     "collapse_navigation": False,
     "sticky_navigation": True,
@@ -95,7 +142,7 @@ toc_object_entries = True
 toc_object_entries_show_parents = "hide"
 
 # Sidebar logo
-html_logo = "_static/logo.png"
+html_logo = "_static/logo-transparent.png"
 html_favicon = "_static/favicon.ico"
 
 # Footer configuration

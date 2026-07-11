@@ -1,3 +1,10 @@
+"""Structured access to solver output artifacts and result metadata.
+
+The objects in this module read and describe files produced by a FrequenSolve
+run, including trace manifests, run metadata, and lightweight handles for trace
+and wavefield outputs that are materialized on demand.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -931,6 +938,15 @@ class TraceOutputHandle:
         return self.manifest.to_fs()
 
     def __getitem__(self, key: str) -> Any:
+        """Return one field from the serialized trace manifest.
+
+        Args:
+            key: Manifest field name.
+
+        Returns:
+            Value from :meth:`to_fs`.
+        """
+
         return self.to_fs()[key]
 
 
@@ -1008,6 +1024,15 @@ class WavefieldOutputHandle:
         return self.manifest.to_fs()
 
     def __getitem__(self, key: str) -> Any:
+        """Return one field from the serialized wavefield manifest.
+
+        Args:
+            key: Manifest field name.
+
+        Returns:
+            Value from :meth:`to_fs`.
+        """
+
         return self.to_fs()[key]
 
 

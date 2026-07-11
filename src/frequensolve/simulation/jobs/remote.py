@@ -1,3 +1,10 @@
+"""Remote-staging helpers mixed into FrequenSolve jobs.
+
+The mixin writes local job and simulation JSON, rewrites project-rooted paths
+for a remote filesystem layout, and enumerates input files that must accompany
+the staged payloads on local, cloud, or HPC execution sites.
+"""
+
 from __future__ import annotations
 
 import json

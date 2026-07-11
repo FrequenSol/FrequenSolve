@@ -98,34 +98,69 @@ class GraphQLClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"API request failed: {e}") from e
 
+    def _build_storage_stack_filter(self, account_id: Optional[str] = None) -> dict:
+        """Build filter for storage stack queries.
+
+        Uses same criteria as submitJob backend: userId (via owner auth),
+        accountId (explicit), stackType, and status. This ensures the Python
+        client only considers stacks that submitJob will accept.
+        """
+        # ROLLBACK_COMPLETE = failed initial creation, no usable resources.
+        # Only CREATE_COMPLETE, UPDATE_COMPLETE, UPDATE_ROLLBACK_COMPLETE are usable.
+        base_filter = {
+            "stackType": {"eq": "storage"},
+            "or": [
+                {"status": {"eq": "CREATE_COMPLETE"}},
+                {"status": {"eq": "UPDATE_COMPLETE"}},
+                {"status": {"eq": "UPDATE_ROLLBACK_COMPLETE"}},
+            ],
+        }
+        if account_id:
+            base_filter["accountId"] = {"eq": account_id}
+        return base_filter
+
+    def _build_compute_stack_filter(self, account_id: Optional[str] = None) -> dict:
+        """Build filter for compute stack queries.
+
+        Uses same criteria as submitJob backend: userId (via owner auth),
+        accountId (explicit), stackType. Ensures the Python client only considers
+        stacks that submitJob will accept.
+        """
+        base_filter = {"stackType": {"eq": "compute"}}
+        if account_id:
+            base_filter["accountId"] = {"eq": account_id}
+        return base_filter
+
     def _check_storage_stack_exists(self) -> bool:
         """Check if storage stack exists.
 
-        Returns:
-            True if storage stack exists, False otherwise
+        Uses same filter as submitJob backend (accountId when available) so
+        we don't report a stack that submit won't accept.
         """
-        storage_query = """
-            query ListStorageStacks {
-                listStacks(filter: {
-                    stackType: { eq: "storage" }
-                    or: [
-                        { status: { eq: "CREATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
-                        { status: { eq: "ROLLBACK_COMPLETE" } }
-                    ]
-                }) {
-                    items {
-                        stackId
-                        outputs
-                        status
-                        createdAt
+        account_id = (
+            self.auth.get_account_id() if hasattr(self.auth, "get_account_id") else None
+        )
+        if account_id:
+            logger.debug(
+                "Filtering storage stacks by accountId to match submitJob backend"
+            )
+        try:
+            filter_obj = self._build_storage_stack_filter(account_id)
+            # Build query with dynamic filter
+            variables = {"filter": filter_obj}
+            storage_query = """
+                query ListStorageStacks($filter: ModelStackFilterInput) {
+                    listStacks(filter: $filter) {
+                        items {
+                            stackId
+                            outputs
+                            status
+                            createdAt
+                        }
                     }
                 }
-            }
-        """
-        try:
-            result = self.execute(storage_query)
+            """
+            result = self.execute(storage_query, variables)
             return (
                 "listStacks" in result
                 and result["listStacks"]["items"]
@@ -137,6 +172,9 @@ class GraphQLClient:
     def get_storage_stack_info(self) -> Dict[str, str]:
         """Get storage stack information (bucket name).
 
+        Uses same filter as submitJob backend (accountId when available) so
+        we only return stacks that submit will accept.
+
         Returns:
             Dict containing:
                 - bucketName: S3 bucket name for simulations
@@ -146,17 +184,14 @@ class GraphQLClient:
         Raises:
             RuntimeError: If storage stack not found
         """
+        account_id = (
+            self.auth.get_account_id() if hasattr(self.auth, "get_account_id") else None
+        )
+        filter_obj = self._build_storage_stack_filter(account_id)
+        variables = {"filter": filter_obj}
         storage_query = """
-            query ListStorageStacks {
-                listStacks(filter: {
-                    stackType: { eq: "storage" }
-                    or: [
-                        { status: { eq: "CREATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
-                        { status: { eq: "ROLLBACK_COMPLETE" } }
-                    ]
-                }) {
+            query ListStorageStacks($filter: ModelStackFilterInput) {
+                listStacks(filter: $filter) {
                     items {
                         stackId
                         outputs
@@ -168,7 +203,7 @@ class GraphQLClient:
         """
 
         logger.debug("Executing GraphQL query: listStacks (storage)")
-        storage_result = self.execute(storage_query)
+        storage_result = self.execute(storage_query, variables)
 
         if (
             "listStacks" not in storage_result
@@ -207,17 +242,19 @@ class GraphQLClient:
         Returns:
             True if compute stack exists, False otherwise
         """
+        account_id = (
+            self.auth.get_account_id() if hasattr(self.auth, "get_account_id") else None
+        )
+        filter_obj = self._build_compute_stack_filter(account_id)
+        filter_obj["or"] = [
+            {"status": {"eq": "CREATE_COMPLETE"}},
+            {"status": {"eq": "UPDATE_COMPLETE"}},
+            {"status": {"eq": "UPDATE_ROLLBACK_COMPLETE"}},
+        ]
+        variables = {"filter": filter_obj}
         compute_query = """
-            query ListComputeStacks {
-                listStacks(filter: {
-                    stackType: { eq: "compute" }
-                    or: [
-                        { status: { eq: "CREATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
-                        { status: { eq: "ROLLBACK_COMPLETE" } }
-                    ]
-                }) {
+            query ListComputeStacks($filter: ModelStackFilterInput) {
+                listStacks(filter: $filter) {
                     items {
                         stackId
                         outputs
@@ -228,7 +265,7 @@ class GraphQLClient:
             }
         """
         try:
-            result = self.execute(compute_query)
+            result = self.execute(compute_query, variables)
             return (
                 "listStacks" in result
                 and result["listStacks"]["items"]
@@ -255,7 +292,8 @@ class GraphQLClient:
         import json
 
         # Query storage stack
-        # Accept any "_COMPLETE" status except "DELETE_COMPLETE"
+        # Only usable states: CREATE_COMPLETE, UPDATE_COMPLETE, UPDATE_ROLLBACK_COMPLETE.
+        # ROLLBACK_COMPLETE = failed initial creation, no usable resources.
         storage_query = """
             query ListStorageStacks {
                 listStacks(filter: {
@@ -263,8 +301,7 @@ class GraphQLClient:
                     or: [
                         { status: { eq: "CREATE_COMPLETE" } },
                         { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
-                        { status: { eq: "ROLLBACK_COMPLETE" } }
+                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } }
                     ]
                 }) {
                     items {
@@ -278,7 +315,8 @@ class GraphQLClient:
         """
 
         # Query compute stack
-        # Accept any "_COMPLETE" status except "DELETE_COMPLETE"
+        # Only usable states: CREATE_COMPLETE, UPDATE_COMPLETE, UPDATE_ROLLBACK_COMPLETE.
+        # ROLLBACK_COMPLETE = failed initial creation, no usable resources.
         compute_query = """
             query ListComputeStacks {
                 listStacks(filter: {
@@ -286,8 +324,7 @@ class GraphQLClient:
                     or: [
                         { status: { eq: "CREATE_COMPLETE" } },
                         { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } },
-                        { status: { eq: "ROLLBACK_COMPLETE" } }
+                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } }
                     ]
                 }) {
                     items {
@@ -300,7 +337,7 @@ class GraphQLClient:
             }
         """
 
-        logger.info("Fetching stack information from API...")
+        logger.debug("Fetching stack information from API...")
         logger.debug("Executing GraphQL query: listStacks (storage)")
         storage_result = self.execute(storage_query)
 
@@ -391,7 +428,7 @@ class GraphQLClient:
         logger.debug("Final merged result:")
         logger.debug(f"  {json.dumps(result_dict, indent=2)}")
 
-        logger.info(f"✓ Stack info loaded: bucket={bucket_name}")
+        logger.debug(f"✓ Stack info loaded: bucket={bucket_name}")
 
         return result_dict
 
@@ -401,6 +438,7 @@ class GraphQLClient:
         vcpu: Optional[int] = None,
         memory: Optional[int] = None,
         job_name: Optional[str] = None,
+        send_simulation_status_email: Optional[bool] = None,
         force_run: bool = False,
     ) -> Dict[str, str]:
         """Submit a simulation job.
@@ -410,6 +448,7 @@ class GraphQLClient:
             vcpu: Number of vCPUs for the job (optional)
             memory: Memory in MB for the job (optional)
             job_name: Custom name for the job (optional)
+            send_simulation_status_email: If True/False, overrides cloud communication preferences for this run only
             force_run: Force a fresh solver run when the backend supports it
 
         Returns:
@@ -429,6 +468,7 @@ class GraphQLClient:
                 $vcpu: Int
                 $memory: Int
                 $jobName: String
+                $sendSimulationStatusEmail: Boolean
                 {force_var}
             ) {{
                 submitJob(
@@ -436,6 +476,7 @@ class GraphQLClient:
                     vcpu: $vcpu
                     memory: $memory
                     jobName: $jobName
+                    sendSimulationStatusEmail: $sendSimulationStatusEmail
                     {force_arg}
                 ) {{
                     simulationId
@@ -445,8 +486,9 @@ class GraphQLClient:
             }}
         """
 
-        variables = {
+        variables: Dict[str, Any] = {
             "jobFileS3Key": job_file_s3_key,
+            "sendSimulationStatusEmail": send_simulation_status_email,
         }
 
         if vcpu is not None:
@@ -503,13 +545,12 @@ class GraphQLClient:
 
         return status
 
-    def deploy_storage_stack(self, environment: str = "dev") -> Dict[str, Any]:
+    def deploy_storage_stack(self, environment: Optional[str] = None) -> Dict[str, Any]:
         """Deploy storage infrastructure stack.
 
         User ID is automatically extracted from the authentication context by AppSync.
-
-        Args:
-            environment: Environment name (default: "dev")
+        ``environment`` is accepted for backward compatibility and ignored; the
+        backend derives the deployment environment from its own runtime context.
 
         Returns:
             Dict containing stackId, stackName, status, outputs, error
@@ -518,8 +559,8 @@ class GraphQLClient:
             RuntimeError: If deployment fails
         """
         mutation = """
-            mutation DeployStorage($environment: String) {
-                deployStorage(environment: $environment) {
+            mutation DeployStorage {
+                deployStorage {
                     stackId
                     stackName
                     status
@@ -529,12 +570,8 @@ class GraphQLClient:
             }
         """
 
-        variables = {
-            "environment": environment,
-        }
-
-        logger.info(f"Deploying storage stack in environment {environment}...")
-        result = self.execute(mutation, variables)
+        logger.debug("Deploying storage stack...")
+        result = self.execute(mutation)
 
         if "deployStorage" not in result:
             raise RuntimeError("Storage stack deployment failed: No response from API")
@@ -546,7 +583,7 @@ class GraphQLClient:
                 f"Storage stack deployment failed: {deploy_result['error']}"
             )
 
-        logger.info(
+        logger.debug(
             f"✓ Storage stack deployment initiated: {deploy_result.get('stackName', 'unknown')}"
         )
         logger.debug(f"  Stack ID: {deploy_result.get('stackId')}")
@@ -556,15 +593,14 @@ class GraphQLClient:
 
     def deploy_compute_stack(
         self,
-        environment: str = "dev",
+        environment: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Deploy compute infrastructure stack.
 
         User ID is automatically extracted from the authentication context by AppSync.
         Stack parameters are automatically fetched from user's compute settings in the database.
-
-        Args:
-            environment: Environment name (default: "dev")
+        ``environment`` is accepted for backward compatibility and ignored; the
+        backend derives the deployment environment from its own runtime context.
 
         Returns:
             Dict containing stackId, stackName, status, outputs, error
@@ -573,12 +609,8 @@ class GraphQLClient:
             RuntimeError: If deployment fails
         """
         mutation = """
-            mutation DeployComputeInfrastructure(
-                $environment: String
-            ) {
-                deployComputeInfrastructure(
-                    environment: $environment
-                ) {
+            mutation DeployComputeInfrastructure {
+                deployComputeInfrastructure {
                     stackId
                     stackName
                     status
@@ -588,12 +620,8 @@ class GraphQLClient:
             }
         """
 
-        variables = {
-            "environment": environment,
-        }
-
-        logger.info(f"Deploying compute stack in environment {environment}...")
-        result = self.execute(mutation, variables)
+        logger.debug("Deploying compute stack...")
+        result = self.execute(mutation)
 
         if "deployComputeInfrastructure" not in result:
             raise RuntimeError("Compute stack deployment failed: No response from API")
@@ -605,7 +633,7 @@ class GraphQLClient:
                 f"Compute stack deployment failed: {deploy_result['error']}"
             )
 
-        logger.info(
+        logger.debug(
             f"✓ Compute stack deployment initiated: {deploy_result.get('stackName', 'unknown')}"
         )
         logger.debug(f"  Stack ID: {deploy_result.get('stackId')}")
@@ -638,7 +666,7 @@ class GraphQLClient:
         Raises:
             RuntimeError: If stack creation fails, times out, or enters failed state
         """
-        logger.info(
+        logger.debug(
             f"Waiting for {stack_type} stack to be ready (timeout: {timeout}s, poll interval: {poll_interval}s)..."
         )
 
@@ -657,13 +685,21 @@ class GraphQLClient:
                 )
 
             try:
-                # Query for the specific stack type
+                # Use same filter as get_storage_stack_info / submitJob (accountId when available)
+                # so we only consider stacks that will be accepted downstream
+                account_id = (
+                    self.auth.get_account_id()
+                    if hasattr(self.auth, "get_account_id")
+                    else None
+                )
                 if stack_type == "storage":
+                    filter_obj = self._build_storage_stack_filter(account_id)
+                    # Relax status for polling - we want to see IN_PROGRESS too
+                    filter_obj.pop("or", None)  # Remove status filter to see any status
+                    variables = {"filter": filter_obj}
                     query = """
-                        query ListStorageStacks {
-                            listStacks(filter: {
-                                stackType: { eq: "storage" }
-                            }) {
+                        query ListStorageStacks($filter: ModelStackFilterInput) {
+                            listStacks(filter: $filter) {
                                 items {
                                     stackId
                                     outputs
@@ -673,12 +709,13 @@ class GraphQLClient:
                             }
                         }
                     """
+                    result = self.execute(query, variables)
                 elif stack_type == "compute":
+                    filter_obj = self._build_compute_stack_filter(account_id)
+                    variables = {"filter": filter_obj}
                     query = """
-                        query ListComputeStacks {
-                            listStacks(filter: {
-                                stackType: { eq: "compute" }
-                            }) {
+                        query ListComputeStacks($filter: ModelStackFilterInput) {
+                            listStacks(filter: $filter) {
                                 items {
                                     stackId
                                     outputs
@@ -688,12 +725,11 @@ class GraphQLClient:
                             }
                         }
                     """
+                    result = self.execute(query, variables)
                 else:
                     raise ValueError(
                         f"Invalid stack_type: {stack_type}. Must be 'storage' or 'compute'"
                     )
-
-                result = self.execute(query)
 
                 stacks = result.get("listStacks", {}).get("items", [])
 
@@ -760,7 +796,7 @@ class GraphQLClient:
 
                 # Log status changes
                 if status != last_status:
-                    logger.info(f"{stack_type} stack status: {status}")
+                    logger.debug(f"{stack_type} stack status: {status}")
                     last_status = status
 
                 # Before grace period expires, ignore terminal failure states that might be stale
@@ -785,7 +821,7 @@ class GraphQLClient:
 
                 # Check for terminal success states
                 if status in ["CREATE_COMPLETE", "UPDATE_COMPLETE"]:
-                    logger.info(f"✓ {stack_type} stack is ready: {status}")
+                    logger.debug(f"✓ {stack_type} stack is ready: {status}")
                     # Return stack info - for storage we need bucketName, for compute we need stackId
                     if stack_type == "storage":
                         outputs = (

@@ -714,6 +714,13 @@ class SurfaceCoordinateSystem(CoordinateSystem):
         offset_units: Optional[Any] = None,
         **kwargs,
     ) -> None:
+        """Create a coordinate system whose last axis follows a model surface.
+
+        Parameters mirror :meth:`CoordinateSystem.surface`. If ``offset`` is
+        supplied, the generated system is fixed at that signed distance from
+        the referenced surface.
+        """
+
         if axes is None:
             axes = [Axis("z", direction="z", positive=normal)]
         axis_list = [Axis.from_fs(axis) for axis in axes]

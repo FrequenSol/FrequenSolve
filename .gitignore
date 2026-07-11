@@ -1,7 +1,10 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
 
 # C extensions
 *.so
@@ -11,12 +14,20 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+develop-eggs/
 dist/
-*.egg-info/
+downloads/
+eggs/
+.eggs/
 lib/
+lib64/
+parts/
+sdist/
 var/
 wheels/
 share/python-wheels/
+*.egg-info/
+*.egg
 .installed.cfg
 MANIFEST
 
@@ -175,3 +186,6 @@ examples/plots/
 *.h5.tmp
 _fs_run/
 run_logs/
+
+# Agent worklogs (local resume artifacts)
+.codex/worklogs/

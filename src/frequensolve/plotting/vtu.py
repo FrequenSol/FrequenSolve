@@ -43,7 +43,8 @@ def _pyvista():
 def read_vtu(path: str | Path):
     """Read a solver ``.vtu`` file with PyVista.
 
-    PyVista is imported lazily so the core SDK remains usable without VTK.
+    PyVista is imported lazily so the core FrequenSolve Python API remains
+    usable without VTK.
     """
 
     path = Path(path)
@@ -779,48 +780,56 @@ def plot_vtu(
 ):
     """Plot a scalar field from a solver ``.vtu`` file.
 
-    Parameters
-    ----------
-    vtu:
-        Path to a ``.vtu`` file or a PyVista dataset.
-    field:
-        VTU data array to plot. If omitted, the first available field is used.
-    component:
-        Optional component for vector/tensor fields. Integers use zero-based
-        component indices. String names use VTU component metadata when present
-        and otherwise support FrequenSolve vector/tensor names such as ``"x"``,
-        ``"z"``, ``"xx"``, ``"xz"``, ``"rr"``, ``"rz"``, and ``"tt"``.
-    part:
-        One of ``"real"``, ``"imag"``, or ``"abs"``. The solver suffix aliases
-        ``"re"``, ``"im"``, and ``"mag"`` are accepted.
-    source:
-        Optional one-based source number for solver outputs named like
-        ``strain_1_im`` or ``pressure_2_re``. When supplied,
-        ``field="strain", source=1, part="im"`` resolves to ``strain_1_im``.
-    label:
-        Optional display name for the field. Part and units are appended.
-    units:
-        Optional unit label, or a mapping from raw/base field name to unit label.
-        If omitted, FrequenSolve uses unit metadata from the VTU header.
-    show_edges:
-        If true, overlay edges from ``extract_all_edges()`` on the scalar plot.
-        This is useful for inspecting higher-order quad/hex topology without
-        relying on VTK/PyVista's rendered surface edges.
-    edge_color:
-        Color used when ``show_edges=True``.
-    edge_width:
-        Line width used when ``show_edges=True``.
-    view:
-        Camera view. The default ``"x_depth"`` orients +x to the right and
-        +y/depth downward for 2D x-depth solver outputs.
-    zoom:
-        Optional camera zoom factor applied after the view is reset. Values
-        greater than 1 fill more of the screenshot/window.
+    Args:
+        vtu: Path to a ``.vtu`` file or a PyVista dataset.
+        field: VTU data array to plot. If omitted, the first available field is
+            used.
+        component: Optional component for vector/tensor fields. Integers use
+            zero-based component indices. String names use VTU component
+            metadata when present and otherwise support FrequenSolve component
+            names such as ``"x"``, ``"z"``, ``"xx"``, ``"xz"``, ``"rr"``,
+            ``"rz"``, and ``"tt"``.
+        part: One of ``"real"``, ``"imag"``, or ``"abs"``. The solver suffix
+            aliases ``"re"``, ``"im"``, and ``"mag"`` are accepted.
+        source: Optional one-based source number for solver outputs named like
+            ``strain_1_im`` or ``pressure_2_re``. When supplied,
+            ``field="strain", source=1, part="im"`` resolves to
+            ``strain_1_im``.
+        association: Data association to search: ``"auto"``, ``"point"``, or
+            ``"cell"``.
+        label: Optional display name for the field. Part and units are appended.
+        units: Optional unit label, or a mapping from raw/base field name to
+            unit label. If omitted, FrequenSolve uses unit metadata from the VTU
+            header.
+        slice: Optional slice specification passed through to PyVista before
+            plotting.
+        cmap: Matplotlib/PyVista colormap name.
+        clim: Explicit color limits.
+        vmin: Lower color limit when ``clim`` is not provided.
+        vmax: Upper color limit when ``clim`` is not provided.
+        show_edges: If true, overlay edges from ``extract_all_edges()`` on the
+            scalar plot. This is useful for inspecting higher-order quad/hex
+            topology without relying on VTK/PyVista's rendered surface edges.
+        edge_color: Color used when ``show_edges=True``.
+        edge_width: Line width used when ``show_edges=True``.
+        scalar_bar: Whether to show a scalar bar, or scalar-bar keyword
+            arguments.
+        background: Plotter background color.
+        view: Camera view. The default ``"x_depth"`` orients +x to the right and
+            +y/depth downward for 2D x-depth solver outputs.
+        zoom: Optional camera zoom factor applied after the view is reset.
+            Values greater than 1 fill more of the screenshot/window.
+        window_size: Optional PyVista window size.
+        screenshot: Optional output path for a screenshot.
+        show: Whether to display the PyVista window.
+        plotter: Existing PyVista plotter to draw into.
+        return_mesh: Whether to return ``(plotter, mesh)``.
+        **add_mesh_kwargs: Extra keyword arguments forwarded to
+            ``plotter.add_mesh``.
 
-    Returns
-    -------
-    pyvista.Plotter or tuple
-        The plotter, or ``(plotter, mesh)`` when ``return_mesh=True``.
+    Returns:
+        ``None`` by default. When ``return_mesh=True``, returns ``(plotter,
+        mesh)`` so callers can continue customizing or inspecting the plot.
     """
 
     pv = _pyvista()

@@ -1,3 +1,5 @@
+"""Resource-pool status objects shared by site implementations."""
+
 from dataclasses import dataclass, field
 
 __all__ = ["PoolStatus", "PoolInfo"]
