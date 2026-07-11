@@ -10,7 +10,11 @@ import subprocess
 import sys
 from collections.abc import Sequence
 
-RELEASE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?(?:\.post\d+)?$")
+VERSION_COMPONENT = r"(?:0|[1-9][0-9]*)"
+RELEASE_VERSION_RE = re.compile(
+    rf"^{VERSION_COMPONENT}\.{VERSION_COMPONENT}\.{VERSION_COMPONENT}"
+    r"(?:rc[1-9][0-9]*)?$"
+)
 
 
 def _git_output(args: Sequence[str]) -> str:
@@ -61,10 +65,8 @@ def validate_release_version(
     if "+" in normalized_version:
         errors.append("version must not include a local version segment")
 
-    if not RELEASE_VERSION_RE.match(normalized_version):
-        errors.append(
-            "version must be a clean PEP 440 release such as 0.2.0 or 0.2.0rc1"
-        )
+    if version != normalized_version or not RELEASE_VERSION_RE.fullmatch(version):
+        errors.append("version must be canonical ASCII X.Y.Z or X.Y.ZrcN with N >= 1")
 
     expected_tag = f"v{normalized_version}"
     if normalized_ref_name != expected_tag:

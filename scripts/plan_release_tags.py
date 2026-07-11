@@ -8,22 +8,26 @@ import re
 import sys
 from collections.abc import Sequence
 
-FINAL_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
-RC_TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+)rc(?P<number>[1-9]\d*)$")
+VERSION_COMPONENT = r"(?:0|[1-9][0-9]*)"
+FINAL_VERSION_PATTERN = (
+    rf"{VERSION_COMPONENT}\.{VERSION_COMPONENT}\.{VERSION_COMPONENT}"
+)
+FINAL_VERSION_RE = re.compile(rf"^{FINAL_VERSION_PATTERN}$")
+RC_TAG_RE = re.compile(
+    rf"^v(?P<version>{FINAL_VERSION_PATTERN})rc(?P<number>[1-9][0-9]*)$"
+)
 
 
 def validate_final_version(version: str) -> list[str]:
-    normalized = version.strip()
-    if FINAL_VERSION_RE.fullmatch(normalized):
+    if FINAL_VERSION_RE.fullmatch(version):
         return []
-    return ["version must be a final PEP 440 base version such as 0.2.0"]
+    return ["version must be canonical ASCII X.Y.Z, such as 0.2.0"]
 
 
 def validate_release_candidate_tag(tag: str) -> list[str]:
-    normalized = tag.strip()
-    if RC_TAG_RE.fullmatch(normalized):
+    if RC_TAG_RE.fullmatch(tag):
         return []
-    return ["release candidate tag must look like v0.2.0rc1"]
+    return ["release candidate tag must be canonical ASCII vX.Y.ZrcN with N >= 1"]
 
 
 def next_release_candidate_tag(version: str, existing_tags: Sequence[str]) -> str:
@@ -33,7 +37,7 @@ def next_release_candidate_tag(version: str, existing_tags: Sequence[str]) -> st
 
     highest = 0
     for tag in existing_tags:
-        match = RC_TAG_RE.fullmatch(tag.strip())
+        match = RC_TAG_RE.fullmatch(tag)
         if match is None or match.group("version") != version:
             continue
         highest = max(highest, int(match.group("number")))
@@ -44,7 +48,7 @@ def final_tag_from_release_candidate(tag: str) -> str:
     errors = validate_release_candidate_tag(tag)
     if errors:
         raise ValueError("; ".join(errors))
-    match = RC_TAG_RE.fullmatch(tag.strip())
+    match = RC_TAG_RE.fullmatch(tag)
     assert match is not None
     return f"v{match.group('version')}"
 
