@@ -104,6 +104,14 @@ def _vtu_array_metadata_from_attrs(attrs: Mapping[str, str]) -> dict[str, Any]:
         "display_name",
         "long_name",
     )
+    units = _vtu_attr(
+        attrs,
+        "fs_units",
+        "fs_unit",
+        "units",
+        "unit",
+        "unit_label",
+    )
     components = _vtu_attr(
         attrs,
         "fs_components",
@@ -114,6 +122,8 @@ def _vtu_array_metadata_from_attrs(attrs: Mapping[str, str]) -> dict[str, Any]:
     metadata = {}
     if display_name:
         metadata["display_name"] = _format_vtu_display_name(display_name)
+    if units:
+        metadata["units"] = units
     component_names = _parse_component_names(components)
     if component_names:
         metadata["components"] = component_names

@@ -489,21 +489,24 @@ def _write_sample_vtu(tmp_path):
     mesh.save(path, binary=False)
     text = path.read_text()
     metadata = {
-        "pressure_real": ('fs_display_name="pressure (Real)"'),
-        "pressure_imag": ('fs_display_name="pressure (Imaginary)"'),
-        "pressure_1_re": ('FS_DISPLAY_NAME="pressure (Real)"'),
-        "pressure_1_im": ('fs_display_name="pressure (Imaginary)"'),
-        "velocity": ('fs_display_name="velocity"'),
+        "pressure_real": ('fs_display_name="pressure (Real)"', 'fs_units="Pa"'),
+        "pressure_imag": ('fs_display_name="pressure (Imaginary)"', 'fs_units="Pa"'),
+        "pressure_1_re": ('FS_DISPLAY_NAME="pressure (Real)"', 'FS_UNITS="Pa"'),
+        "pressure_1_im": ('fs_display_name="pressure (Imaginary)"', 'fs_units="Pa"'),
+        "velocity": ('fs_display_name="velocity"', 'fs_units="m/s"'),
         "strain": (
             'fs_display_name="strain"',
+            'fs_units="1"',
             'fs_components="rr,zz,rz,tt"',
         ),
         "stress_re": (
             'fs_display_name="stress (Real)"',
+            'fs_units="Pa"',
             'fs_components="xx,zz,xz"',
         ),
         "stress_im": (
             'fs_display_name="stress (Imaginary)"',
+            'fs_units="Pa"',
             'fs_components="xx,zz,xz"',
         ),
     }

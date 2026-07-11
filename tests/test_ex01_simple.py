@@ -721,10 +721,9 @@ def test_simulation_setup(simulation):
     test_acquisition_setup(simulation)
     test_output_configuration(simulation)  # Use dedicated output test
 
-    # Add discretization with default method settings
+    # Add default discretization settings
     method = Discretization()
     simulation += method
-    assert simulation.discretization.method == "DPG"
 
     # Add solver config with exact notebook parameters
     solver = SolverConfig(solve_on="final", max_iter=300, tolerance=1.0e-4)

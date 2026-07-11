@@ -29,9 +29,8 @@ class Discretization(ExtraFieldsMixin):
     """Finite-element discretization settings for a simulation.
 
     Args:
-        method: Solver discretization method. The default is ``"DPG"``.
-        **kwargs: Additional solver-facing discretization fields such as DPG
-            stabilization parameters.
+        **kwargs: Optional solver-facing discretization settings. The default
+            discretization requires no explicit fields.
 
     Raises:
         ValueError: If legacy ``order`` is supplied here instead of through mesh
