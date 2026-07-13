@@ -78,6 +78,40 @@ dashboard_port = 8787
     }
 
 
+def test_site_factory_local_runtime_overrides_preserve_profile_solver(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        """
+default = "local"
+
+[sites.local]
+type = "local"
+solver = "/configured/bin/fs3d_s"
+shutdown_on_completion = false
+n_workers = 4
+threads_per_worker = 2
+""".strip()
+    )
+    monkeypatch.setattr(sites, "LocalSite", FakeSite)
+
+    site = sites.Site(
+        config_path=config_path,
+        profile="local",
+        n_workers=1,
+        threads_per_worker=16,
+        shutdown_on_completion=True,
+    )
+
+    assert site.kwargs == {
+        "solver": "/configured/bin/fs3d_s",
+        "shutdown_on_completion": True,
+        "n_workers": 1,
+        "threads_per_worker": 16,
+    }
+
+
 def test_site_factory_uses_stable_home_default_path(monkeypatch, tmp_path):
     monkeypatch.delenv("FREQUENSOLVE_SITE_CONFIG", raising=False)
     monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)

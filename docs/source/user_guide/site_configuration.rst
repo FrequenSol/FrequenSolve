@@ -110,6 +110,14 @@ Select a profile in Python with:
    local = fs.Site(profile="local")
    cluster = fs.Site(profile="hpc")
 
+Profile values can be overridden at construction time without restating the
+rest of the profile. For example, this keeps the local profile's configured
+``solver`` path while using one Dask worker for a memory-heavy run:
+
+.. code-block:: python
+
+   local = fs.Site(profile="local", n_workers=1, threads_per_worker=16)
+
 Set ``FREQUENSOLVE_SITE_CONFIG`` or pass ``fs.Site(config_path=...)`` when a
 test, notebook, or shared workstation should use a different config file:
 
