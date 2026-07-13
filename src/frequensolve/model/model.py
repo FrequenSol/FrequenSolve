@@ -8,6 +8,7 @@ from typing import Any, Dict, Literal, Optional, Union
 import xarray as xr
 
 from frequensolve.geometry.grids import CartesianGrid
+from frequensolve.model.attenuation import AttenuationConfig
 from frequensolve.model.property import Property, PropertyMap
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.mixins import (
@@ -224,6 +225,10 @@ class ModelBase(ExtraFieldsMixin):
         name: Model name used in project paths and serialized payloads.
         dimension: Model dimension. ``0`` is allowed for an uninitialized base
             model; concrete models normalize to 2D or 3D.
+        attenuation_model: Optional model-wide attenuation model name.
+        reference_frequency: Optional positive attenuation reference frequency.
+            Bare values are interpreted as hertz; Pint quantities and
+            unit-bearing mappings may use compatible frequency units.
         subdomains: Material subdomains belonging to this model.
         extra: Additional serialized fields preserved on round trip.
 
@@ -234,14 +239,34 @@ class ModelBase(ExtraFieldsMixin):
 
     name: str = "model"
     dimension: Union[Literal[0], int, float, str] = 0  # 0 is used as an invalid value.
+    attenuation_model: Optional[str] = None
+    reference_frequency: Optional[Any] = None
     subdomains: NamedList = field(default_factory=NamedList)
     extra: Dict[str, Any] = field(default_factory=dict)
     _proj_path: Optional[Path] = None
     _rel_path: Optional[Path] = None
+    _attenuation_extra: Dict[str, Any] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if self.dimension != 0:
             self.dimension = model_dimension(self.dimension)
+        attenuation = self._attenuation_config()
+        if attenuation is not None:
+            self.attenuation_model = attenuation.model
+            self.reference_frequency = attenuation.reference_frequency
+
+    def _attenuation_config(self) -> Optional[AttenuationConfig]:
+        if self.attenuation_model is None and self.reference_frequency is None:
+            return None
+        return AttenuationConfig(
+            model=self.attenuation_model or "kjartansson",
+            reference_frequency=self.reference_frequency,
+            extra=self._attenuation_extra,
+        )
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Serialize the model and its material subdomains.
@@ -280,10 +305,16 @@ class ModelBase(ExtraFieldsMixin):
                 subdomain.mesh_block_id = j
 
         ctx = ctx or ExportContext(self._proj_path, self._rel_path)
+        attenuation = self._attenuation_config()
         payload = {
             "_type": self.__class__.__name__,
             "name": self.name,
             "dimension": self.dimension,
+            **(
+                {"attenuation": attenuation.to_fs(ctx)}
+                if attenuation is not None
+                else {}
+            ),
             "subdomains": [subdomain.to_fs(ctx) for subdomain in self.subdomains],
         }
         return merge_extra(payload, self.extra, "Model")
@@ -308,13 +339,25 @@ class ModelBase(ExtraFieldsMixin):
         class_name = data.pop("_type", cls.__name__)
         if class_name == cls.__name__:
             subdomains = data.pop("subdomains", [])
+            attenuation_payload = data.pop("attenuation", None)
+            attenuation = (
+                AttenuationConfig.from_fs(attenuation_payload)
+                if attenuation_payload is not None
+                else None
+            )
             model = cls(
                 name=data.pop("name", "model"),
                 dimension=data.pop("dimension", 0),
+                attenuation_model=attenuation.model if attenuation else None,
+                reference_frequency=(
+                    attenuation.reference_frequency if attenuation else None
+                ),
                 subdomains=NamedList(
                     [ModelSubdomain.from_fs(item) for item in subdomains]
                 ),
             )
+            if attenuation is not None:
+                model._attenuation_extra = attenuation.extra
             model.extra = data
             return model
         if class_name in class_registry:

@@ -26,6 +26,7 @@ from typing import (
 import xarray as xr
 
 from frequensolve.mesh.mesh_generators import HexMeshGenerator, TetMeshGenerator
+from frequensolve.model.attenuation import AttenuationConfig
 from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import (
     canonical_property_name,
@@ -79,6 +80,10 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         boreholes: Optional initial borehole collection.
         ordering: Whether layers are authored from top to bottom or bottom to
             top.
+        attenuation_model: Optional model-wide attenuation model name.
+        reference_frequency: Optional positive attenuation reference frequency.
+            Bare values are interpreted as hertz; Pint quantities and
+            unit-bearing mappings may use compatible frequency units.
         extra: Additional serialized fields preserved on round trip.
 
     Raises:
@@ -116,6 +121,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         object.__setattr__(self, name, value)
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         self.dimension = model_dimension(self.dimension)
         if self.dimension not in {2, 3}:
             raise ValueError("LayeredModel dimension must be 2 or 3")
@@ -469,13 +475,25 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         x_limits = data.pop("x_limits", data.pop("xlimits", None))
         y_limits = data.pop("y_limits", data.pop("ylimits", None))
         ordering = data.pop("ordering", "top_down")
+        attenuation_payload = data.pop("attenuation", None)
+        attenuation = (
+            AttenuationConfig.from_fs(attenuation_payload)
+            if attenuation_payload is not None
+            else None
+        )
         model = LayeredModel(
             name=name,
             dimension=dimension,
             x_limits=x_limits,
             y_limits=y_limits,
             ordering=ordering,
+            attenuation_model=attenuation.model if attenuation else None,
+            reference_frequency=(
+                attenuation.reference_frequency if attenuation else None
+            ),
         )
+        if attenuation is not None:
+            model._attenuation_extra = attenuation.extra
         model.extra = data
 
         def add_model_surface(surface_payload: Mapping[str, Any]) -> None:
