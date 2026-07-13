@@ -125,6 +125,7 @@ where = ["src"]
 include = ["frequensolve*"]
 
 [tool.setuptools.package-data]
+"frequensolve.orchestrator.sites" = ["site_presets.toml"]
 "frequensolve.orchestrator.sites.hpc" = ["templates/**/*.sh", "templates/**/*.py"]
 
 [tool.versioneer]

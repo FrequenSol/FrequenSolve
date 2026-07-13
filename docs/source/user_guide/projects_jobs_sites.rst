@@ -180,8 +180,10 @@ test, notebook, or shared workstation should use a different config file:
    local = fs.Site(profile="local")
    shared = fs.Site(config_path="/path/to/site.toml", profile="cluster")
 
-Direct constructors such as ``fs.LocalSite(...)``, ``fs.AWSSite(...)``, and
-``fs.Stampede3Site(...)`` remain available when code needs to pin a backend.
+Direct constructors such as ``fs.LocalSite(...)`` and ``fs.AWSSite(...)``
+remain available when code needs to pin a backend. ``fs.Stampede3Site(...)``
+remains as a compatibility adapter; new Stampede3 profiles use generic
+``SlurmSite`` with ``preset = "stampede3"``.
 
 All sites share the same handle/result lifecycle:
 
@@ -215,10 +217,11 @@ disabled too.
        :term:`fast solver` configured in the local site profile.
    * - ``AWSSite``
      - Runs on FrequenSol cloud infrastructure. Most users use this because solver installation is managed remotely.
-   * - ``SlurmSite`` / ``Stampede3Site``
+   * - ``SlurmSite``
      - Runs on configured :term:`HPC` systems through :term:`SSH` and
        :term:`SLURM`. Requires site credentials and a solver executable on the
-       cluster.
+       cluster. Built-in presets can supply standard cluster and partition
+       information.
 
 Only sites with access to the :term:`fast solver` can execute jobs. The Python
 package can author, save, inspect, and load projects without a solver

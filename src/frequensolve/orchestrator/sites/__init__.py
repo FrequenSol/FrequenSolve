@@ -37,6 +37,13 @@ SlurmLoginCredentials = optional_class(
     dependencies=("paramiko", "keyring"),
     module=__name__,
 )
+SlurmPartitionConfig = optional_class(
+    "SlurmPartitionConfig",
+    "frequensolve.orchestrator.sites.hpc.SlurmPartitionConfig",
+    extra="hpc",
+    dependencies=("paramiko", "keyring"),
+    module=__name__,
+)
 SlurmRunConfig = optional_class(
     "SlurmRunConfig",
     "frequensolve.orchestrator.sites.hpc.SlurmRunConfig",
@@ -117,6 +124,7 @@ __all__ = [
     "SITE_CONFIG_ENV_VAR",
     "Site",
     "SlurmLoginCredentials",
+    "SlurmPartitionConfig",
     "SlurmRunConfig",
     "SlurmSite",
     "SlurmSiteConfig",

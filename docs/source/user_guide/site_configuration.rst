@@ -66,10 +66,9 @@ Choosing a Site Type
      - ``frequensolve[hpc]``
      - Generic :term:`SSH`/:term:`SLURM` access, allocation details, and a
        solver installation on the cluster.
-   * - ``stampede3`` or ``tacc``
-     - ``frequensolve[hpc]``
-     - Stampede3 access, allocation details, and a solver installation on the
-       cluster.
+
+``stampede3`` and ``tacc`` remain accepted as compatibility aliases for a
+generic ``slurm`` site using the built-in ``stampede3`` preset.
 
 Selecting Profiles
 ------------------
@@ -92,15 +91,17 @@ Most users should keep multiple named profiles:
    shutdown_on_completion = true
 
    [sites.hpc]
-   type = "stampede3"
+   type = "slurm"
+   preset = "stampede3"
    rel_path = "scratch/frequensolve_tutorials"
-   queue = "skx-dev"
+   default_partition = "skx-dev"
    nodes = 1
    duration = "00:30:00"
 
 The profile name and backend type are separate. In the example above,
-``hpc`` is the profile selected with ``fs.Site(profile="hpc")``, while
-``type = "stampede3"`` selects the Stampede3 backend.
+``hpc`` is the profile selected with ``fs.Site(profile="hpc")``, while the
+``stampede3`` preset supplies the standard host, launcher, partition limits,
+and node shapes for the generic SLURM backend.
 
 Select a profile in Python with:
 
@@ -125,9 +126,10 @@ test, notebook, or shared workstation should use a different config file:
 
    shared = fs.Site(config_path="/path/to/site.toml", profile="hpc")
 
-Direct constructors such as ``fs.LocalSite(...)``, ``fs.AWSSite(...)``, and
-``fs.Stampede3Site(...)`` remain available when code intentionally targets one
-backend.
+Direct constructors such as ``fs.LocalSite(...)`` and ``fs.AWSSite(...)``
+remain available when code intentionally targets one backend.
+``fs.Stampede3Site(...)`` remains as a compatibility adapter for existing code
+and persisted run records.
 
 .. _site-config-spec:
 
@@ -186,6 +188,9 @@ Every ``[sites.<name>]`` table supports the following structural keys:
      - Optional nested table merged into the selected profile. Prefer flat keys
        unless you need to pass a backend-specific argument without mixing it
        with config fields.
+   * - ``preset``
+     - Optional built-in site preset overlaid by the profile. Currently
+       ``stampede3`` is provided for generic ``slurm`` sites.
 
 For named profiles, the profile identifier comes from the table header, such as
 ``[sites.cloud]``.
@@ -284,7 +289,7 @@ extra.
    solver = "/work/shared/frequensol/fs3d_s"
    work_dir = "/scratch/jsmith"
    rel_path = "frequensolve/tutorials"
-   queue = "debug"
+   default_partition = "debug"
    account = "allocation"
    transfer_method = "rsync"
    modules = []
@@ -298,19 +303,21 @@ extra.
    ranks_per_node = 4
    ranks_per_task = 1
 
-Stampede3 profiles create ``Stampede3Site`` instances:
+Stampede3 profiles use the built-in preset and create generic ``SlurmSite``
+instances:
 
 .. code-block:: toml
 
    [sites.stampede3]
-   type = "stampede3"
+   type = "slurm"
+   preset = "stampede3"
    username = "jsmith"
    credential = "tacc-primary"
    ssh_key = "~/.ssh/id_ed25519"
    solver = "/work/shared/frequensol/fs3d_s"
    work_dir = "/scratch/jsmith"
    rel_path = "scratch/frequensolve_tutorials"
-   queue = "skx-dev"
+   default_partition = "skx-dev"
 
    [sites.stampede3.run_config]
    nodes = 1
@@ -326,9 +333,9 @@ Stampede3 profiles create ``Stampede3Site`` instances:
      - Required remote project/work directory relative to the site work root.
    * - ``transfer_method``
      - ``rsync`` or ``sftp``. Defaults to ``rsync``.
-   * - ``queue`` / ``default_queue``
-     - Queue used for the site default and for run submissions unless
-       overridden.
+   * - ``default_partition``
+     - SLURM partition used by default. A top-level ``queue`` and the direct
+       constructor's ``default_queue`` remain compatibility aliases.
    * - ``hostname``
      - Login host for generic ``slurm`` profiles.
    * - ``username``
@@ -360,6 +367,11 @@ Stampede3 profiles create ``Stampede3Site`` instances:
      - Allowed node-count bounds for generic SLURM config validation.
    * - ``cores_per_node`` / ``memory_per_node``
      - Generic SLURM node shape metadata.
+   * - ``partitions``
+     - Optional tables keyed by partition name. Each table can define
+       ``max_duration``, node bounds, cores, sockets, memory, and GPUs per node.
+       When a run selects another known partition, FrequenSolve resolves its
+       limits and node shape before validating and sizing the run.
    * - ``nodes``
      - Requested nodes for submitted jobs.
    * - ``duration``
@@ -377,8 +389,15 @@ Stampede3 profiles create ``Stampede3Site`` instances:
 
 For generic ``slurm`` profiles, config fields and run fields may be written
 flat as shown above, or grouped under nested ``config`` and ``run_config``
-tables. ``stampede3`` profiles use Stampede3's built-in machine config and
-therefore do not accept a nested ``config`` table.
+tables. Preset values are loaded first, nested profile tables are merged over
+them, and explicit construction-time overrides are applied last.
+
+The packaged ``site_presets.toml`` catalog currently defines Stampede3's
+``spr``, ``icx``, ``skx``, and ``skx-dev`` CPU partitions. These values are
+defaults: local profile values can override them, and TACC's ``qlimits`` output
+remains authoritative because queue policy can change without notice. See the
+`Stampede3 user guide <https://docs.tacc.utexas.edu/hpc/stampede3/>`_ for the
+current system and queue details.
 
 FrequenSolve sets ``MKL_NUM_THREADS=1`` and ``MKL_DYNAMIC=FALSE`` for local and
 SLURM solver processes so MKL does not add nested threading underneath the

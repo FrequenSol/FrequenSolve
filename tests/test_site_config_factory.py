@@ -16,6 +16,7 @@ class FakeSite:
 class FakeSlurmSiteConfig:
     hostname: str
     queue: str = "normal"
+    scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
     poll_interval: int = 5
     account: str = ""
@@ -23,7 +24,10 @@ class FakeSlurmSiteConfig:
     min_nodes: int = 1
     max_nodes: int = 1
     cores_per_node: int = 1
+    sockets_per_node: int = 1
     memory_per_node: int = 0
+    gpus_per_node: int = 0
+    partitions: dict | None = None
 
 
 @dataclass
@@ -110,6 +114,8 @@ threads_per_worker = 2
         "n_workers": 1,
         "threads_per_worker": 16,
     }
+    assert site._site_config_path == config_path
+    assert site._site_profile == "local"
 
 
 def test_site_factory_uses_stable_home_default_path(monkeypatch, tmp_path):
@@ -322,7 +328,7 @@ ssh_key = "~/.ssh/id_ed25519"
 solver = "/remote/bin/solver"
 work_dir = "/scratch/user"
 modules = ["gcc", "openmpi"]
-queue = "debug"
+default_partition = "debug"
 account = "acct123"
 nodes = 2
 duration = "00:30:00"
@@ -338,7 +344,7 @@ OMP_NUM_THREADS = "2"
     site = sites.Site(config_path=config_path)
 
     assert site.kwargs["rel_path"] == "projects/demo"
-    assert site.kwargs["default_queue"] == "debug"
+    assert site.kwargs["default_partition"] == "debug"
     assert site.kwargs["verbose"] is True
     assert site.kwargs["username"] == "user"
     assert site.kwargs["credential"] == "primary-cluster"
@@ -372,7 +378,7 @@ default = "cluster"
 type = "slurm"
 rel_path = "projects/demo"
 hostname = "login.example.edu"
-queue = "debug"
+default_partition = "debug"
 account = "acct123"
 nodes = 1
 duration = "00:30:00"
@@ -410,7 +416,7 @@ default = "stampede3"
 [sites.stampede3]
 type = "stampede3"
 rel_path = "projects/demo"
-queue = "skx-dev"
+queue = "icx"
 nodes = 1
 duration = "00:20:00"
 transfer_method = "sftp"
@@ -420,23 +426,92 @@ solver = "/remote/bin/solver"
 work_dir = "/scratch/user"
 """.strip()
     )
-    monkeypatch.setattr(sites, "Stampede3Site", FakeSite)
+    monkeypatch.setattr(sites, "SlurmSite", FakeSite)
 
     site = sites.Site(config_path=config_path)
 
     assert site.kwargs["rel_path"] == "projects/demo"
-    assert site.kwargs["default_queue"] == "skx-dev"
+    assert site.kwargs["default_partition"] == "icx"
     assert site.kwargs["transfer_method"] == "sftp"
     assert site.kwargs["username"] == "user"
     assert site.kwargs["credential"] == "tacc-primary"
     assert site.kwargs["solver"] == "/remote/bin/solver"
     assert site.kwargs["work_dir"] == "/scratch/user"
     assert site.kwargs["run_config"] == FakeSlurmRunConfig(
-        queue="skx-dev",
+        queue="icx",
         nodes=1,
         duration="00:20:00",
+        poll_interval=5,
     )
-    assert "config" not in site.kwargs
+    assert site.kwargs["config"].hostname == "stampede3.tacc.utexas.edu"
+    assert site.kwargs["config"].mpi_wrapper == "ibrun"
+    assert site.kwargs["config"].queue == "icx"
+    assert site.kwargs["config"].partitions["spr"]["cores_per_node"] == 112
+
+
+def test_site_factory_overlays_stampede_preset_and_partition(monkeypatch, tmp_path):
+    install_fake_hpc_module(monkeypatch)
+    config_path = tmp_path / "preset-site.toml"
+    config_path.write_text(
+        """
+default = "tacc"
+
+[sites.tacc]
+type = "slurm"
+preset = "stampede3"
+rel_path = "projects/demo"
+default_partition = "icx"
+username = "user"
+
+[sites.tacc.partitions.icx]
+max_nodes = 8
+""".strip()
+    )
+    monkeypatch.setattr(sites, "SlurmSite", FakeSite)
+
+    site = sites.Site(config_path=config_path)
+
+    assert site.kwargs["default_partition"] == "icx"
+    assert site.kwargs["config"].hostname == "stampede3.tacc.utexas.edu"
+    assert site.kwargs["config"].queue == "icx"
+    assert site.kwargs["config"].partitions["icx"] == {
+        "max_duration": "2-00:00:00",
+        "min_nodes": 1,
+        "max_nodes": 8,
+        "cores_per_node": 80,
+        "sockets_per_node": 2,
+        "memory_per_node": 262144,
+        "gpus_per_node": 0,
+    }
+    assert site.kwargs["run_config"].queue == "icx"
+
+
+def test_site_factory_rejects_unknown_or_incompatible_presets(tmp_path):
+    unknown = tmp_path / "unknown-preset.toml"
+    unknown.write_text(
+        """
+default = "cluster"
+
+[sites.cluster]
+type = "slurm"
+preset = "missing"
+""".strip()
+    )
+    with pytest.raises(ValueError, match="Unknown FrequenSolve site preset.*missing"):
+        sites.Site(config_path=unknown)
+
+    incompatible = tmp_path / "incompatible-preset.toml"
+    incompatible.write_text(
+        """
+default = "cloud"
+
+[sites.cloud]
+type = "aws"
+preset = "stampede3"
+""".strip()
+    )
+    with pytest.raises(ValueError, match="type 'aws'.*incompatible.*stampede3"):
+        sites.Site(config_path=incompatible)
 
 
 def test_site_factory_is_exported_at_top_level():

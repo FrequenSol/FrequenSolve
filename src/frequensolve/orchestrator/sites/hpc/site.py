@@ -1,8 +1,8 @@
 """Generic SSH/SLURM HPC site support.
 
 This module contains the reusable mechanics for SLURM-backed remote sites.
-Site-specific modules should provide credentials, queue configuration, and
-default paths by subclassing :class:`SlurmSite`.
+Built-in presets and user configuration provide partition shapes, scheduler
+limits, credentials, and default paths without requiring site subclasses.
 """
 
 import asyncio
@@ -17,6 +17,7 @@ import time
 from asyncio import Future
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
+from dataclasses import replace
 from datetime import datetime, timezone
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -82,6 +83,7 @@ from frequensolve.util.setup_logger import init_logger
 
 __all__ = [
     "SlurmSiteConfig",
+    "SlurmPartitionConfig",
     "SlurmLoginCredentials",
     "SlurmRunConfig",
     "SlurmSite",
@@ -94,6 +96,19 @@ logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
 # ----------------------------------
 # Generic SLURM Config
 # ----------------------------------
+@dataclass(frozen=True)
+class SlurmPartitionConfig:
+    """Resource shape and scheduler limits for one SLURM partition."""
+
+    max_duration: str = "00-02:00:00"
+    min_nodes: int = 1
+    max_nodes: int = 1
+    cores_per_node: int = 1
+    sockets_per_node: int = 1
+    memory_per_node: int = 0
+    gpus_per_node: int = 0
+
+
 @dataclass
 class SlurmSiteConfig(BaseSiteConfig):
     """Minimal reusable configuration for a SLURM-backed site.
@@ -104,6 +119,7 @@ class SlurmSiteConfig(BaseSiteConfig):
 
     hostname: str
     queue: str = "normal"
+    scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
     poll_interval: int = 5
     account: str = ""
@@ -111,7 +127,70 @@ class SlurmSiteConfig(BaseSiteConfig):
     min_nodes: int = 1
     max_nodes: int = 1
     cores_per_node: int = 1
+    sockets_per_node: int = 1
     memory_per_node: int = 0
+    gpus_per_node: int = 0
+    partitions: Mapping[str, Union[SlurmPartitionConfig, Mapping[str, Any]]] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        normalized: Dict[str, SlurmPartitionConfig] = {}
+        for name, value in self.partitions.items():
+            if isinstance(value, SlurmPartitionConfig):
+                partition = value
+            elif isinstance(value, Mapping):
+                try:
+                    partition = SlurmPartitionConfig(**value)
+                except TypeError as exc:
+                    raise ValueError(
+                        f"Invalid SLURM partition config for {name!r}: {exc}"
+                    ) from exc
+            else:
+                raise ValueError(f"SLURM partition config for {name!r} must be a table")
+            normalized[str(name)] = partition
+        self.partitions = normalized
+        if normalized:
+            self._apply_partition(self.queue)
+
+    @property
+    def default_partition(self) -> str:
+        """Return the partition selected when a run does not override it."""
+
+        return self.queue
+
+    @property
+    def cores_per_socket(self) -> int:
+        """Return the number of CPU cores in each socket."""
+
+        return self.cores_per_node // self.sockets_per_node
+
+    @property
+    def memory_per_core(self) -> float:
+        """Return memory per CPU core in megabytes."""
+
+        return self.memory_per_node / self.cores_per_node
+
+    def for_partition(self, partition: str) -> "SlurmSiteConfig":
+        """Return this site config resolved for a partition."""
+
+        if self.partitions and partition not in self.partitions:
+            known = ", ".join(sorted(self.partitions))
+            raise ValueError(
+                f"Unknown SLURM partition {partition!r}. Known partitions: {known}"
+            )
+        return replace(self, queue=partition)
+
+    def _apply_partition(self, partition: str) -> None:
+        try:
+            values = self.partitions[partition]
+        except KeyError as exc:
+            known = ", ".join(sorted(self.partitions))
+            raise ValueError(
+                f"Unknown SLURM partition {partition!r}. Known partitions: {known}"
+            ) from exc
+        for item in dataclass_fields(SlurmPartitionConfig):
+            setattr(self, item.name, getattr(values, item.name))
 
     def validate_request(self, nodes: int, tasks: int, duration: Optional[str]) -> str:
         """Validate a SLURM allocation request and return a usable duration."""
@@ -363,7 +442,8 @@ class SlurmSite(BaseSite):
         rel_path: Remote project path relative to the configured work root.
         transfer_method: File transfer backend, either ``"rsync"`` or
             ``"sftp"``.
-        default_queue: Optional queue override.
+        default_queue: Deprecated compatibility alias for ``default_partition``.
+        default_partition: Partition used when no run config supplies one.
         config: Optional site configuration object.
         credentials: Optional login credentials object.
         username: SSH username. The configured environment variable remains a
@@ -397,6 +477,7 @@ class SlurmSite(BaseSite):
     site_name: str = "SLURM"
     credentials_cls: Type["SlurmLoginCredentials"] = None
     config_cls: Optional[Type[Any]] = None
+    default_partition: Optional[str] = None
     default_queue: Optional[str] = None
     default_host: Optional[str] = None
     default_solver_executable: Optional[str] = None
@@ -406,6 +487,7 @@ class SlurmSite(BaseSite):
         rel_path: Union[str, Path],
         transfer_method: Literal["rsync", "sftp"] = "rsync",
         default_queue: Optional[str] = None,
+        default_partition: Optional[str] = None,
         config: Optional[Any] = None,
         credentials: Optional["SlurmLoginCredentials"] = None,
         username: Optional[str] = None,
@@ -419,23 +501,55 @@ class SlurmSite(BaseSite):
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
     ):
-        queue = default_queue if default_queue is not None else self.default_queue
+        if (
+            default_partition is not None
+            and default_queue is not None
+            and default_partition != default_queue
+        ):
+            raise ValueError(
+                "Pass either default_partition or default_queue, not conflicting values"
+            )
+        partition = (
+            default_partition
+            if default_partition is not None
+            else (
+                default_queue
+                if default_queue is not None
+                else (
+                    self.default_partition
+                    if self.default_partition is not None
+                    else self.default_queue
+                )
+            )
+        )
         self.verbose = verbose
         logger.debug(
-            "Initializing %s with rel_path=%s, queue=%s",
+            "Initializing %s with rel_path=%s, partition=%s",
             self.site_name,
             rel_path,
-            queue,
+            partition,
         )
 
         if config is not None:
             self.config = config
+            if (
+                partition is not None
+                and getattr(config, "queue", partition) != partition
+                and callable(getattr(config, "for_partition", None))
+            ):
+                self.config = config.for_partition(partition)
         elif self.config_cls is not None:
             self.config = (
-                self.config_cls(queue=queue) if queue is not None else self.config_cls()
+                self.config_cls(queue=partition)
+                if partition is not None
+                else self.config_cls()
             )
         else:
             raise ValueError("SlurmSite requires either a config object or config_cls")
+        if partition is None:
+            partition = self.config.queue
+        self.default_partition = partition
+        self.default_queue = partition
         if self.credentials_cls is None:
             self.credentials_cls = SlurmLoginCredentials
         host = getattr(self.config, "hostname", None) or self.default_host
@@ -452,7 +566,7 @@ class SlurmSite(BaseSite):
         self.modules = [str(module) for module in (modules or [])]
         self.environment = validate_environment(environment)
         self.transfer_method = transfer_method
-        self.run_config = run_config or SlurmRunConfig(queue=queue)
+        self.run_config = run_config or SlurmRunConfig(queue=partition)
         self._rel_proj_path = Path(rel_path)
         self._authenticator = SlurmAuthenticator(self)
         self._transfer = SlurmTransferManager(self)
@@ -1236,11 +1350,20 @@ class SlurmSite(BaseSite):
         """Sync the project to the site."""
         self._sync_project(project)
 
-    def config_for_queue(self, queue: str):
-        """Return the site configuration for a queue/partition name."""
+    def config_for_partition(self, partition: str):
+        """Return the site configuration for a SLURM partition name."""
+
         if self.config_cls is not None:
-            return self.config_cls(queue)
+            return self.config_cls(partition)
+        resolver = getattr(self.config, "for_partition", None)
+        if callable(resolver):
+            return resolver(partition)
         return self.config
+
+    def config_for_queue(self, queue: str):
+        """Compatibility alias for :meth:`config_for_partition`."""
+
+        return self.config_for_partition(queue)
 
     def _reattach_inflight_run(
         self,
@@ -1428,6 +1551,14 @@ class SlurmSite(BaseSite):
     ):
         if not isinstance(job, BaseJob):
             return None
+        metadata = {}
+        config_path = getattr(self, "_site_config_path", None)
+        profile = getattr(self, "_site_profile", None)
+        if config_path is not None and profile is not None:
+            metadata = {
+                "site_config_path": str(config_path),
+                "site_profile": str(profile),
+            }
         record = job.record_site_run(
             site=self.site_name,
             work_dir=self.work_dir,
@@ -1436,6 +1567,7 @@ class SlurmSite(BaseSite):
             site_module=self.__class__.__module__,
             site_class=self.__class__.__name__,
             rel_path=self._rel_proj_path,
+            metadata=metadata,
         )
         self._store_remote_run_records(job, record)
         return record
@@ -2196,7 +2328,7 @@ class SlurmSite(BaseSite):
 
         # Unpack keyword arguments
         queue = str(kwargs.pop("queue", self.config.queue))
-        config = self.config_for_queue(queue)
+        config = self.config_for_partition(queue)
         account = str(kwargs.pop("account", self.config.account))
         run_path = str(kwargs.pop("run_path", self.work_dir))
         rank_values = _normalize_rank_aliases(

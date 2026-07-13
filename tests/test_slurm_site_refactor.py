@@ -17,6 +17,7 @@ from frequensolve.orchestrator.sites.base import (
 )
 from frequensolve.orchestrator.sites.hpc import (
     SlurmLoginCredentials,
+    SlurmPartitionConfig,
     SlurmRunConfig,
     SlurmSite,
     SlurmSiteConfig,
@@ -1117,6 +1118,40 @@ def test_slurm_submit_reattaches_matching_inflight_run(monkeypatch, tmp_path):
     assert job.latest_run(site="Dummy").status == "running"
 
 
+def test_slurm_run_record_recreates_factory_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    site._site_config_path = tmp_path / "site.toml"
+    site._site_profile = "cluster"
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+    monkeypatch.setattr(site, "_store_remote_run_records", lambda job, record: None)
+
+    record = site._record_site_run(job, scheduler_id="77")
+
+    assert record.metadata == {
+        "site_config_path": str(tmp_path / "site.toml"),
+        "site_profile": "cluster",
+    }
+    recreated = object()
+    from frequensolve.orchestrator.sites import config_file
+
+    monkeypatch.setattr(
+        config_file,
+        "Site",
+        lambda **kwargs: (recreated, kwargs),
+    )
+    resolved, kwargs = job._site_from_run_record(record)
+    assert resolved is recreated
+    assert kwargs == {
+        "config_path": str(tmp_path / "site.toml"),
+        "profile": "cluster",
+    }
+
+
 def test_slurm_submit_reattach_compares_numpy_payload_values(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
@@ -1889,6 +1924,37 @@ def test_slurm_site_config_validates_node_and_duration_requests():
         config.validate_request(3, 3, "00-00:30:00")
 
 
+def test_slurm_site_config_resolves_partition_shapes_and_rejects_unknown():
+    config = SlurmSiteConfig(
+        hostname="login.example.edu",
+        queue="debug",
+        partitions={
+            "debug": SlurmPartitionConfig(
+                max_duration="00-00:30:00",
+                max_nodes=2,
+                cores_per_node=8,
+                memory_per_node=32768,
+            ),
+            "normal": {
+                "max_duration": "00-08:00:00",
+                "max_nodes": 16,
+                "cores_per_node": 64,
+                "memory_per_node": 262144,
+            },
+        },
+    )
+
+    assert config.default_partition == "debug"
+    assert config.cores_per_node == 8
+    normal = config.for_partition("normal")
+    assert normal.queue == "normal"
+    assert normal.max_nodes == 16
+    assert normal.cores_per_node == 64
+    assert normal.memory_per_node == 262144
+    with pytest.raises(ValueError, match="Unknown SLURM partition.*missing"):
+        config.for_partition("missing")
+
+
 def test_pool_status_recognizes_slurm_terminal_states():
     for status in ("complete", "failed", "timeout", "cancelled"):
         assert PoolStatus(status=status).is_complete
@@ -1899,3 +1965,11 @@ def test_stampede3_site_is_specific_slurm_subclass():
     assert Stampede3Site.config_cls is Stampede3Config
     assert Stampede3Site.credentials_cls is TACCLoginCredentials
     assert Stampede3Site.default_solver_executable is None
+    config = Stampede3Config("icx")
+    assert config.hostname == "stampede3.tacc.utexas.edu"
+    assert config.queue == "icx"
+    assert config.cores_per_node == 80
+    assert config.cores_per_socket == 40
+    assert config.memory_per_node == 262144
+    assert config.memory_per_core == 3276.8
+    assert config.for_partition("spr").cores_per_node == 112

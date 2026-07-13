@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 from dataclasses import fields
 from importlib import import_module
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional, Union
 
@@ -24,6 +26,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
 
 SITE_CONFIG_ENV_VAR = "FREQUENSOLVE_SITE_CONFIG"
 DEFAULT_SITE_CONFIG_NAME = "site.toml"
+SITE_PRESETS_CONFIG_NAME = "site_presets.toml"
 STARTER_SITE_CONFIG = """# FrequenSolve execution site configuration.
 # Review these profiles, keep the ones you use, then rerun your script or notebook.
 
@@ -50,7 +53,7 @@ ssh_key = "~/.ssh/id_ed25519"
 solver = "/remote/path/to/solver"
 work_dir = "/remote/work/directory"
 rel_path = "frequensolve/tutorials"
-queue = "debug"
+default_partition = "debug"
 account = "allocation"
 transfer_method = "rsync"
 modules = []
@@ -75,12 +78,17 @@ _SITE_TYPES = {
     "localsite": "LocalSite",
     "slurm": "SlurmSite",
     "slurmsite": "SlurmSite",
-    "stampede3": "Stampede3Site",
-    "stampede3site": "Stampede3Site",
-    "tacc": "Stampede3Site",
+    "stampede3": "SlurmSite",
+    "stampede3site": "SlurmSite",
+    "tacc": "SlurmSite",
 }
 
-_RESERVED_SITE_KEYS = {"type"}
+_RESERVED_SITE_KEYS = {
+    "documentation_url",
+    "last_verified",
+    "preset",
+    "type",
+}
 _UNSUPPORTED_TOP_LEVEL_KEYS = {
     "default_site": "use 'default'",
     "profiles": "use [sites.<profile>] tables",
@@ -95,9 +103,11 @@ _UNSUPPORTED_SITE_KEYS = {
 
 __all__ = [
     "DEFAULT_SITE_CONFIG_NAME",
+    "SITE_PRESETS_CONFIG_NAME",
     "SITE_CONFIG_ENV_VAR",
     "Site",
     "load_site_config",
+    "load_site_presets",
     "site_config_path",
 ]
 
@@ -137,6 +147,15 @@ def load_site_config(
     return tomllib.loads(config_path.read_text())
 
 
+def load_site_presets() -> Mapping[str, Any]:
+    """Load the built-in execution-site preset catalog."""
+
+    resource = files("frequensolve.orchestrator.sites").joinpath(
+        SITE_PRESETS_CONFIG_NAME
+    )
+    return tomllib.loads(resource.read_text())
+
+
 def _should_create_starter_config(path: Optional[Union[str, Path]]) -> bool:
     return path is None and not os.getenv(SITE_CONFIG_ENV_VAR)
 
@@ -165,11 +184,16 @@ def Site(
 
     config = load_site_config(config_path)
     site_config = dict(_site_config_table(config, profile=profile))
+    selected_profile = profile or _default_profile(config)
     site_config.update(overrides)
+    site_config = _resolve_site_preset(site_config)
     site_type = _site_type(site_config)
     kwargs = _site_kwargs(site_config, site_type)
     site_class = _resolve_site_class(site_type)
-    return site_class(**kwargs)
+    site = site_class(**kwargs)
+    site._site_config_path = site_config_path(config_path)
+    site._site_profile = selected_profile
+    return site
 
 
 def _site_config_table(
@@ -226,6 +250,80 @@ def _site_type(site_config: Mapping[str, Any]) -> str:
     return raw_type
 
 
+def _resolve_site_preset(site_config: Mapping[str, Any]) -> dict[str, Any]:
+    """Overlay a built-in preset with an individual user profile."""
+
+    profile = dict(site_config)
+    raw_type = profile.get("type")
+    normalized_type = (
+        _normalize_site_type(raw_type) if isinstance(raw_type, str) else None
+    )
+    slurm_type = normalized_type in {
+        "slurm",
+        "slurmsite",
+        "stampede3",
+        "stampede3site",
+        "tacc",
+    }
+    if "queue" in profile and slurm_type:
+        queue = profile.pop("queue")
+        default_partition = profile.get("default_partition")
+        if default_partition is not None and default_partition != queue:
+            raise ValueError(
+                "FrequenSolve SLURM config cannot set conflicting "
+                "default_partition and queue values"
+            )
+        profile["default_partition"] = queue
+    compatibility_alias = normalized_type in {
+        "stampede3",
+        "stampede3site",
+        "tacc",
+    }
+    preset_name = profile.get("preset")
+    if preset_name is None and compatibility_alias:
+        preset_name = "stampede3"
+    if preset_name is None:
+        return profile
+    if not isinstance(preset_name, str) or not preset_name.strip():
+        raise ValueError("FrequenSolve site config preset must be a non-empty string")
+
+    catalog = load_site_presets().get("presets")
+    if not isinstance(catalog, Mapping):  # pragma: no cover - packaged invariant
+        raise ValueError("FrequenSolve site preset catalog has no [presets] table")
+    preset = catalog.get(preset_name)
+    if not isinstance(preset, Mapping):
+        known = ", ".join(sorted(str(name) for name in catalog))
+        raise ValueError(
+            f"Unknown FrequenSolve site preset {preset_name!r}. Known presets: {known}"
+        )
+
+    preset_type = preset.get("type")
+    if (
+        raw_type is not None
+        and not compatibility_alias
+        and isinstance(preset_type, str)
+        and _normalize_site_type(str(raw_type)) != _normalize_site_type(preset_type)
+    ):
+        raise ValueError(
+            f"FrequenSolve site type {raw_type!r} is incompatible with "
+            f"preset {preset_name!r} ({preset_type!r})"
+        )
+    return _deep_merge(preset, profile)
+
+
+def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """Recursively merge mappings without mutating either input."""
+
+    merged = deepcopy(dict(base))
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
 def _reject_unsupported_top_level_keys(config: Mapping[str, Any]) -> None:
     for key, replacement in _UNSUPPORTED_TOP_LEVEL_KEYS.items():
         if key in config:
@@ -256,10 +354,14 @@ def _site_kwargs(site_config: Mapping[str, Any], site_type: str) -> dict[str, An
             raise ValueError("FrequenSolve site config site.kwargs must be a table")
         kwargs.update(nested_kwargs)
     normalized_type = _normalize_site_type(site_type)
-    if normalized_type in {"slurm", "slurmsite"}:
+    if normalized_type in {
+        "slurm",
+        "slurmsite",
+        "stampede3",
+        "stampede3site",
+        "tacc",
+    }:
         return _slurm_site_kwargs(kwargs)
-    if normalized_type in {"stampede3", "stampede3site", "tacc"}:
-        return _stampede3_site_kwargs(kwargs)
     return kwargs
 
 
@@ -288,7 +390,16 @@ def _slurm_site_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
     run_config_cls = hpc.SlurmRunConfig
 
     source = dict(kwargs)
-    site_kwargs = dict(kwargs)
+    if "default_partition" in source:
+        default_partition = source.pop("default_partition")
+        queue = source.get("queue")
+        if queue is not None and queue != default_partition:
+            raise ValueError(
+                "FrequenSolve SLURM config cannot set conflicting "
+                "default_partition and queue values"
+            )
+        source["queue"] = default_partition
+    site_kwargs = dict(source)
     config_value = site_kwargs.pop("config", None)
     run_config_value = site_kwargs.pop("run_config", None)
 
@@ -299,8 +410,8 @@ def _slurm_site_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
     for key in set(config_values) | set(run_config_values):
         site_kwargs.pop(key, None)
 
-    if "default_queue" not in site_kwargs and "queue" in source:
-        site_kwargs["default_queue"] = source["queue"]
+    if "default_partition" not in site_kwargs and "queue" in source:
+        site_kwargs["default_partition"] = source["queue"]
 
     site_kwargs["config"] = _coerce_dataclass_config(
         config_cls,
@@ -308,36 +419,6 @@ def _slurm_site_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
         config_values,
         "SlurmSiteConfig",
     )
-    if run_config_value is not None or run_config_values:
-        site_kwargs["run_config"] = _coerce_dataclass_config(
-            run_config_cls,
-            run_config_value,
-            run_config_values,
-            "SlurmRunConfig",
-        )
-    return site_kwargs
-
-
-def _stampede3_site_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
-    hpc = import_module("frequensolve.orchestrator.sites.hpc")
-    run_config_cls = hpc.SlurmRunConfig
-
-    source = dict(kwargs)
-    site_kwargs = dict(kwargs)
-    run_config_value = site_kwargs.pop("run_config", None)
-    config_value = site_kwargs.pop("config", None)
-    if config_value is not None:
-        raise ValueError("Stampede3 site config does not accept a config table")
-
-    run_config_values = _matching_values(
-        source, _run_config_field_names(run_config_cls)
-    )
-    for key in run_config_values:
-        site_kwargs.pop(key, None)
-
-    if "default_queue" not in site_kwargs and "queue" in source:
-        site_kwargs["default_queue"] = source["queue"]
-
     if run_config_value is not None or run_config_values:
         site_kwargs["run_config"] = _coerce_dataclass_config(
             run_config_cls,

@@ -256,6 +256,12 @@ class JobRecordMixin:
         return self._resolve_fetch_site(site).fetch_logs(self, **kwargs)
 
     def _site_from_run_record(self, record: JobRecord):
+        config_path = record.metadata.get("site_config_path")
+        profile = record.metadata.get("site_profile")
+        if config_path and profile:
+            from frequensolve.orchestrator.sites.config_file import Site
+
+            return Site(config_path=config_path, profile=profile)
         if not record.site_module or not record.site_class or not record.rel_path:
             raise ValueError(
                 f"Run record for {record.site} cannot recreate a site; "

@@ -22,17 +22,21 @@ class TACCLoginCredentials(Credentials):
 class Stampede3Site(SlurmSite):
     """Stampede3 remote execution site.
 
-    This class only supplies Stampede3-specific defaults. SSH, transfer,
-    provisioning, SLURM submission, status polling, and result fetching are
-    implemented by :class:`frequensolve.orchestrator.sites.hpc.SlurmSite`.
+    This compatibility class reads Stampede3 defaults from the built-in site
+    preset. New ``site.toml`` profiles should use ``type = "slurm"`` with
+    ``preset = "stampede3"``. SSH, transfer, provisioning, SLURM submission,
+    status polling, and result fetching are implemented by
+    :class:`frequensolve.orchestrator.sites.hpc.SlurmSite`.
 
     Args:
         rel_path: Site configuration path or name used to load Stampede3
             credentials and defaults.
         transfer_method: File-transfer backend, either ``"rsync"`` or
             ``"sftp"``.
-        default_queue: SLURM queue/partition used when no run config supplies
+        default_partition: SLURM partition used when no run config supplies
             one.
+        default_queue: Deprecated compatibility alias for
+            ``default_partition``.
         run_config: Optional per-run SLURM settings.
         username: TACC username.
         credential: Keyring lookup name.
@@ -57,6 +61,7 @@ class Stampede3Site(SlurmSite):
     site_name = "Stampede3"
     credentials_cls = TACCLoginCredentials
     config_cls = Stampede3Config
+    default_partition = "skx-dev"
     default_queue = "skx-dev"
     default_host = "stampede3.tacc.utexas.edu"
     default_solver_executable = None
@@ -65,7 +70,8 @@ class Stampede3Site(SlurmSite):
         self,
         rel_path: Union[str, Path],
         transfer_method: Literal["rsync", "sftp"] = "rsync",
-        default_queue: str = "skx-dev",
+        default_partition: Optional[str] = None,
+        default_queue: Optional[str] = None,
         credentials: Optional[TACCLoginCredentials] = None,
         username: Optional[str] = None,
         credential: Optional[str] = None,
@@ -81,6 +87,7 @@ class Stampede3Site(SlurmSite):
         super().__init__(
             rel_path=rel_path,
             transfer_method=transfer_method,
+            default_partition=default_partition,
             default_queue=default_queue,
             credentials=credentials,
             username=username,

@@ -1,0 +1,49 @@
+# Built-in execution-site presets. User site.toml profiles explicitly select a
+# preset and may override any value. Queue policy can change without notice;
+# Stampede3 values were checked against the TACC user guide updated 2026-06-02.
+
+[presets.stampede3]
+type = "slurm"
+hostname = "stampede3.tacc.utexas.edu"
+mpi_wrapper = "ibrun"
+scheduler = "SLURM"
+poll_interval = 5
+default_partition = "skx-dev"
+documentation_url = "https://docs.tacc.utexas.edu/hpc/stampede3/"
+last_verified = "2026-06-02"
+
+[presets.stampede3.partitions.spr]
+max_duration = "2-00:00:00"
+min_nodes = 1
+max_nodes = 32
+cores_per_node = 112
+sockets_per_node = 2
+memory_per_node = 131072
+gpus_per_node = 0
+
+[presets.stampede3.partitions.skx]
+max_duration = "2-00:00:00"
+min_nodes = 1
+max_nodes = 256
+cores_per_node = 48
+sockets_per_node = 2
+memory_per_node = 196608
+gpus_per_node = 0
+
+[presets.stampede3.partitions.icx]
+max_duration = "2-00:00:00"
+min_nodes = 1
+max_nodes = 32
+cores_per_node = 80
+sockets_per_node = 2
+memory_per_node = 262144
+gpus_per_node = 0
+
+[presets.stampede3.partitions.skx-dev]
+max_duration = "02:00:00"
+min_nodes = 1
+max_nodes = 16
+cores_per_node = 48
+sockets_per_node = 2
+memory_per_node = 196608
+gpus_per_node = 0
