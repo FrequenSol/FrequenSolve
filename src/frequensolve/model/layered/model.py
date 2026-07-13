@@ -2,7 +2,7 @@
 
 ``LayeredModel`` is the main user-facing model builder for stratigraphic
 velocity/property models. It owns ordered surfaces, layers, fractures,
-boreholes, project path handling, solver-contract export, and reconstruction
+boreholes, solver-contract export, and reconstruction
 from saved FrequenSolve payloads.
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import (
     Any,
     Dict,
@@ -36,7 +35,6 @@ from frequensolve.util.class_registry import register_class
 from frequensolve.util.mixins import (
     ExportContext,
     merge_extra,
-    warn_deprecated_path_api,
 )
 from frequensolve.util.named_list import NamedList
 from frequensolve.util.physics import model_dimension
@@ -104,8 +102,6 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
     extra: Dict[str, Any] = field(default_factory=dict)
 
     _last_added: str = "none"
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
     _surface_names: Set[str] = field(default_factory=set)
     _layer_names: Set[str] = field(default_factory=set)
     _borehole_names: Set[str] = field(default_factory=set)
@@ -559,7 +555,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
             ValueError: If the model is incomplete.
         """
 
-        ctx = ctx or ExportContext(self._proj_path, self._rel_path)
+        ctx = ctx or ExportContext()
         self._normalize_domain_limits()
         self._validate_complete()
 
@@ -667,18 +663,6 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
                 if candidate.mesh_block_id == mesh_block_id:
                     return candidate.lower
         raise ValueError(f"Layer not found: {layer}")
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = Path(proj_path).expanduser().resolve()
-        self._rel_path = Path(rel_path) / self.name
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        if self._proj_path is None or self._rel_path is None:
-            raise ValueError("LayeredModel is not attached to a project path")
-        return self._proj_path / self._rel_path
 
     def _validate_bounds_for_meshing(self) -> None:
         if len(self.surfaces) < 2:

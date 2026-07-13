@@ -20,7 +20,6 @@ from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
     merge_extra,
-    warn_deprecated_path_api,
 )
 
 __all__ = [
@@ -535,8 +534,6 @@ class SparseSurvey(ExtraFieldsMixin):
     relation_file: Optional[Union[str, Path]]
     offset_domain: Optional[Mapping[str, Any]]
     extra: Dict[str, Any]
-    _proj_path: Optional[Path]
-    _rel_path: Optional[Path]
 
     def __init__(
         self,
@@ -580,8 +577,6 @@ class SparseSurvey(ExtraFieldsMixin):
         self.relation_file = relation_file
         self.offset_domain = copy.deepcopy(dict(offset_domain or {})) or None
         self._init_extra(extra, **kwargs)
-        self._proj_path = None
-        self._rel_path = None
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "SparseSurvey":
@@ -1039,8 +1034,3 @@ class SparseSurvey(ExtraFieldsMixin):
                 "component_name",
                 [components[i].get("component_name", "") for i in ids],
             )
-
-    def _set_path(self, proj_path: Path, rel_path: Path) -> None:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = proj_path
-        self._rel_path = rel_path

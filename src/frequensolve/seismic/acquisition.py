@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
@@ -25,7 +24,6 @@ from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
     merge_extra,
-    warn_deprecated_path_api,
 )
 from frequensolve.util.named_list import NamedList
 
@@ -75,8 +73,6 @@ class Acquisition(ExtraFieldsMixin):
     surveys: NamedList = field(default_factory=NamedList)
     max_batch: Optional[int] = None
     extra: Dict[str, Any] = field(default_factory=dict)
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     def __init__(
         self,
@@ -100,8 +96,6 @@ class Acquisition(ExtraFieldsMixin):
         self.surveys = NamedList(surveys or [])
         self.max_batch = max_batch
         self._init_extra(extra, **kwargs)
-        self._proj_path = None
-        self._rel_path = None
         self.__post_init__()
 
     def __post_init__(self) -> None:
@@ -179,7 +173,7 @@ class Acquisition(ExtraFieldsMixin):
 
         from ..util.printing import print_warn
 
-        ctx = ctx or ExportContext(self._proj_path, self._rel_path)
+        ctx = ctx or ExportContext()
 
         names = {}
         for group in self.receiver_groups:
@@ -465,11 +459,6 @@ class Acquisition(ExtraFieldsMixin):
 
         return self.receiver_groups[name]
 
-    def _set_path(self, proj_path: Path, rel_path: Path) -> None:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = Path(proj_path).expanduser().resolve()
-        self._rel_path = Path(rel_path)
-
     def receiver_coords(self, group: Optional[str] = None):
         """Return receiver coordinates."""
 
@@ -520,11 +509,6 @@ class Acquisition(ExtraFieldsMixin):
                 component_map.setdefault(component.field, index)
                 component_map.setdefault(component.field.lower(), index)
         return maps
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
 
 
 def _carpet_coordinates(

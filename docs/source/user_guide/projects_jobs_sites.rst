@@ -46,6 +46,32 @@ contains:
 ``project.save()`` explicitly is still useful when you want to inspect generated
 :term:`JSON`/:term:`HDF5` inputs before running.
 
+Relocating Simulations
+----------------------
+
+Use ``simulation.relocate(new_project_path)`` when an existing simulation's
+project files have already been moved to another root. Relocation updates the
+public ``project_path`` and remaps project-local file references; it does not
+copy files. Use ``Project.copy(source, destination)`` when FrequenSolve should
+copy the complete project tree as well.
+
+.. code-block:: python
+
+   sim.relocate("./moved_project")
+
+Advanced exporters can select a temporary output location without relocating
+the simulation by creating an explicit context:
+
+.. code-block:: python
+
+   ctx = sim.export_context(
+       project_path="./staging",
+       rel_path="inputs/simple_acoustic",
+   )
+   payload = sim.to_fs(ctx)
+
+The default remains ``<project_path>/simulations/<simulation name>``.
+
 Loading Saved Work
 ------------------
 

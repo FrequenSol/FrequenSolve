@@ -610,7 +610,7 @@ class AWSSite(BaseSite):
         else:
             path = Path(path)
 
-        project_name = job.simulation._remote_path.parts[0]
+        project_name = Path(job.simulation.project_path).name
         simulation_name = job.simulation.name
         job_name = job.name
         results_paraview_path = f"jobs/{simulation_name}/{job_name}/results/ParaView"

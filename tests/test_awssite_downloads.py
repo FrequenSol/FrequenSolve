@@ -103,7 +103,7 @@ def test_fetch_paraview_reraises_download_failures(tmp_path):
         name="job-a",
         simulation=SimpleNamespace(
             name="simulation-a",
-            _remote_path=Path("project-a/simulation-a"),
+            project_path=tmp_path / "project-a",
         ),
     )
 

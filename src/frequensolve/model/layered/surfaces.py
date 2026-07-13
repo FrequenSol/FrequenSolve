@@ -21,7 +21,7 @@ from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.model import ModelSubdomain
 from frequensolve.model.property import Property
 from frequensolve.units import is_quantity, unit_expression
-from frequensolve.util.mixins import merge_extra, warn_deprecated_path_api
+from frequensolve.util.mixins import ExportContext, merge_extra
 
 from ._utils import (
     _convert_surface_depth,
@@ -274,8 +274,6 @@ class SimpleSurface:
     name: str = "surface"
     interface: bool = True
     depth: Property = field(default_factory=Property)
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     def __init__(
         self,
@@ -355,7 +353,7 @@ class SimpleSurface:
             "name": self.name,
             "interface": self.interface,
         }
-        ctx = ctx or self.export_context()
+        ctx = ctx or ExportContext()
         use_store = getattr(ctx, "store", None) is not None
         file = (
             None
@@ -369,18 +367,6 @@ class SimpleSurface:
             dataset=dataset,
         )
         return data
-
-    def export_context(self):
-        """Return the export context used for surface-owned property files.
-
-        Returns:
-            Export context rooted at the project path and model-relative path
-            assigned by the containing project.
-        """
-
-        from frequensolve.util.mixins import ExportContext
-
-        return ExportContext(self._proj_path, self._rel_path)
 
     @property
     def data(self):
@@ -408,18 +394,6 @@ class SimpleSurface:
         min = min.values
         max = max.values
         return min, max
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = proj_path
-        self._rel_path = rel_path
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        if self._proj_path is None or self._rel_path is None:
-            raise ValueError("Surface is not attached to a project path")
-        return self._proj_path / self._rel_path
 
     def perturb(
         self,
@@ -784,7 +758,7 @@ class Fracture(SimpleSurface):
         field: str,
         ctx=None,
     ) -> Dict[str, Any]:
-        ctx = ctx or self.export_context()
+        ctx = ctx or ExportContext()
         dataset = f"inputs/model/surfaces/{self.name}/{field}"
         use_store = getattr(ctx, "store", None) is not None
         if (

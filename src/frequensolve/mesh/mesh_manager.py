@@ -13,7 +13,6 @@ from frequensolve.util.mixins import (
     ExtraFieldsMixin,
     fs_serialize,
     merge_extra,
-    warn_deprecated_path_api,
 )
 
 from .mesh_generators import BaseMeshGenerator
@@ -866,8 +865,6 @@ class MeshManager:
     format: Optional[str] = None
     parallel: Optional[MeshParallelism] = None
     adapt: Optional[MeshAdaptor] = None
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     def set_adapt(
         self,
@@ -1126,8 +1123,8 @@ class MeshManager:
             ValueError: If only one of ``file`` and ``format`` is configured.
         """
 
-        ctx = ctx or ExportContext(self._proj_path, self._rel_path)
-        project_path = ctx.project_path or self._proj_path
+        ctx = ctx or ExportContext()
+        project_path = ctx.project_path
         export_path = ctx.path
         if project_path is not None:
             project_path = Path(project_path).expanduser().resolve()
@@ -1184,13 +1181,3 @@ class MeshManager:
             mesh_dict["generator"] = self.mesh.to_fs(ctx)
 
         return mesh_dict
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = Path(proj_path).expanduser().resolve()
-        self._rel_path = Path(rel_path)
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path

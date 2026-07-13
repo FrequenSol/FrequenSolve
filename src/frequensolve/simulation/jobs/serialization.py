@@ -297,9 +297,8 @@ class JobSerializationMixin:
         sim = BaseSimulation.load(sim_file)
         if project_path is not None:
             project = Path(project_path).expanduser().resolve()
-            sim.project_path = project
             sim._file = Path(sim_file).expanduser().resolve()
-            sim._attach_project_path(project, Path("simulations"))
+            sim.relocate(project)
         return sim
 
     @staticmethod

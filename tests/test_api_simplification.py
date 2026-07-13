@@ -1701,7 +1701,7 @@ def test_explicit_axisymmetric_physics_sets_axisymmetric_flag(tmp_path):
     assert components_for_physics("acoustic_axisym") is not None
 
 
-def test_private_path_api_warns_as_deprecated(tmp_path):
+def test_authoring_objects_do_not_store_legacy_export_paths(tmp_path):
     sim = SeismicSimulation(
         name="simple",
         physics="acoustic",
@@ -1709,10 +1709,11 @@ def test_private_path_api_warns_as_deprecated(tmp_path):
         project_path=tmp_path,
     )
 
-    with pytest.warns(DeprecationWarning, match="_set_path"):
-        sim._set_path(tmp_path, Path("simulations"))
-    with pytest.warns(DeprecationWarning, match="_path"):
-        assert sim._path == tmp_path / "simulations" / "simple"
+    for obj in (sim, sim.model, sim.mesh, sim.acquisition):
+        assert not hasattr(obj, "_proj_path")
+        assert not hasattr(obj, "_rel_path")
+        assert not hasattr(obj, "_set_path")
+        assert not hasattr(obj, "_path")
 
 
 def test_project_new_simulation_accepts_coupled_aep_physics(tmp_path):
@@ -3308,6 +3309,119 @@ def test_loaded_receiver_coordinate_file_uses_json_location_not_cwd(
     assert loaded.project_path == copied_project.resolve()
     assert loaded_coords.file == copied_project / "inputs" / "receiver_coords.h5"
     np.testing.assert_allclose(loaded_coords.get(), copied_values)
+
+
+def test_simulation_relocate_remaps_project_local_receiver_file(tmp_path):
+    source_project = tmp_path / "source_project"
+    target_project = tmp_path / "target_project"
+    source_file = source_project / "inputs" / "receiver_coords.h5"
+    target_file = target_project / "inputs" / "receiver_coords.h5"
+    source_mesh = source_project / "inputs" / "mesh.gmp"
+    target_mesh = target_project / "inputs" / "mesh.gmp"
+    source_property = source_project / "inputs" / "properties.h5"
+    target_property = target_project / "inputs" / "properties.h5"
+    remote_property = source_project / "solver-visible" / "properties.bin"
+    source_survey = source_project / "inputs" / "survey.h5"
+    target_survey = target_project / "inputs" / "survey.h5"
+    values = np.array([[0.25, 0.0], [0.75, 0.0]])
+    for file in (source_file, target_file):
+        file.parent.mkdir(parents=True)
+        with h5py.File(file, "w") as h5:
+            h5.create_dataset("coords", data=values)
+
+    coords = CoordsFromFile(file=source_file, format="HDF5", dset="coords")
+    acq = Acquisition()
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
+    acq.surveys.append(SparseSurvey.file("survey", source_survey))
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=source_project,
+        acquisition=acq,
+        mesh=MeshManager(file=source_mesh, format="Gmsh"),
+    )
+    sim.model += ModelSubdomain(
+        mesh_block_id=1,
+        properties={
+            "vp": Property.file(f"{source_property}:/vp", format="hdf5"),
+            "rho": Property.file(remote_property, remote=True),
+        },
+    )
+
+    result = sim.relocate(target_project)
+    relocated = sim.acquisition.receiver_groups[0].coordinates
+
+    assert result is sim
+    assert sim.project_path == target_project.resolve()
+    assert relocated.file == target_file
+    np.testing.assert_allclose(relocated.get(), values)
+    assert sim.mesh.file == target_mesh
+    assert sim.model.subdomains[0].properties["vp"].file_path == (
+        f"{target_property}:/vp"
+    )
+    assert sim.model.subdomains[0].properties["rho"].file_path == remote_property
+    assert sim.acquisition.surveys[0].layout_file == target_survey
+
+
+def test_save_recovers_previous_root_after_project_path_reassignment(tmp_path):
+    source_project = tmp_path / "source_project"
+    target_project = tmp_path / "target_project"
+    source_file = source_project / "inputs" / "receiver_coords.h5"
+    target_file = target_project / "inputs" / "receiver_coords.h5"
+    values = np.array([[0.25, 0.0], [0.75, 0.0]])
+    for file in (source_file, target_file):
+        file.parent.mkdir(parents=True)
+        with h5py.File(file, "w") as h5:
+            h5.create_dataset("coords", data=values)
+
+    coords = CoordsFromFile(file=source_file, format="HDF5", dset="coords")
+    acq = Acquisition()
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=source_project,
+        acquisition=acq,
+    )
+    sim.save()
+
+    sim.project_path = target_project
+    saved = sim.save()
+    relocated = sim.acquisition.receiver_groups[0].coordinates
+
+    assert saved == target_project / "simulations" / "simple" / "simple.json"
+    assert relocated.file == target_file
+    np.testing.assert_allclose(relocated.get(), values)
+
+
+def test_simulation_export_context_accepts_custom_location(tmp_path):
+    project_path = tmp_path / "project"
+    export_root = tmp_path / "export"
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=project_path,
+    )
+
+    ctx = sim.export_context(
+        project_path=export_root,
+        rel_path=Path("custom") / "simple",
+    )
+
+    assert ctx.project_path == export_root.resolve()
+    assert ctx.rel_path == Path("custom") / "simple"
+    assert ctx.path == export_root.resolve() / "custom" / "simple"
+    assert ctx.store.path == ctx.path / "simple.h5"
+    assert sim.project_path == project_path
 
 
 def test_receiver_coordinate_file_rejects_remote_reference():

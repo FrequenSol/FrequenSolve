@@ -26,7 +26,7 @@ class FakeJob:
 
     def __init__(self):
         self.project_path = Path("project-a")
-        self.simulation = SimpleNamespace(_remote_path=Path("project-a/simulation-a"))
+        self.simulation = SimpleNamespace(project_path=Path("project-a"))
         self._job_id = None
 
     def is_run_current(self):

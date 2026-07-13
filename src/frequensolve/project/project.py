@@ -463,7 +463,6 @@ class Project:
         """
 
         if isinstance(base, BaseSimulation):
-            base.project_path = self.path
             base._project = self
             self.simulations.append(base)
         elif isinstance(base, BaseProjectComponent):
@@ -549,11 +548,9 @@ class Project:
 
     def _bind_simulations_to_project(self) -> None:
         proj_path = self.path.resolve()
-        rel_path = Path("./simulations")
         for sim in self.simulations:
             sim._project = self
-            sim.project_path = proj_path
-            sim._attach_project_path(proj_path, rel_path)
+            sim.relocate(proj_path)
 
     def _project_local_path(self, path: Union[str, Path]) -> Path:
         path = Path(path).expanduser()

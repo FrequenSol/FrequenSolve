@@ -2,7 +2,6 @@
 
 import copy
 import json
-import warnings
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Dict, Mapping, Optional
@@ -12,10 +11,8 @@ __all__ = [
     "ExtraFieldsMixin",
     "FSSerializableMixin",
     "MaterializeMixin",
-    "PathContextMixin",
     "TypeTaggedMixin",
     "merge_extra",
-    "warn_deprecated_path_api",
 ]
 
 
@@ -261,23 +258,6 @@ class TypeTaggedMixin(FSSerializableMixin):
         return target_cls.from_fs(payload)
 
 
-class PathContextMixin:
-    """Mixin for objects that carry a project path and relative artifact path."""
-
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
-
-    def export_context(self) -> ExportContext:
-        """Return an export context rooted at this object's path metadata."""
-
-        return ExportContext(self._proj_path, self._rel_path)
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
-
-
 class MaterializeMixin:
     """Marker for objects that need to write local artifacts before export."""
 
@@ -356,21 +336,6 @@ def merge_extra(
         raise ValueError(f"{owner} extra field(s) collide with typed field(s): {names}")
     merged.update(copy.deepcopy(extra))
     return merged
-
-
-def warn_deprecated_path_api(name: str) -> None:
-    """Warn that an object's legacy path API was used.
-
-    Args:
-        name: Fully qualified method or property name to include in the
-            warning.
-    """
-
-    warnings.warn(
-        f"{name} is deprecated; export paths are now supplied by ExportContext.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
 
 
 class ChangedMixin:

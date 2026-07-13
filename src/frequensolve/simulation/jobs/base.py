@@ -521,9 +521,7 @@ class BaseJob(
         return len(self.f_list)
 
     def _project_path(self) -> Path:
-        project_path = getattr(self.simulation, "_proj_path", None)
-        if project_path is None:
-            project_path = getattr(self.simulation, "project_path", None)
+        project_path = getattr(self.simulation, "project_path", None)
         if project_path is None:
             raise ValueError("Job simulation is not attached to a project path")
         return Path(project_path).resolve()

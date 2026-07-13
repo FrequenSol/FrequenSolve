@@ -277,8 +277,6 @@ class Misfit:
 
     norm: Literal["L2"] = "L2"
     receiver_groups: List[MisfitGroup] = field(default_factory=list)
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
         """Serialize the imaging misfit configuration.

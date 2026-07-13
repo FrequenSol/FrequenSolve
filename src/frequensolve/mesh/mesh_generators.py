@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional, Union
 from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
 
 from ..util.class_registry import class_registry, register_class
-from ..util.mixins import TypeTaggedMixin, merge_extra, warn_deprecated_path_api
+from ..util.mixins import TypeTaggedMixin, merge_extra
 
 __all__ = [
     "BaseMeshGenerator",
@@ -75,9 +75,6 @@ def _mesh_bounds_and_units(
 class BaseMeshGenerator(TypeTaggedMixin, ABC):
     """Base class for type-tagged mesh generator configurations."""
 
-    _proj_path: Path = Path()
-    _rel_path: Path = Path()
-
     @classmethod
     def from_fs(cls, data: Dict) -> "BaseMeshGenerator":
         """Deserialize a registered mesh generator payload.
@@ -90,16 +87,6 @@ class BaseMeshGenerator(TypeTaggedMixin, ABC):
         """
 
         return cls.dispatch_from_fs(data, class_registry)
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = Path(proj_path).expanduser().resolve()
-        self._rel_path = Path(rel_path)
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
 
 
 @dataclass
@@ -303,7 +290,7 @@ class HexMeshGenerator(BaseMeshGenerator):
             JSON-compatible mesh generator payload.
         """
 
-        rel_path = getattr(ctx, "rel_path", self._rel_path)
+        rel_path = getattr(ctx, "rel_path", Path())
         if self.l_bound is not None:
             assert self.u_bound is not None
             l_bound, u_bound, units = _mesh_bounds_and_units(

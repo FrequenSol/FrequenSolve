@@ -15,7 +15,6 @@ from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
     merge_extra,
-    warn_deprecated_path_api,
 )
 from frequensolve.util.named_list import NamedList
 from frequensolve.util.physics import model_dimension
@@ -51,8 +50,6 @@ class ModelSubdomain(ExtraFieldsMixin):
     physics: Optional[str] = None
     properties: PropertyMap = field(default_factory=PropertyMap)
     extra: Dict[str, Any] = field(default_factory=dict)
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     def __init__(
         self,
@@ -128,7 +125,7 @@ class ModelSubdomain(ExtraFieldsMixin):
             serialized property mapping.
         """
 
-        ctx = ctx or ExportContext(self._proj_path, self._rel_path)
+        ctx = ctx or ExportContext()
 
         def property_file(key: str, prop: Property) -> Path:
             return ctx.path / f"layer_{self.mesh_block_id}_{key}.bin"
@@ -205,16 +202,6 @@ class ModelSubdomain(ExtraFieldsMixin):
             else:
                 raise ValueError(f"Property {key} does not match dimensions of grid")
 
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = proj_path
-        self._rel_path = rel_path
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
-
 
 @register_class
 @dataclass(kw_only=True)
@@ -243,8 +230,6 @@ class ModelBase(ExtraFieldsMixin):
     reference_frequency: Optional[Any] = None
     subdomains: NamedList = field(default_factory=NamedList)
     extra: Dict[str, Any] = field(default_factory=dict)
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
     _attenuation_extra: Dict[str, Any] = field(
         default_factory=dict,
         init=False,
@@ -304,7 +289,7 @@ class ModelBase(ExtraFieldsMixin):
                 labels[j] = i
                 subdomain.mesh_block_id = j
 
-        ctx = ctx or ExportContext(self._proj_path, self._rel_path)
+        ctx = ctx or ExportContext()
         attenuation = self._attenuation_config()
         payload = {
             "_type": self.__class__.__name__,
@@ -379,13 +364,3 @@ class ModelBase(ExtraFieldsMixin):
     def __iadd__(self, other):
         self.add_subdomain(other)
         return self
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = Path(proj_path).expanduser().resolve()
-        self._rel_path = Path(rel_path) / self.name
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path

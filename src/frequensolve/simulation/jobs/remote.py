@@ -345,9 +345,6 @@ class JobRemoteMixin:
             sim_project = getattr(simulation, "project_path", None)
             if sim_project is not None:
                 roots.append(sim_project)
-            sim_proj_path = getattr(simulation, "_proj_path", None)
-            if sim_proj_path is not None:
-                roots.append(sim_proj_path)
         return self._unique_paths(roots)
 
     @staticmethod

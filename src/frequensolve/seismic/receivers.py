@@ -21,11 +21,9 @@ from frequensolve.units import is_quantity, unit_expression, value_and_units_to_
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.fields import canonical_field
 from frequensolve.util.mixins import (
-    ExportContext,
     ExtraFieldsMixin,
     TypeTaggedMixin,
     merge_extra,
-    warn_deprecated_path_api,
 )
 from frequensolve.util.store import SimulationStore, hash_dataarray_payload
 
@@ -380,21 +378,6 @@ class ReceiverCoords(TypeTaggedMixin, ABC):
 
         return cls.dispatch_from_fs(data, class_registry)
 
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        try:
-            self.path = proj_path / self.path.relative_to(self._proj_path)
-        except Exception:
-            pass
-
-        self._proj_path = proj_path
-        self._rel_path = rel_path
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
-
 
 @register_class
 @dataclass(kw_only=True)
@@ -417,8 +400,6 @@ class CoordsFromFile(ReceiverCoords):
     units: Optional[str] = None
     system: Optional[str] = None
     hash: Optional[str] = None
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     def __init__(
         self,
@@ -471,15 +452,6 @@ class CoordsFromFile(ReceiverCoords):
             hash=data.get("hash"),
         )
 
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        proj_path = Path(proj_path).resolve()
-        rel_path = Path(rel_path)
-        self._proj_path = proj_path
-        self._rel_path = rel_path
-        self.file = self._contextual_file(ExportContext(proj_path, rel_path))
-        self._fill_metadata_from_file()
-
     @staticmethod
     def _simulation_rel_path(rel_path: Optional[Path]) -> Optional[Path]:
         if rel_path is None:
@@ -497,8 +469,8 @@ class CoordsFromFile(ReceiverCoords):
         self, ctx=None, *, source_project_path: Optional[Path] = None
     ) -> Path:
         file = Path(self.file).expanduser()
-        project_path = getattr(ctx, "project_path", None) or self._proj_path
-        rel_path = getattr(ctx, "rel_path", None) or self._rel_path
+        project_path = getattr(ctx, "project_path", None)
+        rel_path = getattr(ctx, "rel_path", None)
         if project_path is not None:
             project_path = Path(project_path).expanduser().resolve()
 
@@ -529,7 +501,7 @@ class CoordsFromFile(ReceiverCoords):
         return file
 
     def _relative_file(self, ctx=None) -> Path:
-        project_path = getattr(ctx, "project_path", None) or self._proj_path
+        project_path = getattr(ctx, "project_path", None)
         file = self._contextual_file(ctx)
         if project_path is None:
             return file
@@ -542,7 +514,7 @@ class CoordsFromFile(ReceiverCoords):
         file = self._contextual_file(ctx)
         if file.is_absolute():
             return file
-        project_path = getattr(ctx, "project_path", None) or self._proj_path
+        project_path = getattr(ctx, "project_path", None)
         if project_path is not None:
             return Path(project_path) / file
         return file
@@ -1325,8 +1297,6 @@ class ReceiverGroup(ExtraFieldsMixin):
     coordinates: ReceiverCoords = field(default_factory=ReceiverCoords)
     sampling: Optional[ReceiverSampling] = None
     extra: Dict = field(default_factory=dict)
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     @property
     def size(self):
@@ -1586,13 +1556,3 @@ class ReceiverGroup(ExtraFieldsMixin):
             sampling=sampling,
             **data,
         )
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = Path(proj_path).expanduser().resolve()
-        self._rel_path = Path(rel_path) / self.name
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
