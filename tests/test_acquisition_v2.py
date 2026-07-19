@@ -110,6 +110,57 @@ def test_json_dense_encoding_roundtrips_against_pinned_sauce_schema():
     assert Acquisition.from_fs(payload).to_fs() == payload
 
 
+def test_hdf5_geometry_and_encoding_match_pinned_sauce_schema_and_roundtrip():
+    geometry = SourceGeometry.hdf5(
+        "inputs/sources.h5",
+        dataset="/sources",
+        kind="scalar",
+        name="catalog",
+        domain=2,
+        system="model",
+        units="m",
+    )
+    encoding = SourceEncoding.hdf5(
+        "inputs/encoding.h5",
+        dataset="/coefficients",
+        name="encoded_fields",
+        field_names_dataset="/field_names",
+        reference_coordinates_dataset="/reference_coordinates",
+    )
+    acquisition = Acquisition(
+        source_geometry=geometry,
+        source_encoding=encoding,
+    )
+
+    payload = acquisition.to_fs()
+
+    _sauce_acquisition_validator().validate(payload)
+    assert payload["source_geometry"] == {
+        "_type": "HDF5",
+        "name": "catalog",
+        "domain": 2,
+        "kind": "scalar",
+        "file": "inputs/sources.h5",
+        "dataset": "/sources",
+        "system": "model",
+        "units": "m",
+    }
+    assert payload["source_encoding"] == {
+        "_type": "HDF5Dense",
+        "name": "encoded_fields",
+        "file": "inputs/encoding.h5",
+        "dataset": "/coefficients",
+        "field_names_dataset": "/field_names",
+        "reference_coordinates_dataset": "/reference_coordinates",
+    }
+    assert acquisition.known_source_point_count() is None
+    assert acquisition.known_source_field_count() is None
+    assert encoding.field_names() == []
+    with pytest.raises(ValueError, match="coordinates are external"):
+        encoding.reference_coordinates(geometry)
+    assert Acquisition.from_fs(payload).to_fs() == payload
+
+
 def test_per_point_directions_serialize_on_source_atoms():
     acquisition = Acquisition(
         source_geometry=SourceGeometry.points(
