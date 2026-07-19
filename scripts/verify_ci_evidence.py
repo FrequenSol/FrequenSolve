@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 
 WORKFLOW_PATH = ".github/workflows/cicd-workflow.yml"
 REQUIRED_JOB = "Required CI"
+EXACT_TREE_EVENTS = frozenset({"push", "workflow_dispatch"})
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -26,11 +27,18 @@ def gh_api(endpoint: str) -> Any:
 
 
 def run_matches(run: dict[str, Any], commit: str) -> bool:
-    """Return whether a workflow run is successful and belongs to the commit."""
+    """Return whether a successful run tested the exact requested commit tree.
+
+    GitHub records a pull-request run's ``head_sha`` as the contributor branch
+    head even though ``actions/checkout`` tests the synthetic
+    ``refs/pull/<number>/merge`` commit.  Those runs therefore cannot prove
+    that the requested commit itself passed and must not authorize a release.
+    """
     return (
         run.get("head_sha") == commit
         and run.get("conclusion") == "success"
         and run.get("path") == WORKFLOW_PATH
+        and run.get("event") in EXACT_TREE_EVENTS
     )
 
 
@@ -47,7 +55,8 @@ def validate_run(repository: str, commit: str, run: dict[str, Any]) -> dict[str,
     if not run_matches(run, commit):
         raise ValueError(
             f"CI run {run.get('id')} is not a successful {WORKFLOW_PATH} run "
-            f"for {commit}"
+            f"for {commit} from an exact-tree event "
+            f"({', '.join(sorted(EXACT_TREE_EVENTS))}); got {run.get('event')!r}"
         )
 
     run_id = int(run["id"])

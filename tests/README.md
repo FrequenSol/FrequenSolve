@@ -127,7 +127,9 @@ pushes, and can also be started manually. It includes:
      the GitHub Actions workflows
    - Executes the deterministic non-integration test lane, with coverage on
      Python 3.10
-   - Uploads coverage to Codecov using OIDC and fails if upload fails
+   - Preserves the Python 3.10 coverage report for a small downstream Codecov
+     upload job; only that job receives OIDC permission, and upload failures
+     fail the aggregate gate
 
 2. **Optional Extras Job**:
    - Installs the visual and seismic-IO extras on Python 3.12

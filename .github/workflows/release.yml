@@ -13,14 +13,6 @@ on:
         description: Immutable release tag whose evidence and package should be published
         required: true
         type: string
-      repository:
-        description: Package index to publish to
-        required: true
-        default: testpypi
-        type: choice
-        options:
-          - testpypi
-          - pypi
 
 jobs:
   build:
@@ -28,11 +20,53 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      publication_target: ${{ steps.publication.outputs.target }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ github.event.release.tag_name || inputs.release_tag }}
+
+      - name: Derive and validate publication target
+        id: publication
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          EVENT_PRERELEASE: ${{ github.event.release.prerelease }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_metadata="$(
+            gh release view "$RELEASE_TAG" \
+              --json tagName,isDraft,isPrerelease
+          )"
+          metadata_tag="$(jq -r '.tagName // empty' <<<"$release_metadata")"
+          metadata_draft="$(jq -r '.isDraft | tostring' <<<"$release_metadata")"
+          metadata_prerelease="$(
+            jq -r '.isPrerelease | tostring' <<<"$release_metadata"
+          )"
+
+          test "$metadata_tag" = "$RELEASE_TAG"
+          test "$metadata_draft" = false
+          [[ "$metadata_prerelease" =~ ^(true|false)$ ]]
+
+          tag_sha="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          checkout_sha="$(git rev-parse 'HEAD^{commit}')"
+          test "$tag_sha" = "$checkout_sha"
+
+          if [ "$EVENT_NAME" = release ]; then
+            test "$EVENT_TAG" = "$metadata_tag"
+            test "$EVENT_PRERELEASE" = "$metadata_prerelease"
+          fi
+
+          publication_target="$(
+            python scripts/plan_release_tags.py publication-target \
+              --tag "$metadata_tag" \
+              --prerelease "$metadata_prerelease"
+          )"
+          echo "Publishing ${metadata_tag} only to ${publication_target}."
+          echo "target=${publication_target}" >> "$GITHUB_OUTPUT"
 
       - name: Require exact-SHA CI and solver evidence
         env:
@@ -84,11 +118,16 @@ jobs:
 
       - name: Verify release version
         id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           version="$(python -c 'import versioneer; print(versioneer.get_version())')"
           echo "Building FrequenSolve ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          python scripts/validate_release_version.py --version "${version}"
+          python scripts/validate_release_version.py \
+            --version "${version}" \
+            --ref-type tag \
+            --ref-name "$RELEASE_TAG"
 
       - name: Build distributions
         run: python -m build
@@ -117,9 +156,7 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     needs: build
-    if: |
-      (github.event_name == 'release' && github.event.release.prerelease) ||
-      (github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi')
+    if: needs.build.outputs.publication_target == 'testpypi'
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:
@@ -141,9 +178,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: build
-    if: |
-      (github.event_name == 'release' && !github.event.release.prerelease) ||
-      (github.event_name == 'workflow_dispatch' && inputs.repository == 'pypi')
+    if: needs.build.outputs.publication_target == 'pypi'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

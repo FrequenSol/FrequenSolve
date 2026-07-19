@@ -105,12 +105,15 @@ def test_ci_evidence_requires_exact_sha_workflow_and_stable_job():
         "head_sha": COMMIT,
         "conclusion": "success",
         "path": ".github/workflows/cicd-workflow.yml",
+        "event": "push",
     }
     jobs = [{"name": "Required CI", "conclusion": "success"}]
 
     assert run_matches(run, COMMIT)
     assert has_required_job(jobs)
     assert not run_matches({**run, "head_sha": "b" * 40}, COMMIT)
+    assert not run_matches({**run, "event": "pull_request"}, COMMIT)
+    assert run_matches({**run, "event": "workflow_dispatch"}, COMMIT)
     assert not has_required_job([{"name": "unit-test", "conclusion": "success"}])
 
 

@@ -13,6 +13,7 @@ FINAL_VERSION_PATTERN = (
     rf"{VERSION_COMPONENT}\.{VERSION_COMPONENT}\.{VERSION_COMPONENT}"
 )
 FINAL_VERSION_RE = re.compile(rf"^{FINAL_VERSION_PATTERN}$")
+FINAL_TAG_RE = re.compile(rf"^v(?P<version>{FINAL_VERSION_PATTERN})$")
 RC_TAG_RE = re.compile(
     rf"^v(?P<version>{FINAL_VERSION_PATTERN})rc(?P<number>[1-9][0-9]*)$"
 )
@@ -53,6 +54,27 @@ def final_tag_from_release_candidate(tag: str) -> str:
     return f"v{match.group('version')}"
 
 
+def publication_target(tag: str, *, is_prerelease: bool) -> str:
+    """Return the only package index allowed by canonical release metadata."""
+    if RC_TAG_RE.fullmatch(tag):
+        if not is_prerelease:
+            raise ValueError(
+                "release candidate tags must be published as GitHub prereleases"
+            )
+        return "testpypi"
+
+    if FINAL_TAG_RE.fullmatch(tag):
+        if is_prerelease:
+            raise ValueError(
+                "final release tags must not be published as GitHub prereleases"
+            )
+        return "pypi"
+
+    raise ValueError(
+        "release tag must be canonical ASCII vX.Y.Z or vX.Y.ZrcN with N >= 1"
+    )
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -73,6 +95,18 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     final.add_argument("--rc-tag", required=True)
 
+    publication = subparsers.add_parser(
+        "publication-target",
+        help="Derive the allowed package index from tag and release metadata.",
+    )
+    publication.add_argument("--tag", required=True)
+    publication.add_argument(
+        "--prerelease",
+        required=True,
+        choices=("true", "false"),
+        help="GitHub release prerelease state.",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -84,6 +118,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "final-from-rc":
             print(final_tag_from_release_candidate(args.rc_tag))
+            return 0
+        if args.command == "publication-target":
+            print(
+                publication_target(
+                    args.tag,
+                    is_prerelease=args.prerelease == "true",
+                )
+            )
             return 0
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

@@ -30,7 +30,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
@@ -63,8 +62,30 @@ jobs:
       if: matrix.python-version == '3.10'
       run: make test
 
-    - name: Upload coverage reports to Codecov
+    - name: Preserve coverage report for the OIDC upload job
       if: matrix.python-version == '3.10'
+      uses: actions/upload-artifact@v7
+      with:
+        name: coverage-report
+        path: coverage.xml
+        if-no-files-found: error
+        retention-days: 7
+
+  coverage-upload:
+    name: Upload coverage to Codecov
+    needs: unit-test
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+    - name: Download coverage report
+      uses: actions/download-artifact@v7
+      with:
+        name: coverage-report
+
+    - name: Upload coverage report to Codecov
       uses: codecov/codecov-action@v6
       with:
         use_oidc: true
@@ -296,6 +317,7 @@ jobs:
     if: always()
     needs:
       - unit-test
+      - coverage-upload
       - optional-extras
       - docs
       - build-package
@@ -305,6 +327,7 @@ jobs:
     - name: Require every PR-safe CI lane
       env:
         UNIT_TEST_RESULT: ${{ needs.unit-test.result }}
+        COVERAGE_UPLOAD_RESULT: ${{ needs.coverage-upload.result }}
         OPTIONAL_EXTRAS_RESULT: ${{ needs.optional-extras.result }}
         DOCS_RESULT: ${{ needs.docs.result }}
         BUILD_PACKAGE_RESULT: ${{ needs.build-package.result }}
@@ -313,6 +336,7 @@ jobs:
         set -euo pipefail
         for result in \
           "$UNIT_TEST_RESULT" \
+          "$COVERAGE_UPLOAD_RESULT" \
           "$OPTIONAL_EXTRAS_RESULT" \
           "$DOCS_RESULT" \
           "$BUILD_PACKAGE_RESULT" \

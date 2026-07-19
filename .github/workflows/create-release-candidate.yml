@@ -26,6 +26,10 @@ permissions:
   contents: write
   actions: read
 
+concurrency:
+  group: release-v${{ inputs.version }}
+  cancel-in-progress: false
+
 jobs:
   prepare-evidence:
     name: Resolve source and require exact-SHA CI
@@ -249,17 +253,98 @@ jobs:
             [ -z "$existing_tag" ] && continue
             args+=(--existing-tag "$existing_tag")
           done < <(git tag -l "v${VERSION}rc*")
-          tag_name="$(python scripts/plan_release_tags.py "${args[@]}")"
+          next_tag="$(python scripts/plan_release_tags.py "${args[@]}")"
 
-          if git rev-parse --verify --quiet "refs/tags/${tag_name}" >/dev/null; then
-            echo "Tag ${tag_name} already exists." >&2
+          final_tag="v${VERSION}"
+          if git rev-parse --verify --quiet "refs/tags/${final_tag}" >/dev/null; then
+            echo "Final tag ${final_tag} already exists; refusing another candidate." >&2
             exit 1
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$tag_name" "$TARGET_SHA" -m "Create ${tag_name}"
-          git push origin "refs/tags/${tag_name}"
+          release_inventory="$(
+            gh release list \
+              --limit 1000 \
+              --json tagName,isDraft,isPrerelease
+          )"
+          if jq -e --arg tag "$final_tag" \
+            'any(.[]; .tagName == $tag)' <<<"$release_inventory" >/dev/null; then
+            echo "Final release ${final_tag} already exists; refusing another candidate." >&2
+            exit 1
+          fi
+
+          next_number="${next_tag##*rc}"
+          latest_tag=""
+          if [ "$next_number" -gt 1 ]; then
+            latest_tag="v${VERSION}rc$((next_number - 1))"
+          fi
+
+          tag_name="$next_tag"
+          if [ -n "$latest_tag" ]; then
+            latest_sha="$(git rev-parse "refs/tags/${latest_tag}^{commit}")"
+            latest_release="$(
+              jq -c --arg tag "$latest_tag" '
+                [.[] | select(.tagName == $tag)] |
+                if length > 1 then
+                  error("duplicate GitHub releases for tag")
+                else
+                  .[0] // empty
+                end
+              ' <<<"$release_inventory"
+            )"
+
+            if [ -z "$latest_release" ]; then
+              if [ "$latest_sha" != "$TARGET_SHA" ]; then
+                echo "Unreleased tag ${latest_tag} points to ${latest_sha}, not ${TARGET_SHA}." >&2
+                exit 1
+              fi
+              tag_name="$latest_tag"
+              echo "Resuming orphaned tag ${tag_name} at ${TARGET_SHA}."
+            else
+              latest_prerelease="$(jq -r '.isPrerelease | tostring' <<<"$latest_release")"
+              latest_draft="$(jq -r '.isDraft | tostring' <<<"$latest_release")"
+              if [ "$latest_prerelease" != true ]; then
+                echo "Existing ${latest_tag} is not a GitHub prerelease." >&2
+                exit 1
+              fi
+
+              latest_assets="$(gh release view "$latest_tag" --json assets)"
+              has_release_evidence="$(
+                jq -r 'any(.assets[]?; .name == "release-evidence.json")' \
+                  <<<"$latest_assets"
+              )"
+              has_heavy_archive="$(
+                jq -r 'any(.assets[]?; .name == "frequensolve-test-evidence.tar.gz")' \
+                  <<<"$latest_assets"
+              )"
+              latest_complete=false
+              if [ "$latest_draft" = false ] && \
+                 [ "$has_release_evidence" = true ] && \
+                 [ "$has_heavy_archive" = true ]; then
+                latest_complete=true
+              fi
+
+              if [ "$latest_sha" = "$TARGET_SHA" ]; then
+                tag_name="$latest_tag"
+                echo "Reusing ${tag_name}; it already targets ${TARGET_SHA}."
+              elif [ "$latest_complete" != true ]; then
+                echo "Incomplete ${latest_tag} points to ${latest_sha}, not ${TARGET_SHA}." >&2
+                exit 1
+              fi
+            fi
+          fi
+
+          if git rev-parse --verify --quiet "refs/tags/${tag_name}" >/dev/null; then
+            existing_sha="$(git rev-parse "refs/tags/${tag_name}^{commit}")"
+            if [ "$existing_sha" != "$TARGET_SHA" ]; then
+              echo "Tag ${tag_name} points to ${existing_sha}, not ${TARGET_SHA}." >&2
+              exit 1
+            fi
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag_name" "$TARGET_SHA" -m "Create ${tag_name}"
+            git push origin "refs/tags/${tag_name}"
+          fi
 
           ci_run_url="$(jq -r '.ciRunUrl' release-evidence.json)"
           docker_run_id="$(jq -r '.dockerCallerRunId' release-evidence.json)"
@@ -280,14 +365,76 @@ jobs:
             fi
           } > release-notes.md
 
-          gh release create \
-            "$tag_name" \
-            release-evidence.json \
-            frequensolve-test-evidence.tar.gz \
+          selected_release="$(
+            gh release list \
+              --limit 1000 \
+              --json tagName,isDraft,isPrerelease |
+              jq -c --arg tag "$tag_name" '
+                [.[] | select(.tagName == $tag)] |
+                if length > 1 then
+                  error("duplicate GitHub releases for tag")
+                else
+                  .[0] // empty
+                end
+              '
+          )"
+          if [ -z "$selected_release" ]; then
+            gh release create "$tag_name" \
+              --verify-tag \
+              --target "$TARGET_SHA" \
+              --title "$tag_name" \
+              --notes-file release-notes.md \
+              --draft \
+              --prerelease \
+              --latest=false
+          else
+            selected_prerelease="$(
+              jq -r '.isPrerelease | tostring' <<<"$selected_release"
+            )"
+            if [ "$selected_prerelease" != true ]; then
+              echo "Existing ${tag_name} is not a GitHub prerelease." >&2
+              exit 1
+            fi
+          fi
+
+          selected_assets="$(gh release view "$tag_name" --json assets)"
+          has_release_evidence="$(
+            jq -r 'any(.assets[]?; .name == "release-evidence.json")' \
+              <<<"$selected_assets"
+          )"
+          has_heavy_archive="$(
+            jq -r 'any(.assets[]?; .name == "frequensolve-test-evidence.tar.gz")' \
+              <<<"$selected_assets"
+          )"
+          if [ "$has_release_evidence" != true ] || \
+             [ "$has_heavy_archive" != true ]; then
+            gh release upload "$tag_name" \
+              release-evidence.json \
+              frequensolve-test-evidence.tar.gz \
+              --clobber
+          fi
+
+          selected_assets="$(gh release view "$tag_name" --json assets)"
+          jq -e '
+            any(.assets[]?; .name == "release-evidence.json") and
+            any(.assets[]?; .name == "frequensolve-test-evidence.tar.gz")
+          ' <<<"$selected_assets" >/dev/null
+
+          gh release edit "$tag_name" \
+            --verify-tag \
             --target "$TARGET_SHA" \
             --title "$tag_name" \
             --notes-file release-notes.md \
-            --prerelease
+            --draft=false \
+            --prerelease=true \
+            --latest=false
+
+          published_release="$(
+            gh release view "$tag_name" --json tagName,isDraft,isPrerelease
+          )"
+          test "$(jq -r '.tagName' <<<"$published_release")" = "$tag_name"
+          test "$(jq -r '.isDraft | tostring' <<<"$published_release")" = false
+          test "$(jq -r '.isPrerelease | tostring' <<<"$published_release")" = true
 
           {
             echo "### Created release candidate"
