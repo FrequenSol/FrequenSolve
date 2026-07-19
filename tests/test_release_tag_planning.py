@@ -99,3 +99,51 @@ def test_next_release_candidate_does_not_count_noncanonical_tags() -> None:
         )
         == "v0.2.0rc2"
     )
+
+
+@pytest.mark.parametrize(
+    ("tag", "is_prerelease", "expected"),
+    [
+        ("v0.2.0rc1", True, "testpypi"),
+        ("v0.2.0", False, "pypi"),
+    ],
+)
+def test_publication_target_is_derived_from_tag_and_release_metadata(
+    tag: str,
+    is_prerelease: bool,
+    expected: str,
+) -> None:
+    planner = load_planner()
+
+    assert planner.publication_target(tag, is_prerelease=is_prerelease) == expected
+
+
+@pytest.mark.parametrize(
+    ("tag", "is_prerelease", "message"),
+    [
+        (
+            "v0.2.0rc1",
+            False,
+            "release candidate tags must be published as GitHub prereleases",
+        ),
+        (
+            "v0.2.0",
+            True,
+            "final release tags must not be published as GitHub prereleases",
+        ),
+        (
+            "v0.2.0-rc.1",
+            True,
+            "release tag must be canonical ASCII",
+        ),
+    ],
+)
+def test_publication_target_rejects_ambiguous_or_mismatched_metadata(
+    tag: str,
+    is_prerelease: bool,
+    message: str,
+) -> None:
+    planner = load_planner()
+
+    with pytest.raises(ValueError, match=message):
+        planner.publication_target(tag, is_prerelease=is_prerelease)

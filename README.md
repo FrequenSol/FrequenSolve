@@ -117,6 +117,17 @@ python -m pytest
 ```
 
 GitHub CI runs unit tests, docs, and package checks on normal PRs and pushes.
+It also runs a single Python 3.12 lane with the visual and seismic-IO extras,
+and installs both built distribution formats on Ubuntu and macOS. The stable
+`Required CI` job aggregates every PR-safe gate.
+
+Run the optional local visual and seismic-IO lane with:
+
+```bash
+python -m pip install -e ".[dev,parallel,visual,seismic-io]"
+make test-optional-extras
+```
+
 The downstream Docker image integration gate is intentionally opt-in because it
 spends Docker/GitHub Actions minutes. To run it, manually dispatch the `CI`
 workflow with `RUN_DOCKER_IMAGE_INTEGRATION=true`.
@@ -130,7 +141,12 @@ python -m build
 python -m twine check dist/*
 ```
 
-For releases, use PEP 440 package versions and `v`-prefixed tags. Release
+For releases, use PEP 440 package versions and `v`-prefixed tags. Creating a
+release candidate is the paid, manual release gate: it requires successful
+`Required CI` evidence for the exact source SHA and calls the pinned
+FrequenSolveDockerImage solver workflow before creating any tag. The evidence
+JSON and checksum-bound heavy-test archive follow that commit through final
+promotion and publication. Release
 candidates are published to TestPyPI, and final releases are published to PyPI.
 See [RELEASING.md](RELEASING.md) for the maintainer workflow.
 

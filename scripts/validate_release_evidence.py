@@ -1,0 +1,103 @@
+"""Validate the immutable evidence attached to a FrequenSolve release."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+try:
+    from scripts.validate_heavy_test_evidence import validate_heavy_test_evidence
+except ModuleNotFoundError:  # Direct execution sets sys.path to scripts/.
+    from validate_heavy_test_evidence import validate_heavy_test_evidence
+
+
+SCHEMA = "frequensolve-release-evidence/v1"
+DOCKER_WORKFLOW_PREFIX = (
+    "FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@"
+)
+TEST_MARKER = "not cloud and not hpc and not interactive"
+TEST_STATUS = "passed"
+TEST_ARTIFACT = "frequensolve-test-evidence"
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
+    """Raise ``ValueError`` unless evidence proves the expected commit."""
+    exact_values = {
+        "schemaVersion": SCHEMA,
+        "commit": expected_commit,
+        "ciWorkflow": ".github/workflows/cicd-workflow.yml",
+        "ciRequiredJob": "Required CI",
+        "dockerTestRef": expected_commit,
+        "dockerTestCommit": expected_commit,
+        "dockerTestMarker": TEST_MARKER,
+        "dockerTestStatus": TEST_STATUS,
+        "dockerTestArtifact": TEST_ARTIFACT,
+        "sauceRef": "main",
+        "fsMumpsRef": "main",
+    }
+    mismatches = [
+        f"{name} must be {expected!r}, got {evidence.get(name)!r}"
+        for name, expected in exact_values.items()
+        if evidence.get(name) != expected
+    ]
+    docker_workflow = evidence.get("dockerWorkflow", "")
+    docker_workflow_ref = docker_workflow.removeprefix(DOCKER_WORKFLOW_PREFIX)
+    if not SHA_RE.fullmatch(docker_workflow_ref):
+        mismatches.append(
+            "dockerWorkflow must pin the DockerImage reusable workflow to a "
+            "40-character commit SHA"
+        )
+    if evidence.get("dockerWorkflowCommit") != docker_workflow_ref:
+        mismatches.append(
+            "dockerWorkflowCommit must equal the commit pinned by dockerWorkflow"
+        )
+    for name in ("sauceCommit", "fsMumpsCommit"):
+        if not SHA_RE.fullmatch(evidence.get(name, "")):
+            mismatches.append(f"{name} must be a lowercase 40-character Git SHA")
+    for name in ("ciRunId", "dockerCallerRunId"):
+        value = evidence.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            mismatches.append(f"{name} must be a positive integer")
+    if not evidence.get("ciRunUrl"):
+        mismatches.append("ciRunUrl must be non-empty")
+    if not evidence.get("dockerImageTag"):
+        mismatches.append("dockerImageTag must be non-empty")
+    archive_sha = evidence.get("dockerTestArchiveSha256", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", archive_sha):
+        mismatches.append("dockerTestArchiveSha256 must be a lowercase SHA-256")
+    heavy_evidence = evidence.get("dockerTestEvidence")
+    if not isinstance(heavy_evidence, dict):
+        mismatches.append("dockerTestEvidence must be an object")
+    else:
+        try:
+            validate_heavy_test_evidence(heavy_evidence, expected_commit)
+        except ValueError as exc:
+            mismatches.append(f"dockerTestEvidence is invalid: {exc}")
+    if mismatches:
+        raise ValueError("; ".join(mismatches))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("evidence", type=Path)
+    parser.add_argument("--commit", required=True)
+    args = parser.parse_args()
+    if not SHA_RE.fullmatch(args.commit):
+        parser.error("--commit must be a lowercase 40-character Git SHA")
+
+    try:
+        evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
+        validate_evidence(evidence, args.commit)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        parser.error(str(exc))
+
+    print(f"release evidence is valid for {args.commit}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
