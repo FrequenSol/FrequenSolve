@@ -1,0 +1,396 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-acquisition-2/schema.json",
+  "title": "FS Acquisition v2",
+  "description": "Source geometry, source encoding, and receiver acquisition configuration.",
+  "x-fs-contract": "fs-acquisition-2",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "sourceKind": {
+      "enum": [
+        "scalar",
+        "vector",
+        "tensor",
+        "monopole",
+        "dipole"
+      ]
+    },
+    "complexCoefficient": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "items": false
+        }
+      ],
+      "description": "A dimensionless real coefficient or [real, imag] pair."
+    },
+    "sourceBasis": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/sourceKind"
+        },
+        "direction": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/direction"
+        },
+        "amplitude": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+        },
+        "mechanism": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "isotropic",
+                "force",
+                "microseismic"
+              ]
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "sourceAtom": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/sourceBasis"
+        },
+        {
+          "type": "object",
+          "required": [
+            "coordinates"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "coordinates": {
+              "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+            }
+          }
+        }
+      ]
+    },
+    "inlineSourceGeometry": {
+      "type": "object",
+      "required": [
+        "_type",
+        "kind",
+        "sources"
+      ],
+      "properties": {
+        "_type": {
+          "const": "Inline"
+        },
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "integer",
+          "default": -1
+        },
+        "kind": {
+          "$ref": "#/$defs/sourceKind"
+        },
+        "defaults": {
+          "$ref": "#/$defs/sourceBasis"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sourceAtom"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "hdf5SourceGeometry": {
+      "type": "object",
+      "required": [
+        "_type",
+        "kind",
+        "file",
+        "dataset"
+      ],
+      "properties": {
+        "_type": {
+          "const": "HDF5"
+        },
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "integer",
+          "default": -1
+        },
+        "kind": {
+          "$ref": "#/$defs/sourceKind"
+        },
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "system": {
+          "type": "string"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "defaults": {
+          "$ref": "#/$defs/sourceBasis"
+        }
+      },
+      "additionalProperties": false
+    },
+    "spsSourceGeometry": {
+      "type": "object",
+      "required": [
+        "_type",
+        "kind",
+        "source_file"
+      ],
+      "properties": {
+        "_type": {
+          "const": "SPSFiles"
+        },
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "integer",
+          "default": -1
+        },
+        "kind": {
+          "$ref": "#/$defs/sourceKind"
+        },
+        "source_file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "system": {
+          "type": "string"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "defaults": {
+          "$ref": "#/$defs/sourceBasis"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceGeometry": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/inlineSourceGeometry"
+        },
+        {
+          "$ref": "#/$defs/hdf5SourceGeometry"
+        },
+        {
+          "$ref": "#/$defs/spsSourceGeometry"
+        }
+      ]
+    },
+    "namedEncodingTerm": {
+      "type": "object",
+      "required": [
+        "source",
+        "coefficient"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coefficient": {
+          "$ref": "#/$defs/complexCoefficient"
+        }
+      },
+      "additionalProperties": false
+    },
+    "namedEncodingField": {
+      "type": "object",
+      "required": [
+        "terms"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "terms": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/namedEncodingTerm"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "namedSourceEncoding": {
+      "type": "object",
+      "required": [
+        "_type",
+        "fields"
+      ],
+      "properties": {
+        "_type": {
+          "const": "Named"
+        },
+        "name": {
+          "type": "string"
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/namedEncodingField"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "denseEncodingField": {
+      "type": "object",
+      "required": [
+        "coefficients"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coefficients": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/complexCoefficient"
+          }
+        },
+        "reference_coordinates": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "jsonDenseSourceEncoding": {
+      "type": "object",
+      "required": [
+        "_type",
+        "fields"
+      ],
+      "properties": {
+        "_type": {
+          "const": "JsonDense"
+        },
+        "name": {
+          "type": "string"
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/denseEncodingField"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "hdf5DenseSourceEncoding": {
+      "type": "object",
+      "required": [
+        "_type",
+        "file",
+        "dataset"
+      ],
+      "properties": {
+        "_type": {
+          "const": "HDF5Dense"
+        },
+        "name": {
+          "type": "string"
+        },
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "field_names_dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_coordinates_dataset": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceEncoding": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/namedSourceEncoding"
+        },
+        {
+          "$ref": "#/$defs/jsonDenseSourceEncoding"
+        },
+        {
+          "$ref": "#/$defs/hdf5DenseSourceEncoding"
+        }
+      ]
+    }
+  },
+  "type": "object",
+  "required": [
+    "source_geometry"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-acquisition-2"
+    },
+    "max_batch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "write_vtk": {
+      "type": "boolean",
+      "description": "Controls writing acquisition source/receiver VTK schematics during task 1. When omitted, the task-1 runtime writes VTK only if the schematic has fewer than 1,000,000 source and receiver sample points."
+    },
+    "source_geometry": {
+      "$ref": "#/$defs/sourceGeometry"
+    },
+    "source_encoding": {
+      "$ref": "#/$defs/sourceEncoding"
+    },
+    "receiver_groups": {
+      "type": "array",
+      "items": {
+        "$ref": "../fs-acquisition-1/schema.json#/$defs/receiverGroup"
+      }
+    }
+  },
+  "additionalProperties": true
+}

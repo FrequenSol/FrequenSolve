@@ -43,7 +43,11 @@ def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) ->
             hint="Create one FrequencyDomainJob per plotted frequency.",
         )
     acquisition = getattr(ctx.simulation, "acquisition", None)
-    source_count = len(getattr(acquisition, "source_groups", []) or [])
+    source_count = (
+        acquisition.source_field_count()
+        if acquisition is not None and hasattr(acquisition, "source_field_count")
+        else 0
+    )
     for index, output in enumerate(outputs.paraview):
         _validate_paraview_output(output, index, source_count, ctx)
     for index, output in enumerate(outputs.wavefields):

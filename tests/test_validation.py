@@ -101,6 +101,16 @@ def test_validation_catches_bad_source_kind(tmp_path):
         job.validate(raise_errors=True)
 
 
+def test_validation_catches_point_kind_that_differs_from_geometry(tmp_path):
+    job = _simple_job(tmp_path)
+    job.simulation.acquisition.source_geometry.sources[0].kind = "vector"
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "acquisition.source.kind.mismatch" in _codes(report)
+
+
 def test_validation_catches_wavefield_grid_outside_domain(tmp_path):
     job = _simple_job(tmp_path)
     job += WavefieldOutput(

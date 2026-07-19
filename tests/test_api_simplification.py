@@ -330,7 +330,7 @@ def test_surface_coordinate_system_helpers_export_acquisition_metadata():
     )
 
     payload = acq.to_fs()
-    assert payload["source_groups"][0]["source"]["coordinates"] == {
+    assert payload["source_geometry"]["sources"][0]["coordinates"] == {
         "value": [0.5, -0.025],
         "units": "km",
         "system": "free_surface",
@@ -437,7 +437,7 @@ def test_simulation_model_surface_helper_uses_surface_offsets_in_points(tmp_path
             "inherit_axes": True,
         },
     ]
-    assert payload["Acquisition"]["source_groups"][0]["source"]["coordinates"] == {
+    assert payload["Acquisition"]["source_geometry"]["sources"][0]["coordinates"] == {
         "value": [0.5, -0.025],
         "units": "km",
         "system": "top",
@@ -463,7 +463,7 @@ def test_solver_frame_key_is_not_exported_and_legacy_input_is_ignored():
     acq.add_receiver_group(name="surface", device=hydrophone, coords=[[0.0, 0.0]])
 
     payload = acq.to_fs()
-    assert "frame" not in payload["source_groups"][0]["source"]
+    assert "frame" not in payload["source_geometry"]["sources"][0]
     assert "frame" not in payload["receiver_groups"][0]
 
     legacy = Acquisition.from_fs(
@@ -490,7 +490,8 @@ def test_solver_frame_key_is_not_exported_and_legacy_input_is_ignored():
         }
     )
     legacy_payload = legacy.to_fs()
-    assert "frame" not in legacy_payload["source_groups"][0]["source"]
+    assert "source_groups" not in legacy_payload
+    assert "frame" not in legacy_payload["source_geometry"]["sources"][0]
     assert "frame" not in legacy_payload["receiver_groups"][0]
 
     with pytest.raises(TypeError, match="frame"):
@@ -525,7 +526,7 @@ def test_acquisition_accepts_quantity_source_and_receiver_coordinates():
     ]
 
     payload = acq.to_fs()
-    assert payload["source_groups"][0]["source"]["coordinates"] == {
+    assert payload["source_geometry"]["sources"][0]["coordinates"] == {
         "value": [0.5, 0.05],
         "units": "km",
     }
@@ -552,7 +553,7 @@ def test_source_and_receiver_coordinate_arrays_are_float64():
         coords=np.asarray([[0.1, 0.0], [0.9, 0.0]], dtype=np.float32),
     )
 
-    assert acq.source_groups[0].source.coordinates.dtype == np.dtype("float64")
+    assert acq.source_point_coords().dtype == np.dtype("float64")
     assert acq.receiver_groups[0].coordinates.coordinates.dtype == np.dtype("float64")
 
 
@@ -575,6 +576,7 @@ def test_unit_payload_mappings_roundtrip_without_method_values():
 
 def test_acquisition_accepts_array_quantity_receiver_coordinates():
     acq = Acquisition()
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.05]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
 
@@ -767,9 +769,12 @@ def test_compound_source_broadcasts_single_direction_vector():
         direction=[0.0, 1.0],
     )
 
-    source = acq.source_groups[0].source
+    payload = acq.to_fs()
 
-    assert np.asarray(source.direction).tolist() == [[0.0, 1.0], [-0.0, -1.0]]
+    assert payload["source_geometry"]["defaults"]["direction"] == [0.0, 1.0]
+    assert [
+        term["coefficient"] for term in payload["source_encoding"]["fields"][0]["terms"]
+    ] == [1.0, -1.0]
 
 
 def test_wavefield_output_uses_grid_contract():

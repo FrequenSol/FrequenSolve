@@ -12,16 +12,17 @@ def test_to_segy_converts_source_and_receiver_coordinate_units(tmp_path):
 
     simulation = {
         "Acquisition": {
-            "source_groups": [
-                {
-                    "source": {
-                        "_type": "PointSource",
+            "schema": "fs-acquisition-2",
+            "source_geometry": {
+                "_type": "Inline",
+                "kind": "scalar",
+                "sources": [
+                    {
                         "name": "point",
-                        "kind": "scalar",
                         "coordinates": {"value": [0.5, 0.05], "units": "km"},
                     }
-                }
-            ],
+                ],
+            },
             "receiver_groups": [
                 {
                     "name": "surface",
@@ -48,7 +49,7 @@ def test_to_segy_converts_source_and_receiver_coordinate_units(tmp_path):
         attrs={
             "simulation": str(simulation_path),
             "project_path": str(tmp_path),
-            "source_group": 1,
+            "source_id": 1,
             "receiver_group": "surface",
         },
     )

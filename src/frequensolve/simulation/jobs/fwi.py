@@ -608,9 +608,9 @@ class DataSpace:
                 no components.
         """
 
-        sources = tuple(range(1, len(simulation.acquisition.source_groups) + 1))
+        sources = tuple(simulation.acquisition.source_field_ids())
         if not sources:
-            raise ValueError("FWI DataSpace requires at least one source group")
+            raise ValueError("FWI DataSpace requires at least one source field")
 
         segments = []
         for group in simulation.acquisition.receiver_groups:
