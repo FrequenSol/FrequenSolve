@@ -1171,8 +1171,8 @@ class JobArtifactMixin:
             for component in group.device.components:
                 components.append(f"{group.name}:{component.name}")
 
-        for isrc, _sgroup in enumerate(sim.acquisition.source_groups):
-            sources.append(f"{isrc + 1}")
+        for source_id in sim.acquisition.source_field_ids():
+            sources.append(str(source_id))
 
         return TraceOutputSpec(
             path=self._result_path / self.outputs.traces.path,
@@ -1225,10 +1225,8 @@ class JobArtifactMixin:
                 [str(source) for source in out.sources]
                 if out.sources is not None
                 else [
-                    f"{isrc + 1}"
-                    for isrc, _sgroup in enumerate(
-                        self.simulation.acquisition.source_groups
-                    )
+                    str(source_id)
+                    for source_id in self.simulation.acquisition.source_field_ids()
                 ]
             )
             groups.append(out.name)
@@ -1308,10 +1306,8 @@ class JobArtifactMixin:
                 [str(source) for source in out.sources]
                 if out.sources is not None
                 else [
-                    f"{isrc + 1}"
-                    for isrc, _source_group in enumerate(
-                        self.simulation.acquisition.source_groups
-                    )
+                    str(source_id)
+                    for source_id in self.simulation.acquisition.source_field_ids()
                 ]
             )
             wave_out[out.name] = {

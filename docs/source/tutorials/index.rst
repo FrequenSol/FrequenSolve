@@ -229,7 +229,7 @@ Survey Tutorials
      - ``visual`` plus a configured site.
      - :download:`02_das.ipynb <../../../examples/tutorials/05_surveys/02_das.ipynb>`
    * - Sources
-     - Scalar point sources, compound sources, and :term:`source batching`.
+     - Physical point geometry, named distributed :term:`source fields <source field>`, and :term:`source batching`.
      - ``visual`` plus a configured site.
      - :download:`03_sources.ipynb <../../../examples/tutorials/05_surveys/03_sources.ipynb>`
    * - Sparse Surveys

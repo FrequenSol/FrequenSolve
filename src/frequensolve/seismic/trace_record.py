@@ -14,6 +14,7 @@ import numpy as np
 from xarray import DataArray, register_dataarray_accessor
 
 from frequensolve._optional import optional_dependency_error
+from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverGroup, coordinate_array_metadata
 from frequensolve.seismic.sources import SourceGroup
 from frequensolve.units import unit_expression
@@ -28,8 +29,9 @@ __all__ = [
 def _source_group(trace: DataArray) -> SourceGroup:
     with open(trace.attrs["simulation"], "r") as f:
         sim = json.load(f)
-    source_index = int(trace.attrs["source_group"])
-    return SourceGroup.from_fs(sim["Acquisition"]["source_groups"][source_index - 1])
+    source_index = int(trace.attrs.get("source_id", trace.attrs.get("source_group", 1)))
+    acquisition = Acquisition.from_fs(sim["Acquisition"])
+    return acquisition.source(source_index)
 
 
 def _receiver_group(trace: DataArray) -> ReceiverGroup:

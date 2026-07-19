@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-coordinate-system-1/schema.json",
+  "title": "FS Coordinate System v1",
+  "description": "Coordinate systems and coordinate-aware values.",
+  "x-fs-contract": "fs-coordinate-system-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "axisName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "coordinateAxis": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/axisName"
+        },
+        "direction": {
+          "enum": [
+            "x",
+            "y",
+            "z"
+          ],
+          "description": "Inherited coordinate direction used by this declared axis."
+        },
+        "positive": {
+          "enum": [
+            "up",
+            "down"
+          ],
+          "description": "Physical orientation for surface z-direction axes."
+        },
+        "origin": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity",
+          "description": "Coordinate origin along this direction. For a surface z-direction axis, this is measured relative to the surface."
+        }
+      },
+      "additionalProperties": true
+    },
+    "axisAlignment": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "string",
+          "default": "east"
+        },
+        "y": {
+          "type": "string",
+          "default": "north"
+        },
+        "z": {
+          "type": "string",
+          "default": "down"
+        }
+      },
+      "additionalProperties": false
+    },
+    "coordinateSystem": {
+      "type": "object",
+      "anyOf": [
+        {
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "required": [
+            "_type"
+          ]
+        }
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "cartesian",
+            "cylindrical",
+            "spherical",
+            "geographic",
+            "surface"
+          ]
+        },
+        "_type": {
+          "enum": [
+            "CartesianCoordinateSystem",
+            "CylindricalCoordinateSystem",
+            "SphericalCoordinateSystem",
+            "GeographicCoordinateSystem",
+            "SurfaceCoordinateSystem"
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/coordinateValue"
+        },
+        "axis_alignment": {
+          "$ref": "#/$defs/axisAlignment"
+        },
+        "surface": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ],
+          "description": "Named or 1-based model surface used by surface-relative coordinate systems."
+        },
+        "normal": {
+          "enum": [
+            "up",
+            "down"
+          ],
+          "deprecated": true,
+          "description": "Deprecated top-level spelling for old surface coordinate systems. Use per-axis positive on the surface z direction."
+        },
+        "axes": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/axisName"
+              },
+              "minItems": 2,
+              "maxItems": 3
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/coordinateAxis"
+              },
+              "minItems": 1,
+              "maxItems": 3
+            }
+          ],
+          "description": "Declared coordinate dimension names. Object axes map names to inherited x/y/z directions and may set per-axis origin/orientation."
+        },
+        "inherit_axes": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, axes not explicitly overridden keep their default inherited names."
+        },
+        "earth_radius": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+        },
+        "ndim": {
+          "type": "integer",
+          "enum": [
+            2,
+            3
+          ],
+          "default": 3
+        },
+        "fixed_axis": {
+          "type": "string",
+          "description": "Axis omitted by a reduced-dimension non-surface coordinate system. This is resolved using built-in axes before any active-axis axes override is applied."
+        },
+        "fixed_value": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+        }
+      },
+      "additionalProperties": true
+    },
+    "coordinateValue": {
+      "oneOf": [
+        {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "system": {
+              "type": "string",
+              "default": "global"
+            },
+            "value": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "direction": {
+      "oneOf": [
+        {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "direction": {
+              "$ref": "#/$defs/axisName"
+            },
+            "value": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "direction"
+              ]
+            },
+            {
+              "required": [
+                "value"
+              ]
+            }
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "fs-coordinate-system-1"
+    },
+    "global_coordinate_system": {
+      "$ref": "#/$defs/coordinateSystem"
+    },
+    "coordinate_systems": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/coordinateSystem"
+      }
+    }
+  },
+  "additionalProperties": true
+}

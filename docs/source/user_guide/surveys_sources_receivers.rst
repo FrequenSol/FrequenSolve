@@ -1,7 +1,7 @@
 Surveys, Sources, and Receivers
 ===============================
 
-Acquisition contains :term:`source groups <source group>`,
+Acquisition contains a :term:`source geometry`, optional :term:`source encoding`,
 :term:`receiver groups <receiver group>`, and optional :term:`sparse survey`
 layouts. Coordinates are physical global coordinates by default, or
 ``CoordinateValue`` objects when a named coordinate system is used.
@@ -13,7 +13,7 @@ Related tutorials:
 - :download:`DAS <../../../examples/tutorials/05_surveys/02_das.ipynb>`
   for fiber-style strain receivers.
 - :download:`Sources <../../../examples/tutorials/05_surveys/03_sources.ipynb>`
-  for scalar, vector, moment, and compound sources.
+  for physical point catalogs and sparse distributed source fields.
 - :download:`Sparse surveys <../../../examples/tutorials/05_surveys/04_sparse_surveys.ipynb>`
   for offset windows and explicit source-receiver layouts.
 
@@ -77,19 +77,38 @@ numbers or :term:`Pint` quantities with explicit units.
 Survey Sources
 --------------
 
-Point source kinds include ``scalar``, ``vector``, ``moment``, ``monopole``,
-and ``dipole``. ``CompoundSource`` combines multiple points and weights into
-one :term:`source group`. When a simulation has multiple compatible sources,
-the solver chooses efficient internal :term:`source batches <source batching>`
-automatically:
+Point source kinds include ``scalar``, ``vector``, ``tensor``, ``monopole``,
+and ``dipole``. ``SourceGeometry`` describes physical source points. When
+``source_encoding`` is omitted, each point is one identity :term:`source field`.
+``SourceEncoding.named`` can instead combine named points into sparse fields:
 
 .. code-block:: python
 
-   acq = fs.Acquisition()
-   acq.add_source_group(
+   geometry = fs.SourceGeometry.points(
        kind="scalar",
-       coords=[[0.25, 0.05], [0.5, 0.05], [0.75, 0.05]],
+       coords=[[0.25, 0.05], [0.75, 0.05], [0.45, 0.08], [0.55, 0.08]],
+       names=["left", "right", "pair_pos", "pair_neg"],
    )
+   encoding = fs.SourceEncoding.named({
+       "left": {"left": 1.0},
+       "right": {"right": 1.0},
+       "difference": {"pair_pos": 1.0, "pair_neg": -1.0},
+   })
+   acq = fs.Acquisition(
+       source_geometry=geometry,
+       source_encoding=encoding,
+   )
+
+Use ``acq.source_point_count()`` for physical geometry size and
+``acq.source_field_count()`` for the number of solver RHS fields. The old
+``add_source_group``, ``add_compound_source``, and ``source_groups`` APIs are
+deprecated adapters: they still construct or expose this model but are never
+serialized. The computed ``source_groups`` compatibility view is read-only;
+use ``set_sources()`` and ``set_source_encoding()`` to update an acquisition.
+Legacy untagged and ``fs-acquisition-1`` payloads remain accepted on input and
+are always re-exported as ``fs-acquisition-2``.
+The solver chooses efficient internal :term:`source batches <source batching>`
+automatically.
 
 Sparse Survey Layouts
 ---------------------
@@ -108,7 +127,7 @@ rules such as offset windows:
    )
 
    acq = fs.Acquisition()
-   acq.add_source_group(kind="scalar", coords=sources)
+   acq.add_sources(kind="scalar", coords=sources)
    acq.add_sparse_receiver_group(
        "near_offsets",
        node,

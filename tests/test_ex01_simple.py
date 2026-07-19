@@ -647,7 +647,7 @@ def test_acquisition_setup(simulation):
     simulation += acq
 
     # Test acquisition setup
-    assert len(acq.source_groups) == 1
+    assert acq.source_field_count() == 1
     assert len(acq.receiver_groups) == 1
     assert acq.receiver_groups[0].name == "surface_hydrophones"
     assert len(acq.receiver_groups[0].device.components) == 1
@@ -655,7 +655,7 @@ def test_acquisition_setup(simulation):
     assert acq.receiver_groups[0].device.components[0].direction is None
 
     # Test source and receiver locations
-    source_coords = acq.source_groups[0].get_coordinates()
+    source_coords = acq.source_point_coords()
     receiver_coords = acq.receiver_groups[0].coordinates.get()
     assert source_coords.shape == (1, 2)
     assert receiver_coords.shape == (1001, 2)

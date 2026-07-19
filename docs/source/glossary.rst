@@ -282,8 +282,21 @@ standard capitalization.
    source grading
       Mesh refinement behavior near sources.
 
+   source geometry
+      Physical source-point catalog exported in ``fs-acquisition-2``. Geometry
+      is distinct from the right-hand-side fields derived from those points.
+
+   source encoding
+      Optional mapping from physical source points to solver source fields.
+      Named encodings are sparse; JSON and HDF5 dense encodings store matrices.
+
+   source field
+      One addressable solver right-hand side. Without explicit source encoding,
+      each physical source point is one identity field.
+
    source group
-      Named collection of sources used to organize an acquisition layout.
+      Deprecated pre-``fs-acquisition-2`` logical-source representation. Use
+      source geometry and source encoding for current exports.
 
    sparse survey
       Acquisition layout that selects a subset of source-receiver-component

@@ -15,7 +15,6 @@ from frequensolve.seismic.receivers import (
     CoordsGrid,
     ReceiverGroup,
 )
-from frequensolve.seismic.sources import SourceGroup
 from frequensolve.util.physics import canonical_dimension, canonical_physics
 
 from .geometry import (
@@ -203,61 +202,196 @@ def _validate_acquisition(acquisition: Any, ctx: _ValidationContext) -> None:
         )
         return
 
-    source_groups = list(getattr(acquisition, "source_groups", []) or [])
+    source_geometry = getattr(acquisition, "source_geometry", None)
     receiver_groups = list(getattr(acquisition, "receiver_groups", []) or [])
-    if not source_groups:
+    if source_geometry is None:
         ctx.report.warning(
             "acquisition.sources.missing",
-            "Acquisition has no source groups.",
-            path="acquisition.source_groups",
+            "Acquisition has no source geometry.",
+            path="acquisition.source_geometry",
         )
-    for index, group in enumerate(source_groups):
-        _validate_source_group(group, index, ctx)
+    else:
+        _validate_source_geometry(source_geometry, ctx)
+        _validate_source_encoding(
+            getattr(acquisition, "source_encoding", None),
+            source_geometry,
+            ctx,
+        )
     for index, group in enumerate(receiver_groups):
         _validate_receiver_group(group, index, ctx)
 
 
-def _validate_source_group(
-    group: SourceGroup,
-    index: int,
+def _validate_source_geometry(
+    geometry: Any,
     ctx: _ValidationContext,
 ) -> None:
-    path = f"acquisition.source_groups[{index}]"
-    source = getattr(group, "source", None)
-    if source is None:
+    path = "acquisition.source_geometry"
+    kind = getattr(geometry, "kind", None)
+    if kind is None:
         ctx.report.error(
-            "acquisition.source.missing",
-            "Source group has no source.",
-            path=path,
+            "acquisition.source.kind.missing",
+            "Source geometry requires a source kind.",
+            path=f"{path}.kind",
         )
+    else:
+        _validate_source_kind(kind, f"{path}.kind", ctx.report)
+
+    _validate_domain_id(getattr(geometry, "domain", None), f"{path}.domain", ctx)
+
+    if getattr(geometry, "units", None) is not None:
+        _validate_units(
+            geometry.units,
+            f"{path}.units",
+            ctx.report,
+            code="acquisition.source_geometry.units.invalid",
+        )
+    if getattr(geometry, "system", None) is not None:
+        _validate_system_reference(geometry.system, f"{path}.system", ctx)
+
+    defaults = getattr(geometry, "defaults", {}) or {}
+    _validate_direction(defaults.get("direction"), f"{path}.defaults.direction", ctx)
+
+    if getattr(geometry, "geometry_type", None) != "Inline":
         return
 
+    sources = list(getattr(geometry, "sources", []) or [])
+    if not sources:
+        ctx.report.error(
+            "acquisition.sources.empty",
+            "Inline source geometry requires at least one source point.",
+            path=f"{path}.sources",
+        )
+        return
+    names = (
+        geometry.point_names()
+        if hasattr(geometry, "point_names")
+        else [source.name for source in sources if getattr(source, "name", None)]
+    )
+    if len(names) != len(set(names)):
+        ctx.report.error(
+            "acquisition.sources.names.duplicate",
+            "Inline source names must be unique.",
+            path=f"{path}.sources",
+        )
+    for index, source in enumerate(sources):
+        _validate_source_point(
+            source,
+            f"{path}.sources[{index}]",
+            ctx,
+            geometry_kind=kind,
+        )
+
+
+def _validate_source_point(
+    source: Any,
+    path: str,
+    ctx: _ValidationContext,
+    *,
+    geometry_kind: Any,
+) -> None:
     kind = getattr(source, "kind", None)
     if kind is not None:
-        _validate_source_kind(kind, f"{path}.source.kind", ctx.report)
-
-    domain = getattr(source, "domain", None)
-    _validate_domain_id(domain, f"{path}.source.domain", ctx)
+        _validate_source_kind(kind, f"{path}.kind", ctx.report)
+        if str(kind).strip().lower() != str(geometry_kind).strip().lower():
+            ctx.report.error(
+                "acquisition.source.kind.mismatch",
+                f"Point source kind {kind!r} does not match source geometry "
+                f"kind {geometry_kind!r}.",
+                path=f"{path}.kind",
+            )
 
     coordinates = getattr(source, "coordinates", None)
     if coordinates is None:
+        ctx.report.error(
+            "acquisition.source.coordinates.missing",
+            "Source points require coordinates.",
+            path=f"{path}.coordinates",
+        )
         return
 
     units, system = _coordinate_units_and_system(coordinates)
-    _validate_coordinate_value_metadata(coordinates, f"{path}.source.coordinates", ctx)
+    _validate_coordinate_value_metadata(coordinates, f"{path}.coordinates", ctx)
     values = _coordinates_to_array(coordinates)
     _validate_points(
         values,
-        path=f"{path}.source.coordinates",
+        path=f"{path}.coordinates",
         ctx=ctx,
         units=units or _default_length_units(ctx),
         system=system,
     )
     _validate_direction(
         getattr(source, "direction", None),
-        f"{path}.source.direction",
+        f"{path}.direction",
         ctx,
     )
+
+
+def _validate_source_encoding(
+    encoding: Any,
+    geometry: Any,
+    ctx: _ValidationContext,
+) -> None:
+    if encoding is None:
+        return
+    path = "acquisition.source_encoding"
+    encoding_type = getattr(encoding, "encoding_type", None)
+    if encoding_type not in {"Named", "JsonDense", "HDF5Dense"}:
+        ctx.report.error(
+            "acquisition.source_encoding.type.unsupported",
+            f"Unsupported source encoding type {encoding_type!r}.",
+            path=path,
+        )
+        return
+
+    point_names = (
+        set(geometry.point_names()) if hasattr(geometry, "point_names") else set()
+    )
+    point_count = getattr(geometry, "point_count", None)
+    fields = list(getattr(encoding, "fields", []) or [])
+    if encoding_type == "HDF5Dense":
+        return
+    if not fields:
+        ctx.report.error(
+            "acquisition.source_encoding.fields.empty",
+            "Explicit source encoding requires at least one field.",
+            path=f"{path}.fields",
+        )
+        return
+    if (
+        encoding_type == "Named"
+        and getattr(geometry, "geometry_type", None) == "Inline"
+    ):
+        unnamed = [
+            index
+            for index, source in enumerate(getattr(geometry, "sources", []) or [])
+            if getattr(source, "name", None) is None
+        ]
+        if unnamed:
+            ctx.report.error(
+                "acquisition.source_encoding.names.required",
+                "Named source encoding requires explicit names for every inline "
+                f"physical source point; missing at indices {unnamed}.",
+                path="acquisition.source_geometry.sources",
+            )
+    for index, field_obj in enumerate(fields):
+        field_path = f"{path}.fields[{index}]"
+        if encoding_type == "Named":
+            for source_name in getattr(field_obj, "terms", {}) or {}:
+                if point_names and source_name not in point_names:
+                    ctx.report.error(
+                        "acquisition.source_encoding.source.unknown",
+                        f"Source encoding references unknown source {source_name!r}.",
+                        path=f"{field_path}.terms",
+                    )
+        elif point_count is not None:
+            coefficients = list(getattr(field_obj, "coefficients", []) or [])
+            if len(coefficients) != point_count:
+                ctx.report.error(
+                    "acquisition.source_encoding.coefficients.length",
+                    "Dense source encoding coefficient count must match the "
+                    "number of physical source points.",
+                    path=f"{field_path}.coefficients",
+                )
 
 
 def _validate_source_kind(kind: Any, path: str, report: ValidationReport) -> None:
