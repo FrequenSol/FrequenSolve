@@ -8,6 +8,8 @@ import pytest
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
+from frequensolve import JobLayout
+
 GENERATOR = Path(__file__).parents[1] / "scripts" / "generate_acquisition_v2_probe.py"
 CONTRACT_ROOT = (
     Path(__file__).parent / "contracts" / "sauce-a54bdda" / "trunk" / "contracts"
@@ -65,10 +67,11 @@ def test_probe_passes_local_solver_init_and_sizing_unchanged(tmp_path):
     project_root = (tmp_path / "project").resolve()
     job_file = _build_probe(project_root)
     job_payload = json.loads(job_file.read_text())
-    simulation_file = project_root / job_payload["simulation"]
-    simulation_payload = json.loads(simulation_file.read_text())
-    mesh_file = project_root / simulation_payload["Mesh"]["file"]
-    sizing_file = job_file.parent / "FS_sizing.json"
+    layout = JobLayout.from_payload(job_payload, job_file=job_file).with_project(
+        project_root
+    )
+    mesh_file = layout.simulation_dir / "mesh.gmp"
+    sizing_file = layout.job_dir / "FS_sizing.json"
 
     command = [
         str(executable_path),

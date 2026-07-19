@@ -138,9 +138,12 @@ See Also
 ex01_simple.ipynb : The example notebook that this test suite verifies
 """
 
+import json
 import os
+import shutil
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -386,6 +389,49 @@ def setup_complete_simulation(simulation):
     simulation += solver
 
 
+def _time_domain_failure_diagnostics(job, result=None, error=None, stdout=""):
+    """Preserve local solver diagnostics in the heavy-test artifact directory."""
+
+    diagnostic_dir = Path(__file__).parent / "output" / "ex01_time_domain_failure"
+    try:
+        if diagnostic_dir.exists():
+            shutil.rmtree(diagnostic_dir)
+        diagnostic_dir.mkdir(parents=True)
+
+        def capture(method):
+            try:
+                return method()
+            except Exception as exc:  # pragma: no cover - diagnostic fallback
+                return {"diagnostic_error": repr(exc)}
+
+        payload = {
+            "exception": (
+                {"type": type(error).__name__, "message": str(error)}
+                if error is not None
+                else None
+            ),
+            "status": vars(result.status) if result is not None else None,
+            "run_state": capture(job.run_state),
+            "failed_tasks": capture(lambda: job.failed_tasks(include_metadata=True)),
+        }
+        (diagnostic_dir / "status.json").write_text(
+            json.dumps(payload, indent=2, default=str) + "\n"
+        )
+        (diagnostic_dir / "stdout.txt").write_text(stdout)
+
+        log_dir = Path(result.logs()) if result is not None else job._stdout_path
+        if log_dir.is_dir():
+            shutil.copytree(log_dir, diagnostic_dir / "logs")
+        if job.run_state_file.is_file():
+            shutil.copy2(job.run_state_file, diagnostic_dir / "_fs_python_run.json")
+        solver_run_dir = job.run_records_file.parent
+        if solver_run_dir.is_dir():
+            shutil.copytree(solver_run_dir, diagnostic_dir / "solver_run")
+    except Exception as exc:  # pragma: no cover - never mask the solver failure
+        return diagnostic_dir, repr(exc)
+    return diagnostic_dir, None
+
+
 def run_time_domain_simulation(project, simulation):
     """Run a time domain simulation and return the results.
 
@@ -399,7 +445,7 @@ def run_time_domain_simulation(project, simulation):
     Returns
     -------
     tuple
-        (trace_db, wavelet) containing the simulation results
+        (td_job, trace_db, wavelet) containing the executed job and results
     """
     from frequensolve.orchestrator.sites.local import LocalSite
 
@@ -412,14 +458,53 @@ def run_time_domain_simulation(project, simulation):
 
     # Capture stdout during job submission
     stdout_capture = StringIO()
-    with redirect_stdout(stdout_capture):
-        result = site.run(td_job)
+    try:
+        with redirect_stdout(stdout_capture):
+            result = site.run(td_job)
+    except Exception as exc:
+        diagnostic_dir, diagnostic_error = _time_domain_failure_diagnostics(
+            td_job, error=exc, stdout=stdout_capture.getvalue()
+        )
+        failure_message = (
+            f"time-domain solver submission failed; diagnostics={diagnostic_dir}"
+        )
+        if diagnostic_error:
+            failure_message += f"; diagnostic_error={diagnostic_error}"
+        raise RuntimeError(failure_message) from exc
+
+    if not result.successful:
+        diagnostic_dir, diagnostic_error = _time_domain_failure_diagnostics(
+            td_job, result=result, stdout=stdout_capture.getvalue()
+        )
+        failure_message = (
+            "time-domain solver run failed; "
+            f"state={result.status.state}; return_code={result.status.return_code}; "
+            f"message={result.status.message!r}; "
+            f"diagnostics={diagnostic_dir}"
+        )
+        if diagnostic_error:
+            failure_message += f"; diagnostic_error={diagnostic_error}"
+        pytest.fail(failure_message, pytrace=False)
 
     # Get results from the site
-    trace_db = result.traces(upscale=4)
+    try:
+        trace_db = result.traces(upscale=4)
+    except Exception as exc:
+        diagnostic_dir, diagnostic_error = _time_domain_failure_diagnostics(
+            td_job,
+            result=result,
+            error=exc,
+            stdout=stdout_capture.getvalue(),
+        )
+        failure_message = (
+            f"time-domain trace loading failed; diagnostics={diagnostic_dir}"
+        )
+        if diagnostic_error:
+            failure_message += f"; diagnostic_error={diagnostic_error}"
+        raise RuntimeError(failure_message) from exc
     wavelet = RickerWavelet(**TIME_DOMAIN_PARAMS["wavelet"])
 
-    return trace_db, wavelet
+    return td_job, trace_db, wavelet
 
 
 # =============================================================================
@@ -757,7 +842,7 @@ def test_time_domain_parameters(time_domain_results):
     - Simulation duration: {TIME_DOMAIN_PARAMS['T_max']} s
     - Ricker wavelet: f={TIME_DOMAIN_PARAMS['wavelet']['f']} Hz, center={TIME_DOMAIN_PARAMS['wavelet']['center']} s
     """
-    trace_db, wavelet = time_domain_results
+    _, trace_db, wavelet = time_domain_results
 
     # Verify frequency range from metadata
     assert (
@@ -787,7 +872,7 @@ def test_time_domain_parameters(time_domain_results):
 
 
 @pytest.mark.integration
-def test_time_domain_simulation_basic(project, simulation):
+def test_time_domain_simulation_basic(time_domain_results):
     """Test basic functionality of time domain simulation without plotting.
 
     This test verifies that:
@@ -802,19 +887,7 @@ def test_time_domain_simulation_basic(project, simulation):
     - f_max=18.0 Hz
     - T_max=4.0 s
     """
-    # Set up complete simulation
-    test_simulation_setup(simulation)
-
-    # Save the project to ensure simulation file exists
-    project.save()
-    assert os.path.exists(
-        os.path.join(project.path, "project.json")
-    ), "Project file should exist"
-
-    # Create and run time domain job with notebook parameters
-    td_job = TimeDomainJob(
-        name="td_job", simulation=simulation, f_min=1.0, f_max=18.0, T_max=4.0
-    )
+    td_job, td_results, _ = time_domain_results
 
     # Verify job parameters through f_list
     assert len(td_job.f_list) > 0, "Should have frequency samples"
@@ -824,12 +897,9 @@ def test_time_domain_simulation_basic(project, simulation):
         td_job.f_list[1] - td_job.f_list[0] == 1.0 / 4.0
     ), "Frequency step should be 1/T_max"
 
-    # Run locally
-    td_results = td_job.traces
-
     # Basic validation of results
     assert td_results is not None, "Should have simulation results"
-    assert len(td_results) > 0, "Should have at least one trace"
+    assert td_results.groups, "Should have at least one receiver group"
 
 
 # -----------------------------------------------------------------------------
@@ -880,7 +950,7 @@ def test_time_domain_wavelet_time_plot(time_domain_results):
 
     This test verifies that the time-domain wavelet plot matches its expected reference image.
     """
-    _, wavelet = time_domain_results
+    _, _, wavelet = time_domain_results
 
     # Create figure and axes
     fig, ax = plt.subplots()
@@ -899,7 +969,7 @@ def test_time_domain_wavelet_freq_plot(time_domain_results):
 
     This test verifies that the frequency-domain wavelet plot matches its expected reference image.
     """
-    _, wavelet = time_domain_results
+    _, _, wavelet = time_domain_results
 
     # Create figure and axes
     fig, ax = plt.subplots()
@@ -918,7 +988,7 @@ def test_time_domain_common_frequency_plot(time_domain_results):
 
     This test verifies that the common frequency plot matches the expected reference image.
     """
-    trace_db, wavelet = time_domain_results
+    _, trace_db, wavelet = time_domain_results
 
     group = trace_db.groups[0]
     component = trace_db.components(group)[0]
@@ -938,7 +1008,7 @@ def test_time_domain_gather_plot(time_domain_results):
 
     This test verifies that the gather plot matches the expected reference image.
     """
-    trace_db, wavelet = time_domain_results
+    _, trace_db, wavelet = time_domain_results
 
     group = trace_db.groups[0]
     component = trace_db.components(group)[0]
