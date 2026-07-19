@@ -79,8 +79,10 @@ We use pytest-mpl for comparing matplotlib-generated images. Here's a guide for 
    - Generate reference images using:
      - `make generate_reference_images` in this repo for non-integration,
        non-cloud, non-HPC visual tests
-     - Recommended: Run the corresponding workflow in FrequenSolveDockerImage
-       to generate solver-backed reference images
+     - For solver-backed images, use the `frequensolve-test-evidence` artifact
+       from an exact, pinned FrequenSolveDockerImage run. Inspect the generated
+       scientific plot and record the run URL and FrequenSolve SHA in the PR
+       that promotes it to `tests/reference_images/`.
 
 4. **Test Output**:
    - Image comparison tests create output in `tests/output/`
