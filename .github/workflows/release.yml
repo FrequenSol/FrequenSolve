@@ -2,12 +2,17 @@ name: Publish Package
 
 permissions:
   contents: write
+  actions: read
 
 on:
   release:
     types: [published]
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: Immutable release tag whose evidence and package should be published
+        required: true
+        type: string
       repository:
         description: Package index to publish to
         required: true
@@ -27,6 +32,43 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
+
+      - name: Require exact-SHA CI and solver evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_sha="$(git rev-parse 'HEAD^{commit}')"
+          mkdir -p .release-evidence
+          gh release download "$RELEASE_TAG" \
+            --pattern release-evidence.json \
+            --dir .release-evidence \
+            --clobber
+          gh release download "$RELEASE_TAG" \
+            --pattern frequensolve-test-evidence.tar.gz \
+            --dir .release-evidence \
+            --clobber
+          evidence_file=.release-evidence/release-evidence.json
+          heavy_archive=.release-evidence/frequensolve-test-evidence.tar.gz
+          python scripts/validate_release_evidence.py \
+            "$evidence_file" \
+            --commit "$release_sha"
+          expected_archive_sha="$(jq -r '.dockerTestArchiveSha256' "$evidence_file")"
+          actual_archive_sha="$(sha256sum "$heavy_archive" | awk '{print $1}')"
+          test "$actual_archive_sha" = "$expected_archive_sha"
+          python scripts/extract_test_evidence_archive.py \
+            "$heavy_archive" \
+            .release-evidence/heavy
+          python scripts/validate_heavy_test_evidence.py \
+            .release-evidence/heavy/frequensolve-test-evidence.json \
+            --commit "$release_sha"
+          ci_run_id="$(jq -r '.ciRunId' "$evidence_file")"
+          python scripts/verify_ci_evidence.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$release_sha" \
+            --run-id "$ci_run_id"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -53,6 +95,18 @@ jobs:
 
       - name: Check package metadata
         run: python -m twine check dist/*
+
+      - name: Install and import release wheel
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          python -I - <<'PY'
+          import frequensolve as fs
+
+          for name in ("Project", "LayeredModel", "LocalSite", "AWSSite"):
+              if getattr(fs, name, None) is None:
+                  raise SystemExit(f"missing release-wheel export: {name}")
+          print(fs.__version__)
+          PY
 
       - name: Upload distributions
         uses: actions/upload-artifact@v7

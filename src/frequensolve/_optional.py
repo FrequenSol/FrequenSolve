@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 from types import TracebackType
-from typing import Iterable, Type
+from typing import Any, Iterable, NoReturn, Type, cast
 
 
 def _dependency_list(dependencies: Iterable[str] | None) -> str:
@@ -58,18 +58,18 @@ def _message(
 
 
 class _MissingOptionalMeta(type):
-    def __getattr__(cls, name: str):
+    def __getattr__(cls, name: str) -> NoReturn:
         raise cls._import_error()
 
 
 class _LazyOptionalMeta(type):
-    def __getattr__(cls, name: str):
+    def __getattr__(cls, name: str) -> Any:
         return getattr(cls._load(), name)
 
-    def __instancecheck__(cls, instance):
+    def __instancecheck__(cls, instance: object) -> bool:
         return isinstance(instance, cls._load())
 
-    def __subclasscheck__(cls, subclass):
+    def __subclasscheck__(cls, subclass: type[Any]) -> bool:
         return issubclass(subclass, cls._load())
 
 
@@ -80,7 +80,7 @@ def missing_optional_class(
     error: BaseException,
     module: str,
     dependencies: Iterable[str] | None = None,
-) -> Type:
+) -> type[Any]:
     """Return a class placeholder that raises an install hint when used.
 
     Args:
@@ -111,13 +111,13 @@ def missing_optional_class(
                 dependencies=cls._dependencies,
             )
 
-        def __new__(cls, *args, **kwargs):
+        def __new__(cls, *args: Any, **kwargs: Any) -> NoReturn:
             raise cls._import_error()
 
-        def __init_subclass__(cls, **kwargs):
+        def __init_subclass__(cls, **kwargs: Any) -> NoReturn:
             raise cls._import_error()
 
-        def __enter__(self):
+        def __enter__(self) -> NoReturn:
             raise self._import_error()
 
         def __exit__(
@@ -131,7 +131,7 @@ def missing_optional_class(
     MissingOptionalDependency.__name__ = symbol
     MissingOptionalDependency.__qualname__ = symbol
     MissingOptionalDependency.__module__ = module
-    return MissingOptionalDependency
+    return cast(type[Any], MissingOptionalDependency)
 
 
 def optional_class(
@@ -141,7 +141,7 @@ def optional_class(
     extra: str,
     dependencies: Iterable[str] | None = None,
     module: str,
-) -> Type:
+) -> type[Any]:
     """Return a lightweight proxy that imports an optional class on first use.
 
     Args:
@@ -167,10 +167,10 @@ def optional_class(
             f"Lazy proxy for `{import_path}`. Requires "
             f"`pip install frequensolve[{extra}]` if dependencies are missing."
         )
-        _target = None
+        _target: type[Any] | None = None
 
         @classmethod
-        def _load(cls):
+        def _load(cls) -> type[Any]:
             if cls._target is None:
                 try:
                     imported = importlib.import_module(module_name)
@@ -184,11 +184,11 @@ def optional_class(
                 cls._target = getattr(imported, attribute)
             return cls._target
 
-        def __new__(cls, *args, **kwargs):
+        def __new__(cls, *args: Any, **kwargs: Any) -> Any:
             target = cls._load()
             return target(*args, **kwargs)
 
-        def __init_subclass__(cls, **kwargs):
+        def __init_subclass__(cls, **kwargs: Any) -> NoReturn:
             target = cls._load()
             raise TypeError(f"Subclass {target.__name__} directly, not its lazy proxy")
 

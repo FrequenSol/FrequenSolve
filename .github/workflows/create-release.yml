@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   create-release:
@@ -32,6 +33,8 @@ jobs:
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolve
+          permission-actions: read
+          permission-contents: write
 
       - name: Promote release candidate
         env:
@@ -62,6 +65,35 @@ jobs:
             exit 1
           fi
 
+          mkdir -p .release-evidence
+          gh release download "$RC_TAG" \
+            --pattern release-evidence.json \
+            --dir .release-evidence \
+            --clobber
+          gh release download "$RC_TAG" \
+            --pattern frequensolve-test-evidence.tar.gz \
+            --dir .release-evidence \
+            --clobber
+          evidence_file=.release-evidence/release-evidence.json
+          heavy_archive=.release-evidence/frequensolve-test-evidence.tar.gz
+          python scripts/validate_release_evidence.py \
+            "$evidence_file" \
+            --commit "$rc_sha"
+          expected_archive_sha="$(jq -r '.dockerTestArchiveSha256' "$evidence_file")"
+          actual_archive_sha="$(sha256sum "$heavy_archive" | awk '{print $1}')"
+          test "$actual_archive_sha" = "$expected_archive_sha"
+          python scripts/extract_test_evidence_archive.py \
+            "$heavy_archive" \
+            .release-evidence/heavy
+          python scripts/validate_heavy_test_evidence.py \
+            .release-evidence/heavy/frequensolve-test-evidence.json \
+            --commit "$rc_sha"
+          ci_run_id="$(jq -r '.ciRunId' "$evidence_file")"
+          python scripts/verify_ci_evidence.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$rc_sha" \
+            --run-id "$ci_run_id"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$final_tag" "$rc_sha" -m "Create ${final_tag}"
@@ -73,6 +105,9 @@ jobs:
             echo "- Promoted from: ${RC_TAG}"
             echo "- Source commit: ${rc_sha}"
             echo "- Package version: ${final_tag#v}"
+            echo "- Required CI: $(jq -r '.ciRunUrl' "$evidence_file")"
+            echo "- Solver evidence run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/$(jq -r '.dockerCallerRunId' "$evidence_file")"
+            echo "- Tested runtime image: $(jq -r '.dockerImageTag' "$evidence_file")"
             echo "- Publishing: PyPI via the Publish Package workflow"
             if [ -n "$NOTES" ]; then
               echo
@@ -80,7 +115,7 @@ jobs:
             fi
           } > release-notes.md
 
-          gh release create "$final_tag" \
+          gh release create "$final_tag" "$evidence_file" "$heavy_archive" \
             --target "$rc_sha" \
             --title "$final_tag" \
             --notes-file release-notes.md \

@@ -33,6 +33,17 @@ python -m pip install -e ".[docs]"
 pre-commit run --all-files
 ```
 
+The first strict typing ratchet covers the public optional-dependency loading
+boundary:
+
+```bash
+make typecheck
+```
+
+Keep that configured file clean, and expand `[tool.mypy].files` one coherent
+module boundary at a time. Do not weaken the existing checks to admit a new
+module; fix or narrowly document its baseline before adding it.
+
 ## Testing
 
 Run the deterministic non-integration lane used by CI:
@@ -40,6 +51,10 @@ Run the deterministic non-integration lane used by CI:
 ```bash
 make test
 ```
+
+This enforces the current coverage ratchet: at least 64.5% combined coverage,
+69.0% line coverage, and 51.8% branch coverage (the measured branch baseline is
+51.876%, conventionally shown as 52%).
 
 The default `pytest` configuration also excludes tests that require solvers,
 external services, credentials, schedulers, manual input, or visual baselines:
@@ -52,6 +67,10 @@ Tests must demonstrate observable behavior or validate a structured contract.
 Do not add pytest checks that only read tracked files and search for expected
 strings. Workflow syntax and expressions are validated by the `actionlint`
 pre-commit hook; documentation is validated by the Sphinx build.
+
+Core serialization invariants use Hypothesis to exercise round trips across a
+wide input range. Prefer focused properties such as lossless structured
+round-tripping over examples that merely repeat implementation details.
 
 Select marked lanes explicitly when you have the required environment:
 
@@ -69,6 +88,13 @@ changed:
 make generate_reference_images
 ```
 
+With the `parallel`, `visual`, and `seismic-io` extras installed, run the
+PR-safe optional lane that CI uses:
+
+```bash
+make test-optional-extras
+```
+
 ## Pull Request Process
 
 1. Create a focused branch for the change.
@@ -77,8 +103,9 @@ make generate_reference_images
 4. Run `make test` and any affected marked lanes locally.
 5. Open a pull request. The CI matrix in
    `.github/workflows/cicd-workflow.yml` runs for `v2` pull requests and
-   pushes; for maintenance branches, run the same local checks before handoff
-   or ask a maintainer to retarget or manually dispatch CI.
+   pushes. Protect `v2` with the stable `Required CI` job; for maintenance
+   branches, run the same local checks before handoff or ask a maintainer to
+   retarget or manually dispatch CI.
 
 Release and deployment workflows are handled by GitHub Actions. Do not add PyPI
 tokens, cloud credentials, or solver licenses to the repository. See
