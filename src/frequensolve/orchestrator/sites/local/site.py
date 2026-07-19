@@ -732,7 +732,9 @@ class LocalSite(BaseSite):
                 self.close(wait=True, retire=True)
 
     def _finalize_local_run(self, run: RunHandle, status: JobStatus) -> RunResult:
-        return self._wait_local_run(run, timeout=0, poll_interval=0)
+        # Polling already established terminal futures; a zero-timeout Dask wait
+        # can still time out before its event loop observes those finished states.
+        return self._wait_local_run(run, timeout=None, poll_interval=0)
 
     def _timeout_local_run(self, run: RunHandle, status: JobStatus) -> RunResult:
         futures = run.backend.get("futures", [])
