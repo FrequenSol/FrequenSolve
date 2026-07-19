@@ -561,6 +561,13 @@ def time_domain_results(tmp_path_factory):
     # Cleanup will happen automatically when the module is done
 
 
+@pytest.fixture
+def visual_wavelet():
+    """Return the deterministic wavelet used by PR-safe visual tests."""
+
+    return RickerWavelet(**TIME_DOMAIN_PARAMS["wavelet"])
+
+
 # =============================================================================
 # Test Suite
 # =============================================================================
@@ -942,40 +949,52 @@ def test_model_plot(simulation):
     return fig
 
 
-@pytest.mark.integration
 @pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
-def test_time_domain_wavelet_time_plot(time_domain_results):
-    """Test the time-domain wavelet plot from time domain simulation.
+def test_time_domain_wavelet_time_plot(visual_wavelet):
+    """Test the deterministic time-domain wavelet plot without a solver.
 
     This test verifies that the time-domain wavelet plot matches its expected reference image.
     """
-    _, _, wavelet = time_domain_results
-
     # Create figure and axes
     fig, ax = plt.subplots()
+    unused_fig, unused_ax = plt.subplots()
 
     # Plot on the provided axes
-    wavelet.plot(ax_time=ax)
+    created_time, created_freq = visual_wavelet.plot(
+        ax_time=ax, ax_freq=unused_ax, color="tab:blue"
+    )
+    plt.close(unused_fig)
+
+    assert created_time is None
+    assert created_freq is None
+    assert len(ax.lines) == 1
+    assert ax.lines[0].get_color() == "tab:blue"
 
     return fig
 
 
-@pytest.mark.integration
 @pytest.mark.visual
 @pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
-def test_time_domain_wavelet_freq_plot(time_domain_results):
-    """Test the frequency-domain wavelet plot from time domain simulation.
+def test_time_domain_wavelet_freq_plot(visual_wavelet):
+    """Test the deterministic frequency-domain wavelet plot without a solver.
 
     This test verifies that the frequency-domain wavelet plot matches its expected reference image.
     """
-    _, _, wavelet = time_domain_results
-
     # Create figure and axes
     fig, ax = plt.subplots()
+    unused_fig, unused_ax = plt.subplots()
 
     # Plot on the provided axes
-    wavelet.plot(ax_freq=ax)
+    created_time, created_freq = visual_wavelet.plot(
+        ax_time=unused_ax, ax_freq=ax, color="tab:orange"
+    )
+    plt.close(unused_fig)
+
+    assert created_time is None
+    assert created_freq is None
+    assert len(ax.lines) == 1
+    assert ax.lines[0].get_color() == "tab:orange"
 
     return fig
 

@@ -410,8 +410,20 @@ class Wavelet:
         signal_min = signal_min[: len(signal_min) // 2 + 1]
         return signal_min
 
-    def plot(self, **kwargs) -> None:
-        """Plot the time-domain and spectrum of the wavelet."""
+    def plot(self, ax_time=None, ax_freq=None, **kwargs):
+        """Plot the time-domain signal and frequency spectrum.
+
+        Args:
+            ax_time: Optional matplotlib axes for the time-domain signal.
+            ax_freq: Optional matplotlib axes for the frequency spectrum.
+            **kwargs: Plot styling plus wavelet display options such as
+                ``T_max``, ``f_max``, ``figsize``, ``fontsize``, ``y_scale``,
+                ``save_time``, and ``save_freq``.
+
+        Returns:
+            Tuple containing figures created for the time and frequency plots.
+            An entry is ``None`` when the corresponding axes were supplied.
+        """
         try:
             import matplotlib.pyplot as plt
         except ModuleNotFoundError as exc:
@@ -448,55 +460,65 @@ class Wavelet:
         fontsize = kwargs.pop("fontsize", 10)
         plt.rcParams.update({"font.size": fontsize})
 
+        fig_time = None
+        if ax_time is None:
+            fig_time, ax_time = plt.subplots(figsize=figsize)
+
         # Plot time-domain
-        plt.figure(figsize=figsize)
         times = self.times
         signal = self.signal
         if signal.shape != times.shape:
             times = times[: signal.size]
-        plt.plot(times[:nTf] - self.center, signal[:nTf], **kwargs)
-        plt.xlabel("Time [s]")
-        plt.ylabel("Amplitude")
-        plt.grid(True, alpha=0.3)
+        ax_time.plot(times[:nTf] - self.center, signal[:nTf], **kwargs)
+        ax_time.set_xlabel("Time [s]")
+        ax_time.set_ylabel("Amplitude")
+        ax_time.grid(True, alpha=0.3)
         if save_time:
-            plt.savefig(
+            ax_time.figure.savefig(
                 save_time,
                 bbox_inches="tight",
                 **({"dpi": dpi} if dpi is not None else {}),
             )
-            plt.close()
-        else:
+            if fig_time is not None:
+                plt.close(fig_time)
+        elif fig_time is not None:
             plt.show()
 
+        fig_freq = None
+        if ax_freq is None:
+            fig_freq, ax_freq = plt.subplots(figsize=figsize)
+
         # Plot frequency-domain
-        plt.figure(figsize=figsize)
         if y_scale == "dB":
             normalized_spectrum = np.abs(self.spectrum) / np.max(np.abs(self.spectrum))
-            plt.plot(
+            ax_freq.plot(
                 self.frequencies[:nF], 20 * np.log10(normalized_spectrum[:nF]), **kwargs
             )
-            plt.xlabel("Frequency [Hz]")
-            plt.ylabel("Amplitude [dB]")
-            plt.grid(True, alpha=0.3)
-            plt.yticks(np.arange(-80, 1, 20))
-            plt.yticks(np.arange(-80, 1, 10), minor=True)
-            plt.ylim(-80, 1)
+            ax_freq.set_xlabel("Frequency [Hz]")
+            ax_freq.set_ylabel("Amplitude [dB]")
+            ax_freq.grid(True, alpha=0.3)
+            ax_freq.set_yticks(np.arange(-80, 1, 20))
+            ax_freq.set_yticks(np.arange(-80, 1, 10), minor=True)
+            ax_freq.set_ylim(-80, 1)
         else:
-            plt.plot(self.frequencies[:nF], np.abs(self.spectrum[:nF]))
-            plt.xlabel("Frequency [Hz]")
-            plt.ylabel("Amplitude")
-            plt.grid(True, alpha=0.3)
+            ax_freq.plot(self.frequencies[:nF], np.abs(self.spectrum[:nF]), **kwargs)
+            ax_freq.set_xlabel("Frequency [Hz]")
+            ax_freq.set_ylabel("Amplitude")
+            ax_freq.grid(True, alpha=0.3)
 
-        plt.grid(True, which="minor", linestyle=":", alpha=0.3)
+        ax_freq.grid(True, which="minor", linestyle=":", alpha=0.3)
         if save_freq:
-            plt.savefig(
+            ax_freq.figure.savefig(
                 save_freq,
                 bbox_inches="tight",
                 **({"dpi": dpi} if dpi is not None else {}),
             )
-            plt.close()
-        else:
+            if fig_freq is not None:
+                plt.close(fig_freq)
+        elif fig_freq is not None:
             plt.show()
+
+        return fig_time, fig_freq
 
 
 class RickerWavelet(Wavelet):
