@@ -622,6 +622,9 @@ class VtkOutput(Output):
         items: Explicit ``VtkItem`` objects or serialized item mappings.
         sources: Source ids to output. Omit or pass ``"all"`` to let the
             solver output every source.
+        upscale: Legacy constructor-level mesh upscaling from 0 through 2.
+            This is translated to ``target.mesh.upscale`` for volume and
+            surface targets.
         show_pml: Whether to include PML regions.
         format: Writer format, one of ``"vtu"``, ``"xdmf"``, ``"xmf"``, or
             ``"vtr"``.
@@ -688,6 +691,7 @@ class VtkOutput(Output):
         properties: Optional[Iterable[str]] = None,
         items: Optional[Iterable[Union[VtkItem, Mapping[str, Any]]]] = None,
         sources: Optional[Union[int, str, Iterable[int]]] = None,
+        upscale: Optional[int] = None,
         show_pml: bool = True,
         format: str = "vtu",
         encoding: Optional[str] = None,
@@ -721,10 +725,6 @@ class VtkOutput(Output):
         when you need per-item units/parts/basis metadata, and class helpers
         such as :meth:`surface` or :meth:`grid` for non-volume targets.
         """
-        if "upscale" in kwargs:
-            raise ValueError(
-                "VtkOutput upscale must be configured as target.mesh.upscale"
-            )
         writer_payload = copy.deepcopy(dict(writer or {}))
         if writer_payload:
             requested_format = str(format).lower()
@@ -780,6 +780,8 @@ class VtkOutput(Output):
             for key, value in writer_payload.items()
             if key not in {"format", "encoding"}
         }
+        if upscale is not None:
+            self._set_target_upscale(upscale)
         self._init_extra(None, **kwargs)
 
     @classmethod
@@ -1012,6 +1014,23 @@ class VtkOutput(Output):
             mesh_payload["upscale"] = _paraview_upscale(mesh_payload["upscale"])
         payload["mesh"] = mesh_payload
         return payload
+
+    def _set_target_upscale(self, upscale: int) -> None:
+        value = _paraview_upscale(upscale)
+        if isinstance(self.target, Mapping):
+            kind = str(self.target["kind"])
+            if kind == "grid":
+                raise ValueError("ParaView grid targets do not support upscale")
+            target_mesh = self.target.get("mesh")
+            mesh = copy.deepcopy(dict(target_mesh)) if target_mesh is not None else {}
+            if "upscale" in mesh and mesh["upscale"] != value:
+                raise ValueError("VtkOutput upscale conflicts with target.mesh.upscale")
+            mesh["upscale"] = value
+            self.target["mesh"] = mesh
+            return
+        if self._inferred_target() == "grid":
+            raise ValueError("ParaView grid targets do not support upscale")
+        self._target_mesh["upscale"] = value
 
     def _inferred_target(self) -> str:
         if self.target is not None:
