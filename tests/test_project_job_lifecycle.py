@@ -475,13 +475,14 @@ def test_run_metadata_deduplicates_existing_output_file_aliases(tmp_path):
     assert metadata.output_files(base="pv", suffix=".vtu", existing=True) == [canonical]
 
 
-def test_job_paraview_outputs_resolve_under_result_directory(tmp_path):
+def test_job_vtk_outputs_resolve_under_result_directory(tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
-    job.paraview("quicklook", path="paraview/qc", fields="pressure")
+    job.vtk("quicklook", path="paraview/qc", fields="pressure")
     job.save()
 
-    assert job.paraview_outputs == {"quicklook": job._result_path / "paraview/qc"}
+    assert job.vtk_outputs == {"quicklook": job._result_path / "paraview/qc"}
+    assert job.paraview_outputs == job.vtk_outputs
 
 
 def test_job_save_load_persists_required_simulation_inputs(tmp_path):

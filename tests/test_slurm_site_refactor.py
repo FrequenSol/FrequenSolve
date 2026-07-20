@@ -1929,7 +1929,7 @@ def test_slurm_fetch_wavefields_downloads_wavefield_output(monkeypatch, tmp_path
     }
 
 
-def test_slurm_fetch_paraview_downloads_configured_output_path(monkeypatch, tmp_path):
+def test_slurm_fetch_vtk_downloads_configured_output_path(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
 
@@ -1937,7 +1937,7 @@ def test_slurm_fetch_paraview_downloads_configured_output_path(monkeypatch, tmp_
     sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
     sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
-    job.paraview("qc", path="paraview/qc", fields="pressure")
+    job.vtk("qc", path="paraview/qc", fields="pressure")
     job.save()
     calls = []
 
@@ -1948,7 +1948,7 @@ def test_slurm_fetch_paraview_downloads_configured_output_path(monkeypatch, tmp_
     monkeypatch.setattr(site, "get", fake_get)
     monkeypatch.setattr(job, "collect_task_run_manifests", lambda: None)
 
-    assert site.fetch_paraview(job) == {"qc": job._result_path / "paraview/qc"}
+    assert site.fetch_vtk(job) == {"qc": job._result_path / "paraview/qc"}
     assert (
         site.work_dir / "jobs" / "simple" / "freq" / "results" / "paraview/qc",
         job._result_path / "paraview/qc",

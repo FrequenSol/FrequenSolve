@@ -33,12 +33,15 @@ __all__ = [
     "ParaViewItem",
     "ParaviewOutput",
     "TraceOutput",
+    "VtkItem",
+    "VtkOutput",
     "WavefieldOutput",
     "field",
     "info",
     "output_property",
     "outputs",
     "paraview",
+    "vtk",
     "wavefield",
 ]
 
@@ -112,7 +115,7 @@ def _normalize_parts(parts: Optional[Union[str, Iterable[str]]]) -> Optional[Lis
     invalid = [part for part in raw_values if part not in aliases]
     if invalid:
         allowed = ", ".join(sorted(aliases))
-        raise ValueError(f"ParaviewOutput.parts must use only: {allowed}")
+        raise ValueError(f"VtkOutput.parts must use only: {allowed}")
     return [aliases[part] for part in raw_values]
 
 
@@ -138,13 +141,21 @@ def _paraview_sources(
     if isinstance(sources, str):
         if sources.strip().lower() == "all":
             return None
-        raise ValueError(
-            "ParaviewOutput.sources must be an integer, iterable of integers, "
-            "or 'all'"
-        )
+        raise ValueError("VtkOutput.sources must be an int, iterable of ints, or 'all'")
     if isinstance(sources, (int, np.integer)):
         return [int(sources)]
     return [int(source_id) for source_id in sources]
+
+
+def _paraview_upscale(value: Any) -> int:
+    """Validate and normalize target mesh upscaling."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise ValueError("ParaView target mesh upscale must be an integer from 0 to 2")
+    upscale = int(value)
+    if not 0 <= upscale <= 2:
+        raise ValueError("ParaView target mesh upscale must be an integer from 0 to 2")
+    return upscale
 
 
 @dataclass(frozen=True, init=False)
@@ -254,8 +265,9 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
 
         output_types: Dict[str, Type[Output]] = {
             "TraceOutput": TraceOutput,
-            "ParaViewOutput": ParaviewOutput,
-            "ParaviewOutput": ParaviewOutput,
+            "VtkOutput": VtkOutput,
+            "ParaViewOutput": VtkOutput,
+            "ParaviewOutput": VtkOutput,
             "WavefieldOutput": WavefieldOutput,
         }
         return cls.dispatch_from_fs(data, output_types)
@@ -421,8 +433,8 @@ class OutputUnits(ExtraFieldsMixin):
 
 
 @dataclass(kw_only=True)
-class ParaViewItem(ExtraFieldsMixin):
-    """Structured ParaView output item.
+class VtkItem(ExtraFieldsMixin):
+    """Structured VTK/visualization output item.
 
     Args:
         kind: Item kind: ``"field"``, ``"property"``, or ``"info"``.
@@ -467,11 +479,11 @@ class ParaViewItem(ExtraFieldsMixin):
         system: str = "global",
         **kwargs,
     ):
-        """Create a structured ParaView output selector."""
+        """Create a structured visualization output selector."""
 
         normalized = str(kind).lower()
         if normalized not in {"field", "property", "info"}:
-            raise ValueError("ParaViewItem kind must be field, property, or info")
+            raise ValueError("VtkItem kind must be field, property, or info")
         self.kind = normalized
         self.value = str(value)
         self.name = name
@@ -527,7 +539,7 @@ class ParaViewItem(ExtraFieldsMixin):
             payload["basis"] = self._basis_payload()
         if self.direction is not None:
             payload["direction"] = self._direction_payload()
-        return merge_extra(payload, self.extra, "ParaViewItem")
+        return merge_extra(payload, self.extra, "VtkItem")
 
     def _basis_payload(self) -> Dict[str, Any]:
         if isinstance(self.basis, Mapping):
@@ -549,14 +561,14 @@ class ParaViewItem(ExtraFieldsMixin):
         return {"system": self.system, "axis": str(self.direction)}
 
     @classmethod
-    def from_fs(cls, data: Mapping[str, Any]) -> "ParaViewItem":
+    def from_fs(cls, data: Mapping[str, Any]) -> "VtkItem":
         """Deserialize a ParaView item payload.
 
         Args:
             data: Serialized item mapping.
 
         Returns:
-            ``ParaViewItem`` instance.
+            ``VtkItem`` instance.
 
         Raises:
             ValueError: If the payload does not identify an item selector.
@@ -590,12 +602,15 @@ class ParaViewItem(ExtraFieldsMixin):
         )
 
 
+ParaViewItem = VtkItem
+
+
 @dataclass(kw_only=True)
-class ParaviewOutput(Output):
-    """ParaView output request.
+class VtkOutput(Output):
+    """VTK/ParaView visualization output request.
 
     The public API intentionally exposes the common cases only: solution fields
-    and material properties on the volume, selected surfaces, or a sampling
+    and material properties on the full domain, selected surfaces, or a sampling
     grid. Advanced fast solver fields can still be passed through ``extra`` or
     loaded from existing solver JSON.
 
@@ -604,10 +619,9 @@ class ParaviewOutput(Output):
         path: Output directory relative to the job result directory.
         fields: Solution fields to output.
         properties: Material properties to output.
-        items: Explicit ``ParaViewItem`` objects or serialized item mappings.
+        items: Explicit ``VtkItem`` objects or serialized item mappings.
         sources: Source ids to output. Omit or pass ``"all"`` to let the
             solver output every source.
-        upscale: Mesh upscaling factor.
         show_pml: Whether to include PML regions.
         format: Writer format, one of ``"vtu"``, ``"xdmf"``, ``"xmf"``, or
             ``"vtr"``.
@@ -641,7 +655,6 @@ class ParaviewOutput(Output):
     properties: Optional[List[str]] = None
     items: Optional[List[Any]] = None
     sources: Optional[List[int]] = None
-    upscale: int = 1
     show_pml: bool = True
     format: str = "vtu"
     encoding: Optional[str] = None
@@ -660,6 +673,7 @@ class ParaviewOutput(Output):
     target_coordinates: Optional[str] = None
     writer: Optional[Mapping[str, Any]] = None
     source: Optional[Mapping[str, Any]] = None
+    _target_mesh: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     _FORMATS = {"vtu", "xdmf", "xmf", "vtr"}
     _TARGETS = {"volume", "surface", "grid"}
@@ -672,9 +686,8 @@ class ParaviewOutput(Output):
         path: Union[str, Path] = "ParaView",
         fields: Optional[Iterable[str]] = None,
         properties: Optional[Iterable[str]] = None,
-        items: Optional[Iterable[Union[ParaViewItem, Mapping[str, Any]]]] = None,
+        items: Optional[Iterable[Union[VtkItem, Mapping[str, Any]]]] = None,
         sources: Optional[Union[int, str, Iterable[int]]] = None,
-        upscale: int = 1,
         show_pml: bool = True,
         format: str = "vtu",
         encoding: Optional[str] = None,
@@ -702,14 +715,16 @@ class ParaviewOutput(Output):
         source: Optional[Mapping[str, Any]] = None,
         **kwargs,
     ):
-        """Create a ParaView output request.
+        """Create a VTK/ParaView visualization output request.
 
-        Use ``fields`` and ``properties`` for common volume output, ``items``
+        Use ``fields`` and ``properties`` for common domain output, ``items``
         when you need per-item units/parts/basis metadata, and class helpers
         such as :meth:`surface` or :meth:`grid` for non-volume targets.
         """
-        if upscale < 0:
-            raise ValueError("ParaviewOutput upscale must be >= 0")
+        if "upscale" in kwargs:
+            raise ValueError(
+                "VtkOutput upscale must be configured as target.mesh.upscale"
+            )
         writer_payload = copy.deepcopy(dict(writer or {}))
         if writer_payload:
             requested_format = str(format).lower()
@@ -717,16 +732,14 @@ class ParaviewOutput(Output):
                 requested_format = "xdmf"
             writer_format = _format_from_writer(writer_payload)
             if requested_format != "vtu" and writer_format != requested_format:
-                raise ValueError("ParaviewOutput format conflicts with writer format")
+                raise ValueError("VtkOutput format conflicts with writer format")
             format = writer_format
             if (
                 encoding is not None
                 and writer_payload.get("encoding") is not None
                 and writer_payload.get("encoding") != encoding
             ):
-                raise ValueError(
-                    "ParaviewOutput encoding conflicts with writer encoding"
-                )
+                raise ValueError("VtkOutput encoding conflicts with writer encoding")
             encoding = writer_payload.get("encoding", encoding)
         if items is not None and (
             fields is not None or properties is not None or parts is not None
@@ -739,18 +752,16 @@ class ParaviewOutput(Output):
         self.properties = [str(prop) for prop in _as_list(properties)] or None
         self.items = _paraview_items(items)
         self.sources = _paraview_sources(sources)
-        self.upscale = int(upscale)
         self.show_pml = bool(show_pml)
-        self.format = _choice(format, self._FORMATS, "ParaviewOutput.format")
+        self.format = _choice(format, self._FORMATS, "VtkOutput.format")
         if self.format == "xmf":
             self.format = "xdmf"
         self.encoding = str(encoding).lower() if encoding is not None else None
-        self.execute_on = _choice(
-            execute_on, self._EXECUTE_ON, "ParaviewOutput.execute_on"
-        )
+        self.execute_on = _choice(execute_on, self._EXECUTE_ON, "VtkOutput.execute_on")
         self.order = int(order) if order is not None else None
         self.parts = _normalize_parts(parts)
-        self.target = copy.deepcopy(target)
+        self.target = self._normalize_target(target)
+        self._target_mesh = {}
         self.grid_spec = copy.deepcopy(grid)
         self.surfaces = copy.deepcopy(_as_list(surfaces)) or None
         self.boundaries = [str(label) for label in _as_list(boundaries)] or None
@@ -772,17 +783,33 @@ class ParaviewOutput(Output):
         self._init_extra(None, **kwargs)
 
     @classmethod
-    def volume(cls, **kwargs) -> "ParaviewOutput":
-        """Create a ParaView volume output request.
+    def domain(
+        cls,
+        *,
+        upscale: Optional[int] = None,
+        **kwargs,
+    ) -> "VtkOutput":
+        """Create a visualization request for the full simulation domain.
 
         Args:
-            **kwargs: Arguments forwarded to ``ParaviewOutput``.
+            upscale: Optional target mesh upscaling from 0 through 2. Omission
+                uses the solver default of 0.
+            **kwargs: Arguments forwarded to ``VtkOutput``.
 
         Returns:
-            Output request targeting the simulation volume.
+            Output request targeting the full 2D or 3D simulation domain.
         """
 
-        return cls(target="volume", **kwargs)
+        output = cls(target="volume", **kwargs)
+        if upscale is not None:
+            output._target_mesh["upscale"] = _paraview_upscale(upscale)
+        return output
+
+    @classmethod
+    def volume(cls, **kwargs) -> "VtkOutput":
+        """Create a full-domain output using the legacy helper name."""
+
+        return cls.domain(**kwargs)
 
     @classmethod
     def surface(
@@ -797,27 +824,30 @@ class ParaviewOutput(Output):
             ]
         ] = None,
         *,
+        upscale: Optional[int] = None,
         boundaries: Optional[Union[str, Iterable[str]]] = None,
         shell: bool = False,
         plane: Optional[Union[AxisAlignedPlane, Mapping[str, Any]]] = None,
         planes: Optional[Iterable[Union[AxisAlignedPlane, Mapping[str, Any]]]] = None,
         **kwargs,
-    ) -> "ParaviewOutput":
+    ) -> "VtkOutput":
         """Create a ParaView surface output request.
 
         Args:
             surfaces: Optional model surface names, indices, or selections to output.
+            upscale: Optional target mesh upscaling from 0 through 2. Omission
+                uses the solver default of 0.
             boundaries: Optional mesh boundary labels to output.
             shell: Whether to output the model shell.
             plane: Optional plane selection.
             planes: Optional collection of plane selections.
-            **kwargs: Arguments forwarded to ``ParaviewOutput``.
+            **kwargs: Arguments forwarded to ``VtkOutput``.
 
         Returns:
             Output request targeting selected surfaces.
         """
 
-        return cls(
+        output = cls(
             target="surface",
             surfaces=surfaces,
             boundaries=boundaries,
@@ -826,19 +856,24 @@ class ParaviewOutput(Output):
             planes=planes,
             **kwargs,
         )
+        if upscale is not None:
+            output._target_mesh["upscale"] = _paraview_upscale(upscale)
+        return output
 
     @classmethod
-    def grid(cls, grid: Any, **kwargs) -> "ParaviewOutput":
+    def grid(cls, grid: Any, **kwargs) -> "VtkOutput":
         """Create a ParaView grid-sampling output request.
 
         Args:
             grid: Grid specification for sampled output.
-            **kwargs: Arguments forwarded to ``ParaviewOutput``.
+            **kwargs: Arguments forwarded to ``VtkOutput``.
 
         Returns:
             Output request targeting the supplied grid.
         """
 
+        if "upscale" in kwargs:
+            raise ValueError("ParaView grid targets do not support upscale")
         return cls(target="grid", grid=grid, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
@@ -855,11 +890,10 @@ class ParaviewOutput(Output):
         """
 
         payload = {
-            "_type": self.__class__.__name__,
+            "_type": "ParaviewOutput",
             "name": self.name,
             "path": self.path,
             "properties": self.properties,
-            "upscale": self.upscale,
             "show_pml": self.show_pml,
             "writer": self._writer_payload(),
         }
@@ -880,9 +914,7 @@ class ParaviewOutput(Output):
             payload["coordinates"] = {"system": self.coordinates}
 
         target_payload = self._target_payload(ctx)
-        if target_payload is not None and (
-            target_payload != {"kind": "volume"} or self.target is not None
-        ):
+        if target_payload is not None:
             payload["target"] = target_payload
 
         if self.items is not None:
@@ -900,7 +932,7 @@ class ParaviewOutput(Output):
             payload.pop("fields", None)
             payload.pop("properties", None)
 
-        return merge_extra(payload, extra, "ParaviewOutput")
+        return merge_extra(payload, extra, "VtkOutput")
 
     def _writer_payload(self) -> Dict[str, Any]:
         if self.format in {"xdmf", "xmf"}:
@@ -933,14 +965,18 @@ class ParaviewOutput(Output):
 
         if self.target_coordinates is not None:
             payload["coordinates"] = {"system": self.target_coordinates}
-        mesh = _drop_none(
-            {
-                "order": self.order,
-                "upscale": self.upscale,
-                "show_pml": self.show_pml,
+        mesh = copy.deepcopy(self._target_mesh)
+        if target == "surface":
+            mesh = {
+                **_drop_none(
+                    {
+                        "order": self.order,
+                        "show_pml": self.show_pml,
+                    }
+                ),
+                **mesh,
             }
-        )
-        if target == "surface" and mesh:
+        if target in {"volume", "surface"} and mesh:
             payload["mesh"] = mesh
         if target == "grid":
             if self.grid_spec is None:
@@ -952,9 +988,34 @@ class ParaviewOutput(Output):
                 payload["selection"] = selections
         return payload
 
+    def _normalize_target(
+        self,
+        target: Optional[Union[str, Mapping[str, Any]]],
+    ) -> Optional[Union[str, Dict[str, Any]]]:
+        if not isinstance(target, Mapping):
+            return copy.deepcopy(target)
+
+        payload = copy.deepcopy(dict(target))
+        if "kind" not in payload:
+            raise ValueError("ParaView target mappings must explicitly define kind")
+        kind = _choice(str(payload["kind"]), self._TARGETS, "VtkOutput.target")
+        payload["kind"] = kind
+        mesh = payload.get("mesh")
+        if mesh is None:
+            return payload
+        if not isinstance(mesh, Mapping):
+            raise ValueError("ParaView target.mesh must be a mapping")
+        mesh_payload = copy.deepcopy(dict(mesh))
+        if "upscale" in mesh_payload:
+            if kind == "grid":
+                raise ValueError("ParaView grid targets do not support upscale")
+            mesh_payload["upscale"] = _paraview_upscale(mesh_payload["upscale"])
+        payload["mesh"] = mesh_payload
+        return payload
+
     def _inferred_target(self) -> str:
         if self.target is not None:
-            return _choice(str(self.target), self._TARGETS, "ParaviewOutput.target")
+            return _choice(str(self.target), self._TARGETS, "VtkOutput.target")
         if self.grid_spec is not None:
             return "grid"
         if self.shell or self.surfaces or self.boundaries or self._planes:
@@ -1012,14 +1073,14 @@ class ParaviewOutput(Output):
         return payload
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "ParaviewOutput":
+    def from_fs(cls, data: Dict) -> "VtkOutput":
         """Deserialize a ParaView output payload.
 
         Args:
             data: Serialized ParaView output mapping.
 
         Returns:
-            ``ParaviewOutput`` instance.
+            ``VtkOutput`` instance.
         """
 
         data = copy.deepcopy(data)
@@ -1040,7 +1101,6 @@ class ParaviewOutput(Output):
             properties=data.pop("properties", None),
             items=items,
             sources=data.pop("sources", None),
-            upscale=data.pop("upscale", 1),
             show_pml=data.pop("show_pml", True),
             format=_format_from_writer(writer),
             encoding=(writer or {}).get("encoding") if writer is not None else None,
@@ -1052,6 +1112,11 @@ class ParaviewOutput(Output):
             source=source,
             **data,
         )
+
+
+# The solver contract and historical Python releases use these spellings.
+ParaViewOutput = VtkOutput
+ParaviewOutput = VtkOutput
 
 
 def _format_from_writer(writer: Optional[Mapping[str, Any]]) -> str:
@@ -1066,12 +1131,12 @@ def _format_from_writer(writer: Optional[Mapping[str, Any]]) -> str:
 
 
 def _paraview_items(
-    items: Optional[Iterable[Union[ParaViewItem, Mapping[str, Any]]]],
-) -> Optional[List[Union[ParaViewItem, Mapping[str, Any]]]]:
+    items: Optional[Iterable[Union[VtkItem, Mapping[str, Any]]]],
+) -> Optional[List[Union[VtkItem, Mapping[str, Any]]]]:
     if items is None:
         return None
     return [
-        item if isinstance(item, ParaViewItem) else ParaViewItem.from_fs(item)
+        item if isinstance(item, VtkItem) else VtkItem.from_fs(item)
         for item in _as_list(items)
     ]
 
@@ -1483,13 +1548,13 @@ class JobOutputs:
             merge into the configuration.
         traces: Trace output configuration. ``None`` leaves the default trace
             output in place.
-        paraview: Initial ParaView output requests.
+        vtk: Initial VTK/visualization output requests.
         wavefields: Initial wavefield output requests.
         units: Optional default output-unit configuration.
     """
 
     traces: TraceOutput = field(default_factory=TraceOutput)
-    paraview: List[ParaviewOutput] = field(default_factory=list)
+    vtk: List[VtkOutput] = field(default_factory=list)
     wavefields: List[WavefieldOutput] = field(default_factory=list)
     units: Optional[OutputUnits] = None
 
@@ -1498,26 +1563,39 @@ class JobOutputs:
         outputs: Any = None,
         *,
         traces: Optional[TraceOutput] = None,
-        paraview: Optional[Iterable[ParaviewOutput]] = None,
+        vtk: Optional[Iterable[VtkOutput]] = None,
+        paraview: Optional[Iterable[VtkOutput]] = None,
         wavefields: Optional[Iterable[WavefieldOutput]] = None,
         units: Optional[Union[OutputUnits, Mapping[str, Any]]] = None,
     ):
         """Create a collection of job output requests.
 
         The collection always contains trace output and may also include any
-        number of ParaView and wavefield outputs.
+        number of VTK/visualization and wavefield outputs.
         """
 
         self.traces = traces or TraceOutput()
-        self.paraview = []
+        self.vtk = []
         self.wavefields = []
         self.units = _output_units(units)
+        for item in _as_output_sequence(vtk):
+            self.add(item)
         for item in _as_output_sequence(paraview):
             self.add(item)
         for item in _as_output_sequence(wavefields):
             self.add(item)
         if outputs is not None:
             self.add(outputs)
+
+    @property
+    def paraview(self) -> List[VtkOutput]:
+        """Return visualization outputs using the historical attribute name."""
+
+        return self.vtk
+
+    @paraview.setter
+    def paraview(self, value: Iterable[VtkOutput]) -> None:
+        self.vtk = list(value)
 
     def __iadd__(self, output: Any) -> "JobOutputs":
         """Merge an output request into this collection.
@@ -1549,7 +1627,7 @@ class JobOutputs:
             return self
         if isinstance(output, JobOutputs):
             self.traces = output.traces
-            self.paraview.extend(output.paraview)
+            self.vtk.extend(output.vtk)
             self.wavefields.extend(output.wavefields)
             self.units = output.units
             return self.ensure_unique_names()
@@ -1569,8 +1647,8 @@ class JobOutputs:
             return self.ensure_unique_names()
         if isinstance(output, TraceOutput):
             self.traces = output
-        elif isinstance(output, ParaviewOutput):
-            self.paraview.append(output)
+        elif isinstance(output, VtkOutput):
+            self.vtk.append(output)
         elif isinstance(output, WavefieldOutput):
             self.wavefields.append(output)
         else:
@@ -1580,7 +1658,7 @@ class JobOutputs:
     def ensure_unique_names(self) -> "JobOutputs":
         """Ensure all named output requests have solver-unique names.
 
-        ParaView and wavefield outputs use their names as solver-side output
+        VTK and wavefield outputs use their names as solver-side output
         identifiers, artifact keys, and file-name bases. When duplicate names
         are present, this method keeps the first output unchanged and appends a
         numeric suffix such as ``"_1"`` to later duplicates.
@@ -1609,7 +1687,7 @@ class JobOutputs:
         payload = {
             "Units": self.units.to_fs(ctx) if self.units is not None else None,
             "traces": self.traces.to_fs(ctx),
-            "ParaView": [pv_out.to_fs(ctx) for pv_out in self.paraview],
+            "ParaView": [vtk_out.to_fs(ctx) for vtk_out in self.vtk],
             "wavefields": [wf_out.to_fs(ctx) for wf_out in self.wavefields],
         }
         return {key: value for key, value in payload.items() if value}
@@ -1631,19 +1709,19 @@ class JobOutputs:
         paraview_data = data.get("ParaView", [])
         if isinstance(paraview_data, Mapping):
             paraview_data = [paraview_data]
-        paraview = [ParaviewOutput.from_fs(pv_out) for pv_out in paraview_data]
+        vtk = [VtkOutput.from_fs(pv_out) for pv_out in paraview_data]
         wavefields = [
             WavefieldOutput.from_fs(wf_out) for wf_out in data.get("wavefields", [])
         ]
         return cls(
             traces=TraceOutput.from_fs(traces) if traces is not None else TraceOutput(),
-            paraview=paraview,
+            vtk=vtk,
             wavefields=wavefields,
             units=OutputUnits.from_fs(data["Units"]) if "Units" in data else None,
         )
 
-    def _named_outputs(self) -> List[Union[ParaviewOutput, WavefieldOutput]]:
-        return [*self.paraview, *self.wavefields]
+    def _named_outputs(self) -> List[Union[VtkOutput, WavefieldOutput]]:
+        return [*self.vtk, *self.wavefields]
 
 
 def _unique_output_name(name: Any, used: set[str]) -> str:
@@ -1677,7 +1755,7 @@ def output_property(
     output_name: Optional[str] = None,
     units: Optional[Union[str, Sequence[str]]] = None,
     **kwargs,
-) -> ParaViewItem:
+) -> VtkItem:
     """Select a material property for ParaView output.
 
     Args:
@@ -1689,10 +1767,10 @@ def output_property(
         **kwargs: Additional solver-facing item fields.
 
     Returns:
-        ``ParaViewItem`` selecting the requested material property.
+        ``VtkItem`` selecting the requested material property.
     """
 
-    return ParaViewItem("property", name, name=output_name, units=units, **kwargs)
+    return VtkItem("property", name, name=output_name, units=units, **kwargs)
 
 
 def info(
@@ -1701,7 +1779,7 @@ def info(
     output_name: Optional[str] = None,
     units: Optional[Union[str, Sequence[str]]] = None,
     **kwargs,
-) -> ParaViewItem:
+) -> VtkItem:
     """Select mesh or domain metadata for ParaView output.
 
     Args:
@@ -1711,10 +1789,10 @@ def info(
         **kwargs: Additional solver-facing item fields.
 
     Returns:
-        ``ParaViewItem`` selecting the requested metadata.
+        ``VtkItem`` selecting the requested metadata.
     """
 
-    return ParaViewItem("info", name, name=output_name, units=units, **kwargs)
+    return VtkItem("info", name, name=output_name, units=units, **kwargs)
 
 
 def field(
@@ -1728,7 +1806,7 @@ def field(
     components: Optional[Iterable[str]] = None,
     system: str = "global",
     **kwargs,
-) -> ParaViewItem:
+) -> VtkItem:
     """Select a solution, xarray, or wavefield field for ParaView output.
 
     Args:
@@ -1744,10 +1822,10 @@ def field(
         **kwargs: Additional solver-facing item fields.
 
     Returns:
-        ``ParaViewItem`` selecting the requested field.
+        ``VtkItem`` selecting the requested field.
     """
 
-    return ParaViewItem(
+    return VtkItem(
         "field",
         name,
         name=output_name,
@@ -1766,31 +1844,32 @@ def field(
 prop = output_property
 
 
-class _ParaViewFactory:
+class _VtkFactory:
     field = staticmethod(field)
     prop = staticmethod(output_property)
     property = staticmethod(output_property)
     info = staticmethod(info)
 
-    def __call__(self, name: str = "paraview", **kwargs) -> ParaviewOutput:
-        return ParaviewOutput(name=name, **kwargs)
+    def __call__(self, name: str = "paraview", **kwargs) -> VtkOutput:
+        return VtkOutput.domain(name=name, **kwargs)
 
-    def volume(self, name: str = "paraview", **kwargs) -> ParaviewOutput:
-        return ParaviewOutput.volume(name=name, **kwargs)
+    def domain(self, name: str = "paraview", **kwargs) -> VtkOutput:
+        return VtkOutput.domain(name=name, **kwargs)
 
-    def surface(self, name: str = "paraview", **kwargs) -> ParaviewOutput:
-        return ParaviewOutput.surface(name=name, **kwargs)
+    def volume(self, name: str = "paraview", **kwargs) -> VtkOutput:
+        return self.domain(name=name, **kwargs)
 
-    def grid(
-        self, name: str = "paraview", grid: Any = None, **kwargs
-    ) -> ParaviewOutput:
+    def surface(self, name: str = "paraview", **kwargs) -> VtkOutput:
+        return VtkOutput.surface(name=name, **kwargs)
+
+    def grid(self, name: str = "paraview", grid: Any = None, **kwargs) -> VtkOutput:
         if grid is None:
-            raise ValueError("paraview.grid requires grid")
-        return ParaviewOutput.grid(grid, name=name, **kwargs)
+            raise ValueError("vtk.grid requires grid")
+        return VtkOutput.grid(grid, name=name, **kwargs)
 
 
-paraview = _ParaViewFactory()
-ParaViewOutput = ParaviewOutput
+vtk = _VtkFactory()
+paraview = vtk
 
 
 def wavefield(
@@ -1889,6 +1968,7 @@ def outputs(
     value: Any = None,
     *,
     traces: Optional[Union[str, Path, TraceOutput]] = "traces",
+    vtk: Any = None,
     paraview: Any = None,
     wavefields: Any = None,
     units: Optional[Union[OutputUnits, Mapping[str, Any]]] = None,
@@ -1900,7 +1980,7 @@ def outputs(
             sequence of requests, or solver-style mapping.
         traces: Trace output path or ``TraceOutput``. ``None`` keeps the
             default trace path.
-        paraview: Additional ParaView output request or requests.
+        vtk: Additional VTK/visualization output request or requests.
         wavefields: Additional wavefield output request or requests.
         units: Optional output-unit defaults.
 
@@ -1931,6 +2011,8 @@ def outputs(
         config.traces = (
             traces if isinstance(traces, TraceOutput) else TraceOutput(traces)
         )
+    for item in _as_output_sequence(vtk):
+        config.add(item)
     for item in _as_output_sequence(paraview):
         config.add(item)
     for item in _as_output_sequence(wavefields):

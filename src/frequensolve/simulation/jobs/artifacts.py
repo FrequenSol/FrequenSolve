@@ -1039,7 +1039,7 @@ class WavefieldOutputHandle:
 class JobArtifactMixin:
     """Artifact discovery and convenience handles for saved job outputs.
 
-    The mixin exposes receiver traces, wavefield traces, ParaView outputs, and
+    The mixin exposes receiver traces, wavefield traces, VTK outputs, and
     packed-trace cache management on concrete job classes.
     """
 
@@ -1154,14 +1154,20 @@ class JobArtifactMixin:
         return TraceManifest.from_job(self, output=self.wavefield_trace_outputs)
 
     @property
-    def paraview_outputs(self) -> dict:
-        """Return configured ParaView outputs.
+    def vtk_outputs(self) -> dict:
+        """Return configured VTK/visualization outputs.
 
         Returns:
-            Mapping from ParaView output name to output path.
+            Mapping from visualization output name to output path.
         """
         self.outputs.ensure_unique_names()
-        return {out.name: self._result_path / out.path for out in self.outputs.paraview}
+        return {out.name: self._result_path / out.path for out in self.outputs.vtk}
+
+    @property
+    def paraview_outputs(self) -> dict:
+        """Return visualization outputs using the historical property name."""
+
+        return self.vtk_outputs
 
     @property
     def trace_path(self) -> Path:

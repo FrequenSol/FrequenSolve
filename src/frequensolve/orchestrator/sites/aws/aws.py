@@ -592,10 +592,8 @@ class AWSSite(BaseSite):
         """
         return True
 
-    def fetch_paraview(
-        self, job: BaseJob, path: Optional[Union[str, Path]] = None
-    ) -> None:
-        """Get ParaView files from S3.
+    def fetch_vtk(self, job: BaseJob, path: Optional[Union[str, Path]] = None) -> None:
+        """Get VTK/visualization files from S3.
 
         Downloads the results/ParaView/ directory for the job from the
         project's S3 bucket to the local project path.
@@ -613,22 +611,29 @@ class AWSSite(BaseSite):
         project_name = Path(job.simulation.project_path).name
         simulation_name = job.simulation.name
         job_name = job.name
-        results_paraview_path = f"jobs/{simulation_name}/{job_name}/results/ParaView"
+        results_vtk_path = f"jobs/{simulation_name}/{job_name}/results/ParaView"
         s3_results_path = (
-            f"s3://{self.config.s3_bucket}/{project_name}/{results_paraview_path}"
+            f"s3://{self.config.s3_bucket}/{project_name}/{results_vtk_path}"
         )
-        local_results_path = path / results_paraview_path
+        local_results_path = path / results_vtk_path
 
         try:
             logger.info(
-                "Fetching ParaView outputs from %s to %s",
+                "Fetching VTK outputs from %s to %s",
                 s3_results_path,
                 local_results_path,
             )
             self.get(s3_results_path, local_results_path)
         except Exception as e:
-            logger.exception("Error downloading ParaView outputs: %s", str(e))
+            logger.exception("Error downloading VTK outputs: %s", str(e))
             raise
+
+    def fetch_paraview(
+        self, job: BaseJob, path: Optional[Union[str, Path]] = None
+    ) -> None:
+        """Fetch visualization files using the historical method name."""
+
+        return self.fetch_vtk(job, path=path)
 
     def _validate_config(self):
         """Validate AWS configuration."""

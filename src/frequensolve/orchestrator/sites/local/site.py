@@ -1424,8 +1424,8 @@ class LocalSite(BaseSite):
         else:
             return images
 
-    def fetch_paraview(self, job: BaseJob, path: Optional[Union[str, Path]] = None):
-        """Return local ParaView output paths for a job.
+    def fetch_vtk(self, job: BaseJob, path: Optional[Union[str, Path]] = None):
+        """Return local VTK/visualization output paths for a job.
 
         Args:
             job: Completed job.
@@ -1433,9 +1433,14 @@ class LocalSite(BaseSite):
                 resolved by the job artifact handle.
 
         Returns:
-            Mapping/list of ParaView output paths recorded by the job.
+            Mapping of visualization output names to local paths.
         """
-        return job.paraview_outputs
+        return job.vtk_outputs
+
+    def fetch_paraview(self, job: BaseJob, path: Optional[Union[str, Path]] = None):
+        """Fetch visualization files using the historical method name."""
+
+        return self.fetch_vtk(job, path=path)
 
     @property
     def provisioned(self) -> bool:

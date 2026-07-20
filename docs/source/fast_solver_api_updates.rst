@@ -205,9 +205,11 @@ The only alternate writer exposed publicly for now is :term:`XDMF` backed by HDF
 
    {"format": "xdmf", "encoding": "hdf5"}
 
-Simple volume output continues to use ``fields`` and ``properties``. Surface
-output is exposed through shell, boundary-label, model-surface, and plane
-selectors. The FrequenSolve Python API also exposes regular grid targets.
+``VtkOutput.domain(...)`` writes the full 2D or 3D computational domain and maps
+to the solver's ``"volume"`` target. It continues to use ``fields`` and
+``properties``. Surface output is exposed through shell, boundary-label,
+model-surface, and plane selectors. The FrequenSolve Python API also exposes
+regular grid targets.
 
 .. code-block:: json
 
@@ -222,6 +224,12 @@ selectors. The FrequenSolve Python API also exposes regular grid targets.
        "tolerance": {"value": 10.0, "units": "m"}}
      ]
    }
+
+``target.mesh.upscale`` is available only for volume and surface targets. It
+accepts integer values from 0 through 2 and defaults to 0 when omitted. Grid
+targets do not support mesh upscaling. Whenever mesh options are present, set
+``target.kind`` explicitly so the intended volume or surface target is
+unambiguous.
 
 The only public complex field-part names are ``real``, ``imag``, and ``abs``.
 When a user requests parts, the FrequenSolve Python API emits normalized ``items`` internally.

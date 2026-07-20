@@ -205,7 +205,7 @@ feature set.
        simulation=sim,
        f_list=[25.0],
        outputs=[
-           fs.ParaviewOutput(
+           fs.VtkOutput.domain(
                name="pv",
                path="paraview",
                fields=["pressure", "velocity_z"],

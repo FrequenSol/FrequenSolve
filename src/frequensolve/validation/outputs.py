@@ -9,8 +9,8 @@ import numpy as np
 from frequensolve.model.property import canonical_property_name
 from frequensolve.simulation.outputs import (
     JobOutputs,
-    ParaViewItem,
-    ParaviewOutput,
+    VtkItem,
+    VtkOutput,
     WavefieldOutput,
 )
 from frequensolve.simulation.physics import components_for_physics
@@ -54,11 +54,11 @@ def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) ->
     if outputs.units is not None:
         _validate_output_units(outputs.units, ctx.report)
 
-    if outputs.paraview and len(getattr(job, "f_list", []) or []) != 1:
+    if outputs.vtk and len(getattr(job, "f_list", []) or []) != 1:
         ctx.report.error(
-            "outputs.paraview.frequency_count",
-            "ParaView outputs currently require a single-frequency job.",
-            path="outputs.paraview",
+            "outputs.vtk.frequency_count",
+            "VTK outputs currently require a single-frequency job.",
+            path="outputs.vtk",
             hint="Create one FrequencyDomainJob per plotted frequency.",
         )
     acquisition = getattr(ctx.simulation, "acquisition", None)
@@ -67,7 +67,7 @@ def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) ->
         if acquisition is not None and hasattr(acquisition, "known_source_field_count")
         else 0
     )
-    for index, output in enumerate(outputs.paraview):
+    for index, output in enumerate(outputs.vtk):
         _validate_paraview_output(output, index, source_count, ctx)
     for index, output in enumerate(outputs.wavefields):
         _validate_wavefield_output(output, index, source_count, ctx)
@@ -86,16 +86,16 @@ def _validate_output_units(units: Any, report: ValidationReport) -> None:
 
 
 def _validate_paraview_output(
-    output: ParaviewOutput,
+    output: VtkOutput,
     index: int,
     source_count: Optional[int],
     ctx: _ValidationContext,
 ) -> None:
-    path = f"outputs.paraview[{index}]"
+    path = f"outputs.vtk[{index}]"
     if not getattr(output, "name", None):
         ctx.report.error(
-            "outputs.paraview.name.missing",
-            "ParaView outputs must have a non-empty name.",
+            "outputs.vtk.name.missing",
+            "VTK outputs must have a non-empty name.",
             path=f"{path}.name",
         )
     for source_id in getattr(output, "sources", []) or []:
@@ -129,7 +129,7 @@ def _validate_paraview_item(
     path: str,
     ctx: _ValidationContext,
 ) -> None:
-    if isinstance(item, ParaViewItem):
+    if isinstance(item, VtkItem):
         kind = item.kind
         value = item.value
         units = item.units
@@ -145,8 +145,8 @@ def _validate_paraview_item(
         direction = item.get("direction")
     else:
         ctx.report.error(
-            "outputs.paraview.item.type.invalid",
-            f"Unsupported ParaView item type {type(item).__name__}.",
+            "outputs.vtk.item.type.invalid",
+            f"Unsupported VTK item type {type(item).__name__}.",
             path=path,
         )
         return
@@ -161,8 +161,8 @@ def _validate_paraview_item(
         _validate_requested_properties([value], f"{path}.property", ctx)
     elif kind != "info":
         ctx.report.error(
-            "outputs.paraview.item.kind.unsupported",
-            f"Unsupported ParaView item kind {kind!r}.",
+            "outputs.vtk.item.kind.unsupported",
+            f"Unsupported VTK item kind {kind!r}.",
             path=f"{path}.kind",
         )
     if system is not None:

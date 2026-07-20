@@ -53,15 +53,19 @@ from frequensolve.simulation.outputs import (
     AxisAlignedPlane,
     JobOutputs,
     OutputUnits,
+    ParaViewItem,
     ParaViewOutput,
     ParaviewOutput,
     TraceOutput,
+    VtkItem,
+    VtkOutput,
     WavefieldOutput,
     field,
     info,
     output_property,
     outputs,
     paraview,
+    vtk,
     wavefield,
 )
 from frequensolve.simulation.physics import (
@@ -1602,7 +1606,7 @@ def test_elastic_velocity_is_canonical_and_displacement_is_removed():
     assert component.field == "velocity"
     assert component.to_fs()["field"] == "velocity"
 
-    paraview = ParaviewOutput(fields=["velocity", "stress"])
+    paraview = VtkOutput(fields=["velocity", "stress"])
     assert paraview.fields == ["velocity", "stress"]
     assert paraview.to_fs()["fields"] == [
         "velocity",
@@ -1840,7 +1844,7 @@ def test_output_paths_must_be_relative_to_result_directory():
     with pytest.raises(ValueError, match="relative"):
         TraceOutput(path="/tmp/traces")
     with pytest.raises(ValueError, match="relative"):
-        ParaviewOutput(path="/tmp/paraview")
+        VtkOutput(path="/tmp/paraview")
     with pytest.raises(ValueError, match="relative"):
         WavefieldOutput(path="/tmp/wavefields")
 
@@ -1882,7 +1886,7 @@ def test_trace_dataset_long_domain_methods_match_short_aliases():
 def test_job_outputs_adds_outputs_and_always_exports_traces():
     outputs = JobOutputs()
 
-    outputs += ParaviewOutput(name="pv", fields=["pressure"])
+    outputs += VtkOutput(name="pv", fields=["pressure"])
     payload = outputs.to_fs()
 
     assert payload["traces"]["path"] == "traces"
@@ -1898,8 +1902,8 @@ def test_job_outputs_make_named_outputs_unique():
     config = JobOutputs()
 
     config += [
-        ParaviewOutput(name="snapshot", fields=["pressure"]),
-        ParaviewOutput(name="snapshot", fields=["velocity"]),
+        VtkOutput(name="snapshot", fields=["pressure"]),
+        VtkOutput(name="snapshot", fields=["velocity"]),
         WavefieldOutput(name="snapshot", field="pressure", grid=grid),
         WavefieldOutput(name="snapshot", field="velocity", grid=grid),
     ]
@@ -1933,7 +1937,7 @@ def test_output_config_helper_exports_units_paraview_and_wavefields():
             properties={"Vp": "ft/s"},
         ),
         traces="trace_products",
-        paraview=paraview.surface(
+        vtk=vtk.surface(
             "quicklook",
             shell=True,
             items=[
@@ -1972,19 +1976,25 @@ def test_output_config_helper_exports_units_paraview_and_wavefields():
     assert "fields" not in payload["wavefields"][0]
 
 
-def test_paraview_factory_supports_alias_and_structured_items():
-    output = paraview.volume(
+def test_vtk_factory_supports_domain_and_structured_items():
+    output = vtk.domain(
         "volume",
         items=[
-            paraview.field("velocity", basis=["x", "z"], units="m/s"),
-            paraview.prop("Rho", units="g/cc"),
+            vtk.field("velocity", basis=["x", "z"], units="m/s"),
+            vtk.prop("Rho", units="g/cc"),
         ],
         format="xmf",
     )
 
     payload = output.to_fs()
 
-    assert isinstance(output, ParaViewOutput)
+    assert isinstance(output, VtkOutput)
+    assert isinstance(output.items[0], VtkItem)
+    assert ParaViewItem is VtkItem
+    assert ParaViewOutput is VtkOutput
+    assert ParaviewOutput is VtkOutput
+    assert paraview is vtk
+    assert payload["_type"] == "ParaviewOutput"
     assert payload["writer"] == {"format": "xdmf", "encoding": "hdf5"}
     assert payload["target"] == {"kind": "volume"}
     assert payload["items"][0]["basis"] == {
@@ -2026,7 +2036,7 @@ def test_job_add_output_exports_outputs_from_job_json(tmp_path):
     sim.save()
 
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
-    job += [ParaviewOutput(name="pv", fields=["pressure"])]
+    job += [VtkOutput(name="pv", fields=["pressure"])]
     payload = job.to_fs()
 
     assert "Outputs" not in sim.to_fs()
@@ -2047,7 +2057,7 @@ def test_job_output_convenience_methods_export_contract(tmp_path):
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
     job.output_units(geometry="ft", pressure="psi")
     job.traces(path="trace_products")
-    job.paraview("quicklook", fields="pressure")
+    job.vtk("quicklook", fields="pressure")
 
     payload = job.to_fs()["Outputs"]
 
@@ -2057,6 +2067,7 @@ def test_job_output_convenience_methods_export_contract(tmp_path):
     }
     assert payload["traces"]["path"] == "trace_products"
     assert payload["ParaView"][0]["name"] == "quicklook"
+    assert payload["ParaView"][0]["target"] == {"kind": "volume"}
     assert payload["ParaView"][0]["fields"] == ["pressure"]
 
 
@@ -2074,7 +2085,7 @@ def test_paraview_output_requires_single_frequency_job(tmp_path):
         name="freq",
         simulation=sim,
         f_list=[10.0, 20.0],
-        outputs=ParaviewOutput(name="pv", fields=["pressure"]),
+        outputs=VtkOutput(name="pv", fields=["pressure"]),
     )
 
     with pytest.raises(ValueError, match="single-frequency"):
@@ -2082,7 +2093,7 @@ def test_paraview_output_requires_single_frequency_job(tmp_path):
 
 
 def test_paraview_surface_output_exports_solver_contract():
-    output = ParaviewOutput.surface(
+    output = VtkOutput.surface(
         name="free_surface",
         surfaces="top",
         fields=["pressure"],
@@ -2106,12 +2117,13 @@ def test_paraview_surface_output_exports_solver_contract():
         "mesh": {"order": 3, "upscale": 2, "show_pml": False},
         "selection": [{"kind": "model_surface", "name": "top"}],
     }
+    assert "upscale" not in payload
     assert payload["fields"] == ["pressure"]
     assert payload["properties"] == ["Vp"]
 
 
-def test_paraview_volume_constructor_exports_solver_contract():
-    output = ParaviewOutput.volume(
+def test_vtk_domain_constructor_exports_solver_volume_contract():
+    output = VtkOutput.domain(
         name="volume",
         fields=["pressure"],
         parts="real",
@@ -2120,7 +2132,8 @@ def test_paraview_volume_constructor_exports_solver_contract():
 
     payload = output.to_fs()
 
-    assert payload["target"] == {"kind": "volume"}
+    assert payload["target"] == {"kind": "volume", "mesh": {"upscale": 1}}
+    assert "upscale" not in payload
     assert payload["items"] == [
         {"kind": "field", "field": "pressure", "parts": ["real"]},
     ]
@@ -2128,33 +2141,78 @@ def test_paraview_volume_constructor_exports_solver_contract():
     assert "properties" not in payload
 
 
-def test_paraview_defaults_to_vtu_appended_binary():
-    output = ParaviewOutput(name="pv", fields=["pressure"])
+def test_vtk_output_defaults_to_domain_and_vtu_appended_binary():
+    output = VtkOutput(name="pv", fields=["pressure"])
     payload = output.to_fs()
 
     assert output.format == "vtu"
     assert payload["writer"] == {"format": "vtu", "encoding": "appended"}
-    assert "target" not in payload
+    assert payload["target"] == {"kind": "volume"}
     assert "source" not in payload
     assert "sources" not in payload
+    assert "upscale" not in payload
 
     with pytest.raises(ValueError, match="format"):
-        ParaviewOutput(name="pv", fields=["pressure"], format="vtk")
+        VtkOutput(name="pv", fields=["pressure"], format="vtk")
+
+
+def test_paraview_upscale_is_only_available_on_volume_and_surface_meshes():
+    volume = VtkOutput.domain(fields=["pressure"])
+    surface = VtkOutput.surface(fields=["pressure"])
+
+    assert volume.to_fs()["target"] == {"kind": "volume"}
+    assert surface.to_fs()["target"]["kind"] == "surface"
+    assert "upscale" not in surface.to_fs()["target"]["mesh"]
+
+    with pytest.raises(ValueError, match=r"target\.mesh\.upscale"):
+        VtkOutput(fields=["pressure"], upscale=1)
+    with pytest.raises(ValueError, match="grid targets do not support upscale"):
+        VtkOutput.grid({"axes": []}, fields=["pressure"], upscale=1)
+    with pytest.raises(ValueError, match="grid targets do not support upscale"):
+        VtkOutput(
+            fields=["pressure"],
+            target={"kind": "grid", "mesh": {"upscale": 1}},
+        )
+
+
+@pytest.mark.parametrize("upscale", [-1, 3, 1.0, True, "1"])
+def test_paraview_target_mesh_upscale_requires_integer_zero_through_two(upscale):
+    with pytest.raises(ValueError, match="integer from 0 to 2"):
+        VtkOutput.domain(fields=["pressure"], upscale=upscale)
+
+
+def test_paraview_target_mesh_requires_explicit_target_kind():
+    with pytest.raises(ValueError, match="explicitly define kind"):
+        VtkOutput(
+            fields=["pressure"],
+            target={"mesh": {"upscale": 1}},
+        )
+
+
+def test_paraview_from_fs_rejects_top_level_upscale():
+    with pytest.raises(ValueError, match=r"target\.mesh\.upscale"):
+        VtkOutput.from_fs(
+            {
+                "_type": "ParaviewOutput",
+                "fields": ["pressure"],
+                "upscale": 1,
+            }
+        )
 
 
 def test_paraview_sources_all_omits_solver_sources_key():
-    default_payload = ParaviewOutput(name="pv", fields=["pressure"]).to_fs()
-    all_payload = ParaviewOutput(
+    default_payload = VtkOutput(name="pv", fields=["pressure"]).to_fs()
+    all_payload = VtkOutput(
         name="pv",
         fields=["pressure"],
         sources="all",
     ).to_fs()
-    scalar_payload = ParaviewOutput(
+    scalar_payload = VtkOutput(
         name="pv",
         fields=["pressure"],
         sources=2,
     ).to_fs()
-    array_payload = ParaviewOutput(
+    array_payload = VtkOutput(
         name="pv",
         fields=["pressure"],
         sources=np.arange(1, 4),
@@ -2166,18 +2224,18 @@ def test_paraview_sources_all_omits_solver_sources_key():
     assert array_payload["sources"] == [1, 2, 3]
 
     with pytest.raises(ValueError, match="sources"):
-        ParaviewOutput(name="pv", fields=["pressure"], sources="first")
+        VtkOutput(name="pv", fields=["pressure"], sources="first")
 
 
 def test_paraview_output_omits_fields_when_not_requested():
-    payload = ParaviewOutput(name="pv", properties=["vp"]).to_fs()
+    payload = VtkOutput(name="pv", properties=["vp"]).to_fs()
 
     assert "fields" not in payload
     assert payload["properties"] == ["vp"]
 
 
 def test_paraview_parts_do_not_default_missing_fields_to_all():
-    payload = ParaviewOutput(name="pv", properties=["vp"], parts="real").to_fs()
+    payload = VtkOutput(name="pv", properties=["vp"], parts="real").to_fs()
 
     assert "fields" not in payload
     assert "properties" not in payload
@@ -2185,7 +2243,7 @@ def test_paraview_parts_do_not_default_missing_fields_to_all():
 
 
 def test_paraview_parts_are_compact_and_validated():
-    output = ParaviewOutput(
+    output = VtkOutput(
         name="real_pressure",
         fields=["pressure"],
         properties=["vp"],
@@ -2201,14 +2259,14 @@ def test_paraview_parts_are_compact_and_validated():
         {"kind": "property", "property": "vp"},
     ]
 
-    assert ParaviewOutput(fields=["pressure"], parts="magnitude").parts == ["abs"]
+    assert VtkOutput(fields=["pressure"], parts="magnitude").parts == ["abs"]
 
     with pytest.raises(ValueError, match="parts"):
-        ParaviewOutput(fields=["pressure"], parts="phase")
+        VtkOutput(fields=["pressure"], parts="phase")
 
 
 def test_axis_aligned_plane_can_be_mixed_with_surface_names():
-    output = ParaviewOutput.surface(
+    output = VtkOutput.surface(
         name="surface_cuts",
         surfaces=[
             "sea_surface",
@@ -2266,7 +2324,7 @@ def test_paraview_grid_and_plane_selection_serialize_with_units():
             {"name": "z", "value": [0.0, 0.5], "units": "km"},
         ],
     }
-    output = ParaviewOutput.surface(
+    output = VtkOutput.surface(
         name="depth_slice",
         plane={"axis": "z", "value": 0.5 * u.km, "tolerance": 10.0 * u.m},
         fields=["pressure"],
@@ -2286,7 +2344,7 @@ def test_paraview_grid_and_plane_selection_serialize_with_units():
         }
     ]
 
-    grid_output = ParaviewOutput.grid(
+    grid_output = VtkOutput.grid(
         grid,
         fields=["pressure"],
     )
@@ -2304,6 +2362,7 @@ def test_paraview_from_fs_preserves_new_blocks_and_extra():
         "path": "pv",
         "target": {
             "kind": "surface",
+            "mesh": {"upscale": 2},
             "selection": [{"kind": "boundary", "labels": ["free"]}],
         },
         "writer": {"format": "xdmf", "distribution": "root"},
@@ -2312,11 +2371,12 @@ def test_paraview_from_fs_preserves_new_blocks_and_extra():
         "advanced_solver_flag": True,
     }
 
-    output = ParaviewOutput.from_fs(data)
+    output = VtkOutput.from_fs(data)
     data["target"]["kind"] = "volume"
     payload = output.to_fs()
 
     assert payload["target"]["kind"] == "surface"
+    assert payload["target"]["mesh"] == {"upscale": 2}
     assert payload["target"]["selection"] == [{"kind": "boundary", "labels": ["free"]}]
     assert payload["writer"] == {
         "format": "xdmf",

@@ -231,7 +231,7 @@ and is the normal place to request :term:`ParaView output`:
        simulation=sim,
        f_list=[20.0],
        outputs=[
-           fs.ParaviewOutput(
+           fs.VtkOutput.domain(
                name="pv",
                fields=["pressure"],
                properties=["vp", "rho"],

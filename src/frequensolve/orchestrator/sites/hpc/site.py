@@ -1260,12 +1260,12 @@ class SlurmSite(BaseSite):
                     exc,
                 )
 
-        if getattr(job.outputs, "paraview", None):
+        if getattr(job.outputs, "vtk", None):
             try:
-                self.fetch_paraview(job)
+                self.fetch_vtk(job)
             except Exception as exc:
                 logger.debug(
-                    "Could not fetch ParaView outputs for job %s: %s",
+                    "Could not fetch VTK outputs for job %s: %s",
                     job.name,
                     exc,
                 )
@@ -1292,8 +1292,8 @@ class SlurmSite(BaseSite):
             return None
         return job.collect_task_run_manifests()
 
-    def fetch_paraview(self, job: BaseJob):
-        """Get Paraview files from the remote site.
+    def fetch_vtk(self, job: BaseJob):
+        """Get configured VTK/visualization files from the remote site.
 
         Args:
             job: A BaseJob object.
@@ -1302,7 +1302,7 @@ class SlurmSite(BaseSite):
         self.fetch_run_metadata(job)
         job.outputs.ensure_unique_names()
         seen = set()
-        for output in job.outputs.paraview:
+        for output in job.outputs.vtk:
             path = Path(output.path)
             key = str(path)
             if key in seen:
@@ -1312,10 +1312,15 @@ class SlurmSite(BaseSite):
             local_dir = job._local_path / "results" / path
             local_dir.mkdir(parents=True, exist_ok=True)
             self._emit(
-                self._fetch_message("Fetching ParaView outputs", remote_dir, local_dir)
+                self._fetch_message("Fetching VTK outputs", remote_dir, local_dir)
             )
             self.get(remote_dir, local_dir)
-        return job.paraview_outputs
+        return job.vtk_outputs
+
+    def fetch_paraview(self, job: BaseJob):
+        """Fetch visualization files using the historical method name."""
+
+        return self.fetch_vtk(job)
 
     def fetch_image(
         self,
