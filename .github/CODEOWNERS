@@ -1,0 +1,5 @@
+# FrequenSol organization owners review package and release-chain changes.
+* @smalbadger @jbadger95
+/.github/ @smalbadger @jbadger95
+/src/frequensolve/orchestrator/ @smalbadger @jbadger95
+/pyproject.toml @smalbadger @jbadger95
