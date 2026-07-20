@@ -83,8 +83,9 @@ need to retry publishing intentionally. Set the required `release_tag` input to
 the immutable release tag; the workflow checks out that exact tag and reads its
 matching release evidence before building. Keep `--ref` on the same tag so the
 reviewed workflow definition and the package source are aligned. Choose
-`repository=testpypi` for release candidates and `repository=pypi` for final
-releases.
+the publication target by publishing the matching GitHub Release: prereleases
+route to TestPyPI and final releases route to PyPI. The retry workflow derives
+that target from the release metadata; it has no separate repository input.
 
 Retry a release-candidate publish:
 
@@ -92,8 +93,7 @@ Retry a release-candidate publish:
 gh workflow run release.yml \
   --repo FrequenSol/FrequenSolve \
   --ref v0.2.0rc1 \
-  -f release_tag=v0.2.0rc1 \
-  -f repository=testpypi
+  -f release_tag=v0.2.0rc1
 ```
 
 Retry a final release publish:
@@ -102,8 +102,7 @@ Retry a final release publish:
 gh workflow run release.yml \
   --repo FrequenSol/FrequenSolve \
   --ref v0.2.0 \
-  -f release_tag=v0.2.0 \
-  -f repository=pypi
+  -f release_tag=v0.2.0
 ```
 
 `Publish Package` requires both matching evidence assets, verifies the archive
