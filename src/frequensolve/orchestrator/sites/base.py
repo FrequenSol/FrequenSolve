@@ -3,11 +3,14 @@
 import asyncio
 import html
 import logging
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Union
+
+from frequensolve.simulation.jobs.run_state import SkipPolicy
 
 TERMINAL_STATES = {
     "completed",
@@ -42,6 +45,7 @@ STATUS_RESET = "\033[0m"
 __all__ = [
     "BaseSite",
     "JobStatus",
+    "LocalHostConfig",
     "RunFailedError",
     "RunHandle",
     "RunResult",
@@ -157,6 +161,21 @@ def _check_if_notebook() -> bool:
             return False  # Other type
     except NameError:
         return False  # Probably standard Python interpreter
+
+
+@dataclass(frozen=True)
+class LocalHostConfig:
+    """Configuration for the machine running the FrequenSolve Python process."""
+
+    tmp_dir: Optional[Union[str, Path]] = None
+
+    @property
+    def tmp_path(self) -> Path:
+        """Return the configured or platform-default local temporary directory."""
+
+        if self.tmp_dir is None or str(self.tmp_dir).strip() == "":
+            return Path(tempfile.gettempdir())
+        return Path(self.tmp_dir).expanduser()
 
 
 @dataclass
@@ -376,7 +395,7 @@ class SubmitPlan:
             "frequency tasks would run"
         )
         if self.force:
-            message += " (force=True; current outputs ignored)"
+            message += " (skip=False; current outputs ignored)"
         else:
             categories = []
             if self.n_current_tasks:
@@ -902,6 +921,14 @@ class BaseSite:
 
     _is_notebook: bool = field(default_factory=_check_if_notebook)
     verbose: bool = False
+    local_host_config: LocalHostConfig = field(default_factory=LocalHostConfig)
+
+    @property
+    def local_host_tmp_dir(self) -> Path:
+        """Local temporary directory configured for this Python host."""
+
+        config = getattr(self, "local_host_config", LocalHostConfig())
+        return config.tmp_path
 
     def _emit(
         self,
@@ -1163,7 +1190,6 @@ class BaseSite:
         residual: Optional[float] = None,
         ignore_solver_options: Optional[bool] = None,
         force: bool = False,
-        force_run: bool = False,
         rerun: bool = False,
         reuse: bool = True,
         validate: bool = True,
@@ -1179,13 +1205,13 @@ class BaseSite:
         Args:
             job: Job object to inspect.
             skip: Skip policy name or object. Supported names include
-                ``"strict"``, ``"compatible"``, ``"tolerant"``, and ``"none"``.
+                ``"strict"``, ``"compatible"``, ``"tolerant"``, ``"none"``,
+                and ``"false"``. Boolean ``False`` also reruns every task.
             skip_policy: Alias for ``skip``.
             residual: Residual threshold for tolerant failed-task acceptance.
             ignore_solver_options: Ignore solver-only simulation settings when
                 comparing task compatibility.
             force: Ignore reusable/current outputs and count all tasks.
-            force_run: Alias for ``force``.
             rerun: Alias for ``force``.
             reuse: Include prior matching frequency outputs that submit would
                 reuse. Defaults to ``True`` to mirror normal submission.
@@ -1198,7 +1224,14 @@ class BaseSite:
             zero-based ``pending_indices`` for solver submission.
         """
 
-        force_run = bool(force or force_run or rerun)
+        policy_value = skip if skip is not None else skip_policy
+        normalized_policy = SkipPolicy.from_value(
+            policy_value,
+            residual=residual,
+            ignore_solver_options=ignore_solver_options,
+            reuse=reuse,
+        )
+        fresh_run = bool(force or rerun or normalized_policy.force)
         self.prepare_job(job, validate=validate)
         if refresh_metadata:
             fetch_metadata = getattr(self, "fetch_run_metadata", None)
@@ -1215,12 +1248,11 @@ class BaseSite:
             except TypeError:
                 total = 0
 
-        policy_value = skip if skip is not None else skip_policy
         if hasattr(job, "plan_tasks"):
             task_plan = job.plan_tasks(
                 skip_policy=policy_value,
                 reuse=reuse,
-                force=force_run,
+                force=fresh_run,
                 apply=False,
                 residual=residual,
                 ignore_solver_options=ignore_solver_options,
@@ -1242,7 +1274,7 @@ class BaseSite:
             )
             skipped = {*current, *reused, *accepted, *accepted_failed}
             failed_existing = (
-                () if force_run else self._failed_existing_tasks(job, total, skipped)
+                () if fresh_run else self._failed_existing_tasks(job, total, skipped)
             )
             return SubmitPlan(
                 job=job,
@@ -1255,10 +1287,10 @@ class BaseSite:
                 accepted_failed_tasks=accepted_failed,
                 failed_existing_tasks=failed_existing,
                 skip_policy=task_plan.get("skip_policy"),
-                force=force_run,
+                force=fresh_run,
             )
 
-        if force_run:
+        if fresh_run:
             current: tuple[int, ...] = ()
         elif hasattr(job, "current_tasks"):
             current_values = []
@@ -1276,7 +1308,7 @@ class BaseSite:
             current = ()
 
         reused: tuple[int, ...] = ()
-        if not force_run and reuse and hasattr(job, "reusable_task_outputs"):
+        if not fresh_run and reuse and hasattr(job, "reusable_task_outputs"):
             reused_values = []
             current_set = set(current)
             for record in job.reusable_task_outputs():
@@ -1292,10 +1324,10 @@ class BaseSite:
 
         skipped = {*current, *reused}
         pending = tuple(
-            task for task in range(1, total + 1) if force_run or task not in skipped
+            task for task in range(1, total + 1) if fresh_run or task not in skipped
         )
         failed_existing = (
-            () if force_run else self._failed_existing_tasks(job, total, skipped)
+            () if fresh_run else self._failed_existing_tasks(job, total, skipped)
         )
         return SubmitPlan(
             job=job,
@@ -1306,7 +1338,7 @@ class BaseSite:
             reused_tasks=reused,
             failed_existing_tasks=failed_existing,
             skip_policy=policy_value,
-            force=force_run,
+            force=fresh_run,
         )
 
     @staticmethod

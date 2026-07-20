@@ -439,7 +439,7 @@ class GraphQLClient:
         memory: Optional[int] = None,
         job_name: Optional[str] = None,
         send_simulation_status_email: Optional[bool] = None,
-        force_run: bool = False,
+        fresh: bool = False,
     ) -> Dict[str, str]:
         """Submit a simulation job.
 
@@ -449,7 +449,7 @@ class GraphQLClient:
             memory: Memory in MB for the job (optional)
             job_name: Custom name for the job (optional)
             send_simulation_status_email: If True/False, overrides cloud communication preferences for this run only
-            force_run: Force a fresh solver run when the backend supports it
+            fresh: Force a fresh solver run when the backend supports it
 
         Returns:
             Dict containing:
@@ -460,8 +460,8 @@ class GraphQLClient:
         Raises:
             RuntimeError: If job submission fails
         """
-        force_var = "$forceRun: Boolean" if force_run else ""
-        force_arg = "forceRun: $forceRun" if force_run else ""
+        force_var = "$forceRun: Boolean" if fresh else ""
+        force_arg = "forceRun: $forceRun" if fresh else ""
         mutation = f"""
             mutation SubmitJob(
                 $jobFileS3Key: String!
@@ -497,7 +497,7 @@ class GraphQLClient:
             variables["memory"] = memory
         if job_name is not None:
             variables["jobName"] = job_name
-        if force_run:
+        if fresh:
             variables["forceRun"] = True
 
         result = self.execute(mutation, variables)

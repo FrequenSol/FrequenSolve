@@ -227,7 +227,13 @@ class Acquisition(ExtraFieldsMixin):
         mechanism: Optional[Any] = None,
         defaults: Optional[Mapping[str, Any]] = None,
     ) -> List[str]:
-        """Append inline physical source points and return their names."""
+        """Append inline physical source points and return their names.
+
+        ``amplitude`` accepts a dimensionless multiplier, a Pint quantity, or
+        a ``{"value": ..., "units": ...}`` physical source strength. Sauce
+        expects force units for vector/dipole sources and moment units for
+        scalar/tensor/monopole sources.
+        """
 
         geometry = SourceGeometry.points(
             kind=kind,

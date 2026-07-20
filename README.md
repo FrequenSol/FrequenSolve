@@ -75,6 +75,9 @@ Starter config:
 ```toml
 default = "cloud"
 
+[host]
+# tmp_dir = "/local/tmp/directory"
+
 [sites.cloud]
 type = "aws"
 domain = "app.frequensol.com"
@@ -93,9 +96,12 @@ hostname = "login.example.edu"
 username = "your-username"
 credential = "example-hpc"
 ssh_key = "~/.ssh/id_ed25519"
-solver = "/remote/path/to/solver"
-work_dir = "/remote/work/directory"
-rel_path = "frequensolve/tutorials"
+# HPC launches route every solver phase through this executable.
+solver = "/remote/path/to/solver-installation/FS_seismic"
+work_dir = "/remote/writable/directory/frequensolve"
+# Optional future location for models and other high-I/O data.
+scratch_dir = "/remote/scratch/directory/frequensolve"
+tmp_dir = "/remote/tmp/directory"
 default_partition = "debug"
 account = "allocation"
 transfer_method = "rsync"
@@ -103,7 +109,8 @@ modules = []
 verbose = true
 
 [sites.hpc.environment]
-# OMP_NUM_THREADS = "1"
+# Module-defined variables can be composed after module loading.
+# LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
 
 [sites.hpc.run_config]
 nodes = 1
@@ -112,6 +119,11 @@ ranks_per_node = 4
 ranks_per_task = 1
 poll_interval = 10
 ```
+
+``work_dir`` is the remote base for relative project, simulation, and job
+paths. It may point to any writable remote filesystem; ``$WORK/frequensolve``
+is only the default when the setting is omitted. Absolute paths in those
+definitions are used as written.
 
 HPC passwords and SSH-key passphrases are stored in the operating system
 keyring only after a successful login. Two-factor codes are never stored.

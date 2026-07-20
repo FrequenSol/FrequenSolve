@@ -48,6 +48,51 @@ def test_point_sources_export_v2_source_geometry():
     assert acq.source_field_names() == ["s001", "s002"]
 
 
+def test_source_amplitudes_export_dimensionless_and_physical_units():
+    scalar = fs.Acquisition()
+    scalar.add_sources(
+        kind="scalar",
+        coords=[[0.25, 0.05]],
+        amplitude=2.5,
+    )
+
+    assert scalar.to_fs()["source_geometry"]["defaults"]["amplitude"] == 2.5
+
+    vector = fs.Acquisition()
+    vector.add_sources(
+        kind="vector",
+        coords=[[0.5, 0.05]],
+        direction=[0.0, 1.0],
+        amplitude=20.0 * fs.ureg.kN,
+    )
+
+    payload = vector.to_fs()
+    assert payload["source_geometry"]["defaults"]["amplitude"] == {
+        "value": 20.0,
+        "units": "kN",
+    }
+    assert fs.Acquisition.from_fs(payload).to_fs() == payload
+
+
+def test_file_source_defaults_serialize_unit_bearing_amplitudes():
+    geometry = fs.SourceGeometry.hdf5(
+        "sources.h5",
+        dataset="source_points",
+        kind="scalar",
+        defaults={
+            "mechanism": "isotropic",
+            "amplitude": 1.0e6 * fs.ureg.N * fs.ureg.m,
+        },
+    )
+
+    payload = geometry.to_fs()
+
+    assert payload["defaults"] == {
+        "mechanism": {"type": "isotropic"},
+        "amplitude": {"value": 1.0e6, "units": "m*N"},
+    }
+
+
 def test_named_source_encoding_exports_sparse_complex_terms():
     acq = fs.Acquisition(
         sources=fs.SourceGeometry.inline(

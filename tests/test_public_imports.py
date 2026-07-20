@@ -209,12 +209,14 @@ def test_public_package_imports_smoke():
         "frequensolve.project",
         "frequensolve.seismic",
         "frequensolve.simulation",
+        "frequensolve.simulation.discretization",
         "frequensolve.simulation.jobs",
         "frequensolve.simulation.jobs.base",
         "frequensolve.simulation.jobs.fwi",
         "frequensolve.simulation.jobs.imaging",
         "frequensolve.simulation.jobs.forward",
         "frequensolve.simulation.outputs",
+        "frequensolve.simulation.solver",
         "frequensolve.util",
         "frequensolve.orchestrator",
         "frequensolve.orchestrator.sites",
@@ -223,6 +225,18 @@ def test_public_package_imports_smoke():
         "frequensolve.orchestrator.utils.progress",
     ]:
         importlib.import_module(name)
+
+
+def test_solver_and_discretization_have_domain_specific_modules():
+    import frequensolve as fs
+
+    discretization = importlib.import_module("frequensolve.simulation.discretization")
+    solver = importlib.import_module("frequensolve.simulation.solver")
+
+    assert fs.Discretization is discretization.Discretization
+    assert fs.SolverConfig is solver.SolverConfig
+    assert fs.SuperPatch is solver.SuperPatch
+    assert importlib.util.find_spec("frequensolve.simulation.numerics_manager") is None
 
 
 def test_removed_legacy_public_names_are_not_exported():

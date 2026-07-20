@@ -28,6 +28,7 @@ from frequensolve.util.setup_logger import (
     disable_jupyter_logging,
     normalize_log_level,
 )
+from frequensolve.util.store import compact_hdf5_file
 
 __all__ = ["Project", "BaseProjectComponent"]
 
@@ -312,6 +313,59 @@ class Project:
             Newly created and project-bound ``SeismicSimulation``.
         """
 
+        return self._create_simulation(
+            name=name,
+            physics=physics,
+            dimension=dimension,
+            attach=True,
+            **kwargs,
+        )
+
+    def study(
+        self,
+        name: str,
+        *,
+        name_template: Optional[str] = None,
+        max_cases: Optional[int] = 1000,
+        **parameters: Mapping[str, Any],
+    ):
+        """Define related simulations from named parameter choices.
+
+        Args:
+            name: Study name used by the default simulation name template.
+            name_template: Optional Python format string containing ``study``,
+                ``index``, or parameter-name fields.
+            max_cases: Maximum combinations allowed in one preview or
+                materialization, or ``None`` for no limit.
+            **parameters: Parameter names mapped to non-empty mappings of
+                choice labels to authoring values.
+
+        Returns:
+            A :class:`frequensolve.simulation.SimulationStudy` bound to this
+            project.
+        """
+
+        from frequensolve.simulation.study import SimulationStudy
+
+        return SimulationStudy(
+            self,
+            name,
+            parameters,
+            name_template=name_template,
+            max_cases=max_cases,
+        )
+
+    def _create_simulation(
+        self,
+        *,
+        name: str,
+        physics: str,
+        dimension: int | float | str,
+        attach: bool,
+        **kwargs: Any,
+    ) -> SeismicSimulation:
+        """Construct a project-bound simulation with optional list attachment."""
+
         options = self._simulation_options(kwargs)
         sim = SeismicSimulation(
             name=name,
@@ -327,7 +381,8 @@ class Project:
             default_units=options["default_units"],
         )
         sim._project = self
-        self.simulations.append(sim)
+        if attach:
+            self.simulations.append(sim)
         return sim
 
     def list_jobs(
@@ -500,12 +555,32 @@ class Project:
         if not sim_dir.exists():
             return
 
-        with tempfile.TemporaryDirectory(prefix=".fs_transfer_", dir=self.path) as tmp:
+        with tempfile.TemporaryDirectory(
+            prefix="fs_transfer_",
+            dir=self._transfer_local_host_tmp_dir(site),
+        ) as tmp:
             temp_dir = Path(tmp)
             shutil.copytree(sim_dir, temp_dir / "simulations", dirs_exist_ok=True)
             self._rewrite_transfer_simulations(temp_dir, remote)
             self._copy_transfer_mesh_files(temp_dir)
+            self._compact_transfer_hdf5_files(temp_dir)
             site.put(temp_dir, remote)
+
+    @staticmethod
+    def _transfer_local_host_tmp_dir(site: BaseSite) -> Optional[Path]:
+        tmp_dir = getattr(site, "local_host_tmp_dir", None)
+        if callable(tmp_dir):
+            tmp_dir = tmp_dir()
+        if tmp_dir is None:
+            host_config = getattr(site, "local_host_config", None)
+            tmp_dir = getattr(host_config, "tmp_path", None)
+            if tmp_dir is None:
+                tmp_dir = getattr(host_config, "tmp_dir", None)
+        if tmp_dir is None or str(tmp_dir).strip() == "":
+            return None
+        path = Path(tmp_dir).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _configure_logging(self) -> None:
         configure_logging(
@@ -738,6 +813,33 @@ class Project:
             dest = temp_dir / mesh_file.relative_to(self.path)
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(mesh_file, dest)
+
+    @staticmethod
+    def _compact_transfer_hdf5_files(temp_dir: Path) -> None:
+        """Repack bloated HDF5 files in a disposable transfer staging tree."""
+
+        candidates = {
+            path
+            for pattern in ("*.h5", "*.hdf5")
+            for path in temp_dir.rglob(pattern)
+            if path.is_file()
+        }
+        for path in sorted(candidates):
+            try:
+                reclaimed = compact_hdf5_file(path)
+            except (OSError, RuntimeError, ValueError) as exc:
+                logging.warning(
+                    "Could not compact staged HDF5 file %s: %s",
+                    path.relative_to(temp_dir),
+                    exc,
+                )
+                continue
+            if reclaimed:
+                logging.info(
+                    "Compacted staged HDF5 file %s; removed %.2f GiB of dead space",
+                    path.relative_to(temp_dir),
+                    reclaimed / (1024**3),
+                )
 
     @staticmethod
     def _site_is_local(site: BaseSite) -> bool:

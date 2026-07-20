@@ -19,10 +19,11 @@ from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import (
     BaseJob,
     FrequencyDomainJob,
+    JobLayout,
     TimeDomainJob,
 )
 from frequensolve.simulation.jobs.artifacts import RunMetadata
-from frequensolve.simulation.numerics_manager import SolverConfig
+from frequensolve.simulation.solver import SolverConfig
 
 
 def _project_with_trace_simulation(tmp_path):
@@ -43,6 +44,32 @@ def test_project_save_load_uses_relative_simulation_paths(tmp_path):
     assert loaded.path == project.path
     assert loaded.simulations["simple"].name == sim.name
     assert loaded.simulations["simple"]._project is loaded
+
+
+def test_job_layout_uses_base_only_for_relative_paths():
+    relative = JobLayout.from_payload(
+        {
+            "project_path": "/shared/frequensolve",
+            "simulation": "simulations/simple/simple.json",
+            "result_path": "jobs/simple/freq/results",
+            "name": "freq",
+        }
+    )
+    absolute = JobLayout.from_payload(
+        {
+            "project_path": "/shared/frequensolve",
+            "simulation": "/models/simple/simple.json",
+            "result_path": "/scratch/results/simple/freq",
+            "name": "freq",
+        }
+    )
+
+    assert relative.simulation_file == Path(
+        "/shared/frequensolve/simulations/simple/simple.json"
+    )
+    assert relative.result_dir == Path("/shared/frequensolve/jobs/simple/freq/results")
+    assert absolute.simulation_file == Path("/models/simple/simple.json")
+    assert absolute.result_dir == Path("/scratch/results/simple/freq")
 
 
 def test_generic_load_dispatches_saved_project_job_and_simulation(tmp_path):
@@ -1319,7 +1346,7 @@ def test_job_task_plan_only_runs_new_frequencies_when_range_expands(tmp_path):
     }
 
 
-def test_job_task_plan_force_runs_all_frequencies(tmp_path):
+def test_job_task_plan_reruns_all_frequencies(tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
     job.save()
@@ -1753,7 +1780,6 @@ def test_init_manifest_does_not_mark_frequency_task_current(tmp_path):
                         "--job",
                         str(job._file),
                         "--init",
-                        "--map",
                     ],
                 },
                 "inputs": {

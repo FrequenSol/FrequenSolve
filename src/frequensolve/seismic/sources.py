@@ -44,6 +44,19 @@ def _mechanism_to_fs(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
+def _source_basis_to_fs(value: Mapping[str, Any]) -> Dict[str, Any]:
+    """Serialize the source-basis fields defined by fs-acquisition-2."""
+
+    payload = copy.deepcopy(dict(value))
+    if "direction" in payload:
+        payload["direction"] = direction_to_fs(payload["direction"])
+    if "amplitude" in payload:
+        payload["amplitude"] = value_and_units_to_fs(payload["amplitude"])
+    if "mechanism" in payload:
+        payload["mechanism"] = _mechanism_to_fs(payload["mechanism"])
+    return payload
+
+
 def _basis_to_fs(
     *,
     kind: Optional[str] = None,
@@ -56,15 +69,14 @@ def _basis_to_fs(
     if kind is not None:
         payload["kind"] = kind
     if direction is not None:
-        payload["direction"] = direction_to_fs(direction)
+        payload["direction"] = direction
     if amplitude is not None:
-        payload["amplitude"] = value_and_units_to_fs(amplitude)
-    mechanism_payload = _mechanism_to_fs(mechanism)
-    if mechanism_payload is not None:
-        payload["mechanism"] = mechanism_payload
+        payload["amplitude"] = amplitude
+    if mechanism is not None:
+        payload["mechanism"] = mechanism
     if extra:
         payload.update(copy.deepcopy(dict(extra)))
-    return payload
+    return _source_basis_to_fs(payload)
 
 
 def _source_kind(kind: str) -> str:
@@ -189,7 +201,13 @@ def _coefficient_abs(value: Any) -> float:
 
 @dataclass(init=False)
 class PointSource(ExtraFieldsMixin):
-    """One physical source point in a source geometry catalog."""
+    """One physical source point in a source geometry catalog.
+
+    ``amplitude`` accepts a dimensionless numeric multiplier, a Pint quantity,
+    or a ``{"value": ..., "units": ...}`` physical source strength. Force
+    units apply to vector and dipole sources; moment units apply to scalar,
+    tensor, and monopole sources.
+    """
 
     coordinates: Any
     name: Optional[str] = None
@@ -336,7 +354,12 @@ class SourceGeometry(ExtraFieldsMixin):
         defaults: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> "SourceGeometry":
-        """Create inline point-source geometry from coordinate rows."""
+        """Create inline point-source geometry from coordinate rows.
+
+        ``amplitude`` is stored in the shared source basis. Plain numbers are
+        dimensionless multipliers; Pint quantities and value/unit mappings are
+        exact physical source strengths in the fs-acquisition-2 contract.
+        """
 
         rows = _coordinate_rows(coords, units=units, system=system)
         source_names = _source_names(names, len(rows))
@@ -490,7 +513,7 @@ class SourceGeometry(ExtraFieldsMixin):
             "kind": self.kind,
         }
         if self.defaults:
-            payload["defaults"] = copy.deepcopy(self.defaults)
+            payload["defaults"] = _source_basis_to_fs(self.defaults)
         if self.geometry_type == "Inline":
             payload["sources"] = [source.to_fs(ctx) for source in self.sources]
         elif self.geometry_type == "HDF5":

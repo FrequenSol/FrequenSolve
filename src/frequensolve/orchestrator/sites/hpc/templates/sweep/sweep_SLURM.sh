@@ -3,8 +3,8 @@
 {% if batch_job %}
 #SBATCH -J {{ name }}
 {% if run_path %}
-#SBATCH -o {{run_path}}/jobs/batch/job_%j.o
-#SBATCH -e {{run_path}}/jobs/batch/job_%j.e
+#SBATCH -o {{dir_out}}/batch/job_%j.o
+#SBATCH -e {{dir_out}}/batch/job_%j.e
 {% else %}
 #SBATCH -o ./job_%j.o
 #SBATCH -e ./job_%j.e
@@ -42,8 +42,8 @@ cd {{run_path}}
 {% endif %}
 
 dir_out={{dir_out}}
-rm -rf $dir_out
-mkdir -p $dir_out
+mkdir -p "$dir_out/batch"
+find "$dir_out" -mindepth 1 -maxdepth 1 ! -name batch -exec rm -rf -- {} +
 
 {% for line in runtime_setup %}
 {{ line }}
@@ -52,6 +52,10 @@ mkdir -p $dir_out
 mpi_exec={{mpi}}
 executable={{executable}}
 n_threads={{n_threads}}
+export OMP_NUM_THREADS=$n_threads
+{% for line in mpi_async_progress_setup %}
+{{ line }}
+{% endfor %}
 n_procs={{n_procs}}
 n_tasks={{n_tasks}}
 fresh_flag=""
@@ -63,7 +67,7 @@ n_workers=$((n_procs / procs_per_task))
 
 start_time=$(date +%s)
 
-$mpi_exec -n $n_procs $executable $n_threads --job $input_file $fresh_flag --init --map
+$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --init > $dir_out/init.log 2>&1
 
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
@@ -77,8 +81,8 @@ done
 wait
 
 {% if imaging_job %}
-echo "$executable -nthreads $n_threads --job $input_file $fresh_flag --smooth"
-$executable -nthreads $n_threads --job $input_file $fresh_flag --smooth >> $dir_out/smooth.log 2>&1
+echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --smooth"
+$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --smooth >> $dir_out/smooth.log 2>&1
 {% endif %}
 
 {% if pack_job %}

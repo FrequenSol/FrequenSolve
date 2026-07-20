@@ -1,5 +1,8 @@
+import inspect
 import sys
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +23,7 @@ class FakeSlurmSiteConfig:
     mpi_wrapper: str = "srun"
     poll_interval: int = 5
     account: str = ""
+    tmp_dir: str | None = None
     max_duration: str = "00-02:00:00"
     min_nodes: int = 1
     max_nodes: int = 1
@@ -35,6 +39,9 @@ class FakeSlurmRunConfig:
     queue: str | None = None
     nodes: int = 1
     duration: str | None = None
+    ranks_per_node: int | None = None
+    ranks_per_task: int | None = None
+    mpi_async_progress: bool = False
     procs_per_node: int | None = None
     procs_per_task: int | None = None
     account: str | None = None
@@ -134,6 +141,10 @@ def test_site_factory_uses_frequensolve_home_override(monkeypatch, tmp_path):
     assert sites.site_config_path() == storage_root / "site.toml"
 
 
+def test_local_host_config_defaults_to_platform_tmp_dir():
+    assert sites.LocalHostConfig().tmp_path == Path(tempfile.gettempdir())
+
+
 def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tmp_path):
     monkeypatch.delenv("FREQUENSOLVE_SITE_CONFIG", raising=False)
     monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
@@ -151,11 +162,34 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
     assert 'type = "aws"' in starter
     assert "[sites.local]" in starter
     assert "[sites.hpc]" in starter
-    assert 'type = "slurm"' in starter
+    assert "[sites.stampede3]" in starter
+    assert 'preset = "stampede3"' in starter
+    assert "[host]" in starter
     assert 'solver = "/path/to/local/solver"' in starter
+    assert 'work_dir = "/remote/writable/directory/frequensolve"' in starter
+    assert 'scratch_dir = "/remote/scratch/directory/frequensolve"' in starter
+    assert "rel_path =" not in starter
+    assert 'tmp_dir = "/remote/tmp/directory"' in starter
+    assert '# tmp_dir = "/local/tmp/directory"' in starter
     assert "modules = []" in starter
     assert "[sites.hpc.environment]" in starter
     assert "[sites.hpc.run_config]" in starter
+    starter_config = sites.load_site_config(config_path)
+    assert set(starter_config["sites"]) == {
+        "cloud",
+        "local",
+        "hpc",
+        "stampede3",
+    }
+    assert starter_config["sites"]["hpc"]["partitions"]["debug"] == {
+        "max_duration": "02:00:00",
+        "min_nodes": 1,
+        "max_nodes": 4,
+        "cores_per_node": 64,
+        "sockets_per_node": 2,
+        "memory_per_node": 262144,
+        "gpus_per_node": 0,
+    }
 
     site = sites.Site()
 
@@ -164,6 +198,17 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
         "interactive": True,
         "verbose": True,
     }
+    assert site.local_host_config == sites.LocalHostConfig()
+
+    install_fake_hpc_module(monkeypatch)
+    monkeypatch.setattr(sites, "SlurmSite", FakeSite)
+    hpc_site = sites.Site(profile="hpc", run_config=FakeSlurmRunConfig())
+
+    assert hpc_site.kwargs["config"].queue == "debug"
+    assert hpc_site.kwargs["config"].tmp_dir == "/remote/tmp/directory"
+    assert hpc_site.local_host_config == sites.LocalHostConfig()
+    assert hpc_site.kwargs["config"].partitions["debug"]["cores_per_node"] == 64
+    assert hpc_site.kwargs["config"].partitions["debug"]["memory_per_node"] == 262144
 
 
 def test_site_factory_reads_named_profiles_and_routes_aws_lazily(monkeypatch, tmp_path):
@@ -318,51 +363,63 @@ def test_site_factory_builds_slurm_config_objects(monkeypatch, tmp_path):
         """
 default = "cluster"
 
+[host]
+tmp_dir = "~/frequensolve-tmp"
+
 [sites.cluster]
 type = "slurm"
-rel_path = "projects/demo"
 hostname = "login.example.edu"
 username = "user"
 credential = "primary-cluster"
 ssh_key = "~/.ssh/id_ed25519"
 solver = "/remote/bin/solver"
-work_dir = "/scratch/user"
+work_dir = "/shared/user/frequensolve"
+scratch_dir = "/scratch/user/frequensolve"
+tmp_dir = "/scratch/user/frequensolve-tmp"
 modules = ["gcc", "openmpi"]
 default_partition = "debug"
 account = "acct123"
 nodes = 2
 duration = "00:30:00"
 procs_per_node = 4
+mpi_async_progress = false
 verbose = true
 
 [sites.cluster.environment]
 OMP_NUM_THREADS = "2"
+LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
 """.strip()
     )
     monkeypatch.setattr(sites, "SlurmSite", FakeSite)
 
     site = sites.Site(config_path=config_path)
 
-    assert site.kwargs["rel_path"] == "projects/demo"
     assert site.kwargs["default_partition"] == "debug"
     assert site.kwargs["verbose"] is True
     assert site.kwargs["username"] == "user"
     assert site.kwargs["credential"] == "primary-cluster"
     assert site.kwargs["ssh_key"] == "~/.ssh/id_ed25519"
     assert site.kwargs["solver"] == "/remote/bin/solver"
-    assert site.kwargs["work_dir"] == "/scratch/user"
+    assert site.kwargs["work_dir"] == "/shared/user/frequensolve"
+    assert site.kwargs["scratch_dir"] == "/scratch/user/frequensolve"
     assert site.kwargs["modules"] == ["gcc", "openmpi"]
-    assert site.kwargs["environment"] == {"OMP_NUM_THREADS": "2"}
+    assert site.kwargs["environment"] == {
+        "OMP_NUM_THREADS": "2",
+        "LD_LIBRARY_PATH": "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}",
+    }
     assert site.kwargs["config"] == FakeSlurmSiteConfig(
         hostname="login.example.edu",
         queue="debug",
         account="acct123",
+        tmp_dir="/scratch/user/frequensolve-tmp",
     )
+    assert site.local_host_config == sites.LocalHostConfig(tmp_dir="~/frequensolve-tmp")
     assert site.kwargs["run_config"] == FakeSlurmRunConfig(
         queue="debug",
         nodes=2,
         duration="00:30:00",
         procs_per_node=4,
+        mpi_async_progress=False,
         account="acct123",
     )
 
@@ -380,30 +437,43 @@ rel_path = "projects/demo"
 hostname = "login.example.edu"
 default_partition = "debug"
 account = "acct123"
+
+[sites.cluster.run_config]
 nodes = 1
 duration = "00:30:00"
+ranks_per_node = 2
 """.strip()
     )
     monkeypatch.setattr(sites, "SlurmSite", FakeSite)
 
     site = sites.Site(
         config_path=config_path,
-        nodes=3,
-        duration="01:00:00",
+        queue="spr",
+        nodes=8,
+        ranks_per_node=8,
+        duration="00-00:30:00",
         account="override-acct",
     )
 
+    assert site.kwargs["default_partition"] == "spr"
     assert site.kwargs["config"] == FakeSlurmSiteConfig(
         hostname="login.example.edu",
-        queue="debug",
+        queue="spr",
         account="override-acct",
     )
     assert site.kwargs["run_config"] == FakeSlurmRunConfig(
-        queue="debug",
-        nodes=3,
-        duration="01:00:00",
+        queue="spr",
+        nodes=8,
+        ranks_per_node=8,
+        duration="00-00:30:00",
         account="override-acct",
     )
+
+
+def test_site_factory_exposes_direct_slurm_resource_parameters():
+    parameters = inspect.signature(sites.Site).parameters
+
+    assert {"queue", "nodes", "ranks_per_node", "duration"} <= set(parameters)
 
 
 def test_site_factory_builds_stampede_run_config(monkeypatch, tmp_path):

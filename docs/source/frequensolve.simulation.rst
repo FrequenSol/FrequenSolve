@@ -17,6 +17,14 @@ Outputs
    :show-inheritance:
    :noindex:
 
+Study Classes
+-------------
+
+.. automodule:: frequensolve.simulation.study
+   :members:
+   :show-inheritance:
+   :noindex:
+
 Job Classes
 -----------
 
@@ -78,10 +86,18 @@ Sampling
    :show-inheritance:
    :noindex:
 
-Numerics
---------
+Discretization
+--------------
 
-.. automodule:: frequensolve.simulation.numerics_manager
+.. automodule:: frequensolve.simulation.discretization
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Solver
+------
+
+.. automodule:: frequensolve.simulation.solver
    :members:
    :show-inheritance:
    :noindex:

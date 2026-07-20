@@ -637,8 +637,15 @@ class CoordsFromFile(ReceiverCoords):
            np.ndarray: Coordinate array for requested receivers.
         """
         if self.format == "HDF5":
-            with h5py.File(self._local_file(), "r") as f:
+            file = self._local_file()
+            with h5py.File(file, "r") as f:
                 dataset = self.dset or "coords"
+                if dataset not in f:
+                    raise KeyError(
+                        f"Receiver coordinate dataset '{dataset}' is missing from "
+                        f"'{file}'. Rebuild and save the simulation acquisition "
+                        "inputs before copying or running it."
+                    )
                 if indices is None:
                     return f[dataset][:]
                 else:
@@ -957,7 +964,7 @@ class CoordsSurfaceCarpet(ReceiverCoords):
         return store.put_array_chunks(
             dataset,
             self.shape,
-            self.iter_chunks(),
+            self.iter_chunks,
             attrs=attrs,
             dims=["receiver", "coordinate"],
             coords={"coordinate": np.asarray(self.axes, dtype=str)},

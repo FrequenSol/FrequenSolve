@@ -153,7 +153,6 @@ class JobRecordMixin:
             status: Initial status to store on the record.
             site_module: Optional module path used to recreate the site.
             site_class: Optional class name used to recreate the site.
-            rel_path: Optional site configuration path.
             metadata: Additional site-specific metadata.
 
         Returns:
@@ -262,14 +261,16 @@ class JobRecordMixin:
             from frequensolve.orchestrator.sites.config_file import Site
 
             return Site(config_path=config_path, profile=profile)
-        if not record.site_module or not record.site_class or not record.rel_path:
+        if not record.site_module or not record.site_class:
             raise ValueError(
                 f"Run record for {record.site} cannot recreate a site; "
                 "fetch through an initialized site instead."
             )
         module = importlib.import_module(record.site_module)
         site_class = getattr(module, record.site_class)
-        return site_class(record.rel_path)
+        if record.rel_path:
+            return site_class(record.rel_path)
+        return site_class(work_dir=record.work_dir)
 
     def _resolve_fetch_site(self, site=None):
         if site is not None:

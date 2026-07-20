@@ -1,4 +1,4 @@
-"""Numerical discretization and solver-configuration objects."""
+"""Linear/nonlinear solver settings for simulations."""
 
 import copy
 from dataclasses import dataclass, field
@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Literal, Union
 
 from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
 
-__all__ = ["Discretization", "SolverConfig", "SuperPatch"]
+__all__ = ["SolverConfig", "SuperPatch"]
 
 
 def _serialize_solver_extra(extra: Dict[str, Any], ctx=None) -> Dict[str, Any]:
@@ -22,47 +22,6 @@ def _serialize_solver_extra(extra: Dict[str, Any], ctx=None) -> Dict[str, Any]:
         else:
             payload[key] = _serialize_adapt_value(value, ctx)
     return payload
-
-
-@dataclass
-class Discretization(ExtraFieldsMixin):
-    """Finite-element discretization settings for a simulation.
-
-    Args:
-        **kwargs: Optional solver-facing discretization settings. The default
-            discretization requires no explicit fields.
-
-    Raises:
-        ValueError: If legacy ``order`` is supplied here instead of through mesh
-            adaptivity.
-    """
-
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-    def __init__(
-        self,
-        **kwargs,
-    ):
-        """Create discretization settings.
-
-        Solver order is now configured through mesh adaptivity, so legacy
-        ``order`` values are rejected with an actionable error.
-        """
-
-        if "order" in kwargs:
-            raise ValueError(
-                "'order' has moved from Discretization to mesh adaptivity; "
-                "use mesh.set_adapt(..., order=...) instead."
-            )
-        self._init_extra(None, **kwargs)
-
-    @classmethod
-    def from_fs(cls, d: Dict[str, Any]) -> "Discretization":
-        d = copy.deepcopy(d)
-        return cls(**d)
-
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
-        return merge_extra({}, self.extra, "Discretization")
 
 
 @dataclass
@@ -160,12 +119,14 @@ class SolverConfig(ExtraFieldsMixin):
             adaptive steps.
         max_iter: Maximum Krylov/nonlinear iterations.
         tolerance: Solver convergence tolerance.
+        precision: Floating-point precision used by the solver executable.
         **kwargs: Additional solver-facing configuration fields.
     """
 
     solve_on: Literal["final", "all"] = "final"
     max_iter: int = 300
     tolerance: float = 1.0e-4
+    precision: Literal["single", "double"] = "single"
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
@@ -173,13 +134,17 @@ class SolverConfig(ExtraFieldsMixin):
         solve_on: Literal["final", "all"] = "final",
         max_iter: int = 300,
         tolerance: float = 1.0e-4,
+        precision: Literal["single", "double"] = "single",
         **kwargs,
     ):
         """Create iterative solver settings."""
 
+        if precision not in {"single", "double"}:
+            raise ValueError("Solver precision must be 'single' or 'double'")
         self.solve_on = solve_on
         self.max_iter = max_iter
         self.tolerance = tolerance
+        self.precision = precision
         self._init_extra(None, **kwargs)
 
     @classmethod
@@ -198,6 +163,7 @@ class SolverConfig(ExtraFieldsMixin):
             solve_on=data.pop("solve_on", "final"),
             max_iter=data.pop("max_iter", 300),
             tolerance=data.pop("tolerance", 1.0e-4),
+            precision=data.pop("precision", "single"),
         )
         obj._init_extra(data)
         return obj
@@ -232,6 +198,7 @@ class SolverConfig(ExtraFieldsMixin):
             "solve_on": self.solve_on,
             "max_iter": self.max_iter,
             "tolerance": self.tolerance,
+            "precision": self.precision,
         }
         return merge_extra(
             payload,

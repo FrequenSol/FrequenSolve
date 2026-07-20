@@ -115,12 +115,12 @@ class SkipPolicy:
                         else bool(ignore_solver_options)
                     ),
                 )
-            elif name in {"none", "force", "rerun", "all"}:
+            elif name in {"none", "false", "force", "rerun", "all"}:
                 policy = cls.none()
             else:
                 raise ValueError(
                     "skip policy must be 'strict', 'compatible', 'tolerant', "
-                    "or 'none'"
+                    "'none', or 'false'"
                 )
 
         if residual is not None:

@@ -1,7 +1,13 @@
 import json
 import logging
 
+import frequensolve as fs
 from frequensolve.project import Project
+
+
+def test_configure_logging_is_available_from_public_api():
+    assert fs.configure_logging is not None
+    assert fs.set_log_level is not None
 
 
 def test_project_configures_package_logging_file(tmp_path):

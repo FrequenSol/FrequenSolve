@@ -14,6 +14,7 @@ from frequensolve.seismic.sources import SourceGeometry
 from frequensolve.simulation.jobs import BaseJob
 from frequensolve.simulation.jobs.fwi import DataSpace, ModelSpace
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
+from frequensolve.simulation.outputs import ParaviewOutput
 from frequensolve.simulation.simulation import SeismicSimulation
 
 
@@ -154,6 +155,26 @@ def test_imaging_job_syntax_serializes_trace_store_roots(tmp_path):
         {"name": "pressure", "IC": "pressure"},
         {"name": "up_down", "IC": "up_down"},
     ]
+
+
+def test_imaging_job_outputs_use_canonical_top_level_contract(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+
+    job = sim.imaging_job(
+        name="rtm",
+        frequencies=[5.0],
+        parameters=["vp"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        outputs=ParaviewOutput(name="rtm_qc", fields=["velocity"]),
+    )
+    job_file = job.save()
+    saved = json.loads(job_file.read_text())
+    loaded = BaseJob.load(job_file)
+
+    assert saved["Outputs"]["ParaView"][0]["name"] == "rtm_qc"
+    assert saved["Outputs"]["ParaView"][0]["fields"] == ["velocity"]
+    assert "outputs" not in saved["Image"]
+    assert loaded.to_fs()["Outputs"]["ParaView"][0]["name"] == "rtm_qc"
 
 
 def test_imaging_job_allows_missing_observed_for_sensitivity_kernels(tmp_path):

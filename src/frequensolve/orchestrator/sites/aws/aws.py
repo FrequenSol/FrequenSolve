@@ -32,7 +32,7 @@ from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.jobs import BaseJob
+from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
@@ -812,11 +812,11 @@ class AWSSite(BaseSite):
         Raises:
             RuntimeError: If job submission fails or stack creation fails.
         """
-        force_run = bool(
-            kwargs.pop("force_run", False)
-            or kwargs.pop("force", False)
-            or kwargs.pop("rerun", False)
+        fresh_run = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
+        skip_policy = SkipPolicy.from_value(
+            kwargs.pop("skip", kwargs.pop("skip_policy", None))
         )
+        fresh_run = bool(fresh_run or skip_policy.force)
         check = bool(kwargs.pop("check", False))
         validate = kwargs.pop("validate", True)
         fetch = kwargs.pop("fetch", False)
@@ -824,7 +824,7 @@ class AWSSite(BaseSite):
         vcpu = kwargs.pop("vcpu", None)
         memory = kwargs.pop("memory", None)
         self.prepare_job(job, validate=validate)
-        if not force_run and job.is_run_current():
+        if not fresh_run and job.is_run_current():
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
             return RunHandle.skipped(self, job)
@@ -880,7 +880,7 @@ class AWSSite(BaseSite):
                     send_simulation_status_email=kwargs.get(
                         "send_simulation_status_email"
                     ),
-                    force_run=force_run,
+                    fresh=fresh_run,
                 )
 
                 simulation_id = result["simulationId"]
@@ -912,8 +912,6 @@ class AWSSite(BaseSite):
                     api_data["vcpu"] = vcpu
                 if memory is not None:
                     api_data["memory"] = memory
-                if force_run:
-                    api_data["force_run"] = True
 
                 # Make API request to submit the job
                 headers = {}

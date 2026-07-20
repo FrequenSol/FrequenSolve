@@ -29,8 +29,6 @@ class Stampede3Site(SlurmSite):
     :class:`frequensolve.orchestrator.sites.hpc.SlurmSite`.
 
     Args:
-        rel_path: Site configuration path or name used to load Stampede3
-            credentials and defaults.
         transfer_method: File-transfer backend, either ``"rsync"`` or
             ``"sftp"``.
         default_partition: SLURM partition used when no run config supplies
@@ -41,8 +39,12 @@ class Stampede3Site(SlurmSite):
         username: TACC username.
         credential: Keyring lookup name.
         ssh_key: Optional SSH private-key path.
-        solver: Remote solver executable path.
-        work_dir: Remote work-directory root.
+        solver: Remote path to the ``FS_seismic`` solver router executable.
+        work_dir: Remote base directory used to resolve relative FrequenSolve
+            paths. It may be on any writable remote filesystem and defaults to
+            ``$WORK/frequensolve``.
+        scratch_dir: Optional remote scratch directory reserved for future
+            model and high-I/O storage.
         modules: Environment modules loaded before solver execution.
         environment: Non-secret environment values exported before solver
             execution.
@@ -68,7 +70,7 @@ class Stampede3Site(SlurmSite):
 
     def __init__(
         self,
-        rel_path: Union[str, Path],
+        rel_path: Optional[Union[str, Path]] = None,
         transfer_method: Literal["rsync", "sftp"] = "rsync",
         default_partition: Optional[str] = None,
         default_queue: Optional[str] = None,
@@ -79,6 +81,7 @@ class Stampede3Site(SlurmSite):
         credential_store: Optional[CredentialStore] = None,
         solver: Optional[Union[str, Path]] = None,
         work_dir: Optional[Union[str, Path]] = None,
+        scratch_dir: Optional[Union[str, Path]] = None,
         modules: Optional[list[str]] = None,
         environment: Optional[dict[str, object]] = None,
         run_config: Optional[SlurmRunConfig] = None,
@@ -96,6 +99,7 @@ class Stampede3Site(SlurmSite):
             credential_store=credential_store,
             solver=solver,
             work_dir=work_dir,
+            scratch_dir=scratch_dir,
             modules=modules,
             environment=environment,
             run_config=run_config,

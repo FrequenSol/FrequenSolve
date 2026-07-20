@@ -1170,6 +1170,15 @@ def test_large_receiver_carpet_stays_lazy_until_hdf5_export(tmp_path):
             receiver_group.coordinates.get([0, 20, 21, -1]),
         )
 
+    store_path = tmp_path / "simulations/simple/simple.h5"
+    sim.save()
+    saved_size = store_path.stat().st_size
+    sim.save()
+    assert store_path.stat().st_size == saved_size
+
+    copied = sim.copy("simple_copy")
+    assert copied.acquisition.receiver_groups[0].size == 231
+
 
 def test_solver_frame_key_is_not_exported_and_legacy_input_is_ignored():
     subdomain = ModelSubdomain.from_fs(

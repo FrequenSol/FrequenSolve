@@ -2,13 +2,14 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.jobs.base import BaseJob
+from frequensolve.simulation.outputs import JobOutputs, Output
 from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.util.class_registry import register_class
 
@@ -339,6 +340,7 @@ class ImagingJob(BaseJob):
         regularization: Optional smoothing/regularization payload.
         save_path: Optional image-output directory.
         reassemble_adjoint: Request adjoint reassembly from stored pieces.
+        outputs: Optional output request or output collection for this job.
         **kwargs: Extra imaging payload fields preserved on export.
 
     Raises:
@@ -376,6 +378,7 @@ class ImagingJob(BaseJob):
         regularization: Optional[dict] = None,
         save_path: Optional[Union[str, Path]] = None,
         reassemble_adjoint: bool = False,
+        outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
         **kwargs,
     ) -> None:
         """Create an imaging job.
@@ -395,6 +398,7 @@ class ImagingJob(BaseJob):
             simulation=simulation,
             f_list=f_list,
             workflow="RTM",
+            outputs=JobOutputs(outputs),
         )
 
         f_sim = self.trace_outputs.path
@@ -712,6 +716,7 @@ class ImagingJob(BaseJob):
             regularization=image_data.pop("Smoothing", None),
             weights=image_data.pop("weights", None),
             reassemble_adjoint=image_data.pop("reassemble_adjoint", None),
+            outputs=JobOutputs.from_fs(data.pop("Outputs", None)),
             **image_data,
         )
         job.misfit = misfit

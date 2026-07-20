@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import signal
 import socket
@@ -92,6 +93,42 @@ __all__ = [
 # Initialize the logger
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
 
+_HPC_RUNTIME_DEFAULTS = {
+    **NUMERIC_RUNTIME_DEFAULTS,
+    "OMP_WAIT_POLICY": "PASSIVE",
+    "KMP_BLOCKTIME": "20ms",
+    "KMP_STACKSIZE": "20M",
+}
+
+_ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT = 60.0
+
+_SHELL_ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _quote_runtime_environment_value(value: str) -> str:
+    """Quote an environment value while expanding simple ``${NAME}`` refs."""
+
+    references = list(_SHELL_ENV_REFERENCE.finditer(value))
+    if not references:
+        return shlex.quote(value)
+
+    def escape_literal(fragment: str) -> str:
+        return (
+            fragment.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("$", "\\$")
+            .replace("`", "\\`")
+        )
+
+    pieces = []
+    position = 0
+    for reference in references:
+        pieces.append(escape_literal(value[position : reference.start()]))
+        pieces.append(reference.group(0))
+        position = reference.end()
+    pieces.append(escape_literal(value[position:]))
+    return f'"{"".join(pieces)}"'
+
 
 # ----------------------------------
 # Generic SLURM Config
@@ -123,6 +160,7 @@ class SlurmSiteConfig(BaseSiteConfig):
     mpi_wrapper: str = "srun"
     poll_interval: int = 5
     account: str = ""
+    tmp_dir: Optional[Union[str, Path]] = None
     max_duration: str = "00-02:00:00"
     min_nodes: int = 1
     max_nodes: int = 1
@@ -279,12 +317,17 @@ class SlurmRunConfig:
         duration: Requested wall time.
         ranks_per_node: MPI ranks per node.
         ranks_per_task: MPI ranks used by each FrequenSolve task.
+        mpi_async_progress: Reserved compatibility option. Enabling it is
+            temporarily unsupported and raises :class:`NotImplementedError`.
         tolerate_failures: Number of failed tasks tolerated before the adaptive
             scheduler aborts. ``None`` disables early aborts.
         account: Allocation account.
         notify_on: Optional SLURM mail notification trigger.
         notify_email: Optional notification email address.
         poll_interval: Polling interval in seconds.
+        scheduler_heartbeat_timeout: Maximum seconds without a new adaptive
+            scheduler heartbeat before the run is reported failed. ``None``
+            disables heartbeat enforcement.
         run_path: Remote run directory override.
         slurm_args: Additional raw ``sbatch`` arguments.
     """
@@ -294,11 +337,13 @@ class SlurmRunConfig:
     duration: Optional[str] = None
     ranks_per_node: Optional[int] = None
     ranks_per_task: Optional[int] = None
+    mpi_async_progress: bool = False
     tolerate_failures: Optional[int] = 4
     account: Optional[str] = None
     notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None
     notify_email: Optional[str] = None
     poll_interval: Optional[int] = None
+    scheduler_heartbeat_timeout: Optional[float] = _ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT
     run_path: Optional[Union[str, Path]] = None
     slurm_args: List[str] = field(default_factory=list)
 
@@ -309,11 +354,15 @@ class SlurmRunConfig:
         duration: Optional[str] = None,
         ranks_per_node: Optional[int] = None,
         ranks_per_task: Optional[int] = None,
+        mpi_async_progress: bool = False,
         tolerate_failures: Optional[int] = 4,
         account: Optional[str] = None,
         notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
         notify_email: Optional[str] = None,
         poll_interval: Optional[int] = None,
+        scheduler_heartbeat_timeout: Optional[float] = (
+            _ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT
+        ),
         run_path: Optional[Union[str, Path]] = None,
         slurm_args: Optional[List[str]] = None,
         **aliases,
@@ -335,6 +384,15 @@ class SlurmRunConfig:
         self.duration = duration
         self.ranks_per_node = values.get("ranks_per_node")
         self.ranks_per_task = values.get("ranks_per_task")
+        if not isinstance(mpi_async_progress, bool):
+            raise ValueError("mpi_async_progress must be true or false")
+        if mpi_async_progress:
+            raise NotImplementedError(
+                "mpi_async_progress=True is temporarily unavailable because it "
+                "can race during MPI initialization and is not yet fully "
+                "supported. Leave mpi_async_progress unset or set it to false."
+            )
+        self.mpi_async_progress = mpi_async_progress
         self.tolerate_failures = _normalize_failure_tolerance(
             tolerate_failures,
             default=4,
@@ -343,6 +401,16 @@ class SlurmRunConfig:
         self.notify_on = notify_on
         self.notify_email = notify_email
         self.poll_interval = poll_interval
+        if (
+            scheduler_heartbeat_timeout is not None
+            and float(scheduler_heartbeat_timeout) <= 0
+        ):
+            raise ValueError("scheduler_heartbeat_timeout must be greater than zero")
+        self.scheduler_heartbeat_timeout = (
+            None
+            if scheduler_heartbeat_timeout is None
+            else float(scheduler_heartbeat_timeout)
+        )
         self.run_path = run_path
         self.slurm_args = list(slurm_args or [])
 
@@ -370,7 +438,7 @@ class SlurmRunConfig:
     def field_names(cls) -> set[str]:
         """Return dataclass field names accepted as run-config overrides."""
 
-        return {item.name for item in dataclass_fields(cls)}
+        return {item.name for item in dataclass_fields(cls)} | set(_RANK_ALIASES)
 
     def merged(self, **overrides) -> "SlurmRunConfig":
         """Return a copy with non-``None`` overrides applied.
@@ -389,11 +457,13 @@ class SlurmRunConfig:
             "duration": self.duration,
             "ranks_per_node": self.ranks_per_node,
             "ranks_per_task": self.ranks_per_task,
+            "mpi_async_progress": self.mpi_async_progress,
             "tolerate_failures": self.tolerate_failures,
             "account": self.account,
             "notify_on": self.notify_on,
             "notify_email": self.notify_email,
             "poll_interval": self.poll_interval,
+            "scheduler_heartbeat_timeout": self.scheduler_heartbeat_timeout,
             "run_path": self.run_path,
             "slurm_args": list(self.slurm_args),
         }
@@ -439,7 +509,6 @@ class SlurmSite(BaseSite):
     Manages authentication, transfer, provisioning, and job execution for SLURM-backed HPC systems.
 
     Args:
-        rel_path: Remote project path relative to the configured work root.
         transfer_method: File transfer backend, either ``"rsync"`` or
             ``"sftp"``.
         default_queue: Deprecated compatibility alias for ``default_partition``.
@@ -451,12 +520,18 @@ class SlurmSite(BaseSite):
         credential: Keyring lookup name used to keep credentials for different
             sites separate.
         ssh_key: Optional private-key path.
-        solver: Remote solver executable path.
-        work_dir: Remote work-directory root.
+        solver: Remote path to the ``FS_seismic`` solver router executable.
+        work_dir: Remote base directory used to resolve relative FrequenSolve
+            project, simulation, and job paths. It may be on any writable
+            remote filesystem and defaults to ``$WORK/frequensolve``.
+        scratch_dir: Optional remote scratch directory reserved for future
+            model and high-I/O storage.
         modules: Environment modules loaded before remote solver execution.
         environment: Non-secret environment values exported before remote
             solver execution.
         run_config: Default SLURM resource request.
+        config.tmp_dir: Optional remote directory for transient transfer
+            tarballs and provisioning scripts. Defaults to ``/tmp``.
         verbose: Whether to print site status messages in addition to logging.
     """
 
@@ -471,6 +546,8 @@ class SlurmSite(BaseSite):
     _work_dir: Path
     solver: Optional[Union[str, Path]]
     _configured_work_dir: Optional[Union[str, Path]]
+    _rel_proj_path: Optional[Path]
+    _scratch_dir: Optional[Path]
     modules: List[str]
     environment: Dict[str, str]
 
@@ -484,7 +561,7 @@ class SlurmSite(BaseSite):
 
     def __init__(
         self,
-        rel_path: Union[str, Path],
+        rel_path: Optional[Union[str, Path]] = None,
         transfer_method: Literal["rsync", "sftp"] = "rsync",
         default_queue: Optional[str] = None,
         default_partition: Optional[str] = None,
@@ -496,6 +573,7 @@ class SlurmSite(BaseSite):
         credential_store: Optional[CredentialStore] = None,
         solver: Optional[Union[str, Path]] = None,
         work_dir: Optional[Union[str, Path]] = None,
+        scratch_dir: Optional[Union[str, Path]] = None,
         modules: Optional[List[str]] = None,
         environment: Optional[Mapping[str, object]] = None,
         run_config: Optional[SlurmRunConfig] = None,
@@ -524,8 +602,9 @@ class SlurmSite(BaseSite):
         )
         self.verbose = verbose
         logger.debug(
-            "Initializing %s with rel_path=%s, partition=%s",
+            "Initializing %s with work_dir=%s, rel_path=%s, partition=%s",
             self.site_name,
+            work_dir,
             rel_path,
             partition,
         )
@@ -561,20 +640,24 @@ class SlurmSite(BaseSite):
         )
         self.solver = solver
         self._configured_work_dir = work_dir
+        self._rel_proj_path = Path(rel_path) if rel_path not in {None, ""} else None
+        self._scratch_dir = self._normalize_optional_remote_dir(
+            scratch_dir,
+            name="scratch_dir",
+        )
         if isinstance(modules, str):
             raise ValueError("modules must be an array of module names")
         self.modules = [str(module) for module in (modules or [])]
         self.environment = validate_environment(environment)
         self.transfer_method = transfer_method
         self.run_config = run_config or SlurmRunConfig(queue=partition)
-        self._rel_proj_path = Path(rel_path)
         self._authenticator = SlurmAuthenticator(self)
         self._transfer = SlurmTransferManager(self)
 
         self._login_client = SSHClientClass(self.authenticate())
         logger.info("SSH client authenticated successfully")
 
-        self._work_dir = self._get_work_dir(self._rel_proj_path)
+        self._work_dir = self._get_work_dir()
         self._executable = self._get_solver_path()
 
         self.pool = PoolInfo()
@@ -585,7 +668,7 @@ class SlurmSite(BaseSite):
 
     @property
     def executable(self) -> str:
-        """Get the solver executable."""
+        """Get the configured solver executable."""
 
         if self._executable is None:
             raise ValueError(
@@ -634,8 +717,26 @@ class SlurmSite(BaseSite):
 
     @property
     def work_dir(self) -> Path:
-        """Gets the remote work directory path."""
+        """Return the remote base directory for relative FrequenSolve paths."""
         return self._work_dir
+
+    @property
+    def scratch_dir(self) -> Optional[Path]:
+        """Return the configured future-facing remote scratch directory."""
+
+        return self._scratch_dir
+
+    @property
+    def remote_tmp_dir(self) -> Path:
+        """Remote directory used for transient staging on the login host."""
+
+        tmp_dir = getattr(self.config, "tmp_dir", None)
+        if tmp_dir is None or str(tmp_dir).strip() == "":
+            return Path("/tmp")
+        path = Path(str(tmp_dir))
+        if not path.is_absolute():
+            raise ValueError("SLURM tmp_dir must be an absolute remote path")
+        return path
 
     @property
     def provisioned(self):
@@ -684,8 +785,12 @@ class SlurmSite(BaseSite):
         self,
         job: BaseJob,
         *,
+        queue: Optional[str] = None,
+        nodes: Optional[int] = None,
+        ranks_per_node: Optional[int] = None,
+        duration: Optional[str] = None,
+        mpi_async_progress: Optional[bool] = None,
         force: bool = False,
-        force_run: bool = False,
         mode: Literal["auto", "attached", "batch"] = "auto",
         fetch: bool = False,
         check: bool = False,
@@ -695,8 +800,14 @@ class SlurmSite(BaseSite):
 
         Args:
             job: Job to submit.
+            queue: Queue or partition for this submission.
+            nodes: Number of nodes for this submission.
+            ranks_per_node: MPI ranks per node for this submission.
+            duration: Wall time for this submission.
+            mpi_async_progress: Reserved compatibility option. Passing ``True``
+                raises :class:`NotImplementedError` while asynchronous MPI
+                progress support is unavailable.
             force: Force a new run even when current results exist.
-            force_run: Alias for ``force``.
             mode: Submission mode: ``"auto"``, ``"attached"``, or ``"batch"``.
             fetch: Whether to fetch outputs after completion.
             check: Whether the returned handle raises by default when waited
@@ -709,7 +820,20 @@ class SlurmSite(BaseSite):
             ``RunHandle`` for the submitted or attached run.
         """
 
-        force_run = bool(force_run or force or overrides.pop("rerun", False))
+        overrides.update(
+            {
+                name: value
+                for name, value in {
+                    "queue": queue,
+                    "nodes": nodes,
+                    "ranks_per_node": ranks_per_node,
+                    "duration": duration,
+                    "mpi_async_progress": mpi_async_progress,
+                }.items()
+                if value is not None
+            }
+        )
+        fresh_run = bool(force or overrides.pop("rerun", False))
         skip_policy_value = overrides.pop("skip", overrides.pop("skip_policy", None))
         residual = overrides.pop("residual", None)
         ignore_solver_options = overrides.pop("ignore_solver_options", None)
@@ -718,7 +842,7 @@ class SlurmSite(BaseSite):
             skip_policy_value,
             residual=residual,
             ignore_solver_options=ignore_solver_options,
-            reuse=reuse and not force_run,
+            reuse=reuse and not fresh_run,
         )
         plan_skip_policy = (
             skip_policy
@@ -729,7 +853,7 @@ class SlurmSite(BaseSite):
             )
             else None
         )
-        force_run = bool(force_run or skip_policy.force)
+        fresh_run = bool(fresh_run or skip_policy.force)
         validate = overrides.pop("validate", True)
         self.prepare_job(job, validate=validate)
         if mode not in {"auto", "attached", "batch"}:
@@ -737,10 +861,11 @@ class SlurmSite(BaseSite):
 
         run_config, extra_kwargs = self.run_config.resolved(self.config, **overrides)
 
-        if not force_run:
+        if not fresh_run:
             handle = self._reattach_inflight_run(
                 job,
                 poll_interval=run_config.poll_interval,
+                scheduler_heartbeat_timeout=run_config.scheduler_heartbeat_timeout,
                 fetch=fetch,
                 check=check,
             )
@@ -769,7 +894,8 @@ class SlurmSite(BaseSite):
             future = self._submit_attached(
                 job,
                 ranks_per_task=run_config.ranks_per_task or 2,
-                fresh=force_run,
+                mpi_async_progress=run_config.mpi_async_progress,
+                fresh=fresh_run,
                 **({"pack": pack} if not pack else {}),
             )
             self._emit(f"Submitted {job.name} to active {self.site_name} allocation")
@@ -789,13 +915,14 @@ class SlurmSite(BaseSite):
                 _fetch_fn=(lambda run: self.fetch_outputs(run.job)) if fetch else None,
             )
             handle.backend["future"] = future
+            handle.backend["mpi_async_progress"] = run_config.mpi_async_progress
             return handle
 
         task_plan = None
         if hasattr(job, "task_run_plan"):
             task_plan = job.task_run_plan(
-                reuse=reuse and not force_run,
-                force=force_run,
+                reuse=reuse and not fresh_run,
+                force=fresh_run,
                 skip_policy=plan_skip_policy,
             )
             pending_indices = list(task_plan["pending_indices"])
@@ -827,7 +954,7 @@ class SlurmSite(BaseSite):
         job_id = self._submit_slurm_batch(
             job,
             run_config,
-            fresh=force_run,
+            fresh=fresh_run,
             **({"task_plan": task_plan} if task_plan is not None else {}),
             **(
                 {"skip_policy": plan_skip_policy}
@@ -840,6 +967,10 @@ class SlurmSite(BaseSite):
         )
         handle = self.handle(job, job_id=job_id, mode="batch")
         handle.poll_interval = run_config.poll_interval or self.config.poll_interval
+        handle.backend["scheduler_heartbeat_timeout"] = (
+            run_config.scheduler_heartbeat_timeout
+        )
+        handle.backend["mpi_async_progress"] = run_config.mpi_async_progress
         handle.check = check
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
         if task_plan is not None:
@@ -880,11 +1011,13 @@ class SlurmSite(BaseSite):
 
         with _temporary_text_file(script, suffix=".sh", prefix="slurm_") as script_path:
             logger.debug("Temporary SLURM script created at %s", script_path)
-            remote_path = f"/tmp/{os.path.basename(script_path)}"
+            remote_path = self.remote_tmp_dir / os.path.basename(script_path)
             try:
                 self.put(script_path, remote_path)
 
-                self.pool.id = self._submit_sbatch(f"sbatch {remote_path}")
+                self.pool.id = self._submit_sbatch(
+                    f"sbatch {shlex.quote(str(remote_path))}"
+                )
                 logger.debug("Job submitted successfully with job ID: %s", self.pool.id)
                 self.pool._status.status = "pending"
                 self._emit(f"Allocation submitted: {self.pool.id}")
@@ -1139,6 +1272,14 @@ class SlurmSite(BaseSite):
 
         return local_results
 
+    @staticmethod
+    def _fetch_message(
+        label: str,
+        remote: Union[str, Path],
+        local: Union[str, Path],
+    ) -> str:
+        return f"{label}\n\tFrom: {remote}\n\tTo: {local}"
+
     def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
         """Fetch ``_fs_run`` metadata and aggregate task manifests locally."""
 
@@ -1171,7 +1312,7 @@ class SlurmSite(BaseSite):
             local_dir = job._local_path / "results" / path
             local_dir.mkdir(parents=True, exist_ok=True)
             self._emit(
-                f"Fetching ParaView outputs\n\tFrom: {remote_dir}\n\tTo: {local_dir}"
+                self._fetch_message("Fetching ParaView outputs", remote_dir, local_dir)
             )
             self.get(remote_dir, local_dir)
         return job.paraview_outputs
@@ -1223,9 +1364,10 @@ class SlurmSite(BaseSite):
     ) -> Union[Path, dict]:
         """Fetch log files from the remote site to the local machine.
 
-        Downloads the task log directory (e.g. task_1.txt, task_2.txt, ...) from
-        the remote job run. Optionally fetches SLURM batch stdout/stderr files
-        (job_<id>.o, job_<id>.e) when include_batch is True.
+        Downloads the job log directory (e.g. task_1.txt, task_2.txt, ... and
+        ``batch/job_<id>.o``) from the remote job run. ``include_batch=True``
+        also supports fetching batch logs created in the legacy shared
+        ``jobs/batch`` directory.
 
         Args:
             job: A BaseJob or list of BaseJobs whose logs to fetch.
@@ -1235,8 +1377,10 @@ class SlurmSite(BaseSite):
                 returns that task's log file instead of the log directory.
             frequency: Optional physical frequency. When provided, selects the
                 matching frequency task and returns that task's log file.
-            include_batch: If True, also fetch SLURM batch logs from
-                run_path/jobs/batch/ (requires job._job_id and run_path).
+            include_batch: If True, ensure the current job's SLURM batch logs
+                are fetched into ``logs/batch``. Falls back to the legacy
+                shared ``run_path/jobs/batch`` location when needed (requires
+                ``job._job_id``).
             show: If True, print log contents after fetching. When
                 include_batch is True, prints in order: batch .o file, batch
                 .e file, then the selected or latest task log file. Otherwise
@@ -1261,7 +1405,11 @@ class SlurmSite(BaseSite):
             try:
                 local_run_dir = j._result_path / "_fs_run"
                 self._emit(
-                    f"Fetching run metadata from {remote_run_dir} to {local_run_dir}"
+                    self._fetch_message(
+                        "Fetching run metadata",
+                        remote_run_dir,
+                        local_run_dir,
+                    )
                 )
                 self.fetch_run_metadata(j)
             except Exception as e:
@@ -1273,7 +1421,9 @@ class SlurmSite(BaseSite):
                 )
             remote_log_dir = self._remote_logs_dir(j)
             try:
-                self._emit(f"Fetching logs from {remote_log_dir} to {log_dir}")
+                self._emit(
+                    self._fetch_message("Fetching logs", remote_log_dir, log_dir)
+                )
                 self.get(remote_log_dir, log_dir)
                 selected_log = self._select_log_path(
                     j,
@@ -1284,22 +1434,34 @@ class SlurmSite(BaseSite):
                 result[j.name] = selected_log
 
                 if include_batch and getattr(j, "_job_id", None):
-                    batch_remote = self.work_dir / "jobs" / "batch"
-                    batch_local = log_dir.parent / "batch"
+                    batch_remote = remote_log_dir / "batch"
+                    legacy_batch_remote = self.work_dir / "jobs" / "batch"
+                    batch_local = log_dir / "batch"
                     self._emit(
-                        f"Fetching batch logs from {batch_remote} to {batch_local}"
+                        self._fetch_message(
+                            "Fetching batch logs",
+                            batch_remote,
+                            batch_local,
+                        )
                     )
                     for suffix in (".o", ".e"):
                         remote_batch = batch_remote / f"job_{j._job_id}{suffix}"
                         local_batch = batch_local / f"job_{j._job_id}{suffix}"
-                        try:
-                            self.get(remote_batch, local_batch)
-                        except Exception as e:
-                            logger.debug(
-                                "Could not fetch batch log %s: %s",
-                                remote_batch,
-                                e,
-                            )
+                        if local_batch.exists():
+                            continue
+                        for candidate in (
+                            remote_batch,
+                            legacy_batch_remote / remote_batch.name,
+                        ):
+                            try:
+                                self.get(candidate, local_batch)
+                                break
+                            except Exception as e:
+                                logger.debug(
+                                    "Could not fetch batch log %s: %s",
+                                    candidate,
+                                    e,
+                                )
                 elif include_batch:
                     logger.warning(
                         "Job %s has no _job_id; skipping SLURM batch logs",
@@ -1370,6 +1532,9 @@ class SlurmSite(BaseSite):
         job: BaseJob,
         *,
         poll_interval: Optional[float] = None,
+        scheduler_heartbeat_timeout: Optional[float] = (
+            _ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT
+        ),
         fetch: bool = False,
         check: bool = False,
     ) -> Optional[RunHandle]:
@@ -1391,6 +1556,7 @@ class SlurmSite(BaseSite):
         )
         handle = self.handle(job, job_id=record.scheduler_id, mode="batch")
         handle.poll_interval = poll_interval or self.config.poll_interval
+        handle.backend["scheduler_heartbeat_timeout"] = scheduler_heartbeat_timeout
         handle.check = check
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
         handle.backend["reattached"] = True
@@ -1634,6 +1800,11 @@ class SlurmSite(BaseSite):
         message = ""
         raw: Dict[str, Any] = {"scheduler": "slurm"}
         if scheduler_status is not None:
+            scheduler_failure = self._adaptive_scheduler_failure(
+                run,
+                scheduler_status,
+                slurm_status=status,
+            )
             scheduler_status = _merge_task_status_with_plan(
                 scheduler_status,
                 run.backend.get("task_plan"),
@@ -1641,6 +1812,11 @@ class SlurmSite(BaseSite):
             )
             raw["task_status"] = scheduler_status
             message = self._format_scheduler_status(scheduler_status)
+            if scheduler_failure is not None:
+                status = "failed"
+                return_code = 1
+                raw["scheduler_liveness"] = scheduler_failure["raw"]
+                message = f"{scheduler_failure['message']}; {message}"
         job_status = JobStatus(
             state=status,
             return_code=return_code,
@@ -1649,6 +1825,71 @@ class SlurmSite(BaseSite):
             raw=raw,
         )
         return job_status
+
+    @staticmethod
+    def _adaptive_scheduler_failure(
+        run: RunHandle,
+        payload: Dict[str, Any],
+        *,
+        slurm_status: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return failure details for a dead adaptive scheduler heartbeat."""
+
+        scheduler_state = str(payload.get("state") or "").strip().lower()
+        if scheduler_state in {"failed", "cancelled", "canceled", "timeout"}:
+            reason = payload.get("abort_reason")
+            detail = f": {reason}" if reason else ""
+            return {
+                "message": f"Adaptive scheduler reported {scheduler_state}{detail}",
+                "raw": {
+                    "state": scheduler_state,
+                    "stale": False,
+                },
+            }
+        if slurm_status != "running":
+            return None
+        if scheduler_state != "running":
+            return None
+
+        heartbeat = payload.get("updated_at")
+        if not heartbeat:
+            return None
+
+        timeout = run.backend.get(
+            "scheduler_heartbeat_timeout",
+            _ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT,
+        )
+        if timeout is None:
+            return None
+        timeout = float(timeout)
+        now = time.monotonic()
+        previous = run.backend.get("_adaptive_scheduler_heartbeat")
+        if previous != heartbeat:
+            run.backend["_adaptive_scheduler_heartbeat"] = heartbeat
+            run.backend["_adaptive_scheduler_heartbeat_seen_at"] = now
+            return None
+
+        last_seen = float(
+            run.backend.setdefault("_adaptive_scheduler_heartbeat_seen_at", now)
+        )
+        age = max(0.0, now - last_seen)
+        if age < timeout:
+            return None
+
+        return {
+            "message": (
+                "Adaptive scheduler heartbeat stopped advancing for "
+                f"{age:.1f} seconds (timeout {timeout:.1f} seconds) while the "
+                f"SLURM job {run.id} is still running"
+            ),
+            "raw": {
+                "state": scheduler_state,
+                "heartbeat": heartbeat,
+                "age_seconds": age,
+                "timeout_seconds": timeout,
+                "stale": True,
+            },
+        }
 
     def _scheduler_status_path(self, job: BaseJob) -> Path:
         """Return the remote scheduler progress file for a batch simulation job."""
@@ -1842,6 +2083,7 @@ class SlurmSite(BaseSite):
             stdout=str(job._remote_path(self.work_dir) / "logs"),
             duration=duration,
             imaging_job=isinstance(job, ImagingJob),
+            mpi_async_progress=config.mpi_async_progress,
             **(
                 {"ranks_per_task": config.ranks_per_task}
                 if config.ranks_per_task is not None
@@ -1872,7 +2114,7 @@ class SlurmSite(BaseSite):
         remote_script, remote_job = self._transfer_SLURM_job(script, job)
 
         logs_path = job._remote_path(self.work_dir) / "logs"
-        cmd = f"mkdir -p {run_path}/jobs/batch {logs_path} && "
+        cmd = f"mkdir -p {logs_path}/batch && "
         cmd += f"rm -f {logs_path}/scheduler_status.json && "
         cmd += "sbatch "
         if config.slurm_args:
@@ -1971,6 +2213,7 @@ class SlurmSite(BaseSite):
         *,
         pack: bool = True,
         fresh: bool = False,
+        mpi_async_progress: bool = False,
         **aliases,
     ) -> Future:
         """Submit a job into an already attached compute allocation."""
@@ -1985,7 +2228,12 @@ class SlurmSite(BaseSite):
         if self._compute_client is None:
             self._attach_compute_client()
 
-        remote_script, remote_job = self._transfer_job(job, pack=pack, fresh=fresh)
+        remote_script, remote_job = self._transfer_job(
+            job,
+            pack=pack,
+            fresh=fresh,
+            mpi_async_progress=mpi_async_progress,
+        )
         ntasks_per_item = max(ranks_per_task, self.pool.nproc // job.n_tasks)
 
         if self._compute_client.is_proxy():
@@ -1999,8 +2247,7 @@ class SlurmSite(BaseSite):
             monitor = self._monitor_command_output(future, job, interactive)
         else:
             cmd = (
-                f"cd {self.work_dir} && "
-                f"{remote_script} {remote_job} {ntasks_per_item}"
+                f"cd {self.work_dir} && {remote_script} {remote_job} {ntasks_per_item}"
             )
             interactive = self.login_client.invoke_shell()
             interactive.send(f"ssh {self.compute_host}\n")
@@ -2052,11 +2299,11 @@ class SlurmSite(BaseSite):
         if self.modules:
             lines.append("module list")
         runtime_environment = {
-            **NUMERIC_RUNTIME_DEFAULTS,
+            **_HPC_RUNTIME_DEFAULTS,
             **self.environment,
         }
         lines.extend(
-            f"export {name}={shlex.quote(value)}"
+            f"export {name}={_quote_runtime_environment_value(value)}"
             for name, value in runtime_environment.items()
         )
         return lines
@@ -2086,7 +2333,7 @@ class SlurmSite(BaseSite):
         return job_id
 
     def _get_solver_path(self) -> str:
-        """Get the solver executable path on the remote system."""
+        """Get the configured solver executable path on the remote system."""
         executable = self.solver
         if executable is None or executable == "":
             executable = self.default_solver_executable
@@ -2227,7 +2474,14 @@ class SlurmSite(BaseSite):
             return path
         return self.work_dir / relative
 
-    def _transfer_job(self, job: BaseJob, *, pack: bool = True, fresh: bool = False):
+    def _transfer_job(
+        self,
+        job: BaseJob,
+        *,
+        pack: bool = True,
+        fresh: bool = False,
+        mpi_async_progress: bool = False,
+    ):
         """Submit a simulation job to the remote site.
 
         Args:
@@ -2240,7 +2494,12 @@ class SlurmSite(BaseSite):
         local_job, remote_job = job.save_for_remote(
             self.__class__.__name__, self.work_dir
         )
-        script = self._sweep_script(job, pack=pack, fresh=fresh)
+        script = self._sweep_script(
+            job,
+            pack=pack,
+            fresh=fresh,
+            mpi_async_progress=mpi_async_progress,
+        )
 
         self._transfer_remote_simulation_inputs(job)
         logger.debug("Transferring job file to remote path: %s", remote_job)
@@ -2273,6 +2532,45 @@ class SlurmSite(BaseSite):
         status = self.run_login(f"squeue -j {job_id} -h -o %t")
         return status == "R"
 
+    @staticmethod
+    def _mpi_async_progress_layout(
+        *,
+        cores_per_node: int,
+        ranks_per_node: int,
+    ) -> tuple[int, List[str]]:
+        """Return solver threads and exports for MPI asynchronous progress."""
+
+        if cores_per_node <= 0 or ranks_per_node <= 0:
+            raise ValueError(
+                "mpi_async_progress requires positive cores_per_node and "
+                "ranks_per_node"
+            )
+        if cores_per_node % ranks_per_node:
+            raise ValueError(
+                "mpi_async_progress requires cores_per_node to be evenly "
+                "divisible by ranks_per_node; "
+                f"got {cores_per_node} cores and {ranks_per_node} ranks"
+            )
+
+        cores_per_rank = cores_per_node // ranks_per_node
+        solver_threads = cores_per_rank - 1
+        if solver_threads < 1:
+            raise ValueError(
+                "mpi_async_progress requires at least two cores per MPI rank "
+                "so one core can be reserved for progress"
+            )
+
+        progress_pins = ",".join(
+            str((rank + 1) * cores_per_rank - 1) for rank in range(ranks_per_node)
+        )
+        return solver_threads, [
+            "export OMP_PLACES=cores",
+            "export OMP_PROC_BIND=close",
+            "export I_MPI_ASYNC_PROGRESS=1",
+            "export I_MPI_ASYNC_PROGRESS_THREADS=1",
+            f"export I_MPI_ASYNC_PROGRESS_PIN={progress_pins}",
+        ]
+
     def _sweep_script(self, job: BaseJob, **kwargs) -> str:
         """Generate a script for sweeping through tasks on pre-provisioned resources."""
 
@@ -2281,18 +2579,34 @@ class SlurmSite(BaseSite):
         pack_job = kwargs.pop("pack", None)
         if pack_job is None:
             pack_job = kwargs.pop("pack_job", True)
+        mpi_async_progress = kwargs.pop("mpi_async_progress", False)
+        kwargs.pop("executable", None)
+        n_threads = self.pool.ncore // self.pool.nproc
+        mpi_async_progress_setup: List[str] = []
+        if mpi_async_progress:
+            nodes = int(self.pool.nhost or 1)
+            if self.pool.ncore % nodes or self.pool.nproc % nodes:
+                raise ValueError(
+                    "mpi_async_progress requires allocation cores and ranks to "
+                    "divide evenly across nodes"
+                )
+            n_threads, mpi_async_progress_setup = self._mpi_async_progress_layout(
+                cores_per_node=self.pool.ncore // nodes,
+                ranks_per_node=self.pool.nproc // nodes,
+            )
         return self._render_template(
             "sweep/sweep_SLURM.sh",
             batch_job=False,
             n_tasks=n_tasks,
             n_procs=self.pool.nproc,
-            n_threads=self.pool.ncore // self.pool.nproc,
+            n_threads=n_threads,
             mpi=self.mpi_cmd,
             dir_out=dir_out,
             executable=self.executable,
             imaging_job=isinstance(job, ImagingJob),
             pack_job=bool(pack_job),
             runtime_setup=self._runtime_setup_lines(),
+            mpi_async_progress_setup=mpi_async_progress_setup,
             **kwargs,
         )
 
@@ -2355,6 +2669,8 @@ class SlurmSite(BaseSite):
         sizing_json = kwargs.pop("sizing_json", None)
         launch_delay_seconds = float(kwargs.pop("launch_delay_seconds", 0.25))
         pack_job = bool(kwargs.pop("pack", True))
+        mpi_async_progress = bool(kwargs.pop("mpi_async_progress", False))
+        kwargs.pop("executable", None)
         n_job_tasks = int(n_tasks if n_job_tasks is None else n_job_tasks)
         if task_indices is None:
             task_indices = list(range(1, n_job_tasks + 1))
@@ -2363,12 +2679,19 @@ class SlurmSite(BaseSite):
         skip_sizing = bool(kwargs.pop("skip_sizing", n_tasks == 1))
         proc_memory = (config.memory_per_node / ranks_per_node) / 1024.0
         duration = config.validate_request(n_nodes, n_nodes * ranks_per_node, duration)
+        n_threads = config.cores_per_node // ranks_per_node
+        mpi_async_progress_setup: List[str] = []
+        if mpi_async_progress:
+            n_threads, mpi_async_progress_setup = self._mpi_async_progress_layout(
+                cores_per_node=config.cores_per_node,
+                ranks_per_node=ranks_per_node,
+            )
         scheduler_config = {
             "executable": str(self.executable),
             "mpi": str(self.mpi_cmd),
             "fresh": bool(kwargs.get("fresh", False)),
             "total_ranks": n_nodes * ranks_per_node,
-            "omp_threads": config.cores_per_node // ranks_per_node,
+            "omp_threads": n_threads,
             "mem_per_rank_gib": proc_memory,
             "job_task_count": n_job_tasks,
             "task_indices": task_indices,
@@ -2400,7 +2723,7 @@ class SlurmSite(BaseSite):
             skip_sizing=1 if skip_sizing else 0,
             n_nodes=n_nodes,
             n_procs=n_nodes * ranks_per_node,
-            n_threads=config.cores_per_node // ranks_per_node,
+            n_threads=n_threads,
             n_tasks=n_tasks,
             n_job_tasks=n_job_tasks,
             smooth_only=bool(kwargs.pop("smooth_only", False)),
@@ -2412,6 +2735,7 @@ class SlurmSite(BaseSite):
             mpi=self.mpi_cmd,
             executable=self.executable,
             runtime_setup=self._runtime_setup_lines(),
+            mpi_async_progress_setup=mpi_async_progress_setup,
             scheduler_config_shell=shlex.quote(json.dumps(scheduler_config, indent=2)),
             sizing_json_shell=shlex.quote(str(sizing_json or "FS_sizing.json")),
             scheduler_runner=shlex.quote(str(self._adaptive_scheduler_remote_path())),
@@ -2479,7 +2803,7 @@ class SlurmSite(BaseSite):
         log_path = Path(log_dir)
 
         if job_id:
-            batch_dir = log_path.parent / "batch"
+            batch_dir = log_path / "batch"
             for suffix, label in ((".o", "batch stdout"), (".e", "batch stderr")):
                 f = batch_dir / f"job_{job_id}{suffix}"
                 if f.exists():
@@ -2512,23 +2836,47 @@ class SlurmSite(BaseSite):
         except OSError as e:
             print(f"--- {header} (could not read: {e}) ---")
             return
-        print(f"\n{'='*60}\n{header}\n{path}\n{'='*60}\n{text}\n")
+        print(f"\n{'=' * 60}\n{header}\n{path}\n{'=' * 60}\n{text}\n")
 
-    def _get_work_dir(self, rel_proj_path: Union[str, Path]) -> Path:
-        """Gets the remote work directory path."""
-        work_dir = self._configured_work_dir
+    @staticmethod
+    def _normalize_optional_remote_dir(
+        value: Optional[Union[str, Path]],
+        *,
+        name: str,
+    ) -> Optional[Path]:
+        """Normalize an optional absolute directory on the remote system."""
 
-        # If the configured variable is not set, try $WORK on the login node.
-        if not work_dir or work_dir == "":
+        if value is None or str(value).strip() == "":
+            return None
+        path = Path(value)
+        if not path.is_absolute():
+            raise ValueError(f"SLURM {name} must be an absolute remote path")
+        return path
+
+    def _get_work_dir(self) -> Path:
+        """Resolve the remote base directory for relative FrequenSolve paths."""
+
+        configured = self._normalize_optional_remote_dir(
+            self._configured_work_dir,
+            name="work_dir",
+        )
+        legacy_rel_path = self._rel_proj_path
+
+        if configured is not None:
+            work_dir = configured
+            if legacy_rel_path is not None:
+                work_dir = work_dir / legacy_rel_path
+        else:
             _, stdout, stderr = self._login_client.client.exec_command("echo $WORK")
-            work_dir = stdout.read().decode().strip()
-            if not work_dir:
+            work_root = stdout.read().decode().strip()
+            if not work_root:
                 raise RuntimeError(
-                    f"Failed to get remote work directory for {self.site_name}; "
-                    "configure work_dir in site.toml or pass work_dir= explicitly"
+                    f"Failed to determine $WORK for {self.site_name}; configure "
+                    "an absolute work_dir base in site.toml or pass work_dir= explicitly"
                 )
+            work_dir = Path(work_root) / (legacy_rel_path or "frequensolve")
 
-        self._work_dir = Path(work_dir) / rel_proj_path
+        self._work_dir = Path(work_dir)
         logger.info("Work directory: %s", self._work_dir)
         return self._work_dir
 
@@ -2560,7 +2908,6 @@ class SlurmSite(BaseSite):
                         [interactive.stdout, interactive.stderr], [], [], 0.1
                     )
                     for fd in reads:
-
                         data = fd.read(4096).decode("utf-8", errors="replace")
                         if fd == interactive.stdout:
                             output_buffer += data

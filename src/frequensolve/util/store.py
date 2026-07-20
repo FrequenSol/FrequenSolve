@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 import blake3
 import h5py
@@ -13,6 +16,9 @@ import numpy as np
 import xarray as xr
 
 __all__ = ["HDF5Reference", "SimulationStore", "hash_dataarray_payload"]
+
+_DEFAULT_COMPACT_MIN_RECLAIM_BYTES = 64 * 1024 * 1024
+_DEFAULT_COMPACT_MIN_RECLAIM_FRACTION = 0.25
 
 
 def _json_default(value: Any) -> Any:
@@ -42,6 +48,74 @@ def _h5_attr_value(value: Any) -> Any:
 def _hash_update_json(hasher, value: Any) -> None:
     payload = json.dumps(value, sort_keys=True, default=_json_default).encode("utf-8")
     hasher.update(payload)
+
+
+def compact_hdf5_file(
+    path: Path,
+    *,
+    min_reclaim_bytes: int = _DEFAULT_COMPACT_MIN_RECLAIM_BYTES,
+    min_reclaim_fraction: float = _DEFAULT_COMPACT_MIN_RECLAIM_FRACTION,
+) -> int:
+    """Atomically repack an HDF5 file when deleted-object space is excessive.
+
+    HDF5 object deletion removes links but normally does not shrink the file.
+    This helper copies only live root objects into a new file and replaces the
+    input only when doing so makes it smaller. It is intended for closed,
+    generated simulation-input files and disposable transfer staging copies,
+    not active result files.
+
+    Args:
+        path: Closed HDF5 file to inspect and potentially repack.
+        min_reclaim_bytes: Minimum estimated dead space required to repack.
+        min_reclaim_fraction: Minimum estimated dead-space fraction required.
+
+    Returns:
+        Number of bytes reclaimed, or zero when the file was left unchanged.
+    """
+
+    path = Path(path)
+    file_size = path.stat().st_size
+    if file_size == 0:
+        return 0
+
+    with h5py.File(path, "r") as source:
+        raw_storage = 0
+
+        def add_storage(_name, obj):
+            nonlocal raw_storage
+            if isinstance(obj, h5py.Dataset):
+                raw_storage += int(obj.id.get_storage_size())
+
+        source.visititems(add_storage)
+
+    estimated_reclaim = max(0, file_size - raw_storage)
+    if estimated_reclaim < int(min_reclaim_bytes):
+        return 0
+    if estimated_reclaim / file_size < float(min_reclaim_fraction):
+        return 0
+
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.compact-",
+        suffix=path.suffix,
+        dir=path.parent,
+    )
+    os.close(descriptor)
+    temp_path = Path(temp_name)
+    try:
+        with h5py.File(path, "r") as source, h5py.File(temp_path, "w") as target:
+            for key, value in source.attrs.items():
+                target.attrs[key] = value
+            for name in source:
+                source.copy(name, target, name=name)
+
+        compact_size = temp_path.stat().st_size
+        if compact_size >= file_size:
+            return 0
+        shutil.copystat(path, temp_path)
+        os.replace(temp_path, path)
+        return file_size - compact_size
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def hash_dataarray_payload(
@@ -161,6 +235,75 @@ class SimulationStore:
             Path(project_path).resolve() if project_path is not None else None
         )
 
+    def prune_unreferenced(self, payload: Mapping[str, Any]) -> list[str]:
+        """Delete store datasets not referenced by a serialized simulation.
+
+        Args:
+            payload: Newly serialized solver payload whose HDF5 references are
+                authoritative for this store.
+
+        Returns:
+            Dataset paths removed from the store.
+        """
+
+        if not self.path.exists():
+            return []
+        referenced = self._referenced_datasets(payload)
+        with h5py.File(self.path, "a") as h5:
+            stored = []
+            h5.visititems(
+                lambda name, obj: (
+                    stored.append(name) if isinstance(obj, h5py.Dataset) else None
+                )
+            )
+            removed = sorted(set(stored) - referenced)
+            for dataset in removed:
+                del h5[dataset]
+        return removed
+
+    def _referenced_datasets(self, payload: Any) -> set[str]:
+        referenced: set[str] = set()
+
+        def visit(value: Any) -> None:
+            if isinstance(value, Mapping):
+                locator = value.get("file")
+                file_format = str(value.get("format", "")).lower()
+                dataset = value.get("dataset")
+                if (
+                    not isinstance(dataset, str)
+                    and isinstance(locator, (str, Path))
+                    and file_format == "hdf5"
+                ):
+                    locator_text = str(locator)
+                    if ":" in locator_text:
+                        _, dataset = locator_text.rsplit(":", 1)
+                if (
+                    isinstance(dataset, str)
+                    and isinstance(locator, (str, Path))
+                    and file_format == "hdf5"
+                    and self._locator_references_store(str(locator), dataset)
+                ):
+                    referenced.add(dataset.strip("/"))
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+
+        visit(payload)
+        return referenced
+
+    def _locator_references_store(self, locator: str, dataset: str) -> bool:
+        suffix = f":{dataset.strip('/')}"
+        file_part = locator[: -len(suffix)] if locator.endswith(suffix) else locator
+        candidate = Path(file_part).expanduser()
+        if not candidate.is_absolute() and self.project_path is not None:
+            candidate = self.project_path / candidate
+        try:
+            return candidate.resolve() == self.path.resolve()
+        except OSError:
+            return False
+
     def put_dataarray(
         self,
         dataset: str,
@@ -227,7 +370,7 @@ class SimulationStore:
         self,
         dataset: str,
         shape: Sequence[int],
-        chunk_iter: Iterable[np.ndarray],
+        chunk_iter: Iterable[np.ndarray] | Callable[[], Iterable[np.ndarray]],
         *,
         attrs: Optional[Mapping[str, Any]] = None,
         dims: Optional[Sequence[str]] = None,
@@ -238,7 +381,9 @@ class SimulationStore:
         """Write an array from row chunks and return its store reference.
 
         This is intended for generated arrays that are too large to first
-        materialize as a single NumPy or xarray object.
+        materialize as a single NumPy or xarray object. Passing a callable that
+        creates a fresh iterator lets an unchanged existing dataset be reused
+        after a hash-only pass.
         """
 
         dataset = dataset.strip("/")
@@ -248,22 +393,13 @@ class SimulationStore:
         shape = tuple(int(value) for value in shape)
         dtype = np.dtype(dtype) if dtype is not None else np.dtype(np.float64)
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        hasher = blake3.blake3()
-        _hash_update_json(hasher, {"dtype": str(dtype), "shape": shape})
-
-        with h5py.File(self.path, "a") as h5:
-            if dataset in h5:
-                del h5[dataset]
-
-            dset = h5.create_dataset(
-                dataset,
-                shape=shape,
-                dtype=dtype,
-                compression=compression,
-            )
+        def digest_chunks(
+            chunks: Iterable[np.ndarray], dset: Optional[h5py.Dataset] = None
+        ) -> str:
+            hasher = blake3.blake3()
+            _hash_update_json(hasher, {"dtype": str(dtype), "shape": shape})
             offset = 0
-            for chunk in chunk_iter:
+            for chunk in chunks:
                 values = np.ascontiguousarray(chunk, dtype=dtype)
                 if values.ndim != len(shape) or values.shape[1:] != shape[1:]:
                     raise ValueError(
@@ -272,7 +408,8 @@ class SimulationStore:
                 stop = offset + values.shape[0]
                 if stop > shape[0]:
                     raise ValueError("Chunk iterator produced too many rows")
-                dset[offset:stop, ...] = values
+                if dset is not None:
+                    dset[offset:stop, ...] = values
                 hasher.update(memoryview(values).cast("B"))
                 offset = stop
             if offset != shape[0]:
@@ -296,7 +433,39 @@ class SimulationStore:
                 )
                 hasher.update(memoryview(coord).cast("B"))
             _hash_update_json(hasher, {"attrs": {}, "extra_attrs": attrs})
-            digest = hasher.hexdigest()
+            return hasher.hexdigest()
+
+        chunk_factory = chunk_iter if callable(chunk_iter) else None
+        expected_digest = (
+            digest_chunks(chunk_factory()) if chunk_factory is not None else None
+        )
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+        with h5py.File(self.path, "a") as h5:
+            if dataset in h5:
+                dset = h5[dataset]
+                if (
+                    expected_digest is not None
+                    and dset.attrs.get("fs_hash") == f"blake3:{expected_digest}"
+                ):
+                    return HDF5Reference(
+                        self.path, dataset, expected_digest, self.project_path
+                    )
+                del h5[dataset]
+
+            dset = h5.create_dataset(
+                dataset,
+                shape=shape,
+                dtype=dtype,
+                compression=compression,
+            )
+            chunks = chunk_factory() if chunk_factory is not None else chunk_iter
+            try:
+                digest = digest_chunks(chunks, dset=dset)
+            except Exception:
+                del h5[dataset]
+                raise
 
             dset.attrs["fs_hash"] = f"blake3:{digest}"
             dset.attrs["fs_hash_algorithm"] = "blake3"

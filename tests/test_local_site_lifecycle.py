@@ -303,6 +303,40 @@ def test_run_task_supports_solver_pack_mode(monkeypatch, tmp_path):
     )
 
 
+def test_run_task_init_does_not_request_map(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeProcess:
+        def wait(self):
+            return 0
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        return FakeProcess()
+
+    job_file = tmp_path / "job.json"
+    job_file.write_text("{}")
+    monkeypatch.setattr(local_module.subprocess, "Popen", fake_popen)
+
+    result = run_task(
+        str(job_file),
+        local_module.MESH_TASK_ID,
+        "/solver",
+        {},
+        stdout_dir=None,
+    )
+
+    assert result["status"] == "success"
+    assert captured["args"] == [
+        "/solver",
+        "-nthreads",
+        "1",
+        "--job",
+        str(job_file),
+        "--init",
+    ]
+
+
 def test_run_task_adds_fresh_flag(monkeypatch, tmp_path):
     captured = {}
 
@@ -571,7 +605,7 @@ def test_submit_local_tasks_preserves_explicit_n_workers(monkeypatch, tmp_path):
     assert [item["kwargs"]["n_threads"] for item in submissions[1:]] == [2, 2]
 
 
-def test_submit_local_tasks_force_run_disables_reuse_and_passes_fresh(
+def test_submit_local_tasks_fresh_run_disables_reuse_and_passes_fresh(
     monkeypatch, tmp_path
 ):
     site, _closed = make_site(monkeypatch)
@@ -605,7 +639,7 @@ def test_submit_local_tasks_force_run_disables_reuse_and_passes_fresh(
 
     site._dask_client = FakeClient()
 
-    site._submit_local_tasks(FakeJob(), force_run=True)
+    site._submit_local_tasks(FakeJob(), fresh_run=True)
 
     assert plan_calls == [{"reuse": False, "force": True}]
     assert [item["task_id"] for item in submissions] == [local_module.MESH_TASK_ID, 0]
@@ -739,7 +773,8 @@ def test_close_uses_cluster_close_without_retiring_workers(monkeypatch):
     assert site._active_n_workers is None
 
 
-def test_local_submit_force_run_bypasses_current_skip(monkeypatch):
+@pytest.mark.parametrize("skip", [False, "false"])
+def test_local_submit_skip_false_bypasses_current_skip(monkeypatch, skip):
     site, _closed = make_site(monkeypatch)
     seen = {}
 
@@ -757,10 +792,10 @@ def test_local_submit_force_run_bypasses_current_skip(monkeypatch):
 
     monkeypatch.setattr(site, "_submit_local_tasks", fake_submit)
 
-    run = site.submit(CurrentJob(), force_run=True)
+    run = site.submit(CurrentJob(), skip=skip)
 
     assert run.mode == "local"
-    assert seen["kwargs"]["force_run"] is True
+    assert seen["kwargs"]["fresh_run"] is True
     assert run.backend["fresh"] is True
 
 

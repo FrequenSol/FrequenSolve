@@ -10,6 +10,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional, Union
 
+from frequensolve.orchestrator.sites.base import LocalHostConfig
 from frequensolve.storage import frequensolve_home
 
 try:
@@ -28,9 +29,16 @@ SITE_CONFIG_ENV_VAR = "FREQUENSOLVE_SITE_CONFIG"
 DEFAULT_SITE_CONFIG_NAME = "site.toml"
 SITE_PRESETS_CONFIG_NAME = "site_presets.toml"
 STARTER_SITE_CONFIG = """# FrequenSolve execution site configuration.
-# Review these profiles, keep the ones you use, then rerun your script or notebook.
+# The cloud profile below is active by default and works with app.frequensol.com.
+# Replace the placeholders before selecting another profile with `default` or
+# fs.Site(profile="..."). Do not store passwords, passphrases, or tokens here.
 
 default = "cloud"
+
+[host]
+# Local machine staging for disposable project bundles and transfer tarballs.
+# Defaults to Python's platform temp directory when omitted.
+# tmp_dir = "/local/tmp/directory"
 
 [sites.cloud]
 type = "aws"
@@ -50,17 +58,32 @@ hostname = "login.example.edu"
 username = "your-username"
 credential = "example-hpc"
 ssh_key = "~/.ssh/id_ed25519"
-solver = "/remote/path/to/solver"
-work_dir = "/remote/work/directory"
-rel_path = "frequensolve/tutorials"
+# HPC launches route every solver phase through this executable.
+solver = "/remote/path/to/solver-installation/FS_seismic"
+work_dir = "/remote/writable/directory/frequensolve"
+# Optional future location for models and other high-I/O data.
+scratch_dir = "/remote/scratch/directory/frequensolve"
+tmp_dir = "/remote/tmp/directory"
 default_partition = "debug"
 account = "allocation"
 transfer_method = "rsync"
 modules = []
 verbose = true
 
+# Define one table per partition using limits and node resources supplied by
+# the cluster administrator. These `debug` values are illustrative.
+[sites.hpc.partitions.debug]
+max_duration = "02:00:00"
+min_nodes = 1
+max_nodes = 4
+cores_per_node = 64
+sockets_per_node = 2
+memory_per_node = 262144 # MiB
+gpus_per_node = 0
+
 [sites.hpc.environment]
-# OMP_NUM_THREADS = "1"
+# Values may reference module-defined variables with simple ${NAME} syntax.
+# LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
 
 [sites.hpc.run_config]
 nodes = 1
@@ -68,6 +91,37 @@ duration = "00:30:00"
 ranks_per_node = 4
 ranks_per_task = 1
 poll_interval = 10
+scheduler_heartbeat_timeout = 60
+
+# Stampede3 uses built-in host, launcher, partition, and node-shape defaults.
+[sites.stampede3]
+type = "slurm"
+preset = "stampede3"
+username = "your-tacc-username"
+account = "your-tacc-allocation"
+credential = "tacc-stampede3"
+ssh_key = "~/.ssh/id_ed25519"
+# HPC launches route every solver phase through this executable.
+solver = "/remote/path/to/solver-installation/FS_seismic"
+# work_dir defaults to $WORK/frequensolve. It may point to any writable remote
+# filesystem; TOML does not expand $WORK or $SCRATCH.
+# work_dir = "/another/remote/path/frequensolve"
+# Optional future location for models and other high-I/O data.
+# scratch_dir = "/scratch/your-tacc-username/frequensolve"
+# Remote transfer/provision staging. Use a concrete absolute path.
+# tmp_dir = "/scratch/your-tacc-username/frequensolve/tmp"
+default_partition = "skx-dev"
+transfer_method = "rsync"
+modules = []
+verbose = true
+
+[sites.stampede3.environment]
+# Values may reference module-defined variables with simple ${NAME} syntax.
+# LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
+
+[sites.stampede3.run_config]
+nodes = 1
+duration = "00:30:00"
 """
 
 _SITE_TYPES = {
@@ -106,6 +160,7 @@ __all__ = [
     "SITE_PRESETS_CONFIG_NAME",
     "SITE_CONFIG_ENV_VAR",
     "Site",
+    "LocalHostConfig",
     "load_site_config",
     "load_site_presets",
     "site_config_path",
@@ -173,27 +228,100 @@ def Site(
     *,
     config_path: Optional[Union[str, Path]] = None,
     profile: Optional[str] = None,
+    queue: Optional[str] = None,
+    nodes: Optional[int] = None,
+    ranks_per_node: Optional[int] = None,
+    duration: Optional[str] = None,
     **overrides: Any,
 ):
     """Create the configured execution site.
 
     The default config location is ``~/.frequensolve/site.toml``. Tests and
     isolated tools can redirect it with ``FREQUENSOLVE_SITE_CONFIG`` or the
-    explicit ``config_path`` argument.
+    explicit ``config_path`` argument. For SLURM profiles, ``queue``, ``nodes``,
+    ``ranks_per_node``, and ``duration`` override the profile's default run
+    configuration directly.
     """
 
     config = load_site_config(config_path)
+    local_host_config = _local_host_config(config)
     site_config = dict(_site_config_table(config, profile=profile))
     selected_profile = profile or _default_profile(config)
     site_config.update(overrides)
+    resource_overrides = {
+        name: value
+        for name, value in {
+            "queue": queue,
+            "nodes": nodes,
+            "ranks_per_node": ranks_per_node,
+            "duration": duration,
+        }.items()
+        if value is not None
+    }
+    site_config = _apply_direct_slurm_resources(site_config, resource_overrides)
     site_config = _resolve_site_preset(site_config)
     site_type = _site_type(site_config)
     kwargs = _site_kwargs(site_config, site_type)
     site_class = _resolve_site_class(site_type)
     site = site_class(**kwargs)
+    site.local_host_config = local_host_config
     site._site_config_path = site_config_path(config_path)
     site._site_profile = selected_profile
     return site
+
+
+def _local_host_config(config: Mapping[str, Any]) -> LocalHostConfig:
+    """Return local-machine settings from the top-level host table."""
+
+    if "host" in config and "local_host" in config:
+        raise ValueError("Use either [host] or [local_host], not both")
+    values = config.get("host", config.get("local_host", {}))
+    if values is None:
+        values = {}
+    if not isinstance(values, Mapping):
+        raise ValueError("FrequenSolve local host config must be a table")
+    unknown = sorted(set(values) - {"tmp_dir"})
+    if unknown:
+        names = ", ".join(unknown)
+        raise ValueError(f"Unsupported FrequenSolve host config key(s): {names}")
+    return LocalHostConfig(tmp_dir=values.get("tmp_dir"))
+
+
+def _apply_direct_slurm_resources(
+    site_config: Mapping[str, Any], resources: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Apply explicit run resources after all profile-level values."""
+
+    profile = dict(site_config)
+    if not resources:
+        return profile
+
+    queue = resources.get("queue")
+    if queue is not None:
+        profile.pop("default_partition", None)
+        nested_config = profile.get("config")
+        if isinstance(nested_config, Mapping):
+            profile["config"] = {**nested_config, "queue": queue}
+        elif nested_config is not None and hasattr(nested_config, "queue"):
+            nested_config = deepcopy(nested_config)
+            nested_config.queue = queue
+            profile["config"] = nested_config
+
+    profile.update(resources)
+    nested_run_config = profile.get("run_config")
+    if isinstance(nested_run_config, Mapping):
+        profile["run_config"] = {**nested_run_config, **resources}
+    elif nested_run_config is not None:
+        merge = getattr(nested_run_config, "merged", None)
+        if callable(merge):
+            profile["run_config"] = merge(**resources)
+        else:
+            nested_run_config = deepcopy(nested_run_config)
+            for name, value in resources.items():
+                if hasattr(nested_run_config, name):
+                    setattr(nested_run_config, name, value)
+            profile["run_config"] = nested_run_config
+    return profile
 
 
 def _site_config_table(
@@ -328,8 +456,7 @@ def _reject_unsupported_top_level_keys(config: Mapping[str, Any]) -> None:
     for key, replacement in _UNSUPPORTED_TOP_LEVEL_KEYS.items():
         if key in config:
             raise ValueError(
-                f"FrequenSolve site config key {key!r} is not supported; "
-                f"{replacement}."
+                f"FrequenSolve site config key {key!r} is not supported; {replacement}."
             )
 
 

@@ -357,7 +357,7 @@ def run_task(
     elif task_id == SMOOTH_TASK_ID:
         args += ["--smooth"]
     elif task_id == MESH_TASK_ID:
-        args += ["--init", "--map"]
+        args += ["--init"]
     else:
         args += ["--task", f"{task_id + 1}"]
     command = shlex.join(args)
@@ -529,11 +529,7 @@ class LocalSite(BaseSite):
             RunHandle for the submitted tasks
         """
         check = bool(kwargs.pop("check", False))
-        force_run = bool(
-            kwargs.pop("force_run", False)
-            or kwargs.pop("force", False)
-            or kwargs.pop("rerun", False)
-        )
+        fresh_run = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
         skip_policy_value = kwargs.pop("skip", kwargs.pop("skip_policy", None))
         residual = kwargs.pop("residual", None)
         ignore_solver_options = kwargs.pop("ignore_solver_options", None)
@@ -542,7 +538,7 @@ class LocalSite(BaseSite):
             skip_policy_value,
             residual=residual,
             ignore_solver_options=ignore_solver_options,
-            reuse=reuse and not force_run,
+            reuse=reuse and not fresh_run,
         )
         plan_skip_policy = (
             skip_policy
@@ -553,7 +549,7 @@ class LocalSite(BaseSite):
             )
             else None
         )
-        force_run = bool(force_run or skip_policy.force)
+        fresh_run = bool(fresh_run or skip_policy.force)
         validate = kwargs.pop("validate", True)
         pack = bool(kwargs.pop("pack", True))
         tolerate_failures = _normalize_failure_tolerance(
@@ -564,7 +560,7 @@ class LocalSite(BaseSite):
             kwargs.pop("shutdown_on_completion", self.shutdown_on_completion)
         )
         self.prepare_job(job, validate=validate)
-        if not force_run and job.is_run_current():
+        if not fresh_run and job.is_run_current():
             logger.info(
                 "Skipping job %s; fingerprint matches and expected trace outputs exist.",
                 job.name,
@@ -575,7 +571,7 @@ class LocalSite(BaseSite):
         try:
             submission = self._submit_local_tasks(
                 job,
-                force_run=force_run,
+                fresh_run=fresh_run,
                 skip_policy=plan_skip_policy,
                 reuse=reuse,
                 **kwargs,
@@ -619,7 +615,7 @@ class LocalSite(BaseSite):
         handle.backend["futures"] = futures
         handle.backend["task_plan"] = task_plan
         handle.backend["pack_after_tasks"] = pack
-        handle.backend["fresh"] = force_run
+        handle.backend["fresh"] = fresh_run
         handle.backend["smooth_only"] = smooth_only
         handle.backend["tolerate_failures"] = tolerate_failures
         handle.backend["shutdown_on_completion"] = shutdown_on_completion
@@ -1214,7 +1210,7 @@ class LocalSite(BaseSite):
     def _submit_local_tasks(
         self,
         job: BaseJob,
-        force_run: bool = False,
+        fresh_run: bool = False,
         *,
         skip_policy: Optional[Any] = None,
         reuse: bool = True,
@@ -1243,8 +1239,8 @@ class LocalSite(BaseSite):
         if ignore_solver_options is not None:
             plan_kwargs["ignore_solver_options"] = ignore_solver_options
         task_plan = job.task_run_plan(
-            reuse=bool(reuse) and not force_run,
-            force=force_run,
+            reuse=bool(reuse) and not fresh_run,
+            force=fresh_run,
             **plan_kwargs,
         )
         pending_indices = list(task_plan["pending_indices"])
@@ -1281,7 +1277,7 @@ class LocalSite(BaseSite):
             n_ranks=1,
             n_threads=init_threads,
             stdout_dir=stdout_dir,
-            fresh=force_run,
+            fresh=fresh_run,
             resources={"CPU": init_threads},
         )
         try:
@@ -1317,7 +1313,7 @@ class LocalSite(BaseSite):
                     n_ranks=n_ranks,
                     n_threads=self._current_threads_per_worker(),
                     stdout_dir=stdout_dir,
-                    fresh=force_run,
+                    fresh=fresh_run,
                     retries=0,
                     priority=i,
                     actor=False,

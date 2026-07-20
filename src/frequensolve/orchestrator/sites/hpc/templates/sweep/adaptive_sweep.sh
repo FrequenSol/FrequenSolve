@@ -3,8 +3,8 @@
 {% if batch_job %}
 #SBATCH -J {{ name }}
 {% if run_path %}
-#SBATCH -o {{run_path}}/jobs/batch/job_%j.o
-#SBATCH -e {{run_path}}/jobs/batch/job_%j.e
+#SBATCH -o {{dir_out}}/batch/job_%j.o
+#SBATCH -e {{dir_out}}/batch/job_%j.e
 {% else %}
 #SBATCH -o ./job_%j.o
 #SBATCH -e ./job_%j.e
@@ -39,8 +39,8 @@ cd {{run_path}}
 {% endif %}
 
 dir_out={{dir_out}}
-rm -rf "$dir_out"
-mkdir -p "$dir_out"
+mkdir -p "$dir_out/batch"
+find "$dir_out" -mindepth 1 -maxdepth 1 ! -name batch -exec rm -rf -- {} +
 scheduler_status="$dir_out/scheduler_status.json"
 scheduler_config="$dir_out/scheduler_config.json"
 sizing_json={{sizing_json_shell}}
@@ -53,6 +53,10 @@ skip_sizing={{skip_sizing}}
 mpi_exec={{mpi}}
 n_procs={{n_procs}}
 n_threads={{n_threads}}
+export OMP_NUM_THREADS=$n_threads
+{% for line in mpi_async_progress_setup %}
+{{ line }}
+{% endfor %}
 n_tasks={{n_tasks}}
 n_job_tasks={{n_job_tasks}}
 executable={{executable}}
@@ -118,11 +122,11 @@ start_time=$(date +%s)
 rm -f "$sizing_json"
 set +e
 if [ "$skip_sizing" = "1" ]; then
-    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size --map"
-    $mpi_exec -n $n_procs "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --init-no-size --map
+    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size"
+    $mpi_exec -n $n_procs "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --init-no-size > "$dir_out/init.log" 2>&1
 else
-    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init --map"
-    $mpi_exec -n $n_procs "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --init --map
+    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init"
+    $mpi_exec -n $n_procs "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --init > "$dir_out/init.log" 2>&1
 fi
 sizing_rc=$?
 set -e
@@ -145,7 +149,7 @@ echo "Skipping frequency sweep; running imaging postprocess only."
 
 {% if imaging_job %}
 echo "Running imaging step..."
-"$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1
+$mpi_exec -n "$n_procs" "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1
 {% if smooth_only %}
 cat > "$scheduler_status" <<EOF
 {"state":"complete","total":0,"successful":0,"failed":0,"running":0,"pending":0,"complete":0}

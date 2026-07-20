@@ -2,6 +2,7 @@
 
 import copy
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
@@ -16,7 +17,8 @@ from frequensolve.model.model import ModelBase
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import CoordsArray
 from frequensolve.simulation.config import SimulationConfig
-from frequensolve.simulation.numerics_manager import Discretization, SolverConfig
+from frequensolve.simulation.discretization import Discretization
+from frequensolve.simulation.solver import SolverConfig
 from frequensolve.units import UnitConfig
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.encoders import CustomJSONEncoder
@@ -31,7 +33,7 @@ from frequensolve.util.physics import (
     model_dimension,
     normalize_simulation_physics,
 )
-from frequensolve.util.store import SimulationStore
+from frequensolve.util.store import SimulationStore, compact_hdf5_file
 
 __all__ = [
     "BaseSimulation",
@@ -642,10 +644,25 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         self._file = file
         indent = json_kwargs.pop("indent", 3)
         ctx = self.export_context()
+        payload = self.to_fs(ctx)
         with open(file, "w") as f:
-            json.dump(
-                self.to_fs(ctx), f, cls=CustomJSONEncoder, indent=indent, **json_kwargs
+            json.dump(payload, f, cls=CustomJSONEncoder, indent=indent, **json_kwargs)
+        removed = ctx.store.prune_unreferenced(payload)
+        if removed:
+            logging.getLogger(__name__).debug(
+                "Removed %d unreferenced datasets from %s: %s",
+                len(removed),
+                ctx.store.path,
+                ", ".join(removed),
             )
+        if ctx.store.path.exists():
+            reclaimed = compact_hdf5_file(ctx.store.path)
+            if reclaimed:
+                logging.getLogger(__name__).info(
+                    "Compacted %s; removed %.2f GiB of dead HDF5 space",
+                    ctx.store.path,
+                    reclaimed / (1024**3),
+                )
         return file
 
     def check(self) -> bool:

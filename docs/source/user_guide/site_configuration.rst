@@ -14,7 +14,10 @@ Quick Start
 The default :term:`site configuration file` is ``~/.frequensolve/site.toml``. On first
 use, if that file does not exist, ``fs.Site()`` creates a starter file and
 raises an exception asking you to review it. Edit the file, then rerun the same
-script or notebook.
+script or notebook. The starter keeps FrequenSol Cloud active by default and
+includes editable local, generic SLURM, and Stampede3 profiles with placeholder
+values. These profiles are ordinary TOML tables, but remain inactive until
+selected by ``default`` or ``fs.Site(profile=...)``.
 
 Cloud is the quickest path for most new users because the solver installation
 is managed remotely:
@@ -93,7 +96,7 @@ Most users should keep multiple named profiles:
    [sites.hpc]
    type = "slurm"
    preset = "stampede3"
-   rel_path = "scratch/frequensolve_tutorials"
+   work_dir = "/shared/username/frequensolve"
    default_partition = "skx-dev"
    nodes = 1
    duration = "00:30:00"
@@ -242,7 +245,6 @@ extra.
    dashboard_port = 8787
 
    [sites.local.environment]
-   # OMP_NUM_THREADS = "1"
 
 .. list-table::
    :header-rows: 1
@@ -272,6 +274,22 @@ extra.
    * - ``verbose``
      - Print user-facing status messages in addition to logging.
 
+Local Host Settings
+~~~~~~~~~~~~~~~~~~~
+
+The optional top-level ``[host]`` table describes the machine running the
+FrequenSolve Python process. It is not part of any remote execution profile.
+
+.. code-block:: toml
+
+   [host]
+   tmp_dir = "/tmp/frequensolve"
+
+``tmp_dir`` controls local disposable staging for project transfer bundles and
+SFTP tarballs. When omitted, FrequenSolve uses Python's platform temp directory
+(``tempfile.gettempdir()``), typically ``/tmp`` on Linux, a per-user
+``/var/folders/...`` path on macOS, and ``%TEMP%`` or ``%TMP%`` on Windows.
+
 HPC Profiles
 ~~~~~~~~~~~~
 
@@ -283,25 +301,38 @@ extra.
    [sites.cluster]
    type = "slurm"
    hostname = "login.example.edu"
-   username = "jsmith"
+   username = "username"
    credential = "example-primary"
    ssh_key = "~/.ssh/id_ed25519"
-   solver = "/work/shared/frequensol/fs3d_s"
-   work_dir = "/scratch/jsmith"
-   rel_path = "frequensolve/tutorials"
+   solver = "/work/shared/frequensol/FS_seismic"
+   work_dir = "/shared/username/frequensolve"
+   scratch_dir = "/scratch/username/frequensolve"
+   tmp_dir = "/scratch/username/frequensolve/tmp"
    default_partition = "debug"
    account = "allocation"
    transfer_method = "rsync"
    modules = []
 
+   # Add one table per partition using limits and node resources from your
+   # cluster documentation or administrator. Memory values are in MiB.
+   [sites.cluster.partitions.debug]
+   max_duration = "02:00:00"
+   min_nodes = 1
+   max_nodes = 4
+   cores_per_node = 64
+   sockets_per_node = 2
+   memory_per_node = 262144
+   gpus_per_node = 0
+
    [sites.cluster.environment]
-   # OMP_NUM_THREADS = "1"
+   # LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
 
    [sites.cluster.run_config]
    nodes = 2
    duration = "00:30:00"
    ranks_per_node = 4
    ranks_per_task = 1
+   scheduler_heartbeat_timeout = 60
 
 Stampede3 profiles use the built-in preset and create generic ``SlurmSite``
 instances:
@@ -311,12 +342,15 @@ instances:
    [sites.stampede3]
    type = "slurm"
    preset = "stampede3"
-   username = "jsmith"
+   username = "username"
    credential = "tacc-primary"
    ssh_key = "~/.ssh/id_ed25519"
-   solver = "/work/shared/frequensol/fs3d_s"
-   work_dir = "/scratch/jsmith"
-   rel_path = "scratch/frequensolve_tutorials"
+   solver = "/work/shared/frequensol/FS_seismic"
+   # Omit work_dir to use $WORK/frequensolve, or choose another writable base:
+   # work_dir = "/shared/username/frequensolve"
+   # Optional future location for models and other high-I/O data:
+   # scratch_dir = "/scratch/username/frequensolve"
+   # tmp_dir = "/scratch/username/frequensolve/tmp"
    default_partition = "skx-dev"
 
    [sites.stampede3.run_config]
@@ -329,8 +363,6 @@ instances:
 
    * - Key
      - Meaning
-   * - ``rel_path``
-     - Required remote project/work directory relative to the site work root.
    * - ``transfer_method``
      - ``rsync`` or ``sftp``. Defaults to ``rsync``.
    * - ``default_partition``
@@ -346,19 +378,39 @@ instances:
    * - ``ssh_key``
      - Optional local private-key path. SSH agent keys are attempted first.
    * - ``solver``
-     - Solver executable path on the remote system.
+     - Absolute path to the remote ``FS_seismic`` router executable.
+       FrequenSolve launches this configured executable for initialization,
+       frequency tasks, imaging postprocessing, and packing.
    * - ``work_dir``
-     - Remote work-directory root. ``rel_path`` is appended to this value.
+     - Absolute remote base directory for relative project, simulation, and job
+       paths. It may be on any writable remote filesystem. Absolute paths in
+       those definitions are not rebased. When omitted, FrequenSolve uses
+       ``$WORK/frequensolve``.
+   * - ``scratch_dir``
+     - Optional absolute remote scratch directory reserved for future model and
+       high-I/O storage. FrequenSolve records this setting but does not use it
+       for job data yet.
+   * - ``tmp_dir``
+     - Optional remote directory for transient transfer tarballs and
+       provisioning scripts. Use a concrete absolute path on the login
+       filesystem. Defaults to ``/tmp``.
    * - ``modules``
-     - Environment modules loaded before the solver starts. Module names are
-       site-specific; generic profiles do not load a TACC module stack.
+     - Environment modules loaded from left to right before the solver starts.
+       Module names and versions are site-specific; profiles and presets do not
+       add an implicit runtime stack.
    * - ``environment``
      - Non-secret environment variables exported for solver runs. Credential
        variables are rejected and must use the credential mechanisms below.
+       Simple ``${NAME}`` references expand after every configured module has
+       loaded; other shell expressions remain escaped.
    * - ``mpi_wrapper``
      - MPI launcher such as ``srun`` or ``ibrun``.
    * - ``poll_interval``
      - Seconds between scheduler status polls.
+   * - ``scheduler_heartbeat_timeout``
+     - Maximum seconds without a new adaptive-scheduler heartbeat before a
+       running SLURM job is reported failed. Defaults to 60. Set it to
+       ``None`` through ``SlurmRunConfig`` to disable the check.
    * - ``account``
      - HPC allocation/account name.
    * - ``max_duration``
@@ -376,8 +428,9 @@ instances:
      - Requested nodes for submitted jobs.
    * - ``duration``
      - Requested wall time, such as ``"00:30:00"``.
-   * - ``procs_per_node`` / ``procs_per_task``
-     - Process layout for solver runs.
+   * - ``ranks_per_node`` / ``ranks_per_task``
+     - MPI rank layout for solver runs. ``procs_per_node`` and
+       ``procs_per_task`` remain compatibility aliases.
    * - ``notify_on`` / ``notify_email``
      - Scheduler notification settings when supported.
    * - ``run_path``
@@ -392,6 +445,60 @@ flat as shown above, or grouped under nested ``config`` and ``run_config``
 tables. Preset values are loaded first, nested profile tables are merged over
 them, and explicit construction-time overrides are applied last.
 
+Module And Library Setup
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Keep site-specific runtime dependencies in the profile. Modules load in the
+listed order, and environment exports run afterward. For example, a build that
+needs a parallel-HDF5 module to take precedence over another dependency can be
+configured without changing Python code:
+
+.. code-block:: toml
+
+   [sites.cluster]
+   modules = ["dependency/1", "parallel-hdf5/2"]
+
+   [sites.cluster.environment]
+   LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
+
+The generated setup is equivalent to:
+
+.. code-block:: bash
+
+   module load dependency/1
+   module load parallel-hdf5/2
+   module list
+   export LD_LIBRARY_PATH="${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
+
+Only simple braced references such as ``${NAME}`` are expanded. This supports
+composition with variables created by module files while preventing profile
+values from becoming arbitrary shell commands.
+
+The common resource settings can be passed directly when constructing a
+profile-based HPC site, without creating a ``SlurmRunConfig``:
+
+.. code-block:: python
+
+   site = fs.Site(
+       profile="stampede3",
+       queue="spr",
+       nodes=8,
+       ranks_per_node=8,
+       duration="00-00:30:00",
+   )
+
+The same keywords can override those defaults for one submission:
+
+.. code-block:: python
+
+   run = site.submit(
+       job,
+       queue="spr",
+       nodes=8,
+       ranks_per_node=8,
+       duration="00-00:30:00",
+   )
+
 The packaged ``site_presets.toml`` catalog currently defines Stampede3's
 ``spr``, ``icx``, ``skx``, and ``skx-dev`` CPU partitions. These values are
 defaults: local profile values can override them, and TACC's ``qlimits`` output
@@ -399,11 +506,25 @@ remains authoritative because queue policy can change without notice. See the
 `Stampede3 user guide <https://docs.tacc.utexas.edu/hpc/stampede3/>`_ for the
 current system and queue details.
 
+.. warning::
+
+   Intel MPI asynchronous progress is not yet fully supported. It can sometimes
+   race during MPI initialization, so FrequenSolve currently rejects
+   ``mpi_async_progress = true``. Leave the option unset or set it to ``false``.
+
+The intended resource layout reserves one core per MPI rank for progress. For
+example, an ``spr`` node has 112 cores; with eight ranks per node, asynchronous
+progress would reserve the last core of each 14-core rank block and leave 13
+solver threads per rank.
+
 FrequenSolve sets ``MKL_NUM_THREADS=1`` and ``MKL_DYNAMIC=FALSE`` for local and
 SLURM solver processes so MKL does not add nested threading underneath the
-solver's own thread controls. Explicit profile ``environment`` values override
-these defaults. FrequenSolve does not set ``OMP_NUM_THREADS``; users may set it
-under the selected profile's ``environment`` table when appropriate.
+solver's own thread controls. HPC launch scripts also default to
+``OMP_WAIT_POLICY=PASSIVE`` and ``KMP_STACKSIZE=20M``.
+Explicit profile ``environment`` values override these defaults. Local users
+may set ``OMP_NUM_THREADS`` under the selected profile's ``environment`` table.
+HPC run scripts export ``OMP_NUM_THREADS=$n_threads`` alongside the existing
+``-nthreads $n_threads`` solver argument.
 ``KMP_STACKSIZE`` is likewise profile-controlled because its appropriate value
 depends on the solver launch and HPC runtime.
 
@@ -436,3 +557,47 @@ Site settings are selected in this order: an explicit constructor argument,
 the selected ``site.toml`` profile, then the backend default. Unknown SSH host
 keys are rejected; connect once with the system ``ssh`` client to verify and
 save a site's key before first use.
+
+Debugging SSH And SLURM
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Enable package debug logging after constructing or loading the project and
+before creating the site. The console shows the active stage while the file
+keeps the complete trace:
+
+.. code-block:: python
+
+   import frequensolve as fs
+
+   fs.configure_logging(
+       level="DEBUG",
+       console=True,
+       log_file="./frequensolve-debug.log",
+   )
+   site = fs.Site(profile="stampede3")
+
+The HPC backend also writes ``/tmp/log/frequensolve/hpc.log``. Debug messages
+identify each remote command and transfer backend without logging passwords,
+private keys, key passphrases, or two-factor codes. OpenSSH commands that reuse
+a verified control socket are non-interactive and bounded by connection and
+command timeouts, so an expired socket produces an exception instead of an
+invisible credential prompt.
+
+At DEBUG logging level, ``rsync`` streams file names and ``-P`` transfer
+progress to the console. At INFO and higher levels, FrequenSolve runs rsync
+quietly with partial-transfer preservation and includes captured stderr only
+when the transfer fails. The site's ``verbose`` setting continues to control
+other interactive status messages but does not enable rsync output.
+
+Before uploading a project, FrequenSolve inspects HDF5 files in its disposable
+transfer staging directory. Set top-level ``[host].tmp_dir`` to choose where
+this local staging happens; otherwise Python's platform temp directory is used.
+Files dominated by space from deleted or replaced datasets are repacked there,
+so only live HDF5 objects cross the network. The project's source HDF5 files
+are not modified.
+
+Simulation saves also treat the newly serialized JSON as authoritative for the
+simulation input store: datasets no longer referenced by that JSON are removed,
+and a store with substantial deleted-object space is atomically repacked. This
+prevents repeated authoring saves or a change from an in-memory property to a
+remote file reference from leaving obsolete arrays in the simulation HDF5 file.

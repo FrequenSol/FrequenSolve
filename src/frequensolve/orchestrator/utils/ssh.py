@@ -3,10 +3,12 @@ SSH manager for SLURM/HPC sites that uses a master socket to
 avoid re-authenticating each time a connection is made.
 """
 
+import shlex
 import subprocess
 import time
 
 from frequensolve._optional import optional_dependency_error
+from frequensolve.util.setup_logger import init_logger
 
 try:
     from paramiko import SSHClient
@@ -18,7 +20,39 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
-__all__ = ["SSHProxy", "SSHClientClass"]
+__all__ = [
+    "SSHProxy",
+    "SSHClientClass",
+    "SSH_COMMAND_TIMEOUT_SECONDS",
+    "SSH_CONNECT_TIMEOUT_SECONDS",
+    "control_socket_ssh_options",
+]
+
+SSH_CONNECT_TIMEOUT_SECONDS = 15
+SSH_COMMAND_TIMEOUT_SECONDS = 120
+SSH_SERVER_ALIVE_INTERVAL_SECONDS = 15
+SSH_SERVER_ALIVE_COUNT_MAX = 2
+
+logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
+
+
+def control_socket_ssh_options(control_path) -> list[str]:
+    """Return non-interactive OpenSSH options for a verified control socket."""
+
+    return [
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ControlPath={control_path}",
+        "-o",
+        f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}",
+        "-o",
+        f"ServerAliveInterval={SSH_SERVER_ALIVE_INTERVAL_SECONDS}",
+        "-o",
+        f"ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX}",
+    ]
 
 
 class BytesIO:
@@ -71,11 +105,26 @@ class SSHProxy:
         compute_host: Optional compute host reached through the login host.
     """
 
-    def __init__(self, control_path, username, host, compute_host=None):
+    def __init__(
+        self,
+        control_path,
+        username,
+        host,
+        compute_host=None,
+        command_timeout=SSH_COMMAND_TIMEOUT_SECONDS,
+    ):
         self.control_path = control_path
         self.username = username
         self.host = host
         self.compute_host = compute_host
+        self.command_timeout = command_timeout
+
+    def _login_ssh_command(self) -> list[str]:
+        return [
+            "ssh",
+            *control_socket_ssh_options(self.control_path),
+            f"{self.username}@{self.host}",
+        ]
 
     def invoke_shell(self):
         """Create an interactive shell using subprocess.Popen."""
@@ -84,13 +133,7 @@ class SSHProxy:
 
         master, slave = pty.openpty()
 
-        cmd = [
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-q",  # Add quiet flag
-            f"{self.username}@{self.host}",
-        ]
+        cmd = [*self._login_ssh_command()[:-1], "-q", self._login_ssh_command()[-1]]
 
         process = subprocess.Popen(
             cmd,
@@ -106,7 +149,10 @@ class SSHProxy:
 
         if self.compute_host is not None:
             master_file.write(
-                f"ssh -o StrictHostKeyChecking=yes {self.compute_host}\n".encode()
+                (
+                    "ssh -o StrictHostKeyChecking=yes -o BatchMode=yes "
+                    f"{shlex.quote(str(self.compute_host))}\n"
+                ).encode()
             )
             master_file.flush()
             time.sleep(1)
@@ -184,29 +230,77 @@ class SSHProxy:
         return (stdin, stdout, stderr)
 
     def _exec_on_login(self, command, term=False):
-        cmd = ["ssh", "-o", "StrictHostKeyChecking=yes"]
+        cmd = self._login_ssh_command()
         if term:
-            cmd.append("-t")
-        cmd.extend(
-            [
-                f"{self.username}@{self.host}",
-                command,
-            ]
-        )
-        return subprocess.run(cmd, capture_output=True)
+            cmd.insert(-1, "-t")
+        cmd.append(command)
+        return self._run_ssh(cmd, target=self.host)
 
     def _exec_on_compute(self, command):
         """Execute a command on a compute node via the login node."""
+        proxy_command = shlex.join(
+            [
+                *self._login_ssh_command()[:-1],
+                "-W",
+                "%h:%p",
+                self._login_ssh_command()[-1],
+            ]
+        )
         cmd = [
             "ssh",
             "-o",
             "StrictHostKeyChecking=yes",
-            "-J",
-            f"{self.username}@{self.host}",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}",
+            "-o",
+            f"ServerAliveInterval={SSH_SERVER_ALIVE_INTERVAL_SECONDS}",
+            "-o",
+            f"ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX}",
+            "-o",
+            f"ProxyCommand={proxy_command}",
             f"{self.username}@{self.compute_host}",
             command,
         ]
-        return subprocess.run(cmd, capture_output=True)
+        return self._run_ssh(cmd, target=self.compute_host)
+
+    def _run_ssh(self, cmd, *, target):
+        logger.debug(
+            "Running non-interactive SSH command via control socket: target=%s "
+            "timeout=%ss command=%s",
+            target,
+            self.command_timeout,
+            cmd[-1],
+        )
+        started = time.monotonic()
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=self.command_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            logger.error(
+                "SSH command timed out after %.1fs for target %s",
+                time.monotonic() - started,
+                target,
+            )
+            raise TimeoutError(
+                f"SSH command to {target} timed out after "
+                f"{self.command_timeout} seconds"
+            ) from exc
+        logger.debug(
+            "SSH command finished in %.3fs for target %s with return code %s",
+            time.monotonic() - started,
+            target,
+            result.returncode,
+        )
+        if result.returncode == 255:
+            stderr = result.stderr.decode(errors="replace").strip()
+            detail = stderr or "OpenSSH reported a connection or authentication error"
+            raise RuntimeError(f"SSH connection to {target} failed: {detail}")
+        return result
 
     def close(self):
         """Close the proxy.

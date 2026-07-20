@@ -28,7 +28,11 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
-from frequensolve.orchestrator.utils.ssh import SSHProxy
+from frequensolve.orchestrator.utils.ssh import (
+    SSH_CONNECT_TIMEOUT_SECONDS,
+    SSHProxy,
+    control_socket_ssh_options,
+)
 from frequensolve.util.setup_logger import init_logger
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
@@ -100,15 +104,13 @@ class SlurmAuthenticator:
                         [
                             "ssh",
                             "-q",
-                            "-o",
-                            "StrictHostKeyChecking=yes",
-                            "-o",
-                            f"ControlPath={control_path}",
+                            *control_socket_ssh_options(control_path),
                             f"{site.credentials.username}@{host}",
                             "echo 'Connection test'",
                         ],
                         capture_output=True,
                         text=True,
+                        timeout=SSH_CONNECT_TIMEOUT_SECONDS + 5,
                     )
 
                     if result.returncode == 0:
@@ -121,6 +123,11 @@ class SlurmAuthenticator:
                         logger.info("Secure connection established with host: %s", host)
                         return proxy_client
 
+                except subprocess.TimeoutExpired:
+                    logger.debug(
+                        "Timed out probing SSH control socket %s", control_path
+                    )
+                    continue
                 except Exception as exc:
                     logger.debug(
                         "Failed to use control socket %s: %s", control_path, exc
@@ -205,7 +212,7 @@ class SlurmAuthenticator:
         site = self.site
         login_client = SSHClient()
 
-        sock = socket.create_connection((host, 22))
+        sock = socket.create_connection((host, 22), timeout=SSH_CONNECT_TIMEOUT_SECONDS)
         transport = Transport(sock)
         try:
             transport.start_client()

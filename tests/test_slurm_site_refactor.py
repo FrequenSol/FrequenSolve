@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -12,6 +13,7 @@ from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
+    LocalHostConfig,
     RunHandle,
     SubmitPlan,
 )
@@ -96,7 +98,7 @@ class DummySlurmSite(SlurmSite):
     credentials_cls = DummyCredentials
     config_cls = DummyConfig
     default_queue = "debug"
-    default_solver_executable = "/remote/bin/FS"
+    default_solver_executable = "/remote/bin/FS_seismic"
 
     def authenticate(self, host=None):
         return DummyRawClient()
@@ -175,7 +177,7 @@ def test_site_dry_run_reports_run_and_skip_counts_without_task_plan():
     assert job.validated is True
     assert job.task_plan_called is False
 
-    force_plan = site.dry_run(job, force=True)
+    force_plan = site.dry_run(job, skip="false")
 
     assert force_plan.n_tasks_to_run == 4
     assert force_plan.n_tasks_to_skip == 0
@@ -379,9 +381,29 @@ def test_generic_slurm_site_can_be_instantiated_without_site_specific_class(
 
     assert site.config.queue == "normal"
     assert site.work_dir == Path("/scratch/user/project/run")
-    assert site.executable == "/remote/bin/FS"
+    assert site.executable == "/remote/bin/FS_seismic"
     assert site.mpi_cmd == "srun"
     assert site.config_for_queue("debug").queue == "debug"
+
+
+def test_slurm_site_defaults_to_frequensolve_under_remote_work(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+
+    site = DummySlurmSite()
+
+    assert site.work_dir == Path("/scratch/user/frequensolve")
+
+
+def test_slurm_site_uses_configured_base_dir_and_stores_scratch_dir(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+
+    site = DummySlurmSite(
+        work_dir="/work/user/frequensolve",
+        scratch_dir="/scratch/user/frequensolve",
+    )
+
+    assert site.work_dir == Path("/work/user/frequensolve")
+    assert site.scratch_dir == Path("/scratch/user/frequensolve")
 
 
 def test_slurm_site_uses_configured_paths_and_runtime(monkeypatch):
@@ -399,18 +421,68 @@ def test_slurm_site_uses_configured_paths_and_runtime(monkeypatch):
 
     assert site.work_dir == Path("/configured/work/project/run")
     assert site.executable == "/configured/bin/FS"
-    assert site._runtime_setup_lines() == [
+    runtime_setup = site._runtime_setup_lines()
+    assert runtime_setup[:3] == [
         "module load compiler/1.0",
         "module load mpi",
         "module list",
+    ]
+    assert {
         "export MKL_DYNAMIC=FALSE",
         "export MKL_NUM_THREADS=4",
+        "export OMP_WAIT_POLICY=PASSIVE",
+        "export KMP_STACKSIZE=20M",
         "export OMP_NUM_THREADS=2",
-    ]
+    } <= set(runtime_setup)
     assert site._render_template("sweep/sweep_SLURM.sh", runtime_setup=[]).startswith(
         "#!/bin/bash"
     )
     assert site.credentials.username == "configured-user"
+
+
+def test_slurm_site_exposes_configured_tmp_dirs(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+
+    config = SlurmSiteConfig(
+        hostname="login.example.edu",
+        queue="debug",
+        tmp_dir="/scratch/user/frequensolve-tmp",
+    )
+    site = DummySlurmSite("project/run", config=config)
+    site.local_host_config = LocalHostConfig(tmp_dir=tmp_path / "local-staging")
+
+    assert site.remote_tmp_dir == Path("/scratch/user/frequensolve-tmp")
+    assert site.local_host_tmp_dir == tmp_path / "local-staging"
+
+
+def test_slurm_site_rejects_relative_remote_tmp_dir(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+
+    config = SlurmSiteConfig(hostname="login.example.edu", tmp_dir="scratch/tmp")
+    site = DummySlurmSite("project/run", config=config)
+
+    with pytest.raises(ValueError, match="tmp_dir.*absolute"):
+        _ = site.remote_tmp_dir
+
+
+@pytest.mark.parametrize("name", ["work_dir", "scratch_dir"])
+def test_slurm_site_rejects_relative_remote_work_and_scratch_dirs(monkeypatch, name):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+
+    with pytest.raises(ValueError, match=rf"{name}.*absolute"):
+        DummySlurmSite(**{name: "relative/path"})
+
+
+def test_slurm_fetch_message_uses_multiline_from_to():
+    message = SlurmSite._fetch_message(
+        "Fetching logs",
+        Path("/remote/job/logs"),
+        Path("/local/job/logs"),
+    )
+
+    assert message == (
+        "Fetching logs\n" "\tFrom: /remote/job/logs\n" "\tTo: /local/job/logs"
+    )
 
 
 def test_slurm_site_rejects_string_modules_and_secret_environment(monkeypatch):
@@ -663,7 +735,8 @@ def test_slurm_submit_auto_uses_batch_when_not_attached(monkeypatch):
     assert seen["config"].queue == "debug"
 
 
-def test_slurm_submit_force_run_passes_fresh_to_batch(monkeypatch):
+@pytest.mark.parametrize("skip", [False, "false"])
+def test_slurm_submit_skip_false_passes_fresh_to_batch(monkeypatch, skip):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
@@ -679,7 +752,7 @@ def test_slurm_submit_force_run_passes_fresh_to_batch(monkeypatch):
 
     monkeypatch.setattr(site, "_submit_slurm_batch", fake_submit)
 
-    run = site.submit(CurrentJob(), force_run=True)
+    run = site.submit(CurrentJob(), skip=skip)
 
     assert run.id == "79"
     assert seen["fresh"] is True
@@ -745,28 +818,69 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
 
     monkeypatch.setattr(site, "_submit_slurm_batch", fake_submit)
 
-    site.submit(DummyJob(), nodes=3, queue="normal", duration="00-00:45:00")
+    run = site.submit(
+        DummyJob(),
+        nodes=3,
+        queue="normal",
+        ranks_per_node=7,
+        duration="00-00:45:00",
+        mpi_async_progress=False,
+        scheduler_heartbeat_timeout=17,
+    )
 
     assert seen["config"].nodes == 3
     assert seen["config"].queue == "normal"
+    assert seen["config"].ranks_per_node == 7
     assert seen["config"].duration == "00-00:45:00"
+    assert seen["config"].mpi_async_progress is False
+    assert seen["config"].scheduler_heartbeat_timeout == 17.0
+    assert run.backend["mpi_async_progress"] is False
+    assert run.backend["scheduler_heartbeat_timeout"] == 17.0
+
+
+def test_slurm_submit_exposes_direct_resource_parameters():
+    parameters = inspect.signature(SlurmSite.submit).parameters
+
+    assert {"queue", "nodes", "ranks_per_node", "duration"} <= set(parameters)
 
 
 def test_slurm_run_config_normalizes_rank_aliases():
-    config = SlurmRunConfig(procs_per_node=4, procs_per_task=2)
+    config = SlurmRunConfig(
+        procs_per_node=4,
+        procs_per_task=2,
+    )
 
     assert config.ranks_per_node == 4
     assert config.ranks_per_task == 2
     assert config.procs_per_node == 4
     assert config.procs_per_task == 2
+    assert config.mpi_async_progress is False
     assert SlurmRunConfig(tolerate_failures=None).tolerate_failures is None
 
     merged = config.merged(ranks_per_node=8, procs_per_task=3)
 
     assert merged.ranks_per_node == 8
     assert merged.ranks_per_task == 3
+    assert merged.mpi_async_progress is False
     with pytest.raises(ValueError, match="Pass either"):
         config.merged(ranks_per_node=8, procs_per_node=4)
+
+    with pytest.raises(ValueError, match="mpi_async_progress"):
+        SlurmRunConfig(mpi_async_progress="yes")
+
+    with pytest.raises(NotImplementedError, match="race during MPI initialization"):
+        SlurmRunConfig(mpi_async_progress=True)
+
+
+def test_slurm_run_config_validates_scheduler_heartbeat_timeout():
+    assert SlurmRunConfig().scheduler_heartbeat_timeout == 60.0
+    assert (
+        SlurmRunConfig(scheduler_heartbeat_timeout=None).scheduler_heartbeat_timeout
+        is None
+    )
+
+    with pytest.raises(ValueError, match="scheduler_heartbeat_timeout"):
+        SlurmRunConfig(scheduler_heartbeat_timeout=0)
 
 
 def test_job_save_for_remote_writes_remote_absolute_result_path(tmp_path):
@@ -801,14 +915,17 @@ def test_project_transfer_keeps_mesh_paths_remote_safe(tmp_path):
     mesh_file.write_text("mesh")
     sim.mesh = MeshManager(file=mesh_file, format="Gmsh")
     remote = Path("/scratch/user/copied_project")
+    staging_parent = tmp_path / "transfer-staging"
     captured = {}
 
     class CaptureSite:
         work_dir = remote
+        local_host_tmp_dir = staging_parent
 
         def put(self, local, target):
             local = Path(local)
             if local.is_dir():
+                captured["staging_parent"] = local.parent
                 sim_json = local / "simulations" / "axisym" / "axisym.json"
                 captured["simulation"] = json.loads(sim_json.read_text())
                 captured["mesh_exists"] = (
@@ -822,6 +939,8 @@ def test_project_transfer_keeps_mesh_paths_remote_safe(tmp_path):
     project._transfer(CaptureSite())
 
     assert captured["mesh_exists"] is True
+    assert captured["staging_parent"] == staging_parent
+    assert project.path not in captured["staging_parent"].parents
     assert captured["simulation"]["project_path"] == str(remote)
     assert captured["simulation"]["Mesh"]["file"] == "simulations/axisym/mesh.gmp"
     assert str(tmp_path) not in json.dumps(captured["simulation"])
@@ -911,7 +1030,11 @@ def test_slurm_batch_maps_local_project_run_path_to_remote(
     )
 
     assert seen["script_kwargs"]["run_path"] == site.work_dir
-    assert seen["cmd"].startswith(f"mkdir -p {site.work_dir}/jobs/batch")
+    assert "executable" not in seen["script_kwargs"]
+    assert seen["cmd"].startswith(
+        f"mkdir -p {site.work_dir}/jobs/simple/freq/logs/batch"
+    )
+    assert f"{site.work_dir}/jobs/batch" not in seen["cmd"]
     assert (
         f"rm -f {site.work_dir}/jobs/simple/freq/logs/scheduler_status.json"
         in seen["cmd"]
@@ -920,6 +1043,53 @@ def test_slurm_batch_maps_local_project_run_path_to_remote(
     assert record is not None
     assert record.scheduler_id == "88"
     assert record.job_file == site.work_dir / "jobs" / "simple" / "freq" / "freq.json"
+
+
+def test_attached_hpc_script_uses_fs_seismic_router(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    site.pool.nhost = 1
+    site.pool.nproc = 2
+    site.pool.ncore = 8
+
+    script = site._sweep_script(DummyJob(), executable="/remote/bin/fs3d")
+
+    assert "executable=/remote/bin/FS_seismic\n" in script
+    assert "executable=/remote/bin/fs3d\n" not in script
+
+
+def test_batch_hpc_script_uses_fs_seismic_router_in_scheduler_config(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        stdout="/scratch/user/jobs/simple/freq/logs",
+        executable="/remote/bin/fs3d",
+    )
+
+    assert "executable=/remote/bin/FS_seismic\n" in script
+    assert '"executable": "/remote/bin/FS_seismic"' in script
+    assert "/remote/bin/fs3d" not in script
+
+
+def test_batch_hpc_script_keeps_scheduler_logs_with_job_logs(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    log_dir = "/scratch/user/jobs/simple/freq/logs"
+
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        stdout=log_dir,
+    )
+
+    assert f"#SBATCH -o {log_dir}/batch/job_%j.o" in script
+    assert f"#SBATCH -e {log_dir}/batch/job_%j.e" in script
+    assert "jobs/batch" not in script
+    assert 'mkdir -p "$dir_out/batch"' in script
+    assert "! -name batch -exec rm -rf -- {} +" in script
 
 
 def test_slurm_batch_submits_only_pending_frequency_tasks(monkeypatch, tmp_path):
@@ -993,7 +1163,7 @@ def test_adaptive_slurm_script_renders_pending_task_indices(monkeypatch):
     assert "adaptive_scheduler.py" in script
 
 
-def test_slurm_scripts_use_only_profile_runtime_setup(monkeypatch):
+def test_slurm_scripts_use_profile_runtime_setup(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite(
         "project/run",
@@ -1013,9 +1183,97 @@ def test_slurm_scripts_use_only_profile_runtime_setup(monkeypatch):
     assert "module load mpi/5" in script
     assert "export MKL_DYNAMIC=FALSE" in script
     assert "export MKL_NUM_THREADS=1" in script
+    assert "export OMP_WAIT_POLICY=PASSIVE" in script
+    assert "export KMP_STACKSIZE=20M" in script
     assert "export OMP_NUM_THREADS=3" in script
+    assert "export OMP_NUM_THREADS=$n_threads" in script
+    assert '"omp_threads": 1' in script
     assert "export VALUE='two words'" in script
     assert "intel/25.1" not in script
+
+
+def test_slurm_runtime_setup_expands_profile_environment_after_modules(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite(
+        "project/run",
+        modules=["dependency/1", "parallel-hdf5/2"],
+        environment={
+            "LD_LIBRARY_PATH": "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}",
+        },
+    )
+
+    lines = site._runtime_setup_lines()
+
+    assert lines.index("module load dependency/1") < lines.index(
+        "module load parallel-hdf5/2"
+    )
+    assert lines.index("module load parallel-hdf5/2") < lines.index("module list")
+    assert lines.index("module list") < lines.index(
+        'export LD_LIBRARY_PATH="${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"'
+    )
+
+
+def test_slurm_runtime_environment_expands_only_simple_braced_references():
+    value = "${SAFE}:$(unsafe):`unsafe`:$HOME"
+
+    quoted = hpc._quote_runtime_environment_value(value)
+
+    assert quoted == '"${SAFE}:\\$(unsafe):\\`unsafe\\`:\\$HOME"'
+
+
+def test_slurm_batch_mpi_async_progress_reserves_one_core_per_rank(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    spr = Stampede3Config("spr")
+    monkeypatch.setattr(site, "config_for_partition", lambda queue: spr)
+
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        stdout="/scratch/user/jobs/simple/freq/logs",
+        duration="00-00:10:00",
+        queue="spr",
+        ranks_per_node=8,
+        mpi_async_progress=True,
+    )
+
+    assert "n_threads=13" in script
+    assert "export OMP_NUM_THREADS=$n_threads" in script
+    assert "export OMP_PLACES=cores" in script
+    assert "export OMP_PROC_BIND=close" in script
+    assert "export I_MPI_ASYNC_PROGRESS=1" in script
+    assert "export I_MPI_ASYNC_PROGRESS_THREADS=1" in script
+    assert "export I_MPI_ASYNC_PROGRESS_PIN=13,27,41,55,69,83,97,111" in script
+    assert '"omp_threads": 13' in script
+    assert '-nthreads "$n_threads"' in script
+
+
+def test_slurm_attached_mpi_async_progress_uses_per_node_topology(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    site.pool.nhost = 2
+    site.pool.nproc = 16
+    site.pool.ncore = 224
+
+    script = site._sweep_script(DummyJob(), mpi_async_progress=True)
+
+    assert "n_threads=13" in script
+    assert "export I_MPI_ASYNC_PROGRESS_PIN=13,27,41,55,69,83,97,111" in script
+    assert "$executable -nthreads $n_threads --job $input_file" in script
+
+
+def test_slurm_mpi_async_progress_validates_rank_core_layout():
+    with pytest.raises(ValueError, match="evenly divisible"):
+        SlurmSite._mpi_async_progress_layout(
+            cores_per_node=10,
+            ranks_per_node=3,
+        )
+
+    with pytest.raises(ValueError, match="at least two cores"):
+        SlurmSite._mpi_async_progress_layout(
+            cores_per_node=8,
+            ranks_per_node=8,
+        )
 
 
 def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):
@@ -1034,6 +1292,8 @@ def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):
 
     assert '"skip_sizing": true' in script
     assert "--init-no-size" in script
+    assert '--init-no-size > "$dir_out/init.log" 2>&1' in script
+    assert "--map" not in script
     assert '"total_ranks": 8' in script
     assert '"task_indices": [' in script
     assert "    4" in script
@@ -1055,7 +1315,10 @@ def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
     )
 
     assert "Skipping frequency sweep; running imaging postprocess only." in script
-    assert '--smooth >> "$dir_out/smooth.log" 2>&1' in script
+    assert (
+        '$mpi_exec -n "$n_procs" "$executable" -nthreads "$n_threads" '
+        '--job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1'
+    ) in script
     assert "--init" not in script
     assert '"--task", str(task_id)' not in script
 
@@ -1150,6 +1413,38 @@ def test_slurm_run_record_recreates_factory_profile(monkeypatch, tmp_path):
         "config_path": str(tmp_path / "site.toml"),
         "profile": "cluster",
     }
+
+
+def test_slurm_run_record_recreates_direct_site_with_configured_work_dir(
+    monkeypatch, tmp_path
+):
+    import frequensolve.simulation.jobs.records as job_records
+
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+    record = job.record_site_run(
+        site="Recorded",
+        work_dir="/work/user/frequensolve",
+        scheduler_id="77",
+        site_module="test.recorded_site",
+        site_class="RecordedSite",
+    )
+    seen = {}
+
+    class RecordedSite:
+        def __init__(self, *, work_dir):
+            seen["work_dir"] = work_dir
+
+    module = type("RecordedSiteModule", (), {"RecordedSite": RecordedSite})
+    monkeypatch.setattr(job_records.importlib, "import_module", lambda name: module)
+
+    resolved = job._site_from_run_record(record)
+
+    assert isinstance(resolved, RecordedSite)
+    assert seen["work_dir"] == Path("/work/user/frequensolve")
 
 
 def test_slurm_submit_reattach_compares_numpy_payload_values(monkeypatch, tmp_path):
@@ -1550,6 +1845,41 @@ def test_slurm_fetch_logs_also_fetches_run_metadata(monkeypatch, tmp_path):
     assert collected == [True]
 
 
+def test_slurm_fetch_logs_uses_per_job_batch_dir_with_legacy_fallback(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job._job_id = "88"
+    calls = []
+    remote_logs = site.work_dir / "jobs" / "simple" / "freq" / "logs"
+
+    def fake_get(remote, local, overwrite=False):
+        remote = Path(remote)
+        local = Path(local)
+        calls.append((remote, local))
+        if remote.parent == remote_logs / "batch":
+            raise FileNotFoundError(remote)
+
+    monkeypatch.setattr(site, "get", fake_get)
+    monkeypatch.setattr(site, "fetch_run_metadata", lambda job: None)
+
+    site.fetch_logs(job, include_batch=True)
+
+    local_batch = job._local_path / "logs" / "batch"
+    for suffix in (".o", ".e"):
+        filename = f"job_88{suffix}"
+        assert (remote_logs / "batch" / filename, local_batch / filename) in calls
+        assert (
+            site.work_dir / "jobs" / "batch" / filename,
+            local_batch / filename,
+        ) in calls
+
+
 def test_slurm_fetch_wavefields_downloads_wavefield_output(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
@@ -1651,6 +1981,141 @@ def test_slurm_batch_poll_reads_scheduler_status(monkeypatch, capsys):
     assert captured.out == ""
 
 
+def test_slurm_batch_poll_fails_when_scheduler_heartbeat_stops(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    payload = {
+        "state": "running",
+        "updated_at": "2026-07-18T07:00:00Z",
+        "total": 4,
+        "successful": 1,
+        "failed": 0,
+        "running": 2,
+        "pending": 1,
+    }
+
+    monkeypatch.setattr(site, "update_status", lambda job_id: "running")
+    monkeypatch.setattr(site, "_read_scheduler_status", lambda run: payload)
+    clock = iter([100.0, 111.0])
+    monkeypatch.setattr(hpc.time, "monotonic", lambda: next(clock))
+
+    run = RunHandle(site=site, job=DummyJob(), id="77", mode="batch")
+    run.backend["scheduler_heartbeat_timeout"] = 10.0
+
+    assert site._poll_run(run).state == "running"
+    status = site._poll_run(run)
+
+    assert status.state == "failed"
+    assert status.return_code == 1
+    assert "heartbeat stopped advancing" in status.message
+    assert status.raw["scheduler_liveness"] == {
+        "state": "running",
+        "heartbeat": "2026-07-18T07:00:00Z",
+        "age_seconds": 11.0,
+        "timeout_seconds": 10.0,
+        "stale": True,
+    }
+
+
+def test_slurm_batch_poll_accepts_advancing_scheduler_heartbeat(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    heartbeats = iter(
+        [
+            "2026-07-18T07:00:00Z",
+            "2026-07-18T07:00:01Z",
+        ]
+    )
+
+    monkeypatch.setattr(site, "update_status", lambda job_id: "running")
+    monkeypatch.setattr(
+        site,
+        "_read_scheduler_status",
+        lambda run: {
+            "state": "running",
+            "updated_at": next(heartbeats),
+            "total": 1,
+            "successful": 0,
+            "failed": 0,
+            "running": 1,
+            "pending": 0,
+        },
+    )
+    clock = iter([100.0, 200.0])
+    monkeypatch.setattr(hpc.time, "monotonic", lambda: next(clock))
+
+    run = RunHandle(site=site, job=DummyJob(), id="77", mode="batch")
+    run.backend["scheduler_heartbeat_timeout"] = 10.0
+
+    assert site._poll_run(run).state == "running"
+    assert site._poll_run(run).state == "running"
+
+
+def test_slurm_batch_poll_stops_when_adaptive_scheduler_reports_failure(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    monkeypatch.setattr(site, "update_status", lambda job_id: "complete")
+    monkeypatch.setattr(
+        site,
+        "_read_scheduler_status",
+        lambda run: {
+            "state": "failed",
+            "abort_reason": "scheduler process exited",
+            "total": 4,
+            "successful": 1,
+            "failed": 1,
+            "running": 0,
+            "pending": 2,
+        },
+    )
+
+    run = RunHandle(site=site, job=DummyJob(), id="77", mode="batch")
+    status = site._poll_run(run)
+
+    assert status.state == "failed"
+    assert status.return_code == 1
+    assert "scheduler process exited" in status.message
+    assert status.raw["scheduler_liveness"] == {
+        "state": "failed",
+        "stale": False,
+    }
+
+
+def test_slurm_batch_poll_does_not_heartbeat_timeout_postprocessing(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    monkeypatch.setattr(site, "update_status", lambda job_id: "running")
+    monkeypatch.setattr(
+        site,
+        "_read_scheduler_status",
+        lambda run: {
+            "state": "complete",
+            "updated_at": "2026-07-18T07:00:00Z",
+            "total": 1,
+            "successful": 1,
+            "failed": 0,
+            "running": 0,
+            "pending": 0,
+        },
+    )
+
+    run = RunHandle(site=site, job=DummyJob(), id="77", mode="batch")
+    run.backend.update(
+        {
+            "scheduler_heartbeat_timeout": 10.0,
+            "_adaptive_scheduler_heartbeat": "2026-07-18T07:00:00Z",
+            "_adaptive_scheduler_heartbeat_seen_at": 0.0,
+        }
+    )
+
+    status = site._poll_run(run)
+
+    assert status.state == "running"
+    assert "scheduler_liveness" not in status.raw
+
+
 def test_slurm_batch_poll_includes_already_current_tasks(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
@@ -1719,6 +2184,7 @@ def test_slurm_batch_poll_ignores_scheduler_status_while_pending(monkeypatch):
 
 def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(hpc, "ImagingJob", DummyJob)
     site = DummySlurmSite("project/run")
     site.pool.nproc = 4
     site.pool.ncore = 8
@@ -1730,6 +2196,7 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
         duration="00-00:30:00",
         ranks_per_node=4,
         tolerate_failures=2,
+        imaging_job=True,
     )
     fresh_batch_script = site._sweep_SLURM_script(
         n_tasks=4,
@@ -1761,6 +2228,24 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     assert "$fresh_flag --pack >> $dir_out/pack.log 2>&1" in attached_script
     assert 'fresh_flag="--fresh"' in fresh_batch_script
     assert 'fresh_flag="--fresh"' in fresh_attached_script
+    assert "export OMP_NUM_THREADS=$n_threads" in batch_script
+    assert "export OMP_NUM_THREADS=$n_threads" in attached_script
+    assert "I_MPI_ASYNC_PROGRESS" not in batch_script
+    assert "I_MPI_ASYNC_PROGRESS" not in attached_script
+    assert "-nthreads $n_threads" in batch_script
+    assert "-nthreads $n_threads" in attached_script
+    assert (
+        '$mpi_exec -n "$n_procs" "$executable" -nthreads "$n_threads" '
+        '--job "$job_file" $fresh_flag --smooth'
+    ) in batch_script
+    assert (
+        "$mpi_exec -n $n_procs $executable -nthreads $n_threads "
+        "--job $input_file $fresh_flag --smooth"
+    ) in attached_script
+    assert '--init > "$dir_out/init.log" 2>&1' in batch_script
+    assert "--init > $dir_out/init.log 2>&1" in attached_script
+    assert "--map" not in batch_script
+    assert "--map" not in attached_script
     assert "--pack" not in attached_disabled_script
     assert "--pack" not in disabled_script
 
@@ -1803,9 +2288,17 @@ def test_slurm_submit_attached_can_disable_pack(monkeypatch):
         def done(self):
             return False
 
-    def fake_submit(job, ranks_per_task=2, *, pack=True, fresh=False):
+    def fake_submit(
+        job,
+        ranks_per_task=2,
+        *,
+        pack=True,
+        fresh=False,
+        mpi_async_progress=False,
+    ):
         seen["pack"] = pack
         seen["fresh"] = fresh
+        seen["mpi_async_progress"] = mpi_async_progress
         return DummyFuture()
 
     monkeypatch.setattr(site, "_submit_attached", fake_submit)
@@ -1814,6 +2307,21 @@ def test_slurm_submit_attached_can_disable_pack(monkeypatch):
 
     assert seen["pack"] is False
     assert seen["fresh"] is False
+    assert seen["mpi_async_progress"] is False
+
+
+def test_slurm_submit_rejects_mpi_async_progress(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
+    site = DummySlurmSite("project/run")
+
+    def fail_submit(*args, **kwargs):
+        raise AssertionError("unsupported configuration reached submission")
+
+    monkeypatch.setattr(site, "_submit_attached", fail_submit)
+
+    with pytest.raises(NotImplementedError, match="race during MPI initialization"):
+        site.submit(DummyJob(), mpi_async_progress=True)
 
 
 def test_slurm_allocation_attach_returns_awaitable_handle(monkeypatch):
