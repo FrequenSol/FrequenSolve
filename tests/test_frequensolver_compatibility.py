@@ -177,6 +177,7 @@ def test_remote_identity_query_quotes_command_and_runs_setup_directly():
         "/work/Frequen Solver/FS_seismic",
         lambda command: commands.append(command)
         or "module setup output\n"
+        + "frequensolve-frequensolver-identity-begin\n"
         + _identity_json()
         + "\nfrequensolve-frequensolver-identity-ok\n",
         setup_commands=["module load intel/25.1"],
@@ -186,11 +187,29 @@ def test_remote_identity_query_quotes_command_and_runs_setup_directly():
     assert commands == [
         "set -e\n"
         "module load intel/25.1\n"
+        "printf '%s\\n' frequensolve-frequensolver-identity-begin\n"
         "'/work/Frequen Solver/FS_seismic' --identity-json\n"
         "printf '%s\\n' frequensolve-frequensolver-identity-ok"
     ]
     assert "mpirun" not in commands[0]
     assert "srun" not in commands[0]
+
+
+def test_remote_identity_query_parses_pretty_json_after_setup_output():
+    pretty_identity = json.dumps(json.loads(_identity_json()), indent=2)
+
+    result = query_remote_frequensolver_identity(
+        "/work/FS_seismic",
+        lambda command: (
+            "module setup output\n"
+            "frequensolve-frequensolver-identity-begin\n"
+            f"{pretty_identity}\n"
+            "frequensolve-frequensolver-identity-ok\n"
+        ),
+        setup_commands=["module load intel/25.1"],
+    )
+
+    assert result.identity == _identity()
 
 
 def test_remote_identity_timeout_warns_without_starting_a_job():

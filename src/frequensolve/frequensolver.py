@@ -316,11 +316,13 @@ def query_remote_frequensolver_identity(
 ) -> FrequenSolverIdentityQuery:
     """Query an SSH-backed configured executable without an MPI launcher."""
 
+    begin_marker = "frequensolve-frequensolver-identity-begin"
     success_marker = "frequensolve-frequensolver-identity-ok"
     command = "\n".join(
         [
             "set -e",
             *setup_commands,
+            f"printf '%s\\n' {shlex.quote(begin_marker)}",
             f"{shlex.quote(str(executable))} --identity-json",
             f"printf '%s\\n' {shlex.quote(success_marker)}",
         ]
@@ -330,13 +332,15 @@ def query_remote_frequensolver_identity(
     except Exception as exc:
         return FrequenSolverIdentityQuery(None, f"identity command failed: {exc}")
     lines = output.strip().splitlines()
-    if len(lines) < 2 or lines[-1] != success_marker:
+    if len(lines) < 3 or lines[-1] != success_marker or begin_marker not in lines:
         return FrequenSolverIdentityQuery(
             None,
             "remote identity command did not complete successfully",
         )
+    begin_index = len(lines) - 1 - lines[::-1].index(begin_marker)
+    identity_output = "\n".join(lines[begin_index + 1 : -1])
     try:
-        return FrequenSolverIdentityQuery(_identity_from_output(lines[-2]))
+        return FrequenSolverIdentityQuery(_identity_from_output(identity_output))
     except ValueError as exc:
         return FrequenSolverIdentityQuery(None, str(exc))
 

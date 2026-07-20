@@ -20,11 +20,6 @@ on:
         description: Optional release candidate notes
         required: false
         type: string
-      use_docker_build_cloud:
-        description: Use Docker Build Cloud for the manual solver-backed release gate
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   contents: write
@@ -125,7 +120,6 @@ jobs:
       FREQUENSOLVE_BRANCH: ${{ needs.prepare-evidence.outputs.target_sha }}
       FREQUENSOLVE_SOURCE: git
       DISABLE_PUSH: true
-      USE_DOCKER_BUILD_CLOUD: ${{ inputs.use_docker_build_cloud }}
     secrets:
       FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
 
