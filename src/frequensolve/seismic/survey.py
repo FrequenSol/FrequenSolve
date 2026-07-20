@@ -771,7 +771,7 @@ class Survey:
 
             raise optional_dependency_error(
                 "Survey trace-store loading",
-                extra="parallel",
+                extra="hpc",
                 dependencies=("h5py",),
                 error=exc,
             ) from exc

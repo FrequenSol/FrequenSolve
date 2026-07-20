@@ -51,7 +51,7 @@ The core workflow is intentionally repetitive across tutorials:
    * - ``TimeDomainJob`` / ``FrequencyDomainJob``
      - ``fs-job-1`` plus job-owned outputs
      - Frequency list or band, result path, logs, traces, and visualization requests.
-   * - ``ParaviewOutput``
+   * - ``VtkOutput``
      - ``fs-output-config-1``
      - Output target, fields, properties, sources, :term:`PML` visibility, :term:`upscaling`, and :term:`VTK` files.
    * - ``TraceDataset``

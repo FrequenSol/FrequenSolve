@@ -209,9 +209,42 @@ def _wavefield_trace_attrs(tmp_path):
     }
 
 
+def _fixed_axis_wavefield_trace_attrs(tmp_path):
+    return {
+        "wavefield_output": "wavefield",
+        "wavefield_grid": {
+            "_type": "XArrayGrid",
+            "dims": ["x", "y", "z"],
+            "coords": {
+                "x": {"data": [0.0], "units": "m"},
+                "y": {"data": [0.0, 1.0], "units": "m"},
+                "z": {"data": [0.0, 1.0, 2.0], "units": "m"},
+            },
+            "units": "m",
+        },
+        "project_path": str(tmp_path),
+    }
+
+
 def test_animate_wavefield_infers_grid_receiver_shape(tmp_path):
     attrs = _wavefield_trace_attrs(tmp_path)
 
+    trace = xr.DataArray(
+        np.arange(12, dtype=float).reshape(2, 6),
+        dims=("time", "receiver"),
+        coords={"time": [0.0, 1.0], "receiver": np.arange(1, 7)},
+        attrs=attrs,
+    )
+
+    animation = animate_wavefield(trace)
+    image = animation._fig.axes[0].images[0]
+
+    assert image.get_array().shape == (2, 3)
+    assert list(image.get_extent()) == [0.0, 2.0, 1.0, 0.0]
+
+
+def test_animate_wavefield_accepts_singleton_3d_grid_dimension(tmp_path):
+    attrs = _fixed_axis_wavefield_trace_attrs(tmp_path)
     trace = xr.DataArray(
         np.arange(12, dtype=float).reshape(2, 6),
         dims=("time", "receiver"),
@@ -254,6 +287,26 @@ def test_plot_wavefield_uses_single_frequency_grid_metadata(tmp_path):
         assert list(image.get_extent()) == [0.0, 2.0, 1.0, 0.0]
         expected_vmin = 0 if mode == "abs" else -image.get_clim()[1]
         assert image.get_clim()[0] == expected_vmin
+
+
+def test_plot_wavefield_accepts_singleton_3d_grid_dimension(tmp_path):
+    attrs = _fixed_axis_wavefield_trace_attrs(tmp_path)
+    data = np.array([np.arange(6, dtype=float) + 1j], dtype=np.complex128)
+    trace = xr.DataArray(
+        data,
+        dims=("frequency", "receiver"),
+        coords={"frequency": [10.0], "receiver": np.arange(1, 7)},
+        attrs=attrs,
+    )
+
+    fig, ax = plot_wavefield(trace, mode="real")
+
+    assert fig is ax.figure
+    np.testing.assert_allclose(
+        np.asarray(ax.images[0].get_array()), data[0].real.reshape(2, 3)
+    )
+    assert ax.get_xlabel() == "Z [m]"
+    assert ax.get_ylabel() == "Y [m]"
 
 
 def test_plot_wavefield_supports_nonuniform_grid_metadata(tmp_path):

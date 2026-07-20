@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import inspect
 import json
 import shutil
 import warnings
@@ -8,6 +9,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pytest
+import sympy as sp
 import xarray as xr
 
 from frequensolve.geometry.frame import (
@@ -30,33 +32,40 @@ from frequensolve.mesh.mesh_manager import (
 )
 from frequensolve.model.layered import LayeredModel
 from frequensolve.model.model import ModelBase, ModelSubdomain
-from frequensolve.model.property import Property, prop
+from frequensolve.model.property import Property, coord, prop, ref, remap
 from frequensolve.project import Project
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import (
     CoordsArray,
     CoordsFromFile,
+    CoordsSurfaceCarpet,
     ReceiverComponent,
     ReceiverFiber,
     ReceiverNode,
 )
 from frequensolve.seismic.sparse_survey import SparseSurvey
+from frequensolve.seismic.trace_store import TraceStore
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.seismic.wavelet import RickerWavelet
 from frequensolve.simulation.jobs import FrequencyDomainJob
 from frequensolve.simulation.jobs.artifacts import OutputArtifact, TraceManifest
 from frequensolve.simulation.outputs import (
+    AxisAlignedPlane,
     JobOutputs,
     OutputUnits,
+    ParaViewItem,
     ParaViewOutput,
     ParaviewOutput,
     TraceOutput,
+    VtkItem,
+    VtkOutput,
     WavefieldOutput,
     field,
     info,
     output_property,
     outputs,
     paraview,
+    vtk,
     wavefield,
 )
 from frequensolve.simulation.physics import (
@@ -125,6 +134,102 @@ def test_structured_remote_property_ref_does_not_touch_filesystem():
     }
 
 
+def test_property_file_valid_range_serializes_lower_bound():
+    prop = Property.file(
+        "/server/only/vp.rsf",
+        absolute=True,
+        valid_min=1500.0 * u.m / u.s,
+    )
+
+    payload = prop.to_fs()
+
+    assert payload == {
+        "file": "/server/only/vp.rsf",
+        "format": "rsf",
+        "absolute": True,
+        "valid_range": {"lower": {"value": 1500.0, "units": "m/s"}},
+    }
+
+
+def test_property_valid_range_preserves_bound_units():
+    prop = Property.file(
+        "/server/only/vp.rsf",
+        units="km/s",
+        absolute=True,
+        valid_range={
+            "min": 1500.0 * u.m / u.s,
+            "max": {"value": 4500.0, "units": "m/s"},
+        },
+        fill_invalid="none",
+    )
+
+    payload = prop.to_fs()
+
+    assert payload["units"] == "km/s"
+    assert payload["fill_invalid"] == "none"
+    assert payload["valid_range"] == {
+        "lower": {"value": 1500.0, "units": "m/s"},
+        "upper": {"value": 4500.0, "units": "m/s"},
+    }
+
+
+def test_property_valid_range_roundtrips_from_serialized_payload():
+    prop = Property.from_value(
+        {
+            "file": "/server/only/vp.rsf",
+            "absolute": True,
+            "valid_range": {"min": 1500.0, "max": 4500.0},
+            "fill_invalid": "nearest",
+        }
+    )
+
+    payload = prop.to_fs()
+
+    assert payload["valid_range"] == {"lower": 1500.0, "upper": 4500.0}
+    assert payload["fill_invalid"] == "nearest"
+
+    with pytest.raises(ValueError, match="fill_invalid"):
+        Property.file("/server/only/vp.rsf", absolute=True, fill_invalid="linear")
+
+
+def test_property_file_remote_true_serializes_solver_visible_ref():
+    prop = Property.file(
+        "/server/only/vp.bin",
+        scale=0.001,
+        units="m/s",
+        remote=True,
+    )
+
+    payload = prop.to_fs()
+
+    assert payload == {
+        "file": "/server/only/vp.bin",
+        "absolute": True,
+        "scale": 0.001,
+        "units": "m/s",
+    }
+
+
+def test_structured_remote_property_payload_uses_remote_flag():
+    prop = Property.from_value(
+        {
+            "file": "/server/only/vp.bin",
+            "remote": True,
+            "scale": 0.001,
+            "units": "m/s",
+        }
+    )
+
+    payload = prop.to_fs()
+
+    assert payload == {
+        "file": "/server/only/vp.bin",
+        "absolute": True,
+        "scale": 0.001,
+        "units": "m/s",
+    }
+
+
 def test_legacy_string_property_loads_as_structured_ref():
     subdomain = ModelSubdomain(
         mesh_block_id=1,
@@ -136,6 +241,76 @@ def test_legacy_string_property_loads_as_structured_ref():
     assert payload["properties"]["vp"]["file"] == "/server/vp.bin"
     assert payload["properties"]["vp"]["absolute"] is True
     assert payload["properties"]["vp"]["scale"] == 0.001
+
+
+def test_remote_hdf5_property_locator_infers_format():
+    payload = Property.file("remote:/server/model/vp.h5:vp", units="m/s").to_fs()
+
+    assert payload == {
+        "file": "/server/model/vp.h5:vp",
+        "format": "hdf5",
+        "absolute": True,
+        "units": "m/s",
+    }
+
+
+def test_remote_rsf_property_infers_format():
+    payload = Property.file("remote:/server/model/vp.rsf", units="m/s").to_fs()
+
+    assert payload == {
+        "file": "/server/model/vp.rsf",
+        "format": "rsf",
+        "absolute": True,
+        "units": "m/s",
+    }
+
+
+def test_rsf_property_reader_uses_header_grid_and_sidecar(tmp_path):
+    header = tmp_path / "vp.rsf"
+    sidecar = tmp_path / "vp.rsf@"
+    values = np.arange(24, dtype=np.float32)
+    values.tofile(sidecar)
+    header.write_text(
+        "\n".join(
+            [
+                "n1=2",
+                "n2=3",
+                "n3=4",
+                "d1=0.5",
+                "d2=0.25",
+                "d3=0.75",
+                "o1=0.0",
+                "o2=1.0",
+                "o3=2.0",
+                'label1="X"',
+                'label2="Y"',
+                'label3="Depth"',
+                'unit1="km"',
+                'unit2="km"',
+                'unit3="km"',
+                'label="Vp"',
+                'unit="m/s"',
+                'data_format="native_float"',
+                "esize=4",
+                'in="./vp.rsf@"',
+            ]
+        )
+    )
+
+    data = Property.read(header)
+    prop = Property(header)
+
+    assert data.dims == ("x", "y", "z")
+    assert data.shape == (2, 3, 4)
+    assert data.name == "Vp"
+    assert data.attrs["units"] == "m/s"
+    assert data.coords["z"].attrs["label"] == "Depth"
+    assert data.coords["x"].attrs["units"] == "km"
+    np.testing.assert_allclose(data.coords["x"], [0.0, 0.5])
+    np.testing.assert_allclose(data.coords["y"], [1.0, 1.25, 1.5])
+    np.testing.assert_allclose(data.coords["z"], [2.0, 2.75, 3.5, 4.25])
+    np.testing.assert_array_equal(data.values.reshape(-1, order="F"), values)
+    assert prop.units == "m/s"
 
 
 def test_derived_property_expressions_export_to_solver_ast():
@@ -190,6 +365,399 @@ def test_derived_property_expressions_export_to_solver_ast():
         "units": "g/cm^3",
     }
     assert props["mu"]["depends_on"] == ["rho", "vs"]
+
+
+def test_branch_property_expression_exports_case_ast():
+    vp = sp.Symbol("Vp")
+    qp = sp.Piecewise(
+        (140.0, vp > 4.5),
+        (90.0, (vp >= 3.5) & (vp < 4.5)),
+        (60.0, True),
+        evaluate=False,
+    )
+    subdomain = ModelSubdomain(
+        mesh_block_id=1,
+        properties={
+            "Vp": 4.0,
+            "Qp": qp,
+        },
+    )
+
+    payload = subdomain.to_fs()
+
+    assert payload["properties"]["qp"] == {
+        "expr": {
+            "op": "case",
+            "branches": [
+                {
+                    "if": {
+                        "op": ">",
+                        "args": [{"ref": "vp"}, {"value": 4.5}],
+                    },
+                    "then": {"value": 140.0},
+                },
+                {
+                    "if": {
+                        "op": "and",
+                        "args": [
+                            {
+                                "op": ">=",
+                                "args": [{"ref": "vp"}, {"value": 3.5}],
+                            },
+                            {
+                                "op": "<",
+                                "args": [{"ref": "vp"}, {"value": 4.5}],
+                            },
+                        ],
+                    },
+                    "then": {"value": 90.0},
+                },
+            ],
+            "else": {"value": 60.0},
+        },
+        "depends_on": ["vp"],
+    }
+
+
+def test_branch_expression_rejects_python_boolean_context():
+    with pytest.raises(TypeError, match="Expression conditions"):
+        bool(ref("Vp") > 4.5)
+
+
+def test_remap_expression_macro_lowers_to_existing_ops():
+    output = Property.expr(
+        remap(
+            prop("Vp"),
+            from_range=(800, 1000),
+            to_range=(600, 1000),
+            units="m/s",
+            clamp=True,
+        )
+    )
+
+    payload = output.to_fs()
+
+    assert payload["expr"] == {
+        "op": "clamp",
+        "args": [
+            {
+                "op": "add",
+                "args": [
+                    {"value": 600, "units": "m/s"},
+                    {
+                        "op": "mul",
+                        "args": [
+                            {
+                                "op": "sub",
+                                "args": [
+                                    {"ref": "vp"},
+                                    {"value": 800, "units": "m/s"},
+                                ],
+                            },
+                            {"value": 2.0},
+                        ],
+                    },
+                ],
+            },
+            {"value": 600, "units": "m/s"},
+            {"value": 1000, "units": "m/s"},
+        ],
+    }
+    assert payload["depends_on"] == ["vp"]
+
+
+def test_remap_expression_macro_accepts_composed_expression():
+    base_vs = 0.5 * prop("Vp")
+    output = Property.expr(
+        remap(
+            base_vs,
+            from_range=(800, 1000),
+            to_range=(600, 1000),
+            units="m/s",
+            clamp=True,
+        )
+    )
+
+    payload = output.to_fs()
+
+    affine = payload["expr"]["args"][0]
+    shifted = affine["args"][1]["args"][0]
+    assert payload["expr"]["op"] == "clamp"
+    assert shifted == {
+        "op": "sub",
+        "args": [
+            {
+                "op": "mul",
+                "args": [{"value": 0.5}, {"ref": "vp"}],
+            },
+            {"value": 800, "units": "m/s"},
+        ],
+    }
+    assert payload["depends_on"] == ["vp"]
+
+
+def test_remap_expression_macro_can_preserve_values_outside_source_range():
+    base_vs = 0.5 * prop("Vp")
+    output = Property.expr(
+        remap(
+            base_vs,
+            from_range=(800, 1000),
+            to_range=(600, 1000),
+            units="m/s",
+            outside="preserve",
+        )
+    )
+
+    payload = output.to_fs()
+    base_node = {
+        "op": "mul",
+        "args": [{"value": 0.5}, {"ref": "vp"}],
+    }
+
+    assert payload["expr"] == {
+        "op": "case",
+        "branches": [
+            {
+                "if": {
+                    "op": "and",
+                    "args": [
+                        {
+                            "op": ">=",
+                            "args": [
+                                base_node,
+                                {"value": 800, "units": "m/s"},
+                            ],
+                        },
+                        {
+                            "op": "<=",
+                            "args": [
+                                base_node,
+                                {"value": 1000, "units": "m/s"},
+                            ],
+                        },
+                    ],
+                },
+                "then": {
+                    "op": "add",
+                    "args": [
+                        {"value": 600, "units": "m/s"},
+                        {
+                            "op": "mul",
+                            "args": [
+                                {
+                                    "op": "sub",
+                                    "args": [
+                                        base_node,
+                                        {"value": 800, "units": "m/s"},
+                                    ],
+                                },
+                                {"value": 2.0},
+                            ],
+                        },
+                    ],
+                },
+            }
+        ],
+        "else": base_node,
+    }
+    assert payload["depends_on"] == ["vp"]
+
+
+def test_remap_expression_macro_converts_quantity_ranges():
+    expr = remap(
+        prop("Vp"),
+        from_range=(0.8 * u.km / u.s, 1.0 * u.km / u.s),
+        to_range=(600.0 * u.m / u.s, 1.0 * u.km / u.s),
+        units="m/s",
+        clamp=False,
+    )
+
+    payload = expr.to_fs()
+
+    assert payload["op"] == "add"
+    assert payload["args"][0] == {"value": 600.0, "units": "m/s"}
+    assert payload["args"][1]["args"][0]["args"][1] == {
+        "value": 800.0,
+        "units": "m/s",
+    }
+    assert payload["args"][1]["args"][1] == {"value": 2.0}
+
+    with pytest.raises(ValueError, match="distinct"):
+        remap(prop("Vp"), from_range=(800, 800), to_range=(600, 1000), units="m/s")
+    with pytest.raises(ValueError, match="clamp or outside"):
+        remap(
+            prop("Vp"),
+            from_range=(800, 1000),
+            to_range=(600, 1000),
+            units="m/s",
+            clamp=True,
+            outside="preserve",
+        )
+
+
+def test_expression_symbols_bind_variables_to_coordinate_axes():
+    z = sp.Symbol("z")
+    qp = Property.expr(
+        sp.Piecewise(
+            (60.0, z < 50.0),
+            (80.0 + 0.4 * z, z < 200.0),
+            (160.0, True),
+            evaluate=False,
+        ),
+        symbols={"z": coord("interface_depth", "z", units="m")},
+    )
+
+    payload = qp.to_fs()
+
+    assert payload == {
+        "expr": {
+            "op": "case",
+            "branches": [
+                {
+                    "if": {"op": "<", "args": [{"var": "z"}, {"value": 50.0}]},
+                    "then": {"value": 60.0},
+                },
+                {
+                    "if": {"op": "<", "args": [{"var": "z"}, {"value": 200.0}]},
+                    "then": {
+                        "op": "add",
+                        "args": [
+                            {"value": 80.0},
+                            {
+                                "op": "mul",
+                                "args": [{"value": 0.4}, {"var": "z"}],
+                            },
+                        ],
+                    },
+                },
+            ],
+            "else": {"value": 160.0},
+        },
+        "symbols": {
+            "z": {
+                "kind": "coordinate",
+                "system": "interface_depth",
+                "axis": "z",
+                "units": "m",
+            }
+        },
+    }
+
+
+def test_sympy_piecewise_requires_true_fallback():
+    z = sp.Symbol("z")
+
+    with pytest.raises(ValueError, match="True fallback"):
+        Property.expr(
+            sp.Piecewise((60.0, z < 50.0), evaluate=False),
+            symbols={"z": coord("interface_depth", "z")},
+        )
+
+
+def test_general_sympy_property_expression_exports_ast():
+    vp, vs = sp.symbols("Vp Vs")
+
+    payload = Property.expr(sp.Abs(vp - vs) + sp.exp(vs / vp)).to_fs()
+
+    assert payload == {
+        "expr": {
+            "op": "add",
+            "args": [
+                {
+                    "op": "abs",
+                    "arg": {
+                        "op": "add",
+                        "args": [
+                            {"ref": "vp"},
+                            {
+                                "op": "mul",
+                                "args": [{"value": -1}, {"ref": "vs"}],
+                            },
+                        ],
+                    },
+                },
+                {
+                    "op": "exp",
+                    "arg": {
+                        "op": "mul",
+                        "args": [
+                            {"ref": "vs"},
+                            {
+                                "op": "pow",
+                                "args": [{"ref": "vp"}, {"value": -1}],
+                            },
+                        ],
+                    },
+                },
+            ],
+        },
+        "depends_on": ["vp", "vs"],
+    }
+
+
+def test_sympy_functions_constants_and_min_max_export_to_ast():
+    vp, vs = sp.symbols("Vp Vs")
+
+    trig = Property.expr(sp.sin(vp) + sp.cos(vs)).to_fs()["expr"]
+    scaled = Property.expr(sp.pi * vp).to_fs()["expr"]
+    bounded = Property.expr(sp.Min(vp, vs, 5000)).to_fs()["expr"]
+
+    assert trig == {
+        "op": "add",
+        "args": [
+            {"op": "cos", "arg": {"ref": "vs"}},
+            {"op": "sin", "arg": {"ref": "vp"}},
+        ],
+    }
+    assert scaled == {
+        "op": "mul",
+        "args": [{"value": pytest.approx(3.141592653589793)}, {"ref": "vp"}],
+    }
+    assert bounded == {
+        "op": "min",
+        "args": [{"value": 5000}, {"ref": "vp"}, {"ref": "vs"}],
+    }
+
+
+def test_unsupported_sympy_functions_raise_clear_error():
+    vp = sp.Symbol("Vp")
+
+    with pytest.raises(ValueError, match="Unsupported SymPy function"):
+        Property.expr(sp.gamma(vp))
+
+
+def test_expression_symbol_bindings_roundtrip_and_accept_coordinate_system_alias():
+    data = {
+        "expr": {
+            "op": "<",
+            "args": [{"var": "z"}, {"value": 10.0}],
+        },
+        "symbols": {
+            "z": {
+                "kind": "coordinate",
+                "coordinate_system": "interface_depth",
+                "axis": "z",
+                "units": "meter",
+            }
+        },
+    }
+
+    payload = Property.from_value(data).to_fs()
+
+    assert payload == {
+        "expr": {
+            "op": "<",
+            "args": [{"var": "z"}, {"value": 10.0}],
+        },
+        "symbols": {
+            "z": {
+                "kind": "coordinate",
+                "system": "interface_depth",
+                "axis": "z",
+                "units": "meter",
+            }
+        },
+    }
 
 
 def test_derived_property_expressions_roundtrip_without_mutating_input():
@@ -317,7 +885,7 @@ def test_surface_coordinate_system_helpers_export_acquisition_metadata():
     }
 
     acq = Acquisition()
-    acq.add_source_group(
+    acq.add_sources(
         kind="scalar",
         coords=surface.points(np.array([0.5]) * u.km, offset=-25.0 * u.m),
     )
@@ -341,6 +909,36 @@ def test_surface_coordinate_system_helpers_export_acquisition_metadata():
         "units": "km",
         "system": "free_surface",
     }
+
+
+def test_surface_coordinate_system_points_grid_builds_surface_carpet():
+    surface = CoordinateSystem.surface("free_surface", surface="top", normal="up")
+
+    assert surface.points_grid(x=[0.0, 0.25, 1.0], units="km").to_fs() == {
+        "value": [[0.0, 0.0], [0.25, 0.0], [1.0, 0.0]],
+        "units": "km",
+        "system": "free_surface",
+    }
+    assert surface.points_grid(
+        x=[0.0, 0.25, 1.0],
+        y=[2.0, 3.0],
+        units="km",
+        below=25.0 * u.m,
+    ).to_fs() == {
+        "value": [
+            [0.0, 2.0, -0.025],
+            [0.25, 2.0, -0.025],
+            [1.0, 2.0, -0.025],
+            [0.0, 3.0, -0.025],
+            [0.25, 3.0, -0.025],
+            [1.0, 3.0, -0.025],
+        ],
+        "units": "km",
+        "system": "free_surface",
+    }
+
+    with pytest.raises(ValueError, match="Specify only one of above or below"):
+        surface.points_grid(x=[0.0, 1.0], above=1.0, below=1.0)
 
 
 def test_simulation_registers_surface_coordinate_system(tmp_path):
@@ -422,7 +1020,7 @@ def test_simulation_model_surface_helper_uses_surface_offsets_in_points(tmp_path
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=sources)
+    acq.add_sources(kind="scalar", coords=sources)
     acq.add_receiver_group(name="surface", device=hydrophone, coords=receivers)
     sim.acquisition = acq
 
@@ -450,6 +1048,142 @@ def test_simulation_model_surface_helper_uses_surface_offsets_in_points(tmp_path
     }
 
 
+def test_acquisition_carpet_helpers_place_dim_minus_one_coords_on_surface(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=3,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0, 0, 0], u_bound=[1, 1, 1], n=[1, 1, 1])
+    )
+
+    top = sim.model_surface("top")
+    assert top.on([[0.5, 0.25]], units="km").to_fs() == {
+        "value": [[0.5, 0.25, 0.0]],
+        "units": "km",
+        "system": "top",
+    }
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq = Acquisition()
+    receiver_group = acq.add_receiver_carpet(
+        name="surface",
+        device=hydrophone,
+        surface=top,
+        x=[0.0, 0.25, 1.0],
+        y=[0.0, 0.5],
+        units="km",
+    )
+    shots = acq.add_sources(
+        kind="scalar",
+        coords=top.points_grid(x=[0.0, 0.25, 1.0], y=[0.0, 0.5], units="km"),
+    )
+    sim.acquisition = acq
+
+    payload = sim.to_fs()
+
+    assert receiver_group.name == "surface"
+    assert len(shots) == 6
+    assert payload["Acquisition"]["receiver_groups"][0]["coordinates"] == {
+        "_type": "CoordsArray",
+        "value": [
+            [0.0, 0.0, 0.0],
+            [0.25, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.5, 0.0],
+            [0.25, 0.5, 0.0],
+            [1.0, 0.5, 0.0],
+        ],
+        "units": "km",
+        "system": "top",
+    }
+    assert payload["Acquisition"]["source_geometry"]["sources"][0]["coordinates"] == {
+        "value": [0.0, 0.0, 0.0],
+        "units": "km",
+        "system": "top",
+    }
+    assert payload["Acquisition"]["source_geometry"]["sources"][-1]["coordinates"] == {
+        "value": [1.0, 0.5, 0.0],
+        "units": "km",
+        "system": "top",
+    }
+
+
+def test_large_receiver_carpet_stays_lazy_until_hdf5_export(tmp_path):
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=3,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0, 0, -1], u_bound=[1, 1, 1], n=[1, 1, 1])
+    )
+
+    top = sim.model_surface("top")
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq = Acquisition()
+    acq.add_sources(kind="scalar", coords=top.points([[0.5, 0.5]], units="km"))
+    receiver_group = acq.add_receiver_carpet(
+        name="surface",
+        device=hydrophone,
+        surface=top,
+        x=np.linspace(0.0, 1.0, 21) * u.km,
+        y=np.linspace(0.0, 1.0, 11) * u.km,
+        below=25.0 * u.m,
+    )
+    sim.acquisition = acq
+
+    assert isinstance(receiver_group.coordinates, CoordsSurfaceCarpet)
+    assert receiver_group.size == 231
+    assert sim.validate().ok
+    np.testing.assert_allclose(
+        receiver_group.coordinates.get(0),
+        [0.0, 0.0, -0.025],
+    )
+    np.testing.assert_allclose(
+        receiver_group.coordinates.get([0, 20, 21, -1]),
+        [
+            [0.0, 0.0, -0.025],
+            [1.0, 0.0, -0.025],
+            [0.0, 0.1, -0.025],
+            [1.0, 1.0, -0.025],
+        ],
+    )
+
+    payload = sim.to_fs()
+    coords = payload["Acquisition"]["receiver_groups"][0]["coordinates"]
+
+    assert coords["_type"] == "CoordsFromFile"
+    assert (
+        coords["file"]
+        == "simulations/simple/simple.h5:inputs/acquisition/receivers/surface/coordinates"
+    )
+    assert coords["units"] == "km"
+    assert coords["system"] == "top"
+    with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
+        dset = h5["inputs/acquisition/receivers/surface/coordinates"]
+        assert dset.shape == (231, 3)
+        assert dset.attrs["units"] == "km"
+        assert dset.attrs["system"] == "top"
+        np.testing.assert_allclose(
+            dset[[0, 20, 21, 230]],
+            receiver_group.coordinates.get([0, 20, 21, -1]),
+        )
+
+    store_path = tmp_path / "simulations/simple/simple.h5"
+    sim.save()
+    saved_size = store_path.stat().st_size
+    sim.save()
+    assert store_path.stat().st_size == saved_size
+
+    copied = sim.copy("simple_copy")
+    assert copied.acquisition.receiver_groups[0].size == 231
+
+
 def test_solver_frame_key_is_not_exported_and_legacy_input_is_ignored():
     subdomain = ModelSubdomain.from_fs(
         {"mesh_block_id": 1, "frame": "reference", "properties": {"vp": 1500.0}}
@@ -457,7 +1191,7 @@ def test_solver_frame_key_is_not_exported_and_legacy_input_is_ignored():
     assert "frame" not in subdomain.to_fs()
 
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq.add_receiver_group(name="surface", device=hydrophone, coords=[[0.0, 0.0]])
@@ -468,17 +1202,17 @@ def test_solver_frame_key_is_not_exported_and_legacy_input_is_ignored():
 
     legacy = Acquisition.from_fs(
         {
-            "source_groups": [
-                {
-                    "source": {
-                        "_type": "PointSource",
+            "source_geometry": {
+                "_type": "Inline",
+                "kind": "scalar",
+                "sources": [
+                    {
                         "name": "shot",
-                        "kind": "scalar",
                         "frame": "reference",
                         "coordinates": [0.5, 0.0],
                     }
-                }
-            ],
+                ],
+            },
             "receiver_groups": [
                 {
                     "name": "surface",
@@ -507,7 +1241,7 @@ def test_acquisition_accepts_quantity_source_and_receiver_coordinates():
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        acq.add_source_group(
+        acq.add_sources(
             kind="vector",
             coords=Q_([[0.5, 0.05]], "km"),
             direction=[0.0, 1.0],
@@ -542,11 +1276,12 @@ def test_source_and_receiver_coordinate_arrays_are_float64():
     geophone = ReceiverNode(name="geophone")
     geophone.add_component(name="v_z", field="velocity", direction=[0.0, 1.0])
 
-    acq.add_compound_source(
+    acq.add_sources(
         kind="scalar",
         coords=np.asarray([[0.125, 0.0], [0.875, 0.0]], dtype=np.float32),
-        weights=np.ones(2),
+        names=["left", "right"],
     )
+    acq.add_distributed_source("compound", {"left": 1.0, "right": 1.0})
     acq.add_receiver_group(
         name="surface",
         device=geophone,
@@ -760,21 +1495,23 @@ def test_receiver_device_name_is_optional_and_omitted_when_absent():
     assert loaded.components[0].field == "pressure"
 
 
-def test_compound_source_broadcasts_single_direction_vector():
+def test_named_source_encoding_replaces_compound_source_weights():
     acq = Acquisition()
-    acq.add_compound_source(
+    acq.add_sources(
         kind="vector",
         coords=[[0.45, 0.1], [0.55, 0.1]],
-        weights=[1.0, -1.0],
+        names=["left", "right"],
         direction=[0.0, 1.0],
     )
+    acq.add_distributed_source("dipole_like", {"left": 1.0, "right": -1.0})
 
     payload = acq.to_fs()
 
     assert payload["source_geometry"]["defaults"]["direction"] == [0.0, 1.0]
-    assert [
-        term["coefficient"] for term in payload["source_encoding"]["fields"][0]["terms"]
-    ] == [1.0, -1.0]
+    assert payload["source_encoding"]["fields"][0]["terms"] == [
+        {"source": "left", "coefficient": 1.0},
+        {"source": "right", "coefficient": -1.0},
+    ]
 
 
 def test_wavefield_output_uses_grid_contract():
@@ -869,7 +1606,7 @@ def test_elastic_velocity_is_canonical_and_displacement_is_removed():
     assert component.field == "velocity"
     assert component.to_fs()["field"] == "velocity"
 
-    paraview = ParaviewOutput(fields=["velocity", "stress"])
+    paraview = VtkOutput(fields=["velocity", "stress"])
     assert paraview.fields == ["velocity", "stress"]
     assert paraview.to_fs()["fields"] == [
         "velocity",
@@ -979,7 +1716,7 @@ def test_explicit_axisymmetric_physics_sets_axisymmetric_flag(tmp_path):
     assert components_for_physics("acoustic_axisym") is not None
 
 
-def test_private_path_api_warns_as_deprecated(tmp_path):
+def test_authoring_objects_do_not_store_legacy_export_paths(tmp_path):
     sim = SeismicSimulation(
         name="simple",
         physics="acoustic",
@@ -987,10 +1724,11 @@ def test_private_path_api_warns_as_deprecated(tmp_path):
         project_path=tmp_path,
     )
 
-    with pytest.warns(DeprecationWarning, match="_set_path"):
-        sim._set_path(tmp_path, Path("simulations"))
-    with pytest.warns(DeprecationWarning, match="_path"):
-        assert sim._path == tmp_path / "simulations" / "simple"
+    for obj in (sim, sim.model, sim.mesh, sim.acquisition):
+        assert not hasattr(obj, "_proj_path")
+        assert not hasattr(obj, "_rel_path")
+        assert not hasattr(obj, "_set_path")
+        assert not hasattr(obj, "_path")
 
 
 def test_project_new_simulation_accepts_coupled_aep_physics(tmp_path):
@@ -1106,15 +1844,49 @@ def test_output_paths_must_be_relative_to_result_directory():
     with pytest.raises(ValueError, match="relative"):
         TraceOutput(path="/tmp/traces")
     with pytest.raises(ValueError, match="relative"):
-        ParaviewOutput(path="/tmp/paraview")
+        VtkOutput(path="/tmp/paraview")
     with pytest.raises(ValueError, match="relative"):
         WavefieldOutput(path="/tmp/wavefields")
+
+
+def test_trace_dataset_long_domain_methods_match_short_aliases():
+    class DummyStore:
+        def read_FD(self, *args, **kwargs):
+            return ("fd", args, kwargs)
+
+        def read_TD(self, *args, **kwargs):
+            return ("td", args, kwargs)
+
+        def read_LD(self, *args, **kwargs):
+            return ("ld", args, kwargs)
+
+    traces = TraceDataset.__new__(TraceDataset)
+    traces._store = DummyStore()
+    wavelet = object()
+
+    assert traces.frequency_domain("surface", "p", source=7) == traces.fd(
+        "surface",
+        "p",
+        source=7,
+    )
+    assert traces.time_domain("surface", "p", 7, wavelet) == traces.td(
+        "surface",
+        "p",
+        7,
+        wavelet,
+    )
+    assert traces.laplace_domain("surface", "p", 7, wavelet) == traces.ld(
+        "surface",
+        "p",
+        7,
+        wavelet,
+    )
 
 
 def test_job_outputs_adds_outputs_and_always_exports_traces():
     outputs = JobOutputs()
 
-    outputs += ParaviewOutput(name="pv", fields=["pressure"])
+    outputs += VtkOutput(name="pv", fields=["pressure"])
     payload = outputs.to_fs()
 
     assert payload["traces"]["path"] == "traces"
@@ -1130,8 +1902,8 @@ def test_job_outputs_make_named_outputs_unique():
     config = JobOutputs()
 
     config += [
-        ParaviewOutput(name="snapshot", fields=["pressure"]),
-        ParaviewOutput(name="snapshot", fields=["velocity"]),
+        VtkOutput(name="snapshot", fields=["pressure"]),
+        VtkOutput(name="snapshot", fields=["velocity"]),
         WavefieldOutput(name="snapshot", field="pressure", grid=grid),
         WavefieldOutput(name="snapshot", field="velocity", grid=grid),
     ]
@@ -1165,7 +1937,7 @@ def test_output_config_helper_exports_units_paraview_and_wavefields():
             properties={"Vp": "ft/s"},
         ),
         traces="trace_products",
-        paraview=paraview.surface(
+        vtk=vtk.surface(
             "quicklook",
             shell=True,
             items=[
@@ -1204,19 +1976,25 @@ def test_output_config_helper_exports_units_paraview_and_wavefields():
     assert "fields" not in payload["wavefields"][0]
 
 
-def test_paraview_factory_supports_alias_and_structured_items():
-    output = paraview.volume(
+def test_vtk_factory_supports_domain_and_structured_items():
+    output = vtk.domain(
         "volume",
         items=[
-            paraview.field("velocity", basis=["x", "z"], units="m/s"),
-            paraview.prop("Rho", units="g/cc"),
+            vtk.field("velocity", basis=["x", "z"], units="m/s"),
+            vtk.prop("Rho", units="g/cc"),
         ],
         format="xmf",
     )
 
     payload = output.to_fs()
 
-    assert isinstance(output, ParaViewOutput)
+    assert isinstance(output, VtkOutput)
+    assert isinstance(output.items[0], VtkItem)
+    assert ParaViewItem is VtkItem
+    assert ParaViewOutput is VtkOutput
+    assert ParaviewOutput is VtkOutput
+    assert paraview is vtk
+    assert payload["_type"] == "ParaviewOutput"
     assert payload["writer"] == {"format": "xdmf", "encoding": "hdf5"}
     assert payload["target"] == {"kind": "volume"}
     assert payload["items"][0]["basis"] == {
@@ -1258,7 +2036,7 @@ def test_job_add_output_exports_outputs_from_job_json(tmp_path):
     sim.save()
 
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
-    job += [ParaviewOutput(name="pv", fields=["pressure"])]
+    job += [VtkOutput(name="pv", fields=["pressure"])]
     payload = job.to_fs()
 
     assert "Outputs" not in sim.to_fs()
@@ -1279,7 +2057,7 @@ def test_job_output_convenience_methods_export_contract(tmp_path):
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
     job.output_units(geometry="ft", pressure="psi")
     job.traces(path="trace_products")
-    job.paraview("quicklook", fields="pressure")
+    job.vtk("quicklook", fields="pressure")
 
     payload = job.to_fs()["Outputs"]
 
@@ -1289,6 +2067,7 @@ def test_job_output_convenience_methods_export_contract(tmp_path):
     }
     assert payload["traces"]["path"] == "trace_products"
     assert payload["ParaView"][0]["name"] == "quicklook"
+    assert payload["ParaView"][0]["target"] == {"kind": "volume"}
     assert payload["ParaView"][0]["fields"] == ["pressure"]
 
 
@@ -1306,7 +2085,7 @@ def test_paraview_output_requires_single_frequency_job(tmp_path):
         name="freq",
         simulation=sim,
         f_list=[10.0, 20.0],
-        outputs=ParaviewOutput(name="pv", fields=["pressure"]),
+        outputs=VtkOutput(name="pv", fields=["pressure"]),
     )
 
     with pytest.raises(ValueError, match="single-frequency"):
@@ -1314,7 +2093,7 @@ def test_paraview_output_requires_single_frequency_job(tmp_path):
 
 
 def test_paraview_surface_output_exports_solver_contract():
-    output = ParaviewOutput.surface(
+    output = VtkOutput.surface(
         name="free_surface",
         surfaces="top",
         fields=["pressure"],
@@ -1338,12 +2117,13 @@ def test_paraview_surface_output_exports_solver_contract():
         "mesh": {"order": 3, "upscale": 2, "show_pml": False},
         "selection": [{"kind": "model_surface", "name": "top"}],
     }
+    assert "upscale" not in payload
     assert payload["fields"] == ["pressure"]
     assert payload["properties"] == ["Vp"]
 
 
-def test_paraview_volume_constructor_exports_solver_contract():
-    output = ParaviewOutput.volume(
+def test_vtk_domain_constructor_exports_solver_volume_contract():
+    output = VtkOutput.domain(
         name="volume",
         fields=["pressure"],
         parts="real",
@@ -1352,7 +2132,8 @@ def test_paraview_volume_constructor_exports_solver_contract():
 
     payload = output.to_fs()
 
-    assert payload["target"] == {"kind": "volume"}
+    assert payload["target"] == {"kind": "volume", "mesh": {"upscale": 1}}
+    assert "upscale" not in payload
     assert payload["items"] == [
         {"kind": "field", "field": "pressure", "parts": ["real"]},
     ]
@@ -1360,28 +2141,118 @@ def test_paraview_volume_constructor_exports_solver_contract():
     assert "properties" not in payload
 
 
-def test_paraview_defaults_to_vtu_appended_binary():
-    output = ParaviewOutput(name="pv", fields=["pressure"])
+def test_vtk_output_defaults_to_domain_and_vtu_appended_binary():
+    output = VtkOutput(name="pv", fields=["pressure"])
     payload = output.to_fs()
 
     assert output.format == "vtu"
     assert payload["writer"] == {"format": "vtu", "encoding": "appended"}
-    assert "target" not in payload
+    assert payload["target"] == {"kind": "volume"}
     assert "source" not in payload
+    assert "sources" not in payload
+    assert "upscale" not in payload
 
     with pytest.raises(ValueError, match="format"):
-        ParaviewOutput(name="pv", fields=["pressure"], format="vtk")
+        VtkOutput(name="pv", fields=["pressure"], format="vtk")
+
+
+def test_paraview_upscale_is_only_available_on_volume_and_surface_meshes():
+    volume = VtkOutput.domain(fields=["pressure"])
+    surface = VtkOutput.surface(fields=["pressure"])
+    legacy_volume = ParaviewOutput(fields=["pressure"], upscale=1)
+    legacy_surface = ParaViewOutput(fields=["pressure"], surfaces="top", upscale=2)
+
+    assert volume.to_fs()["target"] == {"kind": "volume"}
+    assert surface.to_fs()["target"]["kind"] == "surface"
+    assert "upscale" not in surface.to_fs()["target"]["mesh"]
+    assert legacy_volume.to_fs()["target"] == {
+        "kind": "volume",
+        "mesh": {"upscale": 1},
+    }
+    assert legacy_surface.to_fs()["target"]["mesh"]["upscale"] == 2
+
+    with pytest.raises(ValueError, match="grid targets do not support upscale"):
+        VtkOutput.grid({"axes": []}, fields=["pressure"], upscale=1)
+    with pytest.raises(ValueError, match="grid targets do not support upscale"):
+        VtkOutput(
+            fields=["pressure"],
+            target={"kind": "grid", "mesh": {"upscale": 1}},
+        )
+    with pytest.raises(ValueError, match="conflicts with target.mesh.upscale"):
+        VtkOutput(
+            fields=["pressure"],
+            target={"kind": "surface", "mesh": {"upscale": 1}},
+            upscale=2,
+        )
+
+
+@pytest.mark.parametrize("upscale", [-1, 3, 1.0, True, "1"])
+def test_paraview_target_mesh_upscale_requires_integer_zero_through_two(upscale):
+    with pytest.raises(ValueError, match="integer from 0 to 2"):
+        VtkOutput.domain(fields=["pressure"], upscale=upscale)
+    with pytest.raises(ValueError, match="integer from 0 to 2"):
+        VtkOutput(fields=["pressure"], upscale=upscale)
+
+
+def test_paraview_target_mesh_requires_explicit_target_kind():
+    with pytest.raises(ValueError, match="explicitly define kind"):
+        VtkOutput(
+            fields=["pressure"],
+            target={"mesh": {"upscale": 1}},
+        )
+
+
+def test_paraview_from_fs_translates_legacy_top_level_upscale():
+    output = VtkOutput.from_fs(
+        {
+            "_type": "ParaviewOutput",
+            "fields": ["pressure"],
+            "upscale": 1,
+        }
+    )
+
+    assert output.to_fs()["target"] == {
+        "kind": "volume",
+        "mesh": {"upscale": 1},
+    }
+
+
+def test_paraview_sources_all_omits_solver_sources_key():
+    default_payload = VtkOutput(name="pv", fields=["pressure"]).to_fs()
+    all_payload = VtkOutput(
+        name="pv",
+        fields=["pressure"],
+        sources="all",
+    ).to_fs()
+    scalar_payload = VtkOutput(
+        name="pv",
+        fields=["pressure"],
+        sources=2,
+    ).to_fs()
+    array_payload = VtkOutput(
+        name="pv",
+        fields=["pressure"],
+        sources=np.arange(1, 4),
+    ).to_fs()
+
+    assert "sources" not in default_payload
+    assert "sources" not in all_payload
+    assert scalar_payload["sources"] == [2]
+    assert array_payload["sources"] == [1, 2, 3]
+
+    with pytest.raises(ValueError, match="sources"):
+        VtkOutput(name="pv", fields=["pressure"], sources="first")
 
 
 def test_paraview_output_omits_fields_when_not_requested():
-    payload = ParaviewOutput(name="pv", properties=["vp"]).to_fs()
+    payload = VtkOutput(name="pv", properties=["vp"]).to_fs()
 
     assert "fields" not in payload
     assert payload["properties"] == ["vp"]
 
 
 def test_paraview_parts_do_not_default_missing_fields_to_all():
-    payload = ParaviewOutput(name="pv", properties=["vp"], parts="real").to_fs()
+    payload = VtkOutput(name="pv", properties=["vp"], parts="real").to_fs()
 
     assert "fields" not in payload
     assert "properties" not in payload
@@ -1389,7 +2260,7 @@ def test_paraview_parts_do_not_default_missing_fields_to_all():
 
 
 def test_paraview_parts_are_compact_and_validated():
-    output = ParaviewOutput(
+    output = VtkOutput(
         name="real_pressure",
         fields=["pressure"],
         properties=["vp"],
@@ -1405,10 +2276,61 @@ def test_paraview_parts_are_compact_and_validated():
         {"kind": "property", "property": "vp"},
     ]
 
-    assert ParaviewOutput(fields=["pressure"], parts="magnitude").parts == ["abs"]
+    assert VtkOutput(fields=["pressure"], parts="magnitude").parts == ["abs"]
 
     with pytest.raises(ValueError, match="parts"):
-        ParaviewOutput(fields=["pressure"], parts="phase")
+        VtkOutput(fields=["pressure"], parts="phase")
+
+
+def test_axis_aligned_plane_can_be_mixed_with_surface_names():
+    output = VtkOutput.surface(
+        name="surface_cuts",
+        surfaces=[
+            "sea_surface",
+            "sea_floor",
+            "bottom",
+            AxisAlignedPlane(x=0.5 * u.km),
+            AxisAlignedPlane(
+                "offset",
+                2.0,
+                units="km",
+                tolerance=10.0 * u.m,
+            ),
+        ],
+        fields=["pressure"],
+        upscale=0,
+        order=2,
+        show_pml=False,
+    )
+
+    payload = output.to_fs()
+
+    assert payload["target"]["selection"] == [
+        {"kind": "model_surface", "name": "sea_surface"},
+        {"kind": "model_surface", "name": "sea_floor"},
+        {"kind": "model_surface", "name": "bottom"},
+        {
+            "kind": "plane",
+            "system": "global",
+            "axis": "x",
+            "value": {"value": 0.5, "units": "km"},
+        },
+        {
+            "kind": "plane",
+            "system": "global",
+            "axis": "offset",
+            "value": {"value": 2.0, "units": "km"},
+            "tolerance": {"value": 10.0, "units": "m"},
+        },
+    ]
+    assert payload["target"]["mesh"] == {
+        "order": 2,
+        "upscale": 0,
+        "show_pml": False,
+    }
+
+    with pytest.raises(ValueError, match="exactly one axis"):
+        AxisAlignedPlane(x=0.5 * u.km, z=1.0 * u.km)
 
 
 def test_paraview_grid_and_plane_selection_serialize_with_units():
@@ -1419,7 +2341,7 @@ def test_paraview_grid_and_plane_selection_serialize_with_units():
             {"name": "z", "value": [0.0, 0.5], "units": "km"},
         ],
     }
-    output = ParaviewOutput.surface(
+    output = VtkOutput.surface(
         name="depth_slice",
         plane={"axis": "z", "value": 0.5 * u.km, "tolerance": 10.0 * u.m},
         fields=["pressure"],
@@ -1439,7 +2361,7 @@ def test_paraview_grid_and_plane_selection_serialize_with_units():
         }
     ]
 
-    grid_output = ParaviewOutput.grid(
+    grid_output = VtkOutput.grid(
         grid,
         fields=["pressure"],
     )
@@ -1457,6 +2379,7 @@ def test_paraview_from_fs_preserves_new_blocks_and_extra():
         "path": "pv",
         "target": {
             "kind": "surface",
+            "mesh": {"upscale": 2},
             "selection": [{"kind": "boundary", "labels": ["free"]}],
         },
         "writer": {"format": "xdmf", "distribution": "root"},
@@ -1465,11 +2388,12 @@ def test_paraview_from_fs_preserves_new_blocks_and_extra():
         "advanced_solver_flag": True,
     }
 
-    output = ParaviewOutput.from_fs(data)
+    output = VtkOutput.from_fs(data)
     data["target"]["kind"] = "volume"
     payload = output.to_fs()
 
     assert payload["target"]["kind"] == "surface"
+    assert payload["target"]["mesh"] == {"upscale": 2}
     assert payload["target"]["selection"] == [{"kind": "boundary", "labels": ["free"]}]
     assert payload["writer"] == {
         "format": "xdmf",
@@ -1877,6 +2801,224 @@ def test_mesh_adapt_uses_elems_per_wave_and_accepts_epw_alias():
         mesh.set_adapt(elems_per_wave=2.0, f_low=5.0, f_adapt=6.0)
 
 
+def test_mesh_adapt_order_accepts_branch_expression():
+    epw = sp.Symbol("epw")
+    p_order = sp.Piecewise(
+        (2, epw > 4.0),
+        (3, epw > 3.0),
+        (4, True),
+        evaluate=False,
+    )
+    mesh = MeshManager()
+    mesh.set_adapt(epw=2.0, order=p_order, hp={"order": p_order})
+
+    payload = mesh.adapt.to_fs()
+    expected = {
+        "op": "case",
+        "branches": [
+            {
+                "if": {"op": ">", "args": [{"var": "epw"}, {"value": 4.0}]},
+                "then": {"value": 2},
+            },
+            {
+                "if": {"op": ">", "args": [{"var": "epw"}, {"value": 3.0}]},
+                "then": {"value": 3},
+            },
+        ],
+        "else": {"value": 4},
+    }
+    hp_expected = {
+        "op": "case",
+        "branches": [
+            {
+                "if": {"op": ">", "args": [{"var": "epw"}, {"value": 4.0}]},
+                "then": 2,
+            },
+            {
+                "if": {"op": ">", "args": [{"var": "epw"}, {"value": 3.0}]},
+                "then": 3,
+            },
+        ],
+        "else": 4,
+    }
+
+    assert payload["order"] == expected
+    assert payload["hp"]["order"] == hp_expected
+
+
+def test_mesh_hp_adaptivity_serializes_order_ranges_and_axis_policies():
+    epw = sp.Symbol("epw")
+    global_order = sp.Piecewise(
+        (2, epw > 4.0),
+        (3, epw > 3.0),
+        (4, True),
+        evaluate=False,
+    )
+    z_order = sp.Piecewise(
+        (5, epw > 5.0),
+        (4, True),
+        evaluate=False,
+    )
+    mesh = MeshManager()
+    mesh.set_adapt(
+        epw=2.0,
+        hp={
+            "order": global_order,
+            "order_x": {"min": 2, "max": 4},
+            "order_y": {"min": 2, "max": 3},
+            "order_z": {"policy": z_order, "min": 3, "max": 5},
+        },
+    )
+
+    payload = mesh.adapt.to_fs()["hp"]
+
+    assert payload == {
+        "order": {
+            "op": "case",
+            "branches": [
+                {
+                    "if": {"op": ">", "args": [{"var": "epw"}, {"value": 4.0}]},
+                    "then": 2,
+                },
+                {
+                    "if": {"op": ">", "args": [{"var": "epw"}, {"value": 3.0}]},
+                    "then": 3,
+                },
+            ],
+            "else": 4,
+        },
+        "order_x": {"min": 2, "max": 4},
+        "order_y": {"min": 2, "max": 3},
+        "order_z": {
+            "policy": {
+                "op": "case",
+                "branches": [
+                    {
+                        "if": {"op": ">", "args": [{"var": "epw"}, {"value": 5.0}]},
+                        "then": 5,
+                    },
+                ],
+                "else": 4,
+            },
+            "min": 3,
+            "max": 5,
+        },
+    }
+
+
+def test_mesh_hp_adaptivity_serializes_physics_order_overrides():
+    epw = sp.Symbol("epw")
+    default_order = sp.Piecewise(
+        (2, epw > 4.0),
+        (4, True),
+        evaluate=False,
+    )
+    acoustic_order = sp.Piecewise(
+        (3, epw > 2.5),
+        (5, True),
+        evaluate=False,
+    )
+    mesh = MeshManager()
+    mesh.set_adapt(
+        epw=2.0,
+        hp={
+            "order": default_order,
+            "overrides": [
+                {
+                    "classifier": "physics",
+                    "value": "acoustic",
+                    "order": acoustic_order,
+                },
+            ],
+            "order_x": {"policy": 6, "min": 2, "max": 6},
+        },
+    )
+
+    payload = mesh.adapt.to_fs()["hp"]
+
+    assert payload == {
+        "order": {
+            "op": "case",
+            "branches": [
+                {
+                    "if": {"op": ">", "args": [{"var": "epw"}, {"value": 4.0}]},
+                    "then": 2,
+                },
+            ],
+            "else": 4,
+        },
+        "overrides": [
+            {
+                "classifier": "physics",
+                "value": "acoustic",
+                "order": {
+                    "op": "case",
+                    "branches": [
+                        {
+                            "if": {
+                                "op": ">",
+                                "args": [{"var": "epw"}, {"value": 2.5}],
+                            },
+                            "then": 3,
+                        },
+                    ],
+                    "else": 5,
+                },
+            },
+        ],
+        "order_x": {"policy": 6, "min": 2, "max": 6},
+    }
+
+
+def test_mesh_hp_adaptivity_rejects_unsupported_override_classifier():
+    mesh = MeshManager()
+    mesh.set_adapt(
+        epw=2.0,
+        hp={
+            "order": 4,
+            "overrides": [
+                {
+                    "classifier": "domain",
+                    "value": "acoustic",
+                    "order": 3,
+                },
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="classifier 'physics'"):
+        mesh.adapt.to_fs()
+
+
+def test_mesh_hp_p_order_alias_serializes_as_order_and_rejects_conflict():
+    epw = sp.Symbol("epw")
+    p_order = sp.Piecewise((2, epw > 4.0), (3, True), evaluate=False)
+
+    mesh = MeshManager()
+    mesh.set_adapt(epw=2.0, hp={"p_order": p_order})
+
+    with pytest.warns(DeprecationWarning, match="hp.p_order"):
+        payload = mesh.adapt.to_fs()
+
+    assert "p_order" not in payload["hp"]
+    assert payload["hp"]["order"] == {
+        "op": "case",
+        "branches": [
+            {
+                "if": {"op": ">", "args": [{"var": "epw"}, {"value": 4.0}]},
+                "then": 2,
+            },
+        ],
+        "else": 3,
+    }
+
+    mesh = MeshManager()
+    mesh.set_adapt(epw=2.0, hp={"order": 3, "p_order": 4})
+
+    with pytest.raises(ValueError, match="hp.order or hp.p_order"):
+        mesh.adapt.to_fs()
+
+
 def test_mesh_surface_gradings_accept_mapping_and_are_editable():
     mesh = MeshManager()
     mesh.set_adapt(
@@ -1934,6 +3076,26 @@ def test_mesh_surface_gradings_roundtrip_and_preserve_extra():
     assert payload["adapt"]["rcv_grading"] == {"d0": 0.02, "d1": 0.12, "factor": 3.0}
 
 
+def test_mesh_manager_allows_solver_default_mesh_without_generator_or_file():
+    manager = MeshManager()
+    manager.set_adapt(epw=3.0, order=4)
+
+    assert manager.to_fs() == {
+        "adapt": {
+            "elems_per_wave": 3.0,
+            "order": 4,
+        }
+    }
+
+
+def test_mesh_manager_rejects_incomplete_file_mesh_configuration():
+    with pytest.raises(ValueError, match="file.*format"):
+        MeshManager(file="mesh.gmsh").to_fs()
+
+    with pytest.raises(ValueError, match="file.*format"):
+        MeshManager(format="Gmsh").to_fs()
+
+
 def test_array_properties_materialize_to_simulation_hdf5_with_hash(tmp_path):
     grid = xr.DataArray(
         np.arange(6, dtype=np.float32).reshape(3, 2),
@@ -1984,7 +3146,7 @@ def test_array_properties_materialize_to_simulation_hdf5_with_hash(tmp_path):
 
 def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq.add_receiver_group(
@@ -2029,7 +3191,7 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
 
 def test_large_xarray_receiver_coordinates_preserve_units_when_materialized(tmp_path):
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=CoordinateValue([0.5, 0.0], units="m"))
+    acq.add_sources(kind="scalar", coords=CoordinateValue([0.5, 0.0], units="m"))
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     receiver_coords = xr.DataArray(
@@ -2072,7 +3234,7 @@ def test_large_receiver_coordinates_use_default_length_units_when_materialized(
     tmp_path,
 ):
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq.add_receiver_group(
@@ -2105,7 +3267,7 @@ def test_large_receiver_coordinates_use_default_length_units_when_materialized(
 
 def test_large_receiver_coordinates_inline_without_simulation_path():
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq.add_receiver_group(
@@ -2133,7 +3295,7 @@ def test_receiver_coordinate_file_exports_project_relative_locator(tmp_path):
         dset="inputs/acquisition/receivers/surface/coordinates",
     )
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
@@ -2169,7 +3331,7 @@ def test_loaded_receiver_coordinate_file_resolves_project_relative_get(tmp_path)
         dset="coords",
     )
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
@@ -2206,7 +3368,7 @@ def test_loaded_receiver_coordinate_file_uses_json_location_not_cwd(
 
     coords = CoordsFromFile(file=coord_file, format="HDF5", dset="coords")
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
@@ -2237,6 +3399,137 @@ def test_loaded_receiver_coordinate_file_uses_json_location_not_cwd(
     np.testing.assert_allclose(loaded_coords.get(), copied_values)
 
 
+def test_simulation_relocate_remaps_project_local_receiver_file(tmp_path):
+    source_project = tmp_path / "source_project"
+    target_project = tmp_path / "target_project"
+    source_file = source_project / "inputs" / "receiver_coords.h5"
+    target_file = target_project / "inputs" / "receiver_coords.h5"
+    source_mesh = source_project / "inputs" / "mesh.gmp"
+    target_mesh = target_project / "inputs" / "mesh.gmp"
+    source_property = source_project / "inputs" / "properties.h5"
+    target_property = target_project / "inputs" / "properties.h5"
+    remote_property = source_project / "solver-visible" / "properties.bin"
+    source_survey = source_project / "inputs" / "survey.h5"
+    target_survey = target_project / "inputs" / "survey.h5"
+    values = np.array([[0.25, 0.0], [0.75, 0.0]])
+    for file in (source_file, target_file):
+        file.parent.mkdir(parents=True)
+        with h5py.File(file, "w") as h5:
+            h5.create_dataset("coords", data=values)
+
+    coords = CoordsFromFile(file=source_file, format="HDF5", dset="coords")
+    acq = Acquisition()
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
+    acq.surveys.append(SparseSurvey.file("survey", source_survey))
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=source_project,
+        acquisition=acq,
+        mesh=MeshManager(file=source_mesh, format="Gmsh"),
+    )
+    sim.model += ModelSubdomain(
+        mesh_block_id=1,
+        properties={
+            "vp": Property.file(f"{source_property}:/vp", format="hdf5"),
+            "rho": Property.file(remote_property, remote=True),
+        },
+    )
+
+    result = sim.relocate(target_project)
+    relocated = sim.acquisition.receiver_groups[0].coordinates
+
+    assert result is sim
+    assert sim.project_path == target_project.resolve()
+    assert relocated.file == target_file
+    np.testing.assert_allclose(relocated.get(), values)
+    assert sim.mesh.file == target_mesh
+    assert sim.model.subdomains[0].properties["vp"].file_path == (
+        f"{target_property}:/vp"
+    )
+    assert sim.model.subdomains[0].properties["rho"].file_path == remote_property
+    assert sim.acquisition.surveys[0].layout_file == target_survey
+
+
+def test_save_recovers_previous_root_after_project_path_reassignment(tmp_path):
+    source_project = tmp_path / "source_project"
+    target_project = tmp_path / "target_project"
+    source_file = source_project / "inputs" / "receiver_coords.h5"
+    target_file = target_project / "inputs" / "receiver_coords.h5"
+    values = np.array([[0.25, 0.0], [0.75, 0.0]])
+    for file in (source_file, target_file):
+        file.parent.mkdir(parents=True)
+        with h5py.File(file, "w") as h5:
+            h5.create_dataset("coords", data=values)
+
+    coords = CoordsFromFile(file=source_file, format="HDF5", dset="coords")
+    acq = Acquisition()
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
+    hydrophone = ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=source_project,
+        acquisition=acq,
+    )
+    sim.save()
+
+    sim.project_path = target_project
+    saved = sim.save()
+    relocated = sim.acquisition.receiver_groups[0].coordinates
+
+    assert saved == target_project / "simulations" / "simple" / "simple.json"
+    assert relocated.file == target_file
+    np.testing.assert_allclose(relocated.get(), values)
+
+
+def test_simulation_export_context_accepts_custom_location(tmp_path):
+    project_path = tmp_path / "project"
+    export_root = tmp_path / "export"
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=project_path,
+    )
+
+    ctx = sim.export_context(
+        project_path=export_root,
+        rel_path=Path("custom") / "simple",
+    )
+
+    assert ctx.project_path == export_root.resolve()
+    assert ctx.rel_path == Path("custom") / "simple"
+    assert ctx.path == export_root.resolve() / "custom" / "simple"
+    assert ctx.store.path == ctx.path / "simple.h5"
+    assert sim.project_path == project_path
+
+
+def test_receiver_coordinate_file_rejects_remote_reference():
+    with pytest.raises(ValueError, match="does not support remote coordinate files"):
+        CoordsFromFile(
+            file="remote:/server/receiver_coords.h5",
+            format="HDF5",
+            dset="coords",
+        )
+
+    with pytest.raises(ValueError, match="does not support remote coordinate files"):
+        CoordsFromFile.from_fs(
+            {
+                "_type": "CoordsFromFile",
+                "file": "s3://bucket/receiver_coords.h5:coords",
+                "format": "HDF5",
+            }
+        )
+
+
 def test_receiver_coordinate_file_hash_changes_with_hdf5_contents(tmp_path):
     coord_file = tmp_path / "receiver_coords.h5"
     values = np.array([[x, 0.0] for x in np.linspace(0.0, 1.0, 12)])
@@ -2245,7 +3538,7 @@ def test_receiver_coordinate_file_hash_changes_with_hdf5_contents(tmp_path):
 
     coords = CoordsFromFile(file=coord_file, format="HDF5", dset="coords")
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq.add_receiver_group(name="surface", device=hydrophone, coords=coords)
@@ -2275,7 +3568,7 @@ def test_receiver_coordinate_file_hash_changes_with_hdf5_contents(tmp_path):
 
 def test_remote_input_files_include_simulation_hdf5_store(tmp_path):
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq.add_receiver_group(
@@ -2304,6 +3597,72 @@ def test_remote_input_files_include_simulation_hdf5_store(tmp_path):
         tmp_path / "simulations/simple/simple.h5",
         Path("/remote/project/simulations/simple/simple.h5"),
     ) in files
+
+
+def test_remote_input_files_skip_remote_property_refs(tmp_path):
+    model = ModelBase(name="model", dimension=2)
+    model += ModelSubdomain(
+        mesh_block_id=1,
+        properties={"vp": Property.file("/server/only/vp.bin", remote=True)},
+    )
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.model = model
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+
+    files = job.remote_input_files(Path("/remote/project"))
+
+    assert files == []
+
+
+def test_remote_input_files_include_rsf_sidecar(tmp_path):
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    header = model_dir / "vp.rsf"
+    sidecar = model_dir / "vp.rsf@"
+    np.ones(4, dtype=np.float32).tofile(sidecar)
+    header.write_text(
+        "\n".join(
+            [
+                "n1=2",
+                "n2=2",
+                "d1=0.1",
+                "d2=0.1",
+                "o1=0.0",
+                "o2=0.0",
+                'data_format="native_float"',
+                "esize=4",
+                'in="./vp.rsf@"',
+            ]
+        )
+    )
+
+    model = ModelBase(name="model", dimension=2)
+    model += ModelSubdomain(
+        mesh_block_id=1,
+        properties={"vp": Property.file(header, units="m/s")},
+    )
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.model = model
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+
+    files = job.remote_input_files(Path("/remote/project"))
+
+    assert (header, Path("/remote/project/models/vp.rsf")) in files
+    assert (sidecar, Path("/remote/project/models/vp.rsf@")) in files
 
 
 def test_trace_output_exports_only_traces_key(tmp_path):
@@ -2347,7 +3706,7 @@ def test_job_trace_files_use_new_names(tmp_path):
 
 def test_job_wavefields_use_output_requests_not_trace_receiver_groups(tmp_path):
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq.add_receiver_group(
@@ -2409,7 +3768,7 @@ def test_job_wavefields_use_output_requests_not_trace_receiver_groups(tmp_path):
 
 def test_job_wavefield_artifacts_do_not_override_duplicate_output_names(tmp_path):
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
 
     sim = SeismicSimulation(
         name="simple",
@@ -2441,7 +3800,7 @@ def test_job_wavefield_artifacts_do_not_override_duplicate_output_names(tmp_path
 
 def test_job_wavefields_open_with_unsaved_simulation_file(tmp_path):
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
 
     sim = SeismicSimulation(
         name="simple",
@@ -2484,7 +3843,7 @@ def test_job_wavefields_open_with_unsaved_simulation_file(tmp_path):
 
 def test_job_wavefield_outputs_export_device_component_metadata(tmp_path):
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     sim = SeismicSimulation(
         name="simple",
         physics="elastic",
@@ -2617,7 +3976,8 @@ def test_trace_manifest_accepts_solver_packed_trace_product(tmp_path):
     trace_dir = tmp_path / "results" / "traces"
     trace_dir.mkdir(parents=True)
     packed = trace_dir / "traces.h5"
-    packed.touch()
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=np.array([10.0, 20.0]))
     (trace_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -2762,12 +4122,96 @@ def test_trace_dataset_uses_matching_shard_without_packed_manifest(tmp_path):
     assert traces.manifest.laplace == {1: -0.5}
 
 
-def _write_indexed_packed_trace_product(path, group, *, frequencies, values):
+def _write_frequency_trace_shard(path, group, *, frequency, value=1.0):
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("frequency", data=frequency)
+        h5.create_dataset("laplace", data=-0.5)
+        dset = h5.create_dataset(
+            group,
+            data=np.full((1, 1, 1, 2), value, dtype=np.float32),
+        )
+        dset.attrs["dims"] = ["receiver", "component", "shot"]
+        trace_group = h5.require_group(f"/survey/receiver_groups/{group}/traces")
+        trace_group.create_dataset("receiver_id", data=np.array([101], dtype=np.int32))
+        trace_group.create_dataset("source_id", data=np.array([7], dtype=np.int32))
+        trace_group.create_dataset(
+            "component_name",
+            data=np.array(["p"], dtype=string_dtype),
+        )
+
+
+def test_trace_dataset_uses_nested_frequency_named_shards_when_files_missing(tmp_path):
+    result_path = tmp_path / "results"
+    shard_dir = result_path / "traces" / "shards"
+    shard_dir.mkdir(parents=True)
+    shard_1 = shard_dir / "trace_frequency_10.00000_hz.h5"
+    shard_2 = shard_dir / "trace_frequency_20.00000_hz.h5"
+    _write_frequency_trace_shard(shard_1, "surface", frequency=10.0, value=1.0)
+    _write_frequency_trace_shard(shard_2, "surface", frequency=20.0, value=2.0)
+    manifest = TraceManifest(
+        files=[result_path / "traces_1.h5", result_path / "traces_2.h5"],
+        frequencies={1: 10.0, 2: 20.0},
+        groups=["surface"],
+        simulation=tmp_path / "simulation.json",
+        result_path=result_path,
+        output_path=result_path,
+        project_path=tmp_path,
+    )
+
+    traces = TraceDataset.from_manifest(manifest)
+
+    assert traces.manifest.files == [shard_1, shard_2]
+    assert traces.groups == ["surface"]
+    assert traces.frequencies("surface").tolist() == [10.0, 20.0]
+
+
+def test_trace_store_builds_vds_from_shards_when_all_trace_files_missing(tmp_path):
+    result_path = tmp_path / "results"
+    shard_dir = result_path / "traces" / "shards"
+    shard_dir.mkdir(parents=True)
+    _write_frequency_trace_shard(
+        shard_dir / "trace_frequency_10.00000_hz.h5",
+        "surface",
+        frequency=10.0,
+        value=1.0,
+    )
+    _write_frequency_trace_shard(
+        shard_dir / "trace_frequency_20.00000_hz.h5",
+        "surface",
+        frequency=20.0,
+        value=2.0,
+    )
+    store = TraceStore(
+        metadata={
+            "groups": ["surface"],
+            "output_path": result_path,
+            "result_path": result_path,
+            "f_map": {1: 10.0, 2: 20.0},
+        },
+        files=[result_path / "traces_1.h5", result_path / "traces_2.h5"],
+    )
+
+    with pytest.warns(RuntimeWarning, match="creating a VDS from 2 matching"):
+        assert store.groups == ["surface"]
+
+    assert Path(store._consolidated) == result_path / "traces_vds.h5"
+    assert store.frequencies("surface").tolist() == [10.0, 20.0]
+
+
+def _write_indexed_packed_trace_product(
+    path, group, *, frequencies, values, laplace=None
+):
     string_dtype = h5py.string_dtype(encoding="utf-8")
     numbers = np.arange(1, len(frequencies) + 1, dtype=np.int32)
+    laplace_values = (
+        np.zeros(len(frequencies), dtype=float)
+        if laplace is None
+        else np.asarray(laplace, dtype=float)
+    )
     with h5py.File(path, "w") as h5:
         h5.create_dataset("frequency", data=np.asarray(frequencies, dtype=float))
-        h5.create_dataset("laplace", data=np.zeros(len(frequencies), dtype=float))
+        h5.create_dataset("laplace", data=laplace_values)
         h5.create_dataset("task_id", data=numbers)
         h5.create_dataset(
             "survey/packed_layout_kind",
@@ -2803,7 +4247,7 @@ def _write_indexed_packed_trace_product(path, group, *, frequencies, values):
         h5.create_dataset(
             "trace_index/frequency", data=np.asarray(frequencies, dtype=float)
         )
-        h5.create_dataset("trace_index/laplace", data=np.zeros(len(frequencies)))
+        h5.create_dataset("trace_index/laplace", data=laplace_values)
         h5.create_dataset("trace_index/task_id", data=numbers)
         h5.create_dataset(
             "trace_index/shard_file",
@@ -2834,6 +4278,65 @@ def _write_indexed_packed_trace_product(path, group, *, frequencies, values):
             dset.attrs["receiver"] = np.array([101], dtype=np.int32)
             dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
             dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+
+def test_trace_dataset_filters_indexed_packed_rows_by_frequency_and_laplace(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    _write_indexed_packed_trace_product(
+        packed,
+        "surface",
+        frequencies=[7.999999999999999, 8.0],
+        laplace=[-0.1, -0.2],
+        values=[1.0, 2.0],
+    )
+    manifest = TraceManifest(
+        files=[packed],
+        frequencies={1: 8.0},
+        laplace={1: -0.2},
+        groups=["surface"],
+        simulation=tmp_path / "simulation.json",
+        result_path=tmp_path / "results",
+        output_path=trace_dir,
+        project_path=tmp_path,
+    )
+
+    traces = TraceDataset.from_manifest(manifest)
+    fd = traces.fd("surface", "p", source=7)
+
+    assert traces.frequencies("surface").tolist() == [8.0]
+    assert fd.coords["frequency"].values.tolist() == [8.0]
+    assert fd.coords["laplace"].values.tolist() == pytest.approx([-0.2])
+    assert fd.values[:, 0].real.tolist() == [2.0]
+
+
+def test_trace_dataset_keeps_indexed_packed_rows_without_manifest_laplace(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    _write_indexed_packed_trace_product(
+        packed,
+        "surface",
+        frequencies=[8.0],
+        laplace=[-0.2],
+        values=[2.0],
+    )
+    manifest = TraceManifest(
+        files=[packed],
+        frequencies={1: 8.0},
+        groups=["surface"],
+        simulation=tmp_path / "simulation.json",
+        result_path=tmp_path / "results",
+        output_path=trace_dir,
+        project_path=tmp_path,
+    )
+
+    traces = TraceDataset.from_manifest(manifest)
+    fd = traces.fd("surface", "p", source=7)
+
+    assert fd.coords["laplace"].values.tolist() == pytest.approx([-0.2])
+    assert fd.values[:, 0].real.tolist() == [2.0]
 
 
 def test_trace_dataset_uses_named_wavefield_packed_products(tmp_path):
@@ -3073,12 +4576,56 @@ def test_job_run_current_accepts_current_fast_solver_run_manifest_schema(tmp_pat
     assert job.is_run_current()
 
 
+def test_job_run_current_ignores_rank_and_thread_counts(tmp_path):
+    def sha256(path):
+        return f"sha256:{hashlib.sha256(Path(path).read_bytes()).hexdigest()}"
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job.save()
+    trace_file = tmp_path / "jobs/simple/freq/results/traces/traces_1.h5"
+    trace_file.parent.mkdir(parents=True)
+    trace_file.touch()
+
+    run_dir = job._result_path / "_fs_run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-run-manifest-1",
+                "exit_status": {"code": 0, "status": "success"},
+                "execution": {
+                    "mpi": {"ranks": 128},
+                    "openmp": {"threads": 3},
+                },
+                "inputs": {
+                    "job_file": {"hash": sha256(job._file), "path": str(job._file)},
+                    "simulation_file": {
+                        "hash": sha256(sim._file),
+                        "path": str(sim._file),
+                    },
+                },
+            }
+        )
+    )
+
+    assert job.is_run_current()
+
+
 def test_job_run_current_reacts_to_receiver_coordinate_updates(tmp_path):
     def sha256(path):
         return f"sha256:{hashlib.sha256(Path(path).read_bytes()).hexdigest()}"
 
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acq.add_receiver_group(
@@ -3144,7 +4691,8 @@ def test_job_run_current_accepts_solver_packed_trace_product(tmp_path):
 
     trace_dir = tmp_path / "jobs/simple/freq/results/traces"
     trace_dir.mkdir(parents=True)
-    (trace_dir / "traces.h5").touch()
+    with h5py.File(trace_dir / "traces.h5", "w") as h5:
+        h5.create_dataset("frequency", data=np.array([1.0, 2.0]))
     (trace_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -3377,6 +4925,122 @@ def test_trace_store_uses_first_task_metadata_for_compact_later_tasks(tmp_path):
         assert "dims" not in h5["surface"].attrs
 
 
+def test_trace_store_uses_shared_trace_metadata_for_payload_shards(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    shard_dir = trace_dir / "shards"
+    shard_dir.mkdir(parents=True)
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+
+    metadata = trace_dir / "trace_metadata.h5"
+    with h5py.File(metadata, "w") as h5:
+        h5.create_dataset(
+            "metadata/schema_version",
+            data=np.bytes_("fs_trace_metadata_v1            "),
+        )
+        h5.create_dataset(
+            "survey/schema_version",
+            data=np.array(
+                [np.bytes_("fs_seismic_trace_store_v1        ")],
+            ),
+        )
+        h5.create_dataset(
+            "survey/sources/source_id", data=np.array([7], dtype=np.int32)
+        )
+        receivers = h5.require_group("survey/receiver_groups/surface/receivers")
+        receivers.create_dataset(
+            "receiver_id", data=np.array([101, 102], dtype=np.int32)
+        )
+        receivers.create_dataset(
+            "coordinates",
+            data=np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64),
+        )
+        components = h5.require_group("survey/receiver_groups/surface/components")
+        components.create_dataset(
+            "component_name",
+            data=np.array(["p", "vx"], dtype=string_dtype),
+        )
+        catalog = h5.require_group("survey/receiver_groups/_catalog")
+        catalog.create_dataset(
+            "group_name",
+            data=np.array(["surface"], dtype=string_dtype),
+        )
+        catalog.create_dataset(
+            "dataset_path",
+            data=np.array(["/surface"], dtype=string_dtype),
+        )
+        template = h5.create_dataset(
+            "surface",
+            data=np.zeros((1, 2, 2, 2), dtype=np.float32),
+        )
+        template.attrs["dims"] = ["receiver", "component", "shot"]
+        template.attrs["layout_kind"] = ["dense_trace_v1"]
+        template.attrs["units"] = ["m/s"]
+
+    shards = []
+    for task_id, frequency in enumerate([10.0, 20.0], start=1):
+        path = shard_dir / f"f_{frequency:.5f}_hz.h5"
+        shards.append(path)
+        data = np.zeros((1, 2, 2, 2), dtype=np.float32)
+        data[0, 0, :, 0] = float(task_id)
+        data[0, 1, :, 0] = float(task_id + 10)
+        with h5py.File(path, "w") as h5:
+            h5.create_dataset("frequency", data=frequency)
+            h5.create_dataset("laplace", data=0.0)
+            h5.create_dataset("task_id", data=task_id)
+            h5.create_dataset(
+                "trace_metadata_file",
+                data=np.array(
+                    [np.bytes_("traces/trace_metadata.h5     ")],
+                ),
+            )
+            h5.create_dataset("surface", data=data)
+
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=[trace_dir / "traces_1.h5", trace_dir / "traces_2.h5"],
+            frequencies={1: 10.0, 2: 20.0},
+            groups=["surface"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=trace_dir,
+            project_path=tmp_path,
+        )
+    )
+    traces.consolidate()
+
+    assert traces.manifest.files == shards
+    assert traces.groups == ["surface"]
+    assert traces.sources("surface").tolist() == [7]
+    assert traces.receivers("surface").tolist() == [101, 102]
+    assert traces.components("surface").tolist() == ["p", "vx"]
+    assert traces.frequencies("surface").tolist() == [10.0, 20.0]
+
+    fd = traces.fd("surface", "p", source=7)
+    assert fd.dims == ("frequency", "receiver")
+    assert fd.coords["receiver"].values.tolist() == [101, 102]
+    assert fd.values.real.tolist() == [[1.0, 1.0], [2.0, 2.0]]
+
+    with h5py.File(shards[0], "r") as h5:
+        assert "survey" not in h5
+        assert "dims" not in h5["surface"].attrs
+
+    with h5py.File(traces._store._consolidated, "r") as h5:
+        assert "survey" in h5
+        assert h5["surface"].attrs["units"].tolist() == ["m/s"]
+
+    store = TraceStore(
+        metadata={
+            "groups": ["surface"],
+            "output_path": trace_dir,
+            "result_path": tmp_path / "results",
+            "f_map": {1: 10.0, 2: 20.0},
+        },
+        files=[trace_dir / "traces_1.h5", trace_dir / "traces_2.h5"],
+    )
+    with pytest.warns(RuntimeWarning, match="creating a VDS from 2 matching"):
+        assert store.groups == ["surface"]
+
+
 def test_trace_store_uses_solver_packed_trace_file_without_vds_warnings(tmp_path):
     trace_dir = tmp_path / "results" / "traces"
     trace_dir.mkdir(parents=True)
@@ -3519,6 +5183,76 @@ def test_trace_dataset_td_compensates_laplace_domain_amplitudes(tmp_path):
     assert compensated.attrs["domain"] == "time"
     assert compensated.attrs["laplace_compensated"] is True
     assert compensated.attrs["damping_factor"] == pytest.approx(10.0)
+
+
+def test_trace_dataset_td_ignores_zero_mixed_laplace_frequency(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    frequencies = np.array([1.0, 2.0, 3.0])
+    laplace = np.array([-0.25, -0.25, 0.0])
+    data = np.zeros((frequencies.size, 1, 1, 1, 2), dtype=np.float32)
+    data[0, 0, 0, 0, 0] = 1.0
+    data[1, 0, 0, 0, 0] = 0.5
+
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=frequencies)
+        h5.create_dataset("laplace", data=laplace)
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        dset = h5.create_dataset("surface", data=data)
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.array([101], dtype=np.int32)
+        dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+    traces = TraceDataset.open(packed)
+    td = traces.td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=0.5, center=0.0),
+    )
+
+    assert td.attrs["laplace"] == pytest.approx(-0.25)
+    assert td.attrs["laplace_compensated"] is True
+
+
+def test_trace_dataset_td_rejects_nonzero_mixed_laplace_frequency(tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    frequencies = np.array([1.0, 2.0, 3.0])
+    data = np.zeros((frequencies.size, 1, 1, 1, 2), dtype=np.float32)
+    data[..., 0] = 1.0
+
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=frequencies)
+        h5.create_dataset("laplace", data=np.array([-0.25, -0.25, 0.0]))
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        dset = h5.create_dataset("surface", data=data)
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.array([101], dtype=np.int32)
+        dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+    traces = TraceDataset.open(packed)
+    with pytest.raises(ValueError, match="uniform Laplace offset"):
+        traces.td(
+            "surface",
+            "p",
+            source=7,
+            wavelet=RickerWavelet(f=0.5, center=0.0),
+        )
 
 
 def test_trace_dataset_fd_uses_ordinary_wavelet_spectrum_for_laplace_data(tmp_path):
@@ -4045,7 +5779,7 @@ def test_trace_store_normalizes_dense_trace_axis_order(tmp_path):
 
 def test_sparse_survey_authoring_exports_fast_solver_contract():
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
 
@@ -4086,7 +5820,7 @@ def test_sparse_survey_authoring_exports_fast_solver_contract():
 
 def test_sparse_hdf5_survey_reference_does_not_touch_server_file():
     acq = Acquisition()
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     survey = SparseSurvey.file("marine", "/server/surveys/marine_layout.h5")
@@ -4194,7 +5928,7 @@ def test_boundary_condition_rejects_kind_alias():
         BoundaryCondition.from_fs({"kind": "free", "boundaries": ["z_min"]})
 
 
-def test_boundary_condition_normalizes_pml_reflectivity_to_pml_reflection():
+def test_boundary_condition_serializes_pml_reflectivity():
     bc = BoundaryCondition(
         conditions=["pml"],
         boundaries=["x_min"],
@@ -4208,17 +5942,40 @@ def test_boundary_condition_normalizes_pml_reflectivity_to_pml_reflection():
         }
     )
 
-    assert bc.pml_reflection == 1e-2
-    assert bc.to_fs()["pml_reflection"] == 1e-2
-    assert "pml_reflectivity" not in bc.to_fs()
-    assert from_fs.to_fs()["pml_reflection"] == 1e-3
-    with pytest.raises(ValueError, match="pml_reflection or pml_reflectivity"):
+    assert bc.pml_reflectivity == 1e-2
+    assert bc.to_fs()["pml_reflectivity"] == 1e-2
+    assert "pml_reflection" not in bc.to_fs()
+    assert from_fs.to_fs()["pml_reflectivity"] == 1e-3
+    with pytest.raises(ValueError, match="pml_reflectivity or pml_reflection"):
         BoundaryCondition(
             conditions=["pml"],
             boundaries=["x_min"],
             pml_reflection=1e-3,
             pml_reflectivity=1e-2,
         )
+
+
+def test_boundary_condition_accepts_legacy_pml_reflection_quietly():
+    signature = inspect.signature(BoundaryCondition)
+    bc = BoundaryCondition(
+        conditions=["pml"],
+        boundaries=["x_min"],
+        pml_reflection=2.5e-4,
+    )
+    from_fs = BoundaryCondition.from_fs(
+        {
+            "conditions": ["pml"],
+            "boundaries": ["x_min"],
+            "pml_reflection": 3.5e-4,
+        }
+    )
+
+    assert "pml_reflection" not in signature.parameters
+    assert bc.pml_reflectivity == 2.5e-4
+    assert bc.to_fs()["pml_reflectivity"] == 2.5e-4
+    assert "pml_reflection" not in bc.to_fs()
+    assert from_fs.to_fs()["pml_reflectivity"] == 3.5e-4
+    assert "pml_reflection" not in from_fs.to_fs()
 
 
 def test_boundary_conditions_collection_allows_shared_boundary_conditions():
@@ -4296,11 +6053,9 @@ def test_simulation_accepts_boundary_conditions_directly(tmp_path):
         {
             "conditions": ["pml"],
             "boundaries": ["x_min"],
-            "pml_wavelengths": 2.0,
+            "pml_wavelengths": 0.5,
             "pml_exponent": 3.0,
-            "pml_constant": 20.0,
-            "pml_reflection": 0.001,
-            "stretch_limit": 0.25,
+            "pml_reflectivity": 0.01,
             "name": "pml_xmin",
         },
     ]

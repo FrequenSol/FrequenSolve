@@ -1,14 +1,15 @@
 Boreholes
 =========
 
-:term:`Boreholes <borehole>` are authored on ``LayeredModel``. Current solver
-support is for 2D ``LayeredMeshGenerator`` meshes, which is the common
-axisymmetric borehole case. A borehole describes radial layers such as fluid,
-casing, and cement,
-plus borehole-local radial surfaces such as casing walls. The material
-properties for borehole layers are normal model :term:`subdomains <subdomain>`, so they can use the
-same property, physics, unit, and file-backed workflows as any other material
-block.
+:term:`Boreholes <borehole>` are authored on ``LayeredModel``. The common
+axisymmetric workflow
+uses 2D ``LayeredMeshGenerator`` meshes. 3D layered models support vertical
+boreholes with ``x``/``y`` axes and optional borehole-level annular padding;
+plug/tool-body intervals remain 2D-only. A borehole describes radial layers
+such as fluid, casing, and cement, plus borehole-local radial surfaces such as
+casing walls. The material properties for borehole layers are normal model
+subdomains, so they can use the same property, physics, unit, and file-backed
+workflows as any other material block.
 
 .. note::
 
@@ -151,9 +152,12 @@ For a local radial cross-section, call ``draw`` on a borehole object:
 Each borehole surface gives its cumulative outer radius as ``r``. The first
 layer starts at ``r = 0``; each following layer starts at the previous surface's
 ``r``. Radius is represented internally as a ``Property``, so it accepts
-scalar, :term:`Pint`, :term:`xarray`, file-backed, and structured property inputs. Inline
-variable-radius profiles must be one-dimensional over ``z`` or ``depth`` so the
-layered generator can evaluate radius at cell-centroid depth.
+scalar, :term:`Pint`, :term:`xarray`, file-backed, and structured property
+inputs. Inline
+variable-radius profiles may be one-dimensional over ``z`` or ``depth``. 3D
+surface profiles may also be two-dimensional when they include one angular
+dimension, ``theta``, ``azimuth``, or ``angle``, and one depth dimension,
+``z`` or ``depth``.
 
 Named borehole surfaces are exported as ``inner_surface`` and ``outer_surface``
 aliases on the solver-facing layers. Use explicit surface names when a
@@ -247,6 +251,36 @@ names, ``SimpleSurface`` objects, or solver-ready dictionaries:
        bottom="bottom",
        layers=[...],
        surfaces=[...],
+   )
+
+3D Annular Padding
+------------------
+
+For 3D layered boreholes, pass ``annular_padding`` to ``add_borehole``. The
+setting belongs to the borehole payload, not the mesh generator. ``n`` is the
+number of formation-domain padding cells, ``outer_radius`` is the positive
+outer radius of the padded annulus, and ``power`` is an optional positive radial
+spacing exponent.
+
+.. code-block:: python
+
+   model = fs.LayeredModel(
+       dimension=3,
+       x_limits=[0.0, 1.0],
+       y_limits=[0.0, 1.0],
+   )
+
+   model.add_borehole(
+       name="bh3d",
+       x=0.45 * u.km,
+       y=0.35 * u.km,
+       layers=[...],
+       surfaces=[...],
+       annular_padding={
+           "n": 3,
+           "outer_radius": 0.2 * u.m,
+           "power": 1.5,
+       },
    )
 
 Object API
@@ -393,5 +427,8 @@ surfaces.
    }
 
 The solver should treat ``boreholes[].layers[].mesh_block_id`` as references to
-material subdomains. The FrequenSolve Python API keeps the material definitions in
-``subdomains`` and emits borehole geometry under ``boreholes[].surfaces``.
+material :term:`subdomains <subdomain>`. The FrequenSolve Python API keeps the
+material definitions in
+``subdomains`` and emits borehole geometry under ``boreholes[].surfaces``. A
+3D borehole with padding emits ``boreholes[].annular_padding`` beside its
+surfaces.

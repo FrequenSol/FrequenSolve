@@ -2,13 +2,14 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.jobs.base import BaseJob
+from frequensolve.simulation.outputs import JobOutputs, Output
 from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.util.class_registry import register_class
 
@@ -79,6 +80,33 @@ class ImageDatabase:
         else:
             return self.path / f"image_{part}.h5"
 
+    def require_aggregate(self) -> Path:
+        """Return the aggregate image file or raise a solver-specific error.
+
+        Returns:
+            Path to ``image.h5``.
+
+        Raises:
+            FileNotFoundError: If the aggregate file written by the solver
+                smoothing/stacking workflow is missing.
+        """
+
+        file = self.image_file()
+        if file.exists():
+            return file
+        part_files = [self.image_file(i + 1) for i in range(self.parts)]
+        existing_parts = [path.name for path in part_files if path.exists()]
+        detail = (
+            f" Found per-frequency image shard(s): {', '.join(existing_parts)}."
+            if existing_parts
+            else " No per-frequency image shards were found either."
+        )
+        raise FileNotFoundError(
+            f"Aggregate image file {file} is missing. Sauce writes image.h5 "
+            "during the imaging --smooth postprocess after image_N.h5 shards "
+            f"are produced.{detail}"
+        )
+
     @property
     def raw_images(self):
         """Return images from the solver ``image/raw`` group.
@@ -91,26 +119,55 @@ class ImageDatabase:
 
     @property
     def smoothed_images(self):
-        """Return images from the solver ``image/phi`` group.
+        """Return images from the solver ``image/smoothed`` group.
 
         Returns:
             Dataset containing smoothed image volumes.
         """
 
-        return self.read_images("phi")
+        return self.read_images("smoothed")
 
     @staticmethod
     def _decode_label(value):
         if isinstance(value, bytes):
             return value.decode("utf-8")
+        if isinstance(value, np.bytes_):
+            return value.decode("utf-8")
         return str(value)
+
+    @classmethod
+    def _decode_attr(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, (bytes, np.bytes_)):
+            return cls._decode_label(value)
+        if isinstance(value, np.ndarray):
+            if value.shape == ():
+                return cls._decode_attr(value.item())
+            decoded = [cls._decode_attr(item) for item in value.tolist()]
+            return decoded[0] if len(decoded) == 1 else decoded
+        if isinstance(value, (list, tuple)):
+            decoded = [cls._decode_attr(item) for item in value]
+            return decoded[0] if len(decoded) == 1 else decoded
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    @classmethod
+    def _axis_units(cls, attrs, dims):
+        units = cls._decode_attr(attrs.get("axis_units"))
+        if units is None:
+            return [None] * len(dims)
+        if isinstance(units, str):
+            return [units] * len(dims)
+        return list(units)[::-1]
 
     def read_images(self, group):
         """Read one solver image group into an ``xarray.Dataset``.
 
         Args:
             group: HDF5 group under ``image`` to read, such as ``"raw"`` or
-                ``"phi"``.
+                ``"smoothed"``.
 
         Returns:
             Dataset containing one data variable per imaged property.
@@ -120,24 +177,36 @@ class ImageDatabase:
         import xarray as xr
 
         images = xr.Dataset()
-        file = self.image_file()
+        file = self.require_aggregate()
         with h5py.File(file, "r") as f:
             h5group = f["image"][group]
             properties = [self._decode_label(p) for p in h5group["properties"]]
             for prop in properties:
-                attrs = h5group[prop].attrs
+                h5data = h5group[prop]
+                attrs = h5data.attrs
                 x0 = np.asarray(attrs["x0"])[::-1]
                 x1 = np.asarray(attrs["x1"])[::-1]
                 n = np.asarray(attrs["n_grid"], dtype=int)[::-1]
                 dims = [self._decode_label(dim) for dim in attrs["dims"][::-1]]
+                axis_units = self._axis_units(attrs, dims)
                 coords = {}
                 for i, dim in enumerate(dims):
                     coords[dim] = np.linspace(x0[i], x1[i], n[i])
                 im = xr.DataArray(
-                    data=h5group[prop][:].reshape(n),
+                    data=h5data[:].reshape(n),
                     dims=dims,
                     coords=coords,
                 )
+                for dim, units in zip(dims, axis_units):
+                    if units:
+                        im.coords[dim].attrs["units"] = units
+                units = self._decode_attr(attrs.get("units"))
+                if units:
+                    im.attrs["units"] = units
+                for attr_name in ("coordinate_system", "value_scale", "value_storage"):
+                    value = self._decode_attr(attrs.get(attr_name))
+                    if value is not None:
+                        im.attrs[attr_name] = value
                 images[prop] = im
         return images
 
@@ -148,27 +217,18 @@ class MisfitGroup:
 
     Args:
         name: Receiver group name.
-        observed: Directory containing observed traces, or a group-specific
-            trace path.
-        simulated: Directory containing simulated traces, or a group-specific
-            trace path.
+        observed: Trace-store root for observed receiver data, or
+            ``None`` to request solver-side zero data.
+        simulated: Trace-store root for simulated receiver data.
     """
 
     name: str = ""
-    observed: Union[str, Path] = ""
+    observed: Optional[Union[str, Path]] = None
     simulated: Union[str, Path] = ""
 
     def __post_init__(self):
-        """Append the group name to observed/simulated paths when needed."""
-
-        self.observed = self._with_group(self.observed)
-        self.simulated = self._with_group(self.simulated)
-
-    def _with_group(self, path: Union[str, Path]) -> Path:
-        path = Path(path)
-        if self.name and path.name != self.name:
-            return path / self.name
-        return path
+        self.observed = None if self.observed is None else Path(self.observed)
+        self.simulated = Path(self.simulated)
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
         """Serialize the receiver-group misfit path mapping.
@@ -196,7 +256,7 @@ class MisfitGroup:
             data: Serialized misfit-group payload.
 
         Returns:
-            ``MisfitGroup`` with group-specific paths restored.
+            ``MisfitGroup`` with trace-store roots restored.
         """
 
         return cls(
@@ -218,8 +278,6 @@ class Misfit:
 
     norm: Literal["L2"] = "L2"
     receiver_groups: List[MisfitGroup] = field(default_factory=list)
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
         """Serialize the imaging misfit configuration.
@@ -265,7 +323,9 @@ class ImagingJob(BaseJob):
     Args:
         name: Job name used in project paths and serialized payloads.
         simulation: Seismic simulation used to compute simulated data.
-        data_path: Directory containing observed trace data.
+        data_path: Optional directory containing observed trace data. When
+            ``None``, the solver receives ``null`` and uses zero data to compute
+            sensitivity kernels.
         f_list: Frequencies to image.
         resolution: Optional image-grid resolution used when ``grid`` is not
             provided.
@@ -280,16 +340,17 @@ class ImagingJob(BaseJob):
         regularization: Optional smoothing/regularization payload.
         save_path: Optional image-output directory.
         reassemble_adjoint: Request adjoint reassembly from stored pieces.
+        outputs: Optional output request or output collection for this job.
         **kwargs: Extra imaging payload fields preserved on export.
 
     Raises:
-        FileNotFoundError: If ``data_path`` does not exist.
+        FileNotFoundError: If a non-null ``data_path`` does not exist.
         ValueError: If weights do not match frequencies or a grid cannot be
             inferred from the simulation model.
     """
 
     misfit: Misfit = field(default_factory=Misfit)
-    data_path: Union[str, Path]
+    data_path: Optional[Union[str, Path]]
     save_path: Union[str, Path]
     grid: CartesianGrid = field(default_factory=CartesianGrid)
     keep_forward: bool = False
@@ -303,8 +364,8 @@ class ImagingJob(BaseJob):
         self,
         name: str,
         simulation: SeismicSimulation,
-        data_path: Union[str, Path],
-        f_list: List[float],
+        data_path: Optional[Union[str, Path]] = None,
+        f_list: Optional[List[float]] = None,
         resolution: Optional[List[int]] = None,
         grid: Optional[CartesianGrid] = None,
         images: Optional[dict] = None,
@@ -317,6 +378,7 @@ class ImagingJob(BaseJob):
         regularization: Optional[dict] = None,
         save_path: Optional[Union[str, Path]] = None,
         reassemble_adjoint: bool = False,
+        outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
         **kwargs,
     ) -> None:
         """Create an imaging job.
@@ -328,18 +390,21 @@ class ImagingJob(BaseJob):
 
         if "misfit_type" in kwargs:
             misfit_norm = kwargs.pop("misfit_type")
+        if f_list is None:
+            raise ValueError("f_list is required for an imaging job")
         simulation.save()
         super().__init__(
             name=name,
             simulation=simulation,
             f_list=f_list,
             workflow="RTM",
+            outputs=JobOutputs(outputs),
         )
 
         f_sim = self.trace_outputs.path
 
-        self.data_path = Path(data_path)
-        if not self.data_path.exists():
+        self.data_path = None if data_path is None else Path(data_path)
+        if self.data_path is not None and not self.data_path.exists():
             raise FileNotFoundError(f"Data path {self.data_path} does not exist")
 
         if save_path is not None:
@@ -387,7 +452,7 @@ class ImagingJob(BaseJob):
             self.misfit.receiver_groups.append(
                 MisfitGroup(
                     name=receiver_group.name,
-                    observed=Path(data_path),
+                    observed=self.data_path,
                     simulated=f_sim,
                 )
             )
@@ -432,7 +497,43 @@ class ImagingJob(BaseJob):
     def _local_image_path(self):
         return self.save_path
 
-    def _export_path(self, path: Union[str, Path], *, project_relative: bool = False):
+    def image_file(self, part: Optional[int] = None) -> Path:
+        """Return the local aggregate or per-frequency image file path."""
+
+        if part is None:
+            return self.save_path / "image.h5"
+        return self.save_path / f"image_{part}.h5"
+
+    def image_output_exists(self) -> bool:
+        """Return whether the aggregate image product exists locally."""
+
+        return self.image_file().is_file()
+
+    def image_part_outputs_exist(self) -> bool:
+        """Return whether every per-frequency image shard exists locally."""
+
+        return all(
+            self.image_file(part).is_file() for part in range(1, self.n_tasks + 1)
+        )
+
+    def needs_image_smoothing(self) -> bool:
+        """Return whether local shards are present but ``image.h5`` is missing."""
+
+        return self.image_part_outputs_exist() and not self.image_output_exists()
+
+    def is_run_current(self) -> bool:
+        """Return whether the imaging run and aggregate image are current."""
+
+        return super().is_run_current() and self.image_output_exists()
+
+    def _export_path(
+        self,
+        path: Optional[Union[str, Path]],
+        *,
+        project_relative: bool = False,
+    ):
+        if path is None:
+            return None
         path = Path(path)
         if not project_relative:
             return path
@@ -615,6 +716,7 @@ class ImagingJob(BaseJob):
             regularization=image_data.pop("Smoothing", None),
             weights=image_data.pop("weights", None),
             reassemble_adjoint=image_data.pop("reassemble_adjoint", None),
+            outputs=JobOutputs.from_fs(data.pop("Outputs", None)),
             **image_data,
         )
         job.misfit = misfit
@@ -634,6 +736,11 @@ def extract_frequencies_for_job(job: ImagingJob, td):
 
     import h5py
     import xarray as xr
+
+    if job.data_path is None:
+        raise ValueError(
+            "Cannot extract observed frequencies for an imaging job without data_path"
+        )
 
     # Make frequency domain data array
     shape = list(td.shape)

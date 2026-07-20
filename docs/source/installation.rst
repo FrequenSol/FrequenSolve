@@ -44,7 +44,7 @@ Choose the smallest install that matches the workflow you need:
      - Requires a FrequenSol Cloud account and license.
    * - Run with a local solver
      - ``python -m pip install "frequensolve[parallel]"``
-     - Requires an installed :term:`fast solver` and :term:`FS_SOLVER_PATH`.
+     - Requires an installed :term:`fast solver` configured in ``site.toml``.
    * - Run on an HPC cluster
      - ``python -m pip install "frequensolve[hpc]"``
      - Requires :term:`SSH`/:term:`SLURM` access and a solver installation on
@@ -60,13 +60,14 @@ All available user extras are:
 
 .. code-block:: bash
 
-   python -m pip install "frequensolve[visual]"
-   python -m pip install "frequensolve[parallel]"
-   python -m pip install "frequensolve[hpc]"
-   python -m pip install "frequensolve[cloud]"
-   python -m pip install "frequensolve[seismic-io]"
-   python -m pip install "frequensolve[fast-fft]"
-   python -m pip install "frequensolve[inversion]"
+   python -m pip install "frequensolve[visual]"      # plotting, VTK/PyVista helpers
+   python -m pip install "frequensolve[parallel]"    # local Dask execution
+   python -m pip install "frequensolve[hpc]"         # SSH and SLURM site support
+   python -m pip install "frequensolve[cloud]"       # FrequenSol cloud backend
+   python -m pip install "frequensolve[seismic-io]"  # SEG-Y/ASDF export helpers
+   python -m pip install "frequensolve[fast-fft]"     # pyFFTW acceleration
+   python -m pip install "frequensolve[inversion]"    # PyLops-compatible operators
+   python -m pip install "frequensolve[dev,docs]"    # tests and documentation builds
 
 Extras can be combined:
 
@@ -77,10 +78,50 @@ Extras can be combined:
 Solver Access
 -------------
 
-The Python package does not include the solver executable. To run the solver,
-first :ref:`configure a site <site-configuration>` to run the solver on. A
-valid license is required to run the solver. Our `cloud site
-<https://frequensol.com/pricing>`__ is the quickest way to get started.
+The Python package does not include the fast solver executable. To execute
+jobs, :ref:`configure a site <site-configuration>` using one of the supported
+backends. A valid license is required; the cloud site is the quickest managed
+path to solver access.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 76
+
+   * - Site
+     - Requirement
+   * - ``LocalSite``
+     - A local solver binary configured with the profile's ``solver`` key.
+   * - ``AWSSite``
+     - FrequenSol cloud access and the ``cloud`` extra.
+   * - ``SlurmSite`` / ``Stampede3Site``
+     - SSH/SLURM access, the ``hpc`` extra, and a solver installation on the cluster.
+
+Site paths, hosts, usernames, accounts, and scheduler defaults belong in
+``~/.frequensolve/site.toml``. HPC passwords and SSH-key passphrases are
+prompted securely and saved to the operating system keyring only after a
+successful login. A project ``.env`` file is not required.
+Scheduler resources are included in the Python package, so neither
+``PYTHONPATH`` nor a source-checkout path is part of installation. Supported
+solver builds contain their own compiled-in resources.
+
+The notebooks in :doc:`tutorials/index` use strict run cells. If the selected
+site is not configured or the solver is unavailable, the cell should fail and
+point you toward the relevant job/site logs.
+
+Development Install
+-------------------
+
+For package development and documentation work:
+
+.. code-block:: bash
+
+   python -m pip install -e ".[dev,docs,visual]"
+
+Build the documentation locally with:
+
+.. code-block:: bash
+
+   python -m sphinx -b html docs/source docs/build/html
 
 Verification
 ------------

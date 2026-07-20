@@ -242,7 +242,6 @@ class CognitoAuth:
         logger.debug("Getting Identity ID...")
         logger.debug(f"  Identity Pool ID: {self.identity_pool_id}")
         logger.debug(f"  Provider: {provider_name}")
-        logger.debug(f"  ID Token (first 50 chars): {id_token[:50]}...")
 
         try:
             # Get Identity ID
@@ -250,20 +249,14 @@ class CognitoAuth:
                 IdentityPoolId=self.identity_pool_id, Logins={provider_name: id_token}
             )
 
-            logger.debug("Identity Response:")
-            logger.debug(f"  {json.dumps(identity_response, indent=2, default=str)}")
-
             identity_id = identity_response["IdentityId"]
-            logger.debug(f"Identity ID: {identity_id}")
+            logger.debug("Identity ID obtained successfully")
 
             # Get AWS credentials for this identity
             logger.debug("Getting credentials for identity...")
             credentials_response = self.identity_client.get_credentials_for_identity(
                 IdentityId=identity_id, Logins={provider_name: id_token}
             )
-
-            logger.debug("Credentials Response:")
-            logger.debug(f"  {json.dumps(credentials_response, indent=2, default=str)}")
 
             credentials = credentials_response["Credentials"]
 
@@ -289,10 +282,6 @@ class CognitoAuth:
             logger.debug("ClientError occurred:")
             logger.debug(f"  Error Code: {e.response['Error']['Code']}")
             logger.debug(f"  Error Message: {e.response['Error']['Message']}")
-            logger.debug(
-                f"  Full Response: {json.dumps(e.response, indent=2, default=str)}"
-            )
-
             error_code = e.response["Error"]["Code"]
             if error_code == "NotAuthorizedException":
                 raise ValueError("Authentication failed. Please login again.") from e
@@ -300,7 +289,6 @@ class CognitoAuth:
                 raise
         except KeyError as e:
             logger.debug(f"KeyError - missing key: {e}")
-            logger.debug(f"  Available keys in credentials: {list(credentials.keys())}")
             raise
 
     def get_cached_tokens(self) -> Dict[str, str]:

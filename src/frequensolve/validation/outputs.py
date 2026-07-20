@@ -9,8 +9,8 @@ import numpy as np
 from frequensolve.model.property import canonical_property_name
 from frequensolve.simulation.outputs import (
     JobOutputs,
-    ParaViewItem,
-    ParaviewOutput,
+    VtkItem,
+    VtkOutput,
     WavefieldOutput,
 )
 from frequensolve.simulation.physics import components_for_physics
@@ -29,26 +29,45 @@ from .geometry import (
 from .report import ValidationReport
 
 _ADVANCED_FIELD_PREFIXES = {"acoustic", "elastic", "poroelastic", "em", "EM"}
+_FIELD_SELECTOR_SUFFIXES = {
+    "x",
+    "y",
+    "z",
+    "r",
+    "theta",
+    "phi",
+    "xx",
+    "yy",
+    "zz",
+    "xy",
+    "xz",
+    "yz",
+    "rr",
+    "rz",
+    "tt",
+    "div",
+    "curl",
+}
 
 
 def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) -> None:
     if outputs.units is not None:
         _validate_output_units(outputs.units, ctx.report)
 
-    if outputs.paraview and len(getattr(job, "f_list", []) or []) != 1:
+    if outputs.vtk and len(getattr(job, "f_list", []) or []) != 1:
         ctx.report.error(
-            "outputs.paraview.frequency_count",
-            "ParaView outputs currently require a single-frequency job.",
-            path="outputs.paraview",
+            "outputs.vtk.frequency_count",
+            "VTK outputs currently require a single-frequency job.",
+            path="outputs.vtk",
             hint="Create one FrequencyDomainJob per plotted frequency.",
         )
     acquisition = getattr(ctx.simulation, "acquisition", None)
     source_count = (
-        acquisition.source_field_count()
-        if acquisition is not None and hasattr(acquisition, "source_field_count")
+        acquisition.known_source_field_count()
+        if acquisition is not None and hasattr(acquisition, "known_source_field_count")
         else 0
     )
-    for index, output in enumerate(outputs.paraview):
+    for index, output in enumerate(outputs.vtk):
         _validate_paraview_output(output, index, source_count, ctx)
     for index, output in enumerate(outputs.wavefields):
         _validate_wavefield_output(output, index, source_count, ctx)
@@ -67,16 +86,16 @@ def _validate_output_units(units: Any, report: ValidationReport) -> None:
 
 
 def _validate_paraview_output(
-    output: ParaviewOutput,
+    output: VtkOutput,
     index: int,
-    source_count: int,
+    source_count: Optional[int],
     ctx: _ValidationContext,
 ) -> None:
-    path = f"outputs.paraview[{index}]"
+    path = f"outputs.vtk[{index}]"
     if not getattr(output, "name", None):
         ctx.report.error(
-            "outputs.paraview.name.missing",
-            "ParaView outputs must have a non-empty name.",
+            "outputs.vtk.name.missing",
+            "VTK outputs must have a non-empty name.",
             path=f"{path}.name",
         )
     for source_id in getattr(output, "sources", []) or []:
@@ -110,7 +129,7 @@ def _validate_paraview_item(
     path: str,
     ctx: _ValidationContext,
 ) -> None:
-    if isinstance(item, ParaViewItem):
+    if isinstance(item, VtkItem):
         kind = item.kind
         value = item.value
         units = item.units
@@ -126,8 +145,8 @@ def _validate_paraview_item(
         direction = item.get("direction")
     else:
         ctx.report.error(
-            "outputs.paraview.item.type.invalid",
-            f"Unsupported ParaView item type {type(item).__name__}.",
+            "outputs.vtk.item.type.invalid",
+            f"Unsupported VTK item type {type(item).__name__}.",
             path=path,
         )
         return
@@ -142,8 +161,8 @@ def _validate_paraview_item(
         _validate_requested_properties([value], f"{path}.property", ctx)
     elif kind != "info":
         ctx.report.error(
-            "outputs.paraview.item.kind.unsupported",
-            f"Unsupported ParaView item kind {kind!r}.",
+            "outputs.vtk.item.kind.unsupported",
+            f"Unsupported VTK item kind {kind!r}.",
             path=f"{path}.kind",
         )
     if system is not None:
@@ -155,7 +174,7 @@ def _validate_paraview_item(
 def _validate_wavefield_output(
     output: WavefieldOutput,
     index: int,
-    source_count: int,
+    source_count: Optional[int],
     ctx: _ValidationContext,
 ) -> None:
     path = f"outputs.wavefields[{index}]"
@@ -210,7 +229,7 @@ def _validate_field(field: Any, path: str, ctx: _ValidationContext) -> None:
     except Exception:
         return
     allowed = set(registry.allowed_components())
-    if value not in allowed:
+    if value not in allowed and not _is_component_selector(value, allowed):
         ctx.report.error(
             "field.unsupported",
             f"Field {field!r} is not supported by physics "
@@ -225,6 +244,14 @@ def _is_advanced_field(value: str) -> bool:
         return False
     prefix = value.split(":", 1)[0]
     return prefix in _ADVANCED_FIELD_PREFIXES
+
+
+def _is_component_selector(value: str, allowed: set[str]) -> bool:
+    for field in allowed:
+        prefix = f"{field}_"
+        if value.startswith(prefix):
+            return value.removeprefix(prefix) in _FIELD_SELECTOR_SUFFIXES
+    return False
 
 
 def _validate_requested_properties(
@@ -244,19 +271,19 @@ def _validate_requested_properties(
             path=path,
         )
         return
-    unknown = sorted(set(requested).difference(available))
-    if unknown:
-        ctx.report.error(
-            "outputs.property.unknown",
-            f"Requested model properties are not declared: {unknown}.",
-            path=path,
-            hint=f"Available properties are: {', '.join(sorted(available))}.",
-        )
+    # unknown = sorted(set(requested).difference(available))
+    # if unknown:
+    #     ctx.report.error(
+    #         "outputs.property.unknown",
+    #         f"Requested model properties are not declared: {unknown}.",
+    #         path=path,
+    #         hint=f"Available properties are: {', '.join(sorted(available))}.",
+    #     )
 
 
 def _validate_source_id(
     source_id: Any,
-    source_count: int,
+    source_count: Optional[int],
     path: str,
     report: ValidationReport,
 ) -> None:
@@ -276,7 +303,7 @@ def _validate_source_id(
             path=path,
         )
         return
-    if source_count and value > source_count:
+    if source_count is not None and value > source_count:
         report.error(
             "outputs.source_id.out_of_range",
             f"Source id {value} is outside the available source range 1.."

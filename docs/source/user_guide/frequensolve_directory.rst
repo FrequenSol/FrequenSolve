@@ -53,6 +53,10 @@ Directory Contents
    * - ``site.toml``
      - User-editable execution :term:`site configuration file` read by
        ``fs.Site()``.
+   * - Operating-system keyring
+     - HPC passwords and SSH-key passphrases saved after a successful login.
+       This state is managed by macOS Keychain, Windows Credential Manager, or
+       a supported Linux Secret Service rather than a file in this directory.
    * - ``cloud/credentials``
      - Cached FrequenSol Cloud :term:`Cognito` tokens written by ``AWSSite``.
        This file is sensitive and is written with owner-only permissions.
@@ -66,6 +70,11 @@ configuration cache files are managed by the :term:`Python API`; delete them to 
 a fresh login or fresh domain configuration fetch, but do not hand-edit token
 values.
 
+The site file and cloud JSON cache are intentionally different. ``site.toml``
+records the user's execution profiles. ``cloud/config_<domain>.json`` is an
+AWS-specific cache fetched from ``<domain>/api/config.json`` and may be
+regenerated at any time; it is not a site-profile file.
+
 The ``site.toml`` file format is documented separately in
 :doc:`site_configuration`. Start there when you need to configure a cloud,
 local, or :term:`HPC` execution backend.
@@ -76,6 +85,12 @@ Security and Cleanup
 Do not commit files from ``~/.frequensolve`` or any custom
 ``FREQUENSOLVE_HOME`` directory. These files are user-local and may contain
 credentials or environment-specific paths.
+
+Do not put passwords, SSH-key passphrases, or two-factor codes in
+``site.toml``. Headless systems without an available keyring can use an SSH
+agent, prompt on each session, or provide the documented process environment
+variables for automation. FrequenSolve never writes a plaintext credential
+fallback.
 
 To force a fresh cloud login, delete ``cloud/credentials``. To force a fresh
 domain configuration fetch, delete the relevant ``cloud/config_<domain>.json``

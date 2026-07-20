@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import shlex
 import stat
 import subprocess
 import tarfile
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Union
 
 from frequensolve.orchestrator.sites.base import _wait_for_path
+from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
+from frequensolve.orchestrator.utils.ssh import control_socket_ssh_options
 from frequensolve.util.setup_logger import init_logger
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
@@ -51,7 +56,7 @@ class SlurmTransferManager:
         try:
             site.run_login(f"mkdir -p {remote_path.parent}")
 
-            if site.transfer_method == "sftp":
+            if self._uses_sftp():
                 sftp = site.login_client.open_sftp()
                 try:
                     if local_path.is_dir():
@@ -98,7 +103,7 @@ class SlurmTransferManager:
 
         try:
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            if site.transfer_method == "sftp":
+            if self._uses_sftp():
                 logger.debug("Transferring %s to %s (SFTP)", remote_path, local_path)
                 sftp = site.login_client.open_sftp()
                 try:
@@ -130,24 +135,73 @@ class SlurmTransferManager:
         )
 
     def _run_rsync(self, source: str, target: str) -> None:
-        rsync_cmd = ["rsync", "-azP", source, target]
+        debug_output = logger.isEnabledFor(logging.DEBUG)
+        rsync_flags = "-avzP" if debug_output else "-az"
+        rsync_cmd = ["rsync", rsync_flags]
+        if not debug_output:
+            rsync_cmd.append("--partial")
+        rsync_cmd.extend([source, target])
+        if self.site._login_client.is_proxy():
+            control_path, _ = self.site._login_client.get_proxy_details()
+            if not control_path:
+                raise RuntimeError(
+                    "Authenticated SSH proxy did not provide its control socket path"
+                )
+            ssh_command = shlex.join(["ssh", *control_socket_ssh_options(control_path)])
+            rsync_cmd[1:1] = ["-e", ssh_command]
         logger.debug("rsync: %s", rsync_cmd)
-        result = subprocess.run(rsync_cmd, capture_output=True, text=True)
+        if debug_output:
+            logger.debug("Streaming rsync file names and progress to the console")
+            result = subprocess.run(rsync_cmd, text=True)
+        else:
+            result = subprocess.run(rsync_cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            raise RuntimeError(f"rsync failed: {result.stderr}")
+            detail = result.stderr or "see the streamed rsync output above"
+            raise RuntimeError(f"rsync failed: {detail}")
+
+    def _uses_sftp(self) -> bool:
+        """Return whether transfers should use the authenticated SFTP channel."""
+
+        if self.site.transfer_method == "sftp":
+            return True
+        if self.site.transfer_method != "rsync":
+            raise ValueError(
+                "transfer_method must be either 'rsync' or 'sftp', got "
+                f"{self.site.transfer_method!r}"
+            )
+        if self.site._login_client.is_proxy():
+            return False
+        logger.debug(
+            "Using SFTP because rsync cannot reuse the authenticated Paramiko "
+            "connection"
+        )
+        return True
+
+    def _local_tmp_parent(self) -> Path:
+        path = _host_tmp_path_for_config(getattr(self.site, "_site_config_path", None))
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _remote_tmp_file(self, suffix: str) -> Path:
+        tmp_dir = Path(getattr(self.site, "remote_tmp_dir", None) or "/tmp")
+        return tmp_dir / f"frequensolve-{uuid.uuid4().hex}{suffix}"
 
     def _put_dir(self, sftp, local_dir: Path, remote_dir: Path):
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz") as tmp:
+        with tempfile.NamedTemporaryFile(
+            suffix=".tar.gz",
+            dir=self._local_tmp_parent(),
+        ) as tmp:
             with tarfile.open(tmp.name, "w:gz") as tar:
                 tar.add(local_dir, arcname=local_dir.name)
 
-            remote_tar = str(remote_dir.parent / f"{remote_dir.name}.tar.gz")
-            sftp.put(tmp.name, remote_tar)
+            remote_tar = self._remote_tmp_file(".tar.gz")
+            self.site.run_login(f"mkdir -p {shlex.quote(str(remote_tar.parent))}")
+            sftp.put(tmp.name, str(remote_tar))
 
             _, _, stderr = self.site.run_login_cmd(
-                f"cd {remote_dir.parent} && "
-                f"tar xzf {remote_dir.name}.tar.gz && "
-                f"rm {remote_dir.name}.tar.gz"
+                f"cd {shlex.quote(str(remote_dir.parent))} && "
+                f"tar xzf {shlex.quote(str(remote_tar))} && "
+                f"rm -f {shlex.quote(str(remote_tar))}"
             )
 
             err = stderr.read().decode().strip()
@@ -156,24 +210,36 @@ class SlurmTransferManager:
                 raise RuntimeError(f"Failed to extract directory on remote: {err}")
 
     def _get_dir(self, sftp, remote_dir: Path, local_dir: Path):
-        remote_tar = str(remote_dir.parent / f"{remote_dir.name}.tar.gz")
+        remote_tar = self._remote_tmp_file(".tar.gz")
         _, _, stderr = self.site.run_login_cmd(
-            f"cd {remote_dir.parent} && "
-            f"tar czf {remote_dir.name}.tar.gz {remote_dir.name}"
+            f"mkdir -p {shlex.quote(str(remote_tar.parent))} && "
+            f"cd {shlex.quote(str(remote_dir.parent))} && "
+            f"tar czf {shlex.quote(str(remote_tar))} "
+            f"{shlex.quote(remote_dir.name)}"
         )
 
         err = stderr.read().decode().strip()
         if err:
             raise RuntimeError(f"Failed to create tar payload on remote: {err}")
 
-        local_tar = str(local_dir.parent / f"{local_dir.name}.tar.gz")
-        sftp.get(remote_tar, local_tar)
+        with tempfile.NamedTemporaryFile(
+            suffix=".tar.gz",
+            dir=self._local_tmp_parent(),
+            delete=False,
+        ) as tmp:
+            local_tar = tmp.name
 
-        with tarfile.open(local_tar, "r:gz") as tar:
-            tar.extractall(path=local_dir.parent)
+        try:
+            sftp.get(str(remote_tar), local_tar)
 
-        os.remove(local_tar)
-        self.site.run_login(f"rm {remote_tar}")
+            with tarfile.open(local_tar, "r:gz") as tar:
+                tar.extractall(path=local_dir.parent, filter="data")
+        finally:
+            try:
+                os.remove(local_tar)
+            except FileNotFoundError:
+                pass
+            self.site.run_login(f"rm -f {shlex.quote(str(remote_tar))}")
 
     @staticmethod
     def _sftp_is_dir(sftp, remote_path: Union[str, Path]) -> bool:

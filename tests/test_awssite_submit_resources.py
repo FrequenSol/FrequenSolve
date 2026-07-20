@@ -26,7 +26,7 @@ class FakeJob:
 
     def __init__(self):
         self.project_path = Path("project-a")
-        self.simulation = SimpleNamespace(_remote_path=Path("project-a/simulation-a"))
+        self.simulation = SimpleNamespace(project_path=Path("project-a"))
         self._job_id = None
 
     def is_run_current(self):
@@ -66,6 +66,35 @@ def make_rest_site():
     return site
 
 
+def test_aws_cli_environment_replaces_credentials_and_removes_profiles(
+    monkeypatch,
+):
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "inherited-access")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "inherited-secret")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "inherited-token")
+    monkeypatch.setenv("AWS_PROFILE", "inherited-profile")
+    monkeypatch.setenv("HPC_PASSWORD", "hpc-secret")
+    credentials = SimpleNamespace(
+        get_frozen_credentials=lambda: SimpleNamespace(
+            access_key="temporary-access",
+            secret_key="temporary-secret",
+            token="temporary-token",
+        )
+    )
+    site = AWSSite.__new__(AWSSite)
+    site.session = SimpleNamespace(get_credentials=lambda: credentials)
+    site.config = SimpleNamespace(region="us-test-1")
+
+    environment = site._aws_cli_env()
+
+    assert environment["AWS_ACCESS_KEY_ID"] == "temporary-access"
+    assert environment["AWS_SECRET_ACCESS_KEY"] == "temporary-secret"
+    assert environment["AWS_SESSION_TOKEN"] == "temporary-token"
+    assert environment["AWS_DEFAULT_REGION"] == "us-test-1"
+    assert "AWS_PROFILE" not in environment
+    assert "HPC_PASSWORD" not in environment
+
+
 def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
     site = make_graphql_site()
     job = FakeJob()
@@ -84,6 +113,16 @@ def test_graphql_submit_sends_explicit_resource_overrides():
 
     assert site.graphql_client.submit_calls[0]["vcpu"] == 8
     assert site.graphql_client.submit_calls[0]["memory"] == 16384
+
+
+@pytest.mark.parametrize("skip", [False, "false"])
+def test_graphql_submit_skip_false_requests_fresh_run(skip):
+    site = make_graphql_site()
+    job = FakeJob()
+
+    site.submit(job, skip=skip)
+
+    assert site.graphql_client.submit_calls[0]["fresh"] is True
 
 
 def test_rest_submit_preserves_backend_resource_defaults_when_omitted(monkeypatch):
@@ -140,3 +179,24 @@ def test_rest_submit_sends_only_explicit_resource_overrides(monkeypatch):
 
     assert requests[0]["json"]["vcpu"] == 8
     assert "memory" not in requests[0]["json"]
+
+
+@pytest.mark.parametrize("skip", [False, "false"])
+def test_rest_submit_skip_false_requests_fresh_run(monkeypatch, skip):
+    site = make_rest_site()
+    job = FakeJob()
+    requests = []
+
+    def fake_post(url, json, headers, timeout):
+        requests.append(json)
+        return SimpleNamespace(
+            status_code=200,
+            text="",
+            json=lambda: {"status": "success", "simulation_id": "simulation-1"},
+        )
+
+    monkeypatch.setattr(aws_module.requests, "post", fake_post)
+
+    site.submit(job, skip=skip)
+
+    assert len(requests) == 1

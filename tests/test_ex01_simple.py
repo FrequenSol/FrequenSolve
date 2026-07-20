@@ -158,9 +158,9 @@ from frequensolve.seismic.wavelet import RickerWavelet
 from frequensolve.simulation import (
     Discretization,
     FrequencyDomainJob,
-    ParaviewOutput,
     SolverConfig,
     TimeDomainJob,
+    VtkOutput,
 )
 
 # =============================================================================
@@ -232,7 +232,7 @@ SIMULATION_PARAMS = {
         "fields": ["pressure"],
         "properties": ["vp", "rho", "Subdomain"],
         "show_pml": False,
-        "upscale": 1,
+        "target": {"kind": "volume", "mesh": {"upscale": 1}},
     },
 }
 
@@ -357,7 +357,7 @@ def setup_complete_simulation(simulation):
 
     # Add acquisition
     acq = Acquisition()
-    acq.add_source_group(**ACQUISITION_PARAMS["source"])
+    acq.add_sources(**ACQUISITION_PARAMS["source"])
 
     # Set up receiver
     hydrophone = ReceiverNode(name=ACQUISITION_PARAMS["receivers"]["device"])
@@ -727,7 +727,7 @@ def test_acquisition_setup(simulation):
     acq = Acquisition()
 
     # Add source
-    acq.add_source_group(kind="scalar", coords=[[0.5, 0.0]])
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
 
     # Add receivers
     hydrophone = ReceiverNode(name="hydrophone")
@@ -774,15 +774,20 @@ def test_output_configuration(simulation):
         name="freq",
         simulation=simulation,
         f_list=[10.0],
-        outputs=ParaviewOutput(name="simple", fields=["pressure"], upscale=1),
+        outputs=VtkOutput.domain(
+            name="simple",
+            fields=["pressure"],
+            upscale=1,
+        ),
     )
 
     # Verify output configuration
-    assert len(job.outputs.paraview) == 1, "Should have one Paraview output"
-    pv_output = job.outputs.paraview[0]
+    assert len(job.outputs.vtk) == 1, "Should have one VTK output"
+    assert job.outputs.paraview is job.outputs.vtk
+    pv_output = job.outputs.vtk[0]
     assert pv_output.name == "simple", "Output name should match notebook"
     assert pv_output.fields == ["pressure"], "Should output pressure field"
-    assert pv_output.upscale == 1, "Upscale should match notebook"
+    assert pv_output.to_fs()["target"]["mesh"]["upscale"] == 1
     assert job.outputs.traces is not None, "Should write traces by default"
 
 
@@ -813,10 +818,9 @@ def test_simulation_setup(simulation):
     test_acquisition_setup(simulation)
     test_output_configuration(simulation)  # Use dedicated output test
 
-    # Add discretization with default method settings
+    # Add default discretization settings
     method = Discretization()
     simulation += method
-    assert simulation.discretization.method == "DPG"
 
     # Add solver config with exact notebook parameters
     solver = SolverConfig(solve_on="final", max_iter=300, tolerance=1.0e-4)

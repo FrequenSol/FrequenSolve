@@ -7,7 +7,7 @@ import copy
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple, Union
 
 import h5py
 import numpy as np
@@ -21,18 +21,17 @@ from frequensolve.units import is_quantity, unit_expression, value_and_units_to_
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.fields import canonical_field
 from frequensolve.util.mixins import (
-    ExportContext,
     ExtraFieldsMixin,
     TypeTaggedMixin,
     merge_extra,
-    warn_deprecated_path_api,
 )
-from frequensolve.util.store import hash_dataarray_payload
+from frequensolve.util.store import SimulationStore, hash_dataarray_payload
 
 __all__ = [
     "CoordsArray",
     "CoordsFromFile",
     "CoordsGrid",
+    "CoordsSurfaceCarpet",
     "ReceiverComponent",
     "ReceiverGroup",
     "ReceiverCoords",
@@ -42,6 +41,11 @@ __all__ = [
     "ReceiverFiber",
     "ReceiverSampling",
 ]
+
+
+def _is_remote_file_reference(value: Any) -> bool:
+    text = str(value)
+    return text.startswith("remote:") or "://" in text
 
 
 @dataclass(kw_only=True)
@@ -374,21 +378,6 @@ class ReceiverCoords(TypeTaggedMixin, ABC):
 
         return cls.dispatch_from_fs(data, class_registry)
 
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        try:
-            self.path = proj_path / self.path.relative_to(self._proj_path)
-        except Exception:
-            pass
-
-        self._proj_path = proj_path
-        self._rel_path = rel_path
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
-
 
 @register_class
 @dataclass(kw_only=True)
@@ -411,8 +400,6 @@ class CoordsFromFile(ReceiverCoords):
     units: Optional[str] = None
     system: Optional[str] = None
     hash: Optional[str] = None
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     def __init__(
         self,
@@ -426,6 +413,11 @@ class CoordsFromFile(ReceiverCoords):
     ):
         if file is None and "path" in kwargs:
             file = kwargs.pop("path")
+        if kwargs.pop("remote", False) or _is_remote_file_reference(file):
+            raise ValueError(
+                "CoordsFromFile does not support remote coordinate files yet; "
+                "provide a local file or inline/materialized coordinates."
+            )
         self.file = Path(file).expanduser()
         if self.file.is_absolute():
             self.file = self.file.resolve()
@@ -441,6 +433,11 @@ class CoordsFromFile(ReceiverCoords):
 
         file = data["file"]
         format = data["format"]
+        if data.get("remote", False) or _is_remote_file_reference(file):
+            raise ValueError(
+                "CoordsFromFile does not support remote coordinate files yet; "
+                "provide a local file or inline/materialized coordinates."
+            )
         if format == "HDF5":
             if ":" in file:
                 file, dset = file.split(":", 1)
@@ -454,15 +451,6 @@ class CoordsFromFile(ReceiverCoords):
             system=data.get("system"),
             hash=data.get("hash"),
         )
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        proj_path = Path(proj_path).resolve()
-        rel_path = Path(rel_path)
-        self._proj_path = proj_path
-        self._rel_path = rel_path
-        self.file = self._contextual_file(ExportContext(proj_path, rel_path))
-        self._fill_metadata_from_file()
 
     @staticmethod
     def _simulation_rel_path(rel_path: Optional[Path]) -> Optional[Path]:
@@ -481,8 +469,8 @@ class CoordsFromFile(ReceiverCoords):
         self, ctx=None, *, source_project_path: Optional[Path] = None
     ) -> Path:
         file = Path(self.file).expanduser()
-        project_path = getattr(ctx, "project_path", None) or self._proj_path
-        rel_path = getattr(ctx, "rel_path", None) or self._rel_path
+        project_path = getattr(ctx, "project_path", None)
+        rel_path = getattr(ctx, "rel_path", None)
         if project_path is not None:
             project_path = Path(project_path).expanduser().resolve()
 
@@ -513,7 +501,7 @@ class CoordsFromFile(ReceiverCoords):
         return file
 
     def _relative_file(self, ctx=None) -> Path:
-        project_path = getattr(ctx, "project_path", None) or self._proj_path
+        project_path = getattr(ctx, "project_path", None)
         file = self._contextual_file(ctx)
         if project_path is None:
             return file
@@ -526,7 +514,7 @@ class CoordsFromFile(ReceiverCoords):
         file = self._contextual_file(ctx)
         if file.is_absolute():
             return file
-        project_path = getattr(ctx, "project_path", None) or self._proj_path
+        project_path = getattr(ctx, "project_path", None)
         if project_path is not None:
             return Path(project_path) / file
         return file
@@ -649,8 +637,15 @@ class CoordsFromFile(ReceiverCoords):
            np.ndarray: Coordinate array for requested receivers.
         """
         if self.format == "HDF5":
-            with h5py.File(self._local_file(), "r") as f:
+            file = self._local_file()
+            with h5py.File(file, "r") as f:
                 dataset = self.dset or "coords"
+                if dataset not in f:
+                    raise KeyError(
+                        f"Receiver coordinate dataset '{dataset}' is missing from "
+                        f"'{file}'. Rebuild and save the simulation acquisition "
+                        "inputs before copying or running it."
+                    )
                 if indices is None:
                     return f[dataset][:]
                 else:
@@ -787,6 +782,227 @@ class CoordsGrid(ReceiverCoords):
             units=data.get("units"),
             system=data.get("system"),
         )
+
+
+class CoordsSurfaceCarpet(ReceiverCoords):
+    """Receiver coordinates on a surface-relative tensor-product carpet.
+
+    The carpet is kept in compact axis form until values are explicitly
+    requested or exported to HDF5.
+    """
+
+    def __init__(
+        self,
+        *,
+        x: Any,
+        y: Optional[Any] = None,
+        offset: float = 0.0,
+        units: Optional[Any] = None,
+        system: Optional[str] = None,
+    ) -> None:
+        self.x = _surface_carpet_axis("x", x, units)
+        self.y = None if y is None else _surface_carpet_axis("y", y, units)
+        self.offset = float(offset)
+        self.units = units
+        self.system = system
+
+    @classmethod
+    def try_from_surface(
+        cls,
+        surface: Any,
+        *,
+        x: Any,
+        y: Optional[Any] = None,
+        units: Optional[Any] = None,
+        above: Optional[Any] = None,
+        below: Optional[Any] = None,
+    ) -> Optional["CoordsSurfaceCarpet"]:
+        """Return a compact carpet when the surface helper exposes metadata."""
+
+        if above is not None and below is not None:
+            raise ValueError("Specify only one of above or below")
+
+        simulation = getattr(surface, "_simulation", None)
+        if getattr(simulation, "dimension", None) == 3 and y is None:
+            raise ValueError("3D surface points_grid requires x and y axes")
+
+        system = getattr(surface, "coordinate_system", surface)
+        system_name = getattr(system, "name", None)
+        if system_name is None or getattr(system, "type", None) != "surface":
+            return None
+
+        carpet_units = units or _first_quantity_units(x)
+        if carpet_units is None and y is not None:
+            carpet_units = _first_quantity_units(y)
+
+        offset_value = 0.0
+        distance = above if above is not None else below
+        if carpet_units is None and distance is not None:
+            carpet_units = _first_quantity_units(distance)
+
+        if distance is not None:
+            normal = str(getattr(system, "normal", "up") or "up").strip().lower()
+            if above is not None:
+                sign = -1 if normal == "down" else 1
+            else:
+                sign = 1 if normal == "down" else -1
+            try:
+                offset_value = sign * _surface_carpet_scalar(
+                    "surface offset", distance, carpet_units
+                )
+            except ValueError as exc:
+                if "must be a scalar" in str(exc):
+                    return None
+                raise
+
+        return cls(
+            x=x,
+            y=y,
+            offset=offset_value,
+            units=carpet_units,
+            system=system_name,
+        )
+
+    @property
+    def dimension(self) -> int:
+        """Return the number of coordinate columns."""
+
+        return 2 if self.y is None else 3
+
+    @property
+    def axes(self) -> List[str]:
+        """Return coordinate-axis labels."""
+
+        return ["x", "z"] if self.y is None else ["x", "y", "z"]
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        """Return the dense coordinate table shape."""
+
+        return (self.size, self.dimension)
+
+    @property
+    def size(self) -> int:
+        """Return the number of receiver coordinates."""
+
+        if self.y is None:
+            return int(self.x.size)
+        return int(self.x.size * self.y.size)
+
+    @property
+    def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return lower and upper coordinate bounds without materializing rows."""
+
+        if self.y is None:
+            lower = np.asarray([np.min(self.x), self.offset], dtype=float)
+            upper = np.asarray([np.max(self.x), self.offset], dtype=float)
+        else:
+            lower = np.asarray(
+                [np.min(self.x), np.min(self.y), self.offset], dtype=float
+            )
+            upper = np.asarray(
+                [np.max(self.x), np.max(self.y), self.offset], dtype=float
+            )
+        return lower, upper
+
+    def get(
+        self, indices: Optional[Union[int, slice, Sequence[int], np.ndarray]] = None
+    ) -> np.ndarray:
+        """Return coordinate values for all or selected receivers."""
+
+        if indices is None:
+            values = np.empty(self.shape, dtype=np.float64)
+            offset = 0
+            for chunk in self.iter_chunks():
+                stop = offset + chunk.shape[0]
+                values[offset:stop] = chunk
+                offset = stop
+            return values
+
+        if isinstance(indices, slice):
+            flat_indices = np.arange(self.size, dtype=np.int64)[indices]
+        elif isinstance(indices, (int, np.integer)):
+            index = int(indices)
+            if index < 0:
+                index += self.size
+            return self._rows_for_indices(np.asarray([index], dtype=np.int64))[0]
+        else:
+            flat_indices = np.asarray(indices)
+            if flat_indices.dtype == np.dtype(bool):
+                flat_indices = np.nonzero(flat_indices.reshape(-1))[0]
+            flat_indices = flat_indices.astype(np.int64, copy=False).reshape(-1)
+            flat_indices[flat_indices < 0] += self.size
+        return self._rows_for_indices(flat_indices)
+
+    def iter_chunks(self, chunk_size: int = 1 << 20) -> Iterator[np.ndarray]:
+        """Yield dense coordinate chunks in receiver-major order."""
+
+        chunk_size = max(1, int(chunk_size))
+        if self.y is None:
+            for start in range(0, self.size, chunk_size):
+                x_values = self.x[start : start + chunk_size]
+                chunk = np.empty((x_values.size, 2), dtype=np.float64)
+                chunk[:, 0] = x_values
+                chunk[:, 1] = self.offset
+                yield chunk
+            return
+
+        for start in range(0, self.size, chunk_size):
+            stop = min(start + chunk_size, self.size)
+            yield self._rows_for_indices(np.arange(start, stop, dtype=np.int64))
+
+    def to_hdf5_reference(
+        self,
+        store: Any,
+        dataset: str,
+        *,
+        attrs: Optional[Dict[str, Any]] = None,
+        dtype: Any = np.float64,
+    ):
+        """Write this carpet to a store-backed HDF5 dataset."""
+
+        return store.put_array_chunks(
+            dataset,
+            self.shape,
+            self.iter_chunks,
+            attrs=attrs,
+            dims=["receiver", "coordinate"],
+            coords={"coordinate": np.asarray(self.axes, dtype=str)},
+            dtype=dtype,
+        )
+
+    def to_fs(self, ctx=None) -> Dict:
+        """Serialize inline when no HDF5 export context is available."""
+
+        units = (
+            self.units
+            if self.units is not None
+            else getattr(ctx, "default_length_units", None)
+        )
+        return CoordsArray(
+            coordinates=self.get(),
+            units=units,
+            system=self.system,
+        ).to_fs(ctx)
+
+    def _rows_for_indices(self, indices: np.ndarray) -> np.ndarray:
+        if np.any((indices < 0) | (indices >= self.size)):
+            raise IndexError("receiver coordinate index out of range")
+
+        if self.y is None:
+            rows = np.empty((indices.size, 2), dtype=np.float64)
+            rows[:, 0] = self.x[indices]
+            rows[:, 1] = self.offset
+            return rows
+
+        nx = self.x.size
+        x_index = indices % nx
+        y_index = indices // nx
+        rows = np.empty((indices.size, 3), dtype=np.float64)
+        rows[:, 0] = self.x[x_index]
+        rows[:, 1] = self.y[y_index]
+        rows[:, 2] = self.offset
+        return rows
 
 
 @register_class
@@ -942,6 +1158,39 @@ class CoordsArray(ReceiverCoords):
         )
 
 
+def _surface_carpet_axis(name: str, values: Any, units: Optional[Any]) -> np.ndarray:
+    if is_quantity(values):
+        values = values.to(units).magnitude if units is not None else values.magnitude
+    else:
+        quantity_units = _first_quantity_units(values)
+        if quantity_units is not None:
+            target_units = units or quantity_units
+            values = _strip_coordinate_quantities(values, target_units)
+    axis = np.asarray(values, dtype=np.float64).reshape(-1)
+    if axis.size == 0:
+        raise ValueError(f"{name} must contain at least one coordinate")
+    if not np.isfinite(axis).all():
+        raise ValueError(f"{name} coordinates must be finite")
+    return axis
+
+
+def _surface_carpet_scalar(name: str, value: Any, units: Optional[Any]) -> float:
+    if is_quantity(value):
+        value = value.to(units).magnitude if units is not None else value.magnitude
+    else:
+        quantity_units = _first_quantity_units(value)
+        if quantity_units is not None:
+            target_units = units or quantity_units
+            value = _strip_coordinate_quantities(value, target_units)
+    array = np.asarray(value, dtype=np.float64)
+    if array.size != 1:
+        raise ValueError(f"{name} must be a scalar for compact carpet coordinates")
+    scalar = float(array.reshape(-1)[0])
+    if not np.isfinite(scalar):
+        raise ValueError(f"{name} must be finite")
+    return scalar
+
+
 def _first_quantity_units(value: Any) -> Optional[Any]:
     if is_quantity(value):
         return value.units
@@ -1055,8 +1304,6 @@ class ReceiverGroup(ExtraFieldsMixin):
     coordinates: ReceiverCoords = field(default_factory=ReceiverCoords)
     sampling: Optional[ReceiverSampling] = None
     extra: Dict = field(default_factory=dict)
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     @property
     def size(self):
@@ -1166,7 +1413,73 @@ class ReceiverGroup(ExtraFieldsMixin):
         """
 
         coords = self.coordinates
-        if isinstance(coords, CoordsArray):
+        if isinstance(coords, CoordsSurfaceCarpet):
+            default_units = getattr(ctx, "default_length_units", None)
+            coordinate_units = (
+                coords.units if coords.units is not None else default_units
+            )
+            if (
+                coords.size > 200
+                and ctx is not None
+                and getattr(ctx, "store", None) is not None
+            ):
+                dataset = f"inputs/acquisition/receivers/{self.name}/coordinates"
+                attrs = {"fs_kind": "receiver_coordinates"}
+                if coordinate_units is not None:
+                    attrs["units"] = unit_expression(coordinate_units)
+                if coords.system is not None:
+                    attrs["system"] = coords.system
+                ref = coords.to_hdf5_reference(
+                    ctx.store,
+                    dataset,
+                    attrs=attrs,
+                    dtype=np.float64,
+                )
+                coords_payload = {
+                    "_type": "CoordsFromFile",
+                    "file": ref.locator(),
+                    "format": "HDF5",
+                    "hash": f"blake3:{ref.hash}",
+                    **(
+                        {"units": unit_expression(coordinate_units)}
+                        if coordinate_units is not None
+                        else {}
+                    ),
+                    **({"system": coords.system} if coords.system is not None else {}),
+                }
+            elif coords.size > 200 and ctx is not None and ctx.path is not None:
+                file = ctx.path / self.name / "coords.h5"
+                store = SimulationStore(file, project_path=ctx.project_path)
+                attrs = {"fs_kind": "receiver_coordinates"}
+                if coordinate_units is not None:
+                    attrs["units"] = unit_expression(coordinate_units)
+                if coords.system is not None:
+                    attrs["system"] = coords.system
+                ref = coords.to_hdf5_reference(
+                    store,
+                    "coords",
+                    attrs=attrs,
+                    dtype=np.float64,
+                )
+                coords_payload = {
+                    "_type": "CoordsFromFile",
+                    "file": ref.locator(),
+                    "format": "HDF5",
+                    "hash": f"blake3:{ref.hash}",
+                    **(
+                        {"units": unit_expression(coordinate_units)}
+                        if coordinate_units is not None
+                        else {}
+                    ),
+                    **({"system": coords.system} if coords.system is not None else {}),
+                }
+            else:
+                coords_payload = coords.to_fs(ctx)
+                if coordinate_units is not None and "units" not in coords_payload:
+                    if "coords" in coords_payload:
+                        coords_payload["value"] = coords_payload.pop("coords")
+                    coords_payload["units"] = unit_expression(coordinate_units)
+        elif isinstance(coords, CoordsArray):
             default_units = getattr(ctx, "default_length_units", None)
             coordinate_units = (
                 coords.units if coords.units is not None else default_units
@@ -1250,13 +1563,3 @@ class ReceiverGroup(ExtraFieldsMixin):
             sampling=sampling,
             **data,
         )
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = Path(proj_path).expanduser().resolve()
-        self._rel_path = Path(rel_path) / self.name
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path

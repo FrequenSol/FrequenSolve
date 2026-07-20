@@ -145,10 +145,33 @@ omitted. Mesh-specific properties such as ``epw_mult``, ``hmin``, and ``hmax`` a
 Attenuation
 -----------
 
-Elastic :term:`attenuation` is controlled by ``Qp`` and ``Qs``. Poroelastic direct-Biot
-attenuation uses ``qk`` and ``qmu`` where supported. There is no separate
-"viscous physics" switch in the Python API; providing attenuation properties is
-the user-facing way to request attenuative material behavior.
+Elastic :term:`attenuation` is controlled by ``Qp`` and ``Qs``. Poroelastic
+direct-Biot attenuation uses ``qk`` and ``qmu`` where supported. The model-wide
+attenuation configuration selects how those quality factors are interpreted:
+
+.. code-block:: python
+
+   model = fs.LayeredModel(
+       dimension=2,
+       x_limits=[0.0, 10.0] * fs.ureg.km,
+       attenuation_model="kjartansson",
+       reference_frequency=10.0 * fs.ureg.Hz,
+   )
+
+``kjartansson`` is the default attenuation law and uses a 10 Hz reference when
+``reference_frequency`` is omitted. Model names are case-insensitive. A bare
+reference-frequency scalar is interpreted as hertz; Pint quantities and
+``{"value": ..., "units": ...}`` mappings may use any compatible frequency
+unit.
+
+Set ``attenuation_model="none"`` on a model to ignore ``Qp``, ``Qs``, ``Qk``,
+and ``Qmu``. This disables solid-frame Q attenuation but does not disable
+:term:`JKD` hydraulic dispersion.
+
+Solver payloads may spell the reference-frequency field ``reference_frequency``,
+``f0``, or ``f_ref``. They are mutually exclusive. FrequenSolve accepts all
+three when loading dictionaries and emits the canonical ``reference_frequency``
+spelling.
 
 Simulation Boundary Conditions
 ------------------------------
@@ -176,7 +199,7 @@ also available. Labeled external meshes may use mesh boundary labels instead.
 boundary. ``pml_wavelengths`` specifies the width in wavelengths, so the
 physical PML thickness is frequency-dependent: lower frequencies produce wider
 physical PMLs for the same setting, and higher frequencies produce thinner
-ones. ``pml_reflection`` defaults to ``1e-3`` unless supplied explicitly. For
+ones. ``pml_reflectivity`` defaults to ``1e-2`` unless supplied explicitly. For
 conditioning, prefer increasing ``pml_wavelengths`` before making the
 reflection target extremely small.
 

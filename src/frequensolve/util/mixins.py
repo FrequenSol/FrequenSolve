@@ -12,7 +12,6 @@ __all__ = [
     "ExtraFieldsMixin",
     "FSSerializableMixin",
     "MaterializeMixin",
-    "PathContextMixin",
     "TypeTaggedMixin",
     "merge_extra",
     "warn_deprecated_path_api",
@@ -261,23 +260,6 @@ class TypeTaggedMixin(FSSerializableMixin):
         return target_cls.from_fs(payload)
 
 
-class PathContextMixin:
-    """Mixin for objects that carry a project path and relative artifact path."""
-
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
-
-    def export_context(self) -> ExportContext:
-        """Return an export context rooted at this object's path metadata."""
-
-        return ExportContext(self._proj_path, self._rel_path)
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
-
-
 class MaterializeMixin:
     """Marker for objects that need to write local artifacts before export."""
 
@@ -359,12 +341,7 @@ def merge_extra(
 
 
 def warn_deprecated_path_api(name: str) -> None:
-    """Warn that an object's legacy path API was used.
-
-    Args:
-        name: Fully qualified method or property name to include in the
-            warning.
-    """
+    """Warn that an object's legacy path API was used."""
 
     warnings.warn(
         f"{name} is deprecated; export paths are now supplied by ExportContext.",

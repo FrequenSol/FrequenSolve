@@ -1,8 +1,8 @@
 Orchestrator
 ============
 
-Execution Sites
----------------
+Execution Site API
+------------------
 
 .. automodule:: frequensolve.orchestrator.sites.base
    :members:

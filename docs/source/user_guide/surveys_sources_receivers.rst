@@ -110,6 +110,44 @@ are always re-exported as ``fs-acquisition-2``.
 The solver chooses efficient internal :term:`source batches <source batching>`
 automatically.
 
+Source Amplitudes
+~~~~~~~~~~~~~~~~~
+
+``amplitude`` follows the Sauce ``fs-acquisition-2`` source-basis contract. A
+plain number is a dimensionless multiplier. It scales explicit unit-bearing
+direction components when present; otherwise it scales the default physical
+strength for the source kind. A Pint quantity or explicit ``value``/``units``
+mapping is an exact physical source strength:
+
+.. code-block:: python
+
+   u = fs.ureg
+
+   acoustic = fs.Acquisition()
+   acoustic.add_sources(
+       kind="scalar",
+       coords=[[0.5, 0.05]],
+       amplitude=1.0e6 * u.N * u.m,
+   )
+
+   elastic = fs.Acquisition()
+   elastic.add_sources(
+       kind="vector",
+       coords=[[0.5, 0.05]],
+       direction=[0.0, 1.0],
+       amplitude=20.0 * u.kN,
+   )
+
+Vector and dipole amplitudes have force dimensions, conventionally ``N``.
+Scalar, tensor, and monopole amplitudes have moment dimensions, conventionally
+``N*m``. If a direction already contains physical units, use a dimensionless
+top-level amplitude; Sauce rejects simultaneous physical units on both the
+direction and amplitude. Physical strength belongs to ``source_geometry``;
+``source_encoding`` coefficients remain dimensionless complex multipliers.
+
+The same amplitude forms are accepted by :class:`frequensolve.PointSource` and
+inside the ``defaults`` mapping for inline, HDF5, and SPS source geometries.
+
 Sparse Survey Layouts
 ---------------------
 

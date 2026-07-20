@@ -13,6 +13,7 @@ unfamiliar, check the :doc:`../glossary`.
 
    projects_jobs_sites
    site_configuration
+   stampede3_getting_started
    frequensolve_directory
    physics_materials_boundaries
    api_to_contracts

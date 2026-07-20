@@ -140,9 +140,9 @@ def _infer_frequencies(
     )
 
 
-def _observed_data_path(observed: Any) -> Path:
+def _observed_data_path(observed: Any) -> Optional[Path]:
     if observed is None:
-        raise ValueError("observed data must be provided")
+        return None
     if hasattr(observed, "trace_path"):
         return Path(observed.trace_path)
     if isinstance(observed, TraceDataset):
@@ -595,8 +595,8 @@ class DataSpace:
         """Build a data space from a simulation's sources and receivers.
 
         Args:
-            simulation: Simulation containing acquisition source and receiver
-                groups.
+            simulation: Simulation containing acquisition source fields and
+                receiver groups.
             frequencies: Frequencies packed into the data vector.
             dtype: NumPy dtype for packed vectors.
 
@@ -604,13 +604,19 @@ class DataSpace:
             ``DataSpace`` matching the simulation acquisition layout.
 
         Raises:
-            ValueError: If there are no source groups or a receiver group has
+            ValueError: If there are no source fields or a receiver group has
                 no components.
         """
 
-        sources = tuple(simulation.acquisition.source_field_ids())
-        if not sources:
+        source_count = simulation.acquisition.known_source_field_count()
+        if source_count is None:
+            raise ValueError(
+                "FWI DataSpace requires a known source field count for external "
+                "source geometry or encoding"
+            )
+        if source_count < 1:
             raise ValueError("FWI DataSpace requires at least one source field")
+        sources = tuple(range(1, int(source_count) + 1))
 
         segments = []
         for group in simulation.acquisition.receiver_groups:
@@ -1106,7 +1112,7 @@ class FWIProblem:
 def build_imaging_job(
     simulation: Any,
     *,
-    observed: Any,
+    observed: Any = None,
     frequencies: Optional[Iterable[Any]] = None,
     parameters: Optional[Iterable[str]] = None,
     grid: Union[
@@ -1125,7 +1131,9 @@ def build_imaging_job(
 
     Args:
         simulation: Simulation used for imaging.
-        observed: Observed data as a job, trace dataset, or filesystem path.
+        observed: Optional observed data as a job, trace dataset, or filesystem
+            path. When omitted, the solver receives ``null`` data paths and uses
+            zero data to compute sensitivity kernels.
         frequencies: Optional frequencies. Inferred from ``observed`` when
             possible.
         parameters: Optional FWI parameters to image.

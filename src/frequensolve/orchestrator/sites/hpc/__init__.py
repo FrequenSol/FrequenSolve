@@ -3,6 +3,7 @@
 from frequensolve.orchestrator.sites.hpc.config import Stampede3Config
 from frequensolve.orchestrator.sites.hpc.site import (
     SlurmLoginCredentials,
+    SlurmPartitionConfig,
     SlurmRunConfig,
     SlurmSite,
     SlurmSiteConfig,
@@ -20,6 +21,7 @@ from frequensolve.orchestrator.sites.hpc.stampede3 import (
 
 __all__ = [
     "SlurmLoginCredentials",
+    "SlurmPartitionConfig",
     "SlurmRunConfig",
     "SlurmSite",
     "SlurmSiteConfig",

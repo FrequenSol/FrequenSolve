@@ -15,6 +15,8 @@ logging_level = logging.INFO
 DEFAULT_FORMAT = "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s"
 DEFAULT_DEPENDENCY_LOGGERS = ("dask", "distributed", "tornado", "bokeh")
 
+__all__ = ["configure_logging", "set_log_level"]
+
 
 def normalize_log_level(level: Union[int, str]) -> int:
     """Normalize integer or string log levels.

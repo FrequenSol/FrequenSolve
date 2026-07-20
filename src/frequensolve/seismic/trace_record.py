@@ -34,6 +34,14 @@ def _source_group(trace: DataArray) -> SourceGroup:
     return acquisition.source(source_index)
 
 
+def _source_coordinates(trace: DataArray) -> np.ndarray:
+    with open(trace.attrs["simulation"], "r") as f:
+        sim = json.load(f)
+    acquisition = Acquisition.from_fs(sim["Acquisition"])
+    source_index = int(trace.attrs.get("source_id", trace.attrs.get("source_group", 1)))
+    return np.asarray(acquisition.source_coords(source_index), dtype=float)
+
+
 def _receiver_group(trace: DataArray) -> ReceiverGroup:
     with open(trace.attrs["simulation"], "r") as f:
         sim = json.load(f)
@@ -119,6 +127,12 @@ class TraceAccessor:
         """Return source-group metadata reconstructed from trace attributes."""
 
         return _source_group(self._trace)
+
+    @property
+    def source_coordinates(self) -> np.ndarray:
+        """Return source-field reference coordinates for this trace."""
+
+        return _source_coordinates(self._trace)
 
     @property
     def receiver_group(self) -> ReceiverGroup:

@@ -14,7 +14,7 @@ import numpy as np
 from frequensolve.simulation.jobs.artifacts import JobArtifactMixin
 from frequensolve.simulation.jobs.records import JobRecordMixin
 from frequensolve.simulation.jobs.remote import JobRemoteMixin
-from frequensolve.simulation.jobs.run_state import JobRunStateMixin
+from frequensolve.simulation.jobs.run_state import JobRunStateMixin, SkipPolicy
 from frequensolve.simulation.jobs.serialization import JobSerializationMixin
 from frequensolve.simulation.jobs.timings import JobTimingMixin
 from frequensolve.simulation.outputs import (
@@ -29,6 +29,7 @@ __all__ = [
     "JobLayout",
     "JobRecord",
     "BaseJob",
+    "SkipPolicy",
 ]
 
 
@@ -425,21 +426,26 @@ class BaseJob(
         self.outputs.traces = TraceOutput(path=path, **kwargs)
         return self
 
-    def paraview(self, *args, **kwargs) -> "BaseJob":
-        """Add a ParaView field output request.
+    def vtk(self, *args, **kwargs) -> "BaseJob":
+        """Add a full-domain VTK/ParaView visualization output request.
 
         Args:
-            *args: Positional arguments forwarded to ``outputs.paraview``.
-            **kwargs: Keyword arguments forwarded to ``outputs.paraview``.
+            *args: Positional arguments forwarded to ``outputs.vtk``.
+            **kwargs: Keyword arguments forwarded to ``outputs.vtk``.
 
         Returns:
             This job, allowing fluent configuration.
         """
 
-        from frequensolve.simulation.outputs import paraview
+        from frequensolve.simulation.outputs import vtk
 
-        self += paraview(*args, **kwargs)
+        self += vtk(*args, **kwargs)
         return self
+
+    def paraview(self, *args, **kwargs) -> "BaseJob":
+        """Add a visualization output using the historical helper name."""
+
+        return self.vtk(*args, **kwargs)
 
     def wavefield(self, *args, **kwargs) -> "BaseJob":
         """Add a grid-backed wavefield output request.
@@ -480,9 +486,9 @@ class BaseJob(
                 frequency layout.
         """
 
-        if self.outputs.paraview and len(self.f_list) != 1:
+        if self.outputs.vtk and len(self.f_list) != 1:
             raise ValueError(
-                "ParaView outputs currently require a single-frequency job. "
+                "VTK outputs currently require a single-frequency job. "
                 "Create one FrequencyDomainJob per plotted frequency."
             )
 
@@ -520,9 +526,7 @@ class BaseJob(
         return len(self.f_list)
 
     def _project_path(self) -> Path:
-        project_path = getattr(self.simulation, "_proj_path", None)
-        if project_path is None:
-            project_path = getattr(self.simulation, "project_path", None)
+        project_path = getattr(self.simulation, "project_path", None)
         if project_path is None:
             raise ValueError("Job simulation is not attached to a project path")
         return Path(project_path).resolve()

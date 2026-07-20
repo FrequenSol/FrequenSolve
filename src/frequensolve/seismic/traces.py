@@ -64,6 +64,7 @@ class TraceDataset:
             "f_max": float(f_list[-1]),
             "f_map": dict(self.manifest.frequencies),
             "laplace_map": laplace_map,
+            "laplace_map_keys": [int(index) for index in self.manifest.laplace],
             "wavefields": dict(self.manifest.wavefields),
             **(
                 {
@@ -246,14 +247,46 @@ class TraceDataset:
     @staticmethod
     def _candidate_frequency_trace_files(manifest: TraceManifest) -> List[Path]:
         candidates = [TraceManifest.resolve_trace_file(file) for file in manifest.files]
-        shard_dir = manifest.output_path / "shards"
-        if shard_dir.exists():
-            candidates.extend(sorted(shard_dir.glob("*.h5")))
-        candidates.extend(sorted(manifest.output_path.glob("f_*_hz.h5")))
+
+        def add_shard_dir(shard_dir: Path) -> None:
+            if not shard_dir.exists():
+                return
+            modern = sorted(shard_dir.glob("f_*.h5"))
+            files = modern
+            if not files:
+                files = [
+                    path
+                    for pattern in (
+                        "traces_*.h5",
+                        "receivers_*.h5",
+                        "trace_frequency_*.h5",
+                    )
+                    for path in sorted(shard_dir.glob(pattern))
+                ]
+            candidates.extend(files)
+
+        def add_root(root: Path) -> None:
+            for shard_dir in (
+                root / "shards",
+                root / "traces" / "shards",
+                root / "wavefields" / "shards",
+            ):
+                add_shard_dir(shard_dir)
+            if root.exists():
+                for pattern in (
+                    "f_*.h5",
+                    "traces_*.h5",
+                    "receivers_*.h5",
+                    "trace_frequency_*.h5",
+                ):
+                    candidates.extend(sorted(root.glob(pattern)))
+
+        roots = [manifest.output_path, manifest.result_path]
+        for root in roots:
+            add_root(root)
         for group in [*manifest.groups, *manifest.wavefields]:
             group_dir = manifest.output_path / str(group)
-            if group_dir.exists():
-                candidates.extend(sorted(group_dir.glob("*.h5")))
+            add_shard_dir(group_dir)
 
         out = []
         seen = set()
@@ -341,7 +374,7 @@ class TraceDataset:
         groups = groups or "requested wavefields"
         packed_hint = manifest.output_path / "traces.h5"
         named_packed_hint = manifest.output_path / "<wavefield>.h5"
-        shard_hint = manifest.output_path / "traces_*.h5"
+        shard_hint = manifest.output_path / "shards" / "f_*_hz.h5"
         named_shard_hint = manifest.output_path / "<wavefield>" / "f_*_hz.h5"
         raise FileNotFoundError(
             f"No wavefield trace files were found for {groups} in "

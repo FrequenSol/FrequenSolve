@@ -556,12 +556,16 @@ class TraceManifest:
         """Return packed trace frequencies keyed by one-based task number.
 
         Returns:
-            Frequency mapping from the packed trace manifest, or an empty
-            mapping when no packed product is recorded.
+            Frequency mapping from the packed trace manifest, or from the packed
+            HDF5 file when the manifest omits frequency rows. Returns an empty
+            mapping when no usable frequency index is recorded.
         """
 
         products = self._packed_products()
-        return {} if not products else products[0][1]
+        if not products:
+            return {}
+        path, frequencies, _laplace = products[0]
+        return frequencies or self._packed_file_frequency_map(path)
 
     @property
     def packed_laplace(self) -> Dict[int, float]:
@@ -586,13 +590,15 @@ class TraceManifest:
         products = self._packed_products()
         if not products or any(not path.exists() for path, _freq, _laplace in products):
             return dict(self.frequencies)
-        if not any(frequencies for _path, frequencies, _laplace in products):
-            return {}
+        product_frequencies = [
+            frequencies or self._packed_file_frequency_map(path)
+            for path, frequencies, _laplace in products
+        ]
         missing = {}
         for key, frequency in self.frequencies.items():
             if any(
-                frequencies and not _frequency_values_contain(frequencies, frequency)
-                for _path, frequencies, _laplace in products
+                not frequencies or not _frequency_values_contain(frequencies, frequency)
+                for frequencies in product_frequencies
             ):
                 missing[int(key)] = _real_frequency(frequency)
         return missing
@@ -827,6 +833,19 @@ class TraceManifest:
                 )
         return path, frequencies, laplace
 
+    @staticmethod
+    def _packed_file_frequency_map(path: Path) -> Dict[int, float]:
+        try:
+            from frequensolve.seismic.trace_store import TraceStore
+
+            frequencies = TraceStore._read_trace_frequencies(path)
+        except (OSError, KeyError, ValueError):
+            return {}
+        return {
+            index: _real_frequency(frequency)
+            for index, frequency in enumerate(frequencies, start=1)
+        }
+
 
 @dataclass(frozen=True)
 class TraceOutputSpec:
@@ -1020,7 +1039,7 @@ class WavefieldOutputHandle:
 class JobArtifactMixin:
     """Artifact discovery and convenience handles for saved job outputs.
 
-    The mixin exposes receiver traces, wavefield traces, ParaView outputs, and
+    The mixin exposes receiver traces, wavefield traces, VTK outputs, and
     packed-trace cache management on concrete job classes.
     """
 
@@ -1135,14 +1154,20 @@ class JobArtifactMixin:
         return TraceManifest.from_job(self, output=self.wavefield_trace_outputs)
 
     @property
-    def paraview_outputs(self) -> dict:
-        """Return configured ParaView outputs.
+    def vtk_outputs(self) -> dict:
+        """Return configured VTK/visualization outputs.
 
         Returns:
-            Mapping from ParaView output name to output path.
+            Mapping from visualization output name to output path.
         """
         self.outputs.ensure_unique_names()
-        return {out.name: out.path for out in self.outputs.paraview}
+        return {out.name: self._result_path / out.path for out in self.outputs.vtk}
+
+    @property
+    def paraview_outputs(self) -> dict:
+        """Return visualization outputs using the historical property name."""
+
+        return self.vtk_outputs
 
     @property
     def trace_path(self) -> Path:
@@ -1346,7 +1371,7 @@ class JobArtifactMixin:
             return False
         packed_frequencies = manifest.packed_frequencies
         if not packed_frequencies:
-            return True
+            return False
         expected_frequency = self._real_frequency_value(self.f_list[task - 1])
         return np.isclose(
             list(packed_frequencies.values()),
@@ -1367,14 +1392,46 @@ class JobArtifactMixin:
         if 1 <= task <= len(files):
             path = Path(files[task - 1])
             candidates.extend([path, self._legacy_trace_file(path)])
-        shard_dir = manifest.output_path / "shards"
-        if shard_dir.exists():
-            candidates.extend(sorted(shard_dir.glob("*.h5")))
-        candidates.extend(sorted(manifest.output_path.glob("f_*_hz.h5")))
+
+        def add_shard_dir(shard_dir: Path) -> None:
+            if not shard_dir.exists():
+                return
+            modern = sorted(shard_dir.glob("f_*.h5"))
+            files = modern
+            if not files:
+                files = [
+                    path
+                    for pattern in (
+                        "traces_*.h5",
+                        "receivers_*.h5",
+                        "trace_frequency_*.h5",
+                    )
+                    for path in sorted(shard_dir.glob(pattern))
+                ]
+            candidates.extend(files)
+
+        def add_root(root: Path) -> None:
+            for shard_dir in (
+                root / "shards",
+                root / "traces" / "shards",
+                root / "wavefields" / "shards",
+            ):
+                add_shard_dir(shard_dir)
+            if root.exists():
+                for pattern in (
+                    "f_*.h5",
+                    "traces_*.h5",
+                    "receivers_*.h5",
+                    "trace_frequency_*.h5",
+                ):
+                    candidates.extend(sorted(root.glob(pattern)))
+
+        roots = [manifest.output_path, manifest.result_path]
+        for root in roots:
+            add_root(root)
         for group in [*manifest.groups, *manifest.wavefields]:
             group_dir = manifest.output_path / str(group)
-            if group_dir.exists():
-                candidates.extend(sorted(group_dir.glob("*.h5")))
+            add_shard_dir(group_dir)
 
         out: List[Path] = []
         seen = set()

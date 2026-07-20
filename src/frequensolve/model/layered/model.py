@@ -2,7 +2,7 @@
 
 ``LayeredModel`` is the main user-facing model builder for stratigraphic
 velocity/property models. It owns ordered surfaces, layers, fractures,
-boreholes, project path handling, solver-contract export, and reconstruction
+boreholes, solver-contract export, and reconstruction
 from saved FrequenSolve payloads.
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import (
     Any,
     Dict,
@@ -26,6 +25,7 @@ from typing import (
 import xarray as xr
 
 from frequensolve.mesh.mesh_generators import HexMeshGenerator, TetMeshGenerator
+from frequensolve.model.attenuation import AttenuationConfig
 from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import (
     canonical_property_name,
@@ -35,7 +35,6 @@ from frequensolve.util.class_registry import register_class
 from frequensolve.util.mixins import (
     ExportContext,
     merge_extra,
-    warn_deprecated_path_api,
 )
 from frequensolve.util.named_list import NamedList
 from frequensolve.util.physics import model_dimension
@@ -79,6 +78,10 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         boreholes: Optional initial borehole collection.
         ordering: Whether layers are authored from top to bottom or bottom to
             top.
+        attenuation_model: Optional model-wide attenuation model name.
+        reference_frequency: Optional positive attenuation reference frequency.
+            Bare values are interpreted as hertz; Pint quantities and
+            unit-bearing mappings may use compatible frequency units.
         extra: Additional serialized fields preserved on round trip.
 
     Raises:
@@ -99,8 +102,6 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
     extra: Dict[str, Any] = field(default_factory=dict)
 
     _last_added: str = "none"
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
     _surface_names: Set[str] = field(default_factory=set)
     _layer_names: Set[str] = field(default_factory=set)
     _borehole_names: Set[str] = field(default_factory=set)
@@ -116,6 +117,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         object.__setattr__(self, name, value)
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         self.dimension = model_dimension(self.dimension)
         if self.dimension not in {2, 3}:
             raise ValueError("LayeredModel dimension must be 2 or 3")
@@ -469,13 +471,25 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         x_limits = data.pop("x_limits", data.pop("xlimits", None))
         y_limits = data.pop("y_limits", data.pop("ylimits", None))
         ordering = data.pop("ordering", "top_down")
+        attenuation_payload = data.pop("attenuation", None)
+        attenuation = (
+            AttenuationConfig.from_fs(attenuation_payload)
+            if attenuation_payload is not None
+            else None
+        )
         model = LayeredModel(
             name=name,
             dimension=dimension,
             x_limits=x_limits,
             y_limits=y_limits,
             ordering=ordering,
+            attenuation_model=attenuation.model if attenuation else None,
+            reference_frequency=(
+                attenuation.reference_frequency if attenuation else None
+            ),
         )
+        if attenuation is not None:
+            model._attenuation_extra = attenuation.extra
         model.extra = data
 
         def add_model_surface(surface_payload: Mapping[str, Any]) -> None:
@@ -541,7 +555,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
             ValueError: If the model is incomplete.
         """
 
-        ctx = ctx or ExportContext(self._proj_path, self._rel_path)
+        ctx = ctx or ExportContext()
         self._normalize_domain_limits()
         self._validate_complete()
 
@@ -649,18 +663,6 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
                 if candidate.mesh_block_id == mesh_block_id:
                     return candidate.lower
         raise ValueError(f"Layer not found: {layer}")
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = Path(proj_path).expanduser().resolve()
-        self._rel_path = Path(rel_path) / self.name
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        if self._proj_path is None or self._rel_path is None:
-            raise ValueError("LayeredModel is not attached to a project path")
-        return self._proj_path / self._rel_path
 
     def _validate_bounds_for_meshing(self) -> None:
         if len(self.surfaces) < 2:

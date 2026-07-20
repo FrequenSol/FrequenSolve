@@ -222,11 +222,12 @@ def _validate_xarray_grid_payload(
             "XArray grid dimension names must be unique.",
             path=f"{path}.dims",
         )
-    if ctx.dimension and len(dims) != ctx.dimension:
+    expected_dimension = _grid_dimension(ctx, system)
+    if expected_dimension and len(dims) != expected_dimension:
         ctx.report.error(
             "grid.dimension.mismatch",
-            f"Grid has {len(dims)} dimensions but the simulation model "
-            f"dimension is {ctx.dimension}.",
+            f"Grid has {len(dims)} dimensions but this coordinate system "
+            f"expects {expected_dimension}.",
             path=f"{path}.dims",
         )
 
@@ -343,6 +344,14 @@ def _validate_grid_axes(
         )
 
 
+def _grid_dimension(ctx: _ValidationContext, system: Optional[str]) -> int:
+    coordinate_system = _coordinate_system_for_axes(ctx, system)
+    if coordinate_system is None:
+        return ctx.dimension
+    axes = _coordinate_system_axes(coordinate_system, ctx.dimension)
+    return len(axes) or ctx.dimension
+
+
 def _validate_points(
     values: Any,
     *,
@@ -414,7 +423,15 @@ def _validate_bounds(
             path=path,
         )
         return
-    if ctx.dimension and lower.size != ctx.dimension:
+    if axes is not None and lower.size != len(axes):
+        ctx.report.error(
+            "bounds.dimension.mismatch",
+            f"Bounds have {lower.size} dimensions but {len(axes)} axes were "
+            "provided.",
+            path=path,
+        )
+        return
+    if ctx.dimension and axes is None and lower.size != ctx.dimension:
         ctx.report.error(
             "bounds.dimension.mismatch",
             f"Bounds have {lower.size} dimensions but the simulation model "
@@ -932,12 +949,14 @@ def _strip_quantities(value: Any, units: Any) -> Any:
 
 def _convert_units_array(
     values: np.ndarray,
-    from_units: Optional[str],
-    to_units: Optional[str],
+    from_units: Optional[Any],
+    to_units: Optional[Any],
 ) -> np.ndarray:
-    if from_units is None or to_units is None or from_units == to_units:
+    from_expr = unit_expression(from_units) if from_units is not None else None
+    to_expr = unit_expression(to_units) if to_units is not None else None
+    if from_expr is None or to_expr is None or from_expr == to_expr:
         return np.asarray(values, dtype=float)
-    return np.asarray((values * ureg(from_units)).to(to_units).magnitude, dtype=float)
+    return np.asarray((values * ureg(from_expr)).to(to_expr).magnitude, dtype=float)
 
 
 def _coords_array_axes(coords: CoordsArray) -> Optional[list[str]]:

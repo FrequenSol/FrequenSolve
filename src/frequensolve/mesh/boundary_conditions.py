@@ -12,7 +12,7 @@ __all__ = ["BoundaryCondition", "BoundaryConditions"]
 ConditionInput = Union[str, Sequence[str]]
 BoundaryLabel = Union[str, int]
 
-_DEFAULT_PML_REFLECTION = 1e-3
+_DEFAULT_PML_REFLECTIVITY = 1e-2
 _REMOVED_BOUNDARY_CONDITION_FIELDS = {"kind"}
 
 
@@ -23,13 +23,13 @@ def _reject_removed_fields(payload: Mapping[str, Any], owner: str) -> None:
         raise TypeError(f"{owner} no longer accepts removed field(s): {names}")
 
 
-def _resolve_pml_reflection(
-    pml_reflection: Optional[float],
+def _resolve_pml_reflectivity(
     pml_reflectivity: Optional[float],
+    pml_reflection: Optional[float],
 ) -> Optional[float]:
-    if pml_reflection is not None and pml_reflectivity is not None:
-        raise ValueError("Specify only one of pml_reflection or pml_reflectivity")
-    return pml_reflection if pml_reflection is not None else pml_reflectivity
+    if pml_reflectivity is not None and pml_reflection is not None:
+        raise ValueError("Specify only one of pml_reflectivity or pml_reflection")
+    return pml_reflectivity if pml_reflectivity is not None else pml_reflection
 
 
 def _normalize_condition(condition: Any) -> str:
@@ -68,10 +68,8 @@ class BoundaryCondition(ExtraFieldsMixin):
         conditions: Condition name or names to apply.
         pml_wavelengths: PML width measured in local wavelengths.
         pml_exponent: PML complex-stretching exponent.
-        pml_reflection: Target PML reflection coefficient.
-        pml_reflectivity: Deprecated spelling of ``pml_reflection``.
+        pml_reflectivity: Target PML reflectivity coefficient.
         pml_constant: Optional PML stretching constant.
-        stretch_limit: Upper bound for PML stretch scaling.
         extra: Additional solver-facing fields.
         **kwargs: Additional solver-facing fields.
 
@@ -85,11 +83,10 @@ class BoundaryCondition(ExtraFieldsMixin):
     boundaries: List[BoundaryLabel] = field(default_factory=list)
     conditions: Optional[ConditionInput] = None
 
-    pml_wavelengths: float = 2.0
+    pml_wavelengths: float = 0.5
     pml_exponent: float = 3.0
-    pml_reflection: Optional[float] = None
-    pml_constant: Optional[float] = 20.0
-    stretch_limit: float = 0.25
+    pml_reflectivity: Optional[float] = None
+    pml_constant: Optional[float] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
@@ -97,39 +94,35 @@ class BoundaryCondition(ExtraFieldsMixin):
         name: Optional[str] = None,
         boundaries: Optional[Union[BoundaryLabel, Sequence[BoundaryLabel]]] = None,
         conditions: ConditionInput = None,
-        pml_wavelengths: float = 2.0,
+        pml_wavelengths: float = 0.5,
         pml_exponent: float = 3.0,
-        pml_reflection: Optional[float] = None,
         pml_reflectivity: Optional[float] = None,
-        pml_constant: Optional[float] = 20.0,
-        stretch_limit: float = 0.25,
+        pml_constant: Optional[float] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs,
     ) -> None:
+        pml_reflection = kwargs.pop("pml_reflection", None)
         _reject_removed_fields(kwargs, "BoundaryCondition")
         extra_payload = copy.deepcopy(dict(extra or {}))
         _reject_removed_fields(extra_payload, "BoundaryCondition")
-        if "pml_reflectivity" in extra_payload:
-            pml_reflectivity = _resolve_pml_reflection(
-                pml_reflectivity,
-                extra_payload.pop("pml_reflectivity"),
-            )
         self.name = name
         self.boundaries = [] if boundaries is None else boundaries
         self.conditions = conditions
-        self.pml_wavelengths = pml_wavelengths
-        self.pml_exponent = pml_exponent
-        self.pml_reflection = _resolve_pml_reflection(pml_reflection, pml_reflectivity)
+        self.pml_wavelengths = 0.5 if pml_wavelengths is None else pml_wavelengths
+        self.pml_exponent = 3.0 if pml_exponent is None else pml_exponent
+        self.pml_reflectivity = _resolve_pml_reflectivity(
+            pml_reflectivity,
+            pml_reflection,
+        )
         self.pml_constant = pml_constant
-        self.stretch_limit = stretch_limit
         self._init_extra(extra_payload, **kwargs)
         self.__post_init__()
 
     def __post_init__(self) -> None:
         if self.conditions is None:
             raise ValueError("BoundaryCondition requires `conditions`")
-        if self.pml_reflection is None:
-            self.pml_reflection = _DEFAULT_PML_REFLECTION
+        if self.pml_reflectivity is None:
+            self.pml_reflectivity = _DEFAULT_PML_REFLECTIVITY
 
         self.conditions = _normalize_conditions(self.conditions)
         self.boundaries = _normalize_boundaries(self.boundaries)
@@ -148,18 +141,26 @@ class BoundaryCondition(ExtraFieldsMixin):
         data = copy.deepcopy(data)
         data.pop("_type", None)
         _reject_removed_fields(data, "BoundaryCondition")
-        return cls(
-            name=data.pop("name", None),
-            boundaries=data.pop("boundaries"),
-            conditions=data.pop("conditions"),
-            pml_wavelengths=data.pop("pml_wavelengths", 2.0),
-            pml_exponent=data.pop("pml_exponent", 3.0),
-            pml_constant=data.pop("pml_constant", 20.0),
-            pml_reflection=data.pop("pml_reflection", None),
-            pml_reflectivity=data.pop("pml_reflectivity", None),
-            stretch_limit=data.pop("stretch_limit", 0.25),
-            extra=data,
-        )
+        pml_reflection = data.pop("pml_reflection", None)
+        pml_reflectivity = data.pop("pml_reflectivity", None)
+        kwargs: Dict[str, Any] = {
+            "name": data.pop("name", None),
+            "boundaries": data.pop("boundaries"),
+            "conditions": data.pop("conditions"),
+        }
+        if "pml_wavelengths" in data:
+            kwargs["pml_wavelengths"] = data.pop("pml_wavelengths")
+        if "pml_exponent" in data:
+            kwargs["pml_exponent"] = data.pop("pml_exponent")
+        if "pml_constant" in data:
+            kwargs["pml_constant"] = data.pop("pml_constant")
+        if pml_reflection is not None or pml_reflectivity is not None:
+            kwargs["pml_reflectivity"] = _resolve_pml_reflectivity(
+                pml_reflectivity,
+                pml_reflection,
+            )
+        kwargs["extra"] = data
+        return cls(**kwargs)
 
     def has_condition(self, condition: str) -> bool:
         """Return whether this assignment includes a condition.
@@ -191,13 +192,12 @@ class BoundaryCondition(ExtraFieldsMixin):
                 {
                     "pml_wavelengths": self.pml_wavelengths,
                     "pml_exponent": self.pml_exponent,
+                    "pml_reflectivity": self.pml_reflectivity,
                     **(
                         {"pml_constant": self.pml_constant}
                         if self.pml_constant is not None
                         else {}
                     ),
-                    "pml_reflection": self.pml_reflection,
-                    "stretch_limit": self.stretch_limit,
                 }
                 if self.has_condition("pml")
                 else {}

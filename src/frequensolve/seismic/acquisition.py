@@ -5,13 +5,13 @@ from __future__ import annotations
 import copy
 import warnings
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
 from frequensolve.geometry.frame import CoordinateValue, Direction
 from frequensolve.seismic.receivers import (
+    CoordsSurfaceCarpet,
     ReceiverDevice,
     ReceiverGroup,
     coordinate_array_metadata,
@@ -30,7 +30,6 @@ from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
     merge_extra,
-    warn_deprecated_path_api,
 )
 from frequensolve.util.named_list import NamedList
 
@@ -153,8 +152,6 @@ class Acquisition(ExtraFieldsMixin):
     max_batch: Optional[int] = None
     write_vtk: Optional[bool] = None
     extra: Dict[str, Any] = field(default_factory=dict)
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     def __init__(
         self,
@@ -200,8 +197,6 @@ class Acquisition(ExtraFieldsMixin):
         self.max_batch = None if max_batch is None else int(max_batch)
         self.write_vtk = None if write_vtk is None else bool(write_vtk)
         self._init_extra(extra_fields, **kwargs)
-        self._proj_path = None
-        self._rel_path = None
         self._coerce_receivers_and_surveys()
         if source_groups is not None:
             self._load_legacy_source_groups(source_groups)
@@ -306,7 +301,7 @@ class Acquisition(ExtraFieldsMixin):
 
         self._validate_export_contract()
 
-        ctx = ctx or ExportContext(self._proj_path, self._rel_path)
+        ctx = ctx or ExportContext()
 
         # Ensure receiver groups have unique names
         names = {}
@@ -982,6 +977,38 @@ class Acquisition(ExtraFieldsMixin):
         self.receiver_groups.append(group)
         return group
 
+    def add_receiver_carpet(
+        self,
+        name: str,
+        device: ReceiverDevice,
+        *,
+        surface: Any,
+        x: Any,
+        y: Optional[Any] = None,
+        units: Optional[Any] = None,
+        above: Optional[Any] = None,
+        below: Optional[Any] = None,
+        domain: Optional[int] = None,
+        **kwargs: Any,
+    ) -> ReceiverGroup:
+        """Add a receiver group on a tensor-product carpet."""
+
+        coords = _carpet_coordinates(
+            x=x,
+            y=y,
+            surface=surface,
+            units=units,
+            above=above,
+            below=below,
+        )
+        return self.add_receiver_group(
+            name=name,
+            device=device,
+            coords=coords,
+            domain=domain,
+            **kwargs,
+        )
+
     def add_survey(self, survey: SparseSurvey) -> SparseSurvey:
         """Add or replace a named sparse survey layout.
 
@@ -1120,11 +1147,6 @@ class Acquisition(ExtraFieldsMixin):
 
         return self.receiver_groups[name]
 
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = Path(proj_path).expanduser().resolve()
-        self._rel_path = Path(rel_path)
-
     def receiver_coords(self, group: Optional[str] = None):
         """Return receiver coordinates.
 
@@ -1182,10 +1204,38 @@ class Acquisition(ExtraFieldsMixin):
                 component_map.setdefault(component.field.lower(), index)
         return maps
 
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
+
+def _carpet_coordinates(
+    *,
+    surface: Any,
+    x: Any,
+    y: Optional[Any],
+    units: Optional[Any],
+    above: Optional[Any],
+    below: Optional[Any],
+) -> Any:
+    points_grid = getattr(surface, "points_grid", None)
+    if not callable(points_grid):
+        raise TypeError(
+            "surface must provide points_grid(...), such as sim.model_surface(...)"
+        )
+    compact = CoordsSurfaceCarpet.try_from_surface(
+        surface,
+        x=x,
+        y=y,
+        units=units,
+        above=above,
+        below=below,
+    )
+    if compact is not None and compact.size > 200:
+        return compact
+    return points_grid(
+        x,
+        y,
+        units=units,
+        above=above,
+        below=below,
+    )
 
 
 def _source_coordinate_rows(coords):

@@ -1,3 +1,5 @@
+import json
+
 import h5py
 import numpy as np
 import pytest
@@ -8,9 +10,11 @@ from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
+from frequensolve.seismic.sources import SourceGeometry
 from frequensolve.simulation.jobs import BaseJob
 from frequensolve.simulation.jobs.fwi import DataSpace, ModelSpace
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
+from frequensolve.simulation.outputs import VtkOutput
 from frequensolve.simulation.simulation import SeismicSimulation
 
 
@@ -28,9 +32,7 @@ def _elastic_simulation(tmp_path):
     )
 
     acq = Acquisition()
-    acq.add_source_group(
-        kind="vector", coords=np.array([[0.5, 0.1]]), direction=[0.0, 1.0]
-    )
+    acq.add_sources(kind="vector", coords=np.array([[0.5, 0.1]]), direction=[0.0, 1.0])
     device = ReceiverNode(
         name="geophone",
         components=[ReceiverComponent(name="vz", field="velocity")],
@@ -100,12 +102,35 @@ def test_data_space_packs_trace_groups_in_frequency_source_component_receiver_or
     assert roundtrip["surface"].coords["component"].values.tolist() == ["vz"]
 
 
-def test_natural_imaging_syntax_serializes_to_legacy_solver_contract(tmp_path):
+def test_data_space_requires_known_external_source_count(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    sim.acquisition.sources = SourceGeometry.hdf5(
+        "sources.h5",
+        dataset="source_points",
+        kind="vector",
+    )
+
+    with pytest.raises(ValueError, match="known source field count"):
+        DataSpace.from_simulation(sim, frequencies=[5.0])
+
+    sim.acquisition.sources = SourceGeometry.hdf5(
+        "sources.h5",
+        dataset="source_points",
+        kind="vector",
+        count=2,
+    )
+
+    space = DataSpace.from_simulation(sim, frequencies=[5.0])
+
+    assert space.segments[0].sources == (1, 2)
+
+
+def test_imaging_job_syntax_serializes_trace_store_roots(tmp_path):
     sim = _elastic_simulation(tmp_path)
     observed = tmp_path / "observed" / "traces"
     observed.mkdir(parents=True)
 
-    job = sim.imaging(
+    job = sim.imaging_job(
         name="rtm",
         observed=observed,
         frequencies=[5.0],
@@ -132,6 +157,57 @@ def test_natural_imaging_syntax_serializes_to_legacy_solver_contract(tmp_path):
     ]
 
 
+def test_imaging_job_outputs_use_canonical_top_level_contract(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+
+    job = sim.imaging_job(
+        name="rtm",
+        frequencies=[5.0],
+        parameters=["vp"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        outputs=VtkOutput.domain(name="rtm_qc", fields=["velocity"]),
+    )
+    job_file = job.save()
+    saved = json.loads(job_file.read_text())
+    loaded = BaseJob.load(job_file)
+
+    assert saved["Outputs"]["ParaView"][0]["name"] == "rtm_qc"
+    assert saved["Outputs"]["ParaView"][0]["fields"] == ["velocity"]
+    assert saved["Outputs"]["ParaView"][0]["target"] == {"kind": "volume"}
+    assert "outputs" not in saved["Image"]
+    assert loaded.to_fs()["Outputs"]["ParaView"][0]["name"] == "rtm_qc"
+
+
+def test_imaging_job_allows_missing_observed_for_sensitivity_kernels(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+
+    job = sim.imaging_job(
+        name="kernel",
+        frequencies=[5.0],
+        parameters=["vp"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+    )
+    payload = job.to_fs()
+
+    assert payload["Image"]["data_path"] is None
+    assert payload["Image"]["misfit"]["receiver_groups"][0]["observed"] is None
+    assert job.misfit.receiver_groups[0].observed is None
+
+
+def test_legacy_simulation_imaging_method_remains_supported(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+
+    job = sim.imaging(
+        name="kernel",
+        frequencies=[5.0],
+        parameters=["vp"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+    )
+
+    assert isinstance(job, ImagingJob)
+    assert job.data_path is None
+
+
 def test_legacy_imaging_images_syntax_still_serializes(tmp_path):
     sim = _elastic_simulation(tmp_path)
     observed = tmp_path / "observed" / "traces"
@@ -148,6 +224,11 @@ def test_legacy_imaging_images_syntax_still_serializes(tmp_path):
     )
     payload = job.to_fs()
 
+    group = payload["Image"]["misfit"]["receiver_groups"][0]
+    assert group["observed"] == observed
+    assert group["simulated"] == (
+        tmp_path / "jobs" / "smooth" / "rtm" / "results" / "traces"
+    )
     assert payload["Image"]["images"] == [
         {"name": "dVp", "IC": "FWI", "property": "Vp"},
         {"name": "p", "IC": "pressure"},
@@ -159,7 +240,7 @@ def test_imaging_job_save_and_load_round_trips_project_relative_simulation(tmp_p
     observed = tmp_path / "observed" / "traces"
     observed.mkdir(parents=True)
 
-    job = sim.imaging(
+    job = sim.imaging_job(
         name="rtm",
         observed=observed,
         frequencies=[5.0],
@@ -179,9 +260,9 @@ def test_imaging_job_save_and_load_round_trips_project_relative_simulation(tmp_p
     assert loaded.images == {"FWI_Vp": "FWI:Vp", "FWI_Rho": "FWI:Rho"}
     assert loaded.grid.shape == (2, 3)
     loaded_group = loaded.misfit.receiver_groups[0]
-    assert loaded_group.observed == observed / "surface"
+    assert loaded_group.observed == observed
     assert loaded_group.simulated == (
-        tmp_path / "jobs" / "smooth" / "rtm" / "results" / "traces" / "surface"
+        tmp_path / "jobs" / "smooth" / "rtm" / "results" / "traces"
     )
     assert loaded.regularization == {
         "type": "TV",
@@ -191,13 +272,34 @@ def test_imaging_job_save_and_load_round_trips_project_relative_simulation(tmp_p
     }
 
 
+def test_imaging_job_without_observed_saves_and_loads_null_data_path(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+
+    job = sim.imaging_job(
+        name="kernel",
+        frequencies=[5.0],
+        parameters=["vp"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+    )
+
+    job_file = job.save()
+    saved = json.loads(job_file.read_text())
+    loaded = BaseJob.load(job_file)
+
+    assert saved["Image"]["data_path"] is None
+    assert saved["Image"]["misfit"]["receiver_groups"][0]["observed"] is None
+    assert isinstance(loaded, ImagingJob)
+    assert loaded.data_path is None
+    assert loaded.misfit.receiver_groups[0].observed is None
+
+
 def test_imaging_job_rejects_weight_frequency_length_mismatch(tmp_path):
     sim = _elastic_simulation(tmp_path)
     observed = tmp_path / "observed" / "traces"
     observed.mkdir(parents=True)
 
     with pytest.raises(ValueError, match="one value per frequency"):
-        sim.imaging(
+        sim.imaging_job(
             name="rtm",
             observed=observed,
             frequencies=[5.0, 10.0],
@@ -221,12 +323,69 @@ def test_image_database_reads_string_and_byte_labels(tmp_path):
         dataset.attrs["x1"] = np.array([2.0, 1.0])
         dataset.attrs["n_grid"] = np.array([3, 2])
         dataset.attrs["dims"] = np.array(["x", "z"], dtype=string_dtype)
+        dataset.attrs["axis_units"] = np.array(["m", "m"], dtype=string_dtype)
+        dataset.attrs["units"] = np.array(["m/s"], dtype=string_dtype)
+        group = h5.create_group("image/smoothed")
+        group.create_dataset("properties", data=np.array(["vp"], dtype=string_dtype))
+        dataset = group.create_dataset("vp", data=2.0 * values)
+        dataset.attrs["x0"] = np.array([0.0, 0.0])
+        dataset.attrs["x1"] = np.array([2.0, 1.0])
+        dataset.attrs["n_grid"] = np.array([3, 2])
+        dataset.attrs["dims"] = np.array(["x", "z"], dtype=string_dtype)
+        dataset.attrs["axis_units"] = np.array(["km", "km"], dtype=string_dtype)
+        dataset.attrs["units"] = np.array(["km/s"], dtype=string_dtype)
 
     db = ImageDatabase(path=image_path, parts=1, shape=(2, 3))
     images = db.raw_images
+    smoothed = db.smoothed_images
 
     assert images["vp"].dims == ("z", "x")
     np.testing.assert_array_equal(images["vp"].values, values.reshape(2, 3))
+    assert images["vp"].attrs["units"] == "m/s"
+    assert images["vp"].coords["z"].attrs["units"] == "m"
+    assert images["vp"].coords["x"].attrs["units"] == "m"
+    assert smoothed["vp"].dims == ("z", "x")
+    np.testing.assert_array_equal(smoothed["vp"].values, (2.0 * values).reshape(2, 3))
+    assert smoothed["vp"].attrs["units"] == "km/s"
+    assert smoothed["vp"].coords["z"].attrs["units"] == "km"
+    assert smoothed["vp"].coords["x"].attrs["units"] == "km"
+
+
+def test_image_database_requires_aggregate_image(tmp_path):
+    image_path = tmp_path / "image"
+    image_path.mkdir()
+    (image_path / "image_1.h5").touch()
+
+    db = ImageDatabase(path=image_path, parts=1, shape=(2, 3))
+
+    with pytest.raises(FileNotFoundError, match="imaging --smooth postprocess"):
+        db.require_aggregate()
+
+
+def test_imaging_job_current_requires_aggregate_image(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    observed = tmp_path / "observed" / "traces"
+    observed.mkdir(parents=True)
+    job = sim.imaging_job(
+        name="rtm",
+        observed=observed,
+        frequencies=[5.0],
+        parameters=["vp"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+    )
+    job.save()
+    trace_file = job.expected_trace_files()[0]
+    trace_file.parent.mkdir(parents=True, exist_ok=True)
+    trace_file.touch()
+    job.write_run_state(status="completed")
+
+    assert not job.is_run_current()
+
+    job.image_file(1).touch()
+    assert job.needs_image_smoothing()
+
+    job.image_file().touch()
+    assert job.is_run_current()
 
 
 def test_fwi_jacobian_dot_test_and_taylor_test_use_hermitian_products(tmp_path):

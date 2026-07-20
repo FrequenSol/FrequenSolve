@@ -73,3 +73,24 @@ def test_cloud_extra_contains_only_cloud_client_dependencies():
     assert "requests" in cloud_dependencies
     for non_cloud_dependency in ["flask", "python-dotenv", "werkzeug"]:
         assert non_cloud_dependency not in cloud_dependencies
+
+
+def test_hpc_extras_use_keyring_without_requiring_dotenv():
+    extras = load_pyproject()["project"]["optional-dependencies"]
+
+    for extra_name in ("hpc", "parallel"):
+        dependencies = "\n".join(extras[extra_name])
+        assert "keyring" in dependencies
+        assert "python-dotenv" not in dependencies
+
+
+def test_versioneer_uses_v_prefixed_release_tags():
+    pyproject = load_pyproject()
+    setup_cfg = (ROOT / "setup.cfg").read_text(encoding="utf-8")
+    generated_version = (ROOT / "src/frequensolve/_version.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert pyproject["tool"]["versioneer"]["tag_prefix"] == "v"
+    assert "tag_prefix = v" in setup_cfg
+    assert 'cfg.tag_prefix = "v"' in generated_version

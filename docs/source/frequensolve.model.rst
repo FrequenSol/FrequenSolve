@@ -9,6 +9,14 @@ Model
    :show-inheritance:
    :noindex:
 
+Attenuation Configuration
+-------------------------
+
+.. automodule:: frequensolve.model.attenuation
+   :members:
+   :show-inheritance:
+   :noindex:
+
 Properties
 ----------
 

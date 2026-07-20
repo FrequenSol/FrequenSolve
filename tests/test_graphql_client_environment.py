@@ -130,13 +130,13 @@ def test_legacy_environment_argument_is_accepted_but_not_sent():
     assert client.last_variables in (None, {})
 
 
-def test_submit_job_can_send_status_email_override_and_force_run():
+def test_submit_job_can_send_status_email_override_and_fresh_run():
     client = CapturingGraphQLClient()
 
     result = client.submit_job(
         "project/jobs/job.json",
         send_simulation_status_email=True,
-        force_run=True,
+        fresh=True,
     )
 
     assert result["simulationId"] == "simulation-1"

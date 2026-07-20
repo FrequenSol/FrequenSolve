@@ -2,6 +2,9 @@ import importlib
 import importlib.util
 import subprocess
 import sys
+from pathlib import Path
+
+import toml
 
 from frequensolve._optional import missing_optional_class, optional_class
 
@@ -24,6 +27,7 @@ forbidden = {
     'dask',
     'distributed',
     'dotenv',
+    'keyring',
     'matplotlib',
     'paramiko',
     'pint',
@@ -46,10 +50,15 @@ def test_top_level_authoring_exports_are_available():
         "Project",
         "SeismicSimulation",
         "LayeredModel",
+        "BoreholeAnnularPadding",
         "Fracture",
         "ModelSubdomain",
         "Property",
+        "coord",
         "prop",
+        "ref",
+        "remap",
+        "var",
         "CartesianGrid",
         "CoordinateSystem",
         "MeshManager",
@@ -66,10 +75,14 @@ def test_top_level_authoring_exports_are_available():
         "KlauderWavelet",
         "JobOutputs",
         "OutputUnits",
+        "AxisAlignedPlane",
         "ParaViewOutput",
         "ParaviewOutput",
+        "VtkItem",
+        "VtkOutput",
         "outputs",
         "paraview",
+        "vtk",
         "wavefield",
         "field",
         "info",
@@ -84,6 +97,7 @@ def test_top_level_authoring_exports_are_available():
         "vtu_fields",
         "plot_vtu",
         "configure_fft",
+        "load",
     ]
 
     for name in expected:
@@ -126,7 +140,7 @@ def test_optional_backend_exports_are_part_of_public_sdk_surface():
 def test_optional_dependency_placeholder_raises_install_hint():
     Missing = missing_optional_class(
         "MissingBackend",
-        extra="parallel",
+        extra="hpc",
         error=ModuleNotFoundError("No module named 'distributed'"),
         module=__name__,
     )
@@ -138,14 +152,14 @@ def test_optional_dependency_placeholder_raises_install_hint():
     else:
         raise AssertionError("optional placeholder did not raise")
 
-    assert "pip install frequensolve[parallel]" in message
+    assert "pip install frequensolve[hpc]" in message
 
 
 def test_lazy_optional_class_raises_install_hint():
     Missing = optional_class(
         "MissingBackend",
         "frequensolve.missing_backend.MissingBackend",
-        extra="parallel",
+        extra="hpc",
         dependencies=("missing-backend",),
         module=__name__,
     )
@@ -157,8 +171,16 @@ def test_lazy_optional_class_raises_install_hint():
     else:
         raise AssertionError("lazy optional class did not raise")
 
-    assert "pip install frequensolve[parallel]" in message
+    assert "pip install frequensolve[hpc]" in message
     assert "missing-backend" in message
+
+
+def test_parallel_extra_remains_hpc_alias():
+    project_root = Path(__file__).resolve().parents[1]
+    pyproject = toml.load(project_root / "pyproject.toml")
+    extras = pyproject["project"]["optional-dependencies"]
+
+    assert set(extras["parallel"]) == set(extras["hpc"])
 
 
 def test_units_registry_is_lazy_but_usable():
@@ -181,6 +203,7 @@ def test_public_package_imports_smoke():
         "frequensolve.geometry",
         "frequensolve.mesh",
         "frequensolve.model",
+        "frequensolve.expr",
         "frequensolve.model.layered",
         "frequensolve.plotting",
         "frequensolve.plotting.analysis",
@@ -189,12 +212,14 @@ def test_public_package_imports_smoke():
         "frequensolve.project",
         "frequensolve.seismic",
         "frequensolve.simulation",
+        "frequensolve.simulation.discretization",
         "frequensolve.simulation.jobs",
         "frequensolve.simulation.jobs.base",
         "frequensolve.simulation.jobs.fwi",
         "frequensolve.simulation.jobs.imaging",
         "frequensolve.simulation.jobs.forward",
         "frequensolve.simulation.outputs",
+        "frequensolve.simulation.solver",
         "frequensolve.util",
         "frequensolve.orchestrator",
         "frequensolve.orchestrator.sites",
@@ -203,6 +228,28 @@ def test_public_package_imports_smoke():
         "frequensolve.orchestrator.utils.progress",
     ]:
         importlib.import_module(name)
+
+
+def test_solver_and_discretization_have_domain_specific_modules():
+    import frequensolve as fs
+
+    discretization = importlib.import_module("frequensolve.simulation.discretization")
+    solver = importlib.import_module("frequensolve.simulation.solver")
+
+    assert fs.Discretization is discretization.Discretization
+    assert fs.SolverConfig is solver.SolverConfig
+    assert fs.SuperPatch is solver.SuperPatch
+    assert importlib.util.find_spec("frequensolve.simulation.numerics_manager") is None
+
+
+def test_super_patch_acknowledgement_is_inspectable_and_roundtrips():
+    import frequensolve as fs
+
+    patch = fs.SuperPatch(grid=2, domain=7, warning_acknowledged=True)
+
+    assert patch.warning_acknowledged is True
+    assert "warning_acknowledged=True" in repr(patch)
+    assert fs.SuperPatch.from_fs(patch.to_fs()).warning_acknowledged is True
 
 
 def test_removed_legacy_public_names_are_not_exported():

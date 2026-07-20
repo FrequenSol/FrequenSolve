@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, Union
 
+from frequensolve.model.property import rsf_binary_path
 from frequensolve.simulation.simulation import CustomJSONEncoder
 
 if TYPE_CHECKING:
@@ -186,14 +187,22 @@ class JobRemoteMixin:
             if not isinstance(payload, Mapping):
                 continue
             for file_ref in self._iter_file_references(payload):
-                add_pair(
-                    self._remote_project_file_pair(
-                        file_ref,
-                        source_project=local_layout.project,
-                        remote_project=remote_project,
-                        source_projects=source_projects,
-                    )
+                pair = self._remote_project_file_pair(
+                    file_ref,
+                    source_project=local_layout.project,
+                    remote_project=remote_project,
+                    source_projects=source_projects,
                 )
+                add_pair(pair)
+                for sidecar_ref in self._rsf_sidecar_references(pair):
+                    add_pair(
+                        self._remote_project_file_pair(
+                            sidecar_ref,
+                            source_project=local_layout.project,
+                            remote_project=remote_project,
+                            source_projects=source_projects,
+                        )
+                    )
         return files
 
     @staticmethod
@@ -336,9 +345,6 @@ class JobRemoteMixin:
             sim_project = getattr(simulation, "project_path", None)
             if sim_project is not None:
                 roots.append(sim_project)
-            sim_proj_path = getattr(simulation, "_proj_path", None)
-            if sim_proj_path is not None:
-                roots.append(sim_proj_path)
         return self._unique_paths(roots)
 
     @staticmethod
@@ -436,6 +442,19 @@ class JobRemoteMixin:
         if Path(file_part).suffix:
             return file_part
         return text
+
+    @staticmethod
+    def _rsf_sidecar_references(pair: Optional[tuple]) -> Iterable[Path]:
+        if pair is None:
+            return []
+        local, _remote = pair
+        local = Path(local)
+        if local.suffix.lower() != ".rsf" or not local.exists():
+            return []
+        sidecar = rsf_binary_path(local)
+        if sidecar is None or not sidecar.exists():
+            return []
+        return [sidecar]
 
     def _remote_project_file_pair(
         self,

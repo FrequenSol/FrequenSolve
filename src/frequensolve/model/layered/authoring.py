@@ -20,6 +20,7 @@ from frequensolve.model.model import ModelSubdomain
 
 from .borehole import (
     Borehole,
+    BoreholeAnnularPadding,
     BoreholeLayer,
     BoreholePart,
     BoreholePlug,
@@ -187,9 +188,12 @@ class LayeredAuthoringMixin:
         layers: Optional[List[Union[BoreholePart, Mapping[str, Any]]]] = None,
         surfaces: Optional[List[Union[BoreholeSurface, Mapping[str, Any]]]] = None,
         plugs: Optional[List[Union[BoreholePlug, Mapping[str, Any]]]] = None,
+        annular_padding: Optional[
+            Union[BoreholeAnnularPadding, Mapping[str, Any]]
+        ] = None,
         **kwargs,
     ) -> Borehole:
-        """Add a 2D vertical borehole and any declared material subdomains.
+        """Add a vertical borehole and any declared material subdomains.
 
         ``layers`` may be ``BoreholeLayer`` objects or dictionaries. A layer
         value can also include ``physics`` and ``properties``; those fields
@@ -197,21 +201,25 @@ class LayeredAuthoringMixin:
         keeps only the geometry and mesh-block fields required by the solver.
         When a layer does not include ``properties``, its ``mesh_block_id`` must
         already reference an existing model subdomain. ``plugs`` follow the same
-        material rule and describe local axial obstructions inside the borehole.
+        material rule and describe local axial obstructions inside 2D
+        boreholes. The current 3D solver path supports vertical boreholes only
+        and does not support plugs/tool-body intervals.
 
         Args:
             name: Optional borehole name. If omitted or duplicated, the model
                 assigns a unique name.
             axis: Mapping that describes the borehole axis, such as
-                ``{"x": value}`` in 2D.
-            x: Convenience axis coordinate for a 2D vertical borehole.
-            y: Reserved for future 3D borehole support; rejected for 2D models.
+                ``{"x": value}`` in 2D or ``{"x": value, "y": value}`` in 3D.
+            x: Convenience axis x-coordinate.
+            y: Convenience axis y-coordinate required for 3D boreholes.
             top: Top extent as a surface reference, one-based surface index,
                 ``SimpleSurface``, mapping, or depth-like value.
             bottom: Bottom extent in the same forms as ``top``.
             layers: Radial material layers or already-closed borehole parts.
             surfaces: Optional named cumulative-radius surfaces.
             plugs: Optional plug/tool-body intervals inside the borehole.
+            annular_padding: Optional 3D annular padding block with ``n``,
+                ``outer_radius``, and optional ``power``.
             **kwargs: Legacy aliases. ``parts`` aliases ``layers`` and
                 ``extent`` may provide ``top``/``bottom``.
 
@@ -221,8 +229,9 @@ class LayeredAuthoringMixin:
         Raises:
             TypeError: If a layer, surface, or plug specification has an
                 unsupported type.
-            ValueError: If called on a non-2D model, the axis is ambiguous or
-                missing, or borehole material domains cannot be resolved.
+            ValueError: If the axis is ambiguous or missing, unsupported 3D
+                plug geometry is requested, or borehole material domains cannot
+                be resolved.
         """
 
         if "parts" in kwargs:
@@ -235,14 +244,11 @@ class LayeredAuthoringMixin:
             extent = dict(kwargs.pop("extent"))
             top = extent.get("top")
             bottom = extent.get("bottom")
+        p_enrich = kwargs.pop("p_enrich", None)
         if kwargs:
             unexpected = ", ".join(sorted(kwargs))
-            raise TypeError(
-                f"Unexpected LayeredModel.add_borehole arguments: {unexpected}"
-            )
-        if self.dimension != 2:
-            raise ValueError(
-                "LayeredModel.add_borehole currently supports 2D models only"
+            warnings.warn(
+                f"Possibly unexpected LayeredModel.add_borehole arguments: {unexpected}"
             )
         if axis is not None:
             axis_payload = copy.deepcopy(dict(axis))
@@ -259,7 +265,24 @@ class LayeredAuthoringMixin:
         if self.dimension == 2 and "y" in axis_payload:
             raise ValueError("2D boreholes accept x, not y")
         if "x" not in axis_payload:
-            raise ValueError("2D boreholes require axis/x")
+            raise ValueError("Boreholes require axis/x")
+        if self.dimension == 3 and "y" not in axis_payload:
+            raise ValueError("3D boreholes require axis/y")
+        if self.dimension == 3 and plugs:
+            raise ValueError("3D borehole meshing does not support plugs")
+        if self.dimension != 3 and annular_padding is not None:
+            raise ValueError(
+                "Borehole annular_padding is supported for 3D boreholes only"
+            )
+        annular_padding_obj = (
+            annular_padding
+            if isinstance(annular_padding, BoreholeAnnularPadding)
+            else (
+                BoreholeAnnularPadding.from_fs(annular_padding)
+                if annular_padding is not None
+                else None
+            )
+        )
 
         if top is None:
             top = self.upper_surface()
@@ -281,6 +304,19 @@ class LayeredAuthoringMixin:
             )
             for surface in surfaces or []
         ]
+        surface_by_name = {
+            (surface.name or f"{name}_surface_{index + 1}"): surface
+            for index, surface in enumerate(surface_specs)
+        }
+
+        def default_outer_surface(index: int) -> BoreholeSurface:
+            surface_index = (
+                index + 1 if surface_specs and surface_specs[0].is_axis() else index
+            )
+            if surface_index >= len(surface_specs):
+                raise ValueError("Borehole layers without r require matching surfaces")
+            return surface_specs[surface_index]
+
         layer_specs = list(layers if layers is not None else [])
         if layers is not None:
             for index, spec in enumerate(layer_specs):
@@ -304,6 +340,10 @@ class LayeredAuthoringMixin:
                         layer_payload["system"] = spec.system
                     if spec.subdomain_name is not None:
                         layer_payload["subdomain_name"] = spec.subdomain_name
+                    if spec.inner_surface is not None:
+                        layer_payload["inner_surface"] = spec.inner_surface
+                    if spec.outer_surface is not None:
+                        layer_payload["outer_surface"] = spec.outer_surface
                     spec = layer_payload
                 if not isinstance(spec, Mapping):
                     raise TypeError(
@@ -311,13 +351,19 @@ class LayeredAuthoringMixin:
                         "or mapping objects"
                     )
                 if "r" not in spec:
-                    if index >= len(surface_specs):
-                        raise ValueError(
-                            "Borehole layers without r require matching surfaces"
-                        )
+                    outer_name = spec.get("outer_surface")
+                    if outer_name is not None:
+                        if outer_name not in surface_by_name:
+                            raise ValueError(
+                                "Borehole layer references unknown outer_surface "
+                                f"'{outer_name}'"
+                            )
+                        surface = surface_by_name[outer_name]
+                    else:
+                        surface = default_outer_surface(index)
                     layer_specs[index] = {
                         **dict(spec),
-                        "r": surface_specs[index].r,
+                        "r": surface.r,
                     }
         for spec in layer_specs:
             part, subdomain, next_block = self._coerce_borehole_part(
@@ -371,6 +417,9 @@ class LayeredAuthoringMixin:
             surfaces=surface_specs,
             plugs=borehole_plugs,
             model=self,
+            annular_padding=annular_padding_obj,
+            **({"p_enrich": p_enrich} if p_enrich is not None else {}),
+            **kwargs,
         )
         self.boreholes.append(borehole)
         return borehole

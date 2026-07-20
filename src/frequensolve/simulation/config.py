@@ -4,7 +4,6 @@ from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from frequensolve.util.mixins import warn_deprecated_path_api
 from frequensolve.util.physics import (
     canonical_dimension,
     canonical_physics,
@@ -30,8 +29,6 @@ class SimulationConfig:
     dimension: int | float | str
     axisymmetric: InitVar[bool] = False
     _axisymmetric: bool = field(default=False, init=False, repr=False)
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
     _file: Optional[Path] = None
 
     _AXISYMMETRIC_BASE_PHYSICS = {
@@ -85,7 +82,7 @@ class SimulationConfig:
             dimension values.
         """
 
-        project_path = getattr(ctx, "project_path", None) or self._proj_path
+        project_path = getattr(ctx, "project_path", None)
         if project_path is None:
             project_path = getattr(self, "project_path", None)
         return {
@@ -114,16 +111,6 @@ class SimulationConfig:
             dimension=data.get("dimension"),
             axisymmetric=data.get("axisymmetric", False),
         )
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = proj_path
-        self._rel_path = rel_path / self.name
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
 
 
 def _get_axisymmetric(self: SimulationConfig) -> bool:

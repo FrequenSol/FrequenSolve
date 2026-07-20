@@ -23,10 +23,19 @@ __all__: list[str] = []
 _ROOT_TRACE_METADATA_DATASETS = {
     "frequency",
     "laplace",
+    "metadata",
     "task_id",
+    "trace_metadata_file",
     "trace_data",
     "trace_index",
 }
+_TRACE_METADATA_FILE = "trace_metadata.h5"
+_MODERN_TRACE_SHARD_GLOB = "f_*.h5"
+_LEGACY_TRACE_SHARD_GLOBS = (
+    "traces_*.h5",
+    "receivers_*.h5",
+    "trace_frequency_*.h5",
+)
 
 
 class TraceSummary(str):
@@ -49,18 +58,27 @@ class TraceSummary(str):
 def _decode_h5_strings(values):
     values = np.asarray(values)
     if values.dtype.kind in {"S", "O"}:
-        return np.array(
+        return np.asarray(
             [
-                item.decode("utf-8", "ignore") if isinstance(item, bytes) else str(item)
-                for item in values
-            ]
-        )
+                (
+                    item.decode("utf-8", "ignore").rstrip("\x00").rstrip()
+                    if isinstance(item, bytes)
+                    else str(item).rstrip("\x00").rstrip()
+                )
+                for item in values.ravel()
+            ],
+            dtype=object,
+        ).reshape(values.shape)
     return values
 
 
 def _decode_dim_list(values) -> list[str]:
     return [
-        item.decode("utf-8", "ignore") if isinstance(item, bytes) else str(item)
+        (
+            item.decode("utf-8", "ignore").rstrip("\x00").rstrip()
+            if isinstance(item, bytes)
+            else str(item).rstrip("\x00").rstrip()
+        )
         for item in values
     ]
 
@@ -118,6 +136,11 @@ def _trace_data_dims(dset) -> list[str]:
     if "dense_trace_v1" in layout_kind:
         dims = list(reversed(dims))
     return ["frequency", *dims]
+
+
+def _copy_h5_attrs(source, target) -> None:
+    for key, value in source.attrs.items():
+        target.attrs[key] = value
 
 
 def _as_file_list(files: Iterable[Union[str, Path]]) -> List[Union[str, Path]]:
@@ -303,6 +326,7 @@ class TraceStore:
             for path in (
                 f"survey/receiver_groups/{group}/traces/component_name",
                 f"survey/receiver_groups/{group}/components/component_name",
+                "survey/components/component_name",
             ):
                 if path in f:
                     return _unique_preserve_order(_decode_h5_strings(f[path][()]))
@@ -319,9 +343,12 @@ class TraceStore:
         """Return source ids available in a trace group."""
 
         with h5py.File(self._trace_file_for_group(group), "r") as f:
-            path = f"survey/receiver_groups/{group}/traces/source_id"
-            if path in f:
-                return _unique_preserve_order(f[path][()])
+            for path in (
+                f"survey/receiver_groups/{group}/traces/source_id",
+                "survey/sources/source_id",
+            ):
+                if path in f:
+                    return _unique_preserve_order(f[path][()])
             dset = (
                 f[self._indexed_trace_paths(f, group)[0]]
                 if self._is_indexed_packed_h5(f) and group not in f
@@ -351,7 +378,14 @@ class TraceStore:
                 if values:
                     return np.asarray(values, dtype=float)
             if "frequency" in f:
-                return self._filter_expected_frequencies(f["frequency"][()])
+                frequencies = np.asarray(f["frequency"][()]).ravel()
+                laplace = (
+                    np.asarray(f["laplace"][()]).ravel() if "laplace" in f else None
+                )
+                indices = self._expected_frequency_laplace_indices(frequencies, laplace)
+                if indices is not None:
+                    return frequencies[indices].astype(float)
+                return self._filter_expected_frequencies(frequencies)
             dset = (
                 f[self._indexed_trace_paths(f, group)[0]]
                 if self._is_indexed_packed_h5(f) and group not in f
@@ -385,7 +419,10 @@ class TraceStore:
                 values = np.asarray(f["laplace"][()]).ravel()
                 if values.size:
                     if "frequency" in f:
-                        indices = self._expected_frequency_indices(f["frequency"][()])
+                        indices = self._expected_frequency_laplace_indices(
+                            f["frequency"][()],
+                            values,
+                        )
                         if (
                             indices is not None
                             and max(indices, default=-1) < values.size
@@ -405,6 +442,7 @@ class TraceStore:
             for path in (
                 f"survey/receiver_groups/{group}/traces/receiver_id",
                 f"survey/receiver_groups/{group}/receivers/receiver_id",
+                "survey/receivers/receiver_id",
             ):
                 if path in f:
                     return _unique_preserve_order(f[path][()])
@@ -577,6 +615,99 @@ class TraceStore:
     @staticmethod
     def _read_trace_laplace(file: Path) -> float:
         return TraceStore._read_trace_laplace_values(file)[0]
+
+    @staticmethod
+    def _read_trace_metadata_reference(file: Path) -> Optional[str]:
+        try:
+            with h5py.File(file, "r") as h5:
+                values = _dataset_strings(h5, "trace_metadata_file")
+        except (OSError, KeyError, ValueError):
+            return None
+        return values[0] if values else None
+
+    @staticmethod
+    def _is_trace_metadata_file(path: Path) -> bool:
+        if not path.exists():
+            return False
+        try:
+            with h5py.File(path, "r") as h5:
+                schema = _dataset_strings(h5, "metadata/schema_version")
+                if schema:
+                    return "fs_trace_metadata_v1" in schema
+                return "survey" in h5 and "frequency" not in h5
+        except (OSError, KeyError, ValueError):
+            return False
+
+    def _candidate_trace_metadata_files(
+        self,
+        records: Iterable[Path],
+    ) -> list[Path]:
+        records = [Path(record) for record in records]
+        candidates: list[Path] = []
+        seen: set[str] = set()
+
+        def add(path: Path) -> None:
+            key = str(path.resolve(strict=False))
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(path)
+
+        roots: list[Path] = []
+        for root in (
+            self.metadata.get("output_path"),
+            self.metadata.get("result_path"),
+        ):
+            if root is not None:
+                roots.append(Path(root))
+        for record in records:
+            roots.extend([record.parent, record.parent.parent])
+
+        for record in records:
+            if not record.exists():
+                continue
+            reference = self._read_trace_metadata_reference(record)
+            if not reference:
+                continue
+            reference_path = Path(reference)
+            if reference_path.is_absolute():
+                add(reference_path)
+                continue
+            add(record.parent / reference_path)
+            add(record.parent.parent / reference_path)
+            for root in roots:
+                add(root / reference_path)
+
+        for root in roots:
+            add(root / _TRACE_METADATA_FILE)
+            add(root / "traces" / _TRACE_METADATA_FILE)
+            if root.name == "shards":
+                add(root.parent / _TRACE_METADATA_FILE)
+        return candidates
+
+    def _trace_metadata_file_for_records(
+        self,
+        records: Iterable[Path],
+    ) -> Optional[Path]:
+        for candidate in self._candidate_trace_metadata_files(records):
+            if self._is_trace_metadata_file(candidate):
+                return candidate
+        return None
+
+    @staticmethod
+    def _template_dataset_path_for_group(h5, group: str) -> str:
+        group = str(group).strip("/")
+        if group in h5 and isinstance(h5[group], h5py.Dataset):
+            return group
+        catalog = "survey/receiver_groups/_catalog"
+        if catalog in h5:
+            group_names = _dataset_strings(h5, f"{catalog}/group_name")
+            dataset_paths = _dataset_strings(h5, f"{catalog}/dataset_path")
+            for group_name, dataset_path in zip(group_names, dataset_paths):
+                path = _trace_data_tail(dataset_path)
+                if (group_name == group or path == group) and path in h5:
+                    return path
+        raise KeyError(f"Group '{group}' not found in trace metadata")
 
     @staticmethod
     def _is_indexed_packed_h5(h5) -> bool:
@@ -834,6 +965,89 @@ class TraceStore:
                     break
         return indices
 
+    def _expected_frequency_laplace_indices(
+        self,
+        available: Iterable[float],
+        laplace: Optional[Iterable[float]],
+    ) -> Optional[list[int]]:
+        expected = self._expected_frequencies()
+        if not expected:
+            return None
+        available_values = np.asarray(available, dtype=float).ravel()
+        laplace_values = (
+            np.asarray(laplace, dtype=float).ravel() if laplace is not None else None
+        )
+        if laplace_values is None or laplace_values.size != available_values.size:
+            return self._expected_frequency_indices(available_values)
+        if not self._metadata_has_laplace_values(expected):
+            return self._expected_frequency_indices(available_values)
+
+        expected_laplace = self._metadata_laplace_values(expected)
+        indices: list[int] = []
+        used: set[int] = set()
+        for frequency, laplace_value in zip(expected, expected_laplace):
+            real_matches = np.isclose(
+                available_values,
+                float(frequency),
+                rtol=0.0,
+                atol=1.0e-9,
+            )
+            laplace_matches = np.isclose(
+                laplace_values,
+                float(laplace_value),
+                rtol=0.0,
+                atol=1.0e-12,
+            )
+            for match in np.flatnonzero(real_matches & laplace_matches):
+                index = int(match)
+                if index not in used:
+                    indices.append(index)
+                    used.add(index)
+                    break
+        return indices
+
+    def _metadata_has_laplace_values(self, frequencies: Iterable[float]) -> bool:
+        f_map = self.metadata.get("f_map", {})
+        laplace_map = self.metadata.get("laplace_map", {})
+        explicit_keys = self.metadata.get("laplace_map_keys")
+        if explicit_keys is None:
+            if not isinstance(laplace_map, dict) or not laplace_map:
+                return False
+            explicit = {str(key) for key in laplace_map}
+        else:
+            explicit = {str(key) for key in explicit_keys}
+        if not explicit:
+            return False
+        if not isinstance(f_map, dict):
+            return True
+
+        pairs = []
+        for index, frequency in f_map.items():
+            try:
+                pairs.append((str(index), float(np.real(frequency))))
+            except (TypeError, ValueError):
+                continue
+        used: set[int] = set()
+        for frequency in frequencies:
+            match = None
+            for index, (key, known_frequency) in enumerate(pairs):
+                if index in used:
+                    continue
+                if np.isclose(
+                    float(frequency),
+                    known_frequency,
+                    rtol=0.0,
+                    atol=1.0e-9,
+                ):
+                    match = (index, key)
+                    break
+            if match is None:
+                return False
+            used.add(match[0])
+            if match[1] not in explicit:
+                return False
+        return True
+
     def _filter_expected_frequencies(self, values: Iterable[float]) -> np.ndarray:
         frequencies = np.asarray(values, dtype=float).ravel()
         indices = self._expected_frequency_indices(frequencies)
@@ -844,14 +1058,20 @@ class TraceStore:
     def _filter_expected_frequency_data(self, data: DataArray) -> DataArray:
         if "frequency" not in data.dims or "frequency" not in data.coords:
             return data
-        indices = self._expected_frequency_indices(data.coords["frequency"].values)
+        laplace = data.coords["laplace"].values if "laplace" in data.coords else None
+        indices = self._expected_frequency_laplace_indices(
+            data.coords["frequency"].values,
+            laplace,
+        )
         if indices is None:
             return data
         return data.isel(frequency=indices)
 
     def _filter_expected_indexed_rows(self, rows: list[dict]) -> list[dict]:
-        indices = self._expected_frequency_indices(
-            [row["frequency"] for row in rows if row["frequency"] is not None]
+        comparable_rows = [row for row in rows if row["frequency"] is not None]
+        indices = self._expected_frequency_laplace_indices(
+            [row["frequency"] for row in comparable_rows],
+            [row.get("laplace", 0.0) for row in comparable_rows],
         )
         if indices is None:
             return rows
@@ -957,6 +1177,154 @@ class TraceStore:
             return {}
         return group_files
 
+    def _candidate_frequency_shard_files(self, records: Iterable[Path]) -> list[Path]:
+        records = [Path(record) for record in records]
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        record_keys = {str(path.resolve(strict=False)) for path in records}
+
+        def add_file(path: Path) -> None:
+            key = str(path.resolve(strict=False))
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(path)
+
+        def add_shard_dir(shard_dir: Path) -> None:
+            if not shard_dir.exists():
+                return
+            modern = sorted(shard_dir.glob(_MODERN_TRACE_SHARD_GLOB))
+            files = modern
+            if not files:
+                files = [
+                    path
+                    for pattern in _LEGACY_TRACE_SHARD_GLOBS
+                    for path in sorted(shard_dir.glob(pattern))
+                ]
+            for path in files:
+                add_file(path)
+
+        def add_root(root: Optional[Union[str, Path]]) -> None:
+            if root is None:
+                return
+            root = Path(root)
+            for shard_dir in (
+                root / "shards",
+                root / "traces" / "shards",
+                root / "wavefields" / "shards",
+            ):
+                add_shard_dir(shard_dir)
+            if root.exists():
+                for pattern in (_MODERN_TRACE_SHARD_GLOB, *_LEGACY_TRACE_SHARD_GLOBS):
+                    for path in sorted(root.glob(pattern)):
+                        add_file(path)
+
+        add_root(self.metadata.get("output_path"))
+        add_root(self.metadata.get("result_path"))
+        for record in records:
+            add_root(record.parent)
+            add_root(record.parent.parent)
+
+        configured_groups = [str(group) for group in self.metadata.get("groups", [])]
+        expected = self._expected_frequencies()
+        if expected:
+            files_by_frequency: dict[int, Path] = {}
+        else:
+            files = []
+
+        for candidate in candidates:
+            key = str(candidate.resolve(strict=False))
+            if (
+                key in record_keys
+                or not candidate.exists()
+                or self._is_packed_trace_file(candidate)
+            ):
+                continue
+            try:
+                frequencies = self._read_trace_frequencies(candidate)
+            except (OSError, KeyError, ValueError):
+                continue
+            if len(frequencies) != 1:
+                continue
+            if configured_groups:
+                try:
+                    available_groups = set(
+                        self.discover_trace_groups(candidate, configured_groups)
+                    )
+                except (OSError, KeyError, ValueError):
+                    available_groups = set()
+                if not all(group in available_groups for group in configured_groups):
+                    metadata_file = self._trace_metadata_file_for_records(
+                        [candidate, *records]
+                    )
+                    if metadata_file is not None:
+                        try:
+                            available_groups = set(
+                                self.discover_trace_groups(
+                                    metadata_file,
+                                    configured_groups,
+                                )
+                            )
+                        except (OSError, KeyError, ValueError):
+                            available_groups = set()
+                if not all(group in available_groups for group in configured_groups):
+                    continue
+            if not expected:
+                files.append(candidate)
+                continue
+            for index, frequency in enumerate(expected):
+                if index in files_by_frequency:
+                    continue
+                if np.isclose(
+                    float(frequencies[0]),
+                    float(frequency),
+                    rtol=0.0,
+                    atol=1.0e-9,
+                ):
+                    files_by_frequency[index] = candidate
+                    break
+
+        if not expected:
+            return files
+        files = [files_by_frequency[index] for index in sorted(files_by_frequency)]
+        if files and len(files) < len(expected):
+            warnings.warn(
+                "Trace shards are missing "
+                f"{len(expected) - len(files)} of {len(expected)} expected "
+                "frequencies; building a VDS from the available shards.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return files
+
+    def _order_frequency_files(self, files: Iterable[Path]) -> list[Path]:
+        expected = self._expected_frequencies()
+        files = list(files)
+        if not expected:
+            return files
+
+        files_by_frequency: dict[int, Path] = {}
+        for path in files:
+            try:
+                frequencies = self._read_trace_frequencies(path)
+            except (OSError, KeyError, ValueError):
+                continue
+            if len(frequencies) != 1:
+                continue
+            for index, frequency in enumerate(expected):
+                if index in files_by_frequency:
+                    continue
+                if np.isclose(
+                    float(frequencies[0]),
+                    float(frequency),
+                    rtol=0.0,
+                    atol=1.0e-9,
+                ):
+                    files_by_frequency[index] = path
+                    break
+        ordered = [files_by_frequency[index] for index in sorted(files_by_frequency)]
+        return ordered or files
+
     def consolidate(self, cache_dir: Optional[Union[str, Path]] = None) -> Path:
         """Create or select a packed trace file with frequency as leading axis.
 
@@ -995,20 +1363,54 @@ class TraceStore:
             return self._consolidated
 
         available = []
+        missing = []
+        shard_files: list[Path] = []
         for record in records:
             if record.exists():
                 available.append(record)
             else:
+                missing.append(record)
+
+        if missing:
+            shard_files = self._candidate_frequency_shard_files(records)
+            if shard_files:
+                available = self._order_frequency_files([*available, *shard_files])
+                message = (
+                    "Trace files are missing; creating a VDS from "
+                    f"{len(available)} matching frequency shard(s)."
+                    if not any(record.exists() for record in records)
+                    else "Trace files are missing; filling the VDS from matching "
+                    "frequency shard(s)."
+                )
+                warnings.warn(
+                    message,
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            elif not available:
+                for record in missing:
+                    warnings.warn(
+                        "Trace file is missing and will be omitted from the VDS: "
+                        f"{record}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+
+        if not available:
+            raise FileNotFoundError("No trace files exist")
+
+        if missing and any(record.exists() for record in records) and not shard_files:
+            for record in missing:
                 warnings.warn(
                     f"Trace file is missing and will be omitted from the VDS: {record}",
                     RuntimeWarning,
                     stacklevel=2,
                 )
 
-        if not available:
-            raise FileNotFoundError("No trace files exist")
-
-        metadata_record = records[0] if records[0].exists() else available[0]
+        metadata_record = self._trace_metadata_file_for_records(
+            [*records, *available]
+        ) or (records[0] if records[0].exists() else available[0])
+        output_record = records[0] if records else metadata_record
         freqs = [self._read_trace_frequency(record) for record in available]
         laplace = []
         metadata_laplace = self._metadata_laplace_values(freqs)
@@ -1020,7 +1422,8 @@ class TraceStore:
         cache_dir = Path(cache_dir) if cache_dir is not None else self._cache_dir
         if cache_dir is not None:
             cache_dir.mkdir(parents=True, exist_ok=True)
-        new_file = self._consolidated_path(metadata_record, cache_dir=cache_dir)
+        new_file = self._consolidated_path(output_record, cache_dir=cache_dir)
+        new_file.parent.mkdir(parents=True, exist_ok=True)
 
         self.close()
         if new_file.exists():
@@ -1033,24 +1436,37 @@ class TraceStore:
                 first.copy("survey", nf)
 
             for group in self.metadata["groups"]:
-                if group not in first:
-                    raise KeyError(
-                        f"Group '{group}' not found in HDF5 {metadata_record}"
-                    )
-
-                source = first[group]
+                template_path = self._template_dataset_path_for_group(first, group)
+                source = first[template_path]
                 source_shape = source.shape
+                payload_path = _trace_data_tail(template_path)
                 layout = h5py.VirtualLayout(
                     shape=(len(available),) + source_shape,
                     dtype=source.dtype,
                 )
                 for index, record in enumerate(available):
+                    with h5py.File(record, "r") as shard:
+                        if payload_path not in shard:
+                            raise KeyError(
+                                f"Dataset '{payload_path}' not found in HDF5 {record}"
+                            )
+                        if shard[payload_path].shape != source_shape:
+                            raise ValueError(
+                                "Trace payload shape does not match metadata "
+                                f"template for group {group!r}: {record}"
+                            )
                     layout[index] = h5py.VirtualSource(
-                        str(record), group, shape=source_shape
+                        str(record), payload_path, shape=source_shape
                     )
                 nf.create_virtual_dataset(group, layout)
 
                 dset = nf[group]
+                _copy_h5_attrs(source, dset)
+                # The VDS stores axes in the template's physical HDF5 order.
+                # Layout markers describe the template payload order and would
+                # cause readers to reinterpret the VDS axes a second time.
+                if "layout_kind" in dset.attrs:
+                    del dset.attrs["layout_kind"]
                 dims = [*_trace_axis_dims(source), "frequency"]
                 dset.attrs["dims"] = dims
                 for axis, dim in enumerate(dims[:-1]):
@@ -1084,7 +1500,7 @@ class TraceStore:
 
             raise optional_dependency_error(
                 "TraceDataset lazy HDF5 reading",
-                extra="parallel",
+                extra="hpc",
                 dependencies=("dask",),
                 error=exc,
             ) from exc
@@ -1132,6 +1548,7 @@ class TraceStore:
                 survey_paths = [
                     f"survey/receiver_groups/{group}/traces/receiver_id",
                     f"survey/receiver_groups/{group}/receivers/receiver_id",
+                    "survey/receivers/receiver_id",
                 ]
             elif dim == "source":
                 survey_paths = [
@@ -1142,6 +1559,7 @@ class TraceStore:
                 survey_paths = [
                     f"survey/receiver_groups/{group}/traces/component_name",
                     f"survey/receiver_groups/{group}/components/component_name",
+                    "survey/components/component_name",
                 ]
 
             survey_path = next((path for path in survey_paths if path in h5), None)
@@ -1258,7 +1676,7 @@ class TraceStore:
         domain: str,
     ) -> Dict[str, Any]:
         attrs: Dict[str, Any] = {
-            "source_group": source,
+            "source_id": source,
             "receiver_group": group,
             "project_path": str(self.metadata["project"]),
             "simulation": str(self.metadata["simulation"]),
@@ -1314,6 +1732,26 @@ class TraceStore:
         return value
 
     @staticmethod
+    def _active_frequency_mask(gather: DataArray) -> Optional[np.ndarray]:
+        if "frequency" not in gather.dims:
+            return None
+        frequency_size = gather.sizes["frequency"]
+        axes = tuple(axis for axis, dim in enumerate(gather.dims) if dim != "frequency")
+        try:
+            amplitude = np.abs(gather.data)
+            if axes:
+                amplitude = amplitude.max(axis=axes)
+            compute = getattr(amplitude, "compute", None)
+            if callable(compute):
+                amplitude = compute()
+        except Exception:
+            return None
+        amplitude = np.asarray(amplitude).ravel()
+        if amplitude.size != frequency_size:
+            return None
+        return np.isfinite(amplitude) & (amplitude > 0.0)
+
+    @staticmethod
     def _uniform_laplace(gather: DataArray) -> float:
         if "laplace" not in gather.coords:
             return 0.0
@@ -1324,11 +1762,19 @@ class TraceStore:
         if finite.size == 0:
             return 0.0
         first = float(finite[0])
-        if not np.allclose(finite, first, rtol=0.0, atol=1.0e-12):
-            raise ValueError(
-                "Time-domain reconstruction requires a uniform Laplace offset"
-            )
-        return first
+        if np.allclose(finite, first, rtol=0.0, atol=1.0e-12):
+            return first
+
+        active = TraceStore._active_frequency_mask(gather)
+        if active is not None and active.size == values.size:
+            finite = values[np.isfinite(values) & active]
+            if finite.size == 0:
+                return 0.0
+            first = float(finite[0])
+            if np.allclose(finite, first, rtol=0.0, atol=1.0e-12):
+                return first
+
+        raise ValueError("Time-domain reconstruction requires a uniform Laplace offset")
 
     @staticmethod
     def _damping_factor(laplace: float, period: float) -> float:

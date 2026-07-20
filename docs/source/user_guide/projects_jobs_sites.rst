@@ -46,6 +46,113 @@ contains:
 ``project.save()`` explicitly is still useful when you want to inspect generated
 :term:`JSON`/:term:`HDF5` inputs before running.
 
+Relocating Simulations
+----------------------
+
+Use ``simulation.relocate(new_project_path)`` when an existing simulation's
+project files have already been moved to another root. Relocation updates the
+public ``project_path`` and remaps project-local file references; it does not
+copy files. Use ``Project.copy(source, destination)`` when FrequenSolve should
+copy the complete project tree as well.
+
+.. code-block:: python
+
+   sim.relocate("./moved_project")
+
+Advanced exporters can select a temporary output location without relocating
+the simulation by creating an explicit context:
+
+.. code-block:: python
+
+   ctx = sim.export_context(
+       project_path="./staging",
+       rel_path="inputs/simple_acoustic",
+   )
+   payload = sim.to_fs(ctx)
+
+The default remains ``<project_path>/simulations/<simulation name>``.
+
+Simulation Studies
+------------------
+
+Use a simulation study when several simulations share one definition but vary
+in receiver layout, sources, model, or other authoring values. Each parameter
+maps readable choice labels to the values used while building a case:
+
+.. code-block:: python
+
+   study = project.study(
+       "survey_design",
+       name_template="base__{receiver}__{source}__{model}",
+       receiver={
+           "coarse": coarse_receiver_coords,
+           "dense": dense_receiver_coords,
+       },
+       source={
+           "explosive": explosive_sources,
+           "vertical_force": vertical_force_sources,
+       },
+       model={
+           "reference": reference_model,
+           "smoothed": smoothed_model,
+       },
+   )
+
+Define the simulation once. ``case.clone(...)`` creates an independent copy of
+an existing simulation without saving or reloading it. Selected parameter
+values are exposed as normal case attributes:
+
+.. code-block:: python
+
+   @study.simulation
+   def build(case):
+       sim = case.clone(base_simulation)
+       sim.model = case.model
+       sim.acquisition.sources = case.source
+       sim.acquisition.receivers["surface"].coordinates = case.receiver
+       return sim
+
+Calling ``materialize()`` with no cases creates the Cartesian product in
+parameter declaration order. The example above produces eight ordinary,
+project-owned ``SeismicSimulation`` objects:
+
+.. code-block:: python
+
+   study.preview()  # inspect names and selections without building
+   simulations = study.materialize()
+
+Pass explicit cases when only selected combinations are meaningful:
+
+.. code-block:: python
+
+   simulations = study.materialize(
+       cases=[
+           study.case(
+               receiver="coarse",
+               source="explosive",
+               model="reference",
+           ),
+           study.case(
+               receiver="dense",
+               source="vertical_force",
+               model="smoothed",
+           ),
+       ]
+   )
+
+For a fresh definition, use
+``case.new_simulation(physics="acoustic", dimension=2)`` instead of cloning a
+base. Both helpers keep simulations detached until every requested case builds
+successfully.
+
+``name_template`` fields use choice labels, never the underlying values.
+``{study}`` inserts the study name and ``{index}`` inserts the stable zero-based
+case index, including normal Python format specifications such as
+``{index:03d}``. Without a custom template, names include the study, parameter
+names, and labels automatically. FrequenSolve rejects unknown fields, unsafe
+path characters, duplicate rendered names, and collisions with simulations
+already in the project before invoking the builder.
+
 Loading Saved Work
 ------------------
 
@@ -124,7 +231,7 @@ and is the normal place to request :term:`ParaView output`:
        simulation=sim,
        f_list=[20.0],
        outputs=[
-           fs.ParaviewOutput(
+           fs.VtkOutput.domain(
                name="pv",
                fields=["pressure"],
                properties=["vp", "rho"],
@@ -154,8 +261,10 @@ test, notebook, or shared workstation should use a different config file:
    local = fs.Site(profile="local")
    shared = fs.Site(config_path="/path/to/site.toml", profile="cluster")
 
-Direct constructors such as ``fs.LocalSite(...)``, ``fs.AWSSite(...)``, and
-``fs.Stampede3Site(...)`` remain available when code needs to pin a backend.
+Direct constructors such as ``fs.LocalSite(...)`` and ``fs.AWSSite(...)``
+remain available when code needs to pin a backend. ``fs.Stampede3Site(...)``
+remains as a compatibility adapter; new Stampede3 profiles use generic
+``SlurmSite`` with ``preset = "stampede3"``.
 
 All sites share the same handle/result lifecycle:
 
@@ -174,7 +283,8 @@ Run validation explicitly with ``job.validate(raise_errors=True)`` when you
 want a local preflight check before submitting to a site.
 
 By default, ``site.submit(job)`` skips runs whose expected outputs are already
-current. Use ``site.submit(job, force_run=True)`` to force a new run; local and
+current. Use ``site.submit(job, skip=False)`` (or ``skip="false"`` when a
+string value is needed) to force a new run; local and
 :term:`SLURM` sites pass ``--fresh`` to the :term:`fast solver` so solver-side output reuse is
 disabled too.
 
@@ -186,13 +296,14 @@ disabled too.
      - Use
    * - ``LocalSite``
      - Runs through local :term:`Dask` workers. Requires an installed
-       :term:`fast solver` and :term:`FS_SOLVER_PATH`.
+       :term:`fast solver` configured in the local site profile.
    * - ``AWSSite``
      - Runs on FrequenSol cloud infrastructure. Most users use this because solver installation is managed remotely.
-   * - ``SlurmSite`` / ``Stampede3Site``
+   * - ``SlurmSite``
      - Runs on configured :term:`HPC` systems through :term:`SSH` and
        :term:`SLURM`. Requires site credentials and a solver executable on the
-       cluster.
+       cluster. Built-in presets can supply standard cluster and partition
+       information.
 
 Only sites with access to the :term:`fast solver` can execute jobs. The Python
 package can author, save, inspect, and load projects without a solver

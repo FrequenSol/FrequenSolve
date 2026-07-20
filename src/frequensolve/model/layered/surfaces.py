@@ -8,18 +8,20 @@ fracture subdomains in the serialized solver model.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Union
 
+import numpy as np
 import xarray as xr
 from numpy.typing import ArrayLike
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.model import ModelSubdomain
 from frequensolve.model.property import Property
-from frequensolve.units import unit_expression
-from frequensolve.util.mixins import merge_extra, warn_deprecated_path_api
+from frequensolve.units import is_quantity, unit_expression
+from frequensolve.util.mixins import ExportContext, merge_extra
 
 from ._utils import (
     _convert_surface_depth,
@@ -33,7 +35,217 @@ __all__ = [
     "Layer",
     "LayerBounds",
     "Fracture",
+    "dipping_plane_2d",
+    "dipping_plane_3d",
 ]
+
+
+def _angle_degrees(value: Any) -> float:
+    if is_quantity(value):
+        return float(value.to("degree").magnitude)
+    return float(value)
+
+
+def _sequence_length_units(value: Any) -> Optional[str]:
+    if is_quantity(value):
+        return unit_expression(value.units)
+    if isinstance(value, xr.DataArray):
+        units = value.attrs.get("units")
+        return unit_expression(units) if units is not None else None
+    if isinstance(value, Mapping):
+        units = value.get("units")
+        if units is not None:
+            return unit_expression(units)
+        value = value.get("value", value)
+    if isinstance(value, (str, bytes)):
+        return None
+    try:
+        iterator = iter(value)
+    except TypeError:
+        return None
+    for item in iterator:
+        units = _sequence_length_units(item)
+        if units is not None:
+            return units
+    return None
+
+
+def _coerce_length_values(value: Any, units: Optional[str]) -> np.ndarray:
+    if isinstance(value, Mapping) and "value" in value:
+        local_units = value.get("units")
+        values = value["value"]
+        if local_units is not None:
+            values = np.asarray(values, dtype=float)
+            source_units = unit_expression(local_units)
+            if units is not None and source_units != units:
+                from frequensolve.units import ureg
+
+                values = (values * ureg(source_units)).to(units).magnitude
+            return np.asarray(values, dtype=float)
+        value = values
+
+    if is_quantity(value):
+        quantity = value.to(units) if units is not None else value
+        return np.asarray(quantity.magnitude, dtype=float)
+
+    if isinstance(value, xr.DataArray):
+        source_units = value.attrs.get("units")
+        values = np.asarray(value.values, dtype=float)
+        if source_units is not None and units is not None:
+            source_units = unit_expression(source_units)
+            if source_units != units:
+                from frequensolve.units import ureg
+
+                values = (values * ureg(source_units)).to(units).magnitude
+        return np.asarray(values, dtype=float)
+
+    if (
+        isinstance(value, (list, tuple))
+        and value
+        and any(is_quantity(item) for item in value)
+    ):
+        target_units = units or _sequence_length_units(value)
+        return np.asarray(
+            [
+                (
+                    float(item.to(target_units).magnitude)
+                    if is_quantity(item)
+                    else float(item)
+                )
+                for item in value
+            ],
+            dtype=float,
+        )
+
+    return np.asarray(value, dtype=float)
+
+
+def _coerce_point(
+    point: Union[Mapping[str, Any], ArrayLike],
+    names: tuple[str, ...],
+    units: Optional[str],
+) -> np.ndarray:
+    if isinstance(point, Mapping):
+        values = [point[name] for name in names]
+    else:
+        values = list(point)
+    if len(values) != len(names):
+        joined = ", ".join(names)
+        raise ValueError(f"Plane point must contain ({joined})")
+    return _coerce_length_values(values, units).reshape(-1)
+
+
+def _axis_dataarray(
+    values: Any,
+    *,
+    dim: str,
+    units: Optional[str],
+) -> xr.DataArray:
+    coords = _coerce_length_values(values, units).reshape(-1)
+    coord = xr.DataArray(coords, dims=[dim])
+    if units is not None:
+        coord.attrs["units"] = units
+    return coord
+
+
+def dipping_plane_2d(
+    point: Union[Mapping[str, Any], ArrayLike],
+    dip: Any,
+    x: Any,
+    *,
+    units: Optional[Any] = None,
+    name: Optional[str] = None,
+) -> xr.DataArray:
+    """Return a 2D dipping graph surface ``z = f(x)``.
+
+    Args:
+        point: Point on the plane as ``(x, z)`` or ``{"x": ..., "z": ...}``.
+        dip: Dip angle in degrees, positive for increasing depth in ``+x``.
+        x: One-dimensional x coordinates used to sample the plane.
+        units: Optional length units for coordinates and returned depth.
+        name: Optional ``xarray.DataArray`` name.
+
+    Returns:
+        A one-dimensional ``DataArray`` with dimension ``"x"``.
+    """
+
+    target_units = unit_expression(units) if units is not None else None
+    target_units = (
+        target_units or _sequence_length_units(point) or _sequence_length_units(x)
+    )
+    point_values = _coerce_point(point, ("x", "z"), target_units)
+    x_coord = _axis_dataarray(x, dim="x", units=target_units)
+    z = point_values[1] + math.tan(math.radians(_angle_degrees(dip))) * (
+        x_coord.values - point_values[0]
+    )
+    out = xr.DataArray(
+        z,
+        dims=["x"],
+        coords={"x": x_coord},
+        name=name or "dipping_plane",
+    )
+    if target_units is not None:
+        out.attrs["units"] = target_units
+    return out
+
+
+def dipping_plane_3d(
+    point: Union[Mapping[str, Any], ArrayLike],
+    dip: Any,
+    strike: Any,
+    x: Any,
+    y: Any,
+    *,
+    units: Optional[Any] = None,
+    name: Optional[str] = None,
+) -> xr.DataArray:
+    """Return a 3D dipping graph surface ``z = f(x, y)``.
+
+    Strike is measured clockwise from the positive y-axis in the x-y plane.
+    The down-dip direction is strike plus 90 degrees; positive dip increases
+    depth along that direction.
+
+    Args:
+        point: Point on the plane as ``(x, y, z)`` or a mapping.
+        dip: Dip angle in degrees.
+        strike: Strike azimuth in degrees clockwise from positive y.
+        x: One-dimensional x coordinates used to sample the plane.
+        y: One-dimensional y coordinates used to sample the plane.
+        units: Optional length units for coordinates and returned depth.
+        name: Optional ``xarray.DataArray`` name.
+
+    Returns:
+        A two-dimensional ``DataArray`` with dimensions ``("x", "y")``.
+    """
+
+    target_units = unit_expression(units) if units is not None else None
+    target_units = (
+        target_units
+        or _sequence_length_units(point)
+        or _sequence_length_units(x)
+        or _sequence_length_units(y)
+    )
+    point_values = _coerce_point(point, ("x", "y", "z"), target_units)
+    x_coord = _axis_dataarray(x, dim="x", units=target_units)
+    y_coord = _axis_dataarray(y, dim="y", units=target_units)
+    X, Y = np.meshgrid(x_coord.values, y_coord.values, indexing="ij")
+
+    dip_direction = math.radians(_angle_degrees(strike) + 90.0)
+    dip_vector = np.array([math.sin(dip_direction), math.cos(dip_direction)])
+    offset = (X - point_values[0]) * dip_vector[0] + (Y - point_values[1]) * dip_vector[
+        1
+    ]
+    z = point_values[2] + math.tan(math.radians(_angle_degrees(dip))) * offset
+
+    out = xr.DataArray(
+        z,
+        dims=["x", "y"],
+        coords={"x": x_coord, "y": y_coord},
+        name=name or "dipping_plane",
+    )
+    if target_units is not None:
+        out.attrs["units"] = target_units
+    return out
 
 
 @dataclass(kw_only=True)
@@ -62,8 +274,6 @@ class SimpleSurface:
     name: str = "surface"
     interface: bool = True
     depth: Property = field(default_factory=Property)
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
 
     def __init__(
         self,
@@ -143,7 +353,7 @@ class SimpleSurface:
             "name": self.name,
             "interface": self.interface,
         }
-        ctx = ctx or self.export_context()
+        ctx = ctx or ExportContext()
         use_store = getattr(ctx, "store", None) is not None
         file = (
             None
@@ -157,18 +367,6 @@ class SimpleSurface:
             dataset=dataset,
         )
         return data
-
-    def export_context(self):
-        """Return the export context used for surface-owned property files.
-
-        Returns:
-            Export context rooted at the project path and model-relative path
-            assigned by the containing project.
-        """
-
-        from frequensolve.util.mixins import ExportContext
-
-        return ExportContext(self._proj_path, self._rel_path)
 
     @property
     def data(self):
@@ -196,18 +394,6 @@ class SimpleSurface:
         min = min.values
         max = max.values
         return min, max
-
-    def _set_path(self, proj_path: Path, rel_path: Path):
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = proj_path
-        self._rel_path = rel_path
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        if self._proj_path is None or self._rel_path is None:
-            raise ValueError("Surface is not attached to a project path")
-        return self._proj_path / self._rel_path
 
     def perturb(
         self,
@@ -572,7 +758,7 @@ class Fracture(SimpleSurface):
         field: str,
         ctx=None,
     ) -> Dict[str, Any]:
-        ctx = ctx or self.export_context()
+        ctx = ctx or ExportContext()
         dataset = f"inputs/model/surfaces/{self.name}/{field}"
         use_store = getattr(ctx, "store", None) is not None
         if (

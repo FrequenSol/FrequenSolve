@@ -19,6 +19,7 @@ from typing import Any, Dict, Mapping, Optional, Union
 
 from frequensolve._version import get_versions
 from frequensolve.orchestrator.sites.base import BaseSite
+from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
 from frequensolve.units import UnitConfig
 from frequensolve.util.encoders import CustomJSONEncoder
@@ -28,6 +29,7 @@ from frequensolve.util.setup_logger import (
     disable_jupyter_logging,
     normalize_log_level,
 )
+from frequensolve.util.store import compact_hdf5_file
 
 __all__ = ["Project", "BaseProjectComponent"]
 
@@ -312,6 +314,59 @@ class Project:
             Newly created and project-bound ``SeismicSimulation``.
         """
 
+        return self._create_simulation(
+            name=name,
+            physics=physics,
+            dimension=dimension,
+            attach=True,
+            **kwargs,
+        )
+
+    def study(
+        self,
+        name: str,
+        *,
+        name_template: Optional[str] = None,
+        max_cases: Optional[int] = 1000,
+        **parameters: Mapping[str, Any],
+    ):
+        """Define related simulations from named parameter choices.
+
+        Args:
+            name: Study name used by the default simulation name template.
+            name_template: Optional Python format string containing ``study``,
+                ``index``, or parameter-name fields.
+            max_cases: Maximum combinations allowed in one preview or
+                materialization, or ``None`` for no limit.
+            **parameters: Parameter names mapped to non-empty mappings of
+                choice labels to authoring values.
+
+        Returns:
+            A :class:`frequensolve.simulation.SimulationStudy` bound to this
+            project.
+        """
+
+        from frequensolve.simulation.study import SimulationStudy
+
+        return SimulationStudy(
+            self,
+            name,
+            parameters,
+            name_template=name_template,
+            max_cases=max_cases,
+        )
+
+    def _create_simulation(
+        self,
+        *,
+        name: str,
+        physics: str,
+        dimension: int | float | str,
+        attach: bool,
+        **kwargs: Any,
+    ) -> SeismicSimulation:
+        """Construct a project-bound simulation with optional list attachment."""
+
         options = self._simulation_options(kwargs)
         sim = SeismicSimulation(
             name=name,
@@ -327,7 +382,8 @@ class Project:
             default_units=options["default_units"],
         )
         sim._project = self
-        self.simulations.append(sim)
+        if attach:
+            self.simulations.append(sim)
         return sim
 
     def list_jobs(
@@ -463,7 +519,6 @@ class Project:
         """
 
         if isinstance(base, BaseSimulation):
-            base.project_path = self.path
             base._project = self
             self.simulations.append(base)
         elif isinstance(base, BaseProjectComponent):
@@ -501,12 +556,22 @@ class Project:
         if not sim_dir.exists():
             return
 
-        with tempfile.TemporaryDirectory(prefix=".fs_transfer_", dir=self.path) as tmp:
+        with tempfile.TemporaryDirectory(
+            prefix="fs_transfer_",
+            dir=self._transfer_host_tmp_dir(site),
+        ) as tmp:
             temp_dir = Path(tmp)
             shutil.copytree(sim_dir, temp_dir / "simulations", dirs_exist_ok=True)
             self._rewrite_transfer_simulations(temp_dir, remote)
             self._copy_transfer_mesh_files(temp_dir)
+            self._compact_transfer_hdf5_files(temp_dir)
             site.put(temp_dir, remote)
+
+    @staticmethod
+    def _transfer_host_tmp_dir(site: BaseSite) -> Path:
+        path = _host_tmp_path_for_config(getattr(site, "_site_config_path", None))
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _configure_logging(self) -> None:
         configure_logging(
@@ -549,11 +614,9 @@ class Project:
 
     def _bind_simulations_to_project(self) -> None:
         proj_path = self.path.resolve()
-        rel_path = Path("./simulations")
         for sim in self.simulations:
             sim._project = self
-            sim.project_path = proj_path
-            sim._attach_project_path(proj_path, rel_path)
+            sim.relocate(proj_path)
 
     def _project_local_path(self, path: Union[str, Path]) -> Path:
         path = Path(path).expanduser()
@@ -741,6 +804,33 @@ class Project:
             dest = temp_dir / mesh_file.relative_to(self.path)
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(mesh_file, dest)
+
+    @staticmethod
+    def _compact_transfer_hdf5_files(temp_dir: Path) -> None:
+        """Repack bloated HDF5 files in a disposable transfer staging tree."""
+
+        candidates = {
+            path
+            for pattern in ("*.h5", "*.hdf5")
+            for path in temp_dir.rglob(pattern)
+            if path.is_file()
+        }
+        for path in sorted(candidates):
+            try:
+                reclaimed = compact_hdf5_file(path)
+            except (OSError, RuntimeError, ValueError) as exc:
+                logging.warning(
+                    "Could not compact staged HDF5 file %s: %s",
+                    path.relative_to(temp_dir),
+                    exc,
+                )
+                continue
+            if reclaimed:
+                logging.info(
+                    "Compacted staged HDF5 file %s; removed %.2f GiB of dead space",
+                    path.relative_to(temp_dir),
+                    reclaimed / (1024**3),
+                )
 
     @staticmethod
     def _site_is_local(site: BaseSite) -> bool:

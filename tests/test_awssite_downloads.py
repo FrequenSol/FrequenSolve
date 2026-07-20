@@ -90,7 +90,7 @@ def test_get_falls_back_to_prefix_download_when_exact_object_is_missing(tmp_path
     ]
 
 
-def test_fetch_paraview_reraises_download_failures(tmp_path):
+def test_fetch_vtk_reraises_download_failures(tmp_path):
     site = AWSSite.__new__(AWSSite)
     site.config = SimpleNamespace(s3_bucket="bucket")
 
@@ -103,9 +103,9 @@ def test_fetch_paraview_reraises_download_failures(tmp_path):
         name="job-a",
         simulation=SimpleNamespace(
             name="simulation-a",
-            _remote_path=Path("project-a/simulation-a"),
+            project_path=tmp_path / "project-a",
         ),
     )
 
     with pytest.raises(RuntimeError, match="download failed"):
-        site.fetch_paraview(job)
+        site.fetch_vtk(job)

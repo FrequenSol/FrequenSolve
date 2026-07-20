@@ -30,8 +30,9 @@ except ModuleNotFoundError as exc:
 
 from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
+from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.jobs import BaseJob
+from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
@@ -540,10 +541,9 @@ class AWSSite(BaseSite):
     def _aws_cli_env(self) -> Dict[str, str]:
         """Build a process environment so the AWS CLI uses Cognito Identity Pool credentials.
 
-        Copies the current process environment, sets ``AWS_ACCESS_KEY_ID``,
-        ``AWS_SECRET_ACCESS_KEY``, ``AWS_SESSION_TOKEN``, and ``AWS_DEFAULT_REGION``
-        from this site's session, and clears ``AWS_PROFILE`` / ``AWS_DEFAULT_PROFILE``
-        so the CLI does not fall back to ``~/.aws/credentials``.
+        Starts from a sanitized process environment, sets temporary AWS
+        credentials and the region from this site's session, and clears AWS
+        profile selection so the CLI does not fall back to shared credentials.
         """
         creds = self.session.get_credentials()
         if creds is None:
@@ -552,7 +552,7 @@ class AWSSite(BaseSite):
                 "Re-authenticate with AWSSite (Cognito login)."
             )
         frozen = creds.get_frozen_credentials()
-        env = os.environ.copy()
+        env = build_subprocess_environment()
         env["AWS_ACCESS_KEY_ID"] = frozen.access_key
         env["AWS_SECRET_ACCESS_KEY"] = frozen.secret_key
         if frozen.token:
@@ -592,10 +592,8 @@ class AWSSite(BaseSite):
         """
         return True
 
-    def fetch_paraview(
-        self, job: BaseJob, path: Optional[Union[str, Path]] = None
-    ) -> None:
-        """Get ParaView files from S3.
+    def fetch_vtk(self, job: BaseJob, path: Optional[Union[str, Path]] = None) -> None:
+        """Get VTK/visualization files from S3.
 
         Downloads the results/ParaView/ directory for the job from the
         project's S3 bucket to the local project path.
@@ -610,25 +608,32 @@ class AWSSite(BaseSite):
         else:
             path = Path(path)
 
-        project_name = job.simulation._remote_path.parts[0]
+        project_name = Path(job.simulation.project_path).name
         simulation_name = job.simulation.name
         job_name = job.name
-        results_paraview_path = f"jobs/{simulation_name}/{job_name}/results/ParaView"
+        results_vtk_path = f"jobs/{simulation_name}/{job_name}/results/ParaView"
         s3_results_path = (
-            f"s3://{self.config.s3_bucket}/{project_name}/{results_paraview_path}"
+            f"s3://{self.config.s3_bucket}/{project_name}/{results_vtk_path}"
         )
-        local_results_path = path / results_paraview_path
+        local_results_path = path / results_vtk_path
 
         try:
             logger.info(
-                "Fetching ParaView outputs from %s to %s",
+                "Fetching VTK outputs from %s to %s",
                 s3_results_path,
                 local_results_path,
             )
             self.get(s3_results_path, local_results_path)
         except Exception as e:
-            logger.exception("Error downloading ParaView outputs: %s", str(e))
+            logger.exception("Error downloading VTK outputs: %s", str(e))
             raise
+
+    def fetch_paraview(
+        self, job: BaseJob, path: Optional[Union[str, Path]] = None
+    ) -> None:
+        """Fetch visualization files using the historical method name."""
+
+        return self.fetch_vtk(job, path=path)
 
     def _validate_config(self):
         """Validate AWS configuration."""
@@ -812,11 +817,11 @@ class AWSSite(BaseSite):
         Raises:
             RuntimeError: If job submission fails or stack creation fails.
         """
-        force_run = bool(
-            kwargs.pop("force_run", False)
-            or kwargs.pop("force", False)
-            or kwargs.pop("rerun", False)
+        fresh_run = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
+        skip_policy = SkipPolicy.from_value(
+            kwargs.pop("skip", kwargs.pop("skip_policy", None))
         )
+        fresh_run = bool(fresh_run or skip_policy.force)
         check = bool(kwargs.pop("check", False))
         validate = kwargs.pop("validate", True)
         fetch = kwargs.pop("fetch", False)
@@ -824,7 +829,7 @@ class AWSSite(BaseSite):
         vcpu = kwargs.pop("vcpu", None)
         memory = kwargs.pop("memory", None)
         self.prepare_job(job, validate=validate)
-        if not force_run and job.is_run_current():
+        if not fresh_run and job.is_run_current():
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
             return RunHandle.skipped(self, job)
@@ -880,7 +885,7 @@ class AWSSite(BaseSite):
                     send_simulation_status_email=kwargs.get(
                         "send_simulation_status_email"
                     ),
-                    force_run=force_run,
+                    fresh=fresh_run,
                 )
 
                 simulation_id = result["simulationId"]
@@ -912,8 +917,6 @@ class AWSSite(BaseSite):
                     api_data["vcpu"] = vcpu
                 if memory is not None:
                     api_data["memory"] = memory
-                if force_run:
-                    api_data["force_run"] = True
 
                 # Make API request to submit the job
                 headers = {}

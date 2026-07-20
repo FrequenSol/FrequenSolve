@@ -2,9 +2,12 @@
 
 import copy
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
+
+import numpy as np
 
 from frequensolve.geometry.frame import CoordinateSystem
 from frequensolve.mesh.boundary_conditions import BoundaryCondition, BoundaryConditions
@@ -14,7 +17,8 @@ from frequensolve.model.model import ModelBase
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import CoordsArray
 from frequensolve.simulation.config import SimulationConfig
-from frequensolve.simulation.numerics_manager import Discretization, SolverConfig
+from frequensolve.simulation.discretization import Discretization
+from frequensolve.simulation.solver import SolverConfig
 from frequensolve.units import UnitConfig
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.encoders import CustomJSONEncoder
@@ -22,7 +26,6 @@ from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
     merge_extra,
-    warn_deprecated_path_api,
 )
 from frequensolve.util.named_list import NamedList
 from frequensolve.util.physics import (
@@ -30,7 +33,7 @@ from frequensolve.util.physics import (
     model_dimension,
     normalize_simulation_physics,
 )
-from frequensolve.util.store import SimulationStore
+from frequensolve.util.store import SimulationStore, compact_hdf5_file
 
 __all__ = [
     "BaseSimulation",
@@ -118,8 +121,7 @@ class BaseSimulation(SimulationConfig):
                 else _project_path_from_simulation_file(path)
             )
             if project is not None:
-                sim.project_path = project
-                sim._attach_project_path(project, Path("simulations"))
+                sim.relocate(project)
             return sim
         else:
             raise Exception(f"Unknown simulation class: {class_name}")
@@ -145,7 +147,7 @@ class BaseSimulation(SimulationConfig):
                 "your own."
             )
             self.mesh = MeshManager(self.mesh)
-        ctx = ctx or ExportContext(self._proj_path, self._rel_path)
+        ctx = ctx or ExportContext()
         return {
             "_type": self.__class__.__name__,
             **super().to_fs(ctx),
@@ -300,7 +302,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             sim.acquisition = Acquisition.from_fs(data.pop("Acquisition"))
 
         sim.extra = data
-        sim._attach_project_path(project_path, Path("simulations"))
+        sim.relocate(project_path)
         return sim
 
     def _bind_model_coordinate_systems(self) -> None:
@@ -347,7 +349,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
 
         # Change file path
         sim_copy._file = file.parent.parent / name / name
-        sim_copy._attach_project_path(self.project_path, Path("simulations"))
+        sim_copy.relocate(self.project_path)
         return sim_copy
 
     def fwi(
@@ -386,9 +388,9 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             **kwargs,
         )
 
-    def imaging(
+    def imaging_job(
         self,
-        observed,
+        observed=None,
         frequencies=None,
         parameters=None,
         grid=None,
@@ -400,7 +402,8 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         """Create an imaging job using natural parameter/field specifications.
 
         Args:
-            observed: Observed data used by the imaging condition.
+            observed: Optional observed data used by the imaging condition. When
+                omitted, the solver uses zero data for sensitivity kernels.
             frequencies: Optional modeled frequencies.
             parameters: Optional image parameters.
             grid: Optional imaging grid.
@@ -423,6 +426,16 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             images=images,
             **kwargs,
         )
+
+    def imaging(self, *args, **kwargs):
+        """Create an imaging job using the legacy method name.
+
+        ``imaging_job`` is the clearer public spelling, but keeping this alias
+        avoids breaking existing scripts and documentation that use
+        ``simulation.imaging(...)``.
+        """
+
+        return self.imaging_job(*args, **kwargs)
 
     def add_coordinate_system(
         self, system: Union[CoordinateSystem, Mapping[str, Any]]
@@ -570,11 +583,32 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             raise ValueError(f"Cannot add {type(other)} to simulation")
         return self
 
-    def export_context(self) -> ExportContext:
-        """Return the project-relative export context and backing HDF5 store."""
+    def export_context(
+        self,
+        *,
+        project_path: Optional[Union[str, Path]] = None,
+        rel_path: Optional[Union[str, Path]] = None,
+    ) -> ExportContext:
+        """Return an export context and backing HDF5 store.
 
-        proj_path = self._proj_path or Path(self.project_path)
-        rel_path = self._rel_path or Path("simulations") / self.name
+        Args:
+            project_path: Optional export root. Defaults to this simulation's
+                public ``project_path`` without changing it.
+            rel_path: Optional artifact directory relative to the export root.
+                Defaults to ``simulations/<simulation name>``.
+
+        Returns:
+            Export context rooted at the requested location. Supplying an
+            alternate location does not relocate the simulation.
+        """
+
+        selected_project_path = (
+            self.project_path if project_path is None else project_path
+        )
+        proj_path = Path(selected_project_path).expanduser().resolve()
+        rel_path = (
+            Path(rel_path) if rel_path is not None else Path("simulations") / self.name
+        )
         store = SimulationStore(
             proj_path / rel_path / f"{self.name}.h5",
             project_path=proj_path,
@@ -601,7 +635,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             Path to the written simulation JSON file.
         """
 
-        self._attach_project_path(self.project_path, Path("simulations"))
+        self.relocate(self.project_path)
 
         file = self.project_path / "simulations" / f"{self.name}" / f"{self.name}"
         file = file.with_suffix(".json").resolve()
@@ -611,10 +645,25 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         self._file = file
         indent = json_kwargs.pop("indent", 3)
         ctx = self.export_context()
+        payload = self.to_fs(ctx)
         with open(file, "w") as f:
-            json.dump(
-                self.to_fs(ctx), f, cls=CustomJSONEncoder, indent=indent, **json_kwargs
+            json.dump(payload, f, cls=CustomJSONEncoder, indent=indent, **json_kwargs)
+        removed = ctx.store.prune_unreferenced(payload)
+        if removed:
+            logging.getLogger(__name__).debug(
+                "Removed %d unreferenced datasets from %s: %s",
+                len(removed),
+                ctx.store.path,
+                ", ".join(removed),
             )
+        if ctx.store.path.exists():
+            reclaimed = compact_hdf5_file(ctx.store.path)
+            if reclaimed:
+                logging.getLogger(__name__).info(
+                    "Compacted %s; removed %.2f GiB of dead HDF5 space",
+                    ctx.store.path,
+                    reclaimed / (1024**3),
+                )
         return file
 
     def check(self) -> bool:
@@ -637,19 +686,51 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
 
         return validate_simulation(self, raise_errors=raise_errors)
 
-    def _attach_project_path(self, proj_path: Path, rel_path: Path) -> None:
-        """Attach this simulation to a project-relative export root."""
+    def relocate(
+        self,
+        project_path: Union[str, Path],
+        *,
+        source_project_path: Optional[Union[str, Path]] = None,
+    ) -> "SeismicSimulation":
+        """Relocate the simulation and its project-local file references.
 
-        previous_project_path = self._proj_path
-        self._proj_path = Path(proj_path).expanduser().resolve()
-        self._rel_path = Path(rel_path) / self.name
+        Args:
+            project_path: New project root.
+            source_project_path: Optional former project root. Normally this is
+                inferred from the current public root. It can be supplied when
+                ``project_path`` was reassigned before calling ``relocate``.
+
+        Returns:
+            This simulation after relocation.
+
+        Notes:
+            This updates path references but does not copy project files. Use
+            :meth:`frequensolve.project.Project.copy` to copy a project tree.
+        """
+
+        target_project_path = Path(project_path).expanduser().resolve()
+        current_project_path = (
+            Path(self.project_path).expanduser().resolve()
+            if self.project_path is not None
+            else None
+        )
+        if source_project_path is not None:
+            previous_project_path = Path(source_project_path).expanduser().resolve()
+        elif (
+            current_project_path is not None
+            and current_project_path != target_project_path
+        ):
+            previous_project_path = current_project_path
+        else:
+            previous_project_path = (
+                _project_path_from_simulation_file(self._file)
+                if self._file is not None
+                else current_project_path
+            )
+
+        self.project_path = target_project_path
         self._resolve_project_references(source_project_path=previous_project_path)
-
-    def _set_path(self, proj_path: Path, rel_path: Path) -> None:
-        """Backward-compatible alias for attaching the simulation path."""
-
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._attach_project_path(proj_path, rel_path)
+        return self
 
     def _resolve_project_references(
         self, *, source_project_path: Optional[Path] = None
@@ -657,6 +738,17 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         """Normalize loaded file references that need project context at runtime."""
 
         from frequensolve.seismic.receivers import CoordsFromFile
+
+        target_project_path = Path(self.project_path).expanduser().resolve()
+        if source_project_path is not None:
+            source_project_path = Path(source_project_path).expanduser().resolve()
+            if source_project_path != target_project_path:
+                for owner in (self.model, self.mesh, self.acquisition):
+                    _relocate_owned_file_references(
+                        owner,
+                        source_project_path=source_project_path,
+                        target_project_path=target_project_path,
+                    )
 
         if not self.acquisition:
             return
@@ -668,16 +760,6 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
                     ctx, source_project_path=source_project_path
                 )
                 coords._fill_metadata_from_file(ctx)
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
-
-    @property
-    def _remote_path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._remote_path")
-        return Path(self._proj_path.name) / self._rel_path
 
 
 class _SimulationSurface:
@@ -704,9 +786,36 @@ class _SimulationSurface:
     ):
         """Return points on this model surface."""
 
+        if (
+            offset is None
+            and self._simulation.dimension == 3
+            and self._surface_lateral_dimension(values) == 2
+        ):
+            offset = 0.0
         return self._system.points(values, units=units, offset=offset)
 
     on = points
+
+    def points_grid(
+        self,
+        x: Any,
+        y: Optional[Any] = None,
+        *,
+        units: Optional[Any] = None,
+        above: Optional[Any] = None,
+        below: Optional[Any] = None,
+    ):
+        """Return points on a lateral tensor grid tied to this surface."""
+
+        if self._simulation.dimension == 3 and y is None:
+            raise ValueError("3D surface points_grid requires x and y axes")
+        return self._system.points_grid(
+            x,
+            y,
+            units=units,
+            above=above,
+            below=below,
+        )
 
     def above(
         self,
@@ -729,6 +838,18 @@ class _SimulationSurface:
         """Return points offset below this model surface."""
 
         return self._system.below(values, distance=distance, units=units)
+
+    @staticmethod
+    def _surface_lateral_dimension(values: Any) -> Optional[int]:
+        if hasattr(values, "magnitude"):
+            values = values.magnitude
+        try:
+            array = np.asarray(values)
+        except Exception:
+            return None
+        if array.ndim == 2:
+            return int(array.shape[1])
+        return None
 
 
 def _model_surface_name(surface: Union[str, int]) -> str:
@@ -791,3 +912,97 @@ def _project_path_from_simulation_file(path: Path) -> Optional[Path]:
     if path.parent.parent.name == "simulations":
         return path.parent.parent.parent.resolve()
     return None
+
+
+_PROJECT_FILE_ATTRIBUTES = {
+    "file",
+    "file_path",
+    "layout_file",
+    "receiver_file",
+    "relation_file",
+    "source_file",
+}
+
+
+def _relocate_owned_file_references(
+    owner: Any,
+    *,
+    source_project_path: Path,
+    target_project_path: Path,
+) -> None:
+    """Remap absolute project-local paths within a simulation-owned object."""
+
+    seen = set()
+
+    def visit(value: Any) -> None:
+        if value is None or isinstance(value, (str, bytes, Path)):
+            return
+        value_id = id(value)
+        if value_id in seen:
+            return
+        seen.add(value_id)
+
+        if isinstance(value, Mapping):
+            for item in value.values():
+                visit(item)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                visit(item)
+            return
+        if not type(value).__module__.startswith("frequensolve."):
+            return
+
+        for name, item in vars(value).items():
+            if name in _PROJECT_FILE_ATTRIBUTES:
+                if name == "file_path" and getattr(value, "is_remote", False):
+                    continue
+                setattr(
+                    value,
+                    name,
+                    _relocated_project_path(
+                        item,
+                        source_project_path=source_project_path,
+                        target_project_path=target_project_path,
+                    ),
+                )
+            elif not name.startswith("_") and name != "extra":
+                visit(item)
+
+    visit(owner)
+
+
+def _relocated_project_path(
+    value: Any,
+    *,
+    source_project_path: Path,
+    target_project_path: Path,
+) -> Any:
+    """Return a project-local path remapped to another root."""
+
+    if value is None or not isinstance(value, (str, Path)):
+        return value
+    text = str(value)
+    if text.startswith("remote:") or "://" in text:
+        return value
+
+    path_text = text
+    locator_suffix = ""
+    if isinstance(value, str) and ":" in text:
+        candidate, separator, dataset = text.rpartition(":")
+        if Path(candidate).is_absolute():
+            path_text = candidate
+            locator_suffix = f"{separator}{dataset}"
+
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        return value
+    try:
+        relative = path.resolve().relative_to(source_project_path)
+    except ValueError:
+        return value
+
+    relocated = target_project_path / relative
+    if isinstance(value, Path):
+        return relocated
+    return f"{relocated}{locator_suffix}"

@@ -67,10 +67,14 @@ damped Laplace-domain time series directly. ``traces.td(...)`` applies the
 matching amplitude compensation automatically when Laplace metadata are present;
 pass ``laplace_compensation="off"`` to inspect the uncompensated result.
 
-ParaView Output
----------------
+VTK / ParaView Output
+---------------------
 
 :term:`ParaView output` is usually requested from a single-frequency job:
+
+``VtkOutput`` is the public authoring name because VTU/VTR is the normal output
+path. The same request can select XDMF when needed, and it continues to serialize
+under the solver's ``Outputs.ParaView`` contract.
 
 .. code-block:: python
 
@@ -79,7 +83,7 @@ ParaView Output
        simulation=sim,
        f_list=[20.0],
        outputs=[
-           fs.ParaviewOutput(
+           fs.VtkOutput.domain(
                name="pv",
                fields=["pressure"],
                properties=["vp", "rho", "Subdomain"],
@@ -90,21 +94,34 @@ ParaView Output
        ],
    )
 
-The public API exposes volume, surface, and grid targets:
+The public API exposes domain, surface, and grid targets. ``domain`` means the
+entire computational domain in both 2D and 3D; it maps to the solver's
+dimension-independent ``"volume"`` target internally:
 
 .. code-block:: python
 
-   fs.ParaviewOutput.volume(fields=["pressure"])
-   fs.ParaviewOutput.surface(surfaces="top", fields=["pressure"])
-   fs.ParaviewOutput.surface(
+   fs.VtkOutput.domain(fields=["pressure"])
+   fs.VtkOutput.surface(surfaces="top", fields=["pressure"])
+   fs.VtkOutput.surface(
        plane={"axis": "z", "value": 0.25, "units": "km"},
        parts=["real", "imag", "abs"],
    )
 
+Configured requests are available as ``job.outputs.vtk`` and their resolved
+local paths as ``job.vtk_outputs``. Sites use the same vocabulary when results
+need to be transferred explicitly:
+
+.. code-block:: python
+
+   site.fetch_vtk(job)
+   job.vtk_outputs
+
 ``order`` controls the :term:`polynomial order` used when exporting fields for
-visualization. ``upscale`` controls extra sampling inside elements. Use
-``upscale=0`` for a native, low-cost mesh :term:`QC` view, and increase it when smoother
-field images are more important than smaller files.
+visualization. The domain and surface helpers accept ``upscale`` values from 0
+through 2 under their target mesh options; omission means 0. Use ``upscale=0``
+for a native, low-cost mesh :term:`QC` view, and increase it when smoother field
+images are more important than smaller files. Grid targets do not accept
+``upscale``.
 
 VTK/PyVista Helpers
 -------------------

@@ -11,10 +11,15 @@ The commercial solver binaries and backend services are licensed separately. Thi
 
 FrequenSolve supports Python 3.10 through 3.14 on macOS and Linux.
 
-Install the released FrequenSolve Python API with:
+Create an isolated environment and install the released FrequenSolve Python
+API with:
 
 ```bash
+python3.10 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install frequensolve
+frequensolve --version
 ```
 
 Because the repository is public, you can also install from a source checkout
@@ -68,35 +73,55 @@ The FrequenSolve Python API exports JSON/HDF5 contracts consumed by fast solver 
 
 ## Sites And Tutorials
 
-Configure the standard execution site once in `~/.frequensolve/site.toml`, then create it in scripts and notebooks with `fs.Site()`. On first use, `fs.Site()` creates a starter config at that path and raises an exception asking you to review it; rerun after accepting or editing the profiles. Direct constructors such as `fs.LocalSite(...)` and `fs.AWSSite(...)` remain available for advanced cases.
+### Stampede3 quick setup
 
-Starter config:
+Install the HPC dependencies into the active environment, generate a site
+profile, authenticate once, and check it:
 
-```toml
-default = "cloud"
+```bash
+python -m pip install "frequensolve[hpc]"
 
-[sites.cloud]
-type = "aws"
-domain = "app.frequensol.com"
-interactive = true
-verbose = true
-
-[sites.local]
-type = "local"
-shutdown_on_completion = true
-verbose = true
-
-[sites.hpc]
-type = "stampede3"
-rel_path = "scratch/frequensolve_tutorials"
-queue = "skx-dev"
-nodes = 1
-duration = "00:30:00"
-procs_per_node = 4
-procs_per_task = 1
-poll_interval = 10
-verbose = true
+frequensolve site configure stampede3 \
+  --account YOUR_TACC_ALLOCATION \
+  --solver /absolute/remote/path/to/FS_seismic
+frequensolve site connect
+frequensolve site check
 ```
+
+The configuration command prompts for the TACC username and writes a minimal
+`~/.frequensolve/site.toml`. The built-in Stampede3 preset supplies the login
+host, launcher, partitions, and standard Intel MPI, PETSc, and parallel-HDF5
+runtime modules. Users do not normally need to specify a credential label, SSH
+key, hostname, or module list.
+
+`frequensolve site connect` establishes an OpenSSH connection that scripts,
+notebooks, `fs.Site()` instances, and transfers can reuse for up to eight
+hours. It does not modify `~/.ssh/config`. See
+[Share one SSH login across FrequenSolve sessions](docs/guides/ssh-connection-sharing.md)
+for the optional generic OpenSSH configuration alternative.
+
+After setup, activate the environment and use the saved default site from any
+script or notebook:
+
+```bash
+. .venv/bin/activate
+frequensolve site connect
+python your_script.py
+```
+
+```python
+import frequensolve as fs
+
+with fs.Site() as site:
+    result = site.submit(job).wait()
+```
+
+For custom Slurm clusters, local solvers, cloud execution, multiple profiles,
+and site-level overrides, see the
+[site configuration guide](docs/source/user_guide/site_configuration.rst).
+Direct constructors such as `fs.LocalSite(...)` and `fs.AWSSite(...)` remain
+available for advanced cases. Scheduler templates and the adaptive runner are
+installed with FrequenSolve, so `PYTHONPATH` is not required for site setup.
 
 The tutorial notebooks live in `examples/tutorials`. The local documentation catalog is `docs/source/tutorials/index.rst`, with site-specific examples under `examples/tutorials/02_sites`.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import shlex
 from collections.abc import MutableMapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Union
@@ -22,7 +23,11 @@ __all__ = [
     "PropertyExpression",
     "PropertyMap",
     "canonical_property_name",
+    "coord",
     "prop",
+    "ref",
+    "remap",
+    "var",
     "_ensure_minimum_coordinates",
 ]
 
@@ -60,11 +65,57 @@ def canonical_property_name(name: str) -> str:
 
 
 def _is_hdf5_locator(value: Any) -> bool:
-    text = str(value)
+    text = _strip_remote_prefix(value)
     if ":" not in text:
         return False
     file_part = text.split(":", 1)[0].lower()
     return file_part.endswith(".h5") or file_part.endswith(".hdf5")
+
+
+def _strip_remote_prefix(value: Any) -> str:
+    text = str(value)
+    return text.replace("remote:", "", 1) if text.startswith("remote:") else text
+
+
+def _infer_file_format(value: Any) -> Optional[str]:
+    if _is_hdf5_locator(value):
+        return "hdf5"
+    text = _strip_remote_prefix(value)
+    if ":" in text:
+        file_part, _ = text.split(":", 1)
+        if Path(file_part).suffix:
+            text = file_part
+    if Path(text).suffix.lower() == ".rsf":
+        return "rsf"
+    return None
+
+
+def _read_rsf_header(file: Path) -> Dict[str, str]:
+    try:
+        tokens = shlex.split(file.read_text(), comments=True, posix=True)
+    except ValueError as exc:
+        raise ValueError(f"Could not parse RSF header {file}: {exc}") from exc
+    header: Dict[str, str] = {}
+    for token in tokens:
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        header[key] = value
+    return header
+
+
+def rsf_binary_path(file: Union[str, Path]) -> Optional[Path]:
+    """Return the binary sidecar referenced by an RSF header, if present."""
+
+    path = Path(file)
+    header = _read_rsf_header(path)
+    data_ref = header.get("in")
+    if data_ref is None or data_ref in {"", "stdin"}:
+        return None
+    data_path = Path(data_ref)
+    if not data_path.is_absolute():
+        data_path = path.parent / data_path
+    return data_path
 
 
 def _plain_value(value: Any) -> Any:
@@ -77,6 +128,210 @@ def _plain_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_plain_value(item) for item in value]
     return value
+
+
+def _normalize_fill_invalid(value: Optional[Any]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized not in {"nearest", "none"}:
+        raise ValueError("Property fill_invalid must be one of: nearest, none")
+    return normalized
+
+
+def _range_bound_units(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if is_quantity(value):
+        return unit_expression(value.units)
+    if isinstance(value, Mapping):
+        units = value.get("units")
+        return unit_expression(units) if units is not None else None
+    return None
+
+
+def _range_bound_value(value: Any, units: Optional[str]) -> Any:
+    if is_quantity(value):
+        quantity = value.to(units) if units is not None else value
+        return _plain_value(quantity.magnitude)
+    if isinstance(value, Mapping) and "value" in value:
+        source_units = value.get("units")
+        raw_value = value["value"]
+        if source_units is not None and units is not None:
+            converted = (raw_value * ureg(unit_expression(source_units))).to(units)
+            return _plain_value(converted.magnitude)
+        return _plain_value(raw_value)
+    return _plain_value(value)
+
+
+def _range_bound_payload(value: Any, units: Optional[str]) -> Any:
+    if is_quantity(value):
+        return quantity_to_fs(value)
+    if isinstance(value, Mapping) and "value" in value:
+        payload = {"value": _plain_value(value["value"])}
+        if value.get("units") is not None:
+            payload["units"] = unit_expression(value["units"])
+            return payload
+        if units is not None:
+            payload["units"] = units
+            return payload
+        return payload["value"]
+    raw_value = _plain_value(value)
+    if units is None:
+        return raw_value
+    return {"value": raw_value, "units": units}
+
+
+def _range_alias_value(
+    payload: Mapping[str, Any],
+    primary: str,
+    alias: str,
+) -> Any:
+    if primary in payload and alias in payload:
+        raise ValueError(f"Specify only one of valid_range.{primary} or {alias}")
+    if primary in payload:
+        return payload[primary]
+    return payload.get(alias)
+
+
+def _normalize_valid_range(
+    valid_range: Optional[Any] = None,
+    *,
+    valid_min: Optional[Any] = None,
+    valid_max: Optional[Any] = None,
+    units: Optional[Any] = None,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    lower = upper = None
+    default_units = unit_expression(units) if units is not None else None
+
+    if valid_range is not None:
+        if isinstance(valid_range, Mapping):
+            payload = dict(valid_range)
+            top_units = payload.pop("units", None)
+            if top_units is not None:
+                default_units = unit_expression(top_units)
+            lower = _range_alias_value(payload, "lower", "min")
+            upper = _range_alias_value(payload, "upper", "max")
+            unexpected = set(payload) - {"lower", "upper", "min", "max"}
+            if unexpected:
+                names = ", ".join(sorted(unexpected))
+                raise ValueError(f"Unexpected valid_range field(s): {names}")
+        elif isinstance(valid_range, Sequence) and not isinstance(
+            valid_range, (str, bytes)
+        ):
+            if len(valid_range) != 2:
+                raise ValueError(
+                    "Property valid_range sequences must be (lower, upper)"
+                )
+            lower, upper = valid_range
+        else:
+            raise TypeError("Property valid_range must be a mapping or (lower, upper)")
+
+    if valid_min is not None:
+        if lower is not None:
+            raise ValueError("Pass valid_min or valid_range lower, not both")
+        lower = valid_min
+    if valid_max is not None:
+        if upper is not None:
+            raise ValueError("Pass valid_max or valid_range upper, not both")
+        upper = valid_max
+
+    if lower is None and upper is None:
+        return None, default_units
+
+    for value in (lower, upper):
+        value_units = _range_bound_units(value)
+        if default_units is None and value_units is not None:
+            default_units = value_units
+
+    out: Dict[str, Any] = {}
+    if lower is not None:
+        out["lower"] = _range_bound_payload(lower, default_units)
+    if upper is not None:
+        out["upper"] = _range_bound_payload(upper, default_units)
+    return out, default_units
+
+
+def _range_pair(value: Any, *, name: str) -> tuple[Any, Any]:
+    if isinstance(value, Mapping):
+        payload = dict(value)
+        lower = _range_alias_value(payload, "lower", "min")
+        upper = _range_alias_value(payload, "upper", "max")
+        if lower is None or upper is None:
+            raise ValueError(f"{name} must define both lower/min and upper/max")
+        unexpected = set(payload) - {"lower", "upper", "min", "max"}
+        if unexpected:
+            names = ", ".join(sorted(unexpected))
+            raise ValueError(f"Unexpected {name} field(s): {names}")
+        return lower, upper
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        if len(value) == 2:
+            return value[0], value[1]
+    raise ValueError(f"{name} must be a two-item range")
+
+
+def _infer_range_units(units: Optional[Any], *values: Any) -> Optional[str]:
+    if units is not None:
+        return unit_expression(units)
+    for value in values:
+        value_units = _range_bound_units(value)
+        if value_units is not None:
+            return value_units
+    return None
+
+
+def _remap_bound_node(value: Any, units: Optional[str]) -> Dict[str, Any]:
+    payload = {"value": _range_bound_value(value, units)}
+    if units is not None:
+        payload["units"] = units
+    elif isinstance(value, Mapping) and value.get("units") is not None:
+        payload["units"] = unit_expression(value["units"])
+    elif is_quantity(value):
+        payload["units"] = unit_expression(value.units)
+    return payload
+
+
+def _remap_bound_magnitude(value: Any, units: Optional[str]) -> float:
+    return float(_range_bound_value(value, units))
+
+
+def _normalize_remap_outside(
+    outside: Optional[Any],
+    clamp: Optional[Any],
+) -> str:
+    if isinstance(clamp, str):
+        if outside is not None:
+            raise ValueError("Specify either remap clamp or outside, not both")
+        outside = clamp
+        clamp = None
+    elif clamp is not None and not isinstance(clamp, bool):
+        raise TypeError("remap clamp must be a boolean when provided")
+
+    if outside is None:
+        return "clamp" if clamp is not False else "extrapolate"
+
+    normalized = str(outside).strip().lower().replace("-", "_")
+    aliases = {
+        "clamp": "clamp",
+        "saturate": "clamp",
+        "to_range": "clamp",
+        "preserve": "preserve",
+        "unchanged": "preserve",
+        "identity": "preserve",
+        "keep": "preserve",
+        "extrapolate": "extrapolate",
+        "none": "extrapolate",
+        "linear": "extrapolate",
+    }
+    mode = aliases.get(normalized)
+    if mode is None:
+        raise ValueError("remap outside must be one of: clamp, preserve, extrapolate")
+
+    if clamp is not None:
+        clamp_mode = "clamp" if clamp else "extrapolate"
+        if mode != clamp_mode:
+            raise ValueError("Specify either remap clamp or outside, not both")
+    return mode
 
 
 def _coord_units(coord: xr.DataArray) -> Optional[str]:
@@ -168,6 +423,25 @@ class PropertyExpression:
         return cls({"ref": canonical_property_name(name)})
 
     @classmethod
+    def var(cls, name: str) -> "PropertyExpression":
+        """Reference a named expression variable.
+
+        Variables are for non-material expression contexts, such as mesh
+        adaptivity branches based on ``epw``.
+
+        Args:
+            name: Variable name to reference.
+
+        Returns:
+            A property expression containing a ``var`` node.
+        """
+
+        name = str(name).strip()
+        if not name:
+            raise ValueError("Expression variable name cannot be empty")
+        return cls({"var": name})
+
+    @classmethod
     def value(cls, value: Any) -> "PropertyExpression":
         """Create a scalar literal expression.
 
@@ -195,12 +469,22 @@ class PropertyExpression:
         return cls({"value": _plain_value(value)})
 
     @classmethod
-    def from_value(cls, value: Any) -> "PropertyExpression":
+    def from_value(
+        cls,
+        value: Any,
+        *,
+        symbols: Optional[Mapping[str, Any]] = None,
+        default_symbol: str = "ref",
+    ) -> "PropertyExpression":
         """Coerce user input into a ``PropertyExpression``.
 
         Args:
             value: Existing expression, serialized expression payload, scalar
                 value, or mapping containing an ``expr`` field.
+            symbols: Optional expression symbol bindings. Bound symbols become
+                ``var`` nodes.
+            default_symbol: How unbound SymPy symbols are lowered. Supported
+                values are ``"ref"`` and ``"var"``.
 
         Returns:
             A normalized property expression with canonicalized references.
@@ -208,10 +492,22 @@ class PropertyExpression:
 
         if isinstance(value, PropertyExpression):
             return value
+        if _is_sympy_expression(value):
+            return cls(
+                _sympy_to_expression_node(
+                    value,
+                    symbols=set((symbols or {}).keys()),
+                    default_symbol=default_symbol,
+                )
+            )
         if isinstance(value, Mapping):
             payload = copy.deepcopy(dict(value))
             if "expr" in payload:
-                return cls.from_value(payload["expr"])
+                return cls.from_value(
+                    payload["expr"],
+                    symbols=symbols,
+                    default_symbol=default_symbol,
+                )
             return cls(_canonicalize_expression_refs(payload))
         return cls.value(value)
 
@@ -245,10 +541,9 @@ class PropertyExpression:
                     name = canonical_property_name(node["ref"])
                     if name not in out:
                         out.append(name)
-                if "arg" in node:
-                    visit(node["arg"])
-                for child in node.get("args", []):
-                    visit(child)
+                for key, child in node.items():
+                    if key != "ref":
+                        visit(child)
             elif isinstance(node, Sequence) and not isinstance(node, (str, bytes)):
                 for child in node:
                     visit(child)
@@ -301,6 +596,47 @@ class PropertyExpression:
 
     def __rpow__(self, other: Any) -> "PropertyExpression":
         return self._rbinary("pow", other)
+
+    def __lt__(self, other: Any) -> "PropertyExpression":
+        return self._binary("<", other)
+
+    def __le__(self, other: Any) -> "PropertyExpression":
+        return self._binary("<=", other)
+
+    def __gt__(self, other: Any) -> "PropertyExpression":
+        return self._binary(">", other)
+
+    def __ge__(self, other: Any) -> "PropertyExpression":
+        return self._binary(">=", other)
+
+    def __eq__(self, other: Any) -> "PropertyExpression":  # type: ignore[override]
+        return self._binary("==", other)
+
+    def __ne__(self, other: Any) -> "PropertyExpression":  # type: ignore[override]
+        return self._binary("!=", other)
+
+    __hash__ = object.__hash__
+
+    def __and__(self, other: Any) -> "PropertyExpression":
+        return self._binary("and", other)
+
+    def __rand__(self, other: Any) -> "PropertyExpression":
+        return self._rbinary("and", other)
+
+    def __or__(self, other: Any) -> "PropertyExpression":
+        return self._binary("or", other)
+
+    def __ror__(self, other: Any) -> "PropertyExpression":
+        return self._rbinary("or", other)
+
+    def __invert__(self) -> "PropertyExpression":
+        return PropertyExpression({"op": "not", "arg": self.to_fs()})
+
+    def __bool__(self) -> bool:
+        raise TypeError(
+            "Expression conditions cannot be evaluated as Python booleans; "
+            "use '&' for and, '|' for or, and '~' for not."
+        )
 
     def __neg__(self) -> "PropertyExpression":
         return PropertyExpression({"op": "neg", "arg": self.to_fs()})
@@ -357,20 +693,457 @@ def prop(name: str) -> PropertyExpression:
     return PropertyExpression.ref(name)
 
 
+def ref(name: str) -> PropertyExpression:
+    """Create a property-reference expression.
+
+    This is an alias for :func:`prop` for branch-expression DSL symmetry with
+    :func:`var`.
+    """
+
+    return prop(name)
+
+
+def var(name: str) -> PropertyExpression:
+    """Create a named variable-reference expression."""
+
+    return PropertyExpression.var(name)
+
+
+def remap(
+    value: Any,
+    *,
+    from_range: Any,
+    to_range: Any,
+    units: Optional[Any] = None,
+    clamp: Optional[bool] = None,
+    outside: Optional[str] = None,
+) -> PropertyExpression:
+    """Affine-remap a property expression between numeric ranges.
+
+    The helper lowers entirely to existing expression operations:
+    ``add``, ``sub``, ``mul``, and optionally ``clamp`` or ``case``. Numeric
+    range endpoints become unit-bearing literals when ``units`` is supplied or
+    when endpoints carry Pint/unit metadata.
+
+    Args:
+        value: Expression or scalar to remap. This can be a composed expression,
+            such as ``0.5 * prop("Vp")``.
+        from_range: Source ``(lower, upper)`` range.
+        to_range: Destination ``(lower, upper)`` range.
+        units: Optional units for all range endpoint literals.
+        clamp: Backward-compatible shortcut for ``outside``. ``True`` means
+            ``outside="clamp"``; ``False`` means ``outside="extrapolate"``.
+        outside: Behavior outside ``from_range``. ``"clamp"`` saturates to the
+            destination range, ``"extrapolate"`` applies the affine map
+            everywhere, and ``"preserve"`` leaves values outside ``from_range``
+            unchanged.
+
+    Returns:
+        A ``PropertyExpression`` representing the remap.
+    """
+
+    from_lower, from_upper = _range_pair(from_range, name="from_range")
+    to_lower, to_upper = _range_pair(to_range, name="to_range")
+    range_units = _infer_range_units(
+        units,
+        from_lower,
+        from_upper,
+        to_lower,
+        to_upper,
+    )
+    from_span = _remap_bound_magnitude(
+        from_upper, range_units
+    ) - _remap_bound_magnitude(from_lower, range_units)
+    if from_span == 0.0:
+        raise ValueError("from_range endpoints must be distinct")
+    to_span = _remap_bound_magnitude(to_upper, range_units) - _remap_bound_magnitude(
+        to_lower, range_units
+    )
+    scale = to_span / from_span
+
+    from_lower_node = _remap_bound_node(from_lower, range_units)
+    from_upper_node = _remap_bound_node(from_upper, range_units)
+    to_lower_node = _remap_bound_node(to_lower, range_units)
+    to_upper_node = _remap_bound_node(to_upper, range_units)
+    value_expr = PropertyExpression.from_value(value)
+
+    expression = (
+        PropertyExpression.from_value(to_lower_node)
+        + (value_expr - from_lower_node) * scale
+    )
+    outside_mode = _normalize_remap_outside(outside, clamp)
+    if outside_mode == "extrapolate":
+        return expression
+
+    from_lower_mag = _remap_bound_magnitude(from_lower, range_units)
+    from_upper_mag = _remap_bound_magnitude(from_upper, range_units)
+    if from_lower_mag <= from_upper_mag:
+        interval_lower, interval_upper = from_lower_node, from_upper_node
+    else:
+        interval_lower, interval_upper = from_upper_node, from_lower_node
+
+    if outside_mode == "preserve":
+        condition = (value_expr >= interval_lower) & (value_expr <= interval_upper)
+        return PropertyExpression(
+            {
+                "op": "case",
+                "branches": [
+                    {
+                        "if": condition.to_fs(),
+                        "then": expression.to_fs(),
+                    }
+                ],
+                "else": value_expr.to_fs(),
+            }
+        )
+
+    lower_mag = _remap_bound_magnitude(to_lower, range_units)
+    upper_mag = _remap_bound_magnitude(to_upper, range_units)
+    clamp_lower, clamp_upper = (
+        (to_lower_node, to_upper_node)
+        if lower_mag <= upper_mag
+        else (to_upper_node, to_lower_node)
+    )
+    return PropertyExpression(
+        {
+            "op": "clamp",
+            "args": [expression.to_fs(), clamp_lower, clamp_upper],
+        }
+    )
+
+
+def coord(system: str, axis: str, units: Optional[Any] = None) -> Dict[str, Any]:
+    """Bind an expression symbol to a coordinate-system axis.
+
+    Args:
+        system: Coordinate-system name that gives the axis its context.
+        axis: Axis name within ``system``.
+        units: Optional units used when evaluating the symbol.
+
+    Returns:
+        A solver-facing symbol binding payload.
+    """
+
+    system = str(system).strip()
+    axis = str(axis).strip()
+    if not system:
+        raise ValueError("Coordinate symbol binding requires a system")
+    if not axis:
+        raise ValueError("Coordinate symbol binding requires an axis")
+    payload = {"kind": "coordinate", "system": system, "axis": axis}
+    if units is not None:
+        payload["units"] = unit_expression(units)
+    return payload
+
+
 def _canonicalize_expression_refs(node: Any) -> Any:
     if isinstance(node, Mapping):
         payload = {}
         for key, value in node.items():
             if key == "ref":
                 payload[key] = canonical_property_name(value)
-            elif key in {"arg", "args"}:
-                payload[key] = _canonicalize_expression_refs(value)
             else:
-                payload[key] = value
+                payload[key] = _canonicalize_expression_refs(value)
         return payload
     if isinstance(node, Sequence) and not isinstance(node, (str, bytes)):
         return [_canonicalize_expression_refs(item) for item in node]
     return node
+
+
+def _is_sympy_expression(value: Any) -> bool:
+    return type(value).__module__.startswith("sympy.")
+
+
+def _sympy_module():
+    try:
+        import sympy as sp
+    except ImportError as exc:
+        raise ImportError(
+            "SymPy expressions require sympy. Install `sympy` directly or "
+            "reinstall frequensolve with dependencies."
+        ) from exc
+    return sp
+
+
+def _sympy_to_expression_node(
+    value: Any,
+    *,
+    symbols: set[str],
+    default_symbol: str,
+) -> Dict[str, Any]:
+    sp = _sympy_module()
+    if default_symbol not in {"ref", "var"}:
+        raise ValueError("default_symbol must be 'ref' or 'var'")
+
+    if value == sp.S.true:
+        return {"value": True}
+    if value == sp.S.false:
+        return {"value": False}
+
+    if getattr(value, "is_Number", False):
+        if not getattr(value, "is_real", True):
+            raise ValueError(f"Complex SymPy numbers are not supported: {value!r}")
+        if getattr(value, "is_Integer", False):
+            return {"value": int(value)}
+        return {"value": float(value)}
+    if getattr(value, "is_number", False):
+        if not getattr(value, "is_real", True):
+            raise ValueError(f"Complex SymPy constants are not supported: {value!r}")
+        return {"value": float(value.evalf())}
+
+    if getattr(value, "is_Symbol", False):
+        name = str(value)
+        if name in symbols or default_symbol == "var":
+            return {"var": name}
+        return {"ref": canonical_property_name(name)}
+
+    if isinstance(value, sp.Piecewise):
+        branches = []
+        fallback = None
+        for expr, condition in value.args:
+            expr_node = _sympy_to_expression_node(
+                expr,
+                symbols=symbols,
+                default_symbol=default_symbol,
+            )
+            if condition == sp.S.true:
+                fallback = expr_node
+                break
+            branches.append(
+                {
+                    "if": _sympy_to_expression_node(
+                        condition,
+                        symbols=symbols,
+                        default_symbol=default_symbol,
+                    ),
+                    "then": expr_node,
+                }
+            )
+        if fallback is None:
+            raise ValueError("SymPy Piecewise expressions require a True fallback")
+        return {"op": "case", "branches": branches, "else": fallback}
+
+    if isinstance(value, sp.core.relational.Relational):
+        rel_ops = {
+            ">": ">",
+            ">=": ">=",
+            "<": "<",
+            "<=": "<=",
+            "==": "==",
+            "!=": "!=",
+        }
+        op = rel_ops.get(value.rel_op)
+        if op is None:
+            raise ValueError(f"Unsupported SymPy relation: {value.rel_op}")
+        lhs, rhs = value.args
+        return {
+            "op": op,
+            "args": [
+                _sympy_to_expression_node(
+                    lhs,
+                    symbols=symbols,
+                    default_symbol=default_symbol,
+                ),
+                _sympy_to_expression_node(
+                    rhs,
+                    symbols=symbols,
+                    default_symbol=default_symbol,
+                ),
+            ],
+        }
+
+    if value.func == sp.Add:
+        return _fold_expression_args(
+            "add",
+            value.args,
+            symbols=symbols,
+            default_symbol=default_symbol,
+        )
+    if value.func == sp.Mul:
+        return _fold_expression_args(
+            "mul",
+            value.args,
+            symbols=symbols,
+            default_symbol=default_symbol,
+        )
+    if value.func == sp.Pow:
+        base, exponent = value.args
+        return {
+            "op": "pow",
+            "args": [
+                _sympy_to_expression_node(
+                    base,
+                    symbols=symbols,
+                    default_symbol=default_symbol,
+                ),
+                _sympy_to_expression_node(
+                    exponent,
+                    symbols=symbols,
+                    default_symbol=default_symbol,
+                ),
+            ],
+        }
+    if value.func == sp.And:
+        return _fold_expression_args(
+            "and",
+            value.args,
+            symbols=symbols,
+            default_symbol=default_symbol,
+        )
+    if value.func == sp.Or:
+        return _fold_expression_args(
+            "or",
+            value.args,
+            symbols=symbols,
+            default_symbol=default_symbol,
+        )
+    if value.func == sp.Not:
+        (arg,) = value.args
+        return {
+            "op": "not",
+            "arg": _sympy_to_expression_node(
+                arg,
+                symbols=symbols,
+                default_symbol=default_symbol,
+            ),
+        }
+    unary_function_ops = _sympy_unary_function_ops(sp)
+    if value.func in unary_function_ops:
+        (arg,) = value.args
+        return {
+            "op": unary_function_ops[value.func],
+            "arg": _sympy_to_expression_node(
+                arg,
+                symbols=symbols,
+                default_symbol=default_symbol,
+            ),
+        }
+    variadic_function_ops = _sympy_variadic_function_ops(sp)
+    if value.func in variadic_function_ops:
+        return _function_expression_args(
+            variadic_function_ops[value.func],
+            value.args,
+            symbols=symbols,
+            default_symbol=default_symbol,
+        )
+    if isinstance(value, sp.Function):
+        raise ValueError(f"Unsupported SymPy function: {value.func}")
+
+    raise ValueError(f"Unsupported SymPy expression: {value!r}")
+
+
+def _sympy_unary_function_ops(sp) -> Dict[Any, str]:
+    return {
+        sp.Abs: "abs",
+        sp.exp: "exp",
+        sp.log: "log",
+        sp.sin: "sin",
+        sp.cos: "cos",
+        sp.tan: "tan",
+        sp.asin: "asin",
+        sp.acos: "acos",
+        sp.atan: "atan",
+        sp.sinh: "sinh",
+        sp.cosh: "cosh",
+        sp.tanh: "tanh",
+        sp.floor: "floor",
+        sp.ceiling: "ceil",
+        sp.sign: "sign",
+    }
+
+
+def _sympy_variadic_function_ops(sp) -> Dict[Any, str]:
+    return {
+        sp.Min: "min",
+        sp.Max: "max",
+        sp.atan2: "atan2",
+    }
+
+
+def _function_expression_args(
+    op: str,
+    args: Sequence[Any],
+    *,
+    symbols: set[str],
+    default_symbol: str,
+) -> Dict[str, Any]:
+    nodes = [
+        _sympy_to_expression_node(
+            arg,
+            symbols=symbols,
+            default_symbol=default_symbol,
+        )
+        for arg in args
+    ]
+    if not nodes:
+        raise ValueError(f"SymPy {op} function requires at least one argument")
+    return {"op": op, "args": nodes}
+
+
+def _fold_expression_args(
+    op: str,
+    args: Sequence[Any],
+    *,
+    symbols: set[str],
+    default_symbol: str,
+) -> Dict[str, Any]:
+    nodes = [
+        _sympy_to_expression_node(
+            arg,
+            symbols=symbols,
+            default_symbol=default_symbol,
+        )
+        for arg in args
+    ]
+    if not nodes:
+        raise ValueError(f"SymPy {op} expression requires at least one argument")
+    if len(nodes) == 1:
+        return nodes[0]
+    out = {"op": op, "args": [nodes[0], nodes[1]]}
+    for node in nodes[2:]:
+        out = {"op": op, "args": [out, node]}
+    return out
+
+
+def _normalize_expression_symbols(
+    symbols: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    if symbols is None:
+        return {}
+    out = {}
+    for raw_name, raw_binding in symbols.items():
+        name = str(raw_name).strip()
+        if not name:
+            raise ValueError("Expression symbol names cannot be empty")
+        out[name] = _normalize_expression_symbol_binding(name, raw_binding)
+    return out
+
+
+def _normalize_expression_symbol_binding(name: str, binding: Any) -> Dict[str, Any]:
+    if hasattr(binding, "to_fs"):
+        binding = binding.to_fs()
+    if isinstance(binding, str):
+        return {"kind": "coordinate", "system": binding, "axis": name}
+    if not isinstance(binding, Mapping):
+        raise TypeError(
+            "Expression symbol bindings must be mappings, strings, or objects "
+            f"with to_fs(); got {type(binding).__name__}"
+        )
+
+    payload = copy.deepcopy(dict(binding))
+    if "coordinate_system" in payload:
+        coordinate_system = payload.pop("coordinate_system")
+        if "system" in payload and payload["system"] != coordinate_system:
+            raise ValueError("Specify only one of system or coordinate_system")
+        payload["system"] = coordinate_system
+    if payload.get("kind") == "coordinate":
+        if not payload.get("system"):
+            raise ValueError("Coordinate symbol binding requires system")
+        if not payload.get("axis"):
+            raise ValueError("Coordinate symbol binding requires axis")
+        if payload.get("units") is not None:
+            payload["units"] = unit_expression(payload["units"])
+    return payload
 
 
 class PropertyMap(MutableMapping):
@@ -536,6 +1309,10 @@ class Property:
         format: Optional[str] = None,
         absolute: bool = False,
         read: bool = True,
+        fill_invalid: Optional[str] = None,
+        valid_range: Optional[Any] = None,
+        valid_min: Optional[Any] = None,
+        valid_max: Optional[Any] = None,
         **kwargs,
     ):
         """Normalize user property input into one solver-facing representation.
@@ -555,22 +1332,44 @@ class Property:
             self.dispersion = data.dispersion
             data = data.property
 
+        data_is_sympy = _is_sympy_expression(data)
+        if is_quantity(data) and units is None:
+            units = data.units
         self.scale = float(scale)
         self.units = unit_expression(units) if units is not None else None
+        self.valid_range, _range_units = _normalize_valid_range(
+            valid_range,
+            valid_min=valid_min,
+            valid_max=valid_max,
+            units=self.units,
+        )
+        self.fill_invalid = _normalize_fill_invalid(fill_invalid)
         self.system = system
-        self.format = format
+        self.format = format if data_is_sympy else format or _infer_file_format(data)
         self.absolute = bool(absolute)
         self.extra = dict(kwargs)
         self.file_path: Optional[Union[Path, str]] = None
         self.file_grid = grid
         self.darr: Optional[xr.DataArray] = None
         self.expression: Optional[PropertyExpression] = None
+        self.expression_symbols: Dict[str, Any] = {}
         self.is_remote = False
         self.remote_path = None
         self.remote_scale = self.scale
 
         if isinstance(data, PropertyExpression):
             self.expression = data
+            return
+        if data_is_sympy:
+            other = self.expr(
+                data,
+                units=self.units,
+                system=self.system,
+                fill_invalid=self.fill_invalid,
+                valid_range=self.valid_range,
+                **self.extra,
+            )
+            self.__dict__.update(other.__dict__)
             return
 
         if is_quantity(data):
@@ -582,6 +1381,10 @@ class Property:
             payload = dict(data)
             if self.units is not None and "units" not in payload:
                 payload["units"] = self.units
+            if self.valid_range is not None and "valid_range" not in payload:
+                payload["valid_range"] = copy.deepcopy(self.valid_range)
+            if self.fill_invalid is not None and "fill_invalid" not in payload:
+                payload["fill_invalid"] = self.fill_invalid
             if (
                 self.system is not None
                 and "system" not in payload
@@ -594,7 +1397,7 @@ class Property:
 
         if isinstance(data, str) and _is_hdf5_locator(data):
             self.file_path = data
-            self.format = self.format or "hdf5"
+            self.format = self.format or _infer_file_format(data)
             self.darr = None
             return
 
@@ -612,12 +1415,14 @@ class Property:
             self.is_remote = True
             self.remote_path = str(data).replace("remote:", "", 1)
             self.file_path = Path(self.remote_path)
+            self.format = self.format or _infer_file_format(data)
             self.absolute = True
             self.darr = None
         elif isinstance(data, str) and data.startswith("remote:"):
             self.is_remote = True
             self.remote_path = data.replace("remote:", "", 1)
             self.file_path = Path(self.remote_path)
+            self.format = self.format or _infer_file_format(data)
             self.absolute = True
             self.darr = None
         elif isinstance(data, (int, float, np.integer, np.floating)):
@@ -628,8 +1433,16 @@ class Property:
             self.darr = xr.DataArray(data=np.asarray(data))
         elif isinstance(data, Path):
             self.file_path = data
+            self.format = self.format or _infer_file_format(data)
             if read:
                 self.darr = Property.read(data.resolve(), grid=grid)
+                if self.units is None and "units" in self.darr.attrs:
+                    self.units = self.darr.attrs["units"]
+                if self.system is None:
+                    self.system = self.darr.attrs.get(
+                        "system",
+                        self.darr.attrs.get("coordinate_system"),
+                    )
                 if self.scale != 1.0:
                     self.darr = self.darr.copy(deep=True)
                     self.darr.values = self.darr.values * self.scale
@@ -661,8 +1474,13 @@ class Property:
         grid: Optional[Union[CartesianGrid, xr.DataArray, Mapping[str, Any]]] = None,
         format: Optional[str] = None,
         absolute: bool = False,
+        remote: bool = False,
         system: Optional[str] = None,
         coordinate_system: Optional[str] = None,
+        fill_invalid: Optional[str] = None,
+        valid_range: Optional[Any] = None,
+        valid_min: Optional[Any] = None,
+        valid_max: Optional[Any] = None,
         **extra,
     ) -> "Property":
         """Create a lazy file-backed property.
@@ -677,8 +1495,17 @@ class Property:
             format: Optional explicit file format hint.
             absolute: Serialize the path as solver-visible instead of
                 project-relative.
+            remote: Treat the path as solver-visible and never try to read it
+                from the host. Serialized payloads use ``absolute: true`` for
+                solver compatibility.
             system: Optional coordinate-system name for the property grid.
             coordinate_system: Alias accepted in serialized payloads.
+            fill_invalid: Optional invalid-sample repair mode: ``"nearest"`` or
+                ``"none"``.
+            valid_range: Optional valid sample range mapping or ``(lower, upper)``
+                tuple.
+            valid_min: Optional lower valid sample bound.
+            valid_max: Optional upper valid sample bound.
             **extra: Additional payload fields to preserve.
 
         Returns:
@@ -686,6 +1513,8 @@ class Property:
         """
 
         system = _resolve_system_alias(system, coordinate_system)
+        path_text = str(path)
+        remote = bool(remote) or path_text.startswith("remote:")
         data_arg = str(path) if _is_hdf5_locator(path) else Path(path)
         prop = cls(
             data_arg,
@@ -693,16 +1522,19 @@ class Property:
             scale=scale,
             units=units,
             system=system,
-            format=format,
-            absolute=absolute,
+            format=format or _infer_file_format(path),
+            absolute=bool(absolute) or remote,
             read=False,
+            fill_invalid=fill_invalid,
+            valid_range=valid_range,
+            valid_min=valid_min,
+            valid_max=valid_max,
             **extra,
         )
         prop.file_path = str(path) if _is_hdf5_locator(path) else Path(path)
-        prop.is_remote = bool(absolute) or str(path).startswith("remote:")
-        prop.remote_path = (
-            str(path).replace("remote:", "", 1) if prop.is_remote else None
-        )
+        prop.absolute = bool(prop.absolute) or remote
+        prop.is_remote = bool(prop.absolute)
+        prop.remote_path = _strip_remote_prefix(path_text) if prop.is_remote else None
         return prop
 
     @classmethod
@@ -713,6 +1545,11 @@ class Property:
         units: Optional[Any] = None,
         system: Optional[str] = None,
         coordinate_system: Optional[str] = None,
+        symbols: Optional[Mapping[str, Any]] = None,
+        fill_invalid: Optional[str] = None,
+        valid_range: Optional[Any] = None,
+        valid_min: Optional[Any] = None,
+        valid_max: Optional[Any] = None,
         **extra,
     ) -> "Property":
         """Create a property derived from a solver expression.
@@ -723,6 +1560,13 @@ class Property:
             units: Optional units associated with the derived value.
             system: Optional coordinate-system name for the derived value.
             coordinate_system: Alias accepted in serialized payloads.
+            symbols: Optional expression-symbol bindings keyed by symbol name.
+            fill_invalid: Optional invalid-sample repair mode: ``"nearest"`` or
+                ``"none"``.
+            valid_range: Optional valid sample range mapping or ``(lower, upper)``
+                tuple.
+            valid_min: Optional lower valid sample bound.
+            valid_max: Optional upper valid sample bound.
             **extra: Additional payload fields to preserve.
 
         Returns:
@@ -731,13 +1575,27 @@ class Property:
         """
 
         system = _resolve_system_alias(system, coordinate_system)
-        prop = cls(0.0, units=units, system=system, **extra)
+        prop = cls(
+            0.0,
+            units=units,
+            system=system,
+            fill_invalid=fill_invalid,
+            valid_range=valid_range,
+            valid_min=valid_min,
+            valid_max=valid_max,
+            **extra,
+        )
         prop.darr = None
         prop.file_path = None
         prop.file_grid = None
         prop.is_remote = False
         prop.remote_path = None
-        prop.expression = PropertyExpression.from_value(expression)
+        prop.expression_symbols = _normalize_expression_symbols(symbols)
+        prop.expression = PropertyExpression.from_value(
+            expression,
+            symbols=prop.expression_symbols,
+            default_symbol="ref",
+        )
         return prop
 
     @classmethod
@@ -758,6 +1616,8 @@ class Property:
             return value
         if isinstance(value, PropertyExpression):
             return cls.expr(value)
+        if _is_sympy_expression(value):
+            return cls.expr(value)
         if isinstance(value, Mapping):
             payload = dict(value)
             _normalize_system_alias(payload)
@@ -767,6 +1627,7 @@ class Property:
                     payload.pop("expr"),
                     units=payload.pop("units", None),
                     system=payload.pop("system", None),
+                    symbols=payload.pop("symbols", None),
                     **payload,
                 )
             if "value" in payload and "file" not in payload:
@@ -787,6 +1648,7 @@ class Property:
                     grid=prop_grid,
                     format=payload.pop("format", None),
                     absolute=payload.pop("absolute", False),
+                    remote=payload.pop("remote", False),
                     system=payload.pop("system", None),
                     **payload,
                 )
@@ -960,6 +1822,8 @@ class Property:
             depends_on = self.expression.depends_on()
             if depends_on:
                 payload["depends_on"] = depends_on
+            if self.expression_symbols:
+                payload["symbols"] = copy.deepcopy(self.expression_symbols)
         elif self.file_path is not None and self.darr is None:
             payload = self._file_payload(ctx)
         elif self.is_constant:
@@ -996,6 +1860,10 @@ class Property:
             payload["units"] = self.units
         if self.system is not None:
             payload["system"] = self.system
+        if self.fill_invalid is not None:
+            payload["fill_invalid"] = self.fill_invalid
+        if self.valid_range is not None:
+            payload["valid_range"] = copy.deepcopy(self.valid_range)
         return merge_extra(payload, self.extra, "Property")
 
     def _file_payload(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
@@ -1121,9 +1989,11 @@ class Property:
         )
         if not path.exists():
             raise FileNotFoundError(f"File {path} not found")
-        suffix = path.suffix
+        suffix = path.suffix.lower()
         if suffix == ".bin" or suffix == "":
             return Property._bin_reader
+        if suffix == ".rsf":
+            return Property._rsf_reader
         if suffix in [".sgy", ".segy"]:
             return Property._segy_reader
         if suffix in [".h5", ".hdf5"]:
@@ -1138,6 +2008,106 @@ class Property:
     def _bin_reader(file: Path, grid: xr.DataArray) -> xr.DataArray:
         data = np.fromfile(file, dtype=np.float32).reshape(grid.shape)
         return xr.DataArray(data, coords=grid.coords, dims=grid.dims)
+
+    @staticmethod
+    def _rsf_reader(file: Path, **kwargs) -> xr.DataArray:
+        header = _read_rsf_header(file)
+        axes = []
+        axis = 1
+        while f"n{axis}" in header:
+            axes.append(axis)
+            axis += 1
+        if not axes:
+            raise ValueError(f"RSF header {file} does not define any n# axes")
+
+        n = [int(header[f"n{axis}"]) for axis in axes]
+        d = [float(header.get(f"d{axis}", 1.0)) for axis in axes]
+        o = [float(header.get(f"o{axis}", 0.0)) for axis in axes]
+        dims = [
+            Property._rsf_axis_name(header.get(f"label{axis}"), index)
+            for index, axis in enumerate(axes)
+        ]
+        if len(set(dims)) != len(dims):
+            dims = Property._default_rsf_dims(len(dims))
+
+        data_path = rsf_binary_path(file)
+        if data_path is None:
+            raise ValueError(
+                f"RSF header {file} does not reference a binary 'in=' file"
+            )
+
+        dtype = Property._rsf_dtype(header)
+        expected = int(np.prod(n, dtype=np.int64))
+        data = np.fromfile(data_path, dtype=dtype, count=expected)
+        if data.size != expected:
+            raise ValueError(
+                f"RSF binary {data_path} contains {data.size} values; "
+                f"expected {expected} from header axes {n}"
+            )
+        data = data.reshape(tuple(n), order="F")
+        coords = {
+            dim: o[index] + d[index] * np.arange(count)
+            for index, (dim, count) in enumerate(zip(dims, n))
+        }
+        da = xr.DataArray(data, dims=dims, coords=coords, name=header.get("label"))
+        if "unit" in header:
+            da.attrs["units"] = header["unit"]
+        if "label" in header:
+            da.attrs["label"] = header["label"]
+        for index, axis in enumerate(axes):
+            dim = dims[index]
+            if f"unit{axis}" in header:
+                da.coords[dim].attrs["units"] = header[f"unit{axis}"]
+            if f"label{axis}" in header:
+                da.coords[dim].attrs["label"] = header[f"label{axis}"]
+        return da
+
+    @staticmethod
+    def _default_rsf_dims(ndim: int) -> List[str]:
+        if ndim == 1:
+            return ["x"]
+        if ndim == 2:
+            return ["x", "z"]
+        if ndim == 3:
+            return ["x", "y", "z"]
+        return [f"dim{axis}" for axis in range(1, ndim + 1)]
+
+    @staticmethod
+    def _rsf_axis_name(label: Optional[str], index: int) -> str:
+        defaults = Property._default_rsf_dims(index + 1)
+        fallback = defaults[index]
+        if label is None:
+            return fallback
+        normalized = "".join(
+            char.lower() if char.isalnum() else "_" for char in str(label).strip()
+        ).strip("_")
+        normalized = "_".join(part for part in normalized.split("_") if part)
+        return {"depth": "z"}.get(normalized, normalized or fallback)
+
+    @staticmethod
+    def _rsf_dtype(header: Mapping[str, str]) -> np.dtype:
+        data_format = header.get("data_format", "native_float").lower()
+        dtype_map = {
+            "float": np.dtype(np.float32),
+            "native_float": np.dtype(np.float32),
+            "xdr_float": np.dtype(">f4"),
+            "double": np.dtype(np.float64),
+            "native_double": np.dtype(np.float64),
+            "xdr_double": np.dtype(">f8"),
+            "int": np.dtype(np.int32),
+            "native_int": np.dtype(np.int32),
+            "xdr_int": np.dtype(">i4"),
+        }
+        if data_format not in dtype_map:
+            raise ValueError(f"Unsupported RSF data_format: {data_format!r}")
+        dtype = dtype_map[data_format]
+        esize = header.get("esize")
+        if esize is not None and int(esize) != dtype.itemsize:
+            raise ValueError(
+                f"RSF esize={esize} does not match {data_format} item size "
+                f"{dtype.itemsize}"
+            )
+        return dtype
 
     @staticmethod
     def _h5_reader(file: Path, **kwargs) -> xr.DataArray:

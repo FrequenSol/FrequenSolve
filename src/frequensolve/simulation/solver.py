@@ -1,4 +1,4 @@
-"""Numerical discretization and solver-configuration objects."""
+"""Linear/nonlinear solver settings for simulations."""
 
 import copy
 from dataclasses import dataclass, field
@@ -6,92 +6,22 @@ from typing import Any, Dict, List, Literal, Union
 
 from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
 
-__all__ = ["Discretization", "SolverConfig", "SuperPatch", "NumericsManager"]
+__all__ = ["SolverConfig", "SuperPatch"]
 
 
-@dataclass
-class Discretization(ExtraFieldsMixin):
-    """Finite-element discretization settings for a simulation.
+def _serialize_solver_extra(extra: Dict[str, Any], ctx=None) -> Dict[str, Any]:
+    from frequensolve.mesh.mesh_manager import (
+        _serialize_adapt_value,
+        _serialize_hp_payload,
+    )
 
-    Args:
-        method: Solver discretization method. The default is ``"DPG"``.
-        **kwargs: Additional solver-facing discretization fields such as DPG
-            stabilization parameters.
-
-    Raises:
-        ValueError: If legacy ``order`` is supplied here instead of through mesh
-            adaptivity.
-    """
-
-    method: str = "DPG"
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-    def __init__(
-        self,
-        method: str = "DPG",
-        **kwargs,
-    ):
-        """Create discretization settings.
-
-        Solver order is now configured through mesh adaptivity, so legacy
-        ``order`` values are rejected with an actionable error.
-        """
-
-        if "order" in kwargs:
-            raise ValueError(
-                "'order' has moved from Discretization to mesh adaptivity; "
-                "use mesh.set_adapt(..., order=...) instead."
-            )
-        self.method = method
-        self._init_extra(None, **kwargs)
-
-    @classmethod
-    def from_fs(cls, d: Dict[str, Any]) -> "Discretization":
-        """Deserialize discretization settings from solver JSON.
-
-        Args:
-            d: Serialized discretization mapping.
-
-        Returns:
-            ``Discretization`` instance.
-
-        Raises:
-            ValueError: If the payload still uses the legacy ``order`` field.
-        """
-
-        d = copy.deepcopy(d)
-        if "order" in d:
-            raise ValueError(
-                "'order' has moved from Discretization to mesh adaptivity; "
-                "use Mesh.adapt.order instead."
-            )
-        return cls(
-            method=d.pop("method", "DPG"),
-            **d,
-        )
-
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
-        """Serialize discretization settings for solver input.
-
-        Args:
-            ctx: Optional export context accepted for API consistency.
-
-        Returns:
-            JSON-compatible discretization payload.
-
-        Raises:
-            ValueError: If legacy ``order`` has been placed in ``extra``.
-        """
-
-        payload = {
-            "method": self.method,
-        }
-        if "order" in self.extra:
-            raise ValueError(
-                "'order' has moved from Discretization to mesh adaptivity; "
-                "use mesh.set_adapt(..., order=...) instead."
-            )
-        return merge_extra(payload, self.extra, "Discretization")
+    payload = {}
+    for key, value in extra.items():
+        if key == "hp":
+            payload[key] = _serialize_hp_payload(value, ctx)
+        else:
+            payload[key] = _serialize_adapt_value(value, ctx)
+    return payload
 
 
 @dataclass
@@ -143,6 +73,7 @@ class SuperPatch(ExtraFieldsMixin):
             domain = [domain]
         self.grid = grid
         self.domain = domain
+        self.warning_acknowledged = bool(warning_acknowledged)
         self._init_extra(None, **kwargs)
 
     @classmethod
@@ -160,6 +91,7 @@ class SuperPatch(ExtraFieldsMixin):
         return cls(
             grid=data.pop("grid"),
             domain=data.pop("domain"),
+            warning_acknowledged=data.pop("warning_acknowledged", True),
             **data,
         )
 
@@ -189,14 +121,14 @@ class SolverConfig(ExtraFieldsMixin):
             adaptive steps.
         max_iter: Maximum Krylov/nonlinear iterations.
         tolerance: Solver convergence tolerance.
-        grids: Number of multigrid levels.
+        precision: Floating-point precision used by the solver executable.
         **kwargs: Additional solver-facing configuration fields.
     """
 
     solve_on: Literal["final", "all"] = "final"
     max_iter: int = 300
     tolerance: float = 1.0e-4
-    grids: int = 3
+    precision: Literal["single", "double"] = "single"
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
@@ -204,15 +136,17 @@ class SolverConfig(ExtraFieldsMixin):
         solve_on: Literal["final", "all"] = "final",
         max_iter: int = 300,
         tolerance: float = 1.0e-4,
-        grids: int = 3,
+        precision: Literal["single", "double"] = "single",
         **kwargs,
     ):
         """Create iterative solver settings."""
 
+        if precision not in {"single", "double"}:
+            raise ValueError("Solver precision must be 'single' or 'double'")
         self.solve_on = solve_on
         self.max_iter = max_iter
         self.tolerance = tolerance
-        self.grids = grids
+        self.precision = precision
         self._init_extra(None, **kwargs)
 
     @classmethod
@@ -231,7 +165,7 @@ class SolverConfig(ExtraFieldsMixin):
             solve_on=data.pop("solve_on", "final"),
             max_iter=data.pop("max_iter", 300),
             tolerance=data.pop("tolerance", 1.0e-4),
-            grids=data.pop("grids", 3),
+            precision=data.pop("precision", "single"),
         )
         obj._init_extra(data)
         return obj
@@ -266,52 +200,10 @@ class SolverConfig(ExtraFieldsMixin):
             "solve_on": self.solve_on,
             "max_iter": self.max_iter,
             "tolerance": self.tolerance,
-            "grids": self.grids,
+            "precision": self.precision,
         }
-        return merge_extra(payload, self.extra, "SolverConfig")
-
-
-@dataclass
-class NumericsManager:
-    """Container for numerical solver and discretization configuration.
-
-    Args:
-        solver: Solver iteration and multigrid settings.
-        discretization: Discretization method and related solver fields.
-    """
-
-    solver: SolverConfig = field(default_factory=SolverConfig)
-    discretization: Discretization = field(default_factory=Discretization)
-
-    @classmethod
-    def from_fs(cls, data: Dict) -> "NumericsManager":
-        """Deserialize numerical configuration from solver JSON.
-
-        Args:
-            data: Serialized numerics block containing ``solver`` and
-                ``discretization`` sections.
-
-        Returns:
-            ``NumericsManager`` instance.
-        """
-
-        data = copy.deepcopy(data)
-        return cls(
-            solver=SolverConfig.from_fs(data["solver"]),
-            discretization=Discretization.from_fs(data["discretization"]),
+        return merge_extra(
+            payload,
+            _serialize_solver_extra(self.extra, ctx),
+            "SolverConfig",
         )
-
-    def to_fs(self, ctx=None) -> Dict:
-        """Serialize numerical configuration for solver input.
-
-        Args:
-            ctx: Optional export context forwarded to nested serializers.
-
-        Returns:
-            JSON-compatible numerics block.
-        """
-
-        return {
-            "solver": self.solver.to_fs(ctx),
-            "discretization": self.discretization.to_fs(ctx),
-        }

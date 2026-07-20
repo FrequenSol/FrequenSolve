@@ -78,8 +78,7 @@ def test_login():
         try:
             tokens = auth.login(email, password)
             print("  ✓ Login successful!")
-            print(f"  ✓ ID Token: {tokens['id_token'][:50]}...")
-            print(f"  ✓ Refresh Token: {tokens['refresh_token'][:50]}...")
+            print("  ✓ Cognito tokens received")
             print(f"  ✓ Expires at: {tokens['expires_at']}")
         except ValueError as e:
             print(f"\n❌ Authentication failed: {e}")
@@ -93,7 +92,6 @@ def test_login():
     try:
         creds = auth.get_aws_credentials()
         print("  ✓ AWS credentials obtained!")
-        print(f"  ✓ Access Key ID: {creds['AccessKeyId'][:20]}...")
         print(f"  ✓ Identity ID: {creds['IdentityId']}")
         print(f"  ✓ Expires: {creds['Expiration']}")
     except Exception as e:
