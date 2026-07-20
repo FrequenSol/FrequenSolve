@@ -180,6 +180,34 @@ def test_connect_reuses_existing_shared_connection(monkeypatch, tmp_path):
     assert len(calls) == 1
 
 
+def test_connect_restricts_existing_control_directory(monkeypatch, tmp_path):
+    storage_root = tmp_path / "config"
+    runner = CliRunner()
+    configured = _configure(runner, storage_root, "--username", "student")
+    assert configured.exit_code == 0, configured.output
+
+    control_dir = tmp_path / "home" / ".ssh" / "control"
+    control_dir.mkdir(parents=True)
+    control_dir.chmod(0o755)
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(site_commands.shutil, "which", lambda command: "/usr/bin/ssh")
+    monkeypatch.setattr(
+        site_commands.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0),
+    )
+
+    result = runner.invoke(
+        main,
+        ["site", "connect"],
+        env={"FREQUENSOLVE_HOME": str(storage_root)},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert control_dir.stat().st_mode & 0o777 == 0o700
+
+
 def test_connect_supports_generic_slurm_profile(monkeypatch, tmp_path):
     config_path = tmp_path / "site.toml"
     config_path.write_text(
@@ -226,7 +254,11 @@ def test_check_reports_resolved_site_defaults_and_closes(monkeypatch):
 
         def run_login(self, command):
             assert "test -x /work/shared/FS_seismic" in command
-            return "frequensolve-solver-ready"
+            assert "module load intel/25.1" in command
+            assert "module load impi/21.15" in command
+            assert "module load petsc/3.23" in command
+            assert "module load phdf5" in command
+            return "module setup output\nfrequensolve-solver-ready"
 
         def close(self):
             self.closed = True
@@ -243,9 +275,10 @@ def test_check_reports_resolved_site_defaults_and_closes(monkeypatch):
     assert fake_site.closed is True
 
 
-def test_check_fails_when_remote_solver_is_not_executable(monkeypatch):
+def test_check_fails_when_modules_or_remote_solver_are_unavailable(monkeypatch):
     class FakeSite:
         executable = "/work/shared/FS_seismic"
+        modules = []
         closed = False
 
         def run_login(self, command):
@@ -260,5 +293,5 @@ def test_check_fails_when_remote_solver_is_not_executable(monkeypatch):
     result = CliRunner().invoke(main, ["site", "check"])
 
     assert result.exit_code != 0
-    assert "missing or not executable" in result.output
+    assert "modules could not be loaded or the solver is missing" in result.output
     assert fake_site.closed is True

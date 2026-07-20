@@ -105,7 +105,7 @@ def connect(profile: Optional[str], config_path: Optional[Path]) -> None:
     hostname = str(settings["hostname"])
     target = f"{username}@{hostname}"
     control_path = _control_socket_path(username, hostname)
-    control_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _ensure_control_directory(control_path.parent)
 
     check_command = [ssh, "-q", "-S", str(control_path), "-O", "check", target]
     if _run_control_check(check_command):
@@ -172,12 +172,24 @@ def check(profile: Optional[str], config_path: Optional[Path]) -> None:
         execution_site = _create_site(config_path=config_path, profile=profile)
         solver = str(execution_site.executable)
         marker = "frequensolve-solver-ready"
+        setup = [
+            f"module load {shlex.quote(str(module))}"
+            for module in execution_site.modules
+        ]
         output = execution_site.run_login(
-            f"test -x {shlex.quote(solver)} && echo {marker}"
+            "set -e\n"
+            + "\n".join(
+                [
+                    *setup,
+                    f"test -x {shlex.quote(solver)}",
+                    f"printf '%s\\n' {shlex.quote(marker)}",
+                ]
+            )
         )
-        if output.strip() != marker:
+        if marker not in output.splitlines():
             raise click.ClickException(
-                f"The configured solver is missing or not executable: {solver}"
+                "The configured modules could not be loaded or the solver is "
+                f"missing or not executable: {solver}"
             )
         hostname = getattr(execution_site.config, "hostname", "remote site")
         click.echo(f"Site profile is ready: {hostname}")
@@ -282,6 +294,13 @@ def _ssh_settings(path: Path, *, profile: Optional[str]) -> Mapping[str, Any]:
 def _control_socket_path(username: str, hostname: str) -> Path:
     digest = hashlib.sha256(f"{username}@{hostname}".encode()).hexdigest()[:16]
     return Path("~/.ssh/control").expanduser() / f"frequensolve-{digest}"
+
+
+def _ensure_control_directory(path: Path) -> None:
+    """Create the control-socket directory and keep it private to the user."""
+
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
 
 
 def _run_control_check(command: list[str]) -> bool:
