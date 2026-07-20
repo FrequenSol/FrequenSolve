@@ -11,8 +11,9 @@ FrequenSolve uses Stampede3 as a remote execution site. The normal setup is:
 - Keep the separately licensed fast solver executables on Stampede3.
 
 Installing the Python package does not install or license the solver. Obtain
-the Stampede3 solver installation path and any required runtime modules from the FrequenSol
-administrator before trying to submit a job.
+the Stampede3 solver installation path from the FrequenSol administrator
+before trying to submit a job. The built-in site preset supplies the standard
+runtime modules; a different solver build may require an explicit override.
 
 Prerequisites
 -------------
@@ -24,7 +25,7 @@ You need:
   allocation/project id to charge.
 - A licensed fast solver installation on Stampede3 whose required concrete
   executables are executable by your account.
-- Python 3.10 through 3.14, ``ssh``, and preferably ``rsync`` on the computer
+- Python 3.10 through 3.14, ``ssh``, and ``rsync`` on the computer
   where you will run FrequenSolve.
 
 TACC's `Stampede3 user guide
@@ -36,16 +37,16 @@ Install A Pinned Release
 ------------------------
 
 Create an isolated environment on the laptop or workstation that will launch
-your Python code. Replace ``0.3.0`` with the exact version supplied by your
-FrequenSol administrator:
+your Python code. Replace ``0.2.2`` with a later exact version when one is
+supplied by your FrequenSol administrator:
 
 .. code-block:: bash
 
    python3 -m venv ~/.venvs/frequensolve
    . ~/.venvs/frequensolve/bin/activate
    python -m pip install --upgrade pip
-   python -m pip install "frequensolve[hpc]==0.3.0"
-   python -c 'import frequensolve as fs; print(fs.__version__)'
+   python -m pip install "frequensolve[hpc]==0.2.2"
+   frequensolve --version
 
 Use an exact version so every user runs the same API and solver contract. Add
 the ``visual`` extra if this environment will also plot with matplotlib or
@@ -53,188 +54,81 @@ PyVista:
 
 .. code-block:: bash
 
-   python -m pip install "frequensolve[hpc,visual]==0.3.0"
+   python -m pip install "frequensolve[hpc,visual]==0.2.2"
 
 PyPI installs the library, but not the repository's example notebooks. To use
 the examples for the same release, clone its matching tag:
 
 .. code-block:: bash
 
-   git clone --depth 1 --branch v0.3.0 \
+   git clone --depth 1 --branch v0.2.2 \
      https://github.com/FrequenSol/FrequenSolve.git
    python -m pip install jupyterlab
    python -m jupyter lab \
      FrequenSolve/examples/tutorials/02_sites/02_hpc_sites.ipynb
 
-Verify TACC Access And Remote Values
-------------------------------------
+Configure Stampede3
+-------------------
 
-Connect once with the system SSH client before using FrequenSolve. This both
-tests TACC/MFA access and lets you verify Stampede3's host key:
-
-.. code-block:: bash
-
-   ssh your-tacc-username@stampede3.tacc.utexas.edu
-
-From the Stampede3 shell, record the paths and policies that apply to your
-account:
+Generate a focused Stampede3 profile instead of hand-editing the multi-site
+starter file:
 
 .. code-block:: bash
 
-   echo "$WORK"
-   echo "$SCRATCH"
-   qlimits
-   test -x /absolute/path/to/solver-installation/FS_seismic \
-       && echo "FS_seismic is executable"
+   frequensolve site configure stampede3 \
+     --account your-tacc-project-id \
+     --solver /absolute/path/to/solver-installation/FS_seismic
 
-When basing a configured directory on ``$WORK`` or ``$SCRATCH``, use the actual
-path printed by ``echo``. Other absolute writable remote paths are equally
-valid. TOML does not expand remote shell variables, so do not write
-``work_dir = "$WORK/frequensolve"`` or
-``scratch_dir = "$SCRATCH/frequensolve"``.
+Enter your TACC username when prompted. The command writes
+``~/.frequensolve/site.toml`` with conservative ``skx-dev`` defaults. Shared
+machine settings come from the packaged ``stampede3`` preset, including the
+login host, ``ibrun``, partition shapes, and the modules ``intel/25.1``,
+``impi/21.15``, ``petsc/3.23``, and ``phdf5``.
 
-Stampede3's ``$SCRATCH`` is appropriate for active, high-I/O job data but is
-not backed up and files are subject to purge. ``$WORK`` is persistent across
-TACC systems but has a quota and is not intended for high-intensity parallel
-I/O. If ``work_dir`` is omitted, FrequenSolve asks the remote login shell for
-``$WORK`` and uses ``$WORK/frequensolve``. The optional ``scratch_dir`` can name
-a complete absolute directory below ``$SCRATCH`` for future model and high-I/O
-storage, but FrequenSolve does not place job data there yet. An explicit
-``work_dir`` may point to any other writable Stampede3 filesystem; the default
-does not require configured values to live below ``$WORK``.
+The profile does not need explicit ``credential``, ``ssh_key``, ``hostname``,
+``modules``, or partition-shape entries. It contains no password, private key,
+passphrase, or MFA token. If a custom site config already exists, the command
+refuses to overwrite it unless ``--force`` is passed; back up that file before
+choosing to replace it.
 
-Reuse An Authenticated SSH Session
+Authenticate Once Per Work Session
 ----------------------------------
 
-TACC requires MFA. The most reliable setup is to open an OpenSSH control socket
-once, complete MFA there, and let FrequenSolve reuse that authenticated
-connection:
+TACC requires MFA. FrequenSolve can create and manage the reusable OpenSSH
+control connection for you:
 
 .. code-block:: bash
 
-   mkdir -p ~/.ssh/control
-   ssh -M -S ~/.ssh/control/stampede3 \
-     -o ControlPersist=8h \
-     your-tacc-username@stampede3.tacc.utexas.edu
+   frequensolve site connect
 
-After login succeeds, you can exit the interactive shell; ``ControlPersist``
-keeps the socket available for its configured lifetime. Re-run the command when
-it expires.
+Enter your TACC password and MFA code when requested. Existing OpenSSH agent
+and key settings are honored automatically, but a separately configured SSH
+key is not required. The shared connection remains in the background for up to
+eight hours, so no interactive SSH terminal needs to remain open. Running the
+command again safely reuses an active connection. Later scripts, notebooks,
+``fs.Site()`` instances, and ``rsync`` transfers discover the same socket even
+when they run in different processes, so they do not request separate MFA
+tokens.
 
-FrequenSolve can also try an SSH agent, a configured private key, or
-keyboard-interactive password/MFA authentication. Never put a password, private
-key contents, key passphrase, or MFA code in ``site.toml``. TACC specifically
-warns users not to run ``ssh-keygen`` on Stampede3; manage client authentication
-from your local computer and the TACC account portal.
-
-Create ``site.toml``
---------------------
-
-The default configuration path is ``~/.frequensolve/site.toml`` on the computer
-running Python. The first call to ``fs.Site()`` creates a starter file if one is
-missing and asks you to review it:
-
-.. code-block:: bash
-
-   python -c 'import frequensolve as fs; fs.Site()'
-
-Replace the starter's Stampede3 placeholders with a minimal profile like this:
-
-.. code-block:: toml
-
-   default = "stampede3"
-
-   [sites.stampede3]
-   type = "slurm"
-   preset = "stampede3"
-   username = "your-tacc-username"
-   credential = "tacc-stampede3"
-   solver = "/absolute/path/to/solver-installation/FS_seismic"
-   # work_dir = "/another/writable/remote/path/frequensolve"
-   # Reserved for future model and high-I/O storage; not used for jobs yet:
-   # scratch_dir = "/absolute/path/printed/by/echo-SCRATCH/frequensolve"
-   default_partition = "skx-dev"
-   transfer_method = "rsync"
-   modules = []
-   verbose = true
-
-   # Set this only when TACC requires an explicit project/allocation.
-   # account = "your-tacc-project-id"
-
-   # Add this only when you actually use this local private key.
-   # ssh_key = "~/.ssh/id_ed25519"
-
-   [sites.stampede3.run_config]
-   nodes = 1
-   duration = "00:30:00"
-   ranks_per_node = 4
-   ranks_per_task = 1
-   poll_interval = 10
-
-The fields have distinct purposes:
-
-``preset``
-   Supplies the Stampede3 login host, ``ibrun`` launcher, known CPU partitions,
-   and node shapes packaged with FrequenSolve.
-
-``credential``
-   A non-secret label used to separate this profile's entries in the local OS
-   keyring. It is not a TACC password or token.
-
-``solver``
-   Absolute remote path to the licensed ``FS_seismic`` router. FrequenSolve
-   launches this executable for every solver phase, and it chooses the concrete
-   implementation from the saved simulation.
-
-``work_dir``
-   Absolute remote base directory used when project, simulation, or job paths
-   are relative. It can be on any writable remote filesystem. Absolute paths
-   are used as written instead. Omit it to use ``$WORK/frequensolve``.
-
-``scratch_dir``
-   Optional complete absolute remote scratch directory reserved for future
-   model and high-I/O storage. It is accepted and exposed by the site today,
-   but job storage does not use it yet.
-
-``account``
-   TACC project/allocation charged by SLURM. It is normally necessary only when
-   your login has multiple projects or TACC asks you to select one explicitly.
-
-``modules``
-   Module names loaded in the generated SLURM script before the solver starts.
-   Leave the list empty unless the supplied solver build requires a specific
-   runtime stack. Use exact module names supplied with that build. They load in
-   list order. Values under ``[sites.stampede3.environment]`` are exported
-   afterward and may compose module-defined variables with ``${NAME}`` syntax.
-
-``run_config``
-   Default SLURM request. ``skx-dev`` is suitable for a short first check, but
-   TACC's live ``qlimits`` output is authoritative. The built-in preset also
-   knows the ``skx``, ``icx``, and ``spr`` CPU partitions.
+FrequenSolve does not modify ``~/.ssh/config``. Users who prefer standard
+OpenSSH configuration can follow the :download:`optional connection-sharing
+guide <../../guides/ssh-connection-sharing.md>`.
 
 Test The Site Configuration
 ---------------------------
 
-With the Python environment active and the SSH control socket open, construct
-the site without submitting work:
+Verify access, ``$WORK`` resolution, the solver path, and preset modules without
+submitting a Slurm job:
 
 .. code-block:: bash
 
-   python - <<'PY'
-   import frequensolve as fs
+   frequensolve site check
 
-   site = fs.Site()
-   print("backend:", type(site).__name__)
-   print("login host:", site.login_host)
-   print("remote work directory:", site.work_dir)
-   print("solver executable:", site.executable)
-   site.close()
-   PY
-
-Expected results include a ``SlurmSite`` backend, the Stampede3 login host, and
-the configured work base (``$WORK/frequensolve`` when it is omitted from the
-profile). Site construction authenticates and checks the remote work base; use
-the earlier remote ``test -x`` command to verify the ``FS_seismic`` router.
+The default remote work directory is ``$WORK/frequensolve``. An advanced
+profile may instead set a concrete absolute ``work_dir``. TOML does not expand
+remote shell variables, so do not write ``work_dir = "$WORK/frequensolve"``.
+Stampede3 ``$SCRATCH`` is not backed up and is subject to purge; consult TACC's
+current storage policy before configuring alternate job storage.
 
 Solver Router And Precision
 ---------------------------
@@ -272,7 +166,7 @@ pattern is:
    site = fs.Site(
        queue="skx-dev",
        nodes=1,
-       ranks_per_node=4,
+       ranks_per_node=2,
        duration="00:30:00",
    )
    run = site.submit(job, fetch=True)
@@ -299,8 +193,8 @@ Unknown or changed SSH host key
    rejects unknown or mismatched keys.
 
 Repeated password or MFA prompts
-   Reopen the control socket under ``~/.ssh/control``. Passwords may be stored in
-   a supported local OS keyring after successful authentication, but MFA codes
+   Run ``frequensolve site connect`` again. Passwords may be stored in a
+   supported local OS keyring after successful authentication, but MFA codes
    are never stored.
 
 ``Invalid account`` or allocation failure
@@ -312,14 +206,11 @@ Unknown partition or rejected time/node request
    policy can change after the packaged preset was released.
 
 Solver not found or shared-library error
-   Confirm the absolute ``solver`` path from a compute node and add only the
-   modules required by that solver build. The PyPI package does not contain the
-   solver.
+   Run ``frequensolve site check`` and confirm the absolute ``solver`` path. The
+   PyPI package does not contain the solver.
 
 Transfer failure
    Confirm that local ``rsync`` is installed and that ``work_dir`` is writable.
-   Set ``transfer_method = "sftp"`` as a slower fallback when rsync is
-   unavailable.
 
 More diagnostics
    Enable ``fs.configure_logging(level="DEBUG", console=True,
@@ -339,7 +230,7 @@ normal Stampede3 execution. TACC provides Python through a module:
    python -m venv "$WORK/venvs/frequensolve"
    . "$WORK/venvs/frequensolve/bin/activate"
    python -m pip install --upgrade pip
-   python -m pip install "frequensolve==0.3.0"
+   python -m pip install "frequensolve==0.2.2"
 
 This is useful for authoring or inspecting saved contracts on TACC. The
 ``SlurmSite`` workflow is designed for a client machine connecting to Stampede3;

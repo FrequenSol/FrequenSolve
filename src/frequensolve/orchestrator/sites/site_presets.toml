@@ -9,6 +9,7 @@ mpi_wrapper = "ibrun"
 scheduler = "SLURM"
 poll_interval = 5
 default_partition = "skx-dev"
+modules = ["intel/25.1", "impi/21.15", "petsc/3.23", "phdf5"]
 documentation_url = "https://docs.tacc.utexas.edu/hpc/stampede3/"
 last_verified = "2026-06-02"
 
