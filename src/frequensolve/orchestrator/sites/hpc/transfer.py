@@ -242,7 +242,7 @@ class SlurmTransferManager:
             sftp.get(str(remote_tar), local_tar)
 
             with tarfile.open(local_tar, "r:gz") as tar:
-                tar.extractall(path=local_dir.parent)
+                tar.extractall(path=local_dir.parent, filter="data")
         finally:
             try:
                 os.remove(local_tar)
