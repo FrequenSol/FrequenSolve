@@ -23,21 +23,26 @@ on:
         default: 'main'
         type: string
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # This job runs the deterministic Python lane only. The paid Docker/solver
   # workflow remains an explicit manual dispatch or release-candidate gate.
   unit-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
       with:
         python-version: ${{ matrix.python-version }}
 
@@ -64,7 +69,7 @@ jobs:
 
     - name: Preserve coverage report for the OIDC upload job
       if: matrix.python-version == '3.10'
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: coverage-report
         path: coverage.xml
@@ -75,18 +80,19 @@ jobs:
     name: Upload coverage to Codecov
     needs: unit-test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       actions: read
       contents: read
       id-token: write
     steps:
     - name: Download coverage report
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
       with:
         name: coverage-report
 
     - name: Upload coverage report to Codecov
-      uses: codecov/codecov-action@v6
+      uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
       with:
         use_oidc: true
         fail_ci_if_error: true
@@ -96,11 +102,12 @@ jobs:
   optional-extras:
     name: Optional visual and seismic extras
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
       with:
         python-version: "3.12"
 
@@ -114,7 +121,7 @@ jobs:
 
     - name: Upload visual comparison output
       if: always()
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: optional-extras-output
         path: tests/output/
@@ -126,17 +133,18 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.RUN_DOCKER_IMAGE_INTEGRATION }}
     needs: required-ci
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     concurrency:
       group: docker-image-integration-${{ github.event_name == 'workflow_dispatch' && inputs.FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH || 'main' }}
       cancel-in-progress: false
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       # Generate GitHub App Token
       - name: Generate GitHub App Token
         id: generate-token
-        uses: actions/create-github-app-token@v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -208,7 +216,7 @@ jobs:
             --commit "$GITHUB_SHA"
 
       - name: Preserve validated test evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: frequensolve-test-evidence
           path: tests/output/
@@ -218,11 +226,12 @@ jobs:
   docs:
     needs: unit-test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
       with:
         python-version: "3.10"
 
@@ -237,7 +246,7 @@ jobs:
         make html
 
     - name: Upload documentation artifact
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: documentation
         path: docs/build/html/
@@ -245,11 +254,12 @@ jobs:
   build-package:
     needs: unit-test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
       with:
         python-version: "3.10"
 
@@ -265,7 +275,7 @@ jobs:
       run: python -m twine check dist/*
 
     - name: Store build artifacts
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: dist
         path: dist/
@@ -274,18 +284,19 @@ jobs:
     name: Package smoke (${{ matrix.os }}, ${{ matrix.distribution }})
     needs: build-package
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
         distribution: [wheel, sdist]
     steps:
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
       with:
         python-version: "3.12"
 
     - name: Download built distributions
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
       with:
         name: dist
         path: dist/
@@ -323,6 +334,7 @@ jobs:
       - build-package
       - package-smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
     - name: Require every PR-safe CI lane
       env:
