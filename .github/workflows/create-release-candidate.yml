@@ -87,10 +87,10 @@ jobs:
     needs: prepare-evidence
     # Pin the reviewed DockerImage evidence workflow and its checked-out source
     # to the same immutable commit.
-    uses: FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@bd24b877e31a8293cd716bb349498f2bf3a92995
+    uses: FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@5de478ec69444fb61ce3b4d727a7db05a7f7eafb
     with:
       SOURCE_REF: main
-      SOURCE_COMMIT: bd24b877e31a8293cd716bb349498f2bf3a92995
+      SOURCE_COMMIT: 5de478ec69444fb61ce3b4d727a7db05a7f7eafb
       REQUEST_ID: frequensolve-rc-${{ github.run_id }}
       SAUCE_REF: main
       FS_MUMPS_REF: main
@@ -183,7 +183,7 @@ jobs:
             --arg ciRunUrl "$CI_RUN_URL" \
             --arg ciWorkflow ".github/workflows/cicd-workflow.yml" \
             --arg ciRequiredJob "Required CI" \
-            --arg dockerWorkflow "FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@bd24b877e31a8293cd716bb349498f2bf3a92995" \
+            --arg dockerWorkflow "FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@5de478ec69444fb61ce3b4d727a7db05a7f7eafb" \
             --arg dockerWorkflowCommit "$DOCKER_WORKFLOW_COMMIT" \
             --argjson dockerCallerRunId "$GITHUB_RUN_ID" \
             --arg dockerImageTag "$DOCKER_IMAGE_TAG" \
