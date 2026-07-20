@@ -104,8 +104,11 @@ dev = [
     "black>=25.1.0,<26.0.0",
     "build>=1.2.0,<2.0.0",
     "furo>=2024.8.6",
+    "hypothesis>=6.100.0,<7.0.0",
     "ipykernel>=6.29.5,<7.0.0",
     "isort>=6.0.0,<7.0.0",
+    "jsonschema>=4.23.0,<5.0.0",
+    "mypy>=1.14.0,<2.0.0",
     "myst-parser>=4.0.0,<5.0.0",
     "pre-commit>=4.0.0,<5.0.0",
     "pytest>=8.0.0,<9.0.0",
@@ -138,17 +141,16 @@ parentdir_prefix = "frequensolve-"
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-ra -q -m 'not integration and not cloud and not hpc and not interactive and not visual'"
+addopts = "-ra -q --strict-markers -m 'not integration and not cloud and not hpc and not interactive and not visual'"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 timeout = 300
 filterwarnings = [
-    "ignore::DeprecationWarning",
-    "ignore::UserWarning",
+    "error::DeprecationWarning:frequensolve(\\.|$)",
+    "error::UserWarning:frequensolve(\\.|$)",
 ]
-mpl_baseline_path = "tests/reference_images"
 markers = [
     "cloud: requires AWS/Cognito/S3 or the FrequenSol cloud control plane",
     "hpc: requires SLURM, SSH, or a configured remote cluster",
@@ -159,6 +161,7 @@ markers = [
 ]
 
 [tool.coverage.run]
+branch = true
 source = ["src/frequensolve"]
 omit = [
     "tests/*",
@@ -167,6 +170,8 @@ omit = [
 ]
 
 [tool.coverage.report]
+fail_under = 64.5
+precision = 1
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
@@ -192,3 +197,14 @@ line-length = 88
 [tool.ruff.lint]
 select = ["F"]
 ignore = ["F841"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/frequensolve/_optional.py"]
+follow_imports = "skip"
+ignore_missing_imports = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_unused_configs = true
+warn_unused_ignores = true

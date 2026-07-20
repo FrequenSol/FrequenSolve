@@ -12,6 +12,7 @@ def test_to_segy_converts_source_and_receiver_coordinate_units(tmp_path):
 
     simulation = {
         "Acquisition": {
+            "schema": "fs-acquisition-2",
             "source_geometry": {
                 "_type": "Inline",
                 "kind": "scalar",

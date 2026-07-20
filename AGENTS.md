@@ -11,7 +11,7 @@ changes should be made in the repository that owns the behavior.
 ## Branch Baseline
 
 Unless the user, issue, or pull request explicitly names a different base
-branch, create task branches from the repository default branch, `main`.
+branch, create task branches from the repository default branch, `v2`.
 
 The local `v2_sam` branch may be useful for ongoing local development, but do
 not assume it is the correct PR base unless the user says so or the issue is
@@ -149,11 +149,19 @@ interactive, and visual tests:
 python -m pytest
 ```
 
-The Makefile `test` target runs the non-integration lane with coverage and
-matplotlib baseline options:
+The Makefile `test` target runs the deterministic lane with line and branch
+coverage ratchets:
 
 ```sh
 make test
+```
+
+Run the local, non-solver visual and seismic-IO checks after installing their
+extras:
+
+```sh
+python -m pip install -e ".[dev,parallel,visual,seismic-io]"
+make test-optional-extras
 ```
 
 Run formatting, linting, packaging, and docs checks when touched by the change:
@@ -188,6 +196,10 @@ make generate_reference_images
 Keep test additions focused on the behavior being changed. Prefer deterministic
 unit tests for Python modules that can be exercised locally without solver
 binaries, network access, credentials, schedulers, or production data.
+Do not add pytest tests that read tracked workflow, documentation, source, or
+style files and merely assert that expected strings are present. Use executable
+behavior tests or the owning validator such as `actionlint`, Sphinx, or a schema
+validator.
 
 ## Repository Layout
 

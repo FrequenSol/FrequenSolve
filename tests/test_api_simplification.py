@@ -1220,6 +1220,7 @@ def test_solver_frame_key_is_not_exported_and_legacy_input_is_ignored():
         }
     )
     legacy_payload = legacy.to_fs()
+    assert "source_groups" not in legacy_payload
     assert "frame" not in legacy_payload["source_geometry"]["sources"][0]
     assert "frame" not in legacy_payload["receiver_groups"][0]
 
@@ -1306,6 +1307,7 @@ def test_unit_payload_mappings_roundtrip_without_method_values():
 
 def test_acquisition_accepts_array_quantity_receiver_coordinates():
     acq = Acquisition()
+    acq.add_sources(kind="scalar", coords=[[0.5, 0.05]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
 

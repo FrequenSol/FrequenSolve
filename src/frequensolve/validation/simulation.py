@@ -203,13 +203,13 @@ def _validate_acquisition(acquisition: Any, ctx: _ValidationContext) -> None:
         )
         return
 
-    source_geometry = getattr(acquisition, "sources", None)
+    source_geometry = getattr(acquisition, "source_geometry", None)
     receiver_groups = list(getattr(acquisition, "receiver_groups", []) or [])
     if source_geometry is None:
         ctx.report.warning(
             "acquisition.sources.missing",
             "Acquisition has no source geometry.",
-            path="acquisition.sources",
+            path="acquisition.source_geometry",
         )
     else:
         _validate_source_geometry(source_geometry, ctx)
@@ -226,7 +226,7 @@ def _validate_source_geometry(
     geometry: Any,
     ctx: _ValidationContext,
 ) -> None:
-    path = "acquisition.sources"
+    path = "acquisition.source_geometry"
     kind = getattr(geometry, "kind", None)
     if kind is None:
         ctx.report.error(
@@ -263,7 +263,11 @@ def _validate_source_geometry(
             path=f"{path}.sources",
         )
         return
-    names = [source.name for source in sources if getattr(source, "name", None)]
+    names = (
+        geometry.point_names()
+        if hasattr(geometry, "point_names")
+        else [source.name for source in sources if getattr(source, "name", None)]
+    )
     if len(names) != len(set(names)):
         ctx.report.error(
             "acquisition.sources.names.duplicate",
@@ -271,17 +275,31 @@ def _validate_source_geometry(
             path=f"{path}.sources",
         )
     for index, source in enumerate(sources):
-        _validate_source_point(source, f"{path}.sources[{index}]", ctx)
+        _validate_source_point(
+            source,
+            f"{path}.sources[{index}]",
+            ctx,
+            geometry_kind=kind,
+        )
 
 
 def _validate_source_point(
     source: Any,
     path: str,
     ctx: _ValidationContext,
+    *,
+    geometry_kind: Any,
 ) -> None:
     kind = getattr(source, "kind", None)
     if kind is not None:
         _validate_source_kind(kind, f"{path}.kind", ctx.report)
+        if str(kind).strip().lower() != str(geometry_kind).strip().lower():
+            ctx.report.error(
+                "acquisition.source.kind.mismatch",
+                f"Point source kind {kind!r} does not match source geometry "
+                f"kind {geometry_kind!r}.",
+                path=f"{path}.kind",
+            )
 
     coordinates = getattr(source, "coordinates", None)
     if coordinates is None:
@@ -340,6 +358,22 @@ def _validate_source_encoding(
             path=f"{path}.fields",
         )
         return
+    if (
+        encoding_type == "Named"
+        and getattr(geometry, "geometry_type", None) == "Inline"
+    ):
+        unnamed = [
+            index
+            for index, source in enumerate(getattr(geometry, "sources", []) or [])
+            if getattr(source, "name", None) is None
+        ]
+        if unnamed:
+            ctx.report.error(
+                "acquisition.source_encoding.names.required",
+                "Named source encoding requires explicit names for every inline "
+                f"physical source point; missing at indices {unnamed}.",
+                path="acquisition.source_geometry.sources",
+            )
     for index, field_obj in enumerate(fields):
         field_path = f"{path}.fields[{index}]"
         if encoding_type == "Named":

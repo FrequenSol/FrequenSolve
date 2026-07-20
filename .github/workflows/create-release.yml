@@ -14,28 +14,65 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
-  create-release:
+  resolve-release-line:
+    name: Resolve immutable release line
     runs-on: ubuntu-latest
+    outputs:
+      final_tag: ${{ steps.resolve.outputs.final_tag }}
+      rc_sha: ${{ steps.resolve.outputs.rc_sha }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release candidate
+        id: resolve
+        env:
+          RC_TAG: ${{ inputs.release_candidate_tag }}
+        run: |
+          set -euo pipefail
+          final_tag="$(
+            python scripts/plan_release_tags.py final-from-rc --rc-tag "$RC_TAG"
+          )"
+          git fetch --force --tags origin
+          rc_sha="$(git rev-parse --verify "refs/tags/${RC_TAG}^{commit}")"
+          {
+            echo "final_tag=$final_tag"
+            echo "rc_sha=$rc_sha"
+          } >> "$GITHUB_OUTPUT"
+
+  create-release:
+    needs: resolve-release-line
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-${{ needs.resolve-release-line.outputs.final_tag }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
 
       - name: Generate GitHub App token
         id: generate-token
-        uses: actions/create-github-app-token@v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolve
+          permission-actions: read
+          permission-contents: write
 
       - name: Promote release candidate
         env:
           RC_TAG: ${{ github.event.inputs.release_candidate_tag }}
+          FINAL_TAG: ${{ needs.resolve-release-line.outputs.final_tag }}
+          EXPECTED_RC_SHA: ${{ needs.resolve-release-line.outputs.rc_sha }}
           NOTES: ${{ github.event.inputs.notes }}
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
         run: |
@@ -44,28 +81,73 @@ jobs:
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git fetch --force --tags origin '+refs/heads/*:refs/remotes/origin/*'
           final_tag="$(python scripts/plan_release_tags.py final-from-rc --rc-tag "$RC_TAG")"
+          if [ "$final_tag" != "$FINAL_TAG" ]; then
+            echo "Resolved final tag changed from ${FINAL_TAG} to ${final_tag}." >&2
+            exit 1
+          fi
+
+          rc_sha="$(git rev-parse --verify "refs/tags/${RC_TAG}^{commit}")"
+          if [ "$rc_sha" != "$EXPECTED_RC_SHA" ]; then
+            echo "${RC_TAG} moved from ${EXPECTED_RC_SHA} to ${rc_sha}." >&2
+            exit 1
+          fi
+
+          rc_release="$(
+            gh release view "$RC_TAG" --json tagName,isDraft,isPrerelease
+          )"
+          if [ "$(jq -r '.tagName' <<<"$rc_release")" != "$RC_TAG" ] || \
+             [ "$(jq -r '.isDraft | tostring' <<<"$rc_release")" != false ] || \
+             [ "$(jq -r '.isPrerelease | tostring' <<<"$rc_release")" != true ]; then
+            echo "${RC_TAG} must be a published GitHub prerelease." >&2
+            exit 1
+          fi
+
+          mkdir -p .release-evidence
+          gh release download "$RC_TAG" \
+            --pattern release-evidence.json \
+            --dir .release-evidence \
+            --clobber
+          gh release download "$RC_TAG" \
+            --pattern frequensolve-test-evidence.tar.gz \
+            --dir .release-evidence \
+            --clobber
+          evidence_file=.release-evidence/release-evidence.json
+          heavy_archive=.release-evidence/frequensolve-test-evidence.tar.gz
+          python scripts/validate_release_evidence.py \
+            "$evidence_file" \
+            --commit "$rc_sha"
+          expected_archive_sha="$(jq -r '.dockerTestArchiveSha256' "$evidence_file")"
+          actual_archive_sha="$(sha256sum "$heavy_archive" | awk '{print $1}')"
+          test "$actual_archive_sha" = "$expected_archive_sha"
+          python scripts/extract_test_evidence_archive.py \
+            "$heavy_archive" \
+            .release-evidence/heavy
+          python scripts/validate_heavy_test_evidence.py \
+            .release-evidence/heavy/frequensolve-test-evidence.json \
+            --commit "$rc_sha"
+          ci_run_id="$(jq -r '.ciRunId' "$evidence_file")"
+          python scripts/verify_ci_evidence.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$rc_sha" \
+            --run-id "$ci_run_id"
+
+          python scripts/plan_release_tags.py publication-target \
+            --tag "$final_tag" \
+            --prerelease false >/dev/null
 
           if git rev-parse --verify --quiet "refs/tags/${final_tag}" >/dev/null; then
-            echo "Final tag ${final_tag} already exists." >&2
-            exit 1
+            existing_sha="$(git rev-parse "refs/tags/${final_tag}^{commit}")"
+            if [ "$existing_sha" != "$rc_sha" ]; then
+              echo "Final tag ${final_tag} points to ${existing_sha}, not ${rc_sha}." >&2
+              exit 1
+            fi
+            echo "Resuming final tag ${final_tag} at ${rc_sha}."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$final_tag" "$rc_sha" -m "Create ${final_tag}"
+            git push origin "refs/tags/${final_tag}"
           fi
-
-          rc_sha="$(git rev-list -n 1 "$RC_TAG")"
-          if [ -z "$rc_sha" ]; then
-            echo "Could not resolve ${RC_TAG}." >&2
-            exit 1
-          fi
-
-          is_prerelease="$(gh release view "$RC_TAG" --json isPrerelease --jq '.isPrerelease')"
-          if [ "$is_prerelease" != "true" ]; then
-            echo "${RC_TAG} must be a GitHub prerelease." >&2
-            exit 1
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$final_tag" "$rc_sha" -m "Create ${final_tag}"
-          git push origin "refs/tags/${final_tag}"
 
           {
             echo "FrequenSolve release ${final_tag}"
@@ -73,6 +155,9 @@ jobs:
             echo "- Promoted from: ${RC_TAG}"
             echo "- Source commit: ${rc_sha}"
             echo "- Package version: ${final_tag#v}"
+            echo "- Required CI: $(jq -r '.ciRunUrl' "$evidence_file")"
+            echo "- Solver evidence run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/$(jq -r '.dockerCallerRunId' "$evidence_file")"
+            echo "- Tested runtime image: $(jq -r '.dockerImageTag' "$evidence_file")"
             echo "- Publishing: PyPI via the Publish Package workflow"
             if [ -n "$NOTES" ]; then
               echo
@@ -80,11 +165,66 @@ jobs:
             fi
           } > release-notes.md
 
-          gh release create "$final_tag" \
+          final_release="$(
+            gh release list \
+              --limit 1000 \
+              --json tagName,isDraft,isPrerelease |
+              jq -c --arg tag "$final_tag" '
+                [.[] | select(.tagName == $tag)] |
+                if length > 1 then
+                  error("duplicate GitHub releases for tag")
+                else
+                  .[0] // empty
+                end
+              '
+          )"
+          if [ -z "$final_release" ]; then
+            gh release create "$final_tag" \
+              --verify-tag \
+              --target "$rc_sha" \
+              --title "$final_tag" \
+              --notes-file release-notes.md \
+              --draft
+          elif [ "$(jq -r '.isPrerelease | tostring' <<<"$final_release")" != false ]; then
+            echo "Existing ${final_tag} is incorrectly marked as a prerelease." >&2
+            exit 1
+          fi
+
+          final_assets="$(gh release view "$final_tag" --json assets)"
+          has_release_evidence="$(
+            jq -r 'any(.assets[]?; .name == "release-evidence.json")' \
+              <<<"$final_assets"
+          )"
+          has_heavy_archive="$(
+            jq -r 'any(.assets[]?; .name == "frequensolve-test-evidence.tar.gz")' \
+              <<<"$final_assets"
+          )"
+          if [ "$has_release_evidence" != true ] || \
+             [ "$has_heavy_archive" != true ]; then
+            gh release upload "$final_tag" "$evidence_file" "$heavy_archive" --clobber
+          fi
+
+          final_assets="$(gh release view "$final_tag" --json assets)"
+          jq -e '
+            any(.assets[]?; .name == "release-evidence.json") and
+            any(.assets[]?; .name == "frequensolve-test-evidence.tar.gz")
+          ' <<<"$final_assets" >/dev/null
+
+          gh release edit "$final_tag" \
+            --verify-tag \
             --target "$rc_sha" \
             --title "$final_tag" \
             --notes-file release-notes.md \
+            --draft=false \
+            --prerelease=false \
             --latest
+
+          published_release="$(
+            gh release view "$final_tag" --json tagName,isDraft,isPrerelease
+          )"
+          test "$(jq -r '.tagName' <<<"$published_release")" = "$final_tag"
+          test "$(jq -r '.isDraft | tostring' <<<"$published_release")" = false
+          test "$(jq -r '.isPrerelease | tostring' <<<"$published_release")" = false
 
           {
             echo "### Created release"

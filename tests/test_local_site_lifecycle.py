@@ -1121,10 +1121,13 @@ def test_local_watch_reuses_terminal_poll_results_when_finalizing_imaging(
     }
 
 
-def test_local_watch_runs_pack_before_yielding_completed_status(monkeypatch, tmp_path):
+def test_local_watch_finalizes_without_zero_timeout_before_packing(
+    monkeypatch, tmp_path
+):
     site, _closed = make_site(monkeypatch)
     site.threads_per_worker = 2
     submissions = []
+    wait_timeouts = []
 
     class FakeClient:
         def submit(self, func, job_file, task_id, *args, **kwargs):
@@ -1150,9 +1153,13 @@ def test_local_watch_runs_pack_before_yielding_completed_status(monkeypatch, tmp
     run.backend["shutdown_on_completion"] = False
     site._futures.extend(futures)
 
-    monkeypatch.setattr(
-        local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
-    )
+    def wait_for_finished_futures(futures, timeout=None):
+        wait_timeouts.append(timeout)
+        if timeout == 0:
+            raise TimeoutError
+        return SimpleNamespace(not_done=[])
+
+    monkeypatch.setattr(local_module, "wait", wait_for_finished_futures)
 
     statuses = list(run.watch(timeout=1.0, poll_interval=0.0))
 
@@ -1162,6 +1169,7 @@ def test_local_watch_runs_pack_before_yielding_completed_status(monkeypatch, tmp
     assert job.removed_packed
     assert statuses[-1].raw["pack"]["task_id"] == local_module.PACK_TASK_ID
     assert job.states[-1][0] == "completed"
+    assert 0 not in wait_timeouts
 
 
 def test_local_finalize_does_not_zero_timeout_dask_wait(monkeypatch):

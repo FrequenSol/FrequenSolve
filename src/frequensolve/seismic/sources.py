@@ -17,9 +17,18 @@ from frequensolve.geometry.frame import (
     direction_to_fs,
 )
 from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
-from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
+from frequensolve.util.mixins import (
+    ExportContext,
+    ExtraFieldsMixin,
+    merge_extra,
+    warn_deprecated_path_api,
+)
 
 __all__ = [
+    "Source",
+    "SourceGroup",
+    "RuptureSource",
+    "CompoundSource",
     "PointSource",
     "SourceGeometry",
     "SourceEncoding",
@@ -49,7 +58,12 @@ def _source_basis_to_fs(value: Mapping[str, Any]) -> Dict[str, Any]:
 
     payload = copy.deepcopy(dict(value))
     if "direction" in payload:
-        payload["direction"] = direction_to_fs(payload["direction"])
+        direction_payload = direction_to_fs(payload["direction"])
+        if isinstance(direction_payload, np.ndarray):
+            direction_payload = direction_payload.tolist()
+        elif isinstance(direction_payload, np.generic):
+            direction_payload = direction_payload.item()
+        payload["direction"] = direction_payload
     if "amplitude" in payload:
         payload["amplitude"] = value_and_units_to_fs(payload["amplitude"])
     if "mechanism" in payload:
@@ -201,18 +215,13 @@ def _coefficient_abs(value: Any) -> float:
 
 @dataclass(init=False)
 class PointSource(ExtraFieldsMixin):
-    """One physical source point in a source geometry catalog.
-
-    ``amplitude`` accepts a dimensionless numeric multiplier, a Pint quantity,
-    or a ``{"value": ..., "units": ...}`` physical source strength. Force
-    units apply to vector and dipole sources; moment units apply to scalar,
-    tensor, and monopole sources.
-    """
+    """One physical source point in a source geometry catalog."""
 
     coordinates: Any
     name: Optional[str] = None
     kind: Optional[str] = None
     direction: Optional[Any] = None
+    domain: Optional[int] = None
     amplitude: Optional[Any] = None
     mechanism: Optional[Any] = None
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -226,15 +235,31 @@ class PointSource(ExtraFieldsMixin):
         coords: Any = None,
         kind: Optional[str] = None,
         direction: Optional[Any] = None,
+        domain: Optional[int] = None,
         amplitude: Optional[Any] = None,
         mechanism: Optional[Any] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
+        extra_fields = copy.deepcopy(dict(extra or {}))
+        if domain is None and "domain" in extra_fields:
+            domain = extra_fields.pop("domain")
         if coords is not None:
             if coordinates is not None:
                 raise TypeError("Use either coords or coordinates, not both")
             coordinates = coords
+        legacy_kind_positional = (
+            coordinates is not None
+            and kind is None
+            and isinstance(name_or_coordinates, str)
+            and name_or_coordinates.strip().lower() in _SOURCE_KINDS
+        )
+        if legacy_kind_positional:
+            kind = name_or_coordinates
+            name_or_coordinates = None
+            if name is None:
+                name = "point"
+
         if coordinates is None:
             if name_or_coordinates is None:
                 raise TypeError("PointSource requires coordinates")
@@ -246,11 +271,12 @@ class PointSource(ExtraFieldsMixin):
 
         self.coordinates = coordinates
         self.name = name
-        self.kind = kind
+        self.kind = _source_kind(kind) if kind is not None else None
         self.direction = direction
+        self.domain = None if domain is None else int(domain)
         self.amplitude = amplitude
         self.mechanism = mechanism
-        self._init_extra(extra, **kwargs)
+        self._init_extra(extra_fields, **kwargs)
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "PointSource":
@@ -267,20 +293,31 @@ class PointSource(ExtraFieldsMixin):
             name=payload.pop("name", None),
             kind=payload.pop("kind", None),
             direction=direction,
+            domain=payload.pop("domain", None),
             amplitude=payload.pop("amplitude", None),
             mechanism=payload.pop("mechanism", None),
             extra=payload,
         )
 
-    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
+    def to_fs(
+        self,
+        ctx: Optional[ExportContext] = None,
+        *,
+        include_domain: bool = True,
+    ) -> Dict[str, Any]:
         payload = {
             **({"name": self.name} if self.name is not None else {}),
             "coordinates": coordinate_value_to_fs(self.coordinates),
             **_basis_to_fs(
-                kind=self.kind,
+                kind=_source_kind(self.kind) if self.kind is not None else None,
                 direction=self.direction,
                 amplitude=self.amplitude,
                 mechanism=self.mechanism,
+            ),
+            **(
+                {"domain": self.domain}
+                if include_domain and self.domain is not None
+                else {}
             ),
         }
         return merge_extra(payload, self.extra, "PointSource")
@@ -354,21 +391,30 @@ class SourceGeometry(ExtraFieldsMixin):
         defaults: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> "SourceGeometry":
-        """Create inline point-source geometry from coordinate rows.
-
-        ``amplitude`` is stored in the shared source basis. Plain numbers are
-        dimensionless multipliers; Pint quantities and value/unit mappings are
-        exact physical source strengths in the fs-acquisition-2 contract.
-        """
+        """Create inline point-source geometry from coordinate rows."""
 
         rows = _coordinate_rows(coords, units=units, system=system)
         source_names = _source_names(names, len(rows))
+        direction_rows = None
+        if direction is not None and not isinstance(direction, Mapping):
+            try:
+                direction_array = np.asarray(direction, dtype=float)
+            except (TypeError, ValueError):
+                direction_array = None
+            if direction_array is not None and direction_array.ndim == 2:
+                if len(direction_array) != len(rows):
+                    raise ValueError("direction must have one row per coordinate")
+                direction_rows = direction_array.tolist()
+
         source_points = [
             PointSource(name=source_name, coordinates=row)
             for source_name, row in zip(source_names, rows)
         ]
+        if direction_rows is not None:
+            for source, source_direction in zip(source_points, direction_rows):
+                source.direction = source_direction
         default_payload = _basis_to_fs(
-            direction=direction,
+            direction=None if direction_rows is not None else direction,
             amplitude=amplitude,
             mechanism=mechanism,
             extra=defaults,
@@ -515,7 +561,9 @@ class SourceGeometry(ExtraFieldsMixin):
         if self.defaults:
             payload["defaults"] = _source_basis_to_fs(self.defaults)
         if self.geometry_type == "Inline":
-            payload["sources"] = [source.to_fs(ctx) for source in self.sources]
+            payload["sources"] = [
+                source.to_fs(ctx, include_domain=False) for source in self.sources
+            ]
         elif self.geometry_type == "HDF5":
             payload["file"] = _path_to_fs(self.file, ctx)
             payload["dataset"] = self.dataset
@@ -523,16 +571,12 @@ class SourceGeometry(ExtraFieldsMixin):
                 payload["system"] = self.system
             if self.units is not None:
                 payload["units"] = unit_expression(self.units)
-            if self.count is not None:
-                payload["count"] = self.count
         else:
             payload["source_file"] = _path_to_fs(self.source_file, ctx)
             if self.system is not None:
                 payload["system"] = self.system
             if self.units is not None:
                 payload["units"] = unit_expression(self.units)
-            if self.count is not None:
-                payload["count"] = self.count
         return merge_extra(payload, self.extra, "SourceGeometry")
 
     @property
@@ -545,7 +589,7 @@ class SourceGeometry(ExtraFieldsMixin):
         if self.geometry_type != "Inline":
             return []
         return [
-            source.name if source.name is not None else f"source_{index:03d}"
+            source.name if source.name is not None else f"source_{index:06d}"
             for index, source in enumerate(self.sources, start=1)
         ]
 
@@ -849,8 +893,6 @@ class SourceEncoding(ExtraFieldsMixin):
                 payload["reference_coordinates_dataset"] = (
                     self.reference_coordinates_dataset
                 )
-            if self.count is not None:
-                payload["count"] = self.count
         return merge_extra(payload, self.extra, "SourceEncoding")
 
     @property
@@ -903,3 +945,122 @@ class SourceEncoding(ExtraFieldsMixin):
                 raise ValueError("Cannot compute reference coordinates for zero field")
             refs.append(np.average(source_coords, axis=0, weights=weights))
         return np.asarray(refs, dtype=float)
+
+
+class Source:
+    """Compatibility dispatcher for legacy source-group payloads."""
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> Any:
+        payload = copy.deepcopy(dict(data))
+        source_type = payload.pop("_type", "PointSource")
+        if source_type == "PointSource":
+            return PointSource.from_fs(payload)
+        if source_type == "CompoundSource":
+            return CompoundSource.from_fs(payload)
+        if source_type == "RuptureSource":
+            return RuptureSource.from_fs(payload)
+        raise ValueError(f"Unsupported legacy source type {source_type!r}")
+
+
+@dataclass
+class RuptureSource(Source):
+    """Deprecated legacy SRF source retained for input compatibility."""
+
+    srf_file: str
+    name: str = "rupture"
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "RuptureSource":
+        return cls(**copy.deepcopy(dict(data)))
+
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
+        return {
+            "_type": "RuptureSource",
+            "srf_file": self.srf_file,
+            "name": self.name,
+        }
+
+
+@dataclass
+class CompoundSource(Source):
+    """Deprecated weighted-point source retained as an adapter input."""
+
+    kind: str
+    coordinates: Any = field(default_factory=list)
+    direction: Any = field(default_factory=list)
+    domain: Optional[int] = None
+    name: str = "compound"
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "CompoundSource":
+        payload = copy.deepcopy(dict(data))
+        payload.pop("n_points", None)
+        payload.pop("frame", None)
+        if "coordinates" in payload:
+            payload["coordinates"] = CoordinateValue.from_fs(payload["coordinates"])
+        if "direction" in payload:
+            payload["direction"] = Direction.from_fs(payload["direction"])
+        return cls(**payload)
+
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
+        return {
+            "_type": "CompoundSource",
+            "name": self.name,
+            "kind": self.kind,
+            "n_points": len(self.coordinates),
+            "coordinates": coordinate_value_to_fs(self.coordinates),
+            **(
+                {"direction": direction_to_fs(self.direction)}
+                if self.direction is not None
+                else {}
+            ),
+            **({"domain": self.domain} if self.domain is not None else {}),
+        }
+
+
+@dataclass
+class SourceGroup:
+    """Deprecated logical-source view used by pre-v2 callers."""
+
+    source: Any
+    _proj_path: Optional[Path] = None
+    _rel_path: Optional[Path] = None
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "SourceGroup":
+        return cls(source=Source.from_fs(copy.deepcopy(data.get("source", {}))))
+
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
+        source = self.source.to_fs(ctx)
+        if isinstance(self.source, PointSource):
+            source = {"_type": "PointSource", **source}
+        return {"source": source}
+
+    def _set_path(self, proj_path: Path, rel_path: Path) -> None:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
+        self._proj_path = Path(proj_path)
+        self._rel_path = Path(rel_path)
+
+    def get_coordinates(self) -> np.ndarray:
+        """Return source coordinates as a two-dimensional array."""
+
+        coords = self.source.coordinates
+        if isinstance(coords, CoordinateValue):
+            coords = coords.value
+        if is_quantity(coords):
+            coords = coords.magnitude
+        values = np.asarray(coords, dtype=float)
+        if values.ndim == 1:
+            return values.reshape(1, -1)
+        return values
+
+    def coordinates(self) -> np.ndarray:
+        """Compatibility alias for :meth:`get_coordinates`."""
+
+        return self.get_coordinates()
+
+    @property
+    def _path(self) -> Path:
+        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
+        return self._proj_path / self._rel_path

@@ -1,0 +1,452 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-acquisition-1/schema.json",
+  "title": "FS Acquisition v1",
+  "description": "Source and receiver acquisition configuration.",
+  "x-fs-contract": "fs-acquisition-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "sourceGroup": {
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "object",
+          "required": [
+            "_type"
+          ],
+          "properties": {
+            "_type": {
+              "enum": [
+                "PointSource",
+                "CompoundSource",
+                "Microseismic",
+                "GaussianBeam"
+              ]
+            },
+            "kind": {
+              "enum": [
+                "scalar",
+                "vector",
+                "tensor",
+                "monopole",
+                "dipole"
+              ]
+            },
+            "coordinates": {
+              "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+            },
+            "origin": {
+              "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+            },
+            "direction": {
+              "$ref": "../fs-coordinate-system-1/schema.json#/$defs/direction"
+            },
+            "amplitude": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity",
+              "description": "Optional source-strength multiplier. A number is dimensionless and scales explicit unit-bearing direction components when present, otherwise it scales the default physical strength for the source kind. An object with `value` is interpreted as an exact physical source strength. If object `units` are omitted, vector and dipole sources default to `N`, while scalar, tensor, and monopole sources default to `N*m`."
+            },
+            "mechanism": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "enum": [
+                    "isotropic",
+                    "force",
+                    "microseismic"
+                  ]
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "receiverComponent": {
+      "type": "object",
+      "required": [
+        "name",
+        "field"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "direction": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/direction"
+        },
+        "weight": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/complexNumber"
+        }
+      },
+      "additionalProperties": true
+    },
+    "offsetBound": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+    },
+    "sparseTrace": {
+      "type": "object",
+      "required": [
+        "source_id",
+        "receiver_id",
+        "component"
+      ],
+      "properties": {
+        "trace_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "receiver_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "component": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Output component index for this trace."
+        },
+        "weight": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Trace weight. A value of 0 disables the trace."
+        },
+        "source_name": {
+          "type": "string"
+        },
+        "receiver_name": {
+          "type": "string"
+        },
+        "component_name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "offsetDomain": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "enum": [
+            "horizontal",
+            "euclidean"
+          ],
+          "default": "horizontal"
+        },
+        "absolute": {
+          "type": "boolean",
+          "default": true
+        },
+        "min": {
+          "$ref": "#/$defs/offsetBound"
+        },
+        "max": {
+          "$ref": "#/$defs/offsetBound"
+        },
+        "axis": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+        }
+      },
+      "additionalProperties": true
+    },
+    "receiverSampling": {
+      "type": "object",
+      "required": [
+        "_type"
+      ],
+      "properties": {
+        "_type": {
+          "enum": [
+            "DenseAllToAll",
+            "Dense",
+            "Sparse",
+            "SurveyPairs",
+            "OffsetDomain",
+            "HDF5TraceStore",
+            "SPSFiles"
+          ],
+          "default": "DenseAllToAll"
+        },
+        "survey": {
+          "type": "string"
+        },
+        "layout_file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "source_file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "receiver_file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "relation_file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "traces": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sparseTrace"
+          }
+        },
+        "offset_domain": {
+          "$ref": "#/$defs/offsetDomain"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "_type": {
+                "const": "Sparse"
+              }
+            },
+            "required": [
+              "_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "traces"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "_type": {
+                "const": "OffsetDomain"
+              }
+            },
+            "required": [
+              "_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "offset_domain"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "_type": {
+                "const": "HDF5TraceStore"
+              }
+            },
+            "required": [
+              "_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "layout_file"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "_type": {
+                "enum": [
+                  "SurveyPairs",
+                  "SPSFiles"
+                ]
+              }
+            },
+            "required": [
+              "_type"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": [
+                  "layout_file"
+                ]
+              },
+              {
+                "required": [
+                  "source_file",
+                  "receiver_file",
+                  "relation_file"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "receiverGroup": {
+      "type": "object",
+      "required": [
+        "name",
+        "device"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "integer",
+          "default": -1
+        },
+        "post_process": {
+          "type": "boolean",
+          "default": false
+        },
+        "sampling": {
+          "$ref": "#/$defs/receiverSampling"
+        },
+        "coordinates": {
+          "type": "object",
+          "properties": {
+            "_type": {
+              "enum": [
+                "CoordsFromFile",
+                "CoordsArray",
+                "CoordsGrid"
+              ]
+            },
+            "file": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Coordinate file path or HDF5 object locator, e.g. simulation.h5:inputs/acquisition/receivers/surface/coordinates."
+            },
+            "format": {
+              "type": "string"
+            },
+            "hash": {
+              "type": "string",
+              "description": "Optional reproducibility metadata ignored by current runtime readers."
+            },
+            "system": {
+              "type": "string",
+              "default": "global"
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        "device": {
+          "type": "object",
+          "required": [
+            "_type"
+          ],
+          "properties": {
+            "_type": {
+              "enum": [
+                "ReceiverNode",
+                "ReceiverArray",
+                "ReceiverFiber",
+                "ReceiverFiberOld"
+              ]
+            },
+            "components": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/receiverComponent"
+              }
+            },
+            "gauge_length": {
+              "description": "Preferred DAS gauge length key. Accepted as a quantity object or legacy solver-scaled scalar.",
+              "oneOf": [
+                {
+                  "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+                },
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              ]
+            },
+            "channel_spacing": {
+              "description": "Distance between consecutive DAS channel gauge starts. Defaults to gauge_length.",
+              "oneOf": [
+                {
+                  "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+                },
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              ]
+            },
+            "sample_spacing": {
+              "description": "Preferred reusable DAS sample spacing along the fiber. When omitted, gauge_length / points_per_gauge is used.",
+              "oneOf": [
+                {
+                  "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+                },
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              ]
+            },
+            "points_per_gauge": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "DAS sample count per gauge length when sample_spacing is not provided."
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "fs-acquisition-1"
+    },
+    "max_batch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source_groups": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/sourceGroup"
+      }
+    },
+    "receiver_groups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/receiverGroup"
+      }
+    }
+  },
+  "additionalProperties": true
+}

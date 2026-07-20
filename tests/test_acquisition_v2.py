@@ -1,55 +1,81 @@
-import numpy as np
+import json
+from pathlib import Path
+
 import pytest
+from jsonschema import Draft202012Validator
+from referencing import Registry, Resource
 
-import frequensolve as fs
+from frequensolve import (
+    Acquisition,
+    DistributedSource,
+    PointSource,
+    SourceEncoding,
+    SourceGeometry,
+    SourceGroup,
+)
+from frequensolve.units import ureg
+
+CONTRACT_ROOT = (
+    Path(__file__).parent / "contracts" / "sauce-a54bdda" / "trunk" / "contracts"
+)
+ACQUISITION_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-acquisition-2" / "schema.json"
 
 
-def _receiver_device():
-    device = fs.ReceiverNode(name="node")
-    device.add_component(name="pressure", field="pressure")
-    return device
+def _sauce_acquisition_validator() -> Draft202012Validator:
+    registry = Registry()
+    for schema_file in CONTRACT_ROOT.rglob("*.json"):
+        contents = json.loads(schema_file.read_text())
+        resource = Resource.from_contents(contents)
+        registry = registry.with_resource(contents["$id"], resource)
+    schema = json.loads(ACQUISITION_SCHEMA.read_text())
+    return Draft202012Validator(schema, registry=registry)
 
 
-def test_point_sources_export_v2_source_geometry():
-    acq = fs.Acquisition(
-        sources=fs.SourceGeometry.points(
+def _five_point_four_field_acquisition() -> Acquisition:
+    geometry = SourceGeometry.points(
+        kind="scalar",
+        coords=[
+            [0.25, 0.05],
+            [0.50, 0.05],
+            [0.75, 0.05],
+            [0.45, 0.08],
+            [0.55, 0.08],
+        ],
+        names=["shot_left", "shot_center", "shot_right", "pair_pos", "pair_neg"],
+    )
+    encoding = SourceEncoding.named(
+        [
+            DistributedSource.named("shot_left", {"shot_left": 1.0}),
+            DistributedSource.named("shot_center", {"shot_center": 1.0}),
+            DistributedSource.named("shot_right", {"shot_right": 1.0}),
+            DistributedSource.named("difference", {"pair_pos": 1.0, "pair_neg": -1.0}),
+        ]
+    )
+    return Acquisition(source_geometry=geometry, source_encoding=encoding)
+
+
+def test_inline_identity_geometry_matches_pinned_sauce_schema_and_roundtrips():
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
             kind="scalar",
-            coords=[[0.25, 0.05], [0.5, 0.05]],
-            names=["s001", "s002"],
-            units="km",
-            domain=0,
-            mechanism="isotropic",
-        ),
-        max_batch=4,
+            coords=[[0.25, 0.05], [0.75, 0.05]],
+            names=["left", "right"],
+        )
     )
 
-    payload = acq.to_fs()
+    payload = acquisition.to_fs()
 
+    _sauce_acquisition_validator().validate(payload)
     assert payload["schema"] == "fs-acquisition-2"
-    assert payload["max_batch"] == 4
-    assert payload["source_geometry"] == {
-        "_type": "Inline",
-        "domain": 0,
-        "kind": "scalar",
-        "defaults": {"mechanism": {"type": "isotropic"}},
-        "sources": [
-            {
-                "name": "s001",
-                "coordinates": {"value": [0.25, 0.05], "units": "km"},
-            },
-            {
-                "name": "s002",
-                "coordinates": {"value": [0.5, 0.05], "units": "km"},
-            },
-        ],
-    }
+    assert "source_groups" not in payload
     assert "source_encoding" not in payload
-    assert acq.source_field_ids() == [1, 2]
-    assert acq.source_field_names() == ["s001", "s002"]
+    assert acquisition.source_point_count() == 2
+    assert acquisition.source_field_count() == 2
+    assert Acquisition.from_fs(payload).to_fs() == payload
 
 
 def test_source_amplitudes_export_dimensionless_and_physical_units():
-    scalar = fs.Acquisition()
+    scalar = Acquisition()
     scalar.add_sources(
         kind="scalar",
         coords=[[0.25, 0.05]],
@@ -58,12 +84,12 @@ def test_source_amplitudes_export_dimensionless_and_physical_units():
 
     assert scalar.to_fs()["source_geometry"]["defaults"]["amplitude"] == 2.5
 
-    vector = fs.Acquisition()
+    vector = Acquisition()
     vector.add_sources(
         kind="vector",
         coords=[[0.5, 0.05]],
         direction=[0.0, 1.0],
-        amplitude=20.0 * fs.ureg.kN,
+        amplitude=20.0 * ureg.kN,
     )
 
     payload = vector.to_fs()
@@ -71,17 +97,17 @@ def test_source_amplitudes_export_dimensionless_and_physical_units():
         "value": 20.0,
         "units": "kN",
     }
-    assert fs.Acquisition.from_fs(payload).to_fs() == payload
+    assert Acquisition.from_fs(payload).to_fs() == payload
 
 
 def test_file_source_defaults_serialize_unit_bearing_amplitudes():
-    geometry = fs.SourceGeometry.hdf5(
+    geometry = SourceGeometry.hdf5(
         "sources.h5",
         dataset="source_points",
         kind="scalar",
         defaults={
             "mechanism": "isotropic",
-            "amplitude": 1.0e6 * fs.ureg.N * fs.ureg.m,
+            "amplitude": 1.0e6 * ureg.N * ureg.m,
         },
     )
 
@@ -93,167 +119,368 @@ def test_file_source_defaults_serialize_unit_bearing_amplitudes():
     }
 
 
-def test_named_source_encoding_exports_sparse_complex_terms():
-    acq = fs.Acquisition(
-        sources=fs.SourceGeometry.inline(
-            kind="vector",
-            sources=[
-                fs.PointSource("s001", fs.CoordinateValue([0.0, 0.1], units="km")),
-                fs.PointSource("s002", fs.CoordinateValue([0.1, 0.1], units="km")),
-            ],
-            defaults={"direction": [0.0, 1.0]},
-        ),
-        source_encoding=fs.SourceEncoding.named(
-            [fs.DistributedSource("distributed_001", {"s001": 1.0, "s002": 1j})]
-        ),
-        max_batch=1,
-    )
+def test_five_points_and_four_named_fields_match_pinned_sauce_schema():
+    acquisition = _five_point_four_field_acquisition()
 
-    payload = acq.to_fs()
+    payload = acquisition.to_fs()
 
-    assert payload["source_encoding"] == {
-        "_type": "Named",
-        "fields": [
-            {
-                "name": "distributed_001",
-                "terms": [
-                    {"source": "s001", "coefficient": 1.0},
-                    {"source": "s002", "coefficient": [0.0, 1.0]},
-                ],
-            }
-        ],
-    }
-    assert acq.source_field_ids() == [1]
-    assert acq.source_field_names() == ["distributed_001"]
-    assert acq.source_coords().tolist() == [[0.05, 0.1]]
+    _sauce_acquisition_validator().validate(payload)
+    assert len(payload["source_geometry"]["sources"]) == 5
+    assert len(payload["source_encoding"]["fields"]) == 4
+    assert payload["source_encoding"]["fields"][-1]["terms"] == [
+        {"source": "pair_pos", "coefficient": 1.0},
+        {"source": "pair_neg", "coefficient": -1.0},
+    ]
+    assert acquisition.source_point_count() == 5
+    assert acquisition.source_field_count() == 4
+    assert Acquisition.from_fs(payload).to_fs() == payload
 
 
-def test_hdf5_source_geometry_count_is_optional_and_roundtrips():
-    unknown = fs.Acquisition(
-        sources=fs.SourceGeometry.hdf5(
-            "sources.h5",
-            dataset="source_points",
+def test_json_dense_encoding_roundtrips_against_pinned_sauce_schema():
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
             kind="scalar",
-        )
-    )
-
-    assert unknown.known_source_field_count() is None
-    assert unknown.source_field_count() == 0
-    assert unknown.source_field_ids() == []
-
-    counted = fs.Acquisition(
-        sources=fs.SourceGeometry.hdf5(
-            "sources.h5",
-            dataset="source_points",
-            kind="scalar",
-            count=3,
-        )
-    )
-
-    payload = counted.to_fs()
-    loaded = fs.Acquisition.from_fs(payload)
-
-    assert payload["source_geometry"]["count"] == 3
-    assert loaded.known_source_field_count() == 3
-    assert loaded.source_field_ids() == [1, 2, 3]
-
-
-def test_hdf5_source_encoding_count_is_optional_and_roundtrips():
-    acq = fs.Acquisition(
-        sources=fs.SourceGeometry.points(kind="scalar", coords=[[0.0, 0.0]]),
-        source_encoding=fs.SourceEncoding.hdf5(
-            "rhs.h5",
-            dataset="encoded_sources",
-            count=2,
+            coords=[[0.0, 0.0], [1.0, 0.0]],
+            names=["left", "right"],
+        ),
+        source_encoding=SourceEncoding.dense(
+            [[1.0, 1.0], [0.0, -1.0]],
+            names=["left_only", "difference"],
         ),
     )
 
-    payload = acq.to_fs()
-    loaded = fs.Acquisition.from_fs(payload)
+    payload = acquisition.to_fs()
 
-    assert payload["source_encoding"]["count"] == 2
-    assert loaded.known_source_field_count() == 2
-    assert loaded.source_field_ids() == [1, 2]
-
-
-def test_external_source_counts_must_be_positive():
-    with pytest.raises(ValueError, match="source geometry count must be >= 1"):
-        fs.SourceGeometry.hdf5(
-            "sources.h5",
-            dataset="source_points",
-            kind="scalar",
-            count=0,
-        )
-
-    with pytest.raises(ValueError, match="source encoding count must be >= 1"):
-        fs.SourceEncoding.hdf5("rhs.h5", dataset="encoded_sources", count=0)
+    _sauce_acquisition_validator().validate(payload)
+    assert payload["source_encoding"]["_type"] == "JsonDense"
+    assert Acquisition.from_fs(payload).to_fs() == payload
 
 
-def test_dense_source_encoding_accepts_source_major_matrix():
-    encoding = fs.SourceEncoding.dense(
-        np.asarray([[1.0, 0.0], [0.0, 1j]]),
-        names=["mode_1", "mode_2"],
-        reference_coordinates=[[0.0, 0.1], [0.1, 0.1]],
-    )
-
-    assert encoding.to_fs() == {
-        "_type": "JsonDense",
-        "fields": [
-            {
-                "name": "mode_1",
-                "coefficients": [1.0, 0.0],
-                "reference_coordinates": [0.0, 0.1],
-            },
-            {
-                "name": "mode_2",
-                "coefficients": [0.0, [0.0, 1.0]],
-                "reference_coordinates": [0.1, 0.1],
-            },
-        ],
-    }
-
-
-def test_acquisition_add_distributed_source_appends_named_field():
-    acq = fs.Acquisition()
-    acq.add_sources(
+def test_hdf5_geometry_and_encoding_match_pinned_sauce_schema_and_roundtrip():
+    geometry = SourceGeometry.hdf5(
+        "inputs/sources.h5",
+        dataset="/sources",
         kind="scalar",
-        coords=[[0.0, 0.0], [1.0, 0.0]],
-        names=["left", "right"],
+        name="catalog",
+        domain=2,
+        system="model",
+        units="m",
     )
-    acq.add_distributed_source("dipole_like", {"left": 1.0, "right": -1.0})
-
-    assert acq.to_fs()["source_encoding"]["fields"][0]["name"] == "dipole_like"
-    assert acq.source_coords().tolist() == [[0.5, 0.0]]
-
-
-def test_survey_to_acquisition_uses_v2_source_geometry():
-    survey = fs.Survey.dense(
-        "line",
-        sources=[[0.0, 0.0], [1.0, 0.0]],
-        receivers=[[0.0, 1.0], [1.0, 1.0]],
+    encoding = SourceEncoding.hdf5(
+        "inputs/encoding.h5",
+        dataset="/coefficients",
+        name="encoded_fields",
+        field_names_dataset="/field_names",
+        reference_coordinates_dataset="/reference_coordinates",
+    )
+    acquisition = Acquisition(
+        source_geometry=geometry,
+        source_encoding=encoding,
     )
 
-    payload = survey.to_acquisition(_receiver_device()).to_fs()
+    payload = acquisition.to_fs()
 
+    _sauce_acquisition_validator().validate(payload)
+    assert payload["source_geometry"] == {
+        "_type": "HDF5",
+        "name": "catalog",
+        "domain": 2,
+        "kind": "scalar",
+        "file": "inputs/sources.h5",
+        "dataset": "/sources",
+        "system": "model",
+        "units": "m",
+    }
+    assert payload["source_encoding"] == {
+        "_type": "HDF5Dense",
+        "name": "encoded_fields",
+        "file": "inputs/encoding.h5",
+        "dataset": "/coefficients",
+        "field_names_dataset": "/field_names",
+        "reference_coordinates_dataset": "/reference_coordinates",
+    }
+    assert acquisition.known_source_point_count() is None
+    assert acquisition.known_source_field_count() is None
+    assert encoding.field_names() == []
+    with pytest.raises(ValueError, match="coordinates are external"):
+        encoding.reference_coordinates(geometry)
+    assert Acquisition.from_fs(payload).to_fs() == payload
+
+
+def test_per_point_directions_serialize_on_source_atoms():
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="vector",
+            coords=[[0.0, 0.0], [1.0, 0.0]],
+            direction=[[1.0, 0.0], [0.0, 1.0]],
+        )
+    )
+
+    payload = acquisition.to_fs()
+
+    assert "defaults" not in payload["source_geometry"]
+    assert [
+        source["direction"] for source in payload["source_geometry"]["sources"]
+    ] == [[1.0, 0.0], [0.0, 1.0]]
+    _sauce_acquisition_validator().validate(payload)
+
+
+def test_legacy_source_groups_are_migrated_but_never_reexported():
+    acquisition = Acquisition.from_fs(
+        {
+            "source_groups": [
+                {
+                    "source": {
+                        "_type": "PointSource",
+                        "name": "shot",
+                        "kind": "scalar",
+                        "coordinates": [0.5, 0.05],
+                    }
+                }
+            ],
+            "receiver_groups": [],
+        }
+    )
+
+    payload = acquisition.to_fs()
+
+    assert "source_groups" not in payload
+    assert payload["source_geometry"]["sources"][0]["name"] == "shot"
+    with pytest.warns(DeprecationWarning, match="source_groups"):
+        assert acquisition.source_groups[0].source.name == "shot"
+
+
+def test_tagged_v1_source_groups_are_migrated_to_v2():
+    acquisition = Acquisition.from_fs(
+        {
+            "schema": "fs-acquisition-1",
+            "source_groups": [
+                {
+                    "source": {
+                        "_type": "PointSource",
+                        "name": "shot",
+                        "kind": "scalar",
+                        "coordinates": [0.5, 0.05],
+                    }
+                }
+            ],
+            "receiver_groups": [],
+        }
+    )
+
+    payload = acquisition.to_fs()
+
+    _sauce_acquisition_validator().validate(payload)
     assert payload["schema"] == "fs-acquisition-2"
-    assert payload["source_geometry"]["_type"] == "Inline"
-    assert len(payload["source_geometry"]["sources"]) == 2
-    assert len(payload["receiver_groups"]) == 1
     assert "source_groups" not in payload
 
 
-def test_acquisition_constructor_accepts_receivers_alias():
-    receivers = [
-        fs.ReceiverGroup(
-            "surface",
-            _receiver_device(),
-            [[0.0, 0.0], [1.0, 0.0]],
+def test_legacy_point_source_positional_kind_and_domain_are_preserved():
+    default_named = PointSource("scalar", [0.25, 0.05])
+    source = PointSource("scalar", [0.5, 0.05], name="shot", domain=7)
+
+    assert default_named.name == "point"
+    assert default_named.kind == "scalar"
+    assert source.kind == "scalar"
+    assert source.name == "shot"
+    assert source.coordinates == [0.5, 0.05]
+    assert source.domain == 7
+    assert source.to_fs()["domain"] == 7
+
+    acquisition = Acquisition(source_groups=[SourceGroup(source=source)])
+    payload = acquisition.to_fs()
+
+    assert payload["source_geometry"]["kind"] == "scalar"
+    assert payload["source_geometry"]["domain"] == 7
+    assert "domain" not in payload["source_geometry"]["sources"][0]
+    _sauce_acquisition_validator().validate(payload)
+    with pytest.warns(DeprecationWarning, match="source_groups"):
+        assert acquisition.source_groups[0].source.domain == 7
+
+
+def test_source_groups_compatibility_view_rejects_mutation_without_state_loss():
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar", coords=[[0.5, 0.05]], names=["shot"]
         )
+    )
+    before = acquisition.to_fs()
+    replacement = [
+        SourceGroup(source=PointSource("scalar", [0.75, 0.05], name="other"))
     ]
-    acq = fs.Acquisition(
-        sources=fs.SourceGeometry.points(kind="scalar", coords=[[0.5, 0.0]]),
-        receivers=receivers,
+
+    with pytest.warns(DeprecationWarning, match="source_groups"):
+        groups = acquisition.source_groups
+    with pytest.raises(TypeError, match="read-only compatibility view"):
+        groups.append(replacement[0])
+    with pytest.warns(DeprecationWarning, match="source_groups"):
+        with pytest.raises(TypeError, match="read-only compatibility view"):
+            acquisition.source_groups = replacement
+
+    assert acquisition.to_fs() == before
+
+
+def test_inline_point_kind_must_match_geometry_kind():
+    geometry = SourceGeometry.inline(
+        kind="scalar",
+        sources=[PointSource(name="bad", coordinates=[0.5, 0.05], kind="vector")],
     )
 
-    assert acq.receivers is acq.receiver_groups
-    assert acq.to_fs()["receiver_groups"][0]["name"] == "surface"
+    with pytest.raises(ValueError, match="kind must match"):
+        Acquisition(source_geometry=geometry).to_fs()
+
+    normalized_point = PointSource(
+        name="normalized", coordinates=[0.5, 0.05], kind="scalar"
+    )
+    normalized_point.kind = " Scalar "
+    normalized = Acquisition(
+        source_geometry=SourceGeometry.inline(kind="scalar", sources=[normalized_point])
+    ).to_fs()
+    assert normalized["source_geometry"]["sources"][0]["kind"] == "scalar"
+    _sauce_acquisition_validator().validate(normalized)
+
+
+def test_legacy_compound_without_direction_omits_empty_direction():
+    acquisition = Acquisition.from_fs(
+        {
+            "schema": "fs-acquisition-1",
+            "source_groups": [
+                {
+                    "source": {
+                        "_type": "CompoundSource",
+                        "name": "difference",
+                        "kind": "scalar",
+                        "coordinates": [[0.45, 0.08], [0.55, 0.08]],
+                    }
+                }
+            ],
+            "receiver_groups": [],
+        }
+    )
+
+    payload = acquisition.to_fs()
+
+    assert all(
+        "direction" not in point for point in payload["source_geometry"]["sources"]
+    )
+    _sauce_acquisition_validator().validate(payload)
+
+
+def test_unnamed_source_fallback_matches_sauce_and_detects_collisions():
+    unnamed = SourceGeometry.inline(
+        kind="scalar", sources=[PointSource(coordinates=[0.5, 0.05])]
+    )
+    assert unnamed.point_names() == ["source_000001"]
+    _sauce_acquisition_validator().validate(
+        Acquisition(source_geometry=unnamed).to_fs()
+    )
+
+    collision = SourceGeometry.inline(
+        kind="scalar",
+        sources=[
+            PointSource(coordinates=[0.25, 0.05]),
+            PointSource(name="source_000001", coordinates=[0.75, 0.05]),
+        ],
+    )
+    with pytest.raises(ValueError, match="names must be unique"):
+        Acquisition(source_geometry=collision).to_fs()
+
+
+def test_named_encoding_requires_explicit_inline_source_names():
+    geometry = SourceGeometry.inline(
+        kind="scalar", sources=[PointSource(coordinates=[0.5, 0.05])]
+    )
+    encoding = SourceEncoding.named(
+        [DistributedSource.named("field", {"source_000001": 1.0})]
+    )
+
+    with pytest.raises(ValueError, match="requires explicit names"):
+        Acquisition(source_geometry=geometry, source_encoding=encoding).to_fs()
+
+
+def test_acquisition_extra_rejects_legacy_source_groups():
+    geometry = SourceGeometry.points(
+        kind="scalar", coords=[[0.5, 0.05]], names=["shot"]
+    )
+    with pytest.raises(ValueError, match="extra cannot contain legacy source_groups"):
+        Acquisition(source_geometry=geometry, extra={"source_groups": []})
+
+    acquisition = Acquisition(source_geometry=geometry)
+    acquisition.extra["source_groups"] = []
+    with pytest.raises(ValueError, match="extra cannot contain legacy source_groups"):
+        acquisition.to_fs()
+
+
+def test_export_rejects_missing_geometry_and_inconsistent_encoding():
+    with pytest.raises(ValueError, match="requires source_geometry"):
+        Acquisition().to_fs()
+
+    geometry = SourceGeometry.points(
+        kind="scalar",
+        coords=[[0.0, 0.0]],
+        names=["known"],
+    )
+    unknown_encoding = SourceEncoding.named(
+        [DistributedSource.named("bad", {"unknown": 1.0})]
+    )
+    with pytest.raises(ValueError, match="unknown sources"):
+        Acquisition(
+            source_geometry=geometry,
+            source_encoding=unknown_encoding,
+        ).to_fs()
+
+    dense_encoding = SourceEncoding.dense([[1.0]], names=["field"])
+    dense_encoding.fields[0].coefficients.append(0.0)
+    with pytest.raises(ValueError, match="coefficient count"):
+        Acquisition(
+            source_geometry=geometry,
+            source_encoding=dense_encoding,
+        ).to_fs()
+
+
+def test_compound_source_adapter_emits_named_encoding():
+    acquisition = Acquisition()
+    with pytest.warns(DeprecationWarning, match="add_compound_source"):
+        acquisition.add_compound_source(
+            kind="scalar",
+            coords=[[0.45, 0.08], [0.55, 0.08]],
+            weights=[1.0, -1.0],
+        )
+
+    payload = acquisition.to_fs()
+
+    assert len(payload["source_geometry"]["sources"]) == 2
+    assert payload["source_encoding"]["fields"][0]["terms"] == [
+        {"source": "source_0_point_001", "coefficient": 1.0},
+        {"source": "source_0_point_002", "coefficient": -1.0},
+    ]
+    _sauce_acquisition_validator().validate(payload)
+
+
+def test_deprecated_helpers_preserve_zero_based_logical_source_names():
+    acquisition = Acquisition()
+    with pytest.warns(DeprecationWarning):
+        acquisition.add_source_group(
+            kind="scalar",
+            coords=[[0.25, 0.05], [0.50, 0.05], [0.75, 0.05]],
+        )
+    with pytest.warns(DeprecationWarning):
+        acquisition.add_compound_source(
+            kind="scalar",
+            coords=[[0.45, 0.08], [0.55, 0.08]],
+            weights=[1.0, -1.0],
+        )
+
+    assert acquisition.source_field_names() == [
+        "source_0",
+        "source_1",
+        "source_2",
+        "source_3",
+    ]
+    with pytest.warns(DeprecationWarning, match="source_groups"):
+        assert [group.source.name for group in acquisition.source_groups] == [
+            "source_0",
+            "source_1",
+            "source_2",
+            "source_3",
+        ]

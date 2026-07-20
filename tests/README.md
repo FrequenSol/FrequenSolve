@@ -14,6 +14,25 @@ use explicit pytest markers.
 
 Test files can contain both unit tests and opt-in marked tests.
 
+## Quality Bar
+
+Tests must exercise behavior or a real contract boundary. Good tests call the
+public API, execute a parser or validator, round-trip an artifact, or run an
+integration boundary with controlled dependencies. A pytest test that only
+reads a tracked workflow, documentation, source, or style file and asserts that
+literal strings are present does not meet this bar. Use the tool that owns the
+format instead: Sphinx for documentation, `actionlint` for GitHub Actions,
+pre-commit for repository policy, and a schema validator for structured
+contracts.
+
+Property-based tests are appropriate for stable invariants such as structured
+solver-payload round trips. Keep strategies bounded and deterministic under the
+normal Hypothesis profile so the PR-safe lane remains fast.
+
+Marker names are strict. An unknown marker fails collection so a misspelled
+`integration`, `cloud`, `hpc`, `interactive`, or `visual` marker cannot put a
+resource-dependent test into the default lane.
+
 ## Writing Tests
 
 ### Test Framework
@@ -60,8 +79,10 @@ We use pytest-mpl for comparing matplotlib-generated images. Here's a guide for 
    - Generate reference images using:
      - `make generate_reference_images` in this repo for non-integration,
        non-cloud, non-HPC visual tests
-     - Recommended: Run the corresponding workflow in FrequenSolveDockerImage
-       to generate solver-backed reference images
+     - For solver-backed images, use the `frequensolve-test-evidence` artifact
+       from an exact, pinned FrequenSolveDockerImage run. Inspect the generated
+       scientific plot and record the run URL and FrequenSolve SHA in the PR
+       that promotes it to `tests/reference_images/`.
 
 4. **Test Output**:
    - Image comparison tests create output in `tests/output/`
@@ -78,11 +99,18 @@ We use pytest-mpl for comparing matplotlib-generated images. Here's a guide for 
 
 The project includes several Makefile targets for running tests:
 
-- `make test`: Runs deterministic non-integration tests with coverage reporting and matplotlib baseline testing
-  - Generates XML coverage reports
-  - Compares matplotlib figures against baseline images
-  - Generates an HTML summary of matplotlib comparisons
+- `make test`: Runs deterministic non-integration tests with line and branch
+  coverage reporting
+  - Generates XML and JSON coverage reports
+  - Enforces the 64.5% combined, 69.0% line, and 51.8% branch ratchets
   - Skips integration, cloud, HPC, interactive, and visual tests
+
+- `make test-optional-extras`: Runs PR-safe plotting, PyVista, SEG-Y, and
+  matplotlib baseline checks with the `parallel`, `visual`, and `seismic-io`
+  extras installed
+  - Includes visual tests that do not need a solver
+  - Excludes integration, cloud, HPC, and interactive tests
+  - Generates an HTML summary of matplotlib comparisons
 
 - `make generate_reference_images`: Generates reference images for matplotlib tests
   - Creates baseline images in `tests/reference_images/`
@@ -97,25 +125,39 @@ pushes, and can also be started manually. It includes:
 1. **Test Job**:
    - Runs on Python 3.10 through 3.14
    - Installs the package with pip using `.[dev,parallel,cloud]`
-   - Runs pre-commit hooks once on Python 3.10
-   - Executes the deterministic non-integration test lane with `make test`
-   - Uploads coverage reports to Codecov
+   - Runs pre-commit hooks once on Python 3.10, including `actionlint` against
+     the GitHub Actions workflows
+   - Executes the deterministic non-integration test lane, with coverage on
+     Python 3.10
+   - Preserves the Python 3.10 coverage report for a small downstream Codecov
+     upload job; only that job receives OIDC permission, and upload failures
+     fail the aggregate gate
 
-2. **Integration Test Job**:
+2. **Optional Extras Job**:
+   - Installs the visual and seismic-IO extras on Python 3.12
+   - Executes `make test-optional-extras`, including the PR-safe visual baseline
+     and formerly skipped PyVista/SEG-Y behavior
+
+3. **Integration Test Job**:
    - Triggers the `FrequenSol/FrequenSolveDockerImage` CI workflow with the
      current FrequenSolve branch
    - Waits for that downstream workflow to finish
    - Downloads the downstream test artifacts into `tests/output/`
    - Requires the GitHub App secrets configured for the repository workflow
 
-3. **Documentation Job**:
+4. **Documentation Job**:
    - Builds the project documentation
    - Uploads documentation as an artifact
 
-4. **Build Job**:
+5. **Build And Package Smoke Jobs**:
    - Builds the Python package
    - Checks package metadata with `twine`
    - Uploads the `dist/` artifact
+   - Installs and imports both the wheel and sdist on Ubuntu and macOS
+
+6. **Required CI Job**:
+   - Aggregates every PR-safe lane under the stable `Required CI` name used by
+     branch rules and release evidence
 
 ## Important Notes
 
@@ -126,4 +168,5 @@ pushes, and can also be started manually. It includes:
   HPC, interactive, and visual lanes unless you select those markers
   explicitly.
 - Solver-backed integration tests are crucial for ensuring the solver works
-  correctly in a production environment and should be run before any release.
+  correctly in a production environment. The manual release-candidate workflow
+  requires that exact-SHA evidence before it creates a tag.

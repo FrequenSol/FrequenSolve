@@ -2,20 +2,17 @@ name: Publish Package
 
 permissions:
   contents: write
+  actions: read
 
 on:
   release:
     types: [published]
   workflow_dispatch:
     inputs:
-      repository:
-        description: Package index to publish to
+      release_tag:
+        description: Immutable release tag whose evidence and package should be published
         required: true
-        default: testpypi
-        type: choice
-        options:
-          - testpypi
-          - pypi
+        type: string
 
 jobs:
   build:
@@ -23,13 +20,92 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      publication_target: ${{ steps.publication.outputs.target }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
+
+      - name: Derive and validate publication target
+        id: publication
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          EVENT_PRERELEASE: ${{ github.event.release.prerelease }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_metadata="$(
+            gh release view "$RELEASE_TAG" \
+              --json tagName,isDraft,isPrerelease
+          )"
+          metadata_tag="$(jq -r '.tagName // empty' <<<"$release_metadata")"
+          metadata_draft="$(jq -r '.isDraft | tostring' <<<"$release_metadata")"
+          metadata_prerelease="$(
+            jq -r '.isPrerelease | tostring' <<<"$release_metadata"
+          )"
+
+          test "$metadata_tag" = "$RELEASE_TAG"
+          test "$metadata_draft" = false
+          [[ "$metadata_prerelease" =~ ^(true|false)$ ]]
+
+          tag_sha="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          checkout_sha="$(git rev-parse 'HEAD^{commit}')"
+          test "$tag_sha" = "$checkout_sha"
+
+          if [ "$EVENT_NAME" = release ]; then
+            test "$EVENT_TAG" = "$metadata_tag"
+            test "$EVENT_PRERELEASE" = "$metadata_prerelease"
+          fi
+
+          publication_target="$(
+            python scripts/plan_release_tags.py publication-target \
+              --tag "$metadata_tag" \
+              --prerelease "$metadata_prerelease"
+          )"
+          echo "Publishing ${metadata_tag} only to ${publication_target}."
+          echo "target=${publication_target}" >> "$GITHUB_OUTPUT"
+
+      - name: Require exact-SHA CI and solver evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_sha="$(git rev-parse 'HEAD^{commit}')"
+          mkdir -p .release-evidence
+          gh release download "$RELEASE_TAG" \
+            --pattern release-evidence.json \
+            --dir .release-evidence \
+            --clobber
+          gh release download "$RELEASE_TAG" \
+            --pattern frequensolve-test-evidence.tar.gz \
+            --dir .release-evidence \
+            --clobber
+          evidence_file=.release-evidence/release-evidence.json
+          heavy_archive=.release-evidence/frequensolve-test-evidence.tar.gz
+          python scripts/validate_release_evidence.py \
+            "$evidence_file" \
+            --commit "$release_sha"
+          expected_archive_sha="$(jq -r '.dockerTestArchiveSha256' "$evidence_file")"
+          actual_archive_sha="$(sha256sum "$heavy_archive" | awk '{print $1}')"
+          test "$actual_archive_sha" = "$expected_archive_sha"
+          python scripts/extract_test_evidence_archive.py \
+            "$heavy_archive" \
+            .release-evidence/heavy
+          python scripts/validate_heavy_test_evidence.py \
+            .release-evidence/heavy/frequensolve-test-evidence.json \
+            --commit "$release_sha"
+          ci_run_id="$(jq -r '.ciRunId' "$evidence_file")"
+          python scripts/verify_ci_evidence.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$release_sha" \
+            --run-id "$ci_run_id"
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
@@ -42,11 +118,16 @@ jobs:
 
       - name: Verify release version
         id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           version="$(python -c 'import versioneer; print(versioneer.get_version())')"
           echo "Building FrequenSolve ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          python scripts/validate_release_version.py --version "${version}"
+          python scripts/validate_release_version.py \
+            --version "${version}" \
+            --ref-type tag \
+            --ref-name "$RELEASE_TAG"
 
       - name: Build distributions
         run: python -m build
@@ -54,8 +135,20 @@ jobs:
       - name: Check package metadata
         run: python -m twine check dist/*
 
+      - name: Install and import release wheel
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          python -I - <<'PY'
+          import frequensolve as fs
+
+          for name in ("Project", "LayeredModel", "LocalSite", "AWSSite"):
+              if getattr(fs, name, None) is None:
+                  raise SystemExit(f"missing release-wheel export: {name}")
+          print(fs.__version__)
+          PY
+
       - name: Upload distributions
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-package-distributions
           path: dist/
@@ -63,9 +156,7 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     needs: build
-    if: |
-      (github.event_name == 'release' && github.event.release.prerelease) ||
-      (github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi')
+    if: needs.build.outputs.publication_target == 'testpypi'
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:
@@ -73,13 +164,13 @@ jobs:
       id-token: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: python-package-distributions
           path: dist/
 
       - name: Publish package distributions to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
@@ -87,9 +178,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: build
-    if: |
-      (github.event_name == 'release' && !github.event.release.prerelease) ||
-      (github.event_name == 'workflow_dispatch' && inputs.repository == 'pypi')
+    if: needs.build.outputs.publication_target == 'pypi'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -97,13 +186,13 @@ jobs:
       id-token: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: python-package-distributions
           path: dist/
 
       - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
         with:
           skip-existing: true
 
@@ -116,7 +205,7 @@ jobs:
       contents: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: python-package-distributions
           path: dist/

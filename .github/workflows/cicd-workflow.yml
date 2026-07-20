@@ -4,7 +4,6 @@ permissions:
   contents: read
   actions: read
   packages: read
-  id-token: write
 
 on:
   pull_request:
@@ -24,19 +23,26 @@ on:
         default: 'main'
         type: string
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  # This job runs basic Python unit tests only - it does not test Docker functionality
-  # or integration with other services. For full integration testing, see the integration-test job.
+  # This job runs the deterministic Python lane only. The paid Docker/solver
+  # workflow remains an explicit manual dispatch or release-candidate gate.
   unit-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
       with:
         python-version: ${{ matrix.python-version }}
 
@@ -49,29 +55,96 @@ jobs:
       if: matrix.python-version == '3.10'
       run: pre-commit run --show-diff-on-failure --color=always --all-files
 
-    - name: Run tests with pytest
+    - name: Run incremental strict type check
+      if: matrix.python-version == '3.10'
+      run: make typecheck
+
+    - name: Run deterministic tests
+      if: matrix.python-version != '3.10'
+      run: python -m pytest
+
+    - name: Run deterministic tests with coverage ratchet
+      if: matrix.python-version == '3.10'
       run: make test
 
-    - name: Upload coverage reports to Codecov
+    - name: Preserve coverage report for the OIDC upload job
       if: matrix.python-version == '3.10'
-      uses: codecov/codecov-action@v6
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        files: coverage.xml
+        name: coverage-report
+        path: coverage.xml
+        if-no-files-found: error
+        retention-days: 7
+
+  coverage-upload:
+    name: Upload coverage to Codecov
+    needs: unit-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+    - name: Download coverage report
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      with:
+        name: coverage-report
+
+    - name: Upload coverage report to Codecov
+      uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
+      with:
+        use_oidc: true
+        fail_ci_if_error: true
+        files: ./coverage.xml
+        disable_search: true
+
+  optional-extras:
+    name: Optional visual and seismic extras
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+    - name: Set up Python
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: "3.12"
+
+    - name: Install visual and seismic dependencies
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install -e ".[dev,parallel,visual,seismic-io]"
+
+    - name: Run optional visual and seismic tests
+      run: make test-optional-extras
+
+    - name: Upload visual comparison output
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: optional-extras-output
+        path: tests/output/
+        if-no-files-found: error
+        retention-days: 7
 
   integration-test:
     # This job runs all tests (including integration) in the docker image with the solver software.
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.RUN_DOCKER_IMAGE_INTEGRATION }}
-    needs: unit-test
+    needs: required-ci
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     concurrency:
       group: docker-image-integration-${{ github.event_name == 'workflow_dispatch' && inputs.FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH || 'main' }}
       cancel-in-progress: false
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
       # Generate GitHub App Token
       - name: Generate GitHub App Token
         id: generate-token
-        uses: actions/create-github-app-token@v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -85,7 +158,7 @@ jobs:
           DOWNSTREAM_REPO: FrequenSol/FrequenSolveDockerImage
           DOWNSTREAM_WORKFLOW: cicd-workflow.yml
           DOWNSTREAM_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.FREQUENSOLVEDOCKERIMAGE_REPO_BRANCH || 'main' }}
-          FREQUENSOLVE_BRANCH: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+          FREQUENSOLVE_BRANCH: ${{ github.sha }}
         run: |
           set -euo pipefail
 
@@ -127,30 +200,38 @@ jobs:
           echo "Triggered downstream workflow: https://github.com/$DOWNSTREAM_REPO/actions/runs/$run_id"
           gh run watch "$run_id" --repo "$DOWNSTREAM_REPO" --interval 10 --exit-status
 
-      - name: Download test results from Docker workflow
+      - name: Download test evidence from Docker workflow
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
         run: |
           gh run download "${{ steps.docker-workflow.outputs.workflow-id }}" \
             --repo FrequenSol/FrequenSolveDockerImage \
-            --name test-results \
+            --name frequensolve-test-evidence \
             --dir tests/output
 
-      - name: Upload test results
-        uses: actions/upload-artifact@v7
+      - name: Validate test evidence
+        run: |
+          python scripts/validate_heavy_test_evidence.py \
+            tests/output/frequensolve-test-evidence.json \
+            --commit "$GITHUB_SHA"
+
+      - name: Preserve validated test evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: test-results
+          name: frequensolve-test-evidence
           path: tests/output/
+          if-no-files-found: error
           retention-days: 7
 
   docs:
     needs: unit-test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
       with:
         python-version: "3.10"
 
@@ -165,7 +246,7 @@ jobs:
         make html
 
     - name: Upload documentation artifact
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: documentation
         path: docs/build/html/
@@ -173,11 +254,12 @@ jobs:
   build-package:
     needs: unit-test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
       with:
         python-version: "3.10"
 
@@ -193,7 +275,86 @@ jobs:
       run: python -m twine check dist/*
 
     - name: Store build artifacts
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: dist
         path: dist/
+
+  package-smoke:
+    name: Package smoke (${{ matrix.os }}, ${{ matrix.distribution }})
+    needs: build-package
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        distribution: [wheel, sdist]
+    steps:
+    - name: Set up Python
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: "3.12"
+
+    - name: Download built distributions
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      with:
+        name: dist
+        path: dist/
+
+    - name: Install and import built distribution
+      env:
+        DISTRIBUTION: ${{ matrix.distribution }}
+      run: |
+        set -euo pipefail
+        if [ "$DISTRIBUTION" = wheel ]; then
+          package="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+        else
+          package="$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
+        fi
+        test -n "$package"
+        python -m pip install --upgrade pip
+        python -m pip install "$package"
+        python -I - <<'PY'
+        import frequensolve as fs
+
+        for name in ("Project", "LayeredModel", "LocalSite", "AWSSite"):
+            if getattr(fs, name, None) is None:
+                raise SystemExit(f"missing installed-package export: {name}")
+        print(fs.__version__)
+        PY
+
+  required-ci:
+    name: Required CI
+    if: always()
+    needs:
+      - unit-test
+      - coverage-upload
+      - optional-extras
+      - docs
+      - build-package
+      - package-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - name: Require every PR-safe CI lane
+      env:
+        UNIT_TEST_RESULT: ${{ needs.unit-test.result }}
+        COVERAGE_UPLOAD_RESULT: ${{ needs.coverage-upload.result }}
+        OPTIONAL_EXTRAS_RESULT: ${{ needs.optional-extras.result }}
+        DOCS_RESULT: ${{ needs.docs.result }}
+        BUILD_PACKAGE_RESULT: ${{ needs.build-package.result }}
+        PACKAGE_SMOKE_RESULT: ${{ needs.package-smoke.result }}
+      run: |
+        set -euo pipefail
+        for result in \
+          "$UNIT_TEST_RESULT" \
+          "$COVERAGE_UPLOAD_RESULT" \
+          "$OPTIONAL_EXTRAS_RESULT" \
+          "$DOCS_RESULT" \
+          "$BUILD_PACKAGE_RESULT" \
+          "$PACKAGE_SMOKE_RESULT"; do
+          if [ "$result" != success ]; then
+            echo "A required CI dependency finished with result: $result" >&2
+            exit 1
+          fi
+        done

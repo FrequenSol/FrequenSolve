@@ -2,6 +2,7 @@
 
 import copy
 import json
+import warnings
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Dict, Mapping, Optional
@@ -13,6 +14,7 @@ __all__ = [
     "MaterializeMixin",
     "TypeTaggedMixin",
     "merge_extra",
+    "warn_deprecated_path_api",
 ]
 
 
@@ -336,6 +338,16 @@ def merge_extra(
         raise ValueError(f"{owner} extra field(s) collide with typed field(s): {names}")
     merged.update(copy.deepcopy(extra))
     return merged
+
+
+def warn_deprecated_path_api(name: str) -> None:
+    """Warn that an object's legacy path API was used."""
+
+    warnings.warn(
+        f"{name} is deprecated; export paths are now supplied by ExportContext.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 
 class ChangedMixin:

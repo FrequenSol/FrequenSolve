@@ -3,12 +3,14 @@ import matplotlib
 matplotlib.use("Agg")
 
 import h5py
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 import xarray as xr
 
 from frequensolve.plotting.analysis import compute_nrms, compute_timelag
 from frequensolve.plotting.animate import animate_gather, animate_wavefield
+from frequensolve.plotting.layered import _plot_acquisition
 from frequensolve.plotting.traces import (
     diff_gathers,
     plot_cf,
@@ -24,6 +26,9 @@ from frequensolve.plotting.vtu import (
     read_vtu,
     vtu_fields,
 )
+from frequensolve.seismic.acquisition import Acquisition
+from frequensolve.seismic.receivers import ReceiverNode
+from frequensolve.seismic.sources import SourceGeometry
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs.artifacts import TraceManifest
 
@@ -54,6 +59,30 @@ def _frequency_trace(n_frequency=24, n_receiver=8):
         dims=("frequency", "receiver"),
         coords={"frequency": frequency, "receiver": receiver},
     )
+
+
+@pytest.mark.parametrize("geometry_type", ["HDF5", "SPSFiles"])
+def test_plot_acquisition_skips_external_source_catalogs(geometry_type):
+    if geometry_type == "HDF5":
+        geometry = SourceGeometry.hdf5("sources.h5", dataset="/sources", kind="scalar")
+    else:
+        geometry = SourceGeometry.sps("sources.sps", kind="scalar")
+    acquisition = Acquisition(source_geometry=geometry)
+    acquisition.add_receiver_group(
+        name="line",
+        device=ReceiverNode(name="hydrophone"),
+        coords=[[0.0, 0.0], [1.0, 0.0]],
+    )
+
+    fig, ax = plt.subplots()
+    try:
+        _plot_acquisition(None, acquisition, ax)
+
+        assert [collection.get_label() for collection in ax.collections] == [
+            "Receivers (line)"
+        ]
+    finally:
+        plt.close(fig)
 
 
 def test_plot_gather_returns_figure_and_axis():

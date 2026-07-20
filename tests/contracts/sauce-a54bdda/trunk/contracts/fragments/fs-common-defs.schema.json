@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/fragments/fs-common-defs.schema.json",
+  "title": "FrequenSolve common schema definitions",
+  "description": "Reusable JSON Schema fragments shared by FrequenSolve contracts.",
+  "$defs": {
+    "schemaName": {
+      "type": "string",
+      "pattern": "^fs-[a-z0-9-]+-[0-9]+$",
+      "description": "Versioned FrequenSolve schema identifier."
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A filesystem path. Relative path semantics are defined by each contract."
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^(sha256:)?[A-Fa-f0-9]{64}$",
+      "description": "A SHA-256 content hash, optionally prefixed with 'sha256:'."
+    },
+    "units": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      ],
+      "description": "A scalar unit string or component-wise unit strings."
+    },
+    "numericVector": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 1
+    },
+    "vec2": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "vec3": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "intVector": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "minItems": 1
+    },
+    "quantity": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "$ref": "#/$defs/numericVector"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "$ref": "#/$defs/numericVector"
+                }
+              ]
+            },
+            "units": {
+              "$ref": "#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "A numeric value, vector, or value/units object."
+    },
+    "complexNumber": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "items": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "real"
+          ],
+          "properties": {
+            "real": {
+              "type": "number"
+            },
+            "imag": {
+              "type": "number",
+              "default": 0.0
+            },
+            "units": {
+              "$ref": "#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "A real scalar, [real, imag] pair, or object form."
+    },
+    "fileRef": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "schema": {
+          "const": "fs-file-ref-1"
+        },
+        "type": {
+          "const": "File"
+        },
+        "action": {
+          "enum": [
+            "expand",
+            "reference"
+          ],
+          "default": "expand"
+        },
+        "absolute_path": {
+          "$ref": "#/$defs/path"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/path"
+        },
+        "residency": {
+          "enum": [
+            "host",
+            "remote",
+            "managed"
+          ],
+          "default": "host"
+        },
+        "public_key": {
+          "type": "string"
+        },
+        "meta": {
+          "type": "object",
+          "properties": {
+            "hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "supplier": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "overrides": {
+          "type": "object"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "absolute_path"
+          ],
+          "not": {
+            "required": [
+              "relative_path"
+            ]
+          }
+        },
+        {
+          "required": [
+            "relative_path"
+          ],
+          "not": {
+            "required": [
+              "absolute_path"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": [
+        "severity",
+        "message"
+      ],
+      "properties": {
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "error",
+            "fatal"
+          ]
+        },
+        "category": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "suggested_action": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[1] / "scripts" / "validate_release_version.py"
 )
@@ -51,7 +53,33 @@ def test_rejects_semver_style_release_candidate_version() -> None:
         ref_name="v0.2.0-rc.1",
     )
 
-    assert "version must be a clean PEP 440 release such as 0.2.0 or 0.2.0rc1" in errors
+    assert "version must be canonical ASCII X.Y.Z or X.Y.ZrcN with N >= 1" in errors
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "0.2.0rc0",
+        "0.2.0a1",
+        "0.2.0b1",
+        "0.2.0.post1",
+        "00.2.0",
+        "0.02.0",
+        "0.2.00",
+        "０.2.0",
+        "0.2.0 ",
+    ],
+)
+def test_rejects_noncanonical_release_identities(version: str) -> None:
+    validator = load_release_validator()
+
+    errors = validator.validate_release_version(
+        version=version,
+        ref_type="tag",
+        ref_name=f"v{version}",
+    )
+
+    assert "version must be canonical ASCII X.Y.Z or X.Y.ZrcN with N >= 1" in errors
 
 
 def test_rejects_plain_version_tags_because_versioneer_uses_v_prefix() -> None:

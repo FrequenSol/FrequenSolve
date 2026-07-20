@@ -46,8 +46,8 @@ The core workflow is intentionally repetitive across tutorials:
      - ``BCs``
      - ``conditions``, ``boundaries``, and :term:`PML` settings.
    * - ``Acquisition``
-     - ``fs-acquisition-1``
-     - :term:`Source groups <source group>`, :term:`receiver groups <receiver group>`, devices/components, batching, dense/sparse sampling, coordinate units/systems.
+     - ``fs-acquisition-2``
+     - :term:`Source geometry`, optional :term:`source encoding`, physical-point versus RHS-field counts, :term:`receiver groups <receiver group>`, devices/components, dense/sparse sampling, coordinate units/systems.
    * - ``TimeDomainJob`` / ``FrequencyDomainJob``
      - ``fs-job-1`` plus job-owned outputs
      - Frequency list or band, result path, logs, traces, and visualization requests.
@@ -111,6 +111,11 @@ Before a remote or expensive solve, inspect the generated inputs:
    sim_payload = sim.to_fs()
    mesh_payload = sim.mesh.to_fs(sim.export_context())
    acq_payload = sim.acquisition.to_fs(sim.export_context())
+
+For an acquisition, confirm that ``schema`` is ``fs-acquisition-2``,
+``source_geometry`` contains the physical catalog, and optional
+``source_encoding`` contains the intended RHS fields. Current exports never
+contain the legacy ``source_groups`` key.
 
 After a solve, inspect the result before plotting:
 

@@ -471,8 +471,11 @@ def _plot_acquisition(model: Any, acquisition: Any, ax, **kwargs) -> None:
     if not plot_sources:
         return
 
-    coords = acquisition.source_coords()
-    if len(coords):
+    if acquisition.known_source_point_count() is None:
+        return
+
+    coords = acquisition.source_point_coords()
+    if coords.size:
         ax.scatter(
             coords[:, 0],
             coords[:, -1],

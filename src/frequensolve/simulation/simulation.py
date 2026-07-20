@@ -545,7 +545,8 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             payload["coordinate_systems"] = [
                 cs.to_fs() for cs in self.coordinate_systems
             ]
-        payload["Acquisition"] = self.acquisition.to_fs(ctx)
+        if self.acquisition:
+            payload["Acquisition"] = self.acquisition.to_fs(ctx)
         return merge_extra(payload, self.extra, "Simulation")
 
     def __iadd__(self, other):

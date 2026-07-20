@@ -15,7 +15,8 @@ from xarray import DataArray, register_dataarray_accessor
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.seismic.acquisition import Acquisition
-from frequensolve.seismic.receivers import ReceiverGroup
+from frequensolve.seismic.receivers import ReceiverGroup, coordinate_array_metadata
+from frequensolve.seismic.sources import SourceGroup
 from frequensolve.units import unit_expression
 
 TraceRecord = DataArray
@@ -23,6 +24,14 @@ TraceRecord = DataArray
 __all__ = [
     "array_to_segy",
 ]
+
+
+def _source_group(trace: DataArray) -> SourceGroup:
+    with open(trace.attrs["simulation"], "r") as f:
+        sim = json.load(f)
+    source_index = int(trace.attrs.get("source_id", trace.attrs.get("source_group", 1)))
+    acquisition = Acquisition.from_fs(sim["Acquisition"])
+    return acquisition.source(source_index)
 
 
 def _source_coordinates(trace: DataArray) -> np.ndarray:
@@ -81,15 +90,16 @@ def _coordinates_in_output_units(
 
 
 def _source_coordinates_in_output_units(
-    source_coordinates: Any,
+    source: Any,
     *,
     default_units: str,
     output_unit: Any,
     ureg,
 ) -> np.ndarray:
+    values, units, _ = coordinate_array_metadata(source.coordinates)
     values = _coordinates_in_output_units(
-        source_coordinates,
-        units=None,
+        values,
+        units=units,
         default_units=default_units,
         output_unit=output_unit,
         ureg=ureg,
@@ -111,6 +121,12 @@ class TraceAccessor:
 
     def __init__(self, trace: DataArray):
         self._trace = trace
+
+    @property
+    def source_group(self) -> SourceGroup:
+        """Return source-group metadata reconstructed from trace attributes."""
+
+        return _source_group(self._trace)
 
     @property
     def source_coordinates(self) -> np.ndarray:
@@ -168,7 +184,7 @@ class TraceAccessor:
         n_samples = td.shape[0]
 
         receiver_group = self.receiver_group
-        source_coordinates = self.source_coordinates
+        source = self.source_group.source
 
         ureg = pint.UnitRegistry()
         coordinate_units, output_unit = _segy_output_unit(units_out, ureg)
@@ -180,7 +196,7 @@ class TraceAccessor:
             ureg=ureg,
         )
         source_coords = _source_coordinates_in_output_units(
-            source_coordinates,
+            source,
             default_units=units_in,
             output_unit=output_unit,
             ureg=ureg,
