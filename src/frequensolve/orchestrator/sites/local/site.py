@@ -529,7 +529,11 @@ class LocalSite(BaseSite):
             RunHandle for the submitted tasks
         """
         check = bool(kwargs.pop("check", False))
-        fresh_run = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
+        fresh_run = bool(
+            kwargs.pop("force_run", False)
+            or kwargs.pop("force", False)
+            or kwargs.pop("rerun", False)
+        )
         skip_policy_value = kwargs.pop("skip", kwargs.pop("skip_policy", None))
         residual = kwargs.pop("residual", None)
         ignore_solver_options = kwargs.pop("ignore_solver_options", None)

@@ -2,6 +2,7 @@ import pytest
 
 from frequensolve.orchestrator.sites.hpc import auth
 from frequensolve.orchestrator.sites.hpc.site import SlurmSite
+from frequensolve.orchestrator.sites.hpc.stampede3 import TACCLoginCredentials
 from frequensolve.orchestrator.utils.credentials import Credentials
 
 
@@ -14,6 +15,17 @@ class MemoryCredentialStore:
 
     def set_secret(self, key, value):
         self.values[key] = value
+
+
+def test_tacc_credentials_use_established_environment_names(monkeypatch):
+    monkeypatch.setenv("TACC_USERNAME", "tacc-user")
+    monkeypatch.setenv("TACC_PASSWORD", "tacc-password")
+    monkeypatch.setenv("HPC_USERNAME", "generic-user")
+    monkeypatch.setenv("HPC_PASSWORD", "generic-password")
+    credentials = TACCLoginCredentials(credential_store=MemoryCredentialStore())
+
+    assert credentials.username == "tacc-user"
+    assert credentials.password == "tacc-password"
 
 
 def test_configured_username_and_keyring_password_precede_environment(

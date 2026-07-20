@@ -799,6 +799,31 @@ def test_local_submit_skip_false_bypasses_current_skip(monkeypatch, skip):
     assert run.backend["fresh"] is True
 
 
+def test_local_submit_force_run_alias_bypasses_current_skip(monkeypatch):
+    site, _closed = make_site(monkeypatch)
+    seen = {}
+
+    class CurrentJob(DummyJob):
+        name = "current-job"
+
+        def is_run_current(self):
+            return True
+
+    def fake_submit(job, **kwargs):
+        seen["kwargs"] = kwargs
+        return local_module.LocalTaskSubmission(
+            futures=[DummyFuture()], task_plan={"pending_indices": [0]}
+        )
+
+    monkeypatch.setattr(site, "_submit_local_tasks", fake_submit)
+
+    run = site.submit(CurrentJob(), force_run=True)
+
+    assert run.mode == "local"
+    assert seen["kwargs"]["fresh_run"] is True
+    assert run.backend["fresh"] is True
+
+
 def test_submit_local_tasks_reports_init_log_on_failure(monkeypatch, tmp_path):
     site, _closed = make_site(monkeypatch)
     site.executable = "/solver"

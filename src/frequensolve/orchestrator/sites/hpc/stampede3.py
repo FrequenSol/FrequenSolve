@@ -17,6 +17,10 @@ __all__ = ["TACCLoginCredentials", "Stampede3Site"]
 class TACCLoginCredentials(Credentials):
     """TACC credentials used by Stampede3."""
 
+    user_env: str = "TACC_USERNAME"
+    pw_env: str = "TACC_PASSWORD"
+    ssh_key_env: str = "SSH_PASSPHRASE"
+
 
 @dataclass(kw_only=True, init=False)
 class Stampede3Site(SlurmSite):
