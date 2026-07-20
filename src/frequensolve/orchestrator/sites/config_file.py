@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from copy import deepcopy
 from dataclasses import fields
 from importlib import import_module
@@ -10,7 +11,6 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional, Union
 
-from frequensolve.orchestrator.sites.base import LocalHostConfig
 from frequensolve.storage import frequensolve_home
 
 try:
@@ -160,7 +160,6 @@ __all__ = [
     "SITE_PRESETS_CONFIG_NAME",
     "SITE_CONFIG_ENV_VAR",
     "Site",
-    "LocalHostConfig",
     "load_site_config",
     "load_site_presets",
     "site_config_path",
@@ -244,7 +243,7 @@ def Site(
     """
 
     config = load_site_config(config_path)
-    local_host_config = _local_host_config(config)
+    _host_tmp_path(config)
     site_config = dict(_site_config_table(config, profile=profile))
     selected_profile = profile or _default_profile(config)
     site_config.update(overrides)
@@ -264,18 +263,27 @@ def Site(
     kwargs = _site_kwargs(site_config, site_type)
     site_class = _resolve_site_class(site_type)
     site = site_class(**kwargs)
-    site.local_host_config = local_host_config
     site._site_config_path = site_config_path(config_path)
     site._site_profile = selected_profile
     return site
 
 
-def _local_host_config(config: Mapping[str, Any]) -> LocalHostConfig:
-    """Return local-machine settings from the top-level host table."""
+def _host_tmp_path_for_config(
+    config_path: Optional[Union[str, Path]] = None,
+) -> Path:
+    """Return the top-level host temporary directory for a site config file."""
 
-    if "host" in config and "local_host" in config:
-        raise ValueError("Use either [host] or [local_host], not both")
-    values = config.get("host", config.get("local_host", {}))
+    if config_path is None:
+        return Path(tempfile.gettempdir())
+    return _host_tmp_path(load_site_config(config_path))
+
+
+def _host_tmp_path(config: Mapping[str, Any]) -> Path:
+    """Validate the top-level host table and return its temporary directory."""
+
+    if "local_host" in config:
+        raise ValueError("Use [host], not [local_host]")
+    values = config.get("host", {})
     if values is None:
         values = {}
     if not isinstance(values, Mapping):
@@ -284,7 +292,10 @@ def _local_host_config(config: Mapping[str, Any]) -> LocalHostConfig:
     if unknown:
         names = ", ".join(unknown)
         raise ValueError(f"Unsupported FrequenSolve host config key(s): {names}")
-    return LocalHostConfig(tmp_dir=values.get("tmp_dir"))
+    tmp_dir = values.get("tmp_dir")
+    if tmp_dir is None or str(tmp_dir).strip() == "":
+        return Path(tempfile.gettempdir())
+    return Path(tmp_dir).expanduser()
 
 
 def _apply_direct_slurm_resources(

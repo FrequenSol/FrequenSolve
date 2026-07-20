@@ -8,6 +8,7 @@ import pytest
 
 import frequensolve as fs
 from frequensolve.orchestrator import sites
+from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
 
 
 class FakeSite:
@@ -141,8 +142,8 @@ def test_site_factory_uses_frequensolve_home_override(monkeypatch, tmp_path):
     assert sites.site_config_path() == storage_root / "site.toml"
 
 
-def test_local_host_config_defaults_to_platform_tmp_dir():
-    assert sites.LocalHostConfig().tmp_path == Path(tempfile.gettempdir())
+def test_host_tmp_path_defaults_to_platform_tmp_dir():
+    assert _host_tmp_path_for_config() == Path(tempfile.gettempdir())
 
 
 def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tmp_path):
@@ -198,7 +199,7 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
         "interactive": True,
         "verbose": True,
     }
-    assert site.local_host_config == sites.LocalHostConfig()
+    assert _host_tmp_path_for_config(config_path) == Path(tempfile.gettempdir())
 
     install_fake_hpc_module(monkeypatch)
     monkeypatch.setattr(sites, "SlurmSite", FakeSite)
@@ -206,7 +207,6 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
 
     assert hpc_site.kwargs["config"].queue == "debug"
     assert hpc_site.kwargs["config"].tmp_dir == "/remote/tmp/directory"
-    assert hpc_site.local_host_config == sites.LocalHostConfig()
     assert hpc_site.kwargs["config"].partitions["debug"]["cores_per_node"] == 64
     assert hpc_site.kwargs["config"].partitions["debug"]["memory_per_node"] == 262144
 
@@ -413,7 +413,10 @@ LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
         account="acct123",
         tmp_dir="/scratch/user/frequensolve-tmp",
     )
-    assert site.local_host_config == sites.LocalHostConfig(tmp_dir="~/frequensolve-tmp")
+    assert (
+        _host_tmp_path_for_config(config_path)
+        == Path("~/frequensolve-tmp").expanduser()
+    )
     assert site.kwargs["run_config"] == FakeSlurmRunConfig(
         queue="debug",
         nodes=2,

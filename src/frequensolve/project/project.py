@@ -19,6 +19,7 @@ from typing import Any, Dict, Mapping, Optional, Union
 
 from frequensolve._version import get_versions
 from frequensolve.orchestrator.sites.base import BaseSite
+from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
 from frequensolve.units import UnitConfig
 from frequensolve.util.encoders import CustomJSONEncoder
@@ -557,7 +558,7 @@ class Project:
 
         with tempfile.TemporaryDirectory(
             prefix="fs_transfer_",
-            dir=self._transfer_local_host_tmp_dir(site),
+            dir=self._transfer_host_tmp_dir(site),
         ) as tmp:
             temp_dir = Path(tmp)
             shutil.copytree(sim_dir, temp_dir / "simulations", dirs_exist_ok=True)
@@ -567,18 +568,8 @@ class Project:
             site.put(temp_dir, remote)
 
     @staticmethod
-    def _transfer_local_host_tmp_dir(site: BaseSite) -> Optional[Path]:
-        tmp_dir = getattr(site, "local_host_tmp_dir", None)
-        if callable(tmp_dir):
-            tmp_dir = tmp_dir()
-        if tmp_dir is None:
-            host_config = getattr(site, "local_host_config", None)
-            tmp_dir = getattr(host_config, "tmp_path", None)
-            if tmp_dir is None:
-                tmp_dir = getattr(host_config, "tmp_dir", None)
-        if tmp_dir is None or str(tmp_dir).strip() == "":
-            return None
-        path = Path(tmp_dir).expanduser()
+    def _transfer_host_tmp_dir(site: BaseSite) -> Path:
+        path = _host_tmp_path_for_config(getattr(site, "_site_config_path", None))
         path.mkdir(parents=True, exist_ok=True)
         return path
 

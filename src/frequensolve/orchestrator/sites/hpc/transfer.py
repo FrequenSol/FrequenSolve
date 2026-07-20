@@ -11,9 +11,10 @@ import tarfile
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
 from frequensolve.orchestrator.sites.base import _wait_for_path
+from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
 from frequensolve.orchestrator.utils.ssh import control_socket_ssh_options
 from frequensolve.util.setup_logger import init_logger
 
@@ -176,18 +177,8 @@ class SlurmTransferManager:
         )
         return True
 
-    def _local_tmp_parent(self) -> Optional[Path]:
-        tmp_dir = getattr(self.site, "local_host_tmp_dir", None)
-        if callable(tmp_dir):
-            tmp_dir = tmp_dir()
-        if tmp_dir is None:
-            host_config = getattr(self.site, "local_host_config", None)
-            tmp_dir = getattr(host_config, "tmp_path", None)
-            if tmp_dir is None:
-                tmp_dir = getattr(host_config, "tmp_dir", None)
-        if tmp_dir is None or str(tmp_dir).strip() == "":
-            return None
-        path = Path(tmp_dir).expanduser()
+    def _local_tmp_parent(self) -> Path:
+        path = _host_tmp_path_for_config(getattr(self.site, "_site_config_path", None))
         path.mkdir(parents=True, exist_ok=True)
         return path
 

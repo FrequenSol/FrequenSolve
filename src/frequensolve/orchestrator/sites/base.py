@@ -3,7 +3,6 @@
 import asyncio
 import html
 import logging
-import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -45,7 +44,6 @@ STATUS_RESET = "\033[0m"
 __all__ = [
     "BaseSite",
     "JobStatus",
-    "LocalHostConfig",
     "RunFailedError",
     "RunHandle",
     "RunResult",
@@ -161,21 +159,6 @@ def _check_if_notebook() -> bool:
             return False  # Other type
     except NameError:
         return False  # Probably standard Python interpreter
-
-
-@dataclass(frozen=True)
-class LocalHostConfig:
-    """Configuration for the machine running the FrequenSolve Python process."""
-
-    tmp_dir: Optional[Union[str, Path]] = None
-
-    @property
-    def tmp_path(self) -> Path:
-        """Return the configured or platform-default local temporary directory."""
-
-        if self.tmp_dir is None or str(self.tmp_dir).strip() == "":
-            return Path(tempfile.gettempdir())
-        return Path(self.tmp_dir).expanduser()
 
 
 @dataclass
@@ -921,14 +904,6 @@ class BaseSite:
 
     _is_notebook: bool = field(default_factory=_check_if_notebook)
     verbose: bool = False
-    local_host_config: LocalHostConfig = field(default_factory=LocalHostConfig)
-
-    @property
-    def local_host_tmp_dir(self) -> Path:
-        """Local temporary directory configured for this Python host."""
-
-        config = getattr(self, "local_host_config", LocalHostConfig())
-        return config.tmp_path
 
     def _emit(
         self,

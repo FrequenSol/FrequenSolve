@@ -26,6 +26,12 @@ def _stream(text=""):
     return SimpleNamespace(read=lambda: text.encode())
 
 
+def _host_config(tmp_path, tmp_dir):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(f'[host]\ntmp_dir = "{Path(tmp_dir).as_posix()}"\n')
+    return config_path
+
+
 def test_control_socket_probe_is_noninteractive_and_bounded(monkeypatch):
     calls = []
 
@@ -249,7 +255,7 @@ def test_sftp_directory_put_uses_configured_tmp_dirs(tmp_path):
         transfer_method="sftp",
         verbose=False,
         remote_tmp_dir=Path("/remote/tmp/frequensolve"),
-        local_host_tmp_dir=local_tmp,
+        _site_config_path=_host_config(tmp_path, local_tmp),
         run_login=lambda command: commands.append(command) or "",
         run_login_cmd=lambda command: commands.append(command)
         or (None, _stream(), _stream()),
@@ -292,7 +298,7 @@ def test_sftp_directory_get_uses_configured_tmp_dirs(tmp_path):
         transfer_method="sftp",
         verbose=False,
         remote_tmp_dir=Path("/remote/tmp/frequensolve"),
-        local_host_tmp_dir=local_tmp,
+        _site_config_path=_host_config(tmp_path, local_tmp),
         run_login=lambda command: commands.append(command) or "",
         run_login_cmd=lambda command: commands.append(command)
         or (None, _stream(), _stream()),

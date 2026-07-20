@@ -48,6 +48,7 @@ from frequensolve.orchestrator.sites.base import (
     _merge_task_status_with_plan,
 )
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
+from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
 from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import as_list as _as_list
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
@@ -1013,7 +1014,9 @@ class SlurmSite(BaseSite):
             script,
             suffix=".sh",
             prefix="slurm_",
-            directory=self.local_host_tmp_dir,
+            directory=_host_tmp_path_for_config(
+                getattr(self, "_site_config_path", None)
+            ),
         ) as script_path:
             logger.debug("Temporary SLURM script created at %s", script_path)
             remote_path = self.remote_tmp_dir / os.path.basename(script_path)
@@ -2433,7 +2436,9 @@ class SlurmSite(BaseSite):
             script,
             suffix=".slurm",
             prefix="sweep",
-            directory=self.local_host_tmp_dir,
+            directory=_host_tmp_path_for_config(
+                getattr(self, "_site_config_path", None)
+            ),
         ) as script_path:
             logger.debug("Temporary sweep script created at %s", script_path)
             self.put(script_path, remote_script)
@@ -2523,7 +2528,9 @@ class SlurmSite(BaseSite):
             script,
             suffix=".sh",
             prefix="sweep",
-            directory=self.local_host_tmp_dir,
+            directory=_host_tmp_path_for_config(
+                getattr(self, "_site_config_path", None)
+            ),
         ) as script_path:
             logger.debug("Temporary sweep script created at %s", script_path)
             self.put(script_path, remote_script)

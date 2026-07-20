@@ -13,10 +13,10 @@ from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
-    LocalHostConfig,
     RunHandle,
     SubmitPlan,
 )
+from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
 from frequensolve.orchestrator.sites.hpc import (
     SlurmLoginCredentials,
     SlurmPartitionConfig,
@@ -450,10 +450,18 @@ def test_slurm_site_exposes_configured_tmp_dirs(monkeypatch, tmp_path):
         tmp_dir="/scratch/user/frequensolve-tmp",
     )
     site = DummySlurmSite("project/run", config=config)
-    site.local_host_config = LocalHostConfig(tmp_dir=tmp_path / "local-staging")
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        f'[host]\ntmp_dir = "{(tmp_path / "local-staging").as_posix()}"\n'
+    )
+    site._site_config_path = config_path
 
     assert site.remote_tmp_dir == Path("/scratch/user/frequensolve-tmp")
-    assert site.local_host_tmp_dir == tmp_path / "local-staging"
+    assert _host_tmp_path_for_config(site._site_config_path) == (
+        tmp_path / "local-staging"
+    )
+    assert not hasattr(site, "local_host_tmp_dir")
+    assert not hasattr(site, "local_host_config")
 
 
 def test_temporary_slurm_script_does_not_use_current_directory(monkeypatch, tmp_path):
@@ -936,11 +944,13 @@ def test_project_transfer_keeps_mesh_paths_remote_safe(tmp_path):
     sim.mesh = MeshManager(file=mesh_file, format="Gmsh")
     remote = Path("/scratch/user/copied_project")
     staging_parent = tmp_path / "transfer-staging"
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(f'[host]\ntmp_dir = "{staging_parent.as_posix()}"\n')
     captured = {}
 
     class CaptureSite:
         work_dir = remote
-        local_host_tmp_dir = staging_parent
+        _site_config_path = config_path
 
         def put(self, local, target):
             local = Path(local)
@@ -2391,7 +2401,9 @@ def test_slurm_provision_returns_allocation_handle(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
     staging_directory = tmp_path / "local-staging"
-    site.local_host_config = LocalHostConfig(tmp_dir=staging_directory)
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(f'[host]\ntmp_dir = "{staging_directory.as_posix()}"\n')
+    site._site_config_path = config_path
     uploaded_scripts = []
 
     monkeypatch.setattr(
