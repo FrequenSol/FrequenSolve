@@ -154,7 +154,7 @@ jobs:
           set -euo pipefail
           test "$DOCKER_REF" = "$TARGET_SHA"
           test "$DOCKER_COMMIT" = "$TARGET_SHA"
-          test "$DOCKER_WORKFLOW_COMMIT" = bd24b877e31a8293cd716bb349498f2bf3a92995
+          test "$DOCKER_WORKFLOW_COMMIT" = 5de478ec69444fb61ce3b4d727a7db05a7f7eafb
           test "$DOCKER_MARKER" = "not cloud and not hpc and not interactive"
           test "$DOCKER_STATUS" = passed
           test "$DOCKER_ARTIFACT" = frequensolve-test-evidence
