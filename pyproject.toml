@@ -46,6 +46,9 @@ dependencies = [
     "xarray>=2025.1.1,<2026.0.0",
 ]
 
+[project.scripts]
+frequensolve = "frequensolve.commands.cli:main"
+
 [project.urls]
 Homepage = "https://frequensol.com"
 Documentation = "https://docs.frequensol.com"

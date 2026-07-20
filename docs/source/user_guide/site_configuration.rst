@@ -335,7 +335,16 @@ extra.
    scheduler_heartbeat_timeout = 60
 
 Stampede3 profiles use the built-in preset and create generic ``SlurmSite``
-instances:
+instances. The preferred setup command prompts for the username and writes the
+profile:
+
+.. code-block:: bash
+
+   frequensolve site configure stampede3 \
+     --account your-tacc-project-id \
+     --solver /work/shared/frequensol/FS_seismic
+
+The generated profile is equivalent to this minimal configuration:
 
 .. code-block:: toml
 
@@ -343,19 +352,19 @@ instances:
    type = "slurm"
    preset = "stampede3"
    username = "username"
-   credential = "tacc-primary"
-   ssh_key = "~/.ssh/id_ed25519"
    solver = "/work/shared/frequensol/FS_seismic"
    # Omit work_dir to use $WORK/frequensolve, or choose another writable base:
    # work_dir = "/shared/username/frequensolve"
    # Optional future location for models and other high-I/O data:
    # scratch_dir = "/scratch/username/frequensolve"
    # tmp_dir = "/scratch/username/frequensolve/tmp"
-   default_partition = "skx-dev"
 
    [sites.stampede3.run_config]
+   account = "your-tacc-project-id"
    nodes = 1
    duration = "00:30:00"
+   ranks_per_node = 2
+   ranks_per_task = 1
 
 .. list-table::
    :header-rows: 1
@@ -396,8 +405,8 @@ instances:
        filesystem. Defaults to ``/tmp``.
    * - ``modules``
      - Environment modules loaded from left to right before the solver starts.
-       Module names and versions are site-specific; profiles and presets do not
-       add an implicit runtime stack.
+       A preset may supply a runtime stack; an explicit profile array replaces
+       it when a different solver build needs other modules.
    * - ``environment``
      - Non-secret environment variables exported for solver runs. Credential
        variables are rejected and must use the credential mechanisms below.
@@ -500,9 +509,10 @@ The same keywords can override those defaults for one submission:
    )
 
 The packaged ``site_presets.toml`` catalog currently defines Stampede3's
-``spr``, ``icx``, ``skx``, and ``skx-dev`` CPU partitions. These values are
-defaults: local profile values can override them, and TACC's ``qlimits`` output
-remains authoritative because queue policy can change without notice. See the
+``spr``, ``icx``, ``skx``, and ``skx-dev`` CPU partitions plus its standard
+Intel MPI, PETSc, and parallel-HDF5 runtime modules. These values are defaults:
+local profile values can override them, and TACC's ``qlimits`` output remains
+authoritative because queue policy can change without notice. See the
 `Stampede3 user guide <https://docs.tacc.utexas.edu/hpc/stampede3/>`_ for the
 current system and queue details.
 

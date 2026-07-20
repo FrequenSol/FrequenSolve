@@ -99,8 +99,6 @@ type = "slurm"
 preset = "stampede3"
 username = "your-tacc-username"
 account = "your-tacc-allocation"
-credential = "tacc-stampede3"
-ssh_key = "~/.ssh/id_ed25519"
 # HPC launches route every solver phase through this executable.
 solver = "/remote/path/to/solver-installation/FS_seismic"
 # work_dir defaults to $WORK/frequensolve. It may point to any writable remote
@@ -112,7 +110,6 @@ solver = "/remote/path/to/solver-installation/FS_seismic"
 # tmp_dir = "/scratch/your-tacc-username/frequensolve/tmp"
 default_partition = "skx-dev"
 transfer_method = "rsync"
-modules = []
 verbose = true
 
 [sites.stampede3.environment]

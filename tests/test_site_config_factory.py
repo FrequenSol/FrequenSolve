@@ -520,6 +520,12 @@ work_dir = "/scratch/user"
     assert site.kwargs["config"].mpi_wrapper == "ibrun"
     assert site.kwargs["config"].queue == "icx"
     assert site.kwargs["config"].partitions["spr"]["cores_per_node"] == 112
+    assert site.kwargs["modules"] == [
+        "intel/25.1",
+        "impi/21.15",
+        "petsc/3.23",
+        "phdf5",
+    ]
 
 
 def test_site_factory_overlays_stampede_preset_and_partition(monkeypatch, tmp_path):
