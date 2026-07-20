@@ -49,6 +49,8 @@ verbose = true
 [sites.local]
 type = "local"
 solver = "/path/to/local/solver"
+# Compatibility policy: "warn" (default), "strict", or "off".
+frequensolver_policy = "warn"
 shutdown_on_completion = true
 verbose = true
 
@@ -60,6 +62,8 @@ credential = "example-hpc"
 ssh_key = "~/.ssh/id_ed25519"
 # HPC launches route every solver phase through this executable.
 solver = "/remote/path/to/solver-installation/FS_seismic"
+# Compatibility policy: "warn" (default), "strict", or "off".
+frequensolver_policy = "warn"
 work_dir = "/remote/writable/directory/frequensolve"
 # Optional future location for models and other high-I/O data.
 scratch_dir = "/remote/scratch/directory/frequensolve"

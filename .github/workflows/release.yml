@@ -98,6 +98,11 @@ jobs:
           python scripts/validate_heavy_test_evidence.py \
             .release-evidence/heavy/frequensolve-test-evidence.json \
             --commit "$release_sha"
+          python scripts/validate_frequensolver_identity.py \
+            .release-evidence/heavy/frequensolver-identity.json \
+            --version "$(jq -r '.frequensolverVersion' "$evidence_file")" \
+            --commit "$(jq -r '.frequensolverGitCommit' "$evidence_file")" \
+            --build-id "$(jq -r '.frequensolverBuildId' "$evidence_file")"
           ci_run_id="$(jq -r '.ciRunId' "$evidence_file")"
           python scripts/verify_ci_evidence.py \
             --repository "$GITHUB_REPOSITORY" \
@@ -130,7 +135,22 @@ jobs:
             --ref-name "$RELEASE_TAG"
 
       - name: Build distributions
-        run: python -m build
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          release_sha="$(git rev-parse 'HEAD^{commit}')"
+          build_root="$(mktemp -d)"
+          build_source="${build_root}/frequensolve-${PACKAGE_VERSION}"
+          mkdir -p "$build_source"
+          git archive HEAD | tar -x -C "$build_source"
+          python "$build_source/scripts/materialize_frequensolver_compatibility.py" \
+            --release-evidence "$GITHUB_WORKSPACE/.release-evidence/release-evidence.json" \
+            --package-release "$PACKAGE_VERSION" \
+            --package-commit "$release_sha" \
+            --output "$build_source/src/frequensolve/frequensolver_compatibility.json"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          python -m build --outdir "$GITHUB_WORKSPACE/dist" "$build_source"
 
       - name: Check package metadata
         run: python -m twine check dist/*
@@ -144,6 +164,11 @@ jobs:
           for name in ("Project", "LayeredModel", "LocalSite", "AWSSite"):
               if getattr(fs, name, None) is None:
                   raise SystemExit(f"missing release-wheel export: {name}")
+          manifest = fs.load_frequensolver_compatibility()
+          if manifest.package_release != fs.__version__:
+              raise SystemExit("packaged FrequenSolver metadata version mismatch")
+          if manifest.preferred_frequensolver is None:
+              raise SystemExit("release wheel has no preferred FrequenSolver")
           print(fs.__version__)
           PY
 

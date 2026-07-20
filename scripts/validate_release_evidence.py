@@ -22,6 +22,9 @@ TEST_MARKER = "not cloud and not hpc and not interactive"
 TEST_STATUS = "passed"
 TEST_ARTIFACT = "frequensolve-test-evidence"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+FINAL_RELEASE_RE = re.compile(
+    r"^v(?:0|[1-9][0-9]*)\." r"(?:0|[1-9][0-9]*)\." r"(?:0|[1-9][0-9]*)$"
+)
 
 
 def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
@@ -36,7 +39,6 @@ def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
         "dockerTestMarker": TEST_MARKER,
         "dockerTestStatus": TEST_STATUS,
         "dockerTestArtifact": TEST_ARTIFACT,
-        "sauceRef": "main",
         "fsMumpsRef": "main",
     }
     mismatches = [
@@ -58,6 +60,26 @@ def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
     for name in ("sauceCommit", "fsMumpsCommit"):
         if not SHA_RE.fullmatch(evidence.get(name, "")):
             mismatches.append(f"{name} must be a lowercase 40-character Git SHA")
+    frequensolver_release = evidence.get("frequensolverRelease", "")
+    if not FINAL_RELEASE_RE.fullmatch(frequensolver_release):
+        mismatches.append(
+            "frequensolverRelease must be an immutable final release tag vX.Y.Z"
+        )
+    if evidence.get("sauceRef") != frequensolver_release:
+        mismatches.append("sauceRef must equal frequensolverRelease")
+    if evidence.get("frequensolverVersion") != frequensolver_release:
+        mismatches.append("frequensolverVersion must equal frequensolverRelease")
+    if evidence.get("frequensolverGitCommit") != evidence.get("sauceCommit"):
+        mismatches.append("frequensolverGitCommit must equal sauceCommit")
+    if not evidence.get("frequensolverBuildId"):
+        mismatches.append("frequensolverBuildId must be non-empty")
+    expected_release_url = (
+        "https://github.com/FrequenSol/Sauce/releases/tag/" f"{frequensolver_release}"
+    )
+    if evidence.get("frequensolverReleaseUrl") != expected_release_url:
+        mismatches.append(
+            "frequensolverReleaseUrl must identify the immutable FrequenSolver release"
+        )
     for name in ("ciRunId", "dockerCallerRunId"):
         value = evidence.get(name)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -66,6 +88,12 @@ def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
         mismatches.append("ciRunUrl must be non-empty")
     if not evidence.get("dockerImageTag"):
         mismatches.append("dockerImageTag must be non-empty")
+    expected_docker_run_url = (
+        "https://github.com/FrequenSol/FrequenSolve/actions/runs/"
+        f"{evidence.get('dockerCallerRunId')}"
+    )
+    if evidence.get("dockerCallerRunUrl") != expected_docker_run_url:
+        mismatches.append("dockerCallerRunUrl must identify dockerCallerRunId")
     archive_sha = evidence.get("dockerTestArchiveSha256", "")
     if not re.fullmatch(r"[0-9a-f]{64}", archive_sha):
         mismatches.append("dockerTestArchiveSha256 must be a lowercase SHA-256")

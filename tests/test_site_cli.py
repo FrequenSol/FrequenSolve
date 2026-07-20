@@ -1,5 +1,6 @@
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import toml
 from click.testing import CliRunner
@@ -260,6 +261,13 @@ def test_check_reports_resolved_site_defaults_and_closes(monkeypatch):
             assert "module load phdf5" in command
             return "module setup output\nfrequensolve-solver-ready"
 
+        def check_frequensolver_compatibility(self):
+            return SimpleNamespace(
+                confirmed=True,
+                status="compatible",
+                message=("FrequenSolve 0.3.0 matches preferred FrequenSolver v0.1.0."),
+            )
+
         def close(self):
             self.closed = True
 
@@ -272,6 +280,7 @@ def test_check_reports_resolved_site_defaults_and_closes(monkeypatch):
     assert "Site profile is ready: stampede3.tacc.utexas.edu" in result.output
     assert "Remote work directory: /work/student/frequensolve" in result.output
     assert "intel/25.1, impi/21.15, petsc/3.23, phdf5" in result.output
+    assert "matches preferred FrequenSolver" in result.output
     assert fake_site.closed is True
 
 
