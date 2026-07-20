@@ -27,6 +27,7 @@ from frequensolve.orchestrator.sites.hpc import (
     _parse_sbatch_job_id,
 )
 from frequensolve.orchestrator.sites.hpc import site as hpc
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import temporary_text_file
 from frequensolve.orchestrator.sites.hpc.stampede3 import (
     Stampede3Config,
     Stampede3Site,
@@ -453,6 +454,25 @@ def test_slurm_site_exposes_configured_tmp_dirs(monkeypatch, tmp_path):
 
     assert site.remote_tmp_dir == Path("/scratch/user/frequensolve-tmp")
     assert site.local_host_tmp_dir == tmp_path / "local-staging"
+
+
+def test_temporary_slurm_script_does_not_use_current_directory(monkeypatch, tmp_path):
+    working_directory = tmp_path / "read-only-cwd"
+    working_directory.mkdir()
+    working_directory.chmod(0o555)
+    monkeypatch.chdir(working_directory)
+
+    try:
+        with temporary_text_file(
+            "#!/bin/sh\n",
+            suffix=".sh",
+            prefix="slurm_",
+        ) as script_path:
+            assert script_path.parent != working_directory
+            assert script_path.read_text() == "#!/bin/sh\n"
+            assert script_path.stat().st_mode & 0o777 == 0o700
+    finally:
+        working_directory.chmod(0o755)
 
 
 def test_slurm_site_rejects_relative_remote_tmp_dir(monkeypatch):
@@ -2367,11 +2387,18 @@ def test_slurm_context_manager_closes_clients(monkeypatch):
     assert site._compute_client is None
 
 
-def test_slurm_provision_returns_allocation_handle(monkeypatch):
+def test_slurm_provision_returns_allocation_handle(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
+    staging_directory = tmp_path / "local-staging"
+    site.local_host_config = LocalHostConfig(tmp_dir=staging_directory)
+    uploaded_scripts = []
 
-    monkeypatch.setattr(site, "put", lambda local, remote: None)
+    monkeypatch.setattr(
+        site,
+        "put",
+        lambda local, remote: uploaded_scripts.append((Path(local), Path(remote))),
+    )
     monkeypatch.setattr(site, "_submit_sbatch", lambda cmd: "44")
     monkeypatch.setattr(
         site, "_generate_provision_script", lambda *args, **kwargs: "script"
@@ -2382,6 +2409,8 @@ def test_slurm_provision_returns_allocation_handle(monkeypatch):
     assert isinstance(allocation, RunHandle)
     assert allocation.id == "44"
     assert allocation.mode == "allocation"
+    assert uploaded_scripts[0][0].parent == staging_directory
+    assert uploaded_scripts[0][1].parent == site.remote_tmp_dir
 
 
 def test_slurm_attached_run_is_awaitable(monkeypatch):

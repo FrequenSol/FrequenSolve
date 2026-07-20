@@ -1009,7 +1009,12 @@ class SlurmSite(BaseSite):
         duration = self.config.validate_request(nhost, nproc, duration)
         script = self._generate_provision_script(nhost, nproc, duration, **kwargs)
 
-        with _temporary_text_file(script, suffix=".sh", prefix="slurm_") as script_path:
+        with _temporary_text_file(
+            script,
+            suffix=".sh",
+            prefix="slurm_",
+            directory=self.local_host_tmp_dir,
+        ) as script_path:
             logger.debug("Temporary SLURM script created at %s", script_path)
             remote_path = self.remote_tmp_dir / os.path.basename(script_path)
             try:
@@ -2425,7 +2430,10 @@ class SlurmSite(BaseSite):
         remote_script = (self.work_dir / "sweep").with_suffix(".slurm")
         remote_runner = self._adaptive_scheduler_remote_path()
         with _temporary_text_file(
-            script, suffix=".slurm", prefix="sweep"
+            script,
+            suffix=".slurm",
+            prefix="sweep",
+            directory=self.local_host_tmp_dir,
         ) as script_path:
             logger.debug("Temporary sweep script created at %s", script_path)
             self.put(script_path, remote_script)
@@ -2511,7 +2519,12 @@ class SlurmSite(BaseSite):
         self.put(Path(local_job), Path(remote_job))
 
         remote_script = (self.work_dir / "sweep").with_suffix(".sh")
-        with _temporary_text_file(script, suffix=".sh", prefix="sweep") as script_path:
+        with _temporary_text_file(
+            script,
+            suffix=".sh",
+            prefix="sweep",
+            directory=self.local_host_tmp_dir,
+        ) as script_path:
             logger.debug("Temporary sweep script created at %s", script_path)
             self.put(script_path, remote_script)
 

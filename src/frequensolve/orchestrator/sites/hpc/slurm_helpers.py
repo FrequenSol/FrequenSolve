@@ -5,7 +5,7 @@ import re
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, List, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 SLURM_QUEUE_STATES = {
     "PD": "pending",
@@ -108,11 +108,19 @@ def temporary_text_file(
     *,
     suffix: str,
     prefix: str,
-    directory: Union[str, Path] = ".",
+    directory: Optional[Union[str, Path]] = None,
 ):
     """Create a temporary executable text file and remove it afterwards."""
 
-    fd, script_path = tempfile.mkstemp(suffix=suffix, prefix=prefix, dir=directory)
+    temporary_directory = None
+    if directory is not None:
+        temporary_directory = Path(directory).expanduser()
+        temporary_directory.mkdir(parents=True, exist_ok=True)
+    fd, script_path = tempfile.mkstemp(
+        suffix=suffix,
+        prefix=prefix,
+        dir=temporary_directory,
+    )
     path = Path(script_path)
     try:
         with os.fdopen(fd, "w") as f:
