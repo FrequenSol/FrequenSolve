@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -51,6 +53,45 @@ def test_adaptive_scheduler_reads_structured_config_without_environment(
     assert instance._load_task_memory() == [1.5]
     assert instance._choose_base_ranks(1.5) == 1
     assert instance.task_indices == [1]
+
+
+def test_sizing_checkpoint_validation_uses_scheduler_memory_field(tmp_path):
+    scheduler = _load_scheduler_module()
+    sizing = tmp_path / "sizing.json"
+    sizing.write_text(
+        json.dumps(
+            {
+                "schema": "fs-sizing-2",
+                "sweep_status": "forward_sweep_checkpoint",
+                "task": [{"memory": "512 MB"}, {"memory": "1.5 GB"}],
+            }
+        )
+    )
+
+    assert scheduler.validate_sizing_checkpoint(str(sizing), 2) == [0.5, 1.5]
+    result = subprocess.run(
+        [sys.executable, scheduler.__file__, "--validate-sizing", str(sizing), "2"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_sizing_checkpoint_validation_rejects_memory_bytes_only(tmp_path):
+    scheduler = _load_scheduler_module()
+    sizing = tmp_path / "sizing.json"
+    sizing.write_text(
+        json.dumps(
+            {
+                "schema": "fs-sizing-2",
+                "sweep_status": "forward_sweep_checkpoint",
+                "task": [{"memory_bytes": 1024}],
+            }
+        )
+    )
+
+    with pytest.raises(SystemExit, match="task 1 missing valid memory estimate"):
+        scheduler.validate_sizing_checkpoint(str(sizing), 1)
 
 
 def test_adaptive_scheduler_requires_one_task_when_sizing_is_skipped(tmp_path):
