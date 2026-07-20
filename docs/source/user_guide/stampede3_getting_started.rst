@@ -37,7 +37,7 @@ Install A Pinned Release
 ------------------------
 
 Create an isolated environment on the laptop or workstation that will launch
-your Python code. Replace ``0.2.2`` with a later exact version when one is
+your Python code. Replace ``0.3.0`` with a later exact version when one is
 supplied by your FrequenSol administrator:
 
 .. code-block:: bash
@@ -45,7 +45,7 @@ supplied by your FrequenSol administrator:
    python3 -m venv ~/.venvs/frequensolve
    . ~/.venvs/frequensolve/bin/activate
    python -m pip install --upgrade pip
-   python -m pip install "frequensolve[hpc]==0.2.2"
+   python -m pip install "frequensolve[hpc]==0.3.0"
    frequensolve --version
 
 Use an exact version so every user runs the same API and solver contract. Add
@@ -54,14 +54,14 @@ PyVista:
 
 .. code-block:: bash
 
-   python -m pip install "frequensolve[hpc,visual]==0.2.2"
+   python -m pip install "frequensolve[hpc,visual]==0.3.0"
 
 PyPI installs the library, but not the repository's example notebooks. To use
 the examples for the same release, clone its matching tag:
 
 .. code-block:: bash
 
-   git clone --depth 1 --branch v0.2.2 \
+   git clone --depth 1 --branch v0.3.0 \
      https://github.com/FrequenSol/FrequenSolve.git
    python -m pip install jupyterlab
    python -m jupyter lab \
@@ -230,7 +230,7 @@ normal Stampede3 execution. TACC provides Python through a module:
    python -m venv "$WORK/venvs/frequensolve"
    . "$WORK/venvs/frequensolve/bin/activate"
    python -m pip install --upgrade pip
-   python -m pip install "frequensolve==0.2.2"
+   python -m pip install "frequensolve==0.3.0"
 
 This is useful for authoring or inspecting saved contracts on TACC. The
 ``SlurmSite`` workflow is designed for a client machine connecting to Stampede3;
