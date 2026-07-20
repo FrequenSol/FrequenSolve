@@ -207,6 +207,60 @@ def test_hdf5_geometry_and_encoding_match_pinned_sauce_schema_and_roundtrip():
     assert Acquisition.from_fs(payload).to_fs() == payload
 
 
+@pytest.mark.parametrize(
+    "geometry",
+    [
+        SourceGeometry.hdf5(
+            "inputs/sources.h5",
+            dataset="/sources",
+            kind="scalar",
+            count=3,
+        ),
+        SourceGeometry.sps(
+            "inputs/sources.sps",
+            kind="scalar",
+            count=3,
+        ),
+    ],
+    ids=["hdf5", "sps"],
+)
+def test_external_source_geometry_count_roundtrips(geometry):
+    acquisition = Acquisition(source_geometry=geometry)
+
+    payload = acquisition.to_fs()
+    loaded = Acquisition.from_fs(payload)
+
+    assert payload["source_geometry"]["count"] == 3
+    assert loaded.known_source_point_count() == 3
+    assert loaded.known_source_field_count() == 3
+    assert loaded.to_fs() == payload
+
+
+def test_external_source_encoding_count_roundtrips():
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.hdf5(
+            "inputs/sources.h5",
+            dataset="/sources",
+            kind="scalar",
+            count=4,
+        ),
+        source_encoding=SourceEncoding.hdf5(
+            "inputs/encoding.h5",
+            dataset="/coefficients",
+            count=2,
+        ),
+    )
+
+    payload = acquisition.to_fs()
+    loaded = Acquisition.from_fs(payload)
+
+    assert payload["source_geometry"]["count"] == 4
+    assert payload["source_encoding"]["count"] == 2
+    assert loaded.known_source_point_count() == 4
+    assert loaded.known_source_field_count() == 2
+    assert loaded.to_fs() == payload
+
+
 def test_per_point_directions_serialize_on_source_atoms():
     acquisition = Acquisition(
         source_geometry=SourceGeometry.points(

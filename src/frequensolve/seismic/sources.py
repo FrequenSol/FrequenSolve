@@ -571,12 +571,16 @@ class SourceGeometry(ExtraFieldsMixin):
                 payload["system"] = self.system
             if self.units is not None:
                 payload["units"] = unit_expression(self.units)
+            if self.count is not None:
+                payload["count"] = self.count
         else:
             payload["source_file"] = _path_to_fs(self.source_file, ctx)
             if self.system is not None:
                 payload["system"] = self.system
             if self.units is not None:
                 payload["units"] = unit_expression(self.units)
+            if self.count is not None:
+                payload["count"] = self.count
         return merge_extra(payload, self.extra, "SourceGeometry")
 
     @property
@@ -893,6 +897,8 @@ class SourceEncoding(ExtraFieldsMixin):
                 payload["reference_coordinates_dataset"] = (
                     self.reference_coordinates_dataset
                 )
+            if self.count is not None:
+                payload["count"] = self.count
         return merge_extra(payload, self.extra, "SourceEncoding")
 
     @property
