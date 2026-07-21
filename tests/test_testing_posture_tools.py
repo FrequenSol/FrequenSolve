@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from frequensolve.frequensolver import load_frequensolver_compatibility
 from scripts.check_coverage_thresholds import (
     coverage_percentages,
     failed_thresholds,
@@ -195,6 +196,25 @@ def _release_evidence():
 
 def test_release_evidence_accepts_exact_sha_ci_and_docker_proof():
     validate_evidence(_release_evidence(), COMMIT)
+
+
+def test_materialized_frequensolver_manifest_loads(tmp_path):
+    manifest = manifest_from_evidence(
+        _release_evidence(),
+        package_release="0.3.0",
+        package_commit=COMMIT,
+    )
+    manifest_path = tmp_path / "frequensolver_compatibility.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    loaded = load_frequensolver_compatibility(manifest_path)
+
+    assert loaded.package_release == "0.3.0"
+    assert loaded.preferred_frequensolver.release == "v0.1.0"
+    assert loaded.evidence_run_id == 789
+    assert loaded.evidence_url == (
+        "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/789"
+    )
 
 
 def test_release_evidence_rejects_mutable_docker_workflow_ref():
