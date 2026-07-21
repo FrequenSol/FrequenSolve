@@ -1,7 +1,10 @@
 import hashlib
 import io
 import json
+import subprocess
+import sys
 import tarfile
+from pathlib import Path
 
 import pytest
 
@@ -31,6 +34,7 @@ from scripts.validate_release_evidence import (
 from scripts.verify_ci_evidence import has_required_job, run_matches
 
 COMMIT = "a" * 40
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _heavy_evidence():
@@ -365,6 +369,64 @@ def test_frequensolver_identity_accepts_all_printable_single_line_ascii():
         expected_commit="c" * 40,
         expected_build_id=printable_ascii,
     )
+
+
+def test_frequensolver_identity_cli_accepts_leading_hyphen_build_id(tmp_path):
+    build_id = "-release-v0.1.0"
+    identity_file = tmp_path / "frequensolver-identity.json"
+    identity_file.write_text(
+        json.dumps(
+            {
+                "schema": "frequensolver-identity-1",
+                "product": "FrequenSolver",
+                "version": "v0.1.0",
+                "build_id": build_id,
+                "git_commit": "c" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/validate_frequensolver_identity.py"),
+            str(identity_file),
+            "--version=v0.1.0",
+            f"--commit={'c' * 40}",
+            f"--build-id={build_id}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("workflow", "expected_argument"),
+    [
+        (
+            "create-release-candidate.yml",
+            '--build-id="$FREQUENSOLVER_BUILD_ID"',
+        ),
+        (
+            "create-release.yml",
+            '--build-id="$(jq -r \'.frequensolverBuildId\' "$evidence_file")"',
+        ),
+        (
+            "release.yml",
+            '--build-id="$(jq -r \'.frequensolverBuildId\' "$evidence_file")"',
+        ),
+    ],
+)
+def test_release_workflows_bind_build_id_as_one_argument(workflow, expected_argument):
+    workflow_text = (REPO_ROOT / ".github/workflows" / workflow).read_text(
+        encoding="utf-8"
+    )
+
+    assert expected_argument in workflow_text
 
 
 def test_heavy_test_evidence_requires_real_test_outputs(tmp_path):

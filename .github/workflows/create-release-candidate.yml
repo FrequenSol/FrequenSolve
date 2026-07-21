@@ -205,7 +205,7 @@ jobs:
             "$frequensolver_identity" \
             --version "$FREQUENSOLVER_VERSION" \
             --commit "$FREQUENSOLVER_GIT_COMMIT" \
-            --build-id "$FREQUENSOLVER_BUILD_ID"
+            --build-id="$FREQUENSOLVER_BUILD_ID"
           tar -czf frequensolve-test-evidence.tar.gz -C .solver-evidence .
           archive_sha256="$(sha256sum frequensolve-test-evidence.tar.gz | awk '{print $1}')"
 
