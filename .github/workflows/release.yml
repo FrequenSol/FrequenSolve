@@ -102,7 +102,7 @@ jobs:
             .release-evidence/heavy/frequensolver-identity.json \
             --version "$(jq -r '.frequensolverVersion' "$evidence_file")" \
             --commit "$(jq -r '.frequensolverGitCommit' "$evidence_file")" \
-            --build-id "$(jq -r '.frequensolverBuildId' "$evidence_file")"
+            --build-id="$(jq -r '.frequensolverBuildId' "$evidence_file")"
           ci_run_id="$(jq -r '.ciRunId' "$evidence_file")"
           python scripts/verify_ci_evidence.py \
             --repository "$GITHUB_REPOSITORY" \

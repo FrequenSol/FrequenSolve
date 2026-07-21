@@ -14,6 +14,16 @@ EXPECTED_KEYS = {"schema", "product", "version", "build_id", "git_commit"}
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
+def _is_nonempty_printable_single_line_ascii(value: Any) -> bool:
+    """Return whether ``value`` satisfies the FrequenSolver identity contract."""
+
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and all(" " <= character <= "~" for character in value)
+    )
+
+
 def validate_identity(
     identity: dict[str, Any],
     *,
@@ -43,9 +53,11 @@ def validate_identity(
             errors.append(f"{name} must be {value!r}, got {identity.get(name)!r}")
     if not SHA_RE.fullmatch(expected_commit):
         errors.append("expected commit must be a lowercase 40-character Git SHA")
-    build_id = identity.get("build_id")
-    if not isinstance(build_id, str) or not build_id:
-        errors.append("build_id must be a non-empty string")
+    for name in ("version", "build_id"):
+        if not _is_nonempty_printable_single_line_ascii(identity.get(name)):
+            errors.append(
+                f"{name} must be a non-empty printable single-line ASCII string"
+            )
     if errors:
         raise ValueError("; ".join(errors))
 
