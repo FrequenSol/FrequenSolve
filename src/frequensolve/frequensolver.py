@@ -173,7 +173,8 @@ def _manifest_from_mapping(
         raise ValueError("evidence.run_id must be a positive integer")
     evidence_url = _required_string(evidence_payload.get("url"), "evidence.url")
     expected_evidence_url = (
-        "https://github.com/FrequenSol/FrequenSolve/actions/runs/" f"{run_id}"
+        "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/"
+        f"{run_id}"
     )
     if evidence_url != expected_evidence_url:
         raise ValueError("evidence.url must identify evidence.run_id")

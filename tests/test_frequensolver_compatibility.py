@@ -37,7 +37,9 @@ def _manifest() -> FrequenSolverCompatibilityManifest:
             release_url=("https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"),
         ),
         evidence_run_id=456,
-        evidence_url=("https://github.com/FrequenSol/FrequenSolve/actions/runs/456"),
+        evidence_url=(
+            "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/456"
+        ),
     )
 
 
@@ -106,7 +108,8 @@ def test_loader_validates_release_manifest(tmp_path):
                 "evidence": {
                     "run_id": 456,
                     "url": (
-                        "https://github.com/FrequenSol/FrequenSolve/actions/runs/456"
+                        "https://github.com/FrequenSol/"
+                        "FrequenSolveDockerImage/actions/runs/456"
                     ),
                 },
             }
@@ -119,6 +122,35 @@ def test_loader_validates_release_manifest(tmp_path):
     assert loaded.package_release == "0.3.0"
     assert loaded.preferred_frequensolver.release == "v0.1.0"
     assert loaded.evidence_run_id == 456
+
+
+def test_loader_rejects_caller_run_url_for_downstream_evidence(tmp_path):
+    path = tmp_path / "compatibility.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "frequensolve-frequensolver-compatibility/v1",
+                "package_release": "0.3.0",
+                "preferred_frequensolver": {
+                    "release": "v0.1.0",
+                    "git_commit": COMMIT,
+                    "release_url": (
+                        "https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"
+                    ),
+                },
+                "evidence": {
+                    "run_id": 456,
+                    "url": (
+                        "https://github.com/FrequenSol/FrequenSolve/actions/runs/456"
+                    ),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="evidence.url"):
+        load_frequensolver_compatibility(path)
 
 
 def test_loader_rejects_release_url_for_another_frequensolver_release(tmp_path):
@@ -138,7 +170,8 @@ def test_loader_rejects_release_url_for_another_frequensolver_release(tmp_path):
                 "evidence": {
                     "run_id": 456,
                     "url": (
-                        "https://github.com/FrequenSol/FrequenSolve/actions/runs/456"
+                        "https://github.com/FrequenSol/"
+                        "FrequenSolveDockerImage/actions/runs/456"
                     ),
                 },
             }
