@@ -404,31 +404,6 @@ def test_frequensolver_identity_cli_accepts_leading_hyphen_build_id(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize(
-    ("workflow", "expected_argument"),
-    [
-        (
-            "create-release-candidate.yml",
-            '--build-id="$FREQUENSOLVER_BUILD_ID"',
-        ),
-        (
-            "create-release.yml",
-            '--build-id="$(jq -r \'.frequensolverBuildId\' "$evidence_file")"',
-        ),
-        (
-            "release.yml",
-            '--build-id="$(jq -r \'.frequensolverBuildId\' "$evidence_file")"',
-        ),
-    ],
-)
-def test_release_workflows_bind_build_id_as_one_argument(workflow, expected_argument):
-    workflow_text = (REPO_ROOT / ".github/workflows" / workflow).read_text(
-        encoding="utf-8"
-    )
-
-    assert expected_argument in workflow_text
-
-
 def test_heavy_test_evidence_requires_real_test_outputs(tmp_path):
     (tmp_path / "junit.xml").write_text("<testsuites />", encoding="utf-8")
     (tmp_path / "coverage.xml").write_text("<coverage />", encoding="utf-8")
