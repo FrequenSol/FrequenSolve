@@ -75,6 +75,22 @@ def validate_release_version(
     return errors
 
 
+def version_from_release_tag(ref_name: str) -> str:
+    """Return the exact package version encoded by a validated release tag."""
+
+    if not ref_name.startswith("v"):
+        raise ValueError("release tag must start with v")
+    version = ref_name[1:]
+    errors = validate_release_version(
+        version=version,
+        ref_type="tag",
+        ref_name=ref_name,
+    )
+    if errors:
+        raise ValueError("; ".join(errors))
+    return version
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Validate FrequenSolve package release version and git tag."
@@ -82,11 +98,31 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--version", default="", help="Versioneer version override.")
     parser.add_argument("--ref-type", default="", help="GitHub ref type override.")
     parser.add_argument("--ref-name", default="", help="GitHub ref name override.")
+    parser.add_argument(
+        "--version-from-tag",
+        default="",
+        metavar="TAG",
+        help="Print the exact validated package version encoded by TAG.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.version_from_tag:
+        if args.version or args.ref_type or args.ref_name:
+            print(
+                "--version-from-tag cannot be combined with version/ref overrides",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            print(version_from_release_tag(args.version_from_tag))
+        except ValueError as exc:
+            print(f"Invalid FrequenSolve release tag: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     version = args.version or _versioneer_version()
     ref_type = args.ref_type or _current_ref_type()
     ref_name = args.ref_name or _current_ref_name()

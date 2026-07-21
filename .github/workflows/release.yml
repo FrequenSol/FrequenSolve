@@ -126,17 +126,17 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
-          version="$(python -c 'import versioneer; print(versioneer.get_version())')"
+          version="$(
+            python scripts/validate_release_version.py \
+              --version-from-tag "$RELEASE_TAG"
+          )"
           echo "Building FrequenSolve ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          python scripts/validate_release_version.py \
-            --version "${version}" \
-            --ref-type tag \
-            --ref-name "$RELEASE_TAG"
 
       - name: Build distributions
         env:
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           set -euo pipefail
           release_sha="$(git rev-parse 'HEAD^{commit}')"
@@ -144,6 +144,16 @@ jobs:
           build_source="${build_root}/frequensolve-${PACKAGE_VERSION}"
           mkdir -p "$build_source"
           git archive HEAD | tar -x -C "$build_source"
+          python scripts/materialize_release_version.py \
+            --version "$PACKAGE_VERSION" \
+            --release-tag "$RELEASE_TAG" \
+            --revision "$release_sha" \
+            --output "$build_source/src/frequensolve/_version.py"
+          staged_version="$(
+            cd "$build_source"
+            python -c 'import versioneer; print(versioneer.get_version())'
+          )"
+          test "$staged_version" = "$PACKAGE_VERSION"
           python "$build_source/scripts/materialize_frequensolver_compatibility.py" \
             --release-evidence "$GITHUB_WORKSPACE/.release-evidence/release-evidence.json" \
             --package-release "$PACKAGE_VERSION" \
