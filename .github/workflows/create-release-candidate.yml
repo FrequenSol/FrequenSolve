@@ -110,10 +110,10 @@ jobs:
     needs: prepare-evidence
     # Pin the reviewed DockerImage evidence workflow and its checked-out source
     # to the same immutable commit.
-    uses: FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@1d4123dec8b0026075f0479d41afab7bd7c8ada9
+    uses: FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@ade58cf0b9eb183b124d02165a0472a27564a1d0
     with:
       SOURCE_REF: main
-      SOURCE_COMMIT: 1d4123dec8b0026075f0479d41afab7bd7c8ada9
+      SOURCE_COMMIT: ade58cf0b9eb183b124d02165a0472a27564a1d0
       REQUEST_ID: frequensolve-rc-${{ github.run_id }}
       SAUCE_REF: ${{ needs.prepare-evidence.outputs.frequensolver_release }}
       FS_MUMPS_REF: main
@@ -182,7 +182,7 @@ jobs:
           set -euo pipefail
           test "$DOCKER_REF" = "$TARGET_SHA"
           test "$DOCKER_COMMIT" = "$TARGET_SHA"
-          test "$DOCKER_WORKFLOW_COMMIT" = 1d4123dec8b0026075f0479d41afab7bd7c8ada9
+          test "$DOCKER_WORKFLOW_COMMIT" = ade58cf0b9eb183b124d02165a0472a27564a1d0
           test "$DOCKER_MARKER" = "not cloud and not hpc and not interactive"
           test "$DOCKER_STATUS" = passed
           test "$DOCKER_ARTIFACT" = frequensolve-test-evidence
@@ -221,7 +221,7 @@ jobs:
             --arg ciRunUrl "$CI_RUN_URL" \
             --arg ciWorkflow ".github/workflows/cicd-workflow.yml" \
             --arg ciRequiredJob "Required CI" \
-            --arg dockerWorkflow "FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@1d4123dec8b0026075f0479d41afab7bd7c8ada9" \
+            --arg dockerWorkflow "FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@ade58cf0b9eb183b124d02165a0472a27564a1d0" \
             --arg dockerWorkflowCommit "$DOCKER_WORKFLOW_COMMIT" \
             --argjson dockerCallerRunId "$GITHUB_RUN_ID" \
             --arg dockerCallerRunUrl "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
