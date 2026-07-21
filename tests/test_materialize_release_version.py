@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,10 @@ REVISION = "a" * 40
 
 
 def versioneer_identity(source: Path) -> dict[str, object]:
+    env = os.environ.copy()
+    for name in tuple(env):
+        if name.startswith("COV_CORE_") or name == "COVERAGE_PROCESS_START":
+            env.pop(name)
     result = subprocess.run(
         [
             sys.executable,
@@ -22,6 +27,7 @@ def versioneer_identity(source: Path) -> dict[str, object]:
             "import json, versioneer; print(json.dumps(versioneer.get_versions()))",
         ],
         cwd=source,
+        env=env,
         check=True,
         capture_output=True,
         text=True,
