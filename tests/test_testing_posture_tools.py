@@ -317,6 +317,56 @@ def test_frequensolver_identity_evidence_requires_exact_release_build():
         )
 
 
+@pytest.mark.parametrize("field", ["version", "build_id"])
+@pytest.mark.parametrize(
+    "invalid_value",
+    [
+        "release\noutput",
+        "release\x1foutput",
+        "release-\N{LATIN SMALL LETTER E WITH ACUTE}",
+    ],
+    ids=["newline", "control", "non-ascii"],
+)
+def test_frequensolver_identity_rejects_unsafe_text_fields(field, invalid_value):
+    identity = {
+        "schema": "frequensolver-identity-1",
+        "product": "FrequenSolver",
+        "version": "v0.1.0",
+        "build_id": "release-v0.1.0",
+        "git_commit": "c" * 40,
+    }
+    identity[field] = invalid_value
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{field} must be a non-empty printable single-line ASCII string",
+    ):
+        validate_identity(
+            identity,
+            expected_version=identity["version"],
+            expected_commit="c" * 40,
+            expected_build_id=identity["build_id"],
+        )
+
+
+def test_frequensolver_identity_accepts_all_printable_single_line_ascii():
+    printable_ascii = "".join(chr(codepoint) for codepoint in range(0x20, 0x7F))
+    identity = {
+        "schema": "frequensolver-identity-1",
+        "product": "FrequenSolver",
+        "version": printable_ascii,
+        "build_id": printable_ascii,
+        "git_commit": "c" * 40,
+    }
+
+    validate_identity(
+        identity,
+        expected_version=printable_ascii,
+        expected_commit="c" * 40,
+        expected_build_id=printable_ascii,
+    )
+
+
 def test_heavy_test_evidence_requires_real_test_outputs(tmp_path):
     (tmp_path / "junit.xml").write_text("<testsuites />", encoding="utf-8")
     (tmp_path / "coverage.xml").write_text("<coverage />", encoding="utf-8")
