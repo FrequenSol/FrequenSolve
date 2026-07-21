@@ -357,29 +357,33 @@ jobs:
                 exit 1
               fi
 
-              latest_assets="$(gh release view "$latest_tag" --json assets)"
-              has_release_evidence="$(
-                jq -r 'any(.assets[]?; .name == "release-evidence.json")' \
-                  <<<"$latest_assets"
-              )"
-              has_heavy_archive="$(
-                jq -r 'any(.assets[]?; .name == "frequensolve-test-evidence.tar.gz")' \
-                  <<<"$latest_assets"
-              )"
-              latest_complete=false
-              if [ "$latest_draft" = false ] && \
-                 [ "$has_release_evidence" = true ] && \
-                 [ "$has_heavy_archive" = true ]; then
-                latest_complete=true
+              same_commit=false
+              if [ "$latest_sha" = "$TARGET_SHA" ]; then
+                same_commit=true
               fi
 
-              if [ "$latest_sha" = "$TARGET_SHA" ]; then
-                tag_name="$latest_tag"
-                echo "Reusing ${tag_name}; it already targets ${TARGET_SHA}."
-              elif [ "$latest_complete" != true ]; then
-                echo "Incomplete ${latest_tag} points to ${latest_sha}, not ${TARGET_SHA}." >&2
-                exit 1
-              fi
+              retry_action="$(
+                python scripts/plan_release_tags.py retry-action \
+                  --same-commit "$same_commit" \
+                  --draft "$latest_draft"
+              )"
+              case "$retry_action" in
+                reuse)
+                  tag_name="$latest_tag"
+                  echo "Resuming draft ${tag_name}; it targets ${TARGET_SHA}."
+                  ;;
+                advance)
+                  echo "Preserving published ${latest_tag}; creating ${tag_name}."
+                  ;;
+                fail)
+                  echo "Draft ${latest_tag} points to ${latest_sha}, not ${TARGET_SHA}." >&2
+                  exit 1
+                  ;;
+                *)
+                  echo "Unexpected retry action: ${retry_action}" >&2
+                  exit 1
+                  ;;
+              esac
             fi
           fi
 
