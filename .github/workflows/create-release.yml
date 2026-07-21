@@ -161,7 +161,7 @@ jobs:
             echo "- Source commit: ${rc_sha}"
             echo "- Package version: ${final_tag#v}"
             echo "- Required CI: $(jq -r '.ciRunUrl' "$evidence_file")"
-            echo "- Solver evidence run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/$(jq -r '.dockerCallerRunId' "$evidence_file")"
+            echo "- Solver evidence run: $(jq -r '.dockerEvidenceRunUrl' "$evidence_file")"
             echo "- Preferred FrequenSolver: [$(jq -r '.frequensolverRelease' "$evidence_file")]($(jq -r '.frequensolverReleaseUrl' "$evidence_file"))"
             echo "- Tested runtime image: $(jq -r '.dockerImageTag' "$evidence_file")"
             echo "- Publishing: PyPI via the Publish Package workflow"
