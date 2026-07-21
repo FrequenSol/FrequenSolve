@@ -466,6 +466,8 @@ jobs:
           path: .solver-evidence/
           if-no-files-found: error
           retention-days: 90
+          # The validated staging directory is dot-prefixed.
+          include-hidden-files: true
 
   create-release-candidate:
     name: Create release candidate after evidence passes
