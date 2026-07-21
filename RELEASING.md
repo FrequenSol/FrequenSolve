@@ -29,10 +29,15 @@ publishing through GitHub Actions.
 
 Do not add PyPI passwords or API tokens to the repository.
 
-The release-candidate workflow also requires access to the organization-owned
-FrequenSolveDockerImage reusable workflow and the FrequenSolver Builder GitHub
-App secret. Its workflow reference is pinned to a reviewed DockerImage commit;
-do not replace that pin with a mutable branch or tag.
+The release-candidate workflow also requires the FrequenSolver Builder GitHub
+App secret so it can dispatch the private organization-owned
+FrequenSolveDockerImage workflow. FrequenSolve is public, so GitHub does not
+permit a direct reusable-workflow call into that private repository. The
+dispatcher requires DockerImage `main` to resolve to the reviewed commit before
+it starts, passes exact dependency commits with a high-entropy request ID, and
+rejects duplicate or returned runs whose identity differs from that pin.
+Long-running builds are polled through bounded windows with fresh read-only App
+tokens; the dispatch token has write access only to DockerImage.
 
 ## Local Checks
 
@@ -55,9 +60,12 @@ Use the release workflows for the normal maintainer flow:
   the final `frequensolver_release` tag selected for that package line.
   The workflow first resolves the selected ref to an immutable SHA, verifies a
   successful exact-SHA `Required CI` run, resolves the FrequenSolver release
-  tag to its immutable commit, and calls the pinned FrequenSolveDockerImage
-  workflow with that exact pair. Only after the FrequenSolver-backed workflow
-  returns the expected passing marker, identities, commits, and artifact does it
+  tag to its immutable commit, and API-dispatches the pinned private
+  FrequenSolveDockerImage workflow with that exact pair and an exact FS_MUMPS
+  commit. The returned artifact must contain a trusted dispatch manifest that
+  binds the run, request, workflow, resolved commits, no-push mode, and exact
+  heavy-test contract. Only after the FrequenSolver-backed workflow returns the
+  expected passing marker, identities, commits, and artifact does it
   create the next tag in that release line, such as `v0.2.0rc1`, and publish a
   GitHub prerelease. The prerelease includes `release-evidence.json` plus the
   checksum-bound `frequensolve-test-evidence.tar.gz` archive containing the

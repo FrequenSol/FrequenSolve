@@ -42,8 +42,8 @@ def manifest_from_evidence(
             "release_url": evidence["frequensolverReleaseUrl"],
         },
         "evidence": {
-            "run_id": evidence["dockerCallerRunId"],
-            "url": evidence["dockerCallerRunUrl"],
+            "run_id": evidence["dockerEvidenceRunId"],
+            "url": evidence["dockerEvidenceRunUrl"],
         },
     }
 

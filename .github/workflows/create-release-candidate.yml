@@ -108,20 +108,364 @@ jobs:
   docker-integration:
     name: Manual FrequenSolver-backed release evidence
     needs: prepare-evidence
-    # Pin the reviewed DockerImage evidence workflow and its checked-out source
-    # to the same immutable commit.
-    uses: FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@ade58cf0b9eb183b124d02165a0472a27564a1d0
-    with:
-      SOURCE_REF: main
-      SOURCE_COMMIT: ade58cf0b9eb183b124d02165a0472a27564a1d0
-      REQUEST_ID: frequensolve-rc-${{ github.run_id }}
-      SAUCE_REF: ${{ needs.prepare-evidence.outputs.frequensolver_release }}
-      FS_MUMPS_REF: main
-      FREQUENSOLVE_BRANCH: ${{ needs.prepare-evidence.outputs.target_sha }}
-      FREQUENSOLVE_SOURCE: git
-      DISABLE_PUSH: true
-    secrets:
-      FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+    runs-on: ubuntu-latest
+    # Allow the 30-minute dispatch-discovery window plus four bounded polling
+    # windows around the downstream workflow's 180-minute build timeout.
+    timeout-minutes: 260
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sauce_ref: ${{ steps.evidence.outputs.sauce_ref }}
+      sauce_commit: ${{ steps.evidence.outputs.sauce_commit }}
+      frequensolver_version: ${{ steps.evidence.outputs.frequensolver_version }}
+      frequensolver_build_id: ${{ steps.evidence.outputs.frequensolver_build_id }}
+      frequensolver_git_commit: ${{ steps.evidence.outputs.frequensolver_git_commit }}
+      fs_mumps_ref: ${{ steps.evidence.outputs.fs_mumps_ref }}
+      fs_mumps_commit: ${{ steps.evidence.outputs.fs_mumps_commit }}
+      frequensolve_ref: ${{ steps.evidence.outputs.frequensolve_ref }}
+      frequensolve_commit: ${{ steps.evidence.outputs.frequensolve_commit }}
+      dockerimage_commit: ${{ steps.evidence.outputs.dockerimage_commit }}
+      image_tag: ${{ steps.evidence.outputs.image_tag }}
+      frequensolve_test_marker: ${{ steps.evidence.outputs.frequensolve_test_marker }}
+      frequensolve_test_status: ${{ steps.evidence.outputs.frequensolve_test_status }}
+      frequensolve_test_artifact: ${{ steps.evidence.outputs.frequensolve_test_artifact }}
+      evidence_run_id: ${{ steps.dispatch.outputs.run_id }}
+      evidence_run_url: ${{ steps.dispatch.outputs.run_url }}
+      request_id: ${{ steps.dispatch.outputs.request_id }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Generate dependency resolution token
+        id: resolve-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          owner: FrequenSol
+          repositories: FrequenSolveDockerImage, FS_MUMPS
+          permission-contents: read
+
+      - name: Resolve exact downstream inputs
+        id: resolve
+        env:
+          GH_TOKEN: ${{ steps.resolve-token.outputs.token }}
+          DOCKER_WORKFLOW_COMMIT: 673e8932863e4e58da7ecbe31c4bcf0f4535d7c3
+        run: |
+          set -euo pipefail
+          docker_main="$(
+            gh api repos/FrequenSol/FrequenSolveDockerImage/commits/main --jq .sha
+          )"
+          if [ "$docker_main" != "$DOCKER_WORKFLOW_COMMIT" ]; then
+            echo "DockerImage main moved to ${docker_main}; update and review the pinned release workflow commit." >&2
+            exit 1
+          fi
+          fs_mumps_commit="$(
+            gh api repos/FrequenSol/FS_MUMPS/commits/main --jq .sha
+          )"
+          [[ "$fs_mumps_commit" =~ ^[0-9a-f]{40}$ ]]
+          echo "fs_mumps_commit=$fs_mumps_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Generate downstream dispatch token
+        id: dispatch-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          owner: FrequenSol
+          repositories: FrequenSolveDockerImage
+          permission-actions: write
+          permission-contents: read
+
+      - name: Dispatch exact DockerImage evidence run
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
+          DOWNSTREAM_REPO: FrequenSol/FrequenSolveDockerImage
+          DOWNSTREAM_WORKFLOW: cicd-workflow.yml
+          DOWNSTREAM_REF: main
+          DOCKER_WORKFLOW_COMMIT: 673e8932863e4e58da7ecbe31c4bcf0f4535d7c3
+          FREQUENSOLVER_RELEASE: ${{ needs.prepare-evidence.outputs.frequensolver_release }}
+          FS_MUMPS_COMMIT: ${{ steps.resolve.outputs.fs_mumps_commit }}
+          FREQUENSOLVE_COMMIT: ${{ needs.prepare-evidence.outputs.target_sha }}
+          DISPATCH_ACTOR: ${{ steps.dispatch-token.outputs.app-slug }}[bot]
+        run: |
+          set -euo pipefail
+          nonce="$(openssl rand -hex 16)"
+          request_id="frequensolve-rc-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${nonce}"
+          dispatch_started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          gh workflow run "$DOWNSTREAM_WORKFLOW" \
+            --repo "$DOWNSTREAM_REPO" \
+            --ref "$DOWNSTREAM_REF" \
+            -f SOURCE_REF="$DOWNSTREAM_REF" \
+            -f SOURCE_COMMIT="$DOCKER_WORKFLOW_COMMIT" \
+            -f REQUEST_ID="$request_id" \
+            -f SAUCE_REF="$FREQUENSOLVER_RELEASE" \
+            -f FS_MUMPS_REF="$FS_MUMPS_COMMIT" \
+            -f FREQUENSOLVE_BRANCH="$FREQUENSOLVE_COMMIT" \
+            -f FREQUENSOLVE_SOURCE=git \
+            -f DISABLE_PUSH=true
+
+          deadline=$((SECONDS + 1800))
+          run_id=""
+          while [ -z "$run_id" ] && [ "$SECONDS" -lt "$deadline" ]; do
+            gh api "repos/${DOWNSTREAM_REPO}/actions/workflows/${DOWNSTREAM_WORKFLOW}/runs" \
+              --method GET \
+              -f branch="$DOWNSTREAM_REF" \
+              -f event=workflow_dispatch \
+              -f actor="$DISPATCH_ACTOR" \
+              -f created=">=${dispatch_started_at}" \
+              -F per_page=20 > downstream-runs.json
+            set +e
+            run_id="$(
+              python scripts/select_docker_workflow_evidence.py run \
+                downstream-runs.json \
+                --request-id "$request_id" \
+                --actor "$DISPATCH_ACTOR" \
+                --head-sha "$DOCKER_WORKFLOW_COMMIT" \
+                --created-after "$dispatch_started_at" \
+                --allow-missing
+            )"
+            select_status=$?
+            set -e
+            case "$select_status" in
+              0) ;;
+              3) run_id=""; sleep 10 ;;
+              *) exit "$select_status" ;;
+            esac
+          done
+          if [ -z "$run_id" ]; then
+            echo "Timed out waiting for the exact DockerImage workflow run." >&2
+            exit 1
+          fi
+
+          run_url="https://github.com/${DOWNSTREAM_REPO}/actions/runs/${run_id}"
+          {
+            echo "run_id=$run_id"
+            echo "run_url=$run_url"
+            echo "request_id=$request_id"
+            echo "actor=$DISPATCH_ACTOR"
+            echo "started_at=$dispatch_started_at"
+          } >> "$GITHUB_OUTPUT"
+          echo "Triggered exact downstream workflow: $run_url"
+
+      - name: Generate first downstream wait token
+        id: wait-token-1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          owner: FrequenSol
+          repositories: FrequenSolveDockerImage
+          permission-actions: read
+
+      - name: Wait for downstream evidence (window 1)
+        id: wait-1
+        env:
+          GH_TOKEN: ${{ steps.wait-token-1.outputs.token }}
+          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+        run: |
+          python scripts/wait_for_docker_workflow_run.py \
+            --run-id "$RUN_ID" \
+            --timeout-seconds 3000 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Generate second downstream wait token
+        if: ${{ steps.wait-1.outputs.completed != 'true' }}
+        id: wait-token-2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          owner: FrequenSol
+          repositories: FrequenSolveDockerImage
+          permission-actions: read
+
+      - name: Wait for downstream evidence (window 2)
+        if: ${{ steps.wait-1.outputs.completed != 'true' }}
+        id: wait-2
+        env:
+          GH_TOKEN: ${{ steps.wait-token-2.outputs.token }}
+          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+        run: |
+          python scripts/wait_for_docker_workflow_run.py \
+            --run-id "$RUN_ID" \
+            --timeout-seconds 3000 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Generate third downstream wait token
+        if: ${{ steps.wait-1.outputs.completed != 'true' && steps.wait-2.outputs.completed != 'true' }}
+        id: wait-token-3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          owner: FrequenSol
+          repositories: FrequenSolveDockerImage
+          permission-actions: read
+
+      - name: Wait for downstream evidence (window 3)
+        if: ${{ steps.wait-1.outputs.completed != 'true' && steps.wait-2.outputs.completed != 'true' }}
+        id: wait-3
+        env:
+          GH_TOKEN: ${{ steps.wait-token-3.outputs.token }}
+          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+        run: |
+          python scripts/wait_for_docker_workflow_run.py \
+            --run-id "$RUN_ID" \
+            --timeout-seconds 3000 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Generate fourth downstream wait token
+        if: ${{ steps.wait-1.outputs.completed != 'true' && steps.wait-2.outputs.completed != 'true' && steps.wait-3.outputs.completed != 'true' }}
+        id: wait-token-4
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          owner: FrequenSol
+          repositories: FrequenSolveDockerImage
+          permission-actions: read
+
+      - name: Wait for downstream evidence (window 4)
+        if: ${{ steps.wait-1.outputs.completed != 'true' && steps.wait-2.outputs.completed != 'true' && steps.wait-3.outputs.completed != 'true' }}
+        id: wait-4
+        env:
+          GH_TOKEN: ${{ steps.wait-token-4.outputs.token }}
+          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+        run: |
+          python scripts/wait_for_docker_workflow_run.py \
+            --run-id "$RUN_ID" \
+            --timeout-seconds 3000 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Require downstream completion within bounded windows
+        if: ${{ steps.wait-1.outputs.completed != 'true' && steps.wait-2.outputs.completed != 'true' && steps.wait-3.outputs.completed != 'true' && steps.wait-4.outputs.completed != 'true' }}
+        run: |
+          echo "DockerImage evidence run did not complete within 200 minutes." >&2
+          exit 1
+
+      - name: Generate downstream evidence token
+        id: evidence-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          owner: FrequenSol
+          repositories: FrequenSolveDockerImage
+          permission-actions: read
+
+      - name: Download exact downstream evidence artifact
+        env:
+          GH_TOKEN: ${{ steps.evidence-token.outputs.token }}
+          DOWNSTREAM_REPO: FrequenSol/FrequenSolveDockerImage
+          DOWNSTREAM_WORKFLOW: cicd-workflow.yml
+          DOWNSTREAM_REF: main
+          DOCKER_WORKFLOW_COMMIT: 673e8932863e4e58da7ecbe31c4bcf0f4535d7c3
+          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+          REQUEST_ID: ${{ steps.dispatch.outputs.request_id }}
+          DISPATCH_ACTOR: ${{ steps.dispatch.outputs.actor }}
+          DISPATCH_STARTED_AT: ${{ steps.dispatch.outputs.started_at }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${DOWNSTREAM_REPO}/actions/workflows/${DOWNSTREAM_WORKFLOW}/runs" \
+            --method GET \
+            -f branch="$DOWNSTREAM_REF" \
+            -f event=workflow_dispatch \
+            -f actor="$DISPATCH_ACTOR" \
+            -f created=">=${DISPATCH_STARTED_AT}" \
+            -F per_page=100 > completed-downstream-runs.json
+          selected_run_id="$(
+            python scripts/select_docker_workflow_evidence.py run \
+              completed-downstream-runs.json \
+              --request-id "$REQUEST_ID" \
+              --actor "$DISPATCH_ACTOR" \
+              --head-sha "$DOCKER_WORKFLOW_COMMIT" \
+              --created-after "$DISPATCH_STARTED_AT" \
+              --require-success
+          )"
+          test "$selected_run_id" = "$RUN_ID"
+          gh api "repos/${DOWNSTREAM_REPO}/actions/runs/${RUN_ID}/artifacts" \
+            --method GET \
+            -F per_page=100 > downstream-artifacts.json
+          python scripts/select_docker_workflow_evidence.py artifact \
+            downstream-artifacts.json >/dev/null
+          gh run download "$RUN_ID" \
+            --repo "$DOWNSTREAM_REPO" \
+            --name frequensolve-test-evidence \
+            --dir .solver-evidence
+
+      - name: Validate exact downstream evidence
+        id: evidence
+        env:
+          TARGET_SHA: ${{ needs.prepare-evidence.outputs.target_sha }}
+          FREQUENSOLVER_RELEASE: ${{ needs.prepare-evidence.outputs.frequensolver_release }}
+          FREQUENSOLVER_EXPECTED_COMMIT: ${{ needs.prepare-evidence.outputs.frequensolver_commit }}
+          FS_MUMPS_COMMIT: ${{ steps.resolve.outputs.fs_mumps_commit }}
+          DOCKER_WORKFLOW_COMMIT: 673e8932863e4e58da7ecbe31c4bcf0f4535d7c3
+          DOCKER_EVIDENCE_RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+          DOCKER_REQUEST_ID: ${{ steps.dispatch.outputs.request_id }}
+        run: |
+          set -euo pipefail
+          heavy_evidence=.solver-evidence/frequensolve-test-evidence.json
+          frequensolver_identity=.solver-evidence/frequensolver-identity.json
+          dispatch_evidence=.solver-evidence/docker-dispatch-evidence.json
+          test -f "$heavy_evidence"
+          test -f "$frequensolver_identity"
+          test -f "$dispatch_evidence"
+          test ! -L "$heavy_evidence"
+          test ! -L "$frequensolver_identity"
+          test ! -L "$dispatch_evidence"
+          python scripts/validate_heavy_test_evidence.py \
+            "$heavy_evidence" \
+            --commit "$TARGET_SHA"
+
+          frequensolver_version="$(jq -er .version "$frequensolver_identity")"
+          frequensolver_build_id="$(jq -er .build_id "$frequensolver_identity")"
+          frequensolver_git_commit="$(jq -er .git_commit "$frequensolver_identity")"
+          python scripts/validate_frequensolver_identity.py \
+            "$frequensolver_identity" \
+            --version "$FREQUENSOLVER_RELEASE" \
+            --commit "$FREQUENSOLVER_EXPECTED_COMMIT" \
+            --build-id="$frequensolver_build_id"
+          test "$frequensolver_version" = "$FREQUENSOLVER_RELEASE"
+          test "$frequensolver_git_commit" = "$FREQUENSOLVER_EXPECTED_COMMIT"
+          python scripts/validate_docker_dispatch_evidence.py \
+            "$dispatch_evidence" \
+            --run-id "$DOCKER_EVIDENCE_RUN_ID" \
+            --request-id "$DOCKER_REQUEST_ID" \
+            --workflow-commit "$DOCKER_WORKFLOW_COMMIT" \
+            --source-ref main \
+            --sauce-ref "$FREQUENSOLVER_RELEASE" \
+            --sauce-commit "$FREQUENSOLVER_EXPECTED_COMMIT" \
+            --fs-mumps-commit "$FS_MUMPS_COMMIT" \
+            --frequensolve-commit "$TARGET_SHA"
+
+          {
+            echo "sauce_ref=$FREQUENSOLVER_RELEASE"
+            echo "sauce_commit=$frequensolver_git_commit"
+            echo "frequensolver_version=$frequensolver_version"
+            echo "frequensolver_build_id=$frequensolver_build_id"
+            echo "frequensolver_git_commit=$frequensolver_git_commit"
+            echo "fs_mumps_ref=$FS_MUMPS_COMMIT"
+            echo "fs_mumps_commit=$FS_MUMPS_COMMIT"
+            echo "frequensolve_ref=$TARGET_SHA"
+            echo "frequensolve_commit=$TARGET_SHA"
+            echo "dockerimage_commit=$DOCKER_WORKFLOW_COMMIT"
+            echo "image_tag=$DOCKER_WORKFLOW_COMMIT"
+            echo "frequensolve_test_marker=not cloud and not hpc and not interactive"
+            echo "frequensolve_test_status=passed"
+            echo "frequensolve_test_artifact=frequensolve-test-evidence"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Preserve validated evidence in the caller run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: frequensolve-test-evidence
+          path: .solver-evidence/
+          if-no-files-found: error
+          retention-days: 90
 
   create-release-candidate:
     name: Create release candidate after evidence passes
@@ -163,6 +507,9 @@ jobs:
           DOCKER_REF: ${{ needs.docker-integration.outputs.frequensolve_ref }}
           DOCKER_COMMIT: ${{ needs.docker-integration.outputs.frequensolve_commit }}
           DOCKER_WORKFLOW_COMMIT: ${{ needs.docker-integration.outputs.dockerimage_commit }}
+          DOCKER_EVIDENCE_RUN_ID: ${{ needs.docker-integration.outputs.evidence_run_id }}
+          DOCKER_EVIDENCE_RUN_URL: ${{ needs.docker-integration.outputs.evidence_run_url }}
+          DOCKER_REQUEST_ID: ${{ needs.docker-integration.outputs.request_id }}
           DOCKER_MARKER: ${{ needs.docker-integration.outputs.frequensolve_test_marker }}
           DOCKER_STATUS: ${{ needs.docker-integration.outputs.frequensolve_test_status }}
           DOCKER_ARTIFACT: ${{ needs.docker-integration.outputs.frequensolve_test_artifact }}
@@ -182,7 +529,7 @@ jobs:
           set -euo pipefail
           test "$DOCKER_REF" = "$TARGET_SHA"
           test "$DOCKER_COMMIT" = "$TARGET_SHA"
-          test "$DOCKER_WORKFLOW_COMMIT" = ade58cf0b9eb183b124d02165a0472a27564a1d0
+          test "$DOCKER_WORKFLOW_COMMIT" = 673e8932863e4e58da7ecbe31c4bcf0f4535d7c3
           test "$DOCKER_MARKER" = "not cloud and not hpc and not interactive"
           test "$DOCKER_STATUS" = passed
           test "$DOCKER_ARTIFACT" = frequensolve-test-evidence
@@ -192,12 +539,17 @@ jobs:
           test "$FREQUENSOLVER_VERSION" = "$FREQUENSOLVER_RELEASE"
           test -n "$FREQUENSOLVER_BUILD_ID"
           test "$FREQUENSOLVER_GIT_COMMIT" = "$SAUCE_COMMIT"
-          test "$FS_MUMPS_REF" = main
+          test "$FS_MUMPS_REF" = "$FS_MUMPS_COMMIT"
           [[ "$SAUCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$FS_MUMPS_REF" =~ ^[0-9a-f]{40}$ ]]
           [[ "$FS_MUMPS_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DOCKER_EVIDENCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$DOCKER_EVIDENCE_RUN_URL" = "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/${DOCKER_EVIDENCE_RUN_ID}"
+          [[ "$DOCKER_REQUEST_ID" =~ ^frequensolve-rc-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-[0-9a-f]{32}$ ]]
 
           heavy_evidence=.solver-evidence/frequensolve-test-evidence.json
           frequensolver_identity=.solver-evidence/frequensolver-identity.json
+          dispatch_evidence=.solver-evidence/docker-dispatch-evidence.json
           python scripts/validate_heavy_test_evidence.py \
             "$heavy_evidence" \
             --commit "$TARGET_SHA"
@@ -206,6 +558,16 @@ jobs:
             --version "$FREQUENSOLVER_VERSION" \
             --commit "$FREQUENSOLVER_GIT_COMMIT" \
             --build-id="$FREQUENSOLVER_BUILD_ID"
+          python scripts/validate_docker_dispatch_evidence.py \
+            "$dispatch_evidence" \
+            --run-id "$DOCKER_EVIDENCE_RUN_ID" \
+            --request-id "$DOCKER_REQUEST_ID" \
+            --workflow-commit "$DOCKER_WORKFLOW_COMMIT" \
+            --source-ref main \
+            --sauce-ref "$SAUCE_REF" \
+            --sauce-commit "$SAUCE_COMMIT" \
+            --fs-mumps-commit "$FS_MUMPS_COMMIT" \
+            --frequensolve-commit "$TARGET_SHA"
           tar -czf frequensolve-test-evidence.tar.gz -C .solver-evidence .
           archive_sha256="$(sha256sum frequensolve-test-evidence.tar.gz | awk '{print $1}')"
 
@@ -215,16 +577,19 @@ jobs:
             --run-id "$CI_RUN_ID"
 
           jq -n \
-            --arg schemaVersion "frequensolve-release-evidence/v1" \
+            --arg schemaVersion "frequensolve-release-evidence/v2" \
             --arg commit "$TARGET_SHA" \
             --argjson ciRunId "$CI_RUN_ID" \
             --arg ciRunUrl "$CI_RUN_URL" \
             --arg ciWorkflow ".github/workflows/cicd-workflow.yml" \
             --arg ciRequiredJob "Required CI" \
-            --arg dockerWorkflow "FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@ade58cf0b9eb183b124d02165a0472a27564a1d0" \
+            --arg dockerWorkflow "FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@673e8932863e4e58da7ecbe31c4bcf0f4535d7c3" \
             --arg dockerWorkflowCommit "$DOCKER_WORKFLOW_COMMIT" \
             --argjson dockerCallerRunId "$GITHUB_RUN_ID" \
             --arg dockerCallerRunUrl "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --argjson dockerEvidenceRunId "$DOCKER_EVIDENCE_RUN_ID" \
+            --arg dockerEvidenceRunUrl "$DOCKER_EVIDENCE_RUN_URL" \
+            --arg dockerRequestId "$DOCKER_REQUEST_ID" \
             --arg dockerImageTag "$DOCKER_IMAGE_TAG" \
             --arg dockerTestRef "$DOCKER_REF" \
             --arg dockerTestCommit "$DOCKER_COMMIT" \
@@ -233,6 +598,7 @@ jobs:
             --arg dockerTestArtifact "$DOCKER_ARTIFACT" \
             --arg dockerTestArchiveSha256 "$archive_sha256" \
             --slurpfile dockerTestEvidence "$heavy_evidence" \
+            --slurpfile dockerDispatchEvidence "$dispatch_evidence" \
             --arg sauceRef "$SAUCE_REF" \
             --arg sauceCommit "$SAUCE_COMMIT" \
             --arg frequensolverRelease "$FREQUENSOLVER_RELEASE" \
@@ -253,6 +619,9 @@ jobs:
               dockerWorkflowCommit: $dockerWorkflowCommit,
               dockerCallerRunId: $dockerCallerRunId,
               dockerCallerRunUrl: $dockerCallerRunUrl,
+              dockerEvidenceRunId: $dockerEvidenceRunId,
+              dockerEvidenceRunUrl: $dockerEvidenceRunUrl,
+              dockerRequestId: $dockerRequestId,
               dockerImageTag: $dockerImageTag,
               dockerTestRef: $dockerTestRef,
               dockerTestCommit: $dockerTestCommit,
@@ -261,6 +630,7 @@ jobs:
               dockerTestArtifact: $dockerTestArtifact,
               dockerTestArchiveSha256: $dockerTestArchiveSha256,
               dockerTestEvidence: $dockerTestEvidence[0],
+              dockerDispatchEvidence: $dockerDispatchEvidence[0],
               sauceRef: $sauceRef,
               sauceCommit: $sauceCommit,
               frequensolverRelease: $frequensolverRelease,
@@ -401,7 +771,7 @@ jobs:
           fi
 
           ci_run_url="$(jq -r '.ciRunUrl' release-evidence.json)"
-          docker_run_id="$(jq -r '.dockerCallerRunId' release-evidence.json)"
+          docker_run_url="$(jq -r '.dockerEvidenceRunUrl' release-evidence.json)"
           docker_image_tag="$(jq -r '.dockerImageTag' release-evidence.json)"
           frequensolver_release="$(jq -r '.frequensolverRelease' release-evidence.json)"
           frequensolver_release_url="$(jq -r '.frequensolverReleaseUrl' release-evidence.json)"
@@ -412,7 +782,7 @@ jobs:
             echo "- Source commit: ${TARGET_SHA}"
             echo "- Package version: ${tag_name#v}"
             echo "- Required CI: ${ci_run_url}"
-            echo "- Solver evidence run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${docker_run_id}"
+            echo "- Solver evidence run: ${docker_run_url}"
             echo "- Preferred FrequenSolver: [${frequensolver_release}](${frequensolver_release_url})"
             echo "- Tested runtime image: ${docker_image_tag}"
             echo "- Publishing: TestPyPI via the Publish Package workflow"

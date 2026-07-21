@@ -127,6 +127,31 @@ def test_ci_evidence_requires_exact_sha_workflow_and_stable_job():
 
 
 def _release_evidence():
+    docker_request_id = "frequensolve-rc-456-1-0123456789abcdef0123456789abcdef"
+    docker_dispatch_evidence = {
+        "schemaVersion": "frequensolve-docker-dispatch-evidence/v1",
+        "runId": 789,
+        "runUrl": (
+            "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/789"
+        ),
+        "requestId": docker_request_id,
+        "workflowRepository": "FrequenSol/FrequenSolveDockerImage",
+        "workflowPath": ".github/workflows/cicd-workflow.yml",
+        "workflowCommit": "b" * 40,
+        "sourceRef": "main",
+        "sourceCommit": "b" * 40,
+        "sauceRef": "v0.1.0",
+        "sauceCommit": "c" * 40,
+        "fsMumpsRef": "d" * 40,
+        "fsMumpsCommit": "d" * 40,
+        "frequensolveSource": "git",
+        "frequensolveRef": COMMIT,
+        "frequensolveCommit": COMMIT,
+        "disablePush": True,
+        "testMarker": TEST_MARKER,
+        "testStatus": TEST_STATUS,
+        "testArtifact": TEST_ARTIFACT,
+    }
     return {
         "schemaVersion": SCHEMA,
         "commit": COMMIT,
@@ -140,7 +165,12 @@ def _release_evidence():
         "dockerCallerRunUrl": (
             "https://github.com/FrequenSol/FrequenSolve/actions/runs/456"
         ),
-        "dockerImageTag": "sha-bbbbbbbbbbbb",
+        "dockerEvidenceRunId": 789,
+        "dockerEvidenceRunUrl": (
+            "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/789"
+        ),
+        "dockerRequestId": docker_request_id,
+        "dockerImageTag": "b" * 40,
         "dockerTestRef": COMMIT,
         "dockerTestCommit": COMMIT,
         "dockerTestMarker": TEST_MARKER,
@@ -148,6 +178,7 @@ def _release_evidence():
         "dockerTestArtifact": TEST_ARTIFACT,
         "dockerTestArchiveSha256": "e" * 64,
         "dockerTestEvidence": _heavy_evidence(),
+        "dockerDispatchEvidence": docker_dispatch_evidence,
         "sauceRef": "v0.1.0",
         "sauceCommit": "c" * 40,
         "frequensolverRelease": "v0.1.0",
@@ -157,7 +188,7 @@ def _release_evidence():
         "frequensolverVersion": "v0.1.0",
         "frequensolverBuildId": "release-v0.1.0",
         "frequensolverGitCommit": "c" * 40,
-        "fsMumpsRef": "main",
+        "fsMumpsRef": "d" * 40,
         "fsMumpsCommit": "d" * 40,
     }
 
@@ -185,6 +216,48 @@ def test_release_evidence_rejects_mutable_frequensolver_ref():
     evidence["frequensolverVersion"] = "main"
 
     with pytest.raises(ValueError, match="immutable final release tag"):
+        validate_evidence(evidence, COMMIT)
+
+
+def test_release_evidence_rejects_wrong_downstream_run_identity():
+    evidence = _release_evidence()
+    evidence["dockerEvidenceRunUrl"] = (
+        "https://github.com/FrequenSol/FrequenSolve/actions/runs/789"
+    )
+
+    with pytest.raises(ValueError, match="dockerEvidenceRunUrl"):
+        validate_evidence(evidence, COMMIT)
+
+
+def test_release_evidence_requires_high_entropy_correlated_request():
+    evidence = _release_evidence()
+    evidence["dockerRequestId"] = "frequensolve-rc-456-1"
+
+    with pytest.raises(ValueError, match="dockerRequestId"):
+        validate_evidence(evidence, COMMIT)
+
+
+def test_release_evidence_requires_bound_dispatch_manifest():
+    evidence = _release_evidence()
+    evidence["dockerDispatchEvidence"]["fsMumpsCommit"] = "f" * 40
+
+    with pytest.raises(ValueError, match="dockerDispatchEvidence.*fsMumpsCommit"):
+        validate_evidence(evidence, COMMIT)
+
+
+def test_release_evidence_requires_exact_fs_mumps_ref():
+    evidence = _release_evidence()
+    evidence["fsMumpsRef"] = "main"
+
+    with pytest.raises(ValueError, match="fsMumpsRef"):
+        validate_evidence(evidence, COMMIT)
+
+
+def test_release_evidence_requires_pinned_docker_image_tag():
+    evidence = _release_evidence()
+    evidence["dockerImageTag"] = "latest"
+
+    with pytest.raises(ValueError, match="dockerImageTag"):
         validate_evidence(evidence, COMMIT)
 
 
@@ -290,8 +363,10 @@ def test_materializes_package_compatibility_from_validated_release_evidence():
             "release_url": ("https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"),
         },
         "evidence": {
-            "run_id": 456,
-            "url": ("https://github.com/FrequenSol/FrequenSolve/actions/runs/456"),
+            "run_id": 789,
+            "url": (
+                "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/789"
+            ),
         },
     }
 
