@@ -92,6 +92,27 @@ def test_ssh_proxy_reports_command_timeout(monkeypatch):
         proxy._exec_on_login("squeue")
 
 
+def test_ssh_proxy_honors_per_command_timeout(monkeypatch):
+    calls = []
+
+    def time_out(argv, **kwargs):
+        calls.append((argv, kwargs))
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", time_out)
+    proxy = SSHProxy(
+        "/tmp/control.sock",
+        "user",
+        "login.example.edu",
+        command_timeout=120,
+    )
+
+    with pytest.raises(TimeoutError, match="login.example.edu.*15.0 seconds"):
+        proxy.exec_command("FS_seismic --identity-json", timeout=15.0)
+
+    assert calls[0][1]["timeout"] == 15.0
+
+
 def test_ssh_proxy_reports_expired_control_socket(monkeypatch):
     monkeypatch.setattr(
         subprocess,

@@ -169,11 +169,19 @@ python -m twine check dist/*
 For releases, use PEP 440 package versions and `v`-prefixed tags. Creating a
 release candidate is the paid, manual release gate: it requires successful
 `Required CI` evidence for the exact source SHA and calls the pinned
-FrequenSolveDockerImage solver workflow before creating any tag. The evidence
-JSON and checksum-bound heavy-test archive follow that commit through final
-promotion and publication. Release
+FrequenSolveDockerImage solver workflow with an immutable final FrequenSolver
+release before creating any tag. The evidence JSON, preferred FrequenSolver
+release/commit, and checksum-bound heavy-test archive follow that commit through
+final promotion and publication. Release
 candidates are published to TestPyPI, and final releases are published to PyPI.
 See [RELEASING.md](RELEASING.md) for the maintainer workflow.
+
+Released wheels and source distributions include the preferred FrequenSolver
+pairing proven by that evidence. Local and HPC sites check the configured
+executable once before submission. An unknown or different pair produces a
+warning by default, and remote identity probes time out after 15 seconds; set
+`frequensolver_policy = "strict"` in the site profile to require the tested
+release and commit, or `"off"` to opt out explicitly.
 
 Solver, cloud, HPC, and visual tests are marked and must be selected explicitly:
 

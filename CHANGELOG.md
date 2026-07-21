@@ -19,6 +19,8 @@ prepared.
   shards.
 - Added data-driven local and Slurm execution profiles, secure reusable HPC
   credentials and transports, resumable task planning, and adaptive scheduling.
+- Added release-evidence-backed preferred FrequenSolver metadata plus
+  warn/strict/off identity checks for local and HPC execution sites.
 - Renamed `frequensolve.simulation.numerics_manager` to
   `frequensolve.simulation.solver`; direct imports from the old module path must
   be updated.

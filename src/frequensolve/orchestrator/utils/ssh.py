@@ -186,11 +186,13 @@ class SSHProxy:
 
         return ("\n".join(stdout_lines).encode(), "\n".join(stderr_lines).encode())
 
-    def exec_command(self, command):
+    def exec_command(self, command, *, timeout=None):
         """Execute a command through the proxy.
 
         Args:
             command: Remote shell command.
+            timeout: Optional per-command timeout in seconds. Defaults to this
+                proxy's configured command timeout.
 
         Returns:
             ``(stdin, stdout, stderr)`` byte streams compatible with Paramiko's
@@ -198,9 +200,9 @@ class SSHProxy:
         """
 
         if self.compute_host is not None:
-            result = self._exec_on_compute(command)
+            result = self._exec_on_compute(command, timeout=timeout)
         else:
-            result = self._exec_on_login(command)
+            result = self._exec_on_login(command, timeout=timeout)
 
         stdout, stderr = self._filter_output(result)
 
@@ -229,14 +231,14 @@ class SSHProxy:
 
         return (stdin, stdout, stderr)
 
-    def _exec_on_login(self, command, term=False):
+    def _exec_on_login(self, command, term=False, timeout=None):
         cmd = self._login_ssh_command()
         if term:
             cmd.insert(-1, "-t")
         cmd.append(command)
-        return self._run_ssh(cmd, target=self.host)
+        return self._run_ssh(cmd, target=self.host, timeout=timeout)
 
-    def _exec_on_compute(self, command):
+    def _exec_on_compute(self, command, timeout=None):
         """Execute a command on a compute node via the login node."""
         proxy_command = shlex.join(
             [
@@ -263,14 +265,15 @@ class SSHProxy:
             f"{self.username}@{self.compute_host}",
             command,
         ]
-        return self._run_ssh(cmd, target=self.compute_host)
+        return self._run_ssh(cmd, target=self.compute_host, timeout=timeout)
 
-    def _run_ssh(self, cmd, *, target):
+    def _run_ssh(self, cmd, *, target, timeout=None):
+        effective_timeout = self.command_timeout if timeout is None else timeout
         logger.debug(
             "Running non-interactive SSH command via control socket: target=%s "
             "timeout=%ss command=%s",
             target,
-            self.command_timeout,
+            effective_timeout,
             cmd[-1],
         )
         started = time.monotonic()
@@ -278,7 +281,7 @@ class SSHProxy:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                timeout=self.command_timeout,
+                timeout=effective_timeout,
             )
         except subprocess.TimeoutExpired as exc:
             logger.error(
@@ -288,7 +291,7 @@ class SSHProxy:
             )
             raise TimeoutError(
                 f"SSH command to {target} timed out after "
-                f"{self.command_timeout} seconds"
+                f"{effective_timeout} seconds"
             ) from exc
         logger.debug(
             "SSH command finished in %.3fs for target %s with return code %s",
@@ -347,15 +350,18 @@ class SSHClientClass:
         """Get the hostname."""
         return self._hostname
 
-    def exec_command(self, command):
+    def exec_command(self, command, *, timeout=None):
         """Execute a remote command.
 
         Args:
             command: Remote shell command.
+            timeout: Optional per-command timeout in seconds.
 
         Returns:
             ``(stdin, stdout, stderr)`` as returned by the underlying client.
         """
+        if timeout is not None:
+            return self.client.exec_command(command, timeout=timeout)
         return self.client.exec_command(command)
 
     def close(self):

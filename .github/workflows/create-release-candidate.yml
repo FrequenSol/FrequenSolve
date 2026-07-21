@@ -12,15 +12,14 @@ on:
         required: true
         default: v2
         type: string
+      frequensolver_release:
+        description: Immutable final FrequenSolver release tag tested with this package, such as v0.1.0
+        required: true
+        type: string
       notes:
         description: Optional release candidate notes
         required: false
         type: string
-      use_docker_build_cloud:
-        description: Use Docker Build Cloud for the manual solver-backed release gate
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   contents: write
@@ -38,6 +37,9 @@ jobs:
       target_sha: ${{ steps.prepare.outputs.target_sha }}
       ci_run_id: ${{ steps.prepare.outputs.ci_run_id }}
       ci_run_url: ${{ steps.prepare.outputs.ci_run_url }}
+      frequensolver_release: ${{ steps.prepare.outputs.frequensolver_release }}
+      frequensolver_commit: ${{ steps.prepare.outputs.frequensolver_commit }}
+      frequensolver_release_url: ${{ steps.prepare.outputs.frequensolver_release_url }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -51,7 +53,7 @@ jobs:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
-          repositories: FrequenSolve
+          repositories: FrequenSolve, Sauce
           permission-actions: read
           permission-contents: read
 
@@ -59,6 +61,7 @@ jobs:
         id: prepare
         env:
           TARGET_REF: ${{ inputs.target_ref }}
+          FREQUENSOLVER_RELEASE: ${{ inputs.frequensolver_release }}
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
         run: |
           set -euo pipefail
@@ -76,28 +79,47 @@ jobs:
           )"
           ci_run_id="$(jq -r '.runId' <<<"$ci_evidence")"
           ci_run_url="$(jq -r '.runUrl' <<<"$ci_evidence")"
+
+          if [[ ! "$FREQUENSOLVER_RELEASE" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "FrequenSolver release must be a final canonical vX.Y.Z tag." >&2
+            exit 1
+          fi
+          frequensolver_release="$(
+            gh api "repos/FrequenSol/Sauce/releases/tags/${FREQUENSOLVER_RELEASE}"
+          )"
+          test "$(jq -r '.tag_name' <<<"$frequensolver_release")" = "$FREQUENSOLVER_RELEASE"
+          test "$(jq -r '.draft | tostring' <<<"$frequensolver_release")" = false
+          test "$(jq -r '.prerelease | tostring' <<<"$frequensolver_release")" = false
+          frequensolver_release_url="$(jq -r '.html_url' <<<"$frequensolver_release")"
+          test "$frequensolver_release_url" = "https://github.com/FrequenSol/Sauce/releases/tag/${FREQUENSOLVER_RELEASE}"
+          frequensolver_commit="$(
+            gh api "repos/FrequenSol/Sauce/commits/${FREQUENSOLVER_RELEASE}" --jq .sha
+          )"
+          [[ "$frequensolver_commit" =~ ^[0-9a-f]{40}$ ]]
           {
             echo "target_sha=$target_sha"
             echo "ci_run_id=$ci_run_id"
             echo "ci_run_url=$ci_run_url"
+            echo "frequensolver_release=$FREQUENSOLVER_RELEASE"
+            echo "frequensolver_commit=$frequensolver_commit"
+            echo "frequensolver_release_url=$frequensolver_release_url"
           } >> "$GITHUB_OUTPUT"
 
   docker-integration:
-    name: Manual solver-backed release evidence
+    name: Manual FrequenSolver-backed release evidence
     needs: prepare-evidence
     # Pin the reviewed DockerImage evidence workflow and its checked-out source
     # to the same immutable commit.
-    uses: FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@5de478ec69444fb61ce3b4d727a7db05a7f7eafb
+    uses: FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@ade58cf0b9eb183b124d02165a0472a27564a1d0
     with:
       SOURCE_REF: main
-      SOURCE_COMMIT: 5de478ec69444fb61ce3b4d727a7db05a7f7eafb
+      SOURCE_COMMIT: ade58cf0b9eb183b124d02165a0472a27564a1d0
       REQUEST_ID: frequensolve-rc-${{ github.run_id }}
-      SAUCE_REF: main
+      SAUCE_REF: ${{ needs.prepare-evidence.outputs.frequensolver_release }}
       FS_MUMPS_REF: main
       FREQUENSOLVE_BRANCH: ${{ needs.prepare-evidence.outputs.target_sha }}
       FREQUENSOLVE_SOURCE: git
       DISABLE_PUSH: true
-      USE_DOCKER_BUILD_CLOUD: ${{ inputs.use_docker_build_cloud }}
     secrets:
       FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
 
@@ -147,6 +169,12 @@ jobs:
           DOCKER_IMAGE_TAG: ${{ needs.docker-integration.outputs.image_tag }}
           SAUCE_REF: ${{ needs.docker-integration.outputs.sauce_ref }}
           SAUCE_COMMIT: ${{ needs.docker-integration.outputs.sauce_commit }}
+          FREQUENSOLVER_RELEASE: ${{ needs.prepare-evidence.outputs.frequensolver_release }}
+          FREQUENSOLVER_EXPECTED_COMMIT: ${{ needs.prepare-evidence.outputs.frequensolver_commit }}
+          FREQUENSOLVER_RELEASE_URL: ${{ needs.prepare-evidence.outputs.frequensolver_release_url }}
+          FREQUENSOLVER_VERSION: ${{ needs.docker-integration.outputs.frequensolver_version }}
+          FREQUENSOLVER_BUILD_ID: ${{ needs.docker-integration.outputs.frequensolver_build_id }}
+          FREQUENSOLVER_GIT_COMMIT: ${{ needs.docker-integration.outputs.frequensolver_git_commit }}
           FS_MUMPS_REF: ${{ needs.docker-integration.outputs.fs_mumps_ref }}
           FS_MUMPS_COMMIT: ${{ needs.docker-integration.outputs.fs_mumps_commit }}
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
@@ -154,20 +182,30 @@ jobs:
           set -euo pipefail
           test "$DOCKER_REF" = "$TARGET_SHA"
           test "$DOCKER_COMMIT" = "$TARGET_SHA"
-          test "$DOCKER_WORKFLOW_COMMIT" = 5de478ec69444fb61ce3b4d727a7db05a7f7eafb
+          test "$DOCKER_WORKFLOW_COMMIT" = ade58cf0b9eb183b124d02165a0472a27564a1d0
           test "$DOCKER_MARKER" = "not cloud and not hpc and not interactive"
           test "$DOCKER_STATUS" = passed
           test "$DOCKER_ARTIFACT" = frequensolve-test-evidence
           test -n "$DOCKER_IMAGE_TAG"
-          test "$SAUCE_REF" = main
+          test "$SAUCE_REF" = "$FREQUENSOLVER_RELEASE"
+          test "$SAUCE_COMMIT" = "$FREQUENSOLVER_EXPECTED_COMMIT"
+          test "$FREQUENSOLVER_VERSION" = "$FREQUENSOLVER_RELEASE"
+          test -n "$FREQUENSOLVER_BUILD_ID"
+          test "$FREQUENSOLVER_GIT_COMMIT" = "$SAUCE_COMMIT"
           test "$FS_MUMPS_REF" = main
           [[ "$SAUCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$FS_MUMPS_COMMIT" =~ ^[0-9a-f]{40}$ ]]
 
           heavy_evidence=.solver-evidence/frequensolve-test-evidence.json
+          frequensolver_identity=.solver-evidence/frequensolver-identity.json
           python scripts/validate_heavy_test_evidence.py \
             "$heavy_evidence" \
             --commit "$TARGET_SHA"
+          python scripts/validate_frequensolver_identity.py \
+            "$frequensolver_identity" \
+            --version "$FREQUENSOLVER_VERSION" \
+            --commit "$FREQUENSOLVER_GIT_COMMIT" \
+            --build-id "$FREQUENSOLVER_BUILD_ID"
           tar -czf frequensolve-test-evidence.tar.gz -C .solver-evidence .
           archive_sha256="$(sha256sum frequensolve-test-evidence.tar.gz | awk '{print $1}')"
 
@@ -183,9 +221,10 @@ jobs:
             --arg ciRunUrl "$CI_RUN_URL" \
             --arg ciWorkflow ".github/workflows/cicd-workflow.yml" \
             --arg ciRequiredJob "Required CI" \
-            --arg dockerWorkflow "FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@5de478ec69444fb61ce3b4d727a7db05a7f7eafb" \
+            --arg dockerWorkflow "FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@ade58cf0b9eb183b124d02165a0472a27564a1d0" \
             --arg dockerWorkflowCommit "$DOCKER_WORKFLOW_COMMIT" \
             --argjson dockerCallerRunId "$GITHUB_RUN_ID" \
+            --arg dockerCallerRunUrl "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --arg dockerImageTag "$DOCKER_IMAGE_TAG" \
             --arg dockerTestRef "$DOCKER_REF" \
             --arg dockerTestCommit "$DOCKER_COMMIT" \
@@ -196,6 +235,11 @@ jobs:
             --slurpfile dockerTestEvidence "$heavy_evidence" \
             --arg sauceRef "$SAUCE_REF" \
             --arg sauceCommit "$SAUCE_COMMIT" \
+            --arg frequensolverRelease "$FREQUENSOLVER_RELEASE" \
+            --arg frequensolverReleaseUrl "$FREQUENSOLVER_RELEASE_URL" \
+            --arg frequensolverVersion "$FREQUENSOLVER_VERSION" \
+            --arg frequensolverBuildId "$FREQUENSOLVER_BUILD_ID" \
+            --arg frequensolverGitCommit "$FREQUENSOLVER_GIT_COMMIT" \
             --arg fsMumpsRef "$FS_MUMPS_REF" \
             --arg fsMumpsCommit "$FS_MUMPS_COMMIT" \
             '{
@@ -208,6 +252,7 @@ jobs:
               dockerWorkflow: $dockerWorkflow,
               dockerWorkflowCommit: $dockerWorkflowCommit,
               dockerCallerRunId: $dockerCallerRunId,
+              dockerCallerRunUrl: $dockerCallerRunUrl,
               dockerImageTag: $dockerImageTag,
               dockerTestRef: $dockerTestRef,
               dockerTestCommit: $dockerTestCommit,
@@ -218,6 +263,11 @@ jobs:
               dockerTestEvidence: $dockerTestEvidence[0],
               sauceRef: $sauceRef,
               sauceCommit: $sauceCommit,
+              frequensolverRelease: $frequensolverRelease,
+              frequensolverReleaseUrl: $frequensolverReleaseUrl,
+              frequensolverVersion: $frequensolverVersion,
+              frequensolverBuildId: $frequensolverBuildId,
+              frequensolverGitCommit: $frequensolverGitCommit,
               fsMumpsRef: $fsMumpsRef,
               fsMumpsCommit: $fsMumpsCommit
             }' > release-evidence.json
@@ -307,29 +357,33 @@ jobs:
                 exit 1
               fi
 
-              latest_assets="$(gh release view "$latest_tag" --json assets)"
-              has_release_evidence="$(
-                jq -r 'any(.assets[]?; .name == "release-evidence.json")' \
-                  <<<"$latest_assets"
-              )"
-              has_heavy_archive="$(
-                jq -r 'any(.assets[]?; .name == "frequensolve-test-evidence.tar.gz")' \
-                  <<<"$latest_assets"
-              )"
-              latest_complete=false
-              if [ "$latest_draft" = false ] && \
-                 [ "$has_release_evidence" = true ] && \
-                 [ "$has_heavy_archive" = true ]; then
-                latest_complete=true
+              same_commit=false
+              if [ "$latest_sha" = "$TARGET_SHA" ]; then
+                same_commit=true
               fi
 
-              if [ "$latest_sha" = "$TARGET_SHA" ]; then
-                tag_name="$latest_tag"
-                echo "Reusing ${tag_name}; it already targets ${TARGET_SHA}."
-              elif [ "$latest_complete" != true ]; then
-                echo "Incomplete ${latest_tag} points to ${latest_sha}, not ${TARGET_SHA}." >&2
-                exit 1
-              fi
+              retry_action="$(
+                python scripts/plan_release_tags.py retry-action \
+                  --same-commit "$same_commit" \
+                  --draft "$latest_draft"
+              )"
+              case "$retry_action" in
+                reuse)
+                  tag_name="$latest_tag"
+                  echo "Resuming draft ${tag_name}; it targets ${TARGET_SHA}."
+                  ;;
+                advance)
+                  echo "Preserving published ${latest_tag}; creating ${tag_name}."
+                  ;;
+                fail)
+                  echo "Draft ${latest_tag} points to ${latest_sha}, not ${TARGET_SHA}." >&2
+                  exit 1
+                  ;;
+                *)
+                  echo "Unexpected retry action: ${retry_action}" >&2
+                  exit 1
+                  ;;
+              esac
             fi
           fi
 
@@ -349,6 +403,8 @@ jobs:
           ci_run_url="$(jq -r '.ciRunUrl' release-evidence.json)"
           docker_run_id="$(jq -r '.dockerCallerRunId' release-evidence.json)"
           docker_image_tag="$(jq -r '.dockerImageTag' release-evidence.json)"
+          frequensolver_release="$(jq -r '.frequensolverRelease' release-evidence.json)"
+          frequensolver_release_url="$(jq -r '.frequensolverReleaseUrl' release-evidence.json)"
           {
             echo "FrequenSolve release candidate ${tag_name}"
             echo
@@ -357,6 +413,7 @@ jobs:
             echo "- Package version: ${tag_name#v}"
             echo "- Required CI: ${ci_run_url}"
             echo "- Solver evidence run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${docker_run_id}"
+            echo "- Preferred FrequenSolver: [${frequensolver_release}](${frequensolver_release_url})"
             echo "- Tested runtime image: ${docker_image_tag}"
             echo "- Publishing: TestPyPI via the Publish Package workflow"
             if [ -n "$NOTES" ]; then
@@ -387,6 +444,7 @@ jobs:
               --draft \
               --prerelease \
               --latest=false
+            release_is_draft=true
           else
             selected_prerelease="$(
               jq -r '.isPrerelease | tostring' <<<"$selected_release"
@@ -395,29 +453,66 @@ jobs:
               echo "Existing ${tag_name} is not a GitHub prerelease." >&2
               exit 1
             fi
+            release_is_draft="$(
+              jq -r '.isDraft | tostring' <<<"$selected_release"
+            )"
           fi
 
           selected_assets="$(gh release view "$tag_name" --json assets)"
-          has_release_evidence="$(
-            jq -r 'any(.assets[]?; .name == "release-evidence.json")' \
+          release_evidence_count="$(
+            jq -r '[.assets[]? | select(.name == "release-evidence.json")] | length' \
               <<<"$selected_assets"
           )"
-          has_heavy_archive="$(
-            jq -r 'any(.assets[]?; .name == "frequensolve-test-evidence.tar.gz")' \
+          heavy_archive_count="$(
+            jq -r '[.assets[]? | select(.name == "frequensolve-test-evidence.tar.gz")] | length' \
               <<<"$selected_assets"
           )"
-          if [ "$has_release_evidence" != true ] || \
-             [ "$has_heavy_archive" != true ]; then
+
+          if [ "$release_evidence_count" = 1 ] && \
+             [ "$heavy_archive_count" = 1 ]; then
+            existing_assets_dir="$(mktemp -d)"
+            gh release download "$tag_name" \
+              --pattern release-evidence.json \
+              --dir "$existing_assets_dir"
+            gh release download "$tag_name" \
+              --pattern frequensolve-test-evidence.tar.gz \
+              --dir "$existing_assets_dir"
+            if comparison_output="$(
+              python scripts/compare_release_evidence_pair.py \
+                --expected-evidence release-evidence.json \
+                --expected-archive frequensolve-test-evidence.tar.gz \
+                --actual-evidence "$existing_assets_dir/release-evidence.json" \
+                --actual-archive "$existing_assets_dir/frequensolve-test-evidence.tar.gz" \
+                2>&1
+            )"; then
+              echo "$comparison_output"
+            elif [ "$release_is_draft" = true ]; then
+              echo "Replacing the mismatched evidence pair on draft ${tag_name}."
+              echo "$comparison_output"
+              gh release upload "$tag_name" \
+                release-evidence.json \
+                frequensolve-test-evidence.tar.gz \
+                --clobber
+            else
+              echo "Published ${tag_name} already has a different sealed evidence pair; refusing to rewrite its notes or assets." >&2
+              echo "$comparison_output" >&2
+              exit 1
+            fi
+          elif [ "$release_is_draft" = true ]; then
+            echo "Installing a complete evidence pair on draft ${tag_name}."
             gh release upload "$tag_name" \
               release-evidence.json \
               frequensolve-test-evidence.tar.gz \
               --clobber
+          else
+            echo "Published ${tag_name} has an incomplete evidence pair (${release_evidence_count} release-evidence.json, ${heavy_archive_count} heavy archive); refusing to rewrite it." >&2
+            exit 1
           fi
 
           selected_assets="$(gh release view "$tag_name" --json assets)"
           jq -e '
-            any(.assets[]?; .name == "release-evidence.json") and
-            any(.assets[]?; .name == "frequensolve-test-evidence.tar.gz")
+            ([.assets[]? | select(.name == "release-evidence.json")] | length) == 1 and
+            ([.assets[]? | select(.name == "frequensolve-test-evidence.tar.gz")] | length) == 1
           ' <<<"$selected_assets" >/dev/null
 
           gh release edit "$tag_name" \
@@ -442,5 +537,6 @@ jobs:
             echo "- Tag: \`${tag_name}\`"
             echo "- Package version: \`${tag_name#v}\`"
             echo "- Exact source commit: \`${TARGET_SHA}\`"
+            echo "- Preferred FrequenSolver: \`${frequensolver_release}\`"
             echo "- Publish target: TestPyPI"
           } >> "$GITHUB_STEP_SUMMARY"
