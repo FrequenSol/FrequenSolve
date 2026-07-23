@@ -97,6 +97,7 @@ class ModelSubdomain(ExtraFieldsMixin):
             fields if fields is not None else serialized_fields or {},
             grid=grid,
             system=system,
+            canonicalize_keys=False,
         )
         if "frame" in extra:
             raise TypeError(

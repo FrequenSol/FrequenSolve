@@ -1462,7 +1462,7 @@ def _normalize_expression_symbol_binding(name: str, binding: Any) -> Dict[str, A
 
 
 class PropertyMap(MutableMapping):
-    """Mutable mapping of canonical property names to ``Property`` objects.
+    """Mutable mapping of names to ``Property`` objects.
 
     Args:
         values: Optional initial mapping of property names to property-like
@@ -1471,6 +1471,8 @@ class PropertyMap(MutableMapping):
         units: Default units applied to properties that do not specify units.
         system: Default coordinate-system name applied to properties that do
             not specify a system.
+        canonicalize_keys: Whether to canonicalize material-property aliases.
+            Disable this for mappings whose names belong to another namespace.
     """
 
     def __init__(
@@ -1479,6 +1481,7 @@ class PropertyMap(MutableMapping):
         grid: Optional[xr.DataArray] = None,
         units: Optional[Any] = None,
         system: Optional[str] = None,
+        canonicalize_keys: bool = True,
     ):
         """Create a mapping from property names to :class:`Property` objects.
 
@@ -1489,26 +1492,37 @@ class PropertyMap(MutableMapping):
             units: Default units applied to values that do not specify units.
             system: Default coordinate-system name applied to values that do
                 not specify one.
+            canonicalize_keys: Whether keys should use material-property alias
+                normalization.
         """
 
         self._store: Dict[str, Property] = {}
         self.grid = grid
         self.units = unit_expression(units) if units is not None else None
         self.system = system
+        self.canonicalize_keys = bool(canonicalize_keys)
         if values:
             self.update(values)
 
+    def _normalize_key(self, key: Any) -> str:
+        if self.canonicalize_keys:
+            return canonical_property_name(key)
+        normalized = str(key)
+        if not normalized.strip():
+            raise ValueError("Property map keys cannot be empty")
+        return normalized
+
     def __getitem__(self, key: str) -> "Property":
-        """Return a property by canonical or alias name.
+        """Return a property by its configured key normalization.
 
         Args:
-            key: Property name or supported alias.
+            key: Stored name or supported material-property alias.
 
         Returns:
             Stored :class:`Property` instance.
         """
 
-        return self._store[canonical_property_name(key)]
+        return self._store[self._normalize_key(key)]
 
     def __setitem__(self, key: str, value: Any) -> None:
         prop = (
@@ -1520,13 +1534,13 @@ class PropertyMap(MutableMapping):
             prop.units = self.units
         if self.system is not None and prop.system is None:
             prop.system = self.system
-        self._store[canonical_property_name(key)] = prop
+        self._store[self._normalize_key(key)] = prop
 
     def __delitem__(self, key: str) -> None:
-        del self._store[canonical_property_name(key)]
+        del self._store[self._normalize_key(key)]
 
     def __iter__(self) -> Iterator[str]:
-        """Iterate over canonical property names in insertion order."""
+        """Iterate over stored names in insertion order."""
 
         return iter(self._store)
 
@@ -1537,7 +1551,7 @@ class PropertyMap(MutableMapping):
 
     def __contains__(self, key: object) -> bool:
         try:
-            return canonical_property_name(str(key)) in self._store
+            return self._normalize_key(key) in self._store
         except Exception:
             return False
 

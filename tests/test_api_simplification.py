@@ -134,6 +134,29 @@ def test_subdomain_fields_are_independent_expression_data_and_roundtrip():
     assert loaded.to_fs() == payload
 
 
+def test_subdomain_fields_preserve_alias_and_mixed_case_names():
+    subdomain = ModelSubdomain(
+        mesh_block_id=1,
+        fields={"density": 2.0, "VpBase": 1.5},
+        properties={
+            "Vp": Property.expr(
+                PropertyExpression.field("density") + PropertyExpression.field("VpBase")
+            )
+        },
+    )
+
+    payload = subdomain.to_fs()
+    loaded = ModelSubdomain.from_fs(payload)
+
+    assert list(payload["fields"]) == ["density", "VpBase"]
+    assert payload["properties"]["vp"]["expr"] == {
+        "op": "add",
+        "args": [{"field": "density"}, {"field": "VpBase"}],
+    }
+    assert list(loaded.fields) == ["density", "VpBase"]
+    assert loaded.to_fs() == payload
+
+
 def test_property_does_not_mutate_input_dataarray_when_scaled():
     data = xr.DataArray(np.array([1.0, 2.0]), dims=["x"], coords={"x": [0.0, 1.0]})
 
