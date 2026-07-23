@@ -24,6 +24,7 @@ from frequensolve.model.layered import (
     dipping_plane_3d,
 )
 from frequensolve.model.model import ModelSubdomain
+from frequensolve.model.property import Property, PropertyExpression, coord, prop
 from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.units import ureg as u
 
@@ -1536,6 +1537,347 @@ def test_layered_model_sampling_converts_mixed_property_units():
     np.testing.assert_allclose(log, [1500.0, 2000.0])
 
 
+def test_layered_model_samples_nested_expression_properties_per_layer():
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0] * u.km)
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(
+        name="upper",
+        properties={
+            "Vp": 2.0 * u.km / u.s,
+            "Vs": 0.5 * prop("Vp"),
+            "Vratio": prop("Vs") / prop("Vp"),
+        },
+    )
+    model.add_surface(name="interface", depth=0.5 * u.km)
+    model.add_layer(
+        name="lower",
+        properties={
+            "Vp": 3000.0 * u.m / u.s,
+            "Vs": 0.5 * prop("Vp"),
+            "Vratio": prop("Vs") / prop("Vp"),
+        },
+    )
+    model.add_surface(name="bottom", depth=1.0 * u.km)
+
+    sampled_vs = model.sample_uniform(
+        [2, 5],
+        axes_units={"x": "km", "z": "km"},
+        properties="Vs",
+    )
+    sampled_ratio = model.sample_uniform(
+        [2, 5],
+        axes_units={"x": "km", "z": "km"},
+        properties="Vratio",
+    )
+    _, log = model.get_1D_log("Vs", x=0.5, dz=0.25, units="m/s")
+
+    assert sampled_vs["vs"].attrs["units"] == "km/s"
+    np.testing.assert_allclose(sampled_vs["vs"].isel(z=0), 1.0)
+    np.testing.assert_allclose(sampled_vs["vs"].isel(z=-1), 1.5)
+    np.testing.assert_allclose(sampled_ratio["vratio"], 0.5)
+    np.testing.assert_allclose(log[[0, -1]], [1000.0, 1500.0])
+
+
+def test_layered_model_samples_expression_coordinate_symbols(tmp_path):
+    simulation = SeismicSimulation(
+        name="expression-coordinates",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    depth_system = SurfaceCoordinateSystem(
+        name="depth_from_top",
+        surface="top",
+        axes=[Axis("depth", direction="z", positive="down")],
+    )
+    simulation += depth_system
+
+    qp = Property.expr(
+        {
+            "op": "case",
+            "branches": [
+                {
+                    "if": {
+                        "op": "<",
+                        "args": [{"var": "depth"}, {"value": 0.5}],
+                    },
+                    "then": {"value": 60.0},
+                }
+            ],
+            "else": {"value": 100.0},
+        },
+        symbols={"depth": coord(depth_system.name, "depth", units="km")},
+    )
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0] * u.km)
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(name="formation", properties={"Qp": qp})
+    model.add_surface(name="bottom", depth=1.0 * u.km)
+    simulation += model
+
+    sampled = model.sample_uniform(
+        [2, 5],
+        axes_units={"x": "km", "z": "km"},
+        properties="Qp",
+    )
+
+    np.testing.assert_allclose(sampled["qp"].isel(x=0), [60, 60, 100, 100, 100])
+
+
+def test_layered_model_plots_expression_bound_to_implicit_global_x():
+    import matplotlib.pyplot as plt
+
+    vp = Property.expr(
+        {
+            "op": "case",
+            "branches": [
+                {
+                    "if": {
+                        "op": "<",
+                        "args": [{"var": "x"}, {"value": 500.0}],
+                    },
+                    "then": {"value": 1.5, "units": "km/s"},
+                }
+            ],
+            "else": {"value": 2.0, "units": "km/s"},
+        },
+        symbols={"x": coord("global", "x", units="m")},
+    )
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0] * u.km)
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(name="sediment", properties={"Vp": vp})
+    model.add_surface(name="bottom", depth=1.0 * u.km)
+
+    fig, ax = plt.subplots()
+    image = model.plot(
+        "Vp",
+        resolution=[3, 2],
+        ax=ax,
+        surfaces=False,
+        add_colorbar=False,
+    )
+
+    np.testing.assert_allclose(image.get_array(), [[1.5, 2.0, 2.0]] * 2)
+    assert image.get_clim() == pytest.approx((1.5, 2.0))
+    plt.close(fig)
+
+
+def test_layered_model_samples_all_implicit_global_expression_axes_in_3d():
+    coordinate_sum = Property.expr(
+        {
+            "op": "add",
+            "args": [
+                {
+                    "op": "add",
+                    "args": [
+                        {"var": "x"},
+                        {"var": "y"},
+                    ],
+                },
+                {"var": "z"},
+            ],
+        },
+        symbols={axis: coord("global", axis, units="km") for axis in ("x", "y", "z")},
+    )
+    model = LayeredModel(
+        dimension=3,
+        x_limits=[0.0, 1.0] * u.km,
+        y_limits=[0.0, 2.0] * u.km,
+    )
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(name="formation", properties={"Qp": coordinate_sum})
+    model.add_surface(name="bottom", depth=3.0 * u.km)
+
+    sampled = model.sample_uniform(
+        [2, 2, 2],
+        axes_units={"x": "km", "y": "km", "z": "km"},
+        properties="Qp",
+    )
+
+    assert sampled["qp"].isel(x=0, y=0, z=0).item() == pytest.approx(0.0)
+    assert sampled["qp"].isel(x=-1, y=-1, z=-1).item() == pytest.approx(6.0)
+
+
+def test_layered_model_plots_property_derived_from_independent_field_data():
+    import matplotlib.pyplot as plt
+
+    vp_base = xr.DataArray(
+        [1.5, 2.0],
+        dims=["z"],
+        coords={"z": [0.0, 1.0]},
+        attrs={"units": "km/s"},
+    )
+    vp_base.coords["z"].attrs["units"] = "km"
+    scale = PropertyExpression(
+        {
+            "op": "case",
+            "branches": [
+                {
+                    "if": {
+                        "op": "<",
+                        "args": [{"var": "x"}, {"value": 0.5}],
+                    },
+                    "then": {"value": 1.0},
+                }
+            ],
+            "else": {"value": 1.1},
+        }
+    )
+    vp = Property.expr(
+        PropertyExpression.field("vp_base") * scale,
+        units="km/s",
+        symbols={"x": coord("global", "x", units="km")},
+    )
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0] * u.km)
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(
+        name="sediment",
+        fields={"vp_base": vp_base},
+        properties={"Vp": vp},
+    )
+    model.add_surface(name="bottom", depth=1.0 * u.km)
+
+    sampled = model.sample_uniform(
+        [2, 3],
+        axes_units={"x": "km", "z": "km"},
+        properties="Vp",
+    )
+    fig, ax = plt.subplots()
+    image = model.plot(
+        "Vp",
+        resolution=[2, 3],
+        ax=ax,
+        axes_units={"x": "km", "z": "km"},
+        units="m/s",
+        surfaces=False,
+        add_colorbar=False,
+    )
+
+    np.testing.assert_allclose(sampled["vp"].isel(x=0), [1.5, 1.75, 2.0])
+    np.testing.assert_allclose(sampled["vp"].isel(x=-1), [1.65, 1.925, 2.2])
+    assert image.get_clim() == pytest.approx((1500.0, 2200.0))
+    plt.close(fig)
+
+
+def test_layered_model_evaluates_sympy_coordinate_magnitudes_in_binding_units():
+    import sympy as sp
+
+    x, z = sp.symbols("x z", real=True)
+    lateral = sp.Piecewise((1.0, x < 5.0), (1.2, True))
+    depth = sp.exp(-z / 0.3)
+    coordinate_symbols = {
+        "x": coord("global", "x", units="km"),
+        "z": coord("global", "z", units="km"),
+    }
+    scale = PropertyExpression.from_value(
+        1.0 + (lateral - 1.0) * depth,
+        symbols=coordinate_symbols,
+        default_symbol="var",
+    )
+    vp = Property.expr(
+        PropertyExpression.field("vp_base") * scale,
+        units="km/s",
+        symbols=coordinate_symbols,
+    )
+    model = LayeredModel(dimension=2, x_limits=[0.0, 10.0] * u.km)
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(
+        name="sediment",
+        fields={"vp_base": 2.0 * u.km / u.s},
+        properties={"Vp": vp},
+    )
+    model.add_surface(name="bottom", depth=1.0 * u.km)
+
+    sampled = model.sample_uniform(
+        [3, 3],
+        axes_units={"x": "m", "z": "m"},
+        properties="Vp",
+    )
+
+    np.testing.assert_allclose(sampled["vp"].isel(x=0), 2.0)
+    assert sampled["vp"].isel(x=-1, z=0).item() == pytest.approx(2.4)
+    assert sampled["vp"].isel(x=-1, z=-1).item() == pytest.approx(
+        2.0 * (1.0 + 0.2 * np.exp(-1.0 / 0.3))
+    )
+
+
+def test_layered_model_expression_reports_missing_independent_field():
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(
+        name="sediment",
+        properties={"Vp": Property.expr({"field": "vp_base"})},
+    )
+    model.add_surface(name="bottom", depth=1.0)
+
+    with pytest.raises(ValueError, match="field 'vp_base'.*not declared"):
+        model.sample_uniform([2, 2], properties="Vp")
+
+
+def test_layered_model_materializes_legacy_extra_field_payloads():
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(
+        name="sediment",
+        properties={
+            "Vp": Property.expr(
+                PropertyExpression.field("vp_base") * 1.1,
+                units="km/s",
+            )
+        },
+    )
+    model.layers["sediment"].extra["fields"] = {
+        "vp_base": {"value": 1.5, "units": "km/s"}
+    }
+    model.add_surface(name="bottom", depth=1.0)
+
+    sampled = model.sample_uniform([2, 2], properties="Vp")
+
+    np.testing.assert_allclose(sampled["vp"], 1.65)
+    assert sampled["vp"].attrs["units"] == "km/s"
+
+
+def test_layered_model_global_expression_binding_reports_missing_physical_axis():
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(
+        name="formation",
+        properties={
+            "Qp": Property.expr(
+                {"var": "y"},
+                symbols={"y": coord("global", "y")},
+            )
+        },
+    )
+    model.add_surface(name="bottom", depth=1.0)
+
+    with pytest.raises(ValueError, match="unavailable axis 'y'.*'global'"):
+        model.sample_uniform([2, 2], properties="Qp")
+
+
+def test_layered_model_expression_dependencies_report_cycles_and_missing_refs():
+    cyclic = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    cyclic.add_surface(name="top", depth=0.0)
+    cyclic.add_layer(
+        name="cycle",
+        properties={"Vp": prop("Vs"), "Vs": prop("Vp")},
+    )
+    cyclic.add_surface(name="bottom", depth=1.0)
+
+    with pytest.raises(
+        ValueError,
+        match="Circular property expression dependency: vp -> vs -> vp",
+    ):
+        cyclic.sample_uniform([2, 3], properties="Vp")
+
+    missing = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    missing.add_surface(name="top", depth=0.0)
+    missing.add_layer(name="missing", properties={"Vs": 0.5 * prop("Vp")})
+    missing.add_surface(name="bottom", depth=1.0)
+
+    with pytest.raises(ValueError, match="references property 'vp'"):
+        missing.sample_uniform([2, 3], properties="Vs")
+
+
 def test_layered_model_plot_uses_property_units():
     import matplotlib.pyplot as plt
 
@@ -1699,6 +2041,158 @@ def test_layered_model_plot_hides_borehole_boundaries_by_default():
     assert len(ax.lines) == 0
     assert ax.images[0].get_array().min() == pytest.approx(1.48)
     plt.close(fig)
+
+
+def test_layered_model_plot_ignores_unrequested_expression_properties():
+    import matplotlib.pyplot as plt
+
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(
+        name="formation",
+        mesh_block_id=1,
+        properties={
+            "Vp": 2.2,
+            "Rho": {"expr": {"ref": "vp"}},
+        },
+    )
+    model.add_surface(name="bottom", depth=0.5)
+
+    fig, ax = plt.subplots()
+    model.plot("Vp", resolution=[3, 3], ax=ax, surfaces=False, add_colorbar=False)
+
+    np.testing.assert_allclose(ax.images[0].get_array(), 2.2)
+    plt.close(fig)
+
+
+def test_layered_model_plot_materializes_requested_expression_property():
+    import matplotlib.pyplot as plt
+
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0] * u.km)
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(
+        name="upper",
+        properties={"Vp": 2.0 * u.km / u.s, "Vs": 0.5 * prop("Vp")},
+    )
+    model.add_surface(name="interface", depth=0.5 * u.km)
+    model.add_layer(
+        name="lower",
+        properties={"Vp": 3.0 * u.km / u.s, "Vs": 0.5 * prop("Vp")},
+    )
+    model.add_surface(name="bottom", depth=1.0 * u.km)
+
+    fig, ax = plt.subplots()
+    image = model.plot(
+        "Vs",
+        resolution=[3, 5],
+        ax=ax,
+        surfaces=False,
+        add_colorbar=False,
+    )
+
+    assert image.get_clim() == pytest.approx((1.0, 1.5))
+    np.testing.assert_allclose(image.get_array()[0], 1.0)
+    np.testing.assert_allclose(image.get_array()[-1], 1.5)
+    plt.close(fig)
+
+
+def test_layered_model_3d_plot_uses_clean_interactive_slices(monkeypatch):
+    pv = pytest.importorskip("pyvista")
+
+    class PlotterSpy:
+        instances = []
+
+        def __init__(self, **kwargs):
+            self.init_kwargs = kwargs
+            self.meshes = []
+            self.show_kwargs = None
+            self.bounds_kwargs = None
+            self.background = None
+            self.camera_position = None
+            self.camera = type(
+                "CameraSpy",
+                (),
+                {
+                    "position": (1.0, 1.0, 1.0),
+                    "focal_point": (0.0, 0.0, 0.0),
+                    "up": (0.0, 0.0, 1.0),
+                },
+            )()
+            self.__class__.instances.append(self)
+
+        def set_background(self, color):
+            self.background = color
+
+        def add_mesh(self, mesh, **kwargs):
+            self.meshes.append((mesh, kwargs))
+
+        def set_scale(self, **kwargs):
+            self.scale = kwargs
+
+        def show_bounds(self, **kwargs):
+            self.bounds_kwargs = kwargs
+
+        def show_axes(self):
+            self.axes_shown = True
+
+        def enable_anti_aliasing(self, mode):
+            self.anti_aliasing = mode
+
+        def reset_camera(self):
+            self.camera_reset = True
+
+        def show(self, **kwargs):
+            self.show_kwargs = kwargs
+            return "interactive-viewer"
+
+    monkeypatch.setattr(pv, "Plotter", PlotterSpy)
+
+    model = LayeredModel(
+        dimension=3,
+        x_limits=[0.0, 1.0] * u.km,
+        y_limits=[0.0, 1.0] * u.km,
+    )
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(
+        name="formation",
+        properties={
+            "Vp": 2.2 * u.km / u.s,
+            "Vs": 0.5 * prop("Vp"),
+        },
+    )
+    model.add_surface(name="bottom", depth=0.5 * u.km)
+
+    result = model.plot(
+        "Vp",
+        resolution=[3, 3, 3],
+        surfaces=False,
+        interactive=True,
+    )
+
+    plotter = PlotterSpy.instances[-1]
+    assert result == "interactive-viewer"
+    assert plotter.show_kwargs == {"jupyter_backend": "html"}
+    assert isinstance(plotter.meshes[0][0], pv.MultiBlock)
+    assert plotter.meshes[0][1]["show_edges"] is False
+    assert plotter.bounds_kwargs["grid"] is None
+    assert plotter.anti_aliasing == "fxaa"
+    assert plotter.camera.up == (0.0, 0.0, 1.0)
+
+    model.plot("Vs", resolution=[3, 3, 3], surfaces=False, interactive=True)
+    expression_plotter = PlotterSpy.instances[-1]
+    assert expression_plotter.meshes[0][1]["scalars"] == "Vs"
+    assert expression_plotter.meshes[0][1]["clim"] == pytest.approx([1.1, 1.1])
+
+    model.plot("Vp", resolution=[3, 3, 3], surfaces=False)
+    static_plotter = PlotterSpy.instances[-1]
+    assert static_plotter.show_kwargs == {"jupyter_backend": "static"}
+    assert static_plotter.camera.position == (1.0, 1.0, -1.0)
+    assert static_plotter.camera.up == (0.0, 0.0, -1.0)
+
+    model.plot("Vp", resolution=[3, 3, 3], surfaces=False, flip_z=False)
+    elevation_plotter = PlotterSpy.instances[-1]
+    assert elevation_plotter.camera.position == (1.0, 1.0, 1.0)
+    assert elevation_plotter.camera.up == (0.0, 0.0, 1.0)
 
 
 def test_borehole_draw_plots_material_radii():

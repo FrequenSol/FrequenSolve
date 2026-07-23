@@ -177,15 +177,20 @@ filesystem path. Receiver-group names in the observed data must match the
 :term:`simulation` acquisition, because the imaging misfit pairs observed and simulated
 receiver groups by name.
 
-Successful imaging runs can be opened with ``site.fetch_image(job)`` or
-``ImageDatabase``:
+Successful imaging runs can be opened directly from local files with
+``job.load_images()``. This does not contact an execution site:
 
 .. code-block:: python
 
-   image_db = site.fetch_image(job)
+   job = fs.load(job_file)
+   image_db = job.load_images()
    raw = image_db.raw_images
    smoothed = image_db.smoothed_images
 
+For a remote run, call ``site.fetch_image(job)`` once to copy the image files
+locally. Subsequent sessions can reload the job and use ``job.load_images()``
+without reconnecting to the site.
+
 Both properties return :term:`xarray` ``Dataset`` objects on the requested image grid.
 The raw dataset reads the solver ``image/raw`` group; the smoothed dataset reads
-``image/phi`` when the solver writes that group.
+``image/smoothed`` when the solver writes that group.

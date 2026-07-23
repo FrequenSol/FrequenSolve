@@ -256,6 +256,8 @@ class SimpleSurface:
         name: Surface name used in serialized model payloads and references.
         interface: Whether this surface separates adjacent stratigraphic
             layers.
+        cutting: Whether this surface truncates the model below it. Cutting is
+            a meshing role independent of ``interface``.
         depth: Surface depth as a scalar, Pint quantity, file reference,
             serialized property payload, or ``xarray.DataArray``.
         grid: Optional grid metadata used for file-backed or ungridded depth
@@ -273,6 +275,7 @@ class SimpleSurface:
 
     name: str = "surface"
     interface: bool = True
+    cutting: bool = False
     depth: Property = field(default_factory=Property)
 
     def __init__(
@@ -284,6 +287,7 @@ class SimpleSurface:
         scale: float = 1.0,
         units: Optional[Any] = None,
         system: Optional[str] = None,
+        cutting: bool = False,
         **kwargs,
     ):
         # Legacy argument naming convention
@@ -301,6 +305,7 @@ class SimpleSurface:
 
         self.name = name
         self.interface = interface
+        self.cutting = bool(cutting)
         self.depth = Property(
             data=depth,
             grid=grid,
@@ -335,6 +340,7 @@ class SimpleSurface:
             name=name,
             interface=interface,
             depth=depth,
+            cutting=data.get("cutting", False),
             **({"grid": grid} if grid is not None else {}),
         )
 
@@ -352,6 +358,7 @@ class SimpleSurface:
         data = {
             "name": self.name,
             "interface": self.interface,
+            **({"cutting": True} if self.cutting else {}),
         }
         ctx = ctx or ExportContext()
         use_store = getattr(ctx, "store", None) is not None

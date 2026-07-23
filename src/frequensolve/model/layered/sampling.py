@@ -21,7 +21,7 @@ from frequensolve.model.property import (
     _coords_in_data_units,
     canonical_property_name,
 )
-from frequensolve.units import unit_expression
+from frequensolve.units import is_quantity, unit_expression, ureg
 
 from ._utils import (
     _axis_units,
@@ -61,8 +61,9 @@ class LayeredSamplingMixin:
         axes_units: Optional[Dict[str, Any]] = None,
         *,
         frame: Optional[Any] = None,
+        properties: Optional[Union[str, List[str]]] = None,
     ) -> xr.Dataset:
-        """Sample all model properties on a uniform xarray grid.
+        """Sample model properties on a uniform xarray grid.
 
         Args:
             n: Number of samples along each exposed grid axis. The length must
@@ -75,6 +76,9 @@ class LayeredSamplingMixin:
                 coordinate-system name. When provided, its axis names and order
                 define the dataset dimensions while physical ``x``, ``y``, and
                 ``z`` coordinates are retained for geometry evaluation.
+            properties: Optional property name or list of property names to
+                sample. Names and aliases are canonicalized. By default, all
+                model properties are sampled.
 
         Returns:
             Dataset whose data variables are the model's canonical property
@@ -82,8 +86,9 @@ class LayeredSamplingMixin:
 
         Raises:
             ValueError: If the sample count length does not match the grid
-                axes, any sample count is below two, or the requested frame has
-                unsupported or incomplete axis definitions.
+                axes, any sample count is below two, a requested property is not
+                declared by the model, or the requested frame has unsupported
+                or incomplete axis definitions.
         """
         sample_frame = self._resolve_sample_frame(frame)
         sample_axes = self._sample_axes(sample_frame)
@@ -98,8 +103,20 @@ class LayeredSamplingMixin:
         if sample_frame is not None and getattr(sample_frame, "name", None):
             samples.attrs["frame"] = sample_frame.name
 
+        available_properties = self.properties
+        if properties is None:
+            property_names = available_properties
+        else:
+            requested = [properties] if isinstance(properties, str) else properties
+            property_names = [canonical_property_name(name) for name in requested]
+            missing = sorted(set(property_names).difference(available_properties))
+            if missing:
+                raise ValueError(
+                    f"Properties {missing} are not declared by the layered model"
+                )
+
         gridded = xr.Dataset(coords=samples.coords, attrs=dict(samples.attrs))
-        for name in self.properties:
+        for name in property_names:
             units = self.property_units(name)
             gridded[name] = xr.DataArray(
                 dims=samples.dims,
@@ -109,23 +126,26 @@ class LayeredSamplingMixin:
             )
         for layer in self.layers:
             mask = self._get_layer_mask(layer, samples)
+            cache: Dict[str, xr.DataArray] = {}
+            field_cache: Dict[str, xr.DataArray] = {}
 
-            for name in self.properties:
+            for name in property_names:
                 if name not in layer.properties:
                     continue
                 prop = layer.properties[name]
+                data = self._materialize_subdomain_property(
+                    layer,
+                    name,
+                    samples,
+                    cache=cache,
+                    field_cache=field_cache,
+                )
                 target_units = gridded[name].attrs.get("units")
-                source_units = _property_units(prop)
+                source_units = data.attrs.get("units") or _property_units(prop)
                 if target_units is None and source_units is not None:
                     target_units = source_units
                     gridded[name].attrs["units"] = target_units
 
-                if prop.is_constant:
-                    data = xr.full_like(samples, prop.get(), dtype=float)
-                else:
-                    data = self._property_values_on_samples(prop, samples).transpose(
-                        *samples.dims
-                    )
                 data = _convert_dataarray_units(data, source_units, target_units)
                 gridded[name].data = np.where(
                     mask.values,
@@ -200,13 +220,27 @@ class LayeredSamplingMixin:
                 layer.set_property(name, updated[name])
         return self
 
-    def plot(self, property: str, resolution: Optional[List[int]] = None, **kwargs):
+    def plot(
+        self,
+        property: str,
+        resolution: Optional[List[int]] = None,
+        *,
+        interactive: bool = False,
+        flip_z: Optional[bool] = None,
+        **kwargs,
+    ):
         """Plot one sampled model property.
 
         Args:
             property: Property name or alias to sample and plot.
             resolution: Optional two- or three-dimensional sampling resolution.
-                Defaults to ``[500, 500]`` for 2D plotting.
+                Defaults to ``[500, 500]`` for 2D plotting and
+                ``[100, 100, 100]`` for 3D plotting.
+            interactive: For 3D models, display an inline interactive PyVista
+                viewer instead of a static image. The viewer supports rotation,
+                panning, and zooming without adding slice-control outlines.
+            flip_z: For 3D models, display positive Z downward. Defaults to
+                ``True`` for static views and ``False`` for interactive views.
             **kwargs: Plotting options forwarded to
                 ``frequensolve.plotting.layered.plot_layered_model``.
 
@@ -215,8 +249,17 @@ class LayeredSamplingMixin:
         """
         from frequensolve.plotting.layered import plot_layered_model
 
-        resolution = resolution or [500, 500]
-        return plot_layered_model(self, property, resolution, **kwargs)
+        if resolution is None:
+            resolution = [100, 100, 100] if self.dimension == 3 else [500, 500]
+        if flip_z is not None:
+            kwargs["flip_z"] = flip_z
+        return plot_layered_model(
+            self,
+            property,
+            resolution,
+            interactive=interactive,
+            **kwargs,
+        )
 
     def get_1D_log(
         self,
@@ -274,16 +317,22 @@ class LayeredSamplingMixin:
             if property not in layer.properties.keys():
                 continue
             layer_prop = layer.properties[property]
-            prop = self._property_values_on_samples(layer_prop, samples)
-            prop = prop.transpose(*samples.dims)
-            prop = _convert_dataarray_units(
-                prop,
-                _property_units(layer_prop),
+            data = self._materialize_subdomain_property(
+                layer,
+                property,
+                samples,
+            )
+            source_units = data.attrs.get("units") or _property_units(layer_prop)
+            if target_units is None and source_units is not None:
+                target_units = source_units
+            data = _convert_dataarray_units(
+                data,
+                source_units,
                 target_units,
             )
             mask = self._get_layer_mask(layer, samples)
-            data = prop.where(mask)
-            samples.data = np.where(~np.isnan(data), data, samples.data)
+            layer_data = data.where(mask)
+            samples.data = np.where(~np.isnan(layer_data), layer_data, samples.data)
         if target_units is not None:
             samples.attrs["units"] = target_units
 
@@ -656,6 +705,223 @@ class LayeredSamplingMixin:
             return samples
         return self._coordinate_system_samples(system, samples)
 
+    @staticmethod
+    def _expression_operand(data: xr.DataArray) -> Any:
+        units = data.attrs.get("units")
+        values = np.asarray(data.values)
+        if units is None:
+            return values
+        return ureg.Quantity(values, unit_expression(units))
+
+    @staticmethod
+    def _subdomain_label(subdomain: ModelSubdomain) -> str:
+        if getattr(subdomain, "name", None):
+            return str(subdomain.name)
+        return f"mesh block {subdomain.mesh_block_id}"
+
+    def _expression_variables(
+        self,
+        prop: Property,
+        samples: xr.DataArray,
+    ) -> Dict[str, Any]:
+        variables: Dict[str, Any] = {}
+        for name, binding in prop.expression_symbols.items():
+            kind = binding.get("kind")
+            if kind != "coordinate":
+                raise ValueError(
+                    f"Expression variable {name!r} uses unsupported binding "
+                    f"kind {kind!r}"
+                )
+            system_name = str(binding.get("system", "")).strip()
+            axis = str(binding.get("axis", ""))
+
+            if system_name == "global":
+                coordinates = samples
+            else:
+                system = self._coordinate_system(system_name)
+                if system is None:
+                    raise ValueError(
+                        f"Expression variable {name!r} references unavailable "
+                        f"coordinate system {system_name!r}"
+                    )
+                coordinates = self._coordinate_system_samples(system, samples)
+
+            if axis not in coordinates.coords:
+                raise ValueError(
+                    f"Expression variable {name!r} references unavailable axis "
+                    f"{axis!r} on coordinate system {system_name!r}"
+                )
+            data = coordinates.coords[axis].broadcast_like(samples)
+            source_units = data.attrs.get("units")
+            target_units = binding.get("units")
+            data = _convert_dataarray_units(data, source_units, target_units)
+            variables[name] = np.asarray(data.values)
+        return variables
+
+    @staticmethod
+    def _expression_result_dataarray(
+        result: Any,
+        samples: xr.DataArray,
+        declared_units: Optional[str],
+    ) -> xr.DataArray:
+        units = declared_units
+        if is_quantity(result):
+            if declared_units is not None:
+                result = result.to(declared_units)
+            inferred_units = unit_expression(result.units)
+            if units is None and inferred_units != "dimensionless":
+                units = inferred_units
+            values = np.asarray(result.magnitude)
+        else:
+            values = np.asarray(result)
+
+        try:
+            values = np.broadcast_to(values, samples.shape)
+        except ValueError as exc:
+            raise ValueError(
+                f"Expression result shape {values.shape} cannot be broadcast to "
+                f"sampling shape {samples.shape}"
+            ) from exc
+        attrs = {"units": units} if units is not None else {}
+        return xr.DataArray(
+            data=np.array(values, copy=True),
+            dims=samples.dims,
+            coords=samples.coords,
+            attrs=attrs,
+        )
+
+    def _materialize_subdomain_property(
+        self,
+        subdomain: ModelSubdomain,
+        name: str,
+        samples: xr.DataArray,
+        *,
+        cache: Optional[Dict[str, xr.DataArray]] = None,
+        field_cache: Optional[Dict[str, xr.DataArray]] = None,
+        resolving: Tuple[str, ...] = (),
+    ) -> xr.DataArray:
+        name = canonical_property_name(name)
+        cache = {} if cache is None else cache
+        field_cache = {} if field_cache is None else field_cache
+        if name in cache:
+            return cache[name]
+        if name in resolving:
+            cycle = " -> ".join((*resolving, name))
+            raise ValueError(f"Circular property expression dependency: {cycle}")
+        if name not in subdomain.properties:
+            root = resolving[0] if resolving else name
+            raise ValueError(
+                f"Expression property {root!r} references property {name!r}, "
+                f"which is not declared in subdomain "
+                f"{self._subdomain_label(subdomain)!r}"
+            )
+
+        prop = subdomain.properties[name]
+        native_units = _property_units(prop)
+        if prop.expression is None:
+            if prop.is_constant:
+                data = xr.full_like(samples, prop.get(), dtype=float)
+            else:
+                data = self._property_values_on_samples(prop, samples).transpose(
+                    *samples.dims
+                )
+            data = _convert_dataarray_units(data, native_units, native_units)
+        else:
+            path = (*resolving, name)
+            references = {
+                dependency: self._expression_operand(
+                    self._materialize_subdomain_property(
+                        subdomain,
+                        dependency,
+                        samples,
+                        cache=cache,
+                        field_cache=field_cache,
+                        resolving=path,
+                    )
+                )
+                for dependency in prop.expression.depends_on()
+            }
+            fields = {
+                field_name: self._expression_operand(
+                    self._materialize_subdomain_field(
+                        subdomain,
+                        field_name,
+                        samples,
+                        cache=field_cache,
+                    )
+                )
+                for field_name in prop.expression.field_names()
+            }
+            try:
+                result = prop.expression.evaluate(
+                    references,
+                    self._expression_variables(prop, samples),
+                    fields,
+                )
+                data = self._expression_result_dataarray(
+                    result,
+                    samples,
+                    native_units,
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"Cannot evaluate expression property {name!r} in subdomain "
+                    f"{self._subdomain_label(subdomain)!r}: {exc}"
+                ) from exc
+
+        cache[name] = data
+        return data
+
+    def _materialize_subdomain_field(
+        self,
+        subdomain: ModelSubdomain,
+        name: str,
+        samples: xr.DataArray,
+        *,
+        cache: Optional[Dict[str, xr.DataArray]] = None,
+    ) -> xr.DataArray:
+        """Materialize independent named subdomain data on a sample grid."""
+
+        cache = {} if cache is None else cache
+        if name in cache:
+            return cache[name]
+
+        fields = getattr(subdomain, "fields", None)
+        if fields is not None and name in fields:
+            field_prop = fields[name]
+        else:
+            legacy_fields = getattr(subdomain, "extra", {}).get("fields", {})
+            if name not in legacy_fields:
+                raise ValueError(
+                    f"Expression references field {name!r}, which is not declared "
+                    f"in subdomain {self._subdomain_label(subdomain)!r}"
+                )
+            field_prop = Property.from_value(legacy_fields[name])
+
+        if field_prop.expression is not None:
+            raise ValueError(
+                f"Subdomain field {name!r} must contain independent data, not an "
+                "expression"
+            )
+        native_units = _property_units(field_prop)
+        try:
+            if field_prop.is_constant:
+                data = xr.full_like(samples, field_prop.get(), dtype=float)
+            else:
+                data = self._property_values_on_samples(
+                    field_prop,
+                    samples,
+                ).transpose(*samples.dims)
+        except ValueError as exc:
+            raise ValueError(
+                f"Cannot materialize field {name!r} in subdomain "
+                f"{self._subdomain_label(subdomain)!r}: {exc}. Keep the field "
+                "data in memory for local plotting or provide a readable local file."
+            ) from exc
+        data = _convert_dataarray_units(data, native_units, native_units)
+        cache[name] = data
+        return data
+
     def _surface_relative_property_values(
         self, prop: Property, system: Any, samples: xr.DataArray
     ) -> xr.DataArray:
@@ -837,21 +1103,24 @@ class LayeredSamplingMixin:
                 subdomain = subdomains.get(part.mesh_block_id)
                 if subdomain is None:
                     continue
+                cache: Dict[str, xr.DataArray] = {}
+                field_cache: Dict[str, xr.DataArray] = {}
                 for name in gridded.data_vars:
                     if name not in subdomain.properties:
                         continue
                     prop = subdomain.properties[name]
+                    data = self._materialize_subdomain_property(
+                        subdomain,
+                        name,
+                        samples,
+                        cache=cache,
+                        field_cache=field_cache,
+                    )
                     target_units = gridded[name].attrs.get("units")
-                    source_units = _property_units(prop)
+                    source_units = data.attrs.get("units") or _property_units(prop)
                     if target_units is None and source_units is not None:
                         target_units = source_units
                         gridded[name].attrs["units"] = target_units
-                    if prop.is_constant:
-                        data = xr.full_like(samples, prop.get(), dtype=float)
-                    else:
-                        data = self._property_values_on_samples(
-                            prop, samples
-                        ).transpose(*samples.dims)
                     data = _convert_dataarray_units(data, source_units, target_units)
                     gridded[name].data = np.where(
                         mask.values,

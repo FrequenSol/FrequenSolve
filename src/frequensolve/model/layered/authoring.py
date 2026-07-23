@@ -11,13 +11,16 @@ from __future__ import annotations
 import copy
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple, TypeVar, Union
 
+import numpy as np
 import xarray as xr
 from numpy.typing import ArrayLike
 
 from frequensolve.model.model import ModelSubdomain
+from frequensolve.util.named_list import NamedList
 
+from ._utils import _convert_units, _property_units
 from .borehole import (
     Borehole,
     BoreholeAnnularPadding,
@@ -27,6 +30,8 @@ from .borehole import (
     BoreholeSurface,
 )
 from .surfaces import Fracture, Layer, SimpleSurface
+
+_LayeredModelT = TypeVar("_LayeredModelT", bound="LayeredAuthoringMixin")
 
 
 class LayeredAuthoringMixin:
@@ -47,6 +52,7 @@ class LayeredAuthoringMixin:
         grid: Optional[xr.DataArray] = None,
         units: Optional[Any] = None,
         system: Optional[str] = None,
+        fields: Optional[dict] = None,
         **kwargs,
     ) -> None:
         """Add one stratigraphic material layer to the model.
@@ -59,6 +65,8 @@ class LayeredAuthoringMixin:
             physics: Optional material physics family or solver variant.
             properties: Mapping of property names to scalar, array, file, or
                 expression values accepted by ``Property``.
+            fields: Mapping of independent named data fields referenced by
+                property-expression ``field`` nodes.
             grid: Default xarray grid metadata used when coercing file-backed
                 or ungridded property values.
             units: Default units applied to properties that do not declare
@@ -98,6 +106,7 @@ class LayeredAuthoringMixin:
             mesh_block_id=mesh_block_id,
             physics=physics,
             properties=properties,
+            fields=fields,
             grid=grid,
             units=units,
             system=system,
@@ -112,6 +121,7 @@ class LayeredAuthoringMixin:
         scale: float = 1.0,
         units: Optional[Any] = None,
         system: Optional[str] = None,
+        cutting: bool = False,
         **kwargs,
     ):
         """Add a depth surface to the model.
@@ -129,6 +139,9 @@ class LayeredAuthoringMixin:
             system: Optional coordinate-system name for the surface depth
                 coordinates. The legacy ``coordinate_system`` keyword is
                 accepted as an alias.
+            cutting: Whether to label the surface as a model-cutting surface
+                for the mesher. Use :meth:`truncate` to also discard geometry
+                below the surface and make it the lower model boundary.
             **kwargs: Legacy aliases and extra fields. ``xarr`` is accepted as
                 a grid alias and ``z`` as a depth alias.
 
@@ -173,8 +186,287 @@ class LayeredAuthoringMixin:
             scale=scale,
             units=units,
             system=system,
+            cutting=cutting,
         )
         self += surface
+
+    def truncate(
+        self: _LayeredModelT,
+        depth: Optional[Union[float, str, Path, xr.DataArray, Dict[str, Any]]] = None,
+        *,
+        name: Optional[str] = "cutting_surface",
+        grid: Optional[xr.DataArray] = None,
+        scale: float = 1.0,
+        units: Optional[Any] = None,
+        system: Optional[str] = None,
+        **kwargs,
+    ) -> _LayeredModelT:
+        """Truncate the model below a new cutting surface.
+
+        Surfaces proven to be fully deeper than the cut are discarded.
+        Surfaces that cross the cut are retained so a layered mesher can clip
+        them against the serialized ``cutting`` surface. The cut becomes the
+        lower model boundary, and formation layers that are wholly below it
+        are removed.
+
+        This method returns an independent deep copy and leaves the source
+        model unchanged. Depth increases downward, following the layered-model
+        coordinate convention.
+
+        Args:
+            depth: Cutting-surface depth in the forms accepted by
+                :meth:`add_surface`.
+            name: Surface name. Defaults to ``"cutting_surface"``.
+            grid: Optional grid metadata for file-backed or ungridded depth
+                values.
+            scale: Multiplicative scale applied to loaded depth values.
+            units: Optional depth units.
+            system: Optional coordinate-system name for surface coordinates.
+            **kwargs: Legacy aliases accepted by :meth:`add_surface`, including
+                ``xarr``, ``z``, and ``coordinate_system``.
+
+        Returns:
+            A copied layered model truncated at a new ``SimpleSurface`` with
+            ``cutting=True``.
+
+        Raises:
+            ValueError: If the model is incomplete, the cut would extend the
+                model downward, a retained cutting surface already exists, or
+                a surface depth cannot be inspected.
+        """
+
+        truncated = copy.deepcopy(self)
+        truncated._truncate_inplace(
+            depth=depth,
+            name=name,
+            grid=grid,
+            scale=scale,
+            units=units,
+            system=system,
+            **kwargs,
+        )
+        return truncated
+
+    def _truncate_inplace(
+        self,
+        depth: Optional[Union[float, str, Path, xr.DataArray, Dict[str, Any]]] = None,
+        *,
+        name: Optional[str] = "cutting_surface",
+        grid: Optional[xr.DataArray] = None,
+        scale: float = 1.0,
+        units: Optional[Any] = None,
+        system: Optional[str] = None,
+        **kwargs,
+    ) -> SimpleSurface:
+        self._validate_complete()
+
+        if "xarr" in kwargs:
+            grid = kwargs.pop("xarr")
+        if depth is None and "z" in kwargs:
+            depth = kwargs.pop("z")
+        if "frame" in kwargs:
+            raise TypeError(
+                "LayeredModel.truncate frame is no longer supported; "
+                "surface coordinates are physical"
+            )
+        coordinate_system = kwargs.pop("coordinate_system", None)
+        if coordinate_system is not None:
+            if system is not None and system != coordinate_system:
+                raise ValueError("Specify only one of system or coordinate_system")
+            system = coordinate_system
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unexpected LayeredModel.truncate arguments: {unexpected}")
+        if depth is None:
+            raise ValueError("LayeredModel.truncate requires depth")
+
+        cutting_surface = SimpleSurface(
+            name=name or "cutting_surface",
+            interface=True,
+            cutting=True,
+            depth=depth,
+            grid=grid,
+            scale=scale,
+            units=units,
+            system=system,
+        )
+        lower_boundary = self.lower_surface()
+        if self._surface_is_fully_below(cutting_surface, lower_boundary):
+            raise ValueError(
+                "Cutting surface is fully below the current model boundary; "
+                "truncate cannot extend the model"
+            )
+
+        discarded = [
+            surface
+            for surface in self.surfaces
+            if self._surface_is_fully_below(surface, cutting_surface)
+        ]
+        discarded_ids = {id(surface) for surface in discarded}
+        retained = [
+            surface for surface in self.surfaces if id(surface) not in discarded_ids
+        ]
+        if any(getattr(surface, "cutting", False) for surface in retained):
+            raise ValueError(
+                "LayeredModel already has a retained cutting surface; "
+                "a new cut must fully replace it"
+            )
+
+        cutting_surface.name = self._get_unique_name(
+            cutting_surface.name,
+            {surface.name for surface in retained},
+        )
+        lower_boundary_retained = any(surface is lower_boundary for surface in retained)
+        new_surfaces = (
+            retained + [cutting_surface]
+            if self.ordering == "top_down"
+            else [cutting_surface] + retained
+        )
+        boundaries = [
+            surface
+            for index, surface in enumerate(new_surfaces)
+            if index in {0, len(new_surfaces) - 1}
+            or (
+                surface.interface
+                and not (lower_boundary_retained and surface is lower_boundary)
+            )
+        ]
+        required_layer_count = len(boundaries) - 1
+        existing_layers = list(self.layers)
+        if required_layer_count < 1:
+            raise ValueError(
+                "Cutting surface removes the entire model; at least one layer "
+                "must remain above the cut"
+            )
+        if required_layer_count > len(existing_layers):
+            raise ValueError(
+                "Cutting surface does not truncate the current lower model boundary"
+            )
+
+        retained_layers = (
+            existing_layers[:required_layer_count]
+            if self.ordering == "top_down"
+            else existing_layers[-required_layer_count:]
+        )
+        retained_layer_ids = {id(layer) for layer in retained_layers}
+        discarded_fracture_block_ids = {
+            surface.mesh_block_id
+            for surface in discarded
+            if isinstance(surface, Fracture) and surface.mesh_block_id is not None
+        }
+
+        boreholes_to_rebind = []
+        for borehole in self.boreholes:
+            try:
+                top_surface = self._surface_from_reference(borehole.extent["top"])
+            except (KeyError, TypeError, ValueError, IndexError):
+                top_surface = None
+            if top_surface is not None and id(top_surface) in discarded_ids:
+                raise ValueError(
+                    f"Cannot truncate model: borehole '{borehole.name}' starts "
+                    f"on discarded surface '{top_surface.name}'"
+                )
+            try:
+                bottom_surface = self._surface_from_reference(borehole.extent["bottom"])
+            except (KeyError, TypeError, ValueError, IndexError):
+                bottom_surface = None
+            if bottom_surface is lower_boundary or (
+                bottom_surface is not None and id(bottom_surface) in discarded_ids
+            ):
+                boreholes_to_rebind.append(borehole)
+
+        if lower_boundary_retained:
+            lower_boundary.interface = False
+        self.surfaces = NamedList(new_surfaces)
+        self.subdomains = NamedList(
+            [
+                subdomain
+                for subdomain in self.subdomains
+                if (
+                    not isinstance(subdomain, Layer)
+                    or id(subdomain) in retained_layer_ids
+                )
+                and subdomain.mesh_block_id not in discarded_fracture_block_ids
+            ]
+        )
+
+        boundaries = [
+            surface
+            for index, surface in enumerate(self.surfaces)
+            if index in {0, len(self.surfaces) - 1} or surface.interface
+        ]
+        for index, layer in enumerate(retained_layers):
+            if self.ordering == "top_down":
+                layer.upper = boundaries[index]
+                layer.lower = boundaries[index + 1]
+            else:
+                layer.lower = boundaries[index]
+                layer.upper = boundaries[index + 1]
+
+        for borehole in boreholes_to_rebind:
+            borehole.extent["bottom"] = cutting_surface
+
+        self._surface_names = {surface.name for surface in self.surfaces}
+        self._fracture_names = {
+            surface.name for surface in self.surfaces if isinstance(surface, Fracture)
+        }
+        self._layer_names = {layer.name for layer in retained_layers}
+        self._last_added = "surface"
+        return cutting_surface
+
+    @staticmethod
+    def _surface_is_fully_below(
+        surface: SimpleSurface,
+        cutting_surface: SimpleSurface,
+    ) -> bool:
+        surface_data = surface.depth.data
+        cutting_data = cutting_surface.depth.data
+        if surface_data is None or cutting_data is None:
+            missing = surface.name if surface_data is None else cutting_surface.name
+            raise ValueError(
+                f"Cannot truncate using surface '{missing}': its depth is not "
+                "materialized"
+            )
+
+        target_units = _property_units(cutting_surface.depth) or _property_units(
+            surface.depth
+        )
+        surface_values = _convert_units(
+            np.asarray(surface_data.values),
+            _property_units(surface.depth),
+            target_units,
+        )
+        cutting_values = _convert_units(
+            np.asarray(cutting_data.values),
+            _property_units(cutting_surface.depth),
+            target_units,
+        )
+
+        same_grid = surface_data.dims == cutting_data.dims and all(
+            surface_data.coords[dim].attrs.get("units")
+            == cutting_data.coords[dim].attrs.get("units")
+            and np.array_equal(
+                surface_data.coords[dim].values,
+                cutting_data.coords[dim].values,
+            )
+            for dim in surface_data.dims
+        )
+        if surface.depth.is_constant or cutting_surface.depth.is_constant or same_grid:
+            return bool(np.all(surface_values > cutting_values))
+
+        surface_min, _ = surface.extrema
+        _, cutting_max = cutting_surface.extrema
+        surface_min = _convert_units(
+            float(surface_min),
+            _property_units(surface.depth),
+            target_units,
+        )
+        cutting_max = _convert_units(
+            float(cutting_max),
+            _property_units(cutting_surface.depth),
+            target_units,
+        )
+        return bool(surface_min > cutting_max)
 
     def add_borehole(
         self,

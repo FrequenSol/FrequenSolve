@@ -26,8 +26,23 @@ __all__ = [
 ]
 
 
+def _required_trace_attribute(trace: DataArray, name: str) -> Any:
+    try:
+        return trace.attrs[name]
+    except KeyError:
+        raise ValueError(
+            "Trace is missing required FrequenSolve metadata attribute "
+            f"{name!r}; reconstructing acquisition geometry for SEG-Y export "
+            "requires the original trace metadata. Xarray arithmetic can drop "
+            "DataArray attributes. Save `trace_attrs = dict(trace.attrs)` before "
+            "the operation and restore them with "
+            "`result.attrs.update(trace_attrs)` before calling "
+            "`result.fs.to_segy(...)`."
+        ) from None
+
+
 def _source_group(trace: DataArray) -> SourceGroup:
-    with open(trace.attrs["simulation"], "r") as f:
+    with open(_required_trace_attribute(trace, "simulation"), "r") as f:
         sim = json.load(f)
     source_index = int(trace.attrs.get("source_id", trace.attrs.get("source_group", 1)))
     acquisition = Acquisition.from_fs(sim["Acquisition"])
@@ -35,7 +50,7 @@ def _source_group(trace: DataArray) -> SourceGroup:
 
 
 def _source_coordinates(trace: DataArray) -> np.ndarray:
-    with open(trace.attrs["simulation"], "r") as f:
+    with open(_required_trace_attribute(trace, "simulation"), "r") as f:
         sim = json.load(f)
     acquisition = Acquisition.from_fs(sim["Acquisition"])
     source_index = int(trace.attrs.get("source_id", trace.attrs.get("source_group", 1)))
@@ -43,10 +58,10 @@ def _source_coordinates(trace: DataArray) -> np.ndarray:
 
 
 def _receiver_group(trace: DataArray) -> ReceiverGroup:
-    with open(trace.attrs["simulation"], "r") as f:
+    with open(_required_trace_attribute(trace, "simulation"), "r") as f:
         sim = json.load(f)
 
-    group_name = trace.attrs["receiver_group"]
+    group_name = _required_trace_attribute(trace, "receiver_group")
     for receiver_group in sim["Acquisition"]["receiver_groups"]:
         if receiver_group["name"] == group_name:
             break
@@ -58,7 +73,7 @@ def _receiver_group(trace: DataArray) -> ReceiverGroup:
         file = Path(coordinates["file"])
         if not file.is_absolute():
             receiver_group["coordinates"]["file"] = str(
-                Path(trace.attrs["project_path"]) / file
+                Path(_required_trace_attribute(trace, "project_path")) / file
             )
     return ReceiverGroup.from_fs(receiver_group)
 

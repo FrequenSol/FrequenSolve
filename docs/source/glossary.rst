@@ -51,6 +51,10 @@ standard capitalization.
       A measured or simulated direction or quantity in a trace output, such as
       pressure or a velocity component.
 
+   cutting surface
+      A model surface that forms a truncation boundary. Layered meshers can use
+      its explicit cutting role to clip intersecting stratigraphic surfaces.
+
    Dask
       Python parallel computing library used by local parallel execution paths.
 

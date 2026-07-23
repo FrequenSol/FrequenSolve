@@ -553,12 +553,13 @@ class TraceManifest:
 
     @property
     def packed_frequencies(self) -> Dict[int, float]:
-        """Return packed trace frequencies keyed by one-based task number.
+        """Return packed trace frequencies keyed by packed-entry number.
 
         Returns:
-            Frequency mapping from the packed trace manifest, or from the packed
-            HDF5 file when the manifest omits frequency rows. Returns an empty
-            mapping when no usable frequency index is recorded.
+            Frequency mapping from the packed trace manifest. Unique solver task
+            ids are retained as keys; accumulated manifests with repeated task
+            ids use unique packed dataset/entry numbers instead. Falls back to
+            the packed HDF5 file when the manifest omits frequency rows.
         """
 
         products = self._packed_products()
@@ -569,7 +570,7 @@ class TraceManifest:
 
     @property
     def packed_laplace(self) -> Dict[int, float]:
-        """Return packed trace Laplace values keyed by one-based task number.
+        """Return packed trace Laplace values keyed by packed-entry number.
 
         Returns:
             Laplace damping mapping from the packed trace manifest, or an empty
@@ -591,14 +592,27 @@ class TraceManifest:
         if not products or any(not path.exists() for path, _freq, _laplace in products):
             return dict(self.frequencies)
         product_frequencies = [
-            frequencies or self._packed_file_frequency_map(path)
-            for path, frequencies, _laplace in products
+            (
+                frequencies or self._packed_file_frequency_map(path),
+                laplace,
+            )
+            for path, frequencies, laplace in products
         ]
         missing = {}
         for key, frequency in self.frequencies.items():
+            expected_laplace = self.laplace.get(
+                key,
+                self.laplace.get(str(key)),
+            )
             if any(
-                not frequencies or not _frequency_values_contain(frequencies, frequency)
-                for frequencies in product_frequencies
+                not frequencies
+                or not _frequency_laplace_values_contain(
+                    frequencies,
+                    laplace,
+                    frequency,
+                    expected_laplace,
+                )
+                for frequencies, laplace in product_frequencies
             ):
                 missing[int(key)] = _real_frequency(frequency)
         return missing
@@ -817,20 +831,36 @@ class TraceManifest:
         laplace: Dict[int, float] = {}
         rows = data.get("frequencies", [])
         if isinstance(rows, list):
-            sortable = [
-                (index, row)
+            parsed = [
+                (index, int(row.get("task_id", index)), row)
                 for index, row in enumerate(rows, start=1)
                 if isinstance(row, Mapping) and "frequency" in row
             ]
-            sortable.sort(key=lambda item: int(item[1].get("task_id", item[0])))
-            frequencies = {}
-            laplace = {}
-            for original_index, row in sortable:
-                task_id = int(row.get("task_id", original_index))
-                frequencies[task_id] = _real_frequency(row["frequency"])
-                laplace[task_id] = _laplace_value(
-                    row.get("laplace", _laplace_frequency(row["frequency"]))
-                )
+            task_ids = [task_id for _index, task_id, _row in parsed]
+            if len(task_ids) == len(set(task_ids)):
+                keyed_rows = [
+                    (task_id, row)
+                    for _index, task_id, row in sorted(
+                        parsed,
+                        key=lambda item: item[1],
+                    )
+                ]
+            else:
+                entry_ids = [
+                    int(row.get("dataset_number", original_index))
+                    for original_index, _task_id, row in parsed
+                ]
+                if len(entry_ids) != len(set(entry_ids)):
+                    entry_ids = list(range(1, len(parsed) + 1))
+                keyed_rows = [
+                    (entry_id, row)
+                    for entry_id, (_index, _task_id, row) in zip(entry_ids, parsed)
+                ]
+
+            for entry_id, row in keyed_rows:
+                frequencies[entry_id] = _real_frequency(row["frequency"])
+                if "laplace" in row:
+                    laplace[entry_id] = _laplace_value(row["laplace"])
         return path, frequencies, laplace
 
     @staticmethod
@@ -1373,12 +1403,13 @@ class JobArtifactMixin:
         if not packed_frequencies:
             return False
         expected_frequency = self._real_frequency_value(self.f_list[task - 1])
-        return np.isclose(
-            list(packed_frequencies.values()),
+        expected_laplace = _laplace_frequency(self.f_list[task - 1])
+        return _frequency_laplace_values_contain(
+            packed_frequencies,
+            manifest.packed_laplace,
             expected_frequency,
-            rtol=0.0,
-            atol=1.0e-9,
-        ).any()
+            expected_laplace,
+        )
 
     def _candidate_frequency_trace_files(
         self,
@@ -1539,15 +1570,37 @@ def _laplace_value(value: Any) -> float:
     return float(value)
 
 
-def _frequency_values_contain(
+def _frequency_laplace_values_contain(
     values: Mapping[Any, float],
+    laplace_values: Mapping[Any, float],
     frequency: Union[float, complex],
+    laplace: Optional[float] = None,
 ) -> bool:
     expected = _real_frequency(frequency)
-    return any(
-        np.isclose(_real_frequency(value), expected, rtol=0.0, atol=1.0e-9)
-        for value in values.values()
-    )
+    for key, value in values.items():
+        if not np.isclose(
+            _real_frequency(value),
+            expected,
+            rtol=0.0,
+            atol=1.0e-9,
+        ):
+            continue
+        if laplace is None or not laplace_values:
+            return True
+        actual_laplace = laplace_values.get(
+            key,
+            laplace_values.get(str(key)),
+        )
+        if actual_laplace is None:
+            return True
+        if np.isclose(
+            _laplace_value(actual_laplace),
+            _laplace_value(laplace),
+            rtol=0.0,
+            atol=1.0e-12,
+        ):
+            return True
+    return False
 
 
 def _format_frequency(value: float) -> str:

@@ -7,6 +7,8 @@ documentation, and read directly by users who want complete examples.
 The notebooks use a consistent public API style:
 
 - `import frequensolve as fs`
+- `site = fs.Site()` for execution, except in tutorials whose purpose is to
+  demonstrate a specific site profile or backend
 - project-owned simulations from `project.new_simulation(...)`
 - layered models with `properties={...}`
 - explicit `TimeDomainJob` and `FrequencyDomainJob` objects
@@ -63,9 +65,15 @@ directories visible, then fix Python/API errors at the source.
 ## Running
 
 Most notebooks write scratch projects under `./scratch/tutorials/...` relative
-to the notebook working directory. Local examples require a working fast solver
-installation. Site examples require the corresponding AWS, HPC, or local site
-configuration.
+to the notebook working directory. Keep tutorial paths relative and portable;
+do not embed a contributor's checkout, home directory, solver path, or other
+machine-specific location. Ordinary tutorials submit through `fs.Site()` and
+therefore use the reader's default configured execution target. The dedicated
+site examples document the corresponding AWS, HPC, or local requirements.
+
+Keep useful executed output in committed notebooks so readers can inspect the
+expected result without rerunning a solver. Machine-specific paths in generated
+output are acceptable; source cells and instructions must remain portable.
 
 The documentation build links these notebooks as downloadable files; Sphinx does
 not execute or render notebook cells.

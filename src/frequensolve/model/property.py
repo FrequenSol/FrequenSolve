@@ -423,6 +423,22 @@ class PropertyExpression:
         return cls({"ref": canonical_property_name(name)})
 
     @classmethod
+    def field(cls, name: str) -> "PropertyExpression":
+        """Reference independent named data on the current subdomain.
+
+        Args:
+            name: Field name stored in ``ModelSubdomain.fields``.
+
+        Returns:
+            A property expression containing a solver ``field`` node.
+        """
+
+        name = str(name).strip()
+        if not name:
+            raise ValueError("Expression field name cannot be empty")
+        return cls({"field": name})
+
+    @classmethod
     def var(cls, name: str) -> "PropertyExpression":
         """Reference a named expression variable.
 
@@ -550,6 +566,74 @@ class PropertyExpression:
 
         visit(self.node)
         return out
+
+    def field_names(self) -> List[str]:
+        """List auxiliary subdomain fields referenced by the expression."""
+
+        out: List[str] = []
+
+        def visit(node: Any) -> None:
+            if isinstance(node, PropertyExpression):
+                node = node.node
+            if isinstance(node, Mapping):
+                if "field" in node:
+                    name = str(node["field"])
+                    if name not in out:
+                        out.append(name)
+                for key, child in node.items():
+                    if key != "field":
+                        visit(child)
+            elif isinstance(node, Sequence) and not isinstance(node, (str, bytes)):
+                for child in node:
+                    visit(child)
+
+        visit(self.node)
+        return out
+
+    def evaluate(
+        self,
+        references: Mapping[str, Any],
+        variables: Optional[Mapping[str, Any]] = None,
+        fields: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
+        """Evaluate this expression against materialized array values.
+
+        Args:
+            references: Property values keyed by property name or alias. Values
+                may be scalars, NumPy arrays, Pint quantities, or xarray data
+                arrays with optional ``units`` metadata.
+            variables: Optional values for ``var`` nodes, keyed by the exact
+                expression symbol name.
+            fields: Optional independent subdomain data keyed by the exact
+                name used in ``field`` nodes.
+
+        Returns:
+            A scalar, NumPy array, or Pint quantity produced by evaluating the
+            solver expression AST elementwise.
+
+        Raises:
+            ValueError: If a reference, variable, operation, or node is missing
+                or unsupported.
+        """
+
+        normalized_references = {
+            canonical_property_name(name): _expression_operand(value)
+            for name, value in references.items()
+        }
+        normalized_variables = {
+            str(name): _expression_operand(value)
+            for name, value in (variables or {}).items()
+        }
+        normalized_fields = {
+            str(name): _expression_operand(value)
+            for name, value in (fields or {}).items()
+        }
+        return _evaluate_expression_node(
+            self.node,
+            references=normalized_references,
+            variables=normalized_variables,
+            fields=normalized_fields,
+        )
 
     def _binary(self, op: str, other: Any) -> "PropertyExpression":
         return PropertyExpression(
@@ -679,6 +763,236 @@ class PropertyExpression:
 
     def __repr__(self) -> str:
         return f"PropertyExpression({self.node!r})"
+
+
+def _expression_operand(value: Any) -> Any:
+    if not isinstance(value, xr.DataArray):
+        return value
+    values = np.asarray(value.values)
+    units = value.attrs.get("units")
+    if units is None:
+        return values
+    return ureg.Quantity(values, unit_expression(units))
+
+
+def _expression_args(
+    node: Mapping[str, Any],
+    *,
+    references: Mapping[str, Any],
+    variables: Mapping[str, Any],
+    fields: Mapping[str, Any],
+) -> List[Any]:
+    args = node.get("args")
+    if not isinstance(args, Sequence) or isinstance(args, (str, bytes)):
+        raise ValueError(f"Expression operation {node.get('op')!r} requires args")
+    return [
+        _evaluate_expression_node(
+            arg,
+            references=references,
+            variables=variables,
+            fields=fields,
+        )
+        for arg in args
+    ]
+
+
+def _expression_arg(
+    node: Mapping[str, Any],
+    *,
+    references: Mapping[str, Any],
+    variables: Mapping[str, Any],
+    fields: Mapping[str, Any],
+) -> Any:
+    if "arg" not in node:
+        raise ValueError(f"Expression operation {node.get('op')!r} requires an arg")
+    return _evaluate_expression_node(
+        node["arg"],
+        references=references,
+        variables=variables,
+        fields=fields,
+    )
+
+
+def _expression_boolean(value: Any) -> np.ndarray:
+    if is_quantity(value):
+        value = value.to(ureg.dimensionless).magnitude
+    return np.asarray(value, dtype=bool)
+
+
+def _expression_reduce(op: Callable[[Any, Any], Any], values: List[Any]) -> Any:
+    if not values:
+        raise ValueError("Variadic expression operation requires at least one arg")
+    result = values[0]
+    for value in values[1:]:
+        result = op(result, value)
+    return result
+
+
+def _evaluate_expression_node(
+    node: Any,
+    *,
+    references: Mapping[str, Any],
+    variables: Mapping[str, Any],
+    fields: Mapping[str, Any],
+) -> Any:
+    if isinstance(node, PropertyExpression):
+        node = node.node
+    if not isinstance(node, Mapping):
+        raise ValueError(f"Expression nodes must be mappings; got {node!r}")
+
+    if "ref" in node:
+        name = canonical_property_name(node["ref"])
+        if name not in references:
+            raise ValueError(f"Expression references unavailable property {name!r}")
+        return references[name]
+    if "field" in node:
+        name = str(node["field"])
+        if name not in fields:
+            raise ValueError(f"Expression references unavailable field {name!r}")
+        return fields[name]
+    if "var" in node:
+        name = str(node["var"])
+        if name not in variables:
+            raise ValueError(f"Expression references unavailable variable {name!r}")
+        return variables[name]
+    if "value" in node:
+        value = node["value"]
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            value = np.asarray(value)
+        units = node.get("units")
+        if units is not None:
+            return ureg.Quantity(value, unit_expression(units))
+        return value
+
+    op = node.get("op")
+    if not isinstance(op, str):
+        raise ValueError(f"Expression node has no operation: {node!r}")
+
+    if op == "case":
+        if "else" not in node:
+            raise ValueError("Expression case operation requires an else value")
+        result = _evaluate_expression_node(
+            node["else"],
+            references=references,
+            variables=variables,
+            fields=fields,
+        )
+        branches = node.get("branches")
+        if not isinstance(branches, Sequence) or isinstance(branches, (str, bytes)):
+            raise ValueError("Expression case operation requires branches")
+        for branch in reversed(branches):
+            if not isinstance(branch, Mapping) or not {"if", "then"}.issubset(branch):
+                raise ValueError("Expression case branches require if and then nodes")
+            condition = _evaluate_expression_node(
+                branch["if"],
+                references=references,
+                variables=variables,
+                fields=fields,
+            )
+            value = _evaluate_expression_node(
+                branch["then"],
+                references=references,
+                variables=variables,
+                fields=fields,
+            )
+            result = np.where(_expression_boolean(condition), value, result)
+        return result
+
+    if op in {"not", "neg", "magnitude", "convert"}:
+        value = _expression_arg(
+            node,
+            references=references,
+            variables=variables,
+            fields=fields,
+        )
+        if op == "not":
+            return np.logical_not(_expression_boolean(value))
+        if op == "neg":
+            return -value
+        units = node.get("units")
+        if units is None:
+            raise ValueError(f"Expression operation {op!r} requires units")
+        converted = (
+            value.to(unit_expression(units))
+            if is_quantity(value)
+            else ureg.Quantity(value).to(unit_expression(units))
+        )
+        return converted.magnitude if op == "magnitude" else converted
+
+    unary_ops: Dict[str, Callable[[Any], Any]] = {
+        "abs": np.abs,
+        "exp": np.exp,
+        "log": np.log,
+        "sin": np.sin,
+        "cos": np.cos,
+        "tan": np.tan,
+        "asin": np.arcsin,
+        "acos": np.arccos,
+        "atan": np.arctan,
+        "sinh": np.sinh,
+        "cosh": np.cosh,
+        "tanh": np.tanh,
+        "floor": np.floor,
+        "ceil": np.ceil,
+        "sign": np.sign,
+    }
+    if op in unary_ops:
+        return unary_ops[op](
+            _expression_arg(
+                node,
+                references=references,
+                variables=variables,
+                fields=fields,
+            )
+        )
+
+    values = _expression_args(
+        node,
+        references=references,
+        variables=variables,
+        fields=fields,
+    )
+    if op in {"add", "sub", "mul", "div", "pow", ">", ">=", "<", "<=", "==", "!="}:
+        if len(values) != 2:
+            raise ValueError(f"Expression operation {op!r} requires two args")
+        left, right = values
+        binary_ops: Dict[str, Callable[[Any, Any], Any]] = {
+            "add": lambda a, b: a + b,
+            "sub": lambda a, b: a - b,
+            "mul": lambda a, b: a * b,
+            "div": lambda a, b: a / b,
+            "pow": lambda a, b: a**b,
+            ">": lambda a, b: a > b,
+            ">=": lambda a, b: a >= b,
+            "<": lambda a, b: a < b,
+            "<=": lambda a, b: a <= b,
+            "==": lambda a, b: a == b,
+            "!=": lambda a, b: a != b,
+        }
+        return binary_ops[op](left, right)
+    if op == "and":
+        return _expression_reduce(
+            np.logical_and,
+            [_expression_boolean(value) for value in values],
+        )
+    if op == "or":
+        return _expression_reduce(
+            np.logical_or,
+            [_expression_boolean(value) for value in values],
+        )
+    if op == "min":
+        return _expression_reduce(np.minimum, values)
+    if op == "max":
+        return _expression_reduce(np.maximum, values)
+    if op == "atan2":
+        if len(values) != 2:
+            raise ValueError("Expression operation 'atan2' requires two args")
+        return np.arctan2(values[0], values[1])
+    if op == "clamp":
+        if len(values) != 3:
+            raise ValueError("Expression operation 'clamp' requires three args")
+        return np.clip(values[0], values[1], values[2])
+    raise ValueError(f"Unsupported expression operation {op!r}")
 
 
 def prop(name: str) -> PropertyExpression:
@@ -818,7 +1132,8 @@ def coord(system: str, axis: str, units: Optional[Any] = None) -> Dict[str, Any]
     Args:
         system: Coordinate-system name that gives the axis its context.
         axis: Axis name within ``system``.
-        units: Optional units used when evaluating the symbol.
+        units: Optional units into which coordinates are converted before their
+            numeric magnitudes are supplied to the expression.
 
     Returns:
         A solver-facing symbol binding payload.
@@ -2117,8 +2432,26 @@ class Property:
         with h5py.File(fname, "r") as f:
             dset_obj = f[dset]
             if "dims" in dset_obj.attrs:
-                dims = list(dset_obj.attrs["dims"])
-                coords = {dim: dset_obj.attrs[dim] for dim in dims}
+                dims = [
+                    (dim.decode("utf-8") if isinstance(dim, bytes) else str(dim))
+                    for dim in dset_obj.attrs["dims"]
+                ]
+                coords = {}
+                for dim in dims:
+                    coordinate = dset_obj.attrs[dim]
+                    values = np.asarray(coordinate)
+                    if values.ndim == 0:
+                        reference = values.item()
+                        if isinstance(reference, bytes):
+                            reference = reference.decode("utf-8")
+                        if (
+                            isinstance(reference, str)
+                            and reference.startswith("/")
+                            and reference.strip("/") in f
+                            and isinstance(f[reference.strip("/")], h5py.Dataset)
+                        ):
+                            coordinate = f[reference.strip("/")][()]
+                    coords[dim] = coordinate
             elif "coords" not in f:
                 if "grid" not in kwargs or kwargs["grid"] is None:
                     raise ValueError(

@@ -504,6 +504,27 @@ class ImagingJob(BaseJob):
             return self.save_path / "image.h5"
         return self.save_path / f"image_{part}.h5"
 
+    def load_images(self) -> ImageDatabase:
+        """Open imaging results that are already present locally.
+
+        This method never contacts an execution site. Remote results must be
+        fetched or copied into ``save_path`` before calling it.
+
+        Returns:
+            Reader for the aggregate and per-frequency image files.
+
+        Raises:
+            FileNotFoundError: If the aggregate ``image.h5`` is unavailable.
+        """
+
+        images = ImageDatabase(
+            path=self._local_image_path,
+            parts=self.n_tasks,
+            shape=self.grid.shape,
+        )
+        images.require_aggregate()
+        return images
+
     def image_output_exists(self) -> bool:
         """Return whether the aggregate image product exists locally."""
 

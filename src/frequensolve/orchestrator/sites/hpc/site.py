@@ -80,7 +80,7 @@ from frequensolve.orchestrator.utils.pool import PoolInfo
 from frequensolve.orchestrator.utils.ssh import SSHClientClass
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
-from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
+from frequensolve.simulation.jobs.imaging import ImagingJob
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = [
@@ -1348,13 +1348,7 @@ class SlurmSite(BaseSite):
                 local = job._local_image_path
                 self.get(remote, local)
 
-                image_data = ImageDatabase(
-                    path=local,
-                    shape=job.grid.shape,
-                    parts=job.n_tasks,
-                )
-                image_data.require_aggregate()
-                images[job.name] = image_data
+                images[job.name] = job.load_images()
 
             except Exception as e:
                 logger.exception("Error retrieving payload: %s", str(e))
@@ -2692,6 +2686,8 @@ class SlurmSite(BaseSite):
             default=4,
         )
         sizing_json = kwargs.pop("sizing_json", None)
+        if not sizing_json:
+            sizing_json = str(Path(stdout).parent / "FS_sizing.json")
         launch_delay_seconds = float(kwargs.pop("launch_delay_seconds", 0.25))
         pack_job = bool(kwargs.pop("pack", True))
         mpi_async_progress = bool(kwargs.pop("mpi_async_progress", False))
@@ -2727,7 +2723,7 @@ class SlurmSite(BaseSite):
             "mem_cushion": mem_cushion,
             "boost_max_factor": boost_max_factor,
             "failure_tolerance": tolerate_failures,
-            "sizing_json": str(sizing_json or "FS_sizing.json"),
+            "sizing_json": str(sizing_json),
             "launch_delay_seconds": launch_delay_seconds,
         }
 
@@ -2762,7 +2758,7 @@ class SlurmSite(BaseSite):
             runtime_setup=self._runtime_setup_lines(),
             mpi_async_progress_setup=mpi_async_progress_setup,
             scheduler_config_shell=shlex.quote(json.dumps(scheduler_config, indent=2)),
-            sizing_json_shell=shlex.quote(str(sizing_json or "FS_sizing.json")),
+            sizing_json_shell=shlex.quote(str(sizing_json)),
             scheduler_runner=shlex.quote(str(self._adaptive_scheduler_remote_path())),
             **({"sizing_json": sizing_json} if sizing_json is not None else {}),
             **({"run_path": run_path} if run_path is not None else {}),

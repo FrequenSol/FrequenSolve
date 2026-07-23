@@ -1120,6 +1120,25 @@ def test_batch_hpc_script_keeps_scheduler_logs_with_job_logs(monkeypatch):
     assert "jobs/batch" not in script
     assert 'mkdir -p "$dir_out/batch"' in script
     assert "! -name batch -exec rm -rf -- {} +" in script
+    sizing_file = "/scratch/user/jobs/simple/freq/FS_sizing.json"
+    assert f"sizing_json={sizing_file}" in script
+    assert f'"sizing_json": "{sizing_file}"' in script
+
+
+def test_batch_hpc_script_preserves_explicit_sizing_path(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    sizing_file = "/scratch/user/checkpoints/custom-sizing.json"
+
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        stdout="/scratch/user/jobs/simple/freq/logs",
+        sizing_json=sizing_file,
+    )
+
+    assert f"sizing_json={sizing_file}" in script
+    assert f'"sizing_json": "{sizing_file}"' in script
 
 
 def test_slurm_batch_submits_only_pending_frequency_tasks(monkeypatch, tmp_path):

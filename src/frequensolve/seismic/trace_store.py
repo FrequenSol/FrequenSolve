@@ -498,10 +498,25 @@ class TraceStore:
 
         out = ""
         for group in self.groups:
+            freq = self.frequencies(group)
+
+            if len(freq) == 0:
+                expected = self._expected_frequencies()
+                expected_text = (
+                    f" Expected frequencies from the job metadata: {expected} Hz."
+                    if expected
+                    else ""
+                )
+                raise ValueError(
+                    f"Cannot summarize trace group {group!r}: no frequencies are "
+                    f"available.{expected_text} The trace files may be empty, "
+                    "incomplete, or inconsistent with the job metadata; inspect "
+                    "the job logs and fetched trace artifacts."
+                )
+
             recv = self.receivers(group)
             shot = self.shots(group)
             comp = self.components(group)
-            freq = self.frequencies(group)
 
             out += f"{group}\n"
             out += f"  {_gray('Receivers')}\t: {recv[0]} - {recv[-1]}\n"

@@ -2,9 +2,17 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pytest
+import xarray as xr
 
+from frequensolve.model.property import Property
 from frequensolve.project import Project
-from frequensolve.util.store import SimulationStore, compact_hdf5_file
+from frequensolve.util import store as store_module
+from frequensolve.util.store import (
+    SimulationStore,
+    compact_hdf5_file,
+    hash_dataarray_payload,
+)
 
 
 def _bloated_hdf5(path: Path) -> int:
@@ -108,6 +116,151 @@ def test_put_array_chunks_reuses_unchanged_factory_dataset(tmp_path):
     assert factory_calls == 3
     with h5py.File(path, "r") as h5:
         np.testing.assert_array_equal(h5["coordinates"][:], np.arange(12).reshape(4, 3))
+
+
+def test_put_dataarray_replaces_incomplete_matching_hash(tmp_path):
+    path = tmp_path / "simulation.h5"
+    store = SimulationStore(path)
+    data = xr.DataArray(
+        np.arange(6, dtype=np.float64).reshape(3, 2),
+        dims=("x", "z"),
+        coords={"x": [0.0, 0.5, 1.0], "z": [0.0, 1.0]},
+    )
+    attrs = {"fs_kind": "property"}
+    digest = hash_dataarray_payload(data, attrs=attrs, dtype=None)
+    with h5py.File(path, "w") as h5:
+        dset = h5.create_dataset("values", data=data.values)
+        dset.attrs["fs_hash"] = f"blake3:{digest}"
+        dset.attrs["fs_hash_algorithm"] = "blake3"
+        dset.attrs["dims"] = ["x", "z"]
+        dset.attrs["incomplete"] = True
+
+    ref = store.put_dataarray("values", data, attrs=attrs, dtype=None)
+
+    assert ref.hash == digest
+    with h5py.File(path, "r") as h5:
+        dset = h5["values"]
+        assert "incomplete" not in dset.attrs
+        assert list(dset.attrs["x"]) == [0.0, 0.5, 1.0]
+        assert list(dset.attrs["z"]) == [0.0, 1.0]
+        assert dset.attrs["fs_kind"] == "property"
+
+
+def test_put_dataarray_removes_dataset_after_metadata_failure(monkeypatch, tmp_path):
+    path = tmp_path / "simulation.h5"
+    store = SimulationStore(path)
+    data = xr.DataArray(
+        np.arange(3, dtype=np.float64),
+        dims=("x",),
+        coords={"x": [0.0, 0.5, 1.0]},
+    )
+    real_h5_attr_value = store_module._h5_attr_value
+
+    def fail_on_marker(value):
+        if isinstance(value, str) and value == "trigger failure":
+            raise RuntimeError("injected metadata failure")
+        return real_h5_attr_value(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "_h5_attr_value", fail_on_marker)
+        with pytest.raises(RuntimeError, match="injected metadata failure"):
+            store.put_dataarray(
+                "values",
+                data,
+                attrs={"marker": "trigger failure"},
+                dtype=None,
+            )
+
+    with h5py.File(path, "r") as h5:
+        assert "values" not in h5
+
+    ref = store.put_dataarray(
+        "values",
+        data,
+        attrs={"marker": "trigger failure"},
+        dtype=None,
+    )
+    with h5py.File(path, "r") as h5:
+        dset = h5["values"]
+        assert dset.attrs["fs_hash"] == f"blake3:{ref.hash}"
+        assert dset.attrs["marker"] == "trigger failure"
+
+
+def test_put_dataarray_references_large_dimension_coordinate_dataset(tmp_path):
+    path = tmp_path / "simulation.h5"
+    store = SimulationStore(path)
+    x = np.linspace(0.0, 1.0, 10_000)
+    data = xr.DataArray(
+        np.sin(x),
+        dims=("x",),
+        coords={"x": x},
+    )
+
+    ref = store.put_dataarray("values", data, dtype=None)
+
+    with h5py.File(path, "a") as h5:
+        dset = h5["values"]
+        assert dset.attrs["x"] == "/values.__coordinates__/0"
+        coordinate = h5[dset.attrs["x"]]
+        assert coordinate.attrs["dimension"] == "x"
+        assert coordinate.attrs["fs_kind"] == "dimension_coordinate"
+        np.testing.assert_array_equal(coordinate[:], x)
+        h5.create_dataset("obsolete", data=np.arange(3))
+
+    removed = store.prune_unreferenced({"property": ref.to_fs()})
+
+    assert removed == ["obsolete"]
+    loaded = Property.read(Path(f"{path}:values"))
+    assert loaded.dims == ("x",)
+    np.testing.assert_array_equal(loaded.coords["x"], x)
+    np.testing.assert_array_equal(loaded.values, data.values)
+
+    with h5py.File(path, "a") as h5:
+        del h5["values.__coordinates__/0"]
+
+    repeated = store.put_dataarray("values", data, dtype=None)
+
+    assert repeated.hash == ref.hash
+    with h5py.File(path, "r") as h5:
+        coordinate_reference = h5["values"].attrs["x"]
+        assert coordinate_reference in h5
+        np.testing.assert_array_equal(h5[coordinate_reference][:], x)
+
+
+def test_put_array_chunks_replaces_incomplete_matching_hash(tmp_path):
+    path = tmp_path / "simulation.h5"
+    store = SimulationStore(path)
+
+    def chunks():
+        yield np.arange(6, dtype=np.float64).reshape(2, 3)
+
+    first = store.put_array_chunks(
+        "coordinates",
+        (2, 3),
+        chunks,
+        dims=("receiver", "coordinate"),
+        coords={"coordinate": np.asarray(["x", "y", "z"])},
+        attrs={"fs_kind": "receiver_coordinates"},
+    )
+    with h5py.File(path, "a") as h5:
+        del h5["coordinates"].attrs["coordinate"]
+        h5["coordinates"].attrs["incomplete"] = True
+
+    second = store.put_array_chunks(
+        "coordinates",
+        (2, 3),
+        chunks,
+        dims=("receiver", "coordinate"),
+        coords={"coordinate": np.asarray(["x", "y", "z"])},
+        attrs={"fs_kind": "receiver_coordinates"},
+    )
+
+    assert second.hash == first.hash
+    with h5py.File(path, "r") as h5:
+        dset = h5["coordinates"]
+        assert "incomplete" not in dset.attrs
+        assert list(dset.attrs["coordinate"]) == ["x", "y", "z"]
+        assert dset.attrs["fs_kind"] == "receiver_coordinates"
 
 
 def test_simulation_save_prunes_and_compacts_old_store_data(monkeypatch, tmp_path):

@@ -54,7 +54,11 @@ def test_to_segy_converts_source_and_receiver_coordinate_units(tmp_path):
         },
     )
 
-    out = trace.fs.to_segy(tmp_path / "trace.sgy", units_in="km", units_out="m")
+    trace_attrs = dict(trace.attrs)
+    difference = trace - xr.zeros_like(trace)
+    difference.attrs.update(trace_attrs)
+
+    out = difference.fs.to_segy(tmp_path / "trace.sgy", units_in="km", units_out="m")
 
     with segyio.open(str(out), mode="r", strict=False, ignore_geometry=True) as sgy:
         assert sgy.bin[segyio.BinField.MeasurementSystem] == 1
@@ -67,3 +71,20 @@ def test_to_segy_converts_source_and_receiver_coordinate_units(tmp_path):
         assert first[segyio.TraceField.ReceiverGroupElevation] == 0
         assert second[segyio.TraceField.GroupX] == 200
         assert second[segyio.TraceField.ReceiverGroupElevation] == 10
+
+
+def test_missing_trace_metadata_error_explains_xarray_arithmetic():
+    trace = xr.DataArray(
+        np.zeros((3, 2), dtype=float),
+        dims=("time", "receiver"),
+        coords={"time": [0.0, 0.001, 0.002], "receiver": [1, 2]},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "missing required FrequenSolve metadata attribute 'simulation'.*"
+            "Xarray arithmetic can drop DataArray attributes"
+        ),
+    ):
+        _ = trace.fs.receiver_group

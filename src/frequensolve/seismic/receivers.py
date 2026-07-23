@@ -7,7 +7,18 @@ import copy
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import h5py
 import numpy as np
@@ -106,6 +117,64 @@ class ReceiverComponent:
 # ----------------------------------------------------------------------
 # Devices
 # ----------------------------------------------------------------------
+_RECEIVER_FIBER_DEGREE_UNITS = {"deg", "degree", "degrees"}
+_RECEIVER_FIBER_RADIAN_UNITS = {"rad", "radian", "radians"}
+
+
+def _receiver_fiber_angle_degrees(angle: Any) -> float:
+    """Validate a fiber winding angle and return its value in degrees."""
+
+    multiplier = 1.0
+    if is_quantity(angle):
+        try:
+            value = angle.to("degree").magnitude
+        except Exception as exc:
+            raise ValueError(
+                "ReceiverFiber angle must be an angular quantity."
+            ) from exc
+    elif isinstance(angle, Mapping):
+        if "value" not in angle:
+            raise ValueError("ReceiverFiber angle quantity requires a value.")
+        value = angle["value"]
+        units = unit_expression(angle.get("units", "deg")).strip()
+        if units in _RECEIVER_FIBER_RADIAN_UNITS:
+            multiplier = 180.0 / np.pi
+        elif units not in _RECEIVER_FIBER_DEGREE_UNITS:
+            raise ValueError("ReceiverFiber angle units must be degrees or radians.")
+    else:
+        value = angle
+
+    if isinstance(value, (str, bytes, bool)):
+        raise ValueError("ReceiverFiber angle must be a numeric scalar.")
+    try:
+        scalar = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ReceiverFiber angle must be a numeric scalar.") from exc
+    if scalar.ndim != 0:
+        raise ValueError("ReceiverFiber angle must be a numeric scalar.")
+
+    degrees = float(scalar) * multiplier
+    if not np.isfinite(degrees) or not 0.0 < degrees < 90.0:
+        raise ValueError(
+            "ReceiverFiber angle must be strictly between 0 and 90 degrees."
+        )
+    return degrees
+
+
+def _receiver_fiber_angle_to_fs(angle: Any) -> Any:
+    """Serialize a validated fiber winding angle for the solver."""
+
+    degrees = _receiver_fiber_angle_degrees(angle)
+    if not is_quantity(angle):
+        return value_and_units_to_fs(angle)
+
+    payload = value_and_units_to_fs(angle)
+    units = str(payload["units"]).strip().lower()
+    if units in _RECEIVER_FIBER_DEGREE_UNITS | _RECEIVER_FIBER_RADIAN_UNITS:
+        return payload
+    return {"value": degrees, "units": "deg"}
+
+
 @register_class
 @dataclass(kw_only=True)
 class ReceiverDevice(TypeTaggedMixin, ABC):
@@ -181,13 +250,17 @@ class ReceiverFiber(ReceiverDevice):
         sample_spacing: Physical spacing for integration samples along a gauge.
         points_per_gauge: Number of integration samples when sample spacing is
             not provided.
-        radius: Optional fiber radius.
-        pitch: Optional fiber pitch.
+        radius: Optional helical-fiber radius. Required with ``angle`` or
+            ``pitch``.
+        pitch: Optional helical-fiber pitch, mutually exclusive with ``angle``.
+        angle: Optional helical-fiber winding angle from the cable axis,
+            mutually exclusive with ``pitch``. Plain numbers are degrees;
+            unit-aware angular quantities are also accepted.
         response: Optional receiver response wavelet.
 
     Raises:
         ValueError: If ``gauge_length`` is omitted or ``points_per_gauge`` is
-            not positive.
+            not positive, or if the helical-fiber geometry is invalid.
     """
 
     gauge_length: Any = None
@@ -196,6 +269,7 @@ class ReceiverFiber(ReceiverDevice):
     points_per_gauge: Optional[int] = None
     radius: Optional[Any] = None
     pitch: Optional[Any] = None
+    angle: Optional[Any] = None
 
     def __init__(
         self,
@@ -208,6 +282,7 @@ class ReceiverFiber(ReceiverDevice):
         points_per_gauge: Optional[int] = None,
         radius: Optional[Any] = None,
         pitch: Optional[Any] = None,
+        angle: Optional[Any] = None,
         response: Optional[Wavelet] = None,
     ):
         if gauge_length is None:
@@ -228,10 +303,25 @@ class ReceiverFiber(ReceiverDevice):
         self.points_per_gauge = points_per_gauge
         self.radius = radius
         self.pitch = pitch
+        self.angle = angle
+        self._validate_helical_geometry()
+
+    def _validate_helical_geometry(self) -> None:
+        if self.pitch is not None and self.angle is not None:
+            raise ValueError(
+                "ReceiverFiber accepts only one of angle or pitch, not both."
+            )
+        if (self.pitch is not None or self.angle is not None) and self.radius is None:
+            raise ValueError(
+                "ReceiverFiber radius is required when angle or pitch is specified."
+            )
+        if self.angle is not None:
+            _receiver_fiber_angle_degrees(self.angle)
 
     def to_fs(self, ctx=None) -> dict:
         """Serialize this fiber receiver device for solver input."""
 
+        self._validate_helical_geometry()
         data = {
             "_type": self.__class__.__name__,
             **super().to_fs(ctx),
@@ -247,6 +337,8 @@ class ReceiverFiber(ReceiverDevice):
             data["radius"] = value_and_units_to_fs(self.radius)
         if self.pitch is not None:
             data["pitch"] = value_and_units_to_fs(self.pitch)
+        if self.angle is not None:
+            data["angle"] = _receiver_fiber_angle_to_fs(self.angle)
         return data
 
     @classmethod
@@ -263,6 +355,7 @@ class ReceiverFiber(ReceiverDevice):
             points_per_gauge=data.get("points_per_gauge"),
             radius=data.get("radius"),
             pitch=data.get("pitch"),
+            angle=data.get("angle"),
         )
 
 
@@ -1499,6 +1592,7 @@ class ReceiverGroup(ExtraFieldsMixin):
                     dataset,
                     coords.coordinates,
                     attrs=attrs,
+                    coordinate_dims=("coordinate",),
                     dtype=np.float64,
                 )
                 coords_payload = {

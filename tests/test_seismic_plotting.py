@@ -289,6 +289,83 @@ def test_plot_wavefield_uses_single_frequency_grid_metadata(tmp_path):
         assert image.get_clim()[0] == expected_vmin
 
 
+def test_plot_wavefield_accepts_named_axis_selectors(tmp_path):
+    attrs = _wavefield_trace_attrs(tmp_path)
+    values = np.arange(6, dtype=float)
+    trace = xr.DataArray(
+        values + 1j,
+        dims=("receiver",),
+        coords={"frequency": 10.0, "receiver": np.arange(1, 7)},
+        attrs=attrs,
+    )
+
+    fig, ax = plot_wavefield(trace, x="z", y="r", mode="real")
+    image = ax.images[0]
+
+    assert fig is ax.figure
+    np.testing.assert_allclose(np.asarray(image.get_array()), values.reshape(2, 3).T)
+    assert list(image.get_extent()) == [0.0, 1.0, 2.0, 0.0]
+    assert ax.get_xlabel() == "Z [km]"
+    assert ax.get_ylabel() == "R [km]"
+
+
+def test_plot_wavefield_infers_other_named_axis(tmp_path):
+    attrs = _wavefield_trace_attrs(tmp_path)
+    trace = xr.DataArray(
+        np.arange(6, dtype=float) + 1j,
+        dims=("receiver",),
+        coords={"frequency": 10.0, "receiver": np.arange(1, 7)},
+        attrs=attrs,
+    )
+
+    _, ax = plot_wavefield(trace, x="z", mode="real")
+
+    assert ax.get_xlabel() == "Z [km]"
+    assert ax.get_ylabel() == "R [km]"
+
+
+def test_plot_wavefield_rejects_invalid_named_axes(tmp_path):
+    attrs = _wavefield_trace_attrs(tmp_path)
+    trace = xr.DataArray(
+        np.arange(6, dtype=float) + 1j,
+        dims=("receiver",),
+        coords={"frequency": 10.0, "receiver": np.arange(1, 7)},
+        attrs=attrs,
+    )
+
+    with pytest.raises(ValueError, match="x='bad'.*expected one of 'z', 'r'"):
+        plot_wavefield(trace, x="bad")
+    with pytest.raises(ValueError, match="x and y must select different"):
+        plot_wavefield(trace, x="z", y="z")
+
+
+def test_plot_wavefield_explains_dimension_named_axis_typo(tmp_path):
+    attrs = {
+        "wavefield_output": "wavefield",
+        "wavefield_grid": {
+            "_type": "XArrayGrid",
+            "dims": ["z", "x"],
+            "coords": {
+                "z": {"data": [0.0, 1.0], "units": "km"},
+                "x": {"data": [0.0, 1.0, 2.0], "units": "km"},
+            },
+        },
+        "project_path": str(tmp_path),
+    }
+    trace = xr.DataArray(
+        np.arange(6, dtype=float) + 1j,
+        dims=("receiver",),
+        coords={"frequency": 10.0, "receiver": np.arange(1, 7)},
+        attrs=attrs,
+    )
+
+    with pytest.raises(
+        TypeError,
+        match=r"received z='z'.*use y='z'.*y is inferred",
+    ):
+        plot_wavefield(trace, x="x", z="z")
+
+
 def test_plot_wavefield_accepts_singleton_3d_grid_dimension(tmp_path):
     attrs = _fixed_axis_wavefield_trace_attrs(tmp_path)
     data = np.array([np.arange(6, dtype=float) + 1j], dtype=np.complex128)
@@ -334,6 +411,37 @@ def test_plot_wavefield_supports_nonuniform_grid_metadata(tmp_path):
     assert fig is ax.figure
     assert len(ax.images) == 0
     assert len(ax.collections) == 1
+
+
+def test_plot_wavefield_swaps_nonuniform_named_axes(tmp_path):
+    attrs = {
+        "wavefield_output": "wavefield",
+        "wavefield_grid": {
+            "_type": "XArrayGrid",
+            "dims": ["z", "r"],
+            "coords": {
+                "z": {"data": [0.0, 0.25, 1.0]},
+                "r": {"data": [0.0, 2.0]},
+            },
+        },
+        "project_path": str(tmp_path),
+    }
+    values = np.arange(6, dtype=float)
+    trace = xr.DataArray(
+        values + 1j,
+        dims=("receiver",),
+        coords={"frequency": 10.0, "receiver": np.arange(1, 7)},
+        attrs=attrs,
+    )
+
+    _, ax = plot_wavefield(trace, x="z", y="r", mode="real")
+    mesh = ax.collections[0]
+
+    np.testing.assert_allclose(
+        np.asarray(mesh.get_array()).reshape(2, 3), values.reshape(3, 2).T
+    )
+    assert ax.get_xlabel() == "Z"
+    assert ax.get_ylabel() == "R"
 
 
 def test_plot_wavefield_accepts_scalar_frequency_coordinate(tmp_path):

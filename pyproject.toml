@@ -94,7 +94,7 @@ seismic-io = [
 ]
 visual = [
     "matplotlib>=3.7,<4.0",
-    "pyvista>=0.44,<0.47",
+    "pyvista[jupyter]>=0.44,<0.47",
 ]
 docs = [
     "furo>=2024.8.6",

@@ -373,7 +373,7 @@ def test_imaging_job_current_requires_aggregate_image(tmp_path):
         parameters=["vp"],
         grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
     )
-    job.save()
+    job_file = job.save()
     trace_file = job.expected_trace_files()[0]
     trace_file.parent.mkdir(parents=True, exist_ok=True)
     trace_file.touch()
@@ -384,8 +384,16 @@ def test_imaging_job_current_requires_aggregate_image(tmp_path):
     job.image_file(1).touch()
     assert job.needs_image_smoothing()
 
+    with pytest.raises(FileNotFoundError, match="imaging --smooth postprocess"):
+        job.load_images()
+
     job.image_file().touch()
     assert job.is_run_current()
+    loaded = BaseJob.load(job_file)
+    images = loaded.load_images()
+    assert images.path == job.save_path
+    assert images.parts == loaded.n_tasks
+    assert images.shape == loaded.grid.shape
 
 
 def test_fwi_jacobian_dot_test_and_taylor_test_use_hermitian_products(tmp_path):
