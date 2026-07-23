@@ -73,6 +73,7 @@ class SuperPatch(ExtraFieldsMixin):
             domain = [domain]
         self.grid = grid
         self.domain = domain
+        self.warning_acknowledged = bool(warning_acknowledged)
         self._init_extra(None, **kwargs)
 
     @classmethod
@@ -90,6 +91,7 @@ class SuperPatch(ExtraFieldsMixin):
         return cls(
             grid=data.pop("grid"),
             domain=data.pop("domain"),
+            warning_acknowledged=data.pop("warning_acknowledged", True),
             **data,
         )
 

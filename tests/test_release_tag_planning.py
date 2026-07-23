@@ -147,3 +147,28 @@ def test_publication_target_rejects_ambiguous_or_mismatched_metadata(
 
     with pytest.raises(ValueError, match=message):
         planner.publication_target(tag, is_prerelease=is_prerelease)
+
+
+@pytest.mark.parametrize(
+    ("same_commit", "is_draft", "expected"),
+    [
+        (True, True, "reuse"),
+        (False, True, "fail"),
+        (True, False, "advance"),
+        (False, False, "advance"),
+    ],
+)
+def test_release_candidate_retry_action_preserves_immutable_evidence(
+    same_commit: bool,
+    is_draft: bool,
+    expected: str,
+) -> None:
+    planner = load_planner()
+
+    assert (
+        planner.release_candidate_retry_action(
+            same_commit=same_commit,
+            is_draft=is_draft,
+        )
+        == expected
+    )

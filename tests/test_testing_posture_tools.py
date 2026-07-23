@@ -1,13 +1,22 @@
+import hashlib
 import io
+import json
+import subprocess
+import sys
 import tarfile
+from pathlib import Path
 
 import pytest
 
+from frequensolve.frequensolver import load_frequensolver_compatibility
 from scripts.check_coverage_thresholds import (
     coverage_percentages,
     failed_thresholds,
 )
+from scripts.compare_release_evidence_pair import compare_release_evidence_pairs
 from scripts.extract_test_evidence_archive import extract_archive
+from scripts.materialize_frequensolver_compatibility import manifest_from_evidence
+from scripts.validate_frequensolver_identity import validate_identity
 from scripts.validate_heavy_test_evidence import (
     MARKER_EXPRESSION,
 )
@@ -26,6 +35,7 @@ from scripts.validate_release_evidence import (
 from scripts.verify_ci_evidence import has_required_job, run_matches
 
 COMMIT = "a" * 40
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _heavy_evidence():
@@ -118,6 +128,31 @@ def test_ci_evidence_requires_exact_sha_workflow_and_stable_job():
 
 
 def _release_evidence():
+    docker_request_id = "frequensolve-rc-456-1-0123456789abcdef0123456789abcdef"
+    docker_dispatch_evidence = {
+        "schemaVersion": "frequensolve-docker-dispatch-evidence/v1",
+        "runId": 789,
+        "runUrl": (
+            "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/789"
+        ),
+        "requestId": docker_request_id,
+        "workflowRepository": "FrequenSol/FrequenSolveDockerImage",
+        "workflowPath": ".github/workflows/cicd-workflow.yml",
+        "workflowCommit": "b" * 40,
+        "sourceRef": "main",
+        "sourceCommit": "b" * 40,
+        "sauceRef": "v0.1.0",
+        "sauceCommit": "c" * 40,
+        "fsMumpsRef": "d" * 40,
+        "fsMumpsCommit": "d" * 40,
+        "frequensolveSource": "git",
+        "frequensolveRef": COMMIT,
+        "frequensolveCommit": COMMIT,
+        "disablePush": True,
+        "testMarker": TEST_MARKER,
+        "testStatus": TEST_STATUS,
+        "testArtifact": TEST_ARTIFACT,
+    }
     return {
         "schemaVersion": SCHEMA,
         "commit": COMMIT,
@@ -128,7 +163,15 @@ def _release_evidence():
         "dockerWorkflow": f"{DOCKER_WORKFLOW_PREFIX}{'b' * 40}",
         "dockerWorkflowCommit": "b" * 40,
         "dockerCallerRunId": 456,
-        "dockerImageTag": "sha-bbbbbbbbbbbb",
+        "dockerCallerRunUrl": (
+            "https://github.com/FrequenSol/FrequenSolve/actions/runs/456"
+        ),
+        "dockerEvidenceRunId": 789,
+        "dockerEvidenceRunUrl": (
+            "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/789"
+        ),
+        "dockerRequestId": docker_request_id,
+        "dockerImageTag": "b" * 40,
         "dockerTestRef": COMMIT,
         "dockerTestCommit": COMMIT,
         "dockerTestMarker": TEST_MARKER,
@@ -136,15 +179,42 @@ def _release_evidence():
         "dockerTestArtifact": TEST_ARTIFACT,
         "dockerTestArchiveSha256": "e" * 64,
         "dockerTestEvidence": _heavy_evidence(),
-        "sauceRef": "main",
+        "dockerDispatchEvidence": docker_dispatch_evidence,
+        "sauceRef": "v0.1.0",
         "sauceCommit": "c" * 40,
-        "fsMumpsRef": "main",
+        "frequensolverRelease": "v0.1.0",
+        "frequensolverReleaseUrl": (
+            "https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"
+        ),
+        "frequensolverVersion": "v0.1.0",
+        "frequensolverBuildId": "release-v0.1.0",
+        "frequensolverGitCommit": "c" * 40,
+        "fsMumpsRef": "d" * 40,
         "fsMumpsCommit": "d" * 40,
     }
 
 
 def test_release_evidence_accepts_exact_sha_ci_and_docker_proof():
     validate_evidence(_release_evidence(), COMMIT)
+
+
+def test_materialized_frequensolver_manifest_loads(tmp_path):
+    manifest = manifest_from_evidence(
+        _release_evidence(),
+        package_release="0.3.0",
+        package_commit=COMMIT,
+    )
+    manifest_path = tmp_path / "frequensolver_compatibility.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    loaded = load_frequensolver_compatibility(manifest_path)
+
+    assert loaded.package_release == "0.3.0"
+    assert loaded.preferred_frequensolver.release == "v0.1.0"
+    assert loaded.evidence_run_id == 789
+    assert loaded.evidence_url == (
+        "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/789"
+    )
 
 
 def test_release_evidence_rejects_mutable_docker_workflow_ref():
@@ -157,6 +227,276 @@ def test_release_evidence_rejects_mutable_docker_workflow_ref():
         assert "40-character commit SHA" in str(exc)
     else:
         raise AssertionError("mutable Docker workflow reference was accepted")
+
+
+def test_release_evidence_rejects_mutable_frequensolver_ref():
+    evidence = _release_evidence()
+    evidence["sauceRef"] = "main"
+    evidence["frequensolverRelease"] = "main"
+    evidence["frequensolverVersion"] = "main"
+
+    with pytest.raises(ValueError, match="immutable final release tag"):
+        validate_evidence(evidence, COMMIT)
+
+
+def test_release_evidence_rejects_wrong_downstream_run_identity():
+    evidence = _release_evidence()
+    evidence["dockerEvidenceRunUrl"] = (
+        "https://github.com/FrequenSol/FrequenSolve/actions/runs/789"
+    )
+
+    with pytest.raises(ValueError, match="dockerEvidenceRunUrl"):
+        validate_evidence(evidence, COMMIT)
+
+
+def test_release_evidence_requires_high_entropy_correlated_request():
+    evidence = _release_evidence()
+    evidence["dockerRequestId"] = "frequensolve-rc-456-1"
+
+    with pytest.raises(ValueError, match="dockerRequestId"):
+        validate_evidence(evidence, COMMIT)
+
+
+def test_release_evidence_requires_bound_dispatch_manifest():
+    evidence = _release_evidence()
+    evidence["dockerDispatchEvidence"]["fsMumpsCommit"] = "f" * 40
+
+    with pytest.raises(ValueError, match="dockerDispatchEvidence.*fsMumpsCommit"):
+        validate_evidence(evidence, COMMIT)
+
+
+def test_release_evidence_requires_exact_fs_mumps_ref():
+    evidence = _release_evidence()
+    evidence["fsMumpsRef"] = "main"
+
+    with pytest.raises(ValueError, match="fsMumpsRef"):
+        validate_evidence(evidence, COMMIT)
+
+
+def test_release_evidence_requires_pinned_docker_image_tag():
+    evidence = _release_evidence()
+    evidence["dockerImageTag"] = "latest"
+
+    with pytest.raises(ValueError, match="dockerImageTag"):
+        validate_evidence(evidence, COMMIT)
+
+
+def _write_release_evidence_pair(
+    root,
+    evidence,
+    archive_content=b"sealed heavy evidence",
+):
+    root.mkdir()
+    archive = root / "frequensolve-test-evidence.tar.gz"
+    archive.write_bytes(archive_content)
+    evidence = {
+        **evidence,
+        "dockerTestArchiveSha256": hashlib.sha256(archive_content).hexdigest(),
+    }
+    evidence_path = root / "release-evidence.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    return evidence_path, archive
+
+
+def test_release_evidence_pair_comparison_accepts_identical_sealed_assets(tmp_path):
+    expected_evidence, expected_archive = _write_release_evidence_pair(
+        tmp_path / "expected",
+        _release_evidence(),
+    )
+    actual_evidence, actual_archive = _write_release_evidence_pair(
+        tmp_path / "actual",
+        _release_evidence(),
+    )
+    actual_evidence.write_text(
+        json.dumps(json.loads(actual_evidence.read_text()), indent=2),
+        encoding="utf-8",
+    )
+
+    compare_release_evidence_pairs(
+        expected_evidence,
+        expected_archive,
+        actual_evidence,
+        actual_archive,
+    )
+
+
+def test_release_evidence_pair_comparison_rejects_stale_frequensolver_metadata(
+    tmp_path,
+):
+    expected_evidence, expected_archive = _write_release_evidence_pair(
+        tmp_path / "expected",
+        _release_evidence(),
+    )
+    stale = _release_evidence()
+    stale.update(
+        sauceRef="v0.0.9",
+        frequensolverRelease="v0.0.9",
+        frequensolverVersion="v0.0.9",
+    )
+    actual_evidence, actual_archive = _write_release_evidence_pair(
+        tmp_path / "actual",
+        stale,
+    )
+
+    with pytest.raises(ValueError, match="frequensolverRelease"):
+        compare_release_evidence_pairs(
+            expected_evidence,
+            expected_archive,
+            actual_evidence,
+            actual_archive,
+        )
+
+
+def test_release_evidence_pair_comparison_rejects_changed_archive(tmp_path):
+    expected_evidence, expected_archive = _write_release_evidence_pair(
+        tmp_path / "expected",
+        _release_evidence(),
+    )
+    actual_evidence, actual_archive = _write_release_evidence_pair(
+        tmp_path / "actual",
+        _release_evidence(),
+        archive_content=b"different heavy evidence",
+    )
+
+    with pytest.raises(ValueError, match="frequensolve-test-evidence.tar.gz differs"):
+        compare_release_evidence_pairs(
+            expected_evidence,
+            expected_archive,
+            actual_evidence,
+            actual_archive,
+        )
+
+
+def test_materializes_package_compatibility_from_validated_release_evidence():
+    manifest = manifest_from_evidence(
+        _release_evidence(),
+        package_release="0.3.0rc1",
+        package_commit=COMMIT,
+    )
+
+    assert manifest == {
+        "schema": "frequensolve-frequensolver-compatibility/v1",
+        "package_release": "0.3.0rc1",
+        "preferred_frequensolver": {
+            "release": "v0.1.0",
+            "git_commit": "c" * 40,
+            "release_url": ("https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"),
+        },
+        "evidence": {
+            "run_id": 789,
+            "url": (
+                "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/789"
+            ),
+        },
+    }
+
+
+def test_frequensolver_identity_evidence_requires_exact_release_build():
+    identity = {
+        "schema": "frequensolver-identity-1",
+        "product": "FrequenSolver",
+        "version": "v0.1.0",
+        "build_id": "release-v0.1.0",
+        "git_commit": "c" * 40,
+    }
+
+    validate_identity(
+        identity,
+        expected_version="v0.1.0",
+        expected_commit="c" * 40,
+        expected_build_id="release-v0.1.0",
+    )
+
+    with pytest.raises(ValueError, match="git_commit"):
+        validate_identity(
+            {**identity, "git_commit": "d" * 40},
+            expected_version="v0.1.0",
+            expected_commit="c" * 40,
+            expected_build_id="release-v0.1.0",
+        )
+
+
+@pytest.mark.parametrize("field", ["version", "build_id"])
+@pytest.mark.parametrize(
+    "invalid_value",
+    [
+        "release\noutput",
+        "release\x1foutput",
+        "release-\N{LATIN SMALL LETTER E WITH ACUTE}",
+    ],
+    ids=["newline", "control", "non-ascii"],
+)
+def test_frequensolver_identity_rejects_unsafe_text_fields(field, invalid_value):
+    identity = {
+        "schema": "frequensolver-identity-1",
+        "product": "FrequenSolver",
+        "version": "v0.1.0",
+        "build_id": "release-v0.1.0",
+        "git_commit": "c" * 40,
+    }
+    identity[field] = invalid_value
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{field} must be a non-empty printable single-line ASCII string",
+    ):
+        validate_identity(
+            identity,
+            expected_version=identity["version"],
+            expected_commit="c" * 40,
+            expected_build_id=identity["build_id"],
+        )
+
+
+def test_frequensolver_identity_accepts_all_printable_single_line_ascii():
+    printable_ascii = "".join(chr(codepoint) for codepoint in range(0x20, 0x7F))
+    identity = {
+        "schema": "frequensolver-identity-1",
+        "product": "FrequenSolver",
+        "version": printable_ascii,
+        "build_id": printable_ascii,
+        "git_commit": "c" * 40,
+    }
+
+    validate_identity(
+        identity,
+        expected_version=printable_ascii,
+        expected_commit="c" * 40,
+        expected_build_id=printable_ascii,
+    )
+
+
+def test_frequensolver_identity_cli_accepts_leading_hyphen_build_id(tmp_path):
+    build_id = "-release-v0.1.0"
+    identity_file = tmp_path / "frequensolver-identity.json"
+    identity_file.write_text(
+        json.dumps(
+            {
+                "schema": "frequensolver-identity-1",
+                "product": "FrequenSolver",
+                "version": "v0.1.0",
+                "build_id": build_id,
+                "git_commit": "c" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/validate_frequensolver_identity.py"),
+            str(identity_file),
+            "--version=v0.1.0",
+            f"--commit={'c' * 40}",
+            f"--build-id={build_id}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_heavy_test_evidence_requires_real_test_outputs(tmp_path):

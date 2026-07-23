@@ -97,24 +97,7 @@ PY
 trap mark_scheduler_failed EXIT
 
 validate_sizing_checkpoint() {
-    python3 - "$sizing_json" "$n_job_tasks" <<'PY'
-import json, sys
-
-path = sys.argv[1]
-n_tasks = int(sys.argv[2])
-with open(path, "r") as f:
-    payload = json.load(f)
-if payload.get("schema") != "fs-sizing-2":
-    raise SystemExit(f"invalid sizing schema in {path}")
-if payload.get("sweep_status", "complete") not in ("forward_sweep_checkpoint", "complete"):
-    raise SystemExit(f"invalid sizing status in {path}")
-tasks = payload.get("task")
-if not isinstance(tasks, list) or len(tasks) < n_tasks:
-    raise SystemExit(f"missing task estimates in {path}")
-for index, task in enumerate(tasks[:n_tasks]):
-    if int(task.get("memory_bytes", 0)) <= 0:
-        raise SystemExit(f"task {index + 1} missing memory estimate")
-PY
+    python3 {{ scheduler_runner }} --validate-sizing "$sizing_json" "$n_job_tasks"
 }
 
 start_time=$(date +%s)

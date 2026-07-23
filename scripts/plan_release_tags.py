@@ -75,6 +75,22 @@ def publication_target(tag: str, *, is_prerelease: bool) -> str:
     )
 
 
+def release_candidate_retry_action(
+    *,
+    same_commit: bool,
+    is_draft: bool,
+) -> str:
+    """Choose whether the latest RC is safely reusable.
+
+    Published release assets are immutable, so every published RC advances to
+    the next tag. Only a draft at the same source commit is resumable; orphaned
+    tags are handled separately by the workflow before this decision.
+    """
+    if is_draft:
+        return "reuse" if same_commit else "fail"
+    return "advance"
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -107,6 +123,13 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="GitHub release prerelease state.",
     )
 
+    retry = subparsers.add_parser(
+        "retry-action",
+        help="Choose whether to reuse the latest RC or advance to the next tag.",
+    )
+    retry.add_argument("--same-commit", required=True, choices=("true", "false"))
+    retry.add_argument("--draft", required=True, choices=("true", "false"))
+
     return parser.parse_args(argv)
 
 
@@ -124,6 +147,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 publication_target(
                     args.tag,
                     is_prerelease=args.prerelease == "true",
+                )
+            )
+            return 0
+        if args.command == "retry-action":
+            print(
+                release_candidate_retry_action(
+                    same_commit=args.same_commit == "true",
+                    is_draft=args.draft == "true",
                 )
             )
             return 0

@@ -10,6 +10,8 @@ from frequensolve._exports import unique_exports
 from frequensolve._loading import *  # noqa: F403
 from frequensolve._loading import __all__ as _loading_all
 from frequensolve._version import get_versions
+from frequensolve.frequensolver import *  # noqa: F403
+from frequensolve.frequensolver import __all__ as _frequensolver_all
 from frequensolve.geometry import *  # noqa: F403
 from frequensolve.geometry import __all__ as _geometry_all
 from frequensolve.mesh import *  # noqa: F403
@@ -43,6 +45,7 @@ __all__ = [
         _project_all,
         _units_all,
         _geometry_all,
+        _frequensolver_all,
         _model_all,
         _mesh_all,
         _seismic_all,

@@ -16,11 +16,24 @@ from pathlib import Path
 
 def _parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--job", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--status", required=True)
-    return parser.parse_args()
+    parser.add_argument("--validate-sizing", nargs=2, metavar=("PATH", "TASKS"))
+    parser.add_argument("--config")
+    parser.add_argument("--job")
+    parser.add_argument("--output")
+    parser.add_argument("--status")
+    args = parser.parse_args()
+    if args.validate_sizing is None:
+        missing = [
+            name
+            for name in ("config", "job", "output", "status")
+            if getattr(args, name) is None
+        ]
+        if missing:
+            parser.error(
+                "the following arguments are required: "
+                + ", ".join(f"--{name}" for name in missing)
+            )
+    return args
 
 
 def _parse_mem_to_gib(value: str) -> float:
@@ -35,6 +48,40 @@ def _parse_mem_to_gib(value: str) -> float:
         "GB": amount,
         "TB": amount * 1024,
     }[unit]
+
+
+def _load_task_memory_file(path: str, *, expected_tasks=None):
+    with open(path) as file:
+        tasks = json.load(file).get("task")
+    if not isinstance(tasks, list) or not tasks:
+        raise SystemExit(f"Could not find non-empty JSON['task'] list in {path}")
+    if expected_tasks is not None and len(tasks) < expected_tasks:
+        raise SystemExit(
+            f"missing task estimates in {path}: "
+            f"found {len(tasks)}, expected {expected_tasks}"
+        )
+    memory = []
+    for index, task in enumerate(tasks, start=1):
+        try:
+            memory.append(_parse_mem_to_gib(task["memory"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SystemExit(
+                f"task {index} missing valid memory estimate in {path}"
+            ) from exc
+    return memory
+
+
+def validate_sizing_checkpoint(path: str, expected_tasks: int):
+    with open(path) as file:
+        payload = json.load(file)
+    if payload.get("schema") != "fs-sizing-2":
+        raise SystemExit(f"invalid sizing schema in {path}")
+    if payload.get("sweep_status", "complete") not in {
+        "forward_sweep_checkpoint",
+        "complete",
+    }:
+        raise SystemExit(f"invalid sizing status in {path}")
+    return _load_task_memory_file(path, expected_tasks=expected_tasks)
 
 
 def _round_up(value: int, base: int) -> int:
@@ -107,13 +154,7 @@ class AdaptiveScheduler:
     def _load_task_memory(self):
         if self.skip_sizing:
             return [0.0] * max(self.job_task_count, max(self.task_indices, default=1))
-        with open(self.sizing_json) as file:
-            tasks = json.load(file).get("task")
-        if not isinstance(tasks, list) or not tasks:
-            raise SystemExit(
-                f"Could not find non-empty JSON['task'] list in {self.sizing_json}"
-            )
-        return [_parse_mem_to_gib(task["memory"]) for task in tasks]
+        return _load_task_memory_file(self.sizing_json)
 
     def _choose_base_ranks(self, task_memory: float) -> int:
         ranks = int(math.ceil(task_memory * self.mem_cushion / self.mem_per_rank))
@@ -346,6 +387,10 @@ class AdaptiveScheduler:
 
 def main():
     args = _parse_args()
+    if args.validate_sizing is not None:
+        path, expected_tasks = args.validate_sizing
+        validate_sizing_checkpoint(path, int(expected_tasks))
+        return
     with open(args.config) as file:
         config = json.load(file)
     AdaptiveScheduler(

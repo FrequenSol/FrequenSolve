@@ -22,7 +22,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       publication_target: ${{ steps.publication.outputs.target }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event.release.tag_name || inputs.release_tag }}
@@ -98,6 +98,11 @@ jobs:
           python scripts/validate_heavy_test_evidence.py \
             .release-evidence/heavy/frequensolve-test-evidence.json \
             --commit "$release_sha"
+          python scripts/validate_frequensolver_identity.py \
+            .release-evidence/heavy/frequensolver-identity.json \
+            --version "$(jq -r '.frequensolverVersion' "$evidence_file")" \
+            --commit "$(jq -r '.frequensolverGitCommit' "$evidence_file")" \
+            --build-id="$(jq -r '.frequensolverBuildId' "$evidence_file")"
           ci_run_id="$(jq -r '.ciRunId' "$evidence_file")"
           python scripts/verify_ci_evidence.py \
             --repository "$GITHUB_REPOSITORY" \
@@ -105,7 +110,7 @@ jobs:
             --run-id "$ci_run_id"
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
           cache: pip
@@ -121,16 +126,41 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
-          version="$(python -c 'import versioneer; print(versioneer.get_version())')"
+          version="$(
+            python scripts/validate_release_version.py \
+              --version-from-tag "$RELEASE_TAG"
+          )"
           echo "Building FrequenSolve ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          python scripts/validate_release_version.py \
-            --version "${version}" \
-            --ref-type tag \
-            --ref-name "$RELEASE_TAG"
 
       - name: Build distributions
-        run: python -m build
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_sha="$(git rev-parse 'HEAD^{commit}')"
+          build_root="$(mktemp -d)"
+          build_source="${build_root}/frequensolve-${PACKAGE_VERSION}"
+          mkdir -p "$build_source"
+          git archive HEAD | tar -x -C "$build_source"
+          python scripts/materialize_release_version.py \
+            --version "$PACKAGE_VERSION" \
+            --release-tag "$RELEASE_TAG" \
+            --revision "$release_sha" \
+            --output "$build_source/src/frequensolve/_version.py"
+          staged_version="$(
+            cd "$build_source"
+            python -c 'import versioneer; print(versioneer.get_version())'
+          )"
+          test "$staged_version" = "$PACKAGE_VERSION"
+          python "$build_source/scripts/materialize_frequensolver_compatibility.py" \
+            --release-evidence "$GITHUB_WORKSPACE/.release-evidence/release-evidence.json" \
+            --package-release "$PACKAGE_VERSION" \
+            --package-commit "$release_sha" \
+            --output "$build_source/src/frequensolve/frequensolver_compatibility.json"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          python -m build --outdir "$GITHUB_WORKSPACE/dist" "$build_source"
 
       - name: Check package metadata
         run: python -m twine check dist/*
@@ -144,6 +174,11 @@ jobs:
           for name in ("Project", "LayeredModel", "LocalSite", "AWSSite"):
               if getattr(fs, name, None) is None:
                   raise SystemExit(f"missing release-wheel export: {name}")
+          manifest = fs.load_frequensolver_compatibility()
+          if manifest.package_release != fs.__version__:
+              raise SystemExit("packaged FrequenSolver metadata version mismatch")
+          if manifest.preferred_frequensolver is None:
+              raise SystemExit("release wheel has no preferred FrequenSolver")
           print(fs.__version__)
           PY
 
@@ -164,7 +199,7 @@ jobs:
       id-token: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: python-package-distributions
           path: dist/
@@ -186,7 +221,7 @@ jobs:
       id-token: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: python-package-distributions
           path: dist/
@@ -205,7 +240,7 @@ jobs:
       contents: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: python-package-distributions
           path: dist/

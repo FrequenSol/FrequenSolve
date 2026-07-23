@@ -44,6 +44,29 @@ def test_accepts_matching_pep_440_release_candidate_tag() -> None:
     assert errors == []
 
 
+@pytest.mark.parametrize(
+    ("release_tag", "expected_version"),
+    [
+        ("v0.3.0rc2", "0.3.0rc2"),
+        ("v0.3.0", "0.3.0"),
+    ],
+)
+def test_derives_exact_version_from_release_tag(
+    release_tag: str, expected_version: str
+) -> None:
+    validator = load_release_validator()
+
+    assert validator.version_from_release_tag(release_tag) == expected_version
+
+
+@pytest.mark.parametrize("release_tag", ["0.3.0", "v0.3.0-rc.1", "v0.3.0rc0"])
+def test_rejects_invalid_release_tag_derivation(release_tag: str) -> None:
+    validator = load_release_validator()
+
+    with pytest.raises(ValueError):
+        validator.version_from_release_tag(release_tag)
+
+
 def test_rejects_semver_style_release_candidate_version() -> None:
     validator = load_release_validator()
 

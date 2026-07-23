@@ -432,6 +432,61 @@ def _time_domain_failure_diagnostics(job, result=None, error=None, stdout=""):
     return diagnostic_dir, None
 
 
+def _local_solver_from_environment() -> Path:
+    """Resolve the explicit solver supplied by the runtime-image test contract."""
+
+    raw_solver = os.environ.get("LOCAL_SOLVER_EXECUTABLE")
+    if not raw_solver:
+        raise RuntimeError(
+            "LOCAL_SOLVER_EXECUTABLE is required for solver-backed integration tests"
+        )
+    solver = Path(raw_solver).expanduser()
+    if not solver.is_file():
+        raise RuntimeError(f"LOCAL_SOLVER_EXECUTABLE is not a file: {solver}")
+    if not os.access(solver, os.X_OK):
+        raise RuntimeError(f"LOCAL_SOLVER_EXECUTABLE is not executable: {solver}")
+    return solver
+
+
+def test_local_solver_from_environment_accepts_executable(monkeypatch, tmp_path):
+    solver = tmp_path / "FS_seismic"
+    solver.write_text("#!/bin/sh\nexit 0\n")
+    solver.chmod(0o700)
+    monkeypatch.setenv("LOCAL_SOLVER_EXECUTABLE", str(solver))
+
+    assert _local_solver_from_environment() == solver
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (None, "is required"),
+        ("missing-solver", "is not a file"),
+    ],
+)
+def test_local_solver_from_environment_rejects_missing_solver(
+    monkeypatch, tmp_path, value, message
+):
+    monkeypatch.chdir(tmp_path)
+    if value is None:
+        monkeypatch.delenv("LOCAL_SOLVER_EXECUTABLE", raising=False)
+    else:
+        monkeypatch.setenv("LOCAL_SOLVER_EXECUTABLE", value)
+
+    with pytest.raises(RuntimeError, match=message):
+        _local_solver_from_environment()
+
+
+def test_local_solver_from_environment_rejects_non_executable(monkeypatch, tmp_path):
+    solver = tmp_path / "FS_seismic"
+    solver.write_text("not executable\n")
+    solver.chmod(0o600)
+    monkeypatch.setenv("LOCAL_SOLVER_EXECUTABLE", str(solver))
+
+    with pytest.raises(RuntimeError, match="is not executable"):
+        _local_solver_from_environment()
+
+
 def run_time_domain_simulation(project, simulation):
     """Run a time domain simulation and return the results.
 
@@ -449,7 +504,7 @@ def run_time_domain_simulation(project, simulation):
     """
     from frequensolve.orchestrator.sites.local import LocalSite
 
-    site = LocalSite()
+    site = LocalSite(solver=_local_solver_from_environment())
 
     # Define and submit a time-domain simulation
     td_job = TimeDomainJob(

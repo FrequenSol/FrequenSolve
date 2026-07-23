@@ -1210,6 +1210,8 @@ def test_adaptive_slurm_script_renders_pending_task_indices(monkeypatch):
     assert '"skip_sizing": false' in script
     assert "--job $job_file" in script
     assert "adaptive_scheduler.py" in script
+    assert '--validate-sizing "$sizing_json" "$n_job_tasks"' in script
+    assert "memory_bytes" not in script
 
 
 def test_slurm_scripts_use_profile_runtime_setup(monkeypatch):

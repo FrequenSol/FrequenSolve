@@ -2339,13 +2339,18 @@ def test_vtk_output_defaults_to_domain_and_vtu_appended_binary():
 def test_paraview_upscale_is_only_available_on_volume_and_surface_meshes():
     volume = VtkOutput.domain(fields=["pressure"])
     surface = VtkOutput.surface(fields=["pressure"])
+    legacy_volume = ParaviewOutput(fields=["pressure"], upscale=1)
+    legacy_surface = ParaViewOutput(fields=["pressure"], surfaces="top", upscale=2)
 
     assert volume.to_fs()["target"] == {"kind": "volume"}
     assert surface.to_fs()["target"]["kind"] == "surface"
     assert "upscale" not in surface.to_fs()["target"]["mesh"]
+    assert legacy_volume.to_fs()["target"] == {
+        "kind": "volume",
+        "mesh": {"upscale": 1},
+    }
+    assert legacy_surface.to_fs()["target"]["mesh"]["upscale"] == 2
 
-    with pytest.raises(ValueError, match=r"target\.mesh\.upscale"):
-        VtkOutput(fields=["pressure"], upscale=1)
     with pytest.raises(ValueError, match="grid targets do not support upscale"):
         VtkOutput.grid({"axes": []}, fields=["pressure"], upscale=1)
     with pytest.raises(ValueError, match="grid targets do not support upscale"):
@@ -2353,12 +2358,20 @@ def test_paraview_upscale_is_only_available_on_volume_and_surface_meshes():
             fields=["pressure"],
             target={"kind": "grid", "mesh": {"upscale": 1}},
         )
+    with pytest.raises(ValueError, match="conflicts with target.mesh.upscale"):
+        VtkOutput(
+            fields=["pressure"],
+            target={"kind": "surface", "mesh": {"upscale": 1}},
+            upscale=2,
+        )
 
 
 @pytest.mark.parametrize("upscale", [-1, 3, 1.0, True, "1"])
 def test_paraview_target_mesh_upscale_requires_integer_zero_through_two(upscale):
     with pytest.raises(ValueError, match="integer from 0 to 2"):
         VtkOutput.domain(fields=["pressure"], upscale=upscale)
+    with pytest.raises(ValueError, match="integer from 0 to 2"):
+        VtkOutput(fields=["pressure"], upscale=upscale)
 
 
 def test_paraview_target_mesh_requires_explicit_target_kind():
@@ -2369,15 +2382,19 @@ def test_paraview_target_mesh_requires_explicit_target_kind():
         )
 
 
-def test_paraview_from_fs_rejects_top_level_upscale():
-    with pytest.raises(ValueError, match=r"target\.mesh\.upscale"):
-        VtkOutput.from_fs(
-            {
-                "_type": "ParaviewOutput",
-                "fields": ["pressure"],
-                "upscale": 1,
-            }
-        )
+def test_paraview_from_fs_translates_legacy_top_level_upscale():
+    output = VtkOutput.from_fs(
+        {
+            "_type": "ParaviewOutput",
+            "fields": ["pressure"],
+            "upscale": 1,
+        }
+    )
+
+    assert output.to_fs()["target"] == {
+        "kind": "volume",
+        "mesh": {"upscale": 1},
+    }
 
 
 def test_paraview_sources_all_omits_solver_sources_key():

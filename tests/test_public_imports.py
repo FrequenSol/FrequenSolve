@@ -242,6 +242,16 @@ def test_solver_and_discretization_have_domain_specific_modules():
     assert importlib.util.find_spec("frequensolve.simulation.numerics_manager") is None
 
 
+def test_super_patch_acknowledgement_is_inspectable_and_roundtrips():
+    import frequensolve as fs
+
+    patch = fs.SuperPatch(grid=2, domain=7, warning_acknowledged=True)
+
+    assert patch.warning_acknowledged is True
+    assert "warning_acknowledged=True" in repr(patch)
+    assert fs.SuperPatch.from_fs(patch.to_fs()).warning_acknowledged is True
+
+
 def test_removed_legacy_public_names_are_not_exported():
     trace_record = importlib.import_module("frequensolve.seismic.trace_record")
     traces = importlib.import_module("frequensolve.seismic.traces")

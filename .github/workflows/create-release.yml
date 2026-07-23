@@ -25,7 +25,7 @@ jobs:
       rc_sha: ${{ steps.resolve.outputs.rc_sha }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -53,7 +53,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -125,6 +125,11 @@ jobs:
           python scripts/validate_heavy_test_evidence.py \
             .release-evidence/heavy/frequensolve-test-evidence.json \
             --commit "$rc_sha"
+          python scripts/validate_frequensolver_identity.py \
+            .release-evidence/heavy/frequensolver-identity.json \
+            --version "$(jq -r '.frequensolverVersion' "$evidence_file")" \
+            --commit "$(jq -r '.frequensolverGitCommit' "$evidence_file")" \
+            --build-id="$(jq -r '.frequensolverBuildId' "$evidence_file")"
           ci_run_id="$(jq -r '.ciRunId' "$evidence_file")"
           python scripts/verify_ci_evidence.py \
             --repository "$GITHUB_REPOSITORY" \
@@ -156,7 +161,8 @@ jobs:
             echo "- Source commit: ${rc_sha}"
             echo "- Package version: ${final_tag#v}"
             echo "- Required CI: $(jq -r '.ciRunUrl' "$evidence_file")"
-            echo "- Solver evidence run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/$(jq -r '.dockerCallerRunId' "$evidence_file")"
+            echo "- Solver evidence run: $(jq -r '.dockerEvidenceRunUrl' "$evidence_file")"
+            echo "- Preferred FrequenSolver: [$(jq -r '.frequensolverRelease' "$evidence_file")]($(jq -r '.frequensolverReleaseUrl' "$evidence_file"))"
             echo "- Tested runtime image: $(jq -r '.dockerImageTag' "$evidence_file")"
             echo "- Publishing: PyPI via the Publish Package workflow"
             if [ -n "$NOTES" ]; then
@@ -185,29 +191,63 @@ jobs:
               --title "$final_tag" \
               --notes-file release-notes.md \
               --draft
+            release_is_draft=true
           elif [ "$(jq -r '.isPrerelease | tostring' <<<"$final_release")" != false ]; then
             echo "Existing ${final_tag} is incorrectly marked as a prerelease." >&2
+            exit 1
+          else
+            release_is_draft="$(jq -r '.isDraft | tostring' <<<"$final_release")"
+          fi
+
+          final_assets="$(gh release view "$final_tag" --json assets)"
+          release_evidence_count="$(
+            jq -r '[.assets[]? | select(.name == "release-evidence.json")] | length' \
+              <<<"$final_assets"
+          )"
+          heavy_archive_count="$(
+            jq -r '[.assets[]? | select(.name == "frequensolve-test-evidence.tar.gz")] | length' \
+              <<<"$final_assets"
+          )"
+
+          if [ "$release_evidence_count" = 1 ] && \
+             [ "$heavy_archive_count" = 1 ]; then
+            existing_assets_dir="$(mktemp -d)"
+            gh release download "$final_tag" \
+              --pattern release-evidence.json \
+              --dir "$existing_assets_dir"
+            gh release download "$final_tag" \
+              --pattern frequensolve-test-evidence.tar.gz \
+              --dir "$existing_assets_dir"
+            if comparison_output="$(
+              python scripts/compare_release_evidence_pair.py \
+                --expected-evidence "$evidence_file" \
+                --expected-archive "$heavy_archive" \
+                --actual-evidence "$existing_assets_dir/release-evidence.json" \
+                --actual-archive "$existing_assets_dir/frequensolve-test-evidence.tar.gz" \
+                2>&1
+            )"; then
+              echo "$comparison_output"
+            elif [ "$release_is_draft" = true ]; then
+              echo "Replacing the mismatched evidence pair on draft ${final_tag}."
+              echo "$comparison_output"
+              gh release upload "$final_tag" "$evidence_file" "$heavy_archive" --clobber
+            else
+              echo "Published ${final_tag} already has a different sealed evidence pair; refusing to rewrite its notes or assets." >&2
+              echo "$comparison_output" >&2
+              exit 1
+            fi
+          elif [ "$release_is_draft" = true ]; then
+            echo "Installing a complete evidence pair on draft ${final_tag}."
+            gh release upload "$final_tag" "$evidence_file" "$heavy_archive" --clobber
+          else
+            echo "Published ${final_tag} has an incomplete evidence pair (${release_evidence_count} release-evidence.json, ${heavy_archive_count} heavy archive); refusing to rewrite it." >&2
             exit 1
           fi
 
           final_assets="$(gh release view "$final_tag" --json assets)"
-          has_release_evidence="$(
-            jq -r 'any(.assets[]?; .name == "release-evidence.json")' \
-              <<<"$final_assets"
-          )"
-          has_heavy_archive="$(
-            jq -r 'any(.assets[]?; .name == "frequensolve-test-evidence.tar.gz")' \
-              <<<"$final_assets"
-          )"
-          if [ "$has_release_evidence" != true ] || \
-             [ "$has_heavy_archive" != true ]; then
-            gh release upload "$final_tag" "$evidence_file" "$heavy_archive" --clobber
-          fi
-
-          final_assets="$(gh release view "$final_tag" --json assets)"
           jq -e '
-            any(.assets[]?; .name == "release-evidence.json") and
-            any(.assets[]?; .name == "frequensolve-test-evidence.tar.gz")
+            ([.assets[]? | select(.name == "release-evidence.json")] | length) == 1 and
+            ([.assets[]? | select(.name == "frequensolve-test-evidence.tar.gz")] | length) == 1
           ' <<<"$final_assets" >/dev/null
 
           gh release edit "$final_tag" \
