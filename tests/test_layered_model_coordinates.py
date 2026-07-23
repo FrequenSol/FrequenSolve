@@ -1623,6 +1623,25 @@ def test_layered_model_samples_expression_coordinate_symbols(tmp_path):
     np.testing.assert_allclose(sampled["qp"].isel(x=0), [60, 60, 100, 100, 100])
 
 
+def test_layered_model_default_z_sampling_preserves_surface_units_for_expressions():
+    depth = Property.expr(
+        {"var": "z"},
+        symbols={"z": coord("global", "z", units="m")},
+    )
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0] * u.km)
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(name="formation", properties={"Qp": depth})
+    model.add_surface(name="bottom", depth=1.0 * u.km)
+
+    sampled = model.sample_uniform([2, 3], properties="Qp")
+    depths, log = model.get_1D_log("Qp", x=0.5, dz=0.5)
+
+    assert sampled.coords["z"].attrs["units"] == "km"
+    np.testing.assert_allclose(sampled["qp"].isel(x=0), [0.0, 500.0, 1000.0])
+    np.testing.assert_allclose(depths, [0.0, 0.5])
+    np.testing.assert_allclose(log, [0.0, 500.0])
+
+
 def test_layered_model_plots_expression_bound_to_implicit_global_x():
     import matplotlib.pyplot as plt
 
@@ -1756,6 +1775,35 @@ def test_layered_model_plots_property_derived_from_independent_field_data():
     np.testing.assert_allclose(sampled["vp"].isel(x=-1), [1.65, 1.925, 2.2])
     assert image.get_clim() == pytest.approx((1500.0, 2200.0))
     plt.close(fig)
+
+
+def test_layered_model_samples_independent_field_after_bare_roundtrip():
+    vp_base = xr.DataArray(
+        [1.5, 2.0],
+        dims=["z"],
+        coords={"z": [0.0, 1.0]},
+        attrs={"units": "km/s"},
+    )
+    vp_base.coords["z"].attrs["units"] = "km"
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0] * u.km)
+    model.add_surface(name="top", depth=0.0 * u.km)
+    model.add_layer(
+        name="sediment",
+        fields={"vp_base": vp_base},
+        properties={
+            "Vp": Property.expr(
+                PropertyExpression.field("vp_base") * 1.1,
+                units="km/s",
+            )
+        },
+    )
+    model.add_surface(name="bottom", depth=1.0 * u.km)
+
+    loaded = LayeredModel.from_fs(model.to_fs())
+    sampled = loaded.sample_uniform([2, 3], properties="Vp")
+
+    xr.testing.assert_identical(loaded.layers[0].fields["vp_base"].get(), vp_base)
+    np.testing.assert_allclose(sampled["vp"], [[1.65, 1.925, 2.2]] * 2)
 
 
 def test_layered_model_evaluates_sympy_coordinate_magnitudes_in_binding_units():
