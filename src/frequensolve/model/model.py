@@ -293,15 +293,6 @@ class ModelBase(ExtraFieldsMixin):
             self.attenuation_model = attenuation.model
             self.reference_frequency = attenuation.reference_frequency
 
-    def _attenuation_config(self) -> Optional[AttenuationConfig]:
-        if self.attenuation_model is None and self.reference_frequency is None:
-            return None
-        return AttenuationConfig(
-            model=self.attenuation_model or "kjartansson",
-            reference_frequency=self.reference_frequency,
-            extra=self._attenuation_extra,
-        )
-
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Serialize the model and its material subdomains.
 
@@ -413,3 +404,12 @@ class ModelBase(ExtraFieldsMixin):
     def __iadd__(self, other):
         self.add_subdomain(other)
         return self
+
+    def _attenuation_config(self) -> Optional[AttenuationConfig]:
+        if self.attenuation_model is None and self.reference_frequency is None:
+            return None
+        return AttenuationConfig(
+            model=self.attenuation_model or "kjartansson",
+            reference_frequency=self.reference_frequency,
+            extra=self._attenuation_extra,
+        )

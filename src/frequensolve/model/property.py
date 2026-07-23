@@ -635,22 +635,6 @@ class PropertyExpression:
             fields=normalized_fields,
         )
 
-    def _binary(self, op: str, other: Any) -> "PropertyExpression":
-        return PropertyExpression(
-            {
-                "op": op,
-                "args": [self.to_fs(), PropertyExpression.from_value(other).to_fs()],
-            }
-        )
-
-    def _rbinary(self, op: str, other: Any) -> "PropertyExpression":
-        return PropertyExpression(
-            {
-                "op": op,
-                "args": [PropertyExpression.from_value(other).to_fs(), self.to_fs()],
-            }
-        )
-
     def __add__(self, other: Any) -> "PropertyExpression":
         return self._binary("add", other)
 
@@ -763,6 +747,22 @@ class PropertyExpression:
 
     def __repr__(self) -> str:
         return f"PropertyExpression({self.node!r})"
+
+    def _binary(self, op: str, other: Any) -> "PropertyExpression":
+        return PropertyExpression(
+            {
+                "op": op,
+                "args": [self.to_fs(), PropertyExpression.from_value(other).to_fs()],
+            }
+        )
+
+    def _rbinary(self, op: str, other: Any) -> "PropertyExpression":
+        return PropertyExpression(
+            {
+                "op": op,
+                "args": [PropertyExpression.from_value(other).to_fs(), self.to_fs()],
+            }
+        )
 
 
 def _expression_operand(value: Any) -> Any:
@@ -1504,14 +1504,6 @@ class PropertyMap(MutableMapping):
         if values:
             self.update(values)
 
-    def _normalize_key(self, key: Any) -> str:
-        if self.canonicalize_keys:
-            return canonical_property_name(key)
-        normalized = str(key)
-        if not normalized.strip():
-            raise ValueError("Property map keys cannot be empty")
-        return normalized
-
     def __getitem__(self, key: str) -> "Property":
         """Return a property by its configured key normalization.
 
@@ -1599,6 +1591,14 @@ class PropertyMap(MutableMapping):
     def __repr__(self) -> str:
         keys = ", ".join(self._store)
         return f"PropertyMap({{{keys}}})"
+
+    def _normalize_key(self, key: Any) -> str:
+        if self.canonicalize_keys:
+            return canonical_property_name(key)
+        normalized = str(key)
+        if not normalized.strip():
+            raise ValueError("Property map keys cannot be empty")
+        return normalized
 
 
 class Property:

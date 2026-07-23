@@ -740,46 +740,6 @@ class Fracture(SimpleSurface):
         self.subdomain_name = subdomain_name
         self.extra = dict(kwargs)
 
-    @staticmethod
-    def _coerce_gap(
-        value: Union[xr.DataArray, Mapping[str, Any], ArrayLike],
-        *,
-        grid: Optional[xr.DataArray] = None,
-        units: Optional[Any] = None,
-        system: Optional[str] = None,
-    ) -> Property:
-        if isinstance(value, Property):
-            prop = copy.deepcopy(value)
-        elif isinstance(value, Mapping) and {"dims", "data"}.issubset(value):
-            prop = Property(_inline_dataarray_from_fs(value))
-        else:
-            prop = Property(value, grid=grid, units=units, system=system)
-        if prop.darr is not None and not prop.is_constant and prop.darr.ndim != 1:
-            raise ValueError("Fracture gap must be one-dimensional")
-        return prop
-
-    def _property_to_fs(
-        self,
-        prop: Property,
-        *,
-        field: str,
-        ctx=None,
-    ) -> Dict[str, Any]:
-        ctx = ctx or ExportContext()
-        dataset = f"inputs/model/surfaces/{self.name}/{field}"
-        use_store = getattr(ctx, "store", None) is not None
-        if (
-            prop.darr is not None
-            and not prop.is_constant
-            and prop.file_path is None
-            and not use_store
-        ):
-            return _inline_dataarray_to_fs(_dataarray_with_property_metadata(prop))
-        file = None
-        if not prop.is_constant and not use_store and ctx.path is not None:
-            file = ctx.path / f"{self.name}_{field}.bin"
-        return prop.to_fs(ctx=ctx, file=file, dataset=dataset)
-
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "Fracture":
         """Deserialize a fracture surface from a solver payload.
@@ -824,6 +784,46 @@ class Fracture(SimpleSurface):
         if self.mesh_block_id is not None:
             payload["mesh_block_id"] = self.mesh_block_id
         return merge_extra(payload, self.extra, "Fracture")
+
+    @staticmethod
+    def _coerce_gap(
+        value: Union[xr.DataArray, Mapping[str, Any], ArrayLike],
+        *,
+        grid: Optional[xr.DataArray] = None,
+        units: Optional[Any] = None,
+        system: Optional[str] = None,
+    ) -> Property:
+        if isinstance(value, Property):
+            prop = copy.deepcopy(value)
+        elif isinstance(value, Mapping) and {"dims", "data"}.issubset(value):
+            prop = Property(_inline_dataarray_from_fs(value))
+        else:
+            prop = Property(value, grid=grid, units=units, system=system)
+        if prop.darr is not None and not prop.is_constant and prop.darr.ndim != 1:
+            raise ValueError("Fracture gap must be one-dimensional")
+        return prop
+
+    def _property_to_fs(
+        self,
+        prop: Property,
+        *,
+        field: str,
+        ctx=None,
+    ) -> Dict[str, Any]:
+        ctx = ctx or ExportContext()
+        dataset = f"inputs/model/surfaces/{self.name}/{field}"
+        use_store = getattr(ctx, "store", None) is not None
+        if (
+            prop.darr is not None
+            and not prop.is_constant
+            and prop.file_path is None
+            and not use_store
+        ):
+            return _inline_dataarray_to_fs(_dataarray_with_property_metadata(prop))
+        file = None
+        if not prop.is_constant and not use_store and ctx.path is not None:
+            file = ctx.path / f"{self.name}_{field}.bin"
+        return prop.to_fs(ctx=ctx, file=file, dataset=dataset)
 
 
 def _is_fracture_surface_payload(data: Mapping[str, Any]) -> bool:

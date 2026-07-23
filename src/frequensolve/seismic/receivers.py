@@ -306,18 +306,6 @@ class ReceiverFiber(ReceiverDevice):
         self.angle = angle
         self._validate_helical_geometry()
 
-    def _validate_helical_geometry(self) -> None:
-        if self.pitch is not None and self.angle is not None:
-            raise ValueError(
-                "ReceiverFiber accepts only one of angle or pitch, not both."
-            )
-        if (self.pitch is not None or self.angle is not None) and self.radius is None:
-            raise ValueError(
-                "ReceiverFiber radius is required when angle or pitch is specified."
-            )
-        if self.angle is not None:
-            _receiver_fiber_angle_degrees(self.angle)
-
     def to_fs(self, ctx=None) -> dict:
         """Serialize this fiber receiver device for solver input."""
 
@@ -357,6 +345,18 @@ class ReceiverFiber(ReceiverDevice):
             pitch=data.get("pitch"),
             angle=data.get("angle"),
         )
+
+    def _validate_helical_geometry(self) -> None:
+        if self.pitch is not None and self.angle is not None:
+            raise ValueError(
+                "ReceiverFiber accepts only one of angle or pitch, not both."
+            )
+        if (self.pitch is not None or self.angle is not None) and self.radius is None:
+            raise ValueError(
+                "ReceiverFiber radius is required when angle or pitch is specified."
+            )
+        if self.angle is not None:
+            _receiver_fiber_angle_degrees(self.angle)
 
 
 @register_class

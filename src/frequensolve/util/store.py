@@ -347,74 +347,6 @@ class SimulationStore:
                 del h5[dataset]
         return removed
 
-    def _referenced_datasets(self, payload: Any) -> set[str]:
-        referenced: set[str] = set()
-
-        def visit(value: Any) -> None:
-            if isinstance(value, Mapping):
-                locator = value.get("file")
-                file_format = str(value.get("format", "")).lower()
-                dataset = value.get("dataset")
-                if (
-                    not isinstance(dataset, str)
-                    and isinstance(locator, (str, Path))
-                    and file_format == "hdf5"
-                ):
-                    locator_text = str(locator)
-                    if ":" in locator_text:
-                        _, dataset = locator_text.rsplit(":", 1)
-                if (
-                    isinstance(dataset, str)
-                    and isinstance(locator, (str, Path))
-                    and file_format == "hdf5"
-                    and self._locator_references_store(str(locator), dataset)
-                ):
-                    referenced.add(dataset.strip("/"))
-                for item in value.values():
-                    visit(item)
-            elif isinstance(value, (list, tuple)):
-                for item in value:
-                    visit(item)
-
-        visit(payload)
-        return referenced
-
-    @staticmethod
-    def _referenced_coordinate_datasets(
-        h5: h5py.File,
-        datasets: Iterable[str],
-    ) -> set[str]:
-        referenced: set[str] = set()
-        for dataset in datasets:
-            if dataset not in h5 or not isinstance(h5[dataset], h5py.Dataset):
-                continue
-            dset = h5[dataset]
-            for dim in np.asarray(dset.attrs.get("dims", [])).ravel():
-                if isinstance(dim, bytes):
-                    dim = dim.decode("utf-8")
-                dim = str(dim)
-                if dim not in dset.attrs:
-                    continue
-                reference = _coordinate_reference(dset.attrs[dim])
-                if (
-                    reference is not None
-                    and reference in h5
-                    and isinstance(h5[reference], h5py.Dataset)
-                ):
-                    referenced.add(reference)
-        return referenced
-
-    def _locator_references_store(self, locator: str, dataset: str) -> bool:
-        suffix = f":{dataset.strip('/')}"
-        file_part = locator[: -len(suffix)] if locator.endswith(suffix) else locator
-        candidate = Path(file_part).expanduser()
-        if not candidate.is_absolute() and self.project_path is not None:
-            candidate = self.project_path / candidate
-        try:
-            return candidate.resolve() == self.path.resolve()
-        except OSError:
-            return False
-
     def put_dataarray(
         self,
         dataset: str,
@@ -645,3 +577,71 @@ class SimulationStore:
                 raise
 
         return HDF5Reference(self.path, dataset, digest, self.project_path)
+
+    def _referenced_datasets(self, payload: Any) -> set[str]:
+        referenced: set[str] = set()
+
+        def visit(value: Any) -> None:
+            if isinstance(value, Mapping):
+                locator = value.get("file")
+                file_format = str(value.get("format", "")).lower()
+                dataset = value.get("dataset")
+                if (
+                    not isinstance(dataset, str)
+                    and isinstance(locator, (str, Path))
+                    and file_format == "hdf5"
+                ):
+                    locator_text = str(locator)
+                    if ":" in locator_text:
+                        _, dataset = locator_text.rsplit(":", 1)
+                if (
+                    isinstance(dataset, str)
+                    and isinstance(locator, (str, Path))
+                    and file_format == "hdf5"
+                    and self._locator_references_store(str(locator), dataset)
+                ):
+                    referenced.add(dataset.strip("/"))
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+
+        visit(payload)
+        return referenced
+
+    @staticmethod
+    def _referenced_coordinate_datasets(
+        h5: h5py.File,
+        datasets: Iterable[str],
+    ) -> set[str]:
+        referenced: set[str] = set()
+        for dataset in datasets:
+            if dataset not in h5 or not isinstance(h5[dataset], h5py.Dataset):
+                continue
+            dset = h5[dataset]
+            for dim in np.asarray(dset.attrs.get("dims", [])).ravel():
+                if isinstance(dim, bytes):
+                    dim = dim.decode("utf-8")
+                dim = str(dim)
+                if dim not in dset.attrs:
+                    continue
+                reference = _coordinate_reference(dset.attrs[dim])
+                if (
+                    reference is not None
+                    and reference in h5
+                    and isinstance(h5[reference], h5py.Dataset)
+                ):
+                    referenced.add(reference)
+        return referenced
+
+    def _locator_references_store(self, locator: str, dataset: str) -> bool:
+        suffix = f":{dataset.strip('/')}"
+        file_part = locator[: -len(suffix)] if locator.endswith(suffix) else locator
+        candidate = Path(file_part).expanduser()
+        if not candidate.is_absolute() and self.project_path is not None:
+            candidate = self.project_path / candidate
+        try:
+            return candidate.resolve() == self.path.resolve()
+        except OSError:
+            return False
