@@ -29,8 +29,9 @@ publishing through GitHub Actions.
 
 Do not add PyPI passwords or API tokens to the repository.
 
-The release-candidate workflow also requires the FrequenSolver Builder GitHub
-App secret so it can dispatch the private organization-owned
+The default `standard` validation profile does not dispatch a Docker build.
+The optional `solver-backed` profile also requires the FrequenSolver Builder
+GitHub App secret so it can dispatch the private organization-owned
 FrequenSolveDockerImage workflow. FrequenSolve is public, so GitHub does not
 permit a direct reusable-workflow call into that private repository. The
 dispatcher requires DockerImage `main` to resolve to the reviewed commit before
@@ -57,34 +58,41 @@ local equivalents.
 Use the release workflows for the normal maintainer flow:
 
 - Run `Create Release Candidate` with a final base version such as `0.2.0` and
-  the final `frequensolver_release` tag selected for that package line.
-  The workflow first resolves the selected ref to an immutable SHA, verifies a
-  successful exact-SHA `Required CI` run, resolves the FrequenSolver release
-  tag to its immutable commit, and API-dispatches the pinned private
-  FrequenSolveDockerImage workflow with that exact pair and an exact FS_MUMPS
-  commit. The returned artifact must contain a trusted dispatch manifest that
-  binds the run, request, workflow, resolved commits, no-push mode, and exact
-  heavy-test contract. Only after the FrequenSolver-backed workflow returns the
-  expected passing marker, identities, commits, and artifact does it
-  create the next tag in that release line, such as `v0.2.0rc1`, and publish a
-  GitHub prerelease. The prerelease includes `release-evidence.json` plus the
-  checksum-bound `frequensolve-test-evidence.tar.gz` archive containing the
-  heavy-run JSON, JUnit, branch coverage, and visual comparison output. Its
-  event triggers
-  `Publish Package`, which builds the package, attaches the distributions to
-  the GitHub Release, and publishes `0.2.0rc1` to TestPyPI.
+  the final `frequensolver_release` tag selected for that package line. Choose
+  one explicit validation profile:
+
+  - `standard` (the default) requires successful exact-tree `Required CI` for
+    the immutable source commit and records the immutable preferred
+    FrequenSolver release and commit. It does not dispatch Docker or claim that
+    the solver pairing was exercised. Its GitHub prerelease contains exactly
+    one release evidence asset, `release-evidence.json`, and no heavy archive.
+  - `solver-backed` requires the same exact-tree CI and immutable
+    FrequenSolver identity, then API-dispatches the pinned private
+    FrequenSolveDockerImage workflow with the exact FrequenSolve, Sauce, and
+    FS_MUMPS commits. The returned evidence must bind the request, workflow,
+    commits, no-push mode, and passing heavy-test contract. Its GitHub
+    prerelease contains `release-evidence.json` plus one checksum-bound
+    `frequensolve-test-evidence.tar.gz` archive.
+
+  After the selected profile passes, the workflow creates the next tag in the
+  release line, such as `v0.2.0rc1`, and publishes a GitHub prerelease. That
+  event triggers `Publish Package`, which builds the package, attaches the
+  distributions, and publishes `0.2.0rc1` to TestPyPI.
 - Run `Create Release` with an approved release candidate tag such as
-  `v0.2.0rc1`. The workflow revalidates the attached exact-SHA CI and solver
-  evidence, creates `v0.2.0` on the same commit, and carries both evidence
-  assets into the final GitHub Release. The release event triggers `Publish Package`,
-  which validates the evidence again, rebuilds from the final tag, attaches the
+  `v0.2.0rc1`. The workflow derives the validation profile only from the sealed
+  evidence, revalidates its exact-SHA CI and profile-specific asset set, creates
+  `v0.2.0` on the same commit, and carries that asset set unchanged into the
+  final GitHub Release. The release event triggers `Publish Package`, which
+  validates the evidence again, rebuilds from the final tag, attaches the
   distributions to the GitHub Release, and publishes `0.2.0` to PyPI.
 
-Release creation treats those two evidence assets as one sealed pair. A retry
-may replace both assets together while the GitHub Release is still a draft. A
-published release is reused only when both assets exactly match the newly
-sealed pair; a stale or incomplete published pair fails before release notes or
-assets are changed.
+Release creation treats the profile-specific assets as one sealed set. A retry
+may replace the complete set while the GitHub Release is still a draft. A
+published release is reused only when its assets exactly match the newly sealed
+set. Standard releases require exactly one `release-evidence.json` and zero
+heavy archives; solver-backed releases require exactly one of each. A stale,
+extra, or incomplete published set fails before release notes or assets are
+changed. Legacy v2 evidence remains readable as solver-backed evidence.
 
 `Publish Package` also supports manual `workflow_dispatch` for maintainers who
 need to retry publishing intentionally. Set the required `release_tag` input to
@@ -113,13 +121,14 @@ gh workflow run release.yml \
   -f release_tag=v0.2.0
 ```
 
-`Publish Package` requires both matching evidence assets, verifies the archive
-checksum and machine-readable heavy results, and reruns the exact-SHA CI
-validation before it builds or publishes. It materializes
+`Publish Package` requires the exact profile-specific evidence asset set and
+reruns exact-SHA CI validation before it builds or publishes. For
+solver-backed evidence it also verifies the archive checksum and
+machine-readable heavy results. It materializes
 `frequensolver_compatibility.json` from that sealed evidence in a git-free
-staging tree, so the wheel and sdist carry the tested FrequenSolver release,
-commit, and evidence URL without making Versioneer report a dirty version. It
-also runs
+staging tree, so the wheel and sdist carry the preferred immutable
+FrequenSolver release, commit, validation profile, and evidence URL without
+making Versioneer report a dirty version. It also runs
 `scripts/validate_release_version.py`. The version validator requires a tag ref
 named `v<Versioneer version>` and rejects
 dirty, untagged, branch-derived, local-version, or non-PEP-440 builds such as
@@ -137,8 +146,11 @@ cannot leave site validation or submission blocked indefinitely.
 The `frequensolver_policy` site setting supports:
 
 - `warn` (default): continue but warn when the identity is unavailable or the
-  release/commit differs from the tested pair.
-- `strict`: refuse submission unless the exact tested pair is confirmed.
+  release/commit differs from the preferred pair, or when a standard release
+  did not run solver-backed validation.
+- `strict`: refuse submission unless solver-backed evidence confirms the exact
+  release and commit. An identity match from a standard release remains
+  `untested` and is rejected.
 - `off`: skip the identity query explicitly.
 
 The environment variable `FREQUENSOLVE_FREQUENSOLVER_POLICY` supplies the

@@ -1,4 +1,4 @@
-"""Compare two sealed FrequenSolve release-evidence asset pairs."""
+"""Compare two sealed FrequenSolve release-evidence asset sets."""
 
 from __future__ import annotations
 
@@ -7,6 +7,17 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any
+
+try:
+    from scripts.validate_release_evidence import (
+        SOLVER_BACKED_PROFILE,
+        release_evidence_profile,
+    )
+except ModuleNotFoundError:  # Direct execution sets sys.path to scripts/.
+    from validate_release_evidence import (
+        SOLVER_BACKED_PROFILE,
+        release_evidence_profile,
+    )
 
 ARCHIVE_SHA_FIELD = "dockerTestArchiveSha256"
 
@@ -26,19 +37,19 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def compare_release_evidence_pairs(
+def compare_release_evidence_assets(
     expected_evidence_path: Path,
-    expected_archive_path: Path,
     actual_evidence_path: Path,
-    actual_archive_path: Path,
+    *,
+    expected_archive_path: Path | None = None,
+    actual_archive_path: Path | None = None,
 ) -> None:
-    """Raise ``ValueError`` unless both evidence asset pairs are identical."""
+    """Raise ``ValueError`` unless both profile-aware asset sets are identical."""
+
     expected_evidence = _load_evidence(expected_evidence_path)
     actual_evidence = _load_evidence(actual_evidence_path)
-    expected_archive_sha = _sha256(expected_archive_path)
-    actual_archive_sha = _sha256(actual_archive_path)
-
     mismatches: list[str] = []
+
     if expected_evidence != actual_evidence:
         differing_fields = sorted(
             key
@@ -49,6 +60,37 @@ def compare_release_evidence_pairs(
             "release-evidence.json differs in fields: " + ", ".join(differing_fields)
         )
 
+    expected_profile = release_evidence_profile(expected_evidence)
+    actual_profile = release_evidence_profile(actual_evidence)
+    if expected_profile != actual_profile:
+        mismatches.append(
+            f"validation profiles differ ({expected_profile!r} != {actual_profile!r})"
+        )
+
+    archive_paths = (expected_archive_path, actual_archive_path)
+    if expected_profile != SOLVER_BACKED_PROFILE:
+        if any(path is not None for path in archive_paths):
+            mismatches.append(
+                "standard release evidence must not include a heavy evidence archive"
+            )
+        if mismatches:
+            raise ValueError(
+                "existing release evidence assets do not match the newly sealed set: "
+                + "; ".join(mismatches)
+            )
+        return
+
+    if expected_archive_path is None or actual_archive_path is None:
+        mismatches.append(
+            "solver-backed release evidence requires both heavy evidence archives"
+        )
+        raise ValueError(
+            "existing release evidence assets do not match the newly sealed set: "
+            + "; ".join(mismatches)
+        )
+
+    expected_archive_sha = _sha256(expected_archive_path)
+    actual_archive_sha = _sha256(actual_archive_path)
     for label, evidence, archive_sha in (
         ("newly sealed", expected_evidence, expected_archive_sha),
         ("existing release", actual_evidence, actual_archive_sha),
@@ -69,30 +111,50 @@ def compare_release_evidence_pairs(
 
     if mismatches:
         raise ValueError(
-            "existing release evidence assets do not match the newly sealed pair: "
+            "existing release evidence assets do not match the newly sealed set: "
             + "; ".join(mismatches)
         )
+
+
+def compare_release_evidence_pairs(
+    expected_evidence_path: Path,
+    expected_archive_path: Path,
+    actual_evidence_path: Path,
+    actual_archive_path: Path,
+) -> None:
+    """Retain the legacy four-path API for solver-backed callers."""
+
+    compare_release_evidence_assets(
+        expected_evidence_path,
+        actual_evidence_path,
+        expected_archive_path=expected_archive_path,
+        actual_archive_path=actual_archive_path,
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--expected-evidence", required=True, type=Path)
-    parser.add_argument("--expected-archive", required=True, type=Path)
+    parser.add_argument("--expected-archive", type=Path)
     parser.add_argument("--actual-evidence", required=True, type=Path)
-    parser.add_argument("--actual-archive", required=True, type=Path)
+    parser.add_argument("--actual-archive", type=Path)
     args = parser.parse_args()
 
     try:
-        compare_release_evidence_pairs(
+        if (args.expected_archive is None) != (args.actual_archive is None):
+            raise ValueError(
+                "--expected-archive and --actual-archive must be provided together"
+            )
+        compare_release_evidence_assets(
             args.expected_evidence,
-            args.expected_archive,
             args.actual_evidence,
-            args.actual_archive,
+            expected_archive_path=args.expected_archive,
+            actual_archive_path=args.actual_archive,
         )
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         parser.error(str(exc))
 
-    print("existing release evidence assets match the newly sealed pair")
+    print("existing release evidence assets match the newly sealed set")
     return 0
 
 

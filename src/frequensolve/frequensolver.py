@@ -1,9 +1,9 @@
 """FrequenSolver release identity and compatibility checks.
 
-FrequenSolve distributions carry the immutable FrequenSolver release that was
-used for their release-candidate evidence.  This module loads that declaration,
-queries a configured solver without starting MPI or a job, and applies the
-requested ``warn``, ``strict``, or ``off`` policy.
+FrequenSolve distributions carry the immutable preferred FrequenSolver release
+and the validation profile used for their release evidence.  This module loads
+that declaration, queries a configured solver without starting MPI or a job,
+and applies the requested ``warn``, ``strict``, or ``off`` policy.
 
 Importing this module never invokes a solver and never emits a warning.
 """
@@ -21,7 +21,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Callable, Literal, Mapping, Optional, Sequence, Union
 
-COMPATIBILITY_SCHEMA = "frequensolve-frequensolver-compatibility/v1"
+LEGACY_COMPATIBILITY_SCHEMA = "frequensolve-frequensolver-compatibility/v1"
+COMPATIBILITY_SCHEMA = "frequensolve-frequensolver-compatibility/v2"
 IDENTITY_SCHEMA = "frequensolver-identity-1"
 IDENTITY_PRODUCT = "FrequenSolver"
 IDENTITY_QUERY_TIMEOUT_SECONDS = 15.0
@@ -34,6 +35,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 CompatibilityPolicy = Literal["warn", "strict", "off"]
 CompatibilityStatus = Literal["compatible", "untested", "unknown", "off"]
+ValidationProfile = Literal["standard", "solver-backed"]
 
 __all__ = [
     "COMPATIBILITY_SCHEMA",
@@ -81,6 +83,13 @@ class FrequenSolverCompatibilityManifest:
     evidence_run_id: Optional[int]
     evidence_url: Optional[str]
     schema: str = COMPATIBILITY_SCHEMA
+    validation_profile: Optional[ValidationProfile] = "solver-backed"
+
+    @property
+    def solver_backed(self) -> bool:
+        """Return whether the manifest records solver-backed validation."""
+
+        return self.validation_profile == "solver-backed"
 
 
 @dataclass(frozen=True)
@@ -113,7 +122,7 @@ class FrequenSolverCompatibility:
 
     @property
     def confirmed(self) -> bool:
-        """Return whether the running pair exactly matches the tested pair."""
+        """Return whether solver-backed evidence confirms the running pair."""
 
         return self.status == "compatible"
 
@@ -146,9 +155,11 @@ def _manifest_from_mapping(
     payload: Mapping[str, object],
 ) -> FrequenSolverCompatibilityManifest:
     schema = payload.get("schema")
-    if schema != COMPATIBILITY_SCHEMA:
+    if schema not in {COMPATIBILITY_SCHEMA, LEGACY_COMPATIBILITY_SCHEMA}:
         raise ValueError(
-            f"compatibility schema must be {COMPATIBILITY_SCHEMA!r}, got {schema!r}"
+            "compatibility schema must be "
+            f"{COMPATIBILITY_SCHEMA!r} or legacy {LEGACY_COMPATIBILITY_SCHEMA!r}, "
+            f"got {schema!r}"
         )
     package_release = _required_string(
         payload.get("package_release"),
@@ -156,28 +167,59 @@ def _manifest_from_mapping(
         allow_unknown=True,
     )
     preferred_payload = payload.get("preferred_frequensolver")
-    evidence_payload = payload.get("evidence")
-    if preferred_payload is None and evidence_payload is None:
+    validation_payload = (
+        payload.get("evidence")
+        if schema == LEGACY_COMPATIBILITY_SCHEMA
+        else payload.get("validation")
+    )
+    if preferred_payload is None and validation_payload is None:
         return FrequenSolverCompatibilityManifest(
             package_release=package_release,
             preferred_frequensolver=None,
             evidence_run_id=None,
             evidence_url=None,
+            validation_profile=None,
+            schema=str(schema),
         )
     if not isinstance(preferred_payload, Mapping):
         raise ValueError("preferred_frequensolver must be an object")
-    if not isinstance(evidence_payload, Mapping):
-        raise ValueError("evidence must be an object")
-    run_id = evidence_payload.get("run_id")
+    if not isinstance(validation_payload, Mapping):
+        field = "evidence" if schema == LEGACY_COMPATIBILITY_SCHEMA else "validation"
+        raise ValueError(f"{field} must be an object")
+
+    if schema == LEGACY_COMPATIBILITY_SCHEMA:
+        validation_profile: ValidationProfile = "solver-backed"
+        validation_field = "evidence"
+    else:
+        profile = validation_payload.get("profile")
+        if profile not in {"standard", "solver-backed"}:
+            raise ValueError("validation.profile must be 'standard' or 'solver-backed'")
+        validation_profile = profile  # type: ignore[assignment]
+        declared_solver_backed = validation_payload.get("solver_backed")
+        if not isinstance(declared_solver_backed, bool):
+            raise ValueError("validation.solver_backed must be a boolean")
+        if declared_solver_backed != (validation_profile == "solver-backed"):
+            raise ValueError("validation.solver_backed must match validation.profile")
+        validation_field = "validation"
+
+    run_id = validation_payload.get("run_id")
     if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0:
-        raise ValueError("evidence.run_id must be a positive integer")
-    evidence_url = _required_string(evidence_payload.get("url"), "evidence.url")
+        raise ValueError(f"{validation_field}.run_id must be a positive integer")
+    evidence_url = _required_string(
+        validation_payload.get("url"), f"{validation_field}.url"
+    )
+    evidence_repository = (
+        "FrequenSolveDockerImage"
+        if validation_profile == "solver-backed"
+        else "FrequenSolve"
+    )
     expected_evidence_url = (
-        "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/"
-        f"{run_id}"
+        f"https://github.com/FrequenSol/{evidence_repository}/actions/runs/{run_id}"
     )
     if evidence_url != expected_evidence_url:
-        raise ValueError("evidence.url must identify evidence.run_id")
+        raise ValueError(
+            f"{validation_field}.url must identify {validation_field}.run_id"
+        )
     preferred_release = _required_string(
         preferred_payload.get("release"),
         "preferred_frequensolver.release",
@@ -197,7 +239,7 @@ def _manifest_from_mapping(
         "preferred_frequensolver.release_url",
     )
     expected_release_url = (
-        "https://github.com/FrequenSol/Sauce/releases/tag/" f"{preferred_release}"
+        f"https://github.com/FrequenSol/Sauce/releases/tag/{preferred_release}"
     )
     if preferred_release_url != expected_release_url:
         raise ValueError(
@@ -213,6 +255,8 @@ def _manifest_from_mapping(
         ),
         evidence_run_id=run_id,
         evidence_url=evidence_url,
+        validation_profile=validation_profile,
+        schema=str(schema),
     )
 
 
@@ -398,10 +442,19 @@ def _warning_message(
             f"{query.identity.version} (commit {query.identity.git_commit[:12]})."
         )
     evidence = f" Evidence: {manifest.evidence_url}." if manifest.evidence_url else ""
+    if manifest.solver_backed:
+        release_declaration = (
+            f"was tested with FrequenSolver {_preferred_label(preferred)}."
+        )
+    else:
+        release_declaration = (
+            f"declares FrequenSolver {_preferred_label(preferred)} as its preferred "
+            "immutable release, but the standard release profile did not run "
+            "solver-backed validation."
+        )
     return (
         "FrequenSolver compatibility warning\n\n"
-        f"FrequenSolve {manifest.package_release} was tested with FrequenSolver "
-        f"{_preferred_label(preferred)}.{evidence}\n\n"
+        f"FrequenSolve {manifest.package_release} {release_declaration}{evidence}\n\n"
         f"{running} {reason} This pairing has not been validated and may result "
         "in unexpected behavior.\n\n"
         f"Preferred FrequenSolver: {_preferred_label(preferred)}"
@@ -449,6 +502,16 @@ def _assess(
             manifest,
             query,
             reason="Its commit does not match the tested release commit.",
+        )
+        return FrequenSolverCompatibility("untested", message, manifest, identity)
+    if not manifest.solver_backed:
+        message = _warning_message(
+            manifest,
+            query,
+            reason=(
+                "The immutable identities match, but solver-backed release "
+                "validation was not run."
+            ),
         )
         return FrequenSolverCompatibility("untested", message, manifest, identity)
     return FrequenSolverCompatibility(

@@ -102,34 +102,71 @@ jobs:
             exit 1
           fi
 
+          rc_assets="$(gh release view "$RC_TAG" --json assets)"
+          release_evidence_count="$(
+            jq -r '[.assets[]? | select(.name == "release-evidence.json")] | length' \
+              <<<"$rc_assets"
+          )"
+          heavy_archive_count="$(
+            jq -r '[.assets[]? | select(.name == "frequensolve-test-evidence.tar.gz")] | length' \
+              <<<"$rc_assets"
+          )"
+          if [ "$release_evidence_count" != 1 ]; then
+            echo "${RC_TAG} must contain exactly one release-evidence.json asset." >&2
+            exit 1
+          fi
+
           mkdir -p .release-evidence
           gh release download "$RC_TAG" \
             --pattern release-evidence.json \
             --dir .release-evidence \
             --clobber
-          gh release download "$RC_TAG" \
-            --pattern frequensolve-test-evidence.tar.gz \
-            --dir .release-evidence \
-            --clobber
           evidence_file=.release-evidence/release-evidence.json
-          heavy_archive=.release-evidence/frequensolve-test-evidence.tar.gz
-          python scripts/validate_release_evidence.py \
-            "$evidence_file" \
-            --commit "$rc_sha"
-          expected_archive_sha="$(jq -r '.dockerTestArchiveSha256' "$evidence_file")"
-          actual_archive_sha="$(sha256sum "$heavy_archive" | awk '{print $1}')"
-          test "$actual_archive_sha" = "$expected_archive_sha"
-          python scripts/extract_test_evidence_archive.py \
-            "$heavy_archive" \
-            .release-evidence/heavy
-          python scripts/validate_heavy_test_evidence.py \
-            .release-evidence/heavy/frequensolve-test-evidence.json \
-            --commit "$rc_sha"
-          python scripts/validate_frequensolver_identity.py \
-            .release-evidence/heavy/frequensolver-identity.json \
-            --version "$(jq -r '.frequensolverVersion' "$evidence_file")" \
-            --commit "$(jq -r '.frequensolverGitCommit' "$evidence_file")" \
-            --build-id="$(jq -r '.frequensolverBuildId' "$evidence_file")"
+          validation_profile="$(
+            python scripts/validate_release_evidence.py \
+              "$evidence_file" \
+              --commit "$rc_sha" \
+              --print-profile
+          )"
+          case "$validation_profile" in
+            standard)
+              if [ "$heavy_archive_count" != 0 ]; then
+                echo "Standard release evidence must not include a heavy archive." >&2
+                exit 1
+              fi
+              ;;
+            solver-backed)
+              if [ "$heavy_archive_count" != 1 ]; then
+                echo "Solver-backed release evidence requires exactly one heavy archive." >&2
+                exit 1
+              fi
+              gh release download "$RC_TAG" \
+                --pattern frequensolve-test-evidence.tar.gz \
+                --dir .release-evidence \
+                --clobber
+              heavy_archive=.release-evidence/frequensolve-test-evidence.tar.gz
+              expected_archive_sha="$(
+                jq -r '.dockerTestArchiveSha256' "$evidence_file"
+              )"
+              actual_archive_sha="$(sha256sum "$heavy_archive" | awk '{print $1}')"
+              test "$actual_archive_sha" = "$expected_archive_sha"
+              python scripts/extract_test_evidence_archive.py \
+                "$heavy_archive" \
+                .release-evidence/heavy
+              python scripts/validate_heavy_test_evidence.py \
+                .release-evidence/heavy/frequensolve-test-evidence.json \
+                --commit "$rc_sha"
+              python scripts/validate_frequensolver_identity.py \
+                .release-evidence/heavy/frequensolver-identity.json \
+                --version "$(jq -r '.frequensolverVersion' "$evidence_file")" \
+                --commit "$(jq -r '.frequensolverGitCommit' "$evidence_file")" \
+                --build-id="$(jq -r '.frequensolverBuildId' "$evidence_file")"
+              ;;
+            *)
+              echo "Unexpected validated profile: ${validation_profile}" >&2
+              exit 1
+              ;;
+          esac
           ci_run_id="$(jq -r '.ciRunId' "$evidence_file")"
           python scripts/verify_ci_evidence.py \
             --repository "$GITHUB_REPOSITORY" \
@@ -161,9 +198,15 @@ jobs:
             echo "- Source commit: ${rc_sha}"
             echo "- Package version: ${final_tag#v}"
             echo "- Required CI: $(jq -r '.ciRunUrl' "$evidence_file")"
-            echo "- Solver evidence run: $(jq -r '.dockerEvidenceRunUrl' "$evidence_file")"
             echo "- Preferred FrequenSolver: [$(jq -r '.frequensolverRelease' "$evidence_file")]($(jq -r '.frequensolverReleaseUrl' "$evidence_file"))"
-            echo "- Tested runtime image: $(jq -r '.dockerImageTag' "$evidence_file")"
+            if [ "$validation_profile" = solver-backed ]; then
+              echo "- Validation profile: solver-backed"
+              echo "- Solver evidence run: $(jq -r '.dockerEvidenceRunUrl' "$evidence_file")"
+              echo "- Tested runtime image: $(jq -r '.dockerImageTag' "$evidence_file")"
+            else
+              echo "- Validation profile: standard"
+              echo "- Solver-backed validation: not run"
+            fi
             echo "- Publishing: PyPI via the Publish Package workflow"
             if [ -n "$NOTES" ]; then
               echo
@@ -208,46 +251,64 @@ jobs:
             jq -r '[.assets[]? | select(.name == "frequensolve-test-evidence.tar.gz")] | length' \
               <<<"$final_assets"
           )"
+          expected_heavy_archive_count=0
+          comparison_args=(--expected-evidence "$evidence_file")
+          upload_assets=("$evidence_file")
+          if [ "$validation_profile" = solver-backed ]; then
+            expected_heavy_archive_count=1
+            comparison_args+=(--expected-archive "$heavy_archive")
+            upload_assets+=("$heavy_archive")
+          fi
 
           if [ "$release_evidence_count" = 1 ] && \
-             [ "$heavy_archive_count" = 1 ]; then
+             [ "$heavy_archive_count" = "$expected_heavy_archive_count" ]; then
             existing_assets_dir="$(mktemp -d)"
             gh release download "$final_tag" \
               --pattern release-evidence.json \
               --dir "$existing_assets_dir"
-            gh release download "$final_tag" \
-              --pattern frequensolve-test-evidence.tar.gz \
-              --dir "$existing_assets_dir"
+            comparison_args+=(
+              --actual-evidence "$existing_assets_dir/release-evidence.json"
+            )
+            if [ "$validation_profile" = solver-backed ]; then
+              gh release download "$final_tag" \
+                --pattern frequensolve-test-evidence.tar.gz \
+                --dir "$existing_assets_dir"
+              comparison_args+=(
+                --actual-archive "$existing_assets_dir/frequensolve-test-evidence.tar.gz"
+              )
+            fi
             if comparison_output="$(
               python scripts/compare_release_evidence_pair.py \
-                --expected-evidence "$evidence_file" \
-                --expected-archive "$heavy_archive" \
-                --actual-evidence "$existing_assets_dir/release-evidence.json" \
-                --actual-archive "$existing_assets_dir/frequensolve-test-evidence.tar.gz" \
-                2>&1
+                "${comparison_args[@]}" 2>&1
             )"; then
               echo "$comparison_output"
             elif [ "$release_is_draft" = true ]; then
-              echo "Replacing the mismatched evidence pair on draft ${final_tag}."
+              echo "Replacing the mismatched evidence asset set on draft ${final_tag}."
               echo "$comparison_output"
-              gh release upload "$final_tag" "$evidence_file" "$heavy_archive" --clobber
+              gh release upload "$final_tag" "${upload_assets[@]}" --clobber
             else
-              echo "Published ${final_tag} already has a different sealed evidence pair; refusing to rewrite its notes or assets." >&2
+              echo "Published ${final_tag} already has a different sealed evidence asset set; refusing to rewrite its notes or assets." >&2
               echo "$comparison_output" >&2
               exit 1
             fi
           elif [ "$release_is_draft" = true ]; then
-            echo "Installing a complete evidence pair on draft ${final_tag}."
-            gh release upload "$final_tag" "$evidence_file" "$heavy_archive" --clobber
+            if [ "$validation_profile" = standard ] && \
+               [ "$heavy_archive_count" != 0 ]; then
+              gh release delete-asset "$final_tag" \
+                frequensolve-test-evidence.tar.gz \
+                --yes
+            fi
+            echo "Installing the complete evidence asset set on draft ${final_tag}."
+            gh release upload "$final_tag" "${upload_assets[@]}" --clobber
           else
-            echo "Published ${final_tag} has an incomplete evidence pair (${release_evidence_count} release-evidence.json, ${heavy_archive_count} heavy archive); refusing to rewrite it." >&2
+            echo "Published ${final_tag} has an invalid evidence asset set (${release_evidence_count} release-evidence.json, ${heavy_archive_count} heavy archive, expected ${expected_heavy_archive_count}); refusing to rewrite it." >&2
             exit 1
           fi
 
           final_assets="$(gh release view "$final_tag" --json assets)"
-          jq -e '
+          jq -e --argjson expectedHeavy "$expected_heavy_archive_count" '
             ([.assets[]? | select(.name == "release-evidence.json")] | length) == 1 and
-            ([.assets[]? | select(.name == "frequensolve-test-evidence.tar.gz")] | length) == 1
+            ([.assets[]? | select(.name == "frequensolve-test-evidence.tar.gz")] | length) == $expectedHeavy
           ' <<<"$final_assets" >/dev/null
 
           gh release edit "$final_tag" \
@@ -271,5 +332,6 @@ jobs:
             echo
             echo "- Tag: \`${final_tag}\`"
             echo "- Promoted from: \`${RC_TAG}\`"
+            echo "- Validation profile: \`${validation_profile}\`"
             echo "- Publish target: PyPI"
           } >> "$GITHUB_STEP_SUMMARY"

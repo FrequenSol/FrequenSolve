@@ -43,6 +43,20 @@ def _manifest() -> FrequenSolverCompatibilityManifest:
     )
 
 
+def _standard_manifest() -> FrequenSolverCompatibilityManifest:
+    return FrequenSolverCompatibilityManifest(
+        package_release="0.3.0",
+        preferred_frequensolver=PreferredFrequenSolver(
+            release="v0.1.0",
+            git_commit=COMMIT,
+            release_url=("https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"),
+        ),
+        evidence_run_id=123,
+        evidence_url=("https://github.com/FrequenSol/FrequenSolve/actions/runs/123"),
+        validation_profile="standard",
+    )
+
+
 def _identity(*, version: str = "v0.1.0", commit: str = COMMIT):
     return FrequenSolverIdentity(
         version=version,
@@ -67,8 +81,22 @@ def test_packaged_development_manifest_loads_without_query_or_warning():
     with warnings_not_emitted():
         manifest = load_frequensolver_compatibility()
 
-    assert manifest.schema == "frequensolve-frequensolver-compatibility/v1"
+    assert manifest.schema == "frequensolve-frequensolver-compatibility/v2"
     assert manifest.preferred_frequensolver is None
+    assert manifest.validation_profile is None
+    assert not manifest.solver_backed
+
+
+def test_manifest_preserves_legacy_positional_schema_argument():
+    manifest = FrequenSolverCompatibilityManifest(
+        "0.3.0",
+        None,
+        None,
+        None,
+        "frequensolve-frequensolver-compatibility/v1",
+    )
+
+    assert manifest.schema == "frequensolve-frequensolver-compatibility/v1"
 
 
 class warnings_not_emitted:
@@ -122,6 +150,43 @@ def test_loader_validates_release_manifest(tmp_path):
     assert loaded.package_release == "0.3.0"
     assert loaded.preferred_frequensolver.release == "v0.1.0"
     assert loaded.evidence_run_id == 456
+    assert loaded.validation_profile == "solver-backed"
+    assert loaded.solver_backed
+    assert loaded.schema == "frequensolve-frequensolver-compatibility/v1"
+
+
+def test_loader_validates_standard_v2_manifest(tmp_path):
+    path = tmp_path / "compatibility.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "frequensolve-frequensolver-compatibility/v2",
+                "package_release": "0.3.0",
+                "preferred_frequensolver": {
+                    "release": "v0.1.0",
+                    "git_commit": COMMIT,
+                    "release_url": (
+                        "https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"
+                    ),
+                },
+                "validation": {
+                    "profile": "standard",
+                    "solver_backed": False,
+                    "run_id": 123,
+                    "url": (
+                        "https://github.com/FrequenSol/FrequenSolve/actions/runs/123"
+                    ),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_frequensolver_compatibility(path)
+
+    assert loaded.validation_profile == "standard"
+    assert not loaded.solver_backed
+    assert loaded.evidence_run_id == 123
 
 
 def test_loader_rejects_caller_run_url_for_downstream_evidence(tmp_path):
@@ -208,11 +273,13 @@ def test_remote_identity_query_quotes_command_and_runs_setup_directly():
 
     result = query_remote_frequensolver_identity(
         "/work/Frequen Solver/FS_seismic",
-        lambda command: commands.append(command)
-        or "module setup output\n"
-        + "frequensolve-frequensolver-identity-begin\n"
-        + _identity_json()
-        + "\nfrequensolve-frequensolver-identity-ok\n",
+        lambda command: (
+            commands.append(command)
+            or "module setup output\n"
+            + "frequensolve-frequensolver-identity-begin\n"
+            + _identity_json()
+            + "\nfrequensolve-frequensolver-identity-ok\n"
+        ),
         setup_commands=["module load intel/25.1"],
     )
 
@@ -407,6 +474,44 @@ def test_exact_release_and_commit_are_confirmed(monkeypatch):
     assert "matches preferred FrequenSolver" in result.message
 
 
+def test_standard_profile_exact_identity_remains_untested(monkeypatch):
+    monkeypatch.setattr(
+        frequensolver,
+        "query_local_frequensolver_identity",
+        lambda *args, **kwargs: FrequenSolverIdentityQuery(_identity()),
+    )
+
+    with pytest.warns(
+        FrequenSolverCompatibilityWarning,
+        match="did not run solver-backed validation",
+    ):
+        result = check_frequensolver_compatibility(
+            "/solver",
+            manifest=_standard_manifest(),
+        )
+
+    assert result.status == "untested"
+    assert not result.confirmed
+
+
+def test_standard_profile_exact_identity_fails_strict_policy(monkeypatch):
+    monkeypatch.setattr(
+        frequensolver,
+        "query_local_frequensolver_identity",
+        lambda *args, **kwargs: FrequenSolverIdentityQuery(_identity()),
+    )
+
+    with pytest.raises(
+        FrequenSolverCompatibilityError,
+        match="did not run solver-backed validation",
+    ):
+        check_frequensolver_compatibility(
+            "/solver",
+            manifest=_standard_manifest(),
+            policy="strict",
+        )
+
+
 def _confirmed_result():
     return FrequenSolverCompatibility(
         status="compatible",
@@ -558,8 +663,9 @@ def test_slurm_site_caches_one_check_per_policy(monkeypatch):
     monkeypatch.setattr(
         hpc_site_module,
         "check_frequensolver_compatibility",
-        lambda *args, **kwargs: policies.append(kwargs["policy"])
-        or _confirmed_result(),
+        lambda *args, **kwargs: (
+            policies.append(kwargs["policy"]) or _confirmed_result()
+        ),
     )
 
     site.check_frequensolver_compatibility()
