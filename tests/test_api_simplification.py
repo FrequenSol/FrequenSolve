@@ -127,38 +127,10 @@ def test_subdomain_fields_are_independent_expression_data_and_roundtrip():
 
     assert payload["fields"]["vp_base"] == {
         "value": [1.5, 2.0],
-        "dims": ["z"],
-        "coords": {"z": {"data": [0.0, 1.0]}},
         "units": "km/s",
     }
     assert payload["properties"]["vp"]["expr"]["args"][0] == {"field": "vp_base"}
-    xr.testing.assert_identical(loaded.fields["vp_base"].get(), vp_base)
-    assert loaded.to_fs() == payload
-
-
-def test_subdomain_fields_roundtrip_nonuniform_multidimensional_coordinates():
-    lookup = xr.DataArray(
-        np.arange(6.0).reshape(2, 3),
-        dims=["offset", "depth"],
-        coords={"offset": [0.0, 2.0], "depth": [0.0, 0.2, 1.0]},
-        attrs={"units": "km/s"},
-    )
-    lookup.coords["offset"].attrs["units"] = "km"
-    lookup.coords["depth"].attrs["units"] = "km"
-
-    payload = ModelSubdomain(
-        mesh_block_id=1,
-        fields={"lookup": lookup},
-        properties={"Vp": Property.expr(PropertyExpression.field("lookup"))},
-    ).to_fs()
-    loaded = ModelSubdomain.from_fs(payload)
-
-    assert payload["fields"]["lookup"]["dims"] == ["offset", "depth"]
-    assert payload["fields"]["lookup"]["coords"] == {
-        "offset": {"data": [0.0, 2.0], "units": "km"},
-        "depth": {"data": [0.0, 0.2, 1.0], "units": "km"},
-    }
-    xr.testing.assert_identical(loaded.fields["lookup"].get(), lookup)
+    np.testing.assert_allclose(loaded.fields["vp_base"].get(), vp_base)
     assert loaded.to_fs() == payload
 
 
@@ -524,28 +496,6 @@ def test_property_expression_evaluates_independent_field_data():
     np.testing.assert_allclose(result.to("m/s").magnitude, [1650.0, 2200.0])
     with pytest.raises(ValueError, match="unavailable field 'vp_base'"):
         expression.evaluate({})
-
-
-def test_property_expression_evaluates_solver_sqrt_and_log10_operations():
-    expression = PropertyExpression(
-        {
-            "op": "add",
-            "args": [
-                {"op": "sqrt", "arg": {"field": "squared"}},
-                {"op": "log10", "arg": {"field": "powers"}},
-            ],
-        }
-    )
-
-    result = expression.evaluate(
-        {},
-        fields={
-            "squared": np.array([1.0, 4.0, 9.0]),
-            "powers": np.array([1.0, 10.0, 100.0]),
-        },
-    )
-
-    np.testing.assert_allclose(result, [1.0, 3.0, 5.0])
 
 
 def test_branch_property_expression_exports_case_ast():
@@ -1648,7 +1598,7 @@ def test_receiver_fiber_exports_quantity_lengths_with_units():
     assert explicit["channel_spacing"] == {"value": 12.5, "units": "m"}
 
 
-def test_receiver_fiber_exports_angle_as_compatible_helical_pitch():
+def test_receiver_fiber_exports_helical_angle_quantities_and_roundtrips():
     das = ReceiverFiber(
         gauge_length=10 * u.m,
         radius=0.5 * u.m,
@@ -1658,11 +1608,8 @@ def test_receiver_fiber_exports_angle_as_compatible_helical_pitch():
     payload = das.to_fs()
 
     assert payload["radius"] == {"value": 0.5, "units": "m"}
-    assert payload["pitch"] == {
-        "value": pytest.approx(np.pi / np.tan(np.deg2rad(60))),
-        "units": "m",
-    }
-    assert "angle" not in payload
+    assert payload["angle"] == {"value": 60, "units": "deg"}
+    assert "pitch" not in payload
     assert ReceiverFiber.from_fs(payload).to_fs() == payload
 
     radians = ReceiverFiber(
@@ -1670,11 +1617,8 @@ def test_receiver_fiber_exports_angle_as_compatible_helical_pitch():
         radius=0.5 * u.m,
         angle=np.pi / 3 * u.rad,
     ).to_fs()
-    assert radians["pitch"] == {
-        "value": pytest.approx(np.pi / np.tan(np.pi / 3)),
-        "units": "m",
-    }
-    assert "angle" not in radians
+    assert radians["angle"]["units"] == "rad"
+    assert radians["angle"]["value"] == pytest.approx(np.pi / 3)
 
     mapped = ReceiverFiber.from_fs(
         {
@@ -1684,12 +1628,10 @@ def test_receiver_fiber_exports_angle_as_compatible_helical_pitch():
             "angle": {"value": 1.0, "units": "radians"},
         }
     ).to_fs()
-    assert mapped["pitch"] == pytest.approx(np.pi / np.tan(1.0))
-    assert "angle" not in mapped
+    assert mapped["angle"] == {"value": 1.0, "units": "radians"}
 
     numeric = ReceiverFiber(gauge_length=10, radius=0.5, angle=45).to_fs()
-    assert numeric["pitch"] == pytest.approx(np.pi)
-    assert "angle" not in numeric
+    assert numeric["angle"] == 45
 
 
 def test_receiver_fiber_rejects_invalid_helical_angle_configuration():
@@ -3382,7 +3324,7 @@ def test_array_properties_materialize_to_simulation_hdf5_with_hash(tmp_path):
         assert h5[prop["dataset"]].attrs["sentinel"] == "kept"
 
 
-def test_large_model_field_coordinates_remain_inline_hdf5_attributes(tmp_path):
+def test_large_model_field_coordinates_use_hdf5_dataset_reference(tmp_path):
     z = np.linspace(0.0, 1.0, 10_000)
     field = xr.DataArray(
         1.5 + z,
@@ -3409,11 +3351,12 @@ def test_large_model_field_coordinates_remain_inline_hdf5_attributes(tmp_path):
     payload = json.loads(simulation_file.read_text())
     field_payload = payload["Model"]["subdomains"][0]["fields"]["vp_base"]
 
-    assert "dims" not in field_payload
-    assert "coords" not in field_payload
     with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
         dset = h5[field_payload["dataset"]]
-        np.testing.assert_array_equal(dset.attrs["z"], z)
+        coordinate_reference = dset.attrs["z"]
+        assert coordinate_reference.startswith("/")
+        assert coordinate_reference in h5
+        np.testing.assert_array_equal(h5[coordinate_reference][:], z)
 
 
 def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):

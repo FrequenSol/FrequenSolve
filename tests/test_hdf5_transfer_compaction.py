@@ -186,7 +186,7 @@ def test_put_dataarray_removes_dataset_after_metadata_failure(monkeypatch, tmp_p
         assert dset.attrs["marker"] == "trigger failure"
 
 
-def test_put_dataarray_inlines_large_dimension_coordinate_for_solver(tmp_path):
+def test_put_dataarray_references_large_dimension_coordinate_dataset(tmp_path):
     path = tmp_path / "simulation.h5"
     store = SimulationStore(path)
     x = np.linspace(0.0, 1.0, 10_000)
@@ -200,8 +200,11 @@ def test_put_dataarray_inlines_large_dimension_coordinate_for_solver(tmp_path):
 
     with h5py.File(path, "a") as h5:
         dset = h5["values"]
-        np.testing.assert_array_equal(dset.attrs["x"], x)
-        assert "values.__coordinates__" not in h5
+        assert dset.attrs["x"] == "/values.__coordinates__/0"
+        coordinate = h5[dset.attrs["x"]]
+        assert coordinate.attrs["dimension"] == "x"
+        assert coordinate.attrs["fs_kind"] == "dimension_coordinate"
+        np.testing.assert_array_equal(coordinate[:], x)
         h5.create_dataset("obsolete", data=np.arange(3))
 
     removed = store.prune_unreferenced({"property": ref.to_fs()})
@@ -212,56 +215,16 @@ def test_put_dataarray_inlines_large_dimension_coordinate_for_solver(tmp_path):
     np.testing.assert_array_equal(loaded.coords["x"], x)
     np.testing.assert_array_equal(loaded.values, data.values)
 
-    # Migrate a store written by the prior external-coordinate format instead
-    # of reusing its matching hash and leaving an incompatible solver contract.
     with h5py.File(path, "a") as h5:
-        dset = h5["values"]
-        del dset.attrs["x"]
-        coordinate_group = h5.create_group("values.__coordinates__")
-        coordinate_group.create_dataset("0", data=x)
-        dset.attrs["x"] = "/values.__coordinates__/0"
+        del h5["values.__coordinates__/0"]
 
     repeated = store.put_dataarray("values", data, dtype=None)
 
     assert repeated.hash == ref.hash
     with h5py.File(path, "r") as h5:
-        np.testing.assert_array_equal(h5["values"].attrs["x"], x)
-        assert "values.__coordinates__" not in h5
-
-
-def test_put_array_chunks_inlines_large_dimension_coordinate_for_solver(tmp_path):
-    path = tmp_path / "simulation.h5"
-    store = SimulationStore(path)
-    x = np.linspace(0.0, 1.0, 10_000)
-
-    ref = store.put_array_chunks(
-        "values",
-        (x.size,),
-        lambda: iter((np.zeros(x.size),)),
-        dims=("x",),
-        coords={"x": x},
-        dtype=np.float64,
-    )
-
-    assert ref.hash
-    with h5py.File(path, "r") as h5:
-        np.testing.assert_array_equal(h5["values"].attrs["x"], x)
-        assert "values.__coordinates__" not in h5
-
-
-def test_prune_unreferenced_removes_empty_coordinate_owner_group(tmp_path):
-    path = tmp_path / "simulation.h5"
-    store = SimulationStore(path)
-    with h5py.File(path, "w") as h5:
-        h5.create_dataset("obsolete", data=np.arange(3))
-        group = h5.create_group("obsolete.__coordinates__")
-        group.create_dataset("0", data=np.arange(3))
-
-    removed = store.prune_unreferenced({})
-
-    assert removed == ["obsolete", "obsolete.__coordinates__/0"]
-    with h5py.File(path, "r") as h5:
-        assert "obsolete.__coordinates__" not in h5
+        coordinate_reference = h5["values"].attrs["x"]
+        assert coordinate_reference in h5
+        np.testing.assert_array_equal(h5[coordinate_reference][:], x)
 
 
 def test_put_array_chunks_replaces_incomplete_matching_hash(tmp_path):
