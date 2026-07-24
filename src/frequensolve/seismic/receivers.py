@@ -161,18 +161,37 @@ def _receiver_fiber_angle_degrees(angle: Any) -> float:
     return degrees
 
 
-def _receiver_fiber_angle_to_fs(angle: Any) -> Any:
-    """Serialize a validated fiber winding angle for the solver."""
+def _receiver_fiber_pitch_from_angle(radius: Any, angle: Any) -> Any:
+    """Return the legacy pitch contract equivalent to a winding angle."""
 
     degrees = _receiver_fiber_angle_degrees(angle)
-    if not is_quantity(angle):
-        return value_and_units_to_fs(angle)
+    factor = 2.0 * np.pi / np.tan(np.deg2rad(degrees))
+    radius_payload = value_and_units_to_fs(radius)
+    if isinstance(radius_payload, Mapping):
+        if "value" not in radius_payload:
+            raise ValueError("ReceiverFiber radius quantity requires a value.")
+        pitch = copy.deepcopy(radius_payload)
+        radius_value = pitch["value"]
+    else:
+        pitch = None
+        radius_value = radius_payload
 
-    payload = value_and_units_to_fs(angle)
-    units = str(payload["units"]).strip().lower()
-    if units in _RECEIVER_FIBER_DEGREE_UNITS | _RECEIVER_FIBER_RADIAN_UNITS:
-        return payload
-    return {"value": degrees, "units": "deg"}
+    if isinstance(radius_value, (str, bytes, bool)):
+        raise ValueError("ReceiverFiber radius must be a numeric scalar.")
+    try:
+        scalar = np.asarray(radius_value, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ReceiverFiber radius must be a numeric scalar.") from exc
+    if scalar.ndim != 0:
+        raise ValueError("ReceiverFiber radius must be a numeric scalar.")
+
+    pitch_value = float(scalar) * factor
+    if not np.isfinite(pitch_value) or pitch_value <= 0.0:
+        raise ValueError("ReceiverFiber radius must be positive and finite.")
+    if pitch is None:
+        return pitch_value
+    pitch["value"] = pitch_value
+    return pitch
 
 
 @register_class
@@ -326,7 +345,7 @@ class ReceiverFiber(ReceiverDevice):
         if self.pitch is not None:
             data["pitch"] = value_and_units_to_fs(self.pitch)
         if self.angle is not None:
-            data["angle"] = _receiver_fiber_angle_to_fs(self.angle)
+            data["pitch"] = _receiver_fiber_pitch_from_angle(self.radius, self.angle)
         return data
 
     @classmethod
@@ -1588,11 +1607,12 @@ class ReceiverGroup(ExtraFieldsMixin):
                     attrs["units"] = unit_expression(coordinate_units)
                 if coords.system is not None:
                     attrs["system"] = coords.system
+                coordinate_dim = coords.coordinates.dims[1]
                 ref = ctx.store.put_dataarray(
                     dataset,
                     coords.coordinates,
                     attrs=attrs,
-                    coordinate_dims=("coordinate",),
+                    coordinate_dims=(coordinate_dim,),
                     dtype=np.float64,
                 )
                 coords_payload = {

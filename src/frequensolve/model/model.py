@@ -178,6 +178,7 @@ class ModelSubdomain(ExtraFieldsMixin):
                         ctx=ctx,
                         file_factory=field_file if ctx.path is not None else None,
                         dataset_factory=field_dataset,
+                        preserve_inline_coordinates=True,
                     )
                 }
                 if self.fields

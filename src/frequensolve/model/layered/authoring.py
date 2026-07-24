@@ -203,11 +203,11 @@ class LayeredAuthoringMixin:
     ) -> _LayeredModelT:
         """Truncate the model below a new cutting surface.
 
-        Surfaces proven to be fully deeper than the cut are discarded.
-        Surfaces that cross the cut are retained so a layered mesher can clip
-        them against the serialized ``cutting`` surface. The cut becomes the
-        lower model boundary, and formation layers that are wholly below it
-        are removed.
+        Surfaces proven to be nowhere shallower than the cut are discarded,
+        including an existing surface coincident with the cut. Surfaces that
+        cross the cut are retained so a layered mesher can clip them against
+        the serialized ``cutting`` surface. The cut becomes the lower model
+        boundary, and formation layers that are wholly below it are removed.
 
         This method returns an independent deep copy and leaves the source
         model unchanged. Depth increases downward, following the layered-model
@@ -709,7 +709,11 @@ class LayeredAuthoringMixin:
         discarded = [
             surface
             for surface in self.surfaces
-            if self._surface_is_fully_below(surface, cutting_surface)
+            if self._surface_is_fully_below(
+                surface,
+                cutting_surface,
+                include_coincident=True,
+            )
         ]
         discarded_ids = {id(surface) for surface in discarded}
         retained = [
@@ -827,6 +831,8 @@ class LayeredAuthoringMixin:
     def _surface_is_fully_below(
         surface: SimpleSurface,
         cutting_surface: SimpleSurface,
+        *,
+        include_coincident: bool = False,
     ) -> bool:
         surface_data = surface.depth.data
         cutting_data = cutting_surface.depth.data
@@ -861,7 +867,12 @@ class LayeredAuthoringMixin:
             for dim in surface_data.dims
         )
         if surface.depth.is_constant or cutting_surface.depth.is_constant or same_grid:
-            return bool(np.all(surface_values > cutting_values))
+            comparison = (
+                surface_values >= cutting_values
+                if include_coincident
+                else surface_values > cutting_values
+            )
+            return bool(np.all(comparison))
 
         surface_min, _ = surface.extrema
         _, cutting_max = cutting_surface.extrema
@@ -875,7 +886,11 @@ class LayeredAuthoringMixin:
             _property_units(cutting_surface.depth),
             target_units,
         )
-        return bool(surface_min > cutting_max)
+        return bool(
+            surface_min >= cutting_max
+            if include_coincident
+            else surface_min > cutting_max
+        )
 
     def _fracture_subdomain_name(self, fracture: Fracture) -> str:
         return fracture.subdomain_name or fracture.name

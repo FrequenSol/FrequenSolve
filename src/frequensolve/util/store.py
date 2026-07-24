@@ -19,7 +19,6 @@ __all__ = ["HDF5Reference", "SimulationStore", "hash_dataarray_payload"]
 
 _DEFAULT_COMPACT_MIN_RECLAIM_BYTES = 64 * 1024 * 1024
 _DEFAULT_COMPACT_MIN_RECLAIM_FRACTION = 0.25
-_MAX_INLINE_COORDINATE_BYTES = 16 * 1024
 _COORDINATE_DATASET_SUFFIX = ".__coordinates__"
 
 
@@ -47,22 +46,6 @@ def _h5_attr_value(value: Any) -> Any:
     return value
 
 
-def _coordinate_value_nbytes(value: Any) -> int:
-    """Estimate HDF5 attribute storage for one dimension coordinate."""
-
-    values = np.asarray(value)
-    if values.dtype.kind not in {"O", "S", "U"}:
-        return int(values.nbytes)
-
-    size = 0
-    for item in values.ravel():
-        if isinstance(item, bytes):
-            size += len(item)
-        else:
-            size += len(str(item).encode("utf-8"))
-    return size + values.size * 8
-
-
 def _coordinate_group_path(dataset: str) -> str:
     return f"{dataset.strip('/')}{_COORDINATE_DATASET_SUFFIX}"
 
@@ -84,50 +67,34 @@ def _coordinate_reference(value: Any) -> Optional[str]:
     return reference.strip("/")
 
 
-def _coordinate_references_available(
-    h5: h5py.File,
+def _dimension_coordinates_are_inline(
     dset: h5py.Dataset,
     dimensions: Iterable[str],
 ) -> bool:
+    """Return whether solver-facing dimension coordinates are inline."""
+
     for dim in dimensions:
         if dim not in dset.attrs:
             return False
         reference = _coordinate_reference(dset.attrs[dim])
-        if reference is not None and (
-            reference not in h5 or not isinstance(h5[reference], h5py.Dataset)
-        ):
+        if reference is not None:
             return False
     return True
 
 
 def _write_dimension_coordinates(
-    h5: h5py.File,
     dset: h5py.Dataset,
-    dataset: str,
     coordinates: Mapping[str, Any],
 ) -> None:
-    """Write dimension coordinates inline or as referenced HDF5 datasets."""
+    """Write dimension coordinates as solver-compatible HDF5 attributes.
 
-    inline_bytes = 0
-    coordinate_group = _coordinate_group_path(dataset)
-    for index, (dim, coordinate) in enumerate(coordinates.items()):
-        values = np.asarray(coordinate)
-        estimated_bytes = _coordinate_value_nbytes(values)
-        if inline_bytes + estimated_bytes <= _MAX_INLINE_COORDINATE_BYTES:
-            dset.attrs[dim] = _h5_attr_value(values)
-            inline_bytes += estimated_bytes
-            continue
+    Callers create datasets with ``track_order=True`` so HDF5 uses dense
+    attribute storage when an axis is larger than the compact object-header
+    limit.
+    """
 
-        group = h5.require_group(coordinate_group)
-        group.attrs["fs_kind"] = "dimension_coordinates"
-        group.attrs["owner"] = f"/{dataset}"
-        coordinate_dataset = group.create_dataset(
-            str(index),
-            data=_h5_attr_value(values),
-        )
-        coordinate_dataset.attrs["dimension"] = dim
-        coordinate_dataset.attrs["fs_kind"] = "dimension_coordinate"
-        dset.attrs[dim] = f"/{coordinate_dataset.name.strip('/')}"
+    for dim, coordinate in coordinates.items():
+        dset.attrs[dim] = _h5_attr_value(np.asarray(coordinate))
 
 
 def _hash_update_json(hasher, value: Any) -> None:
@@ -345,6 +312,23 @@ class SimulationStore:
             removed = sorted(set(stored) - referenced)
             for dataset in removed:
                 del h5[dataset]
+            empty_coordinate_groups = []
+            h5.visititems(
+                lambda name, obj: (
+                    empty_coordinate_groups.append(name)
+                    if isinstance(obj, h5py.Group)
+                    and name.endswith(_COORDINATE_DATASET_SUFFIX)
+                    and len(obj) == 0
+                    else None
+                )
+            )
+            for group in sorted(
+                empty_coordinate_groups,
+                key=lambda name: name.count("/"),
+                reverse=True,
+            ):
+                if group in h5 and len(h5[group]) == 0:
+                    del h5[group]
         return removed
 
     def put_dataarray(
@@ -412,7 +396,7 @@ class SimulationStore:
                 if (
                     dset.attrs.get("fs_hash") == f"blake3:{digest}"
                     and required_attrs.issubset(dset.attrs.keys())
-                    and _coordinate_references_available(h5, dset, coordinate_dims)
+                    and _dimension_coordinates_are_inline(dset, coordinate_dims)
                 ):
                     return HDF5Reference(self.path, dataset, digest, self.project_path)
                 del h5[dataset]
@@ -420,13 +404,16 @@ class SimulationStore:
             coordinate_group = _coordinate_group_path(dataset)
             if coordinate_group in h5:
                 del h5[coordinate_group]
-            dset = h5.create_dataset(dataset, data=values, compression=compression)
+            dset = h5.create_dataset(
+                dataset,
+                data=values,
+                compression=compression,
+                track_order=True,
+            )
             try:
                 dset.attrs["dims"] = _h5_attr_value(list(data.dims))
                 _write_dimension_coordinates(
-                    h5,
                     dset,
-                    dataset,
                     {
                         dim: np.asarray(data.coords[dim].values)
                         for dim in coordinate_dims
@@ -542,7 +529,7 @@ class SimulationStore:
                     expected_digest is not None
                     and dset.attrs.get("fs_hash") == f"blake3:{expected_digest}"
                     and required_attrs.issubset(dset.attrs.keys())
-                    and _coordinate_references_available(h5, dset, coords)
+                    and _dimension_coordinates_are_inline(dset, coords)
                 ):
                     return HDF5Reference(
                         self.path, dataset, expected_digest, self.project_path
@@ -557,13 +544,14 @@ class SimulationStore:
                 shape=shape,
                 dtype=dtype,
                 compression=compression,
+                track_order=True,
             )
             chunks = chunk_factory() if chunk_factory is not None else chunk_iter
             try:
                 digest = digest_chunks(chunks, dset=dset)
                 if dims:
                     dset.attrs["dims"] = _h5_attr_value(dims)
-                _write_dimension_coordinates(h5, dset, dataset, coords)
+                _write_dimension_coordinates(dset, coords)
                 for key, value in attrs.items():
                     if value is None:
                         continue

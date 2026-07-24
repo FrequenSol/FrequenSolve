@@ -63,8 +63,10 @@ used along the gauge. If ``sample_spacing`` is omitted,
 ``radius`` and exactly one of ``angle`` or ``pitch``. ``angle`` is the winding
 angle from the cable axis and must be strictly between 0 and 90 degrees. Plain
 angle values are degrees, and angular :term:`Pint` quantities may use degrees
-or radians. Length-like DAS fields accept plain solver-scaled numbers or Pint
-quantities with explicit units.
+or radians. During export, FrequenSolve converts ``angle`` to the equivalent
+legacy ``pitch`` using the supplied radius, so the generated input works with
+released and current solver builds. Length-like DAS fields accept plain
+solver-scaled numbers or Pint quantities with explicit units.
 
 .. code-block:: python
 

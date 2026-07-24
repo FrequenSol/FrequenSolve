@@ -296,16 +296,22 @@ class LayeredSamplingMixin:
 
         if dz <= 0:
             raise ValueError("dz must be positive")
+        z_units = self._default_z_units()
+        default_z_min, default_z_max = self.z_limits_in(z_units)
         if z_min is None:
-            z_min = self.z_limits[0]
+            z_min = default_z_min
         if z_max is None:
-            z_max = self.z_limits[1]
+            z_max = default_z_max
         depths = np.arange(z_min, z_max, dz)
         samples = xr.DataArray(
             data=np.nan * np.ones((1, len(depths))),
             dims=["x", "z"],
             coords={"x": [x], "z": depths},
         )
+        if self._x_units is not None:
+            samples.coords["x"].attrs["units"] = self._x_units
+        if z_units is not None:
+            samples.coords["z"].attrs["units"] = z_units
         property = canonical_property_name(property)
         target_units = (
             unit_expression(units)
@@ -524,6 +530,13 @@ class LayeredSamplingMixin:
             return self._x_units
         if spec.direction == "y":
             return self._y_units
+        return self._default_z_units()
+
+    def _default_z_units(self) -> Optional[str]:
+        for surface in self.surfaces:
+            units = _property_units(surface.depth)
+            if units is not None:
+                return units
         return None
 
     def _axis_limits(self, axis: str, units: Optional[str]) -> Tuple[float, float]:
