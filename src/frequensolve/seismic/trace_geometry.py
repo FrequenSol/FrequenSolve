@@ -413,12 +413,16 @@ def _cartesian_grid_from_xarray_payload(payload: Mapping[str, Any]) -> Cartesian
 def wavefield_grid_display(
     trace: xr.DataArray,
     *,
+    x: str | None = None,
+    y: str | None = None,
     L_scale: float = 1.0,
 ) -> dict[str, Any] | None:
     """Return display metadata for gridded wavefield traces.
 
     Args:
         trace: Wavefield trace data array.
+        x: Grid dimension to display on the horizontal axis.
+        y: Grid dimension to display on the vertical axis.
         L_scale: Coordinate scale factor applied to display extents.
 
     Returns:
@@ -431,18 +435,27 @@ def wavefield_grid_display(
         dims = _wavefield_grid_display_dims(payload)
         if dims is None:
             return None
-        y_dim, x_dim = dims[0], dims[1]
-        x = _coord_payload_values(payload, x_dim) * L_scale
-        y = _coord_payload_values(payload, y_dim) * L_scale
+        y_dim, x_dim, transpose = _resolve_wavefield_display_dims(
+            (dims[0], dims[1]), x=x, y=y
+        )
+        x_values = _coord_payload_values(payload, x_dim) * L_scale
+        y_values = _coord_payload_values(payload, y_dim) * L_scale
         x_units = _coord_payload_units(payload, x_dim)
         y_units = _coord_payload_units(payload, y_dim)
         return {
-            "extent": [float(x[0]), float(x[-1]), float(y[-1]), float(y[0])],
+            "dimensions": (dims[0], dims[1]),
+            "extent": [
+                float(x_values[0]),
+                float(x_values[-1]),
+                float(y_values[-1]),
+                float(y_values[0]),
+            ],
             "xlabel": f"{x_dim.upper()}{f' [{x_units}]' if x_units else ''}",
             "ylabel": f"{y_dim.upper()}{f' [{y_units}]' if y_units else ''}",
-            "x": x,
-            "y": y,
-            "uniform": _coords_uniform(x) and _coords_uniform(y),
+            "x": x_values,
+            "y": y_values,
+            "uniform": _coords_uniform(x_values) and _coords_uniform(y_values),
+            "transpose": transpose,
         }
 
     grid = receiver_grid(trace)
@@ -450,17 +463,59 @@ def wavefield_grid_display(
         return None
     units = f" [{grid.units}]" if grid.units else ""
     dims = list(grid.dims) if len(grid.dims) >= 2 else ["x", "z"]
+    y_dim, x_dim, transpose = _resolve_wavefield_display_dims(
+        (dims[1], dims[0]), x=x, y=y
+    )
+    axis_index = {dims[0]: 0, dims[1]: 1}
+    x_index = axis_index[x_dim]
+    y_index = axis_index[y_dim]
+    x_values = np.linspace(grid.x0[x_index], grid.x1[x_index], grid.n[x_index])
+    y_values = np.linspace(grid.x0[y_index], grid.x1[y_index], grid.n[y_index])
     return {
+        "dimensions": (dims[0], dims[1]),
         "extent": [
-            float(grid.x0[0]) * L_scale,
-            float(grid.x1[0]) * L_scale,
-            float(grid.x1[1]) * L_scale,
-            float(grid.x0[1]) * L_scale,
+            float(x_values[0]) * L_scale,
+            float(x_values[-1]) * L_scale,
+            float(y_values[-1]) * L_scale,
+            float(y_values[0]) * L_scale,
         ],
-        "xlabel": f"{dims[0].upper()}{units}",
-        "ylabel": f"{dims[1].upper()}{units}",
+        "xlabel": f"{x_dim.upper()}{units}",
+        "ylabel": f"{y_dim.upper()}{units}",
+        "x": x_values * L_scale,
+        "y": y_values * L_scale,
         "uniform": True,
+        "transpose": transpose,
     }
+
+
+def _resolve_wavefield_display_dims(
+    native_dims: tuple[str, str],
+    *,
+    x: str | None,
+    y: str | None,
+) -> tuple[str, str, bool]:
+    """Resolve xarray-style axis selectors against two display dimensions."""
+
+    native_y, native_x = native_dims
+    available = (native_y, native_x)
+    for axis_name, dim in (("x", x), ("y", y)):
+        if dim is not None and dim not in available:
+            expected = ", ".join(repr(name) for name in available)
+            raise ValueError(
+                f"{axis_name}={dim!r} is not a wavefield grid dimension; "
+                f"expected one of {expected}"
+            )
+
+    if x is None and y is None:
+        y, x = native_y, native_x
+    elif x is None:
+        x = next(dim for dim in available if dim != y)
+    elif y is None:
+        y = next(dim for dim in available if dim != x)
+
+    if x == y:
+        raise ValueError("x and y must select different wavefield grid dimensions")
+    return y, x, (y, x) == (native_x, native_y)
 
 
 def _receiver_grid_display_shape(

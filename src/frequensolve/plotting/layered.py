@@ -13,6 +13,37 @@ from frequensolve.model.property import canonical_property_name
 __all__ = ["plot_layered_model"]
 
 
+def _plot_value_limits(
+    model: Any,
+    property_key: str,
+    samples: xr.DataArray,
+    units: str | None,
+    vmin: float | None,
+    vmax: float | None,
+) -> tuple[float, float]:
+    """Resolve plot limits, falling back to materialized expression values."""
+
+    if vmin is not None and vmax is not None:
+        return vmin, vmax
+
+    try:
+        default_min, default_max = model.extreme_values(property_key, units=units)
+    except (TypeError, ValueError):
+        values = np.asarray(samples.values, dtype=float)
+        finite_values = values[np.isfinite(values)]
+        if finite_values.size == 0:
+            raise ValueError(
+                f"Cannot determine finite plot limits for property '{property_key}'"
+            ) from None
+        default_min = float(finite_values.min())
+        default_max = float(finite_values.max())
+
+    return (
+        default_min if vmin is None else vmin,
+        default_max if vmax is None else vmax,
+    )
+
+
 def plot_layered_model(model: Any, property: str, resolution: List[int], **kwargs):
     """Plot a layered model property.
 
@@ -30,9 +61,6 @@ def plot_layered_model(model: Any, property: str, resolution: List[int], **kwarg
 def _plot_layered_model_3d(model: Any, property: str, resolution: List[int], **kwargs):
     try:
         import pyvista as pv
-
-        if pv.OFF_SCREEN:
-            pv.set_jupyter_backend("static")
     except ModuleNotFoundError as exc:
         raise optional_dependency_error(
             "3D layered-model plotting",
@@ -46,46 +74,67 @@ def _plot_layered_model_3d(model: Any, property: str, resolution: List[int], **k
 
     property_key = canonical_property_name(property)
     axes_units = kwargs.pop("axes_units", {"x": "km", "y": "km", "z": "km"})
-    samples = model.sample_uniform(resolution, axes_units=axes_units)[property_key]
+    interactive = bool(kwargs.pop("interactive", False))
+    flip_z = bool(kwargs.pop("flip_z", not interactive))
+    jupyter_backend = kwargs.pop(
+        "jupyter_backend",
+        "html" if interactive else "static",
+    )
+    samples = model.sample_uniform(
+        resolution,
+        axes_units=axes_units,
+        properties=property_key,
+    )[property_key]
     units = kwargs.pop("units", samples.attrs.get("units"))
     samples = model.convert_property_units(samples, property_key, units)
     x = samples.coords["x"].values
     y = samples.coords["y"].values
     z = samples.coords["z"].values
 
-    vmin, vmax = model.extreme_values(property_key, units=units)
-    vmin = kwargs.pop("vmin", vmin)
-    vmax = kwargs.pop("vmax", vmax)
+    vmin, vmax = _plot_value_limits(
+        model,
+        property_key,
+        samples,
+        units,
+        kwargs.pop("vmin", None),
+        kwargs.pop("vmax", None),
+    )
     cmap = kwargs.pop("cmap", "viridis")
     label = kwargs.pop("label", property)
     if units:
         label = f"{label} [{units}]"
 
-    mx, my, mz = np.meshgrid(x, y, z, indexing="ij")
-    grid = pv.StructuredGrid(mx, my, mz)
+    grid = pv.RectilinearGrid(x, y, z)
     grid[property] = samples.values.flatten(order="F")
 
-    plotter = pv.Plotter()
+    plotter = pv.Plotter(
+        window_size=kwargs.pop("window_size", (1100, 750)),
+    )
+    plotter.set_background(kwargs.pop("background_color", "#f8fafc"))
     scalar_bar_args = dict(
         vertical=True,
-        height=0.5,
+        height=0.45,
         width=0.05,
-        position_x=0.85,
-        position_y=0.25,
-        title_font_size=14,
+        position_x=0.88,
+        position_y=0.275,
+        title_font_size=15,
         label_font_size=12,
-        fmt="%.2f",
+        n_labels=5,
+        fmt="%.3g",
         title=label,
-        color="black",
+        color="#111827",
     )
 
     if kwargs.pop("slices", True):
-        plotter.add_mesh_slice_orthogonal(
-            grid,
+        slice_mesh = grid.slice_orthogonal()
+        plotter.add_mesh(
+            slice_mesh,
             scalars=property,
             cmap=cmap,
-            rng=[vmin, vmax],
+            clim=[vmin, vmax],
             scalar_bar_args=scalar_bar_args,
+            show_edges=False,
+            lighting=False,
         )
     else:
         plotter.add_mesh(
@@ -93,13 +142,17 @@ def _plot_layered_model_3d(model: Any, property: str, resolution: List[int], **k
             scalars=property,
             cmap=cmap,
             opacity=kwargs.pop("opacity", 1.0),
-            rng=[vmin, vmax],
+            clim=[vmin, vmax],
             scalar_bar_args=scalar_bar_args,
+            show_edges=False,
+            lighting=False,
         )
 
     plotter.set_scale(zscale=kwargs.pop("z_scale", 1))
 
     if kwargs.pop("surfaces", True):
+        surface_color = kwargs.pop("surface_color", "#64748b")
+        surface_opacity = kwargs.pop("surface_opacity", 0.12)
         for surface in model.surfaces:
             try:
                 sx, sy = np.meshgrid(x, y, indexing="ij")
@@ -117,23 +170,44 @@ def _plot_layered_model_3d(model: Any, property: str, resolution: List[int], **k
                 sgrid = pv.StructuredGrid(sx, sy, sz)
                 plotter.add_mesh(
                     sgrid,
-                    color="black",
-                    opacity=0.3,
-                    style="wireframe",
+                    color=surface_color,
+                    opacity=surface_opacity,
+                    style="surface",
+                    show_edges=False,
+                    lighting=False,
                 )
             except Exception:
                 continue
 
-    plotter.show_grid(
-        font_size=kwargs.pop("fontsize", 12),
-        xtitle="X",
-        ytitle="Y",
-        ztitle="Z",
-    )
-    plotter.show_axes()
-    if kwargs.pop("interactive", False):
-        return plotter.show()
-    return plotter.show(jupyter_backend="static")
+    def axis_title(axis: str) -> str:
+        axis_units = axes_units.get(axis) if axes_units else None
+        return f"{axis.upper()} [{axis_units}]" if axis_units else axis.upper()
+
+    if kwargs.pop("show_bounds", True):
+        plotter.show_bounds(
+            grid=None,
+            location="outer",
+            all_edges=False,
+            font_size=kwargs.pop("fontsize", 12),
+            color="#374151",
+            xtitle=axis_title("x"),
+            ytitle=axis_title("y"),
+            ztitle=axis_title("z"),
+        )
+    if kwargs.pop("show_axes", True):
+        plotter.show_axes()
+    if kwargs.pop("anti_aliasing", True):
+        plotter.enable_anti_aliasing("fxaa")
+    plotter.camera_position = kwargs.pop("camera_position", "iso")
+    if flip_z:
+        camera = plotter.camera
+        px, py, pz = camera.position
+        fx, fy, fz = camera.focal_point
+        ux, uy, uz = camera.up
+        camera.position = (px, py, 2.0 * fz - pz)
+        camera.up = (ux, uy, -uz)
+    plotter.reset_camera()
+    return plotter.show(jupyter_backend=jupyter_backend)
 
 
 def _plot_layered_model_2d(model: Any, property: str, resolution: List[int], **kwargs):
@@ -148,8 +222,14 @@ def _plot_layered_model_2d(model: Any, property: str, resolution: List[int], **k
         ) from exc
 
     property_key = canonical_property_name(property)
+    kwargs.pop("interactive", None)
+    kwargs.pop("flip_z", None)
     axes_units = kwargs.pop("axes_units", {"x": "km", "z": "km"})
-    samples = model.sample_uniform(resolution, axes_units=axes_units)[property_key]
+    samples = model.sample_uniform(
+        resolution,
+        axes_units=axes_units,
+        properties=property_key,
+    )[property_key]
 
     units = kwargs.pop("units", samples.attrs.get("units"))
     samples = model.convert_property_units(samples, property_key, units)
@@ -189,9 +269,14 @@ def _plot_layered_model_2d(model: Any, property: str, resolution: List[int], **k
 
     _annotate_samples(samples, units, label, axes_names, axes_units)
 
-    vmin, vmax = model.extreme_values(property_key, units=units)
-    vmin = kwargs.pop("vmin", vmin)
-    vmax = kwargs.pop("vmax", vmax)
+    vmin, vmax = _plot_value_limits(
+        model,
+        property_key,
+        samples,
+        units,
+        kwargs.pop("vmin", None),
+        kwargs.pop("vmax", None),
+    )
 
     samples = samples.clip(min=vmin, max=vmax)
     image = samples.plot.imshow(

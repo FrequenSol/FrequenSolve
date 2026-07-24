@@ -32,6 +32,8 @@ class ModelSubdomain(ExtraFieldsMixin):
         name: Optional user-facing subdomain name.
         physics: Optional physics/material family for this subdomain.
         properties: Mapping of property names to property-like values.
+        fields: Mapping of independent named data used by property-expression
+            ``field`` nodes.
         grid: Default grid metadata used when coercing subdomain properties.
         units: Default units applied to properties that omit units.
         system: Default coordinate-system name applied to properties that omit
@@ -49,6 +51,7 @@ class ModelSubdomain(ExtraFieldsMixin):
     name: Optional[str] = None
     physics: Optional[str] = None
     properties: PropertyMap = field(default_factory=PropertyMap)
+    fields: PropertyMap = field(default_factory=PropertyMap)
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
@@ -61,6 +64,7 @@ class ModelSubdomain(ExtraFieldsMixin):
         units: Optional[Any] = None,
         system: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
+        fields: Optional[Dict[str, Union[float, str, Path, xr.DataArray]]] = None,
         **kwargs,
     ):
         # Legacy argument naming convention
@@ -85,7 +89,17 @@ class ModelSubdomain(ExtraFieldsMixin):
             units=units,
             system=system,
         )
-        if extra and "frame" in extra:
+        extra = copy.deepcopy(dict(extra or {}))
+        serialized_fields = extra.pop("fields", None)
+        if fields is not None and serialized_fields is not None:
+            raise ValueError("Specify subdomain fields directly or in extra, not both")
+        self.fields = PropertyMap(
+            fields if fields is not None else serialized_fields or {},
+            grid=grid,
+            system=system,
+            canonicalize_keys=False,
+        )
+        if "frame" in extra:
             raise TypeError(
                 "ModelSubdomain frame is no longer supported; material coordinates are physical"
             )
@@ -100,6 +114,16 @@ class ModelSubdomain(ExtraFieldsMixin):
         """
 
         self.properties[key] = value
+
+    def set_field(self, key: str, value: Union[float, xr.DataArray]) -> None:
+        """Set or replace named data used by property expressions.
+
+        Args:
+            key: Independent field name referenced by a ``field`` expression node.
+            value: Property-like scalar, array, or file value.
+        """
+
+        self.fields[key] = value
 
     def __getitem__(self, key: str):
         """Return the materialized value for one subdomain property.
@@ -133,6 +157,12 @@ class ModelSubdomain(ExtraFieldsMixin):
         def property_dataset(key: str, prop: Property) -> str:
             return f"inputs/model/subdomains/{self.mesh_block_id}/properties/{key}"
 
+        def field_file(key: str, prop: Property) -> Path:
+            return ctx.path / f"layer_{self.mesh_block_id}_field_{key}.bin"
+
+        def field_dataset(key: str, prop: Property) -> str:
+            return f"inputs/model/subdomains/{self.mesh_block_id}/fields/{key}"
+
         payload = {
             "mesh_block_id": self.mesh_block_id,
             "name": self.name,
@@ -141,6 +171,18 @@ class ModelSubdomain(ExtraFieldsMixin):
                 ctx=ctx,
                 file_factory=property_file if ctx.path is not None else None,
                 dataset_factory=property_dataset,
+            ),
+            **(
+                {
+                    "fields": self.fields.to_fs(
+                        ctx=ctx,
+                        file_factory=field_file if ctx.path is not None else None,
+                        dataset_factory=field_dataset,
+                        preserve_inline_coordinates=True,
+                    )
+                }
+                if self.fields
+                else {}
             ),
         }
         return merge_extra(payload, self.extra, "Subdomain")
@@ -159,6 +201,7 @@ class ModelSubdomain(ExtraFieldsMixin):
 
         data = copy.deepcopy(data)
         props = {}
+        fields = data.pop("fields", {})
         grid = None
         for prop, value in data.pop("properties").items():
             if isinstance(value, dict) and "file" in value and "grid" in value:
@@ -174,6 +217,7 @@ class ModelSubdomain(ExtraFieldsMixin):
             name=data.pop("name", None),
             physics=data.pop("physics", None),
             properties=props,
+            fields=fields,
             extra=data,
             **({"grid": grid} if grid is not None else {}),
         )
@@ -196,11 +240,17 @@ class ModelSubdomain(ExtraFieldsMixin):
         if "grid" in kwargs:
             grid = kwargs.pop("grid")
 
-        for key, prop in self.properties.items():
-            if prop.data.dims == grid.dims:
-                self.properties[key]._like(grid)
-            else:
-                raise ValueError(f"Property {key} does not match dimensions of grid")
+        for collection_name, collection in (
+            ("Property", self.properties),
+            ("Field", self.fields),
+        ):
+            for key, prop in collection.items():
+                if prop.data.dims == grid.dims:
+                    collection[key]._like(grid)
+                else:
+                    raise ValueError(
+                        f"{collection_name} {key} does not match dimensions of grid"
+                    )
 
 
 @register_class
@@ -243,15 +293,6 @@ class ModelBase(ExtraFieldsMixin):
         if attenuation is not None:
             self.attenuation_model = attenuation.model
             self.reference_frequency = attenuation.reference_frequency
-
-    def _attenuation_config(self) -> Optional[AttenuationConfig]:
-        if self.attenuation_model is None and self.reference_frequency is None:
-            return None
-        return AttenuationConfig(
-            model=self.attenuation_model or "kjartansson",
-            reference_frequency=self.reference_frequency,
-            extra=self._attenuation_extra,
-        )
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Serialize the model and its material subdomains.
@@ -364,3 +405,12 @@ class ModelBase(ExtraFieldsMixin):
     def __iadd__(self, other):
         self.add_subdomain(other)
         return self
+
+    def _attenuation_config(self) -> Optional[AttenuationConfig]:
+        if self.attenuation_model is None and self.reference_frequency is None:
+            return None
+        return AttenuationConfig(
+            model=self.attenuation_model or "kjartansson",
+            reference_frequency=self.reference_frequency,
+            extra=self._attenuation_extra,
+        )

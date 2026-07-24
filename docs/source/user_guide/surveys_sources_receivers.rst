@@ -60,8 +60,13 @@ DAS
 ``gauge_length``, and ``sample_spacing`` controls the :term:`sample spacing`
 used along the gauge. If ``sample_spacing`` is omitted,
 ``points_per_gauge`` may be used instead. Helical fiber response adds
-``radius`` and ``pitch``. Length-like DAS fields accept plain solver-scaled
-numbers or :term:`Pint` quantities with explicit units.
+``radius`` and exactly one of ``angle`` or ``pitch``. ``angle`` is the winding
+angle from the cable axis and must be strictly between 0 and 90 degrees. Plain
+angle values are degrees, and angular :term:`Pint` quantities may use degrees
+or radians. During export, FrequenSolve converts ``angle`` to the equivalent
+legacy ``pitch`` using the supplied radius, so the generated input works with
+released and current solver builds. Length-like DAS fields accept plain
+solver-scaled numbers or Pint quantities with explicit units.
 
 .. code-block:: python
 
@@ -71,6 +76,8 @@ numbers or :term:`Pint` quantities with explicit units.
        gauge_length=10 * u.m,
        channel_spacing=10 * u.m,
        sample_spacing=2 * u.m,
+       radius=2 * u.cm,
+       angle=60 * u.deg,
    )
    das.add_component(name="eps_tt", field="strain", direction=[1.0, 0.0])
 

@@ -89,8 +89,13 @@ def _image_extent_for_origin(
     return [float(x[0]), float(x[-1]), float(y[0]), float(y[-1])]
 
 
-def _grid_display(trace: xr.DataArray):
-    return wavefield_grid_display(trace)
+def _grid_display(
+    trace: xr.DataArray,
+    *,
+    x: str | None = None,
+    y: str | None = None,
+):
+    return wavefield_grid_display(trace, x=x, y=y)
 
 
 def _prepare_time_gather(
@@ -149,10 +154,18 @@ def _prepare_frequency_wavefield(
 
 def _frequency_wavefield_grid(
     trace: xr.DataArray,
+    *,
+    x: str | None = None,
+    y: str | None = None,
 ) -> tuple[np.ndarray, dict[str, Any] | None]:
     shape = _receiver_grid_display_shape(trace, caller="plot_wavefield")
     values = trace_values(trace, complex_=True).reshape(*shape)
-    return values, _grid_display(trace)
+    display = _grid_display(trace, x=x, y=y)
+    if display is None and (x is not None or y is not None):
+        raise ValueError("plot_wavefield x/y selectors require a 2D named grid")
+    if display is not None and display.get("transpose", False):
+        values = values.T
+    return values, display
 
 
 def _complex_mode_values(
@@ -486,6 +499,8 @@ def plot_wavefield(
     trace: xr.DataArray,
     *,
     ax=None,
+    x: str | None = None,
+    y: str | None = None,
     A: float | None = None,
     cmap: str = "RdBu_r",
     figsize: tuple[float, float] = (5, 5),
@@ -504,7 +519,9 @@ def plot_wavefield(
 
     ``trace`` must contain one selected component/source and either exactly one
     ``frequency`` sample or a scalar ``frequency`` coordinate. The receiver
-    grid is read from the wavefield output metadata.
+    grid is read from the wavefield output metadata. Use ``x`` and ``y`` to
+    select which named grid dimensions appear on each plot axis; specifying one
+    infers the other.
     """
 
     unsupported = {"frequency", "frequency_index", "grid_shape"}.intersection(
@@ -517,7 +534,28 @@ def plot_wavefield(
             "before plotting and use the receiver grid from the output metadata."
         )
     trace, frequency_value = _prepare_frequency_wavefield(trace)
-    values_complex, display = _frequency_wavefield_grid(trace)
+    values_complex, display = _frequency_wavefield_grid(trace, x=x, y=y)
+    if display is not None:
+        dimensions = set(display.get("dimensions", ()))
+        selector_typos = [
+            name
+            for name, value in imshow_kwargs.items()
+            if name in dimensions and value == name
+        ]
+        if selector_typos:
+            name = selector_typos[0]
+            if x is not None and y is None:
+                correction = f"use y={name!r}, or omit it because y is inferred"
+            elif y is not None and x is None:
+                correction = f"use x={name!r}, or omit it because x is inferred"
+            elif x is None and y is None:
+                correction = f"use x={name!r} or y={name!r}"
+            else:
+                correction = "remove the extra selector"
+            raise TypeError(
+                f"plot_wavefield received {name}={name!r}; grid dimensions are "
+                f"selected with the x= and y= parameters. Please {correction}."
+            )
     values, symmetric = _complex_mode_values(values_complex, mode=mode)
     limit = _amplitude_limit(values, A)
 

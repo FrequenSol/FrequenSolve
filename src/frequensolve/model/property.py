@@ -423,6 +423,22 @@ class PropertyExpression:
         return cls({"ref": canonical_property_name(name)})
 
     @classmethod
+    def field(cls, name: str) -> "PropertyExpression":
+        """Reference independent named data on the current subdomain.
+
+        Args:
+            name: Field name stored in ``ModelSubdomain.fields``.
+
+        Returns:
+            A property expression containing a solver ``field`` node.
+        """
+
+        name = str(name).strip()
+        if not name:
+            raise ValueError("Expression field name cannot be empty")
+        return cls({"field": name})
+
+    @classmethod
     def var(cls, name: str) -> "PropertyExpression":
         """Reference a named expression variable.
 
@@ -551,20 +567,72 @@ class PropertyExpression:
         visit(self.node)
         return out
 
-    def _binary(self, op: str, other: Any) -> "PropertyExpression":
-        return PropertyExpression(
-            {
-                "op": op,
-                "args": [self.to_fs(), PropertyExpression.from_value(other).to_fs()],
-            }
-        )
+    def field_names(self) -> List[str]:
+        """List auxiliary subdomain fields referenced by the expression."""
 
-    def _rbinary(self, op: str, other: Any) -> "PropertyExpression":
-        return PropertyExpression(
-            {
-                "op": op,
-                "args": [PropertyExpression.from_value(other).to_fs(), self.to_fs()],
-            }
+        out: List[str] = []
+
+        def visit(node: Any) -> None:
+            if isinstance(node, PropertyExpression):
+                node = node.node
+            if isinstance(node, Mapping):
+                if "field" in node:
+                    name = str(node["field"])
+                    if name not in out:
+                        out.append(name)
+                for key, child in node.items():
+                    if key != "field":
+                        visit(child)
+            elif isinstance(node, Sequence) and not isinstance(node, (str, bytes)):
+                for child in node:
+                    visit(child)
+
+        visit(self.node)
+        return out
+
+    def evaluate(
+        self,
+        references: Mapping[str, Any],
+        variables: Optional[Mapping[str, Any]] = None,
+        fields: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
+        """Evaluate this expression against materialized array values.
+
+        Args:
+            references: Property values keyed by property name or alias. Values
+                may be scalars, NumPy arrays, Pint quantities, or xarray data
+                arrays with optional ``units`` metadata.
+            variables: Optional values for ``var`` nodes, keyed by the exact
+                expression symbol name.
+            fields: Optional independent subdomain data keyed by the exact
+                name used in ``field`` nodes.
+
+        Returns:
+            A scalar, NumPy array, or Pint quantity produced by evaluating the
+            solver expression AST elementwise.
+
+        Raises:
+            ValueError: If a reference, variable, operation, or node is missing
+                or unsupported.
+        """
+
+        normalized_references = {
+            canonical_property_name(name): _expression_operand(value)
+            for name, value in references.items()
+        }
+        normalized_variables = {
+            str(name): _expression_operand(value)
+            for name, value in (variables or {}).items()
+        }
+        normalized_fields = {
+            str(name): _expression_operand(value)
+            for name, value in (fields or {}).items()
+        }
+        return _evaluate_expression_node(
+            self.node,
+            references=normalized_references,
+            variables=normalized_variables,
+            fields=normalized_fields,
         )
 
     def __add__(self, other: Any) -> "PropertyExpression":
@@ -679,6 +747,309 @@ class PropertyExpression:
 
     def __repr__(self) -> str:
         return f"PropertyExpression({self.node!r})"
+
+    def _binary(self, op: str, other: Any) -> "PropertyExpression":
+        return PropertyExpression(
+            {
+                "op": op,
+                "args": [self.to_fs(), PropertyExpression.from_value(other).to_fs()],
+            }
+        )
+
+    def _rbinary(self, op: str, other: Any) -> "PropertyExpression":
+        return PropertyExpression(
+            {
+                "op": op,
+                "args": [PropertyExpression.from_value(other).to_fs(), self.to_fs()],
+            }
+        )
+
+
+def _expression_operand(value: Any) -> Any:
+    if not isinstance(value, xr.DataArray):
+        return value
+    values = np.asarray(value.values)
+    units = value.attrs.get("units")
+    if units is None:
+        return values
+    return ureg.Quantity(values, unit_expression(units))
+
+
+def _inline_dataarray_coordinates_to_fs(data: xr.DataArray) -> Dict[str, Any]:
+    """Serialize exact dimension-coordinate metadata for an inline array value."""
+
+    coords: Dict[str, Any] = {}
+    for dim in data.dims:
+        coord = data.coords.get(dim)
+        if coord is None:
+            continue
+        coord_payload = {"data": np.asarray(coord.values).tolist()}
+        if coord.attrs.get("units"):
+            coord_payload["units"] = unit_expression(coord.attrs["units"])
+        coords[dim] = coord_payload
+    return {"dims": list(data.dims), "coords": coords}
+
+
+def _dataarray_from_inline_value(
+    value: Any,
+    *,
+    dims: Any,
+    coords: Any,
+) -> xr.DataArray:
+    """Reconstruct an inline array value with its serialized dimensions."""
+
+    if not isinstance(dims, Sequence) or isinstance(dims, (str, bytes)):
+        raise ValueError("Inline property dims must be a sequence")
+    dimension_names = [str(dim) for dim in dims]
+    if not isinstance(coords, Mapping):
+        raise ValueError("Inline property coords must be a mapping")
+
+    restored_coords: Dict[str, Any] = {}
+    for dim in dimension_names:
+        coord_payload = coords.get(dim)
+        if coord_payload is None:
+            continue
+        if isinstance(coord_payload, Mapping):
+            coord_values = coord_payload.get(
+                "data",
+                coord_payload.get("values"),
+            )
+            if coord_values is None:
+                raise ValueError(f"Inline property coord {dim!r} requires data")
+            coord = xr.DataArray(coord_values, dims=[dim])
+            if coord_payload.get("units"):
+                coord.attrs["units"] = unit_expression(coord_payload["units"])
+            restored_coords[dim] = coord
+        else:
+            restored_coords[dim] = coord_payload
+
+    return xr.DataArray(
+        data=np.asarray(value),
+        dims=dimension_names,
+        coords=restored_coords,
+    )
+
+
+def _expression_args(
+    node: Mapping[str, Any],
+    *,
+    references: Mapping[str, Any],
+    variables: Mapping[str, Any],
+    fields: Mapping[str, Any],
+) -> List[Any]:
+    args = node.get("args")
+    if not isinstance(args, Sequence) or isinstance(args, (str, bytes)):
+        raise ValueError(f"Expression operation {node.get('op')!r} requires args")
+    return [
+        _evaluate_expression_node(
+            arg,
+            references=references,
+            variables=variables,
+            fields=fields,
+        )
+        for arg in args
+    ]
+
+
+def _expression_arg(
+    node: Mapping[str, Any],
+    *,
+    references: Mapping[str, Any],
+    variables: Mapping[str, Any],
+    fields: Mapping[str, Any],
+) -> Any:
+    if "arg" not in node:
+        raise ValueError(f"Expression operation {node.get('op')!r} requires an arg")
+    return _evaluate_expression_node(
+        node["arg"],
+        references=references,
+        variables=variables,
+        fields=fields,
+    )
+
+
+def _expression_boolean(value: Any) -> np.ndarray:
+    if is_quantity(value):
+        value = value.to(ureg.dimensionless).magnitude
+    return np.asarray(value, dtype=bool)
+
+
+def _expression_reduce(op: Callable[[Any, Any], Any], values: List[Any]) -> Any:
+    if not values:
+        raise ValueError("Variadic expression operation requires at least one arg")
+    result = values[0]
+    for value in values[1:]:
+        result = op(result, value)
+    return result
+
+
+def _evaluate_expression_node(
+    node: Any,
+    *,
+    references: Mapping[str, Any],
+    variables: Mapping[str, Any],
+    fields: Mapping[str, Any],
+) -> Any:
+    if isinstance(node, PropertyExpression):
+        node = node.node
+    if not isinstance(node, Mapping):
+        raise ValueError(f"Expression nodes must be mappings; got {node!r}")
+
+    if "ref" in node:
+        name = canonical_property_name(node["ref"])
+        if name not in references:
+            raise ValueError(f"Expression references unavailable property {name!r}")
+        return references[name]
+    if "field" in node:
+        name = str(node["field"])
+        if name not in fields:
+            raise ValueError(f"Expression references unavailable field {name!r}")
+        return fields[name]
+    if "var" in node:
+        name = str(node["var"])
+        if name not in variables:
+            raise ValueError(f"Expression references unavailable variable {name!r}")
+        return variables[name]
+    if "value" in node:
+        value = node["value"]
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            value = np.asarray(value)
+        units = node.get("units")
+        if units is not None:
+            return ureg.Quantity(value, unit_expression(units))
+        return value
+
+    op = node.get("op")
+    if not isinstance(op, str):
+        raise ValueError(f"Expression node has no operation: {node!r}")
+
+    if op == "case":
+        if "else" not in node:
+            raise ValueError("Expression case operation requires an else value")
+        result = _evaluate_expression_node(
+            node["else"],
+            references=references,
+            variables=variables,
+            fields=fields,
+        )
+        branches = node.get("branches")
+        if not isinstance(branches, Sequence) or isinstance(branches, (str, bytes)):
+            raise ValueError("Expression case operation requires branches")
+        for branch in reversed(branches):
+            if not isinstance(branch, Mapping) or not {"if", "then"}.issubset(branch):
+                raise ValueError("Expression case branches require if and then nodes")
+            condition = _evaluate_expression_node(
+                branch["if"],
+                references=references,
+                variables=variables,
+                fields=fields,
+            )
+            value = _evaluate_expression_node(
+                branch["then"],
+                references=references,
+                variables=variables,
+                fields=fields,
+            )
+            result = np.where(_expression_boolean(condition), value, result)
+        return result
+
+    if op in {"not", "neg", "magnitude", "convert"}:
+        value = _expression_arg(
+            node,
+            references=references,
+            variables=variables,
+            fields=fields,
+        )
+        if op == "not":
+            return np.logical_not(_expression_boolean(value))
+        if op == "neg":
+            return -value
+        units = node.get("units")
+        if units is None:
+            raise ValueError(f"Expression operation {op!r} requires units")
+        converted = (
+            value.to(unit_expression(units))
+            if is_quantity(value)
+            else ureg.Quantity(value).to(unit_expression(units))
+        )
+        return converted.magnitude if op == "magnitude" else converted
+
+    unary_ops: Dict[str, Callable[[Any], Any]] = {
+        "abs": np.abs,
+        "exp": np.exp,
+        "log": np.log,
+        "log10": np.log10,
+        "sqrt": np.sqrt,
+        "sin": np.sin,
+        "cos": np.cos,
+        "tan": np.tan,
+        "asin": np.arcsin,
+        "acos": np.arccos,
+        "atan": np.arctan,
+        "sinh": np.sinh,
+        "cosh": np.cosh,
+        "tanh": np.tanh,
+        "floor": np.floor,
+        "ceil": np.ceil,
+        "sign": np.sign,
+    }
+    if op in unary_ops:
+        return unary_ops[op](
+            _expression_arg(
+                node,
+                references=references,
+                variables=variables,
+                fields=fields,
+            )
+        )
+
+    values = _expression_args(
+        node,
+        references=references,
+        variables=variables,
+        fields=fields,
+    )
+    if op in {"add", "sub", "mul", "div", "pow", ">", ">=", "<", "<=", "==", "!="}:
+        if len(values) != 2:
+            raise ValueError(f"Expression operation {op!r} requires two args")
+        left, right = values
+        binary_ops: Dict[str, Callable[[Any, Any], Any]] = {
+            "add": lambda a, b: a + b,
+            "sub": lambda a, b: a - b,
+            "mul": lambda a, b: a * b,
+            "div": lambda a, b: a / b,
+            "pow": lambda a, b: a**b,
+            ">": lambda a, b: a > b,
+            ">=": lambda a, b: a >= b,
+            "<": lambda a, b: a < b,
+            "<=": lambda a, b: a <= b,
+            "==": lambda a, b: a == b,
+            "!=": lambda a, b: a != b,
+        }
+        return binary_ops[op](left, right)
+    if op == "and":
+        return _expression_reduce(
+            np.logical_and,
+            [_expression_boolean(value) for value in values],
+        )
+    if op == "or":
+        return _expression_reduce(
+            np.logical_or,
+            [_expression_boolean(value) for value in values],
+        )
+    if op == "min":
+        return _expression_reduce(np.minimum, values)
+    if op == "max":
+        return _expression_reduce(np.maximum, values)
+    if op == "atan2":
+        if len(values) != 2:
+            raise ValueError("Expression operation 'atan2' requires two args")
+        return np.arctan2(values[0], values[1])
+    if op == "clamp":
+        if len(values) != 3:
+            raise ValueError("Expression operation 'clamp' requires three args")
+        return np.clip(values[0], values[1], values[2])
+    raise ValueError(f"Unsupported expression operation {op!r}")
 
 
 def prop(name: str) -> PropertyExpression:
@@ -818,7 +1189,8 @@ def coord(system: str, axis: str, units: Optional[Any] = None) -> Dict[str, Any]
     Args:
         system: Coordinate-system name that gives the axis its context.
         axis: Axis name within ``system``.
-        units: Optional units used when evaluating the symbol.
+        units: Optional units into which coordinates are converted before their
+            numeric magnitudes are supplied to the expression.
 
     Returns:
         A solver-facing symbol binding payload.
@@ -1147,7 +1519,7 @@ def _normalize_expression_symbol_binding(name: str, binding: Any) -> Dict[str, A
 
 
 class PropertyMap(MutableMapping):
-    """Mutable mapping of canonical property names to ``Property`` objects.
+    """Mutable mapping of names to ``Property`` objects.
 
     Args:
         values: Optional initial mapping of property names to property-like
@@ -1156,6 +1528,8 @@ class PropertyMap(MutableMapping):
         units: Default units applied to properties that do not specify units.
         system: Default coordinate-system name applied to properties that do
             not specify a system.
+        canonicalize_keys: Whether to canonicalize material-property aliases.
+            Disable this for mappings whose names belong to another namespace.
     """
 
     def __init__(
@@ -1164,6 +1538,7 @@ class PropertyMap(MutableMapping):
         grid: Optional[xr.DataArray] = None,
         units: Optional[Any] = None,
         system: Optional[str] = None,
+        canonicalize_keys: bool = True,
     ):
         """Create a mapping from property names to :class:`Property` objects.
 
@@ -1174,26 +1549,29 @@ class PropertyMap(MutableMapping):
             units: Default units applied to values that do not specify units.
             system: Default coordinate-system name applied to values that do
                 not specify one.
+            canonicalize_keys: Whether keys should use material-property alias
+                normalization.
         """
 
         self._store: Dict[str, Property] = {}
         self.grid = grid
         self.units = unit_expression(units) if units is not None else None
         self.system = system
+        self.canonicalize_keys = bool(canonicalize_keys)
         if values:
             self.update(values)
 
     def __getitem__(self, key: str) -> "Property":
-        """Return a property by canonical or alias name.
+        """Return a property by its configured key normalization.
 
         Args:
-            key: Property name or supported alias.
+            key: Stored name or supported material-property alias.
 
         Returns:
             Stored :class:`Property` instance.
         """
 
-        return self._store[canonical_property_name(key)]
+        return self._store[self._normalize_key(key)]
 
     def __setitem__(self, key: str, value: Any) -> None:
         prop = (
@@ -1205,13 +1583,13 @@ class PropertyMap(MutableMapping):
             prop.units = self.units
         if self.system is not None and prop.system is None:
             prop.system = self.system
-        self._store[canonical_property_name(key)] = prop
+        self._store[self._normalize_key(key)] = prop
 
     def __delitem__(self, key: str) -> None:
-        del self._store[canonical_property_name(key)]
+        del self._store[self._normalize_key(key)]
 
     def __iter__(self) -> Iterator[str]:
-        """Iterate over canonical property names in insertion order."""
+        """Iterate over stored names in insertion order."""
 
         return iter(self._store)
 
@@ -1222,7 +1600,7 @@ class PropertyMap(MutableMapping):
 
     def __contains__(self, key: object) -> bool:
         try:
-            return canonical_property_name(str(key)) in self._store
+            return self._normalize_key(key) in self._store
         except Exception:
             return False
 
@@ -1231,6 +1609,7 @@ class PropertyMap(MutableMapping):
         ctx: Optional[ExportContext] = None,
         file_factory: Optional[Callable[[str, "Property"], Path]] = None,
         dataset_factory: Optional[Callable[[str, "Property"], str]] = None,
+        preserve_inline_coordinates: bool = False,
     ) -> Dict[str, Any]:
         """Serialize every stored property.
 
@@ -1241,6 +1620,9 @@ class PropertyMap(MutableMapping):
                 path for a non-constant in-memory property.
             dataset_factory: Optional callback that returns the HDF5 dataset
                 path for a non-constant in-memory property.
+            preserve_inline_coordinates: Include exact xarray dimension and
+                coordinate metadata when an array is serialized as an inline
+                value.
 
         Returns:
             Mapping from canonical property name to serialized property payload.
@@ -1264,12 +1646,25 @@ class PropertyMap(MutableMapping):
                 and prop.darr is not None
             ):
                 dataset = dataset_factory(key, prop)
-            payload[key] = prop.to_fs(ctx=ctx, file=file, dataset=dataset)
+            payload[key] = prop.to_fs(
+                ctx=ctx,
+                file=file,
+                dataset=dataset,
+                preserve_inline_coordinates=preserve_inline_coordinates,
+            )
         return payload
 
     def __repr__(self) -> str:
         keys = ", ".join(self._store)
         return f"PropertyMap({{{keys}}})"
+
+    def _normalize_key(self, key: Any) -> str:
+        if self.canonicalize_keys:
+            return canonical_property_name(key)
+        normalized = str(key)
+        if not normalized.strip():
+            raise ValueError("Property map keys cannot be empty")
+        return normalized
 
 
 class Property:
@@ -1632,11 +2027,28 @@ class Property:
                 )
             if "value" in payload and "file" not in payload:
                 prop_grid = payload.pop("grid", grid)
+                inline_dims = payload.pop("dims", None)
+                inline_coords = (
+                    payload.pop("coords", {}) if inline_dims is not None else None
+                )
+                prop_units = payload.pop("units", None)
+                prop_system = payload.pop("system", None)
+                prop_value = payload.pop("value")
+                if inline_dims is not None:
+                    prop_value = _dataarray_from_inline_value(
+                        prop_value,
+                        dims=inline_dims,
+                        coords=inline_coords,
+                    )
+                    if prop_units is not None:
+                        prop_value.attrs["units"] = unit_expression(prop_units)
+                    if prop_system is not None:
+                        prop_value.attrs["system"] = prop_system
                 return cls(
-                    payload.pop("value"),
+                    prop_value,
                     grid=prop_grid,
-                    units=payload.pop("units", None),
-                    system=payload.pop("system", None),
+                    units=prop_units,
+                    system=prop_system,
                     **payload,
                 )
             if "file" in payload:
@@ -1801,6 +2213,7 @@ class Property:
         ctx: Optional[ExportContext] = None,
         file: Optional[Union[str, Path]] = None,
         dataset: Optional[str] = None,
+        preserve_inline_coordinates: bool = False,
     ) -> Dict[str, Any]:
         """Serialize the property for a FrequenSolve input payload.
 
@@ -1811,6 +2224,9 @@ class Property:
                 in-memory arrays outside an HDF5 store.
             dataset: Optional HDF5 dataset path used when ``ctx`` provides a
                 store.
+            preserve_inline_coordinates: Include exact xarray dimension and
+                coordinate metadata when this property is emitted as an inline
+                array value.
 
         Returns:
             Serialized property payload containing one of ``value``, ``file``,
@@ -1844,6 +2260,8 @@ class Property:
                 payload = ref.to_fs()
             elif file is None:
                 payload = {"value": self.darr.values.tolist()}
+                if preserve_inline_coordinates:
+                    payload.update(_inline_dataarray_coordinates_to_fs(self.darr))
             else:
                 path = Path(file)
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -2117,8 +2535,26 @@ class Property:
         with h5py.File(fname, "r") as f:
             dset_obj = f[dset]
             if "dims" in dset_obj.attrs:
-                dims = list(dset_obj.attrs["dims"])
-                coords = {dim: dset_obj.attrs[dim] for dim in dims}
+                dims = [
+                    (dim.decode("utf-8") if isinstance(dim, bytes) else str(dim))
+                    for dim in dset_obj.attrs["dims"]
+                ]
+                coords = {}
+                for dim in dims:
+                    coordinate = dset_obj.attrs[dim]
+                    values = np.asarray(coordinate)
+                    if values.ndim == 0:
+                        reference = values.item()
+                        if isinstance(reference, bytes):
+                            reference = reference.decode("utf-8")
+                        if (
+                            isinstance(reference, str)
+                            and reference.startswith("/")
+                            and reference.strip("/") in f
+                            and isinstance(f[reference.strip("/")], h5py.Dataset)
+                        ):
+                            coordinate = f[reference.strip("/")][()]
+                    coords[dim] = coordinate
             elif "coords" not in f:
                 if "grid" not in kwargs or kwargs["grid"] is None:
                     raise ValueError(

@@ -56,7 +56,7 @@ from frequensolve.orchestrator.utils.environment import (
 )
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
-from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
+from frequensolve.simulation.jobs.imaging import ImagingJob
 
 logger = logging.getLogger(__name__)
 
@@ -1456,14 +1456,7 @@ class LocalSite(BaseSite):
             jobs = job
         images = {}
         for job in jobs:
-            local = job._local_image_path
-            image = ImageDatabase(
-                path=local,
-                shape=job.grid.shape,
-                parts=job.n_tasks,
-            )
-            image.require_aggregate()
-            images[job.name] = image
+            images[job.name] = job.load_images()
 
         if len(images) == 1:
             return images[jobs[0].name]

@@ -20,6 +20,17 @@ The solver should continue to accept external model files when a user explicitly
 references a file-backed property, :term:`SEG-Y` input, or another specialized format.
 The FrequenSolve Python API will not read or validate server-only files before export.
 
+HDF5 Dimension Coordinates
+--------------------------
+
+Materialized ``xarray.DataArray`` values retain a ``dims`` attribute on their
+:term:`HDF5` dataset. For each dimension named there, the attribute with the
+same name remains a one-dimensional numeric array containing the coordinate
+values. FrequenSolve creates these datasets with HDF5 attribute-order tracking,
+which enables dense attribute storage when a coordinate vector is too large for
+the compact object header. Keeping numeric coordinates inline preserves the
+existing released-solver contract while allowing large generated grids.
+
 Units and Coordinate Systems
 ----------------------------
 

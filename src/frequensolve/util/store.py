@@ -19,6 +19,7 @@ __all__ = ["HDF5Reference", "SimulationStore", "hash_dataarray_payload"]
 
 _DEFAULT_COMPACT_MIN_RECLAIM_BYTES = 64 * 1024 * 1024
 _DEFAULT_COMPACT_MIN_RECLAIM_FRACTION = 0.25
+_COORDINATE_DATASET_SUFFIX = ".__coordinates__"
 
 
 def _json_default(value: Any) -> Any:
@@ -43,6 +44,57 @@ def _h5_attr_value(value: Any) -> Any:
         if all(isinstance(item, (str, bytes, np.str_, np.bytes_)) for item in flat):
             return value.astype(string_dtype)
     return value
+
+
+def _coordinate_group_path(dataset: str) -> str:
+    return f"{dataset.strip('/')}{_COORDINATE_DATASET_SUFFIX}"
+
+
+def _h5_scalar_string(value: Any) -> Optional[str]:
+    values = np.asarray(value)
+    if values.ndim != 0:
+        return None
+    item = values.item()
+    if isinstance(item, bytes):
+        item = item.decode("utf-8")
+    return item if isinstance(item, str) else None
+
+
+def _coordinate_reference(value: Any) -> Optional[str]:
+    reference = _h5_scalar_string(value)
+    if reference is None or not reference.startswith("/"):
+        return None
+    return reference.strip("/")
+
+
+def _dimension_coordinates_are_inline(
+    dset: h5py.Dataset,
+    dimensions: Iterable[str],
+) -> bool:
+    """Return whether solver-facing dimension coordinates are inline."""
+
+    for dim in dimensions:
+        if dim not in dset.attrs:
+            return False
+        reference = _coordinate_reference(dset.attrs[dim])
+        if reference is not None:
+            return False
+    return True
+
+
+def _write_dimension_coordinates(
+    dset: h5py.Dataset,
+    coordinates: Mapping[str, Any],
+) -> None:
+    """Write dimension coordinates as solver-compatible HDF5 attributes.
+
+    Callers create datasets with ``track_order=True`` so HDF5 uses dense
+    attribute storage when an axis is larger than the compact object-header
+    limit.
+    """
+
+    for dim, coordinate in coordinates.items():
+        dset.attrs[dim] = _h5_attr_value(np.asarray(coordinate))
 
 
 def _hash_update_json(hasher, value: Any) -> None:
@@ -248,8 +300,9 @@ class SimulationStore:
 
         if not self.path.exists():
             return []
-        referenced = self._referenced_datasets(payload)
         with h5py.File(self.path, "a") as h5:
+            referenced = self._referenced_datasets(payload)
+            referenced.update(self._referenced_coordinate_datasets(h5, referenced))
             stored = []
             h5.visititems(
                 lambda name, obj: (
@@ -259,50 +312,24 @@ class SimulationStore:
             removed = sorted(set(stored) - referenced)
             for dataset in removed:
                 del h5[dataset]
+            empty_coordinate_groups = []
+            h5.visititems(
+                lambda name, obj: (
+                    empty_coordinate_groups.append(name)
+                    if isinstance(obj, h5py.Group)
+                    and name.endswith(_COORDINATE_DATASET_SUFFIX)
+                    and len(obj) == 0
+                    else None
+                )
+            )
+            for group in sorted(
+                empty_coordinate_groups,
+                key=lambda name: name.count("/"),
+                reverse=True,
+            ):
+                if group in h5 and len(h5[group]) == 0:
+                    del h5[group]
         return removed
-
-    def _referenced_datasets(self, payload: Any) -> set[str]:
-        referenced: set[str] = set()
-
-        def visit(value: Any) -> None:
-            if isinstance(value, Mapping):
-                locator = value.get("file")
-                file_format = str(value.get("format", "")).lower()
-                dataset = value.get("dataset")
-                if (
-                    not isinstance(dataset, str)
-                    and isinstance(locator, (str, Path))
-                    and file_format == "hdf5"
-                ):
-                    locator_text = str(locator)
-                    if ":" in locator_text:
-                        _, dataset = locator_text.rsplit(":", 1)
-                if (
-                    isinstance(dataset, str)
-                    and isinstance(locator, (str, Path))
-                    and file_format == "hdf5"
-                    and self._locator_references_store(str(locator), dataset)
-                ):
-                    referenced.add(dataset.strip("/"))
-                for item in value.values():
-                    visit(item)
-            elif isinstance(value, (list, tuple)):
-                for item in value:
-                    visit(item)
-
-        visit(payload)
-        return referenced
-
-    def _locator_references_store(self, locator: str, dataset: str) -> bool:
-        suffix = f":{dataset.strip('/')}"
-        file_part = locator[: -len(suffix)] if locator.endswith(suffix) else locator
-        candidate = Path(file_part).expanduser()
-        if not candidate.is_absolute() and self.project_path is not None:
-            candidate = self.project_path / candidate
-        try:
-            return candidate.resolve() == self.path.resolve()
-        except OSError:
-            return False
 
     def put_dataarray(
         self,
@@ -310,6 +337,7 @@ class SimulationStore:
         data: xr.DataArray,
         *,
         attrs: Optional[Mapping[str, Any]] = None,
+        coordinate_dims: Optional[Sequence[str]] = None,
         compression: Optional[str] = None,
         dtype: Optional[Any] = np.float32,
     ) -> HDF5Reference:
@@ -319,6 +347,9 @@ class SimulationStore:
             dataset: Dataset path inside the HDF5 file.
             data: Data array to write.
             attrs: Additional HDF5 attributes to write on the dataset.
+            coordinate_dims: Dimensions whose coordinates should be described
+                by HDF5 attributes. Large values are stored in referenced
+                datasets. Defaults to every dimension.
             compression: Optional HDF5 compression filter.
             dtype: Optional dtype used for stored values. ``None`` preserves
                 the input dtype.
@@ -330,6 +361,15 @@ class SimulationStore:
 
         dataset = dataset.strip("/")
         attrs = dict(attrs or {})
+        coordinate_dims = tuple(
+            data.dims if coordinate_dims is None else coordinate_dims
+        )
+        unknown_dims = set(coordinate_dims) - set(data.dims)
+        if unknown_dims:
+            unknown = ", ".join(sorted(unknown_dims))
+            raise ValueError(
+                f"Coordinate dimensions are not present in data: {unknown}"
+            )
         hash_dtype = dtype
         if dtype is not None and np.dtype(dtype) == np.dtype(np.float32):
             hash_dtype = None
@@ -339,30 +379,62 @@ class SimulationStore:
         values = np.ascontiguousarray(data.values)
         if dtype is not None:
             values = values.astype(dtype, copy=False)
+        axis_units = [data.coords[dim].attrs.get("units", "") for dim in data.dims]
+        required_attrs = {
+            "fs_hash",
+            "fs_hash_algorithm",
+            "dims",
+            *coordinate_dims,
+            *(key for key, value in attrs.items() if value is not None),
+        }
+        if any(axis_units):
+            required_attrs.add("axis_units")
+
         with h5py.File(self.path, "a") as h5:
             if dataset in h5:
                 dset = h5[dataset]
-                if dset.attrs.get("fs_hash") == f"blake3:{digest}":
+                if (
+                    dset.attrs.get("fs_hash") == f"blake3:{digest}"
+                    and required_attrs.issubset(dset.attrs.keys())
+                    and _dimension_coordinates_are_inline(dset, coordinate_dims)
+                ):
                     return HDF5Reference(self.path, dataset, digest, self.project_path)
                 del h5[dataset]
 
-            dset = h5.create_dataset(dataset, data=values, compression=compression)
-            dset.attrs["fs_hash"] = f"blake3:{digest}"
-            dset.attrs["fs_hash_algorithm"] = "blake3"
-            dset.attrs["dims"] = _h5_attr_value(list(data.dims))
-            for dim in data.dims:
-                dset.attrs[dim] = _h5_attr_value(np.asarray(data.coords[dim].values))
+            coordinate_group = _coordinate_group_path(dataset)
+            if coordinate_group in h5:
+                del h5[coordinate_group]
+            dset = h5.create_dataset(
+                dataset,
+                data=values,
+                compression=compression,
+                track_order=True,
+            )
+            try:
+                dset.attrs["dims"] = _h5_attr_value(list(data.dims))
+                _write_dimension_coordinates(
+                    dset,
+                    {
+                        dim: np.asarray(data.coords[dim].values)
+                        for dim in coordinate_dims
+                    },
+                )
 
-            axis_units = []
-            for dim in data.dims:
-                axis_units.append(data.coords[dim].attrs.get("units", ""))
-            if any(axis_units):
-                dset.attrs["axis_units"] = _h5_attr_value(axis_units)
+                if any(axis_units):
+                    dset.attrs["axis_units"] = _h5_attr_value(axis_units)
 
-            for key, value in attrs.items():
-                if value is None:
-                    continue
-                dset.attrs[key] = _h5_attr_value(_json_default(value))
+                for key, value in attrs.items():
+                    if value is None:
+                        continue
+                    dset.attrs[key] = _h5_attr_value(_json_default(value))
+
+                dset.attrs["fs_hash_algorithm"] = "blake3"
+                dset.attrs["fs_hash"] = f"blake3:{digest}"
+            except Exception:
+                del h5[dataset]
+                if coordinate_group in h5:
+                    del h5[coordinate_group]
+                raise
 
         return HDF5Reference(self.path, dataset, digest, self.project_path)
 
@@ -445,37 +517,119 @@ class SimulationStore:
         with h5py.File(self.path, "a") as h5:
             if dataset in h5:
                 dset = h5[dataset]
+                required_attrs = {
+                    "fs_hash",
+                    "fs_hash_algorithm",
+                    *(coords.keys()),
+                    *(key for key, value in attrs.items() if value is not None),
+                }
+                if dims:
+                    required_attrs.add("dims")
                 if (
                     expected_digest is not None
                     and dset.attrs.get("fs_hash") == f"blake3:{expected_digest}"
+                    and required_attrs.issubset(dset.attrs.keys())
+                    and _dimension_coordinates_are_inline(dset, coords)
                 ):
                     return HDF5Reference(
                         self.path, dataset, expected_digest, self.project_path
                     )
                 del h5[dataset]
 
+            coordinate_group = _coordinate_group_path(dataset)
+            if coordinate_group in h5:
+                del h5[coordinate_group]
             dset = h5.create_dataset(
                 dataset,
                 shape=shape,
                 dtype=dtype,
                 compression=compression,
+                track_order=True,
             )
             chunks = chunk_factory() if chunk_factory is not None else chunk_iter
             try:
                 digest = digest_chunks(chunks, dset=dset)
+                if dims:
+                    dset.attrs["dims"] = _h5_attr_value(dims)
+                _write_dimension_coordinates(dset, coords)
+                for key, value in attrs.items():
+                    if value is None:
+                        continue
+                    dset.attrs[key] = _h5_attr_value(_json_default(value))
+                dset.attrs["fs_hash_algorithm"] = "blake3"
+                dset.attrs["fs_hash"] = f"blake3:{digest}"
             except Exception:
                 del h5[dataset]
+                if coordinate_group in h5:
+                    del h5[coordinate_group]
                 raise
 
-            dset.attrs["fs_hash"] = f"blake3:{digest}"
-            dset.attrs["fs_hash_algorithm"] = "blake3"
-            if dims:
-                dset.attrs["dims"] = _h5_attr_value(dims)
-            for dim, coord in coords.items():
-                dset.attrs[dim] = _h5_attr_value(np.asarray(coord))
-            for key, value in attrs.items():
-                if value is None:
-                    continue
-                dset.attrs[key] = _h5_attr_value(_json_default(value))
-
         return HDF5Reference(self.path, dataset, digest, self.project_path)
+
+    def _referenced_datasets(self, payload: Any) -> set[str]:
+        referenced: set[str] = set()
+
+        def visit(value: Any) -> None:
+            if isinstance(value, Mapping):
+                locator = value.get("file")
+                file_format = str(value.get("format", "")).lower()
+                dataset = value.get("dataset")
+                if (
+                    not isinstance(dataset, str)
+                    and isinstance(locator, (str, Path))
+                    and file_format == "hdf5"
+                ):
+                    locator_text = str(locator)
+                    if ":" in locator_text:
+                        _, dataset = locator_text.rsplit(":", 1)
+                if (
+                    isinstance(dataset, str)
+                    and isinstance(locator, (str, Path))
+                    and file_format == "hdf5"
+                    and self._locator_references_store(str(locator), dataset)
+                ):
+                    referenced.add(dataset.strip("/"))
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+
+        visit(payload)
+        return referenced
+
+    @staticmethod
+    def _referenced_coordinate_datasets(
+        h5: h5py.File,
+        datasets: Iterable[str],
+    ) -> set[str]:
+        referenced: set[str] = set()
+        for dataset in datasets:
+            if dataset not in h5 or not isinstance(h5[dataset], h5py.Dataset):
+                continue
+            dset = h5[dataset]
+            for dim in np.asarray(dset.attrs.get("dims", [])).ravel():
+                if isinstance(dim, bytes):
+                    dim = dim.decode("utf-8")
+                dim = str(dim)
+                if dim not in dset.attrs:
+                    continue
+                reference = _coordinate_reference(dset.attrs[dim])
+                if (
+                    reference is not None
+                    and reference in h5
+                    and isinstance(h5[reference], h5py.Dataset)
+                ):
+                    referenced.add(reference)
+        return referenced
+
+    def _locator_references_store(self, locator: str, dataset: str) -> bool:
+        suffix = f":{dataset.strip('/')}"
+        file_part = locator[: -len(suffix)] if locator.endswith(suffix) else locator
+        candidate = Path(file_part).expanduser()
+        if not candidate.is_absolute() and self.project_path is not None:
+            candidate = self.project_path / candidate
+        try:
+            return candidate.resolve() == self.path.resolve()
+        except OSError:
+            return False

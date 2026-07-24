@@ -105,7 +105,8 @@ Layered Model Geometry
 Layered models are ordered. Surfaces and layers are added in sequence, and that
 sequence determines which surfaces bound layer intervals. A surface becomes a
 material interface because of where it appears in that sequence; there is no
-separate surface flag that makes it an interface.
+separate surface flag that makes it an interface. A cutting role is orthogonal
+to that ordering and tells the mesher where the model is truncated.
 
 .. list-table::
    :header-rows: 1
@@ -118,6 +119,9 @@ separate surface flag that makes it an interface.
    * - Non-interface surface
      - Preserves geometry for meshing, output selection, or later reference
        without changing material topology.
+   * - :term:`Cutting surface <cutting surface>`
+     - Becomes the lower model boundary while preserving intersecting surfaces
+       for clipping by the mesher.
    * - :term:`Borehole <borehole>` or local feature
      - Adds geometry and optional subdomains that meshing and output requests
        can reference.
@@ -127,6 +131,39 @@ separate surface flag that makes it an interface.
    * - Uniform sampled view
      - ``model.sample_uniform(...)`` creates an ``xarray.Dataset`` for QC,
        plotting, and export.
+
+Truncating Below a Surface
+--------------------------
+
+Use ``truncate(...)`` to crop an existing layered model. It accepts the same
+depth, grid, unit, and coordinate-system forms as ``add_surface(...)``:
+
+.. code-block:: python
+
+   truncated_model = model.truncate(
+       name="section_bottom",
+       depth=1.5 * fs.ureg.km,
+   )
+
+The method returns an independent deep copy, so both ``model`` and
+``truncated_model`` remain available. In the copy, existing surfaces fully
+deeper than the cut and formation layers wholly below it are removed. Surfaces
+that cross the cut remain in the ordered surface list so the mesher can clip
+them. The new lower boundary is exported with an explicit cutting role:
+
+.. code-block:: json
+
+   {
+     "name": "section_bottom",
+     "interface": true,
+     "cutting": true,
+     "depth": {"value": 1.5, "units": "km"}
+   }
+
+Surface depths must be materialized when ``truncate(...)`` is called so the API
+can determine which geometry lies wholly below the cut. To label geometry for a
+custom workflow without changing the model, use
+``add_surface(..., cutting=True)`` directly.
 
 Fractures
 ---------

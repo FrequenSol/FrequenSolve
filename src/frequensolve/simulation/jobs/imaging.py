@@ -127,41 +127,6 @@ class ImageDatabase:
 
         return self.read_images("smoothed")
 
-    @staticmethod
-    def _decode_label(value):
-        if isinstance(value, bytes):
-            return value.decode("utf-8")
-        if isinstance(value, np.bytes_):
-            return value.decode("utf-8")
-        return str(value)
-
-    @classmethod
-    def _decode_attr(cls, value):
-        if value is None:
-            return None
-        if isinstance(value, (bytes, np.bytes_)):
-            return cls._decode_label(value)
-        if isinstance(value, np.ndarray):
-            if value.shape == ():
-                return cls._decode_attr(value.item())
-            decoded = [cls._decode_attr(item) for item in value.tolist()]
-            return decoded[0] if len(decoded) == 1 else decoded
-        if isinstance(value, (list, tuple)):
-            decoded = [cls._decode_attr(item) for item in value]
-            return decoded[0] if len(decoded) == 1 else decoded
-        if isinstance(value, np.generic):
-            return value.item()
-        return value
-
-    @classmethod
-    def _axis_units(cls, attrs, dims):
-        units = cls._decode_attr(attrs.get("axis_units"))
-        if units is None:
-            return [None] * len(dims)
-        if isinstance(units, str):
-            return [units] * len(dims)
-        return list(units)[::-1]
-
     def read_images(self, group):
         """Read one solver image group into an ``xarray.Dataset``.
 
@@ -209,6 +174,41 @@ class ImageDatabase:
                         im.attrs[attr_name] = value
                 images[prop] = im
         return images
+
+    @staticmethod
+    def _decode_label(value):
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        if isinstance(value, np.bytes_):
+            return value.decode("utf-8")
+        return str(value)
+
+    @classmethod
+    def _decode_attr(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, (bytes, np.bytes_)):
+            return cls._decode_label(value)
+        if isinstance(value, np.ndarray):
+            if value.shape == ():
+                return cls._decode_attr(value.item())
+            decoded = [cls._decode_attr(item) for item in value.tolist()]
+            return decoded[0] if len(decoded) == 1 else decoded
+        if isinstance(value, (list, tuple)):
+            decoded = [cls._decode_attr(item) for item in value]
+            return decoded[0] if len(decoded) == 1 else decoded
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    @classmethod
+    def _axis_units(cls, attrs, dims):
+        units = cls._decode_attr(attrs.get("axis_units"))
+        if units is None:
+            return [None] * len(dims)
+        if isinstance(units, str):
+            return [units] * len(dims)
+        return list(units)[::-1]
 
 
 @dataclass(kw_only=True)
@@ -487,22 +487,33 @@ class ImagingJob(BaseJob):
             raise ValueError(f"Unknown model dimension: {simulation.model.dimension}")
         self.reassemble_adjoint = reassemble_adjoint
 
-    def _remote_image_path(self, work_dir: Union[Path, str]):
-        """Get local path but with version number."""
-        rel_path = self.save_path.relative_to(self.project_path)
-        remote = Path(work_dir) / rel_path
-        return remote
-
-    @property
-    def _local_image_path(self):
-        return self.save_path
-
     def image_file(self, part: Optional[int] = None) -> Path:
         """Return the local aggregate or per-frequency image file path."""
 
         if part is None:
             return self.save_path / "image.h5"
         return self.save_path / f"image_{part}.h5"
+
+    def load_images(self) -> ImageDatabase:
+        """Open imaging results that are already present locally.
+
+        This method never contacts an execution site. Remote results must be
+        fetched or copied into ``save_path`` before calling it.
+
+        Returns:
+            Reader for the aggregate and per-frequency image files.
+
+        Raises:
+            FileNotFoundError: If the aggregate ``image.h5`` is unavailable.
+        """
+
+        images = ImageDatabase(
+            path=self._local_image_path,
+            parts=self.n_tasks,
+            shape=self.grid.shape,
+        )
+        images.require_aggregate()
+        return images
 
     def image_output_exists(self) -> bool:
         """Return whether the aggregate image product exists locally."""
@@ -525,56 +536,6 @@ class ImagingJob(BaseJob):
         """Return whether the imaging run and aggregate image are current."""
 
         return super().is_run_current() and self.image_output_exists()
-
-    def _export_path(
-        self,
-        path: Optional[Union[str, Path]],
-        *,
-        project_relative: bool = False,
-    ):
-        if path is None:
-            return None
-        path = Path(path)
-        if not project_relative:
-            return path
-        try:
-            return path.resolve().relative_to(self._project_path())
-        except ValueError:
-            return path
-
-    def _misfit_to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
-        payload = self.misfit.to_fs(ctx)
-        if not project_relative:
-            return payload
-        for group in payload["receiver_groups"]:
-            group["observed"] = self._export_path(
-                group["observed"], project_relative=True
-            )
-            group["simulated"] = self._export_path(
-                group["simulated"], project_relative=True
-            )
-        return payload
-
-    @staticmethod
-    def _resolve_saved_path(
-        path: Union[str, Path, None],
-        *,
-        base_path: Optional[Union[str, Path]] = None,
-        project_path: Optional[Union[str, Path]] = None,
-    ) -> Optional[Path]:
-        if path is None:
-            return None
-        path = Path(path)
-        if path.is_absolute():
-            return path
-        if project_path is not None:
-            return Path(project_path) / path
-        if base_path is not None:
-            project_root = BaseJob._project_root_from_job_path(Path(base_path))
-            if project_root is not None:
-                return project_root / path
-            return Path(base_path).resolve() / path
-        return path
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
         """Serialize this imaging job to the solver job contract.
@@ -721,6 +682,66 @@ class ImagingJob(BaseJob):
         )
         job.misfit = misfit
         return job
+
+    def _remote_image_path(self, work_dir: Union[Path, str]):
+        """Get local path but with version number."""
+        rel_path = self.save_path.relative_to(self.project_path)
+        remote = Path(work_dir) / rel_path
+        return remote
+
+    @property
+    def _local_image_path(self):
+        return self.save_path
+
+    def _export_path(
+        self,
+        path: Optional[Union[str, Path]],
+        *,
+        project_relative: bool = False,
+    ):
+        if path is None:
+            return None
+        path = Path(path)
+        if not project_relative:
+            return path
+        try:
+            return path.resolve().relative_to(self._project_path())
+        except ValueError:
+            return path
+
+    def _misfit_to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
+        payload = self.misfit.to_fs(ctx)
+        if not project_relative:
+            return payload
+        for group in payload["receiver_groups"]:
+            group["observed"] = self._export_path(
+                group["observed"], project_relative=True
+            )
+            group["simulated"] = self._export_path(
+                group["simulated"], project_relative=True
+            )
+        return payload
+
+    @staticmethod
+    def _resolve_saved_path(
+        path: Union[str, Path, None],
+        *,
+        base_path: Optional[Union[str, Path]] = None,
+        project_path: Optional[Union[str, Path]] = None,
+    ) -> Optional[Path]:
+        if path is None:
+            return None
+        path = Path(path)
+        if path.is_absolute():
+            return path
+        if project_path is not None:
+            return Path(project_path) / path
+        if base_path is not None:
+            project_root = BaseJob._project_root_from_job_path(Path(base_path))
+            if project_root is not None:
+                return project_root / path
+            return Path(base_path).resolve() / path
+        return path
 
 
 def extract_frequencies_for_job(job: ImagingJob, td):

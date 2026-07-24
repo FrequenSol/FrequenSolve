@@ -16,10 +16,10 @@ Running a Notebook
    <https://github.com/FrequenSol/FrequenSolve/tree/v2/examples/tutorials>`__.
 3. Open it in JupyterLab, Jupyter Notebook, VS Code, or another notebook
    environment.
-4. Configure a :term:`site` before running solver cells. Cloud tutorials need a
-   FrequenSol Cloud account and license; local tutorials need a local solver
-   installation; HPC tutorials need :term:`SSH`/:term:`SLURM` credentials and a
-   solver installation on the cluster.
+4. Configure a default :term:`site` before running solver cells. Ordinary
+   tutorials resolve it through ``fs.Site()`` and do not assume a specific
+   backend. The dedicated cloud, local, and HPC site tutorials document their
+   account, solver, credential, and cluster requirements explicitly.
 5. Run cells in order. If a solver cell fails, inspect the generated
    :term:`project` directory, :term:`job` logs, and :term:`run result`
    before rerunning.

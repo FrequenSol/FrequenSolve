@@ -32,7 +32,14 @@ from frequensolve.mesh.mesh_manager import (
 )
 from frequensolve.model.layered import LayeredModel
 from frequensolve.model.model import ModelBase, ModelSubdomain
-from frequensolve.model.property import Property, coord, prop, ref, remap
+from frequensolve.model.property import (
+    Property,
+    PropertyExpression,
+    coord,
+    prop,
+    ref,
+    remap,
+)
 from frequensolve.project import Project
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import (
@@ -95,6 +102,87 @@ def test_property_map_is_editable_and_canonicalizes_names():
     assert set(payload["properties"]) == {"vp", "rho"}
     assert payload["properties"]["vp"] == {"value": 2.0, "units": "km/s"}
     assert payload["properties"]["rho"] == {"value": 2.2, "units": "g/cm^3"}
+
+
+def test_subdomain_fields_are_independent_expression_data_and_roundtrip():
+    vp_base = xr.DataArray(
+        [1.5, 2.0],
+        dims=["z"],
+        coords={"z": [0.0, 1.0]},
+        attrs={"units": "km/s"},
+    )
+    subdomain = ModelSubdomain(
+        mesh_block_id=1,
+        fields={"vp_base": vp_base},
+        properties={
+            "Vp": Property.expr(
+                PropertyExpression.field("vp_base") * 1.1,
+                units="km/s",
+            )
+        },
+    )
+
+    payload = subdomain.to_fs()
+    loaded = ModelSubdomain.from_fs(payload)
+
+    assert payload["fields"]["vp_base"] == {
+        "value": [1.5, 2.0],
+        "dims": ["z"],
+        "coords": {"z": {"data": [0.0, 1.0]}},
+        "units": "km/s",
+    }
+    assert payload["properties"]["vp"]["expr"]["args"][0] == {"field": "vp_base"}
+    xr.testing.assert_identical(loaded.fields["vp_base"].get(), vp_base)
+    assert loaded.to_fs() == payload
+
+
+def test_subdomain_fields_roundtrip_nonuniform_multidimensional_coordinates():
+    lookup = xr.DataArray(
+        np.arange(6.0).reshape(2, 3),
+        dims=["offset", "depth"],
+        coords={"offset": [0.0, 2.0], "depth": [0.0, 0.2, 1.0]},
+        attrs={"units": "km/s"},
+    )
+    lookup.coords["offset"].attrs["units"] = "km"
+    lookup.coords["depth"].attrs["units"] = "km"
+
+    payload = ModelSubdomain(
+        mesh_block_id=1,
+        fields={"lookup": lookup},
+        properties={"Vp": Property.expr(PropertyExpression.field("lookup"))},
+    ).to_fs()
+    loaded = ModelSubdomain.from_fs(payload)
+
+    assert payload["fields"]["lookup"]["dims"] == ["offset", "depth"]
+    assert payload["fields"]["lookup"]["coords"] == {
+        "offset": {"data": [0.0, 2.0], "units": "km"},
+        "depth": {"data": [0.0, 0.2, 1.0], "units": "km"},
+    }
+    xr.testing.assert_identical(loaded.fields["lookup"].get(), lookup)
+    assert loaded.to_fs() == payload
+
+
+def test_subdomain_fields_preserve_alias_and_mixed_case_names():
+    subdomain = ModelSubdomain(
+        mesh_block_id=1,
+        fields={"density": 2.0, "VpBase": 1.5},
+        properties={
+            "Vp": Property.expr(
+                PropertyExpression.field("density") + PropertyExpression.field("VpBase")
+            )
+        },
+    )
+
+    payload = subdomain.to_fs()
+    loaded = ModelSubdomain.from_fs(payload)
+
+    assert list(payload["fields"]) == ["density", "VpBase"]
+    assert payload["properties"]["vp"]["expr"] == {
+        "op": "add",
+        "args": [{"field": "density"}, {"field": "VpBase"}],
+    }
+    assert list(loaded.fields) == ["density", "VpBase"]
+    assert loaded.to_fs() == payload
 
 
 def test_property_does_not_mutate_input_dataarray_when_scaled():
@@ -365,6 +453,99 @@ def test_derived_property_expressions_export_to_solver_ast():
         "units": "g/cm^3",
     }
     assert props["mu"]["depends_on"] == ["rho", "vs"]
+
+
+def test_property_expression_evaluates_unit_aware_arrays():
+    expression = Property.expr(
+        (0.5 * prop("Vp").to("km/s")).to("m/s"),
+        units="m/s",
+    ).expression
+    vp = xr.DataArray([1500.0, 2000.0], dims=["z"], attrs={"units": "m/s"})
+
+    result = expression.evaluate({"Vp": vp})
+
+    assert f"{result.units:~}" == "m / s"
+    np.testing.assert_allclose(result.magnitude, [750.0, 1000.0])
+
+
+def test_property_expression_evaluates_cases_and_clamps_elementwise():
+    expression = Property.expr(
+        {
+            "op": "case",
+            "branches": [
+                {
+                    "if": {
+                        "op": ">=",
+                        "args": [
+                            {"ref": "Vp"},
+                            {"value": 2.0, "units": "km/s"},
+                        ],
+                    },
+                    "then": {
+                        "op": "clamp",
+                        "args": [
+                            {"ref": "Vp"},
+                            {"value": 2.0, "units": "km/s"},
+                            {"value": 2.5, "units": "km/s"},
+                        ],
+                    },
+                }
+            ],
+            "else": {"value": 2.0, "units": "km/s"},
+        }
+    ).expression
+
+    result = expression.evaluate({"vp": np.array([1500.0, 2200.0, 3000.0]) * u("m/s")})
+
+    np.testing.assert_allclose(result.to("m/s").magnitude, [2000.0, 2200.0, 2500.0])
+
+
+def test_property_expression_evaluation_reports_missing_bindings_and_operations():
+    with pytest.raises(ValueError, match="unavailable property 'vp'"):
+        prop("Vp").evaluate({})
+    with pytest.raises(ValueError, match="unavailable variable 'depth'"):
+        Property.expr({"var": "depth"}).expression.evaluate({})
+    with pytest.raises(ValueError, match="Unsupported expression operation 'mystery'"):
+        Property.expr({"op": "mystery", "args": []}).expression.evaluate({})
+
+
+def test_property_expression_evaluates_independent_field_data():
+    expression = PropertyExpression.field("vp_base") * 1.1
+    vp_base = xr.DataArray(
+        [1500.0, 2000.0],
+        dims=["z"],
+        attrs={"units": "m/s"},
+    )
+
+    result = expression.evaluate({}, fields={"vp_base": vp_base})
+
+    assert expression.depends_on() == []
+    assert expression.field_names() == ["vp_base"]
+    np.testing.assert_allclose(result.to("m/s").magnitude, [1650.0, 2200.0])
+    with pytest.raises(ValueError, match="unavailable field 'vp_base'"):
+        expression.evaluate({})
+
+
+def test_property_expression_evaluates_solver_sqrt_and_log10_operations():
+    expression = PropertyExpression(
+        {
+            "op": "add",
+            "args": [
+                {"op": "sqrt", "arg": {"field": "squared"}},
+                {"op": "log10", "arg": {"field": "powers"}},
+            ],
+        }
+    )
+
+    result = expression.evaluate(
+        {},
+        fields={
+            "squared": np.array([1.0, 4.0, 9.0]),
+            "powers": np.array([1.0, 10.0, 100.0]),
+        },
+    )
+
+    np.testing.assert_allclose(result, [1.0, 3.0, 5.0])
 
 
 def test_branch_property_expression_exports_case_ast():
@@ -1465,6 +1646,63 @@ def test_receiver_fiber_exports_quantity_lengths_with_units():
 
     assert explicit["gauge_length"] == {"value": 0.01, "units": "km"}
     assert explicit["channel_spacing"] == {"value": 12.5, "units": "m"}
+
+
+def test_receiver_fiber_exports_angle_as_compatible_helical_pitch():
+    das = ReceiverFiber(
+        gauge_length=10 * u.m,
+        radius=0.5 * u.m,
+        angle=60 * u.deg,
+    )
+
+    payload = das.to_fs()
+
+    assert payload["radius"] == {"value": 0.5, "units": "m"}
+    assert payload["pitch"] == {
+        "value": pytest.approx(np.pi / np.tan(np.deg2rad(60))),
+        "units": "m",
+    }
+    assert "angle" not in payload
+    assert ReceiverFiber.from_fs(payload).to_fs() == payload
+
+    radians = ReceiverFiber(
+        gauge_length=10 * u.m,
+        radius=0.5 * u.m,
+        angle=np.pi / 3 * u.rad,
+    ).to_fs()
+    assert radians["pitch"] == {
+        "value": pytest.approx(np.pi / np.tan(np.pi / 3)),
+        "units": "m",
+    }
+    assert "angle" not in radians
+
+    mapped = ReceiverFiber.from_fs(
+        {
+            "components": [],
+            "gauge_length": 10,
+            "radius": 0.5,
+            "angle": {"value": 1.0, "units": "radians"},
+        }
+    ).to_fs()
+    assert mapped["pitch"] == pytest.approx(np.pi / np.tan(1.0))
+    assert "angle" not in mapped
+
+    numeric = ReceiverFiber(gauge_length=10, radius=0.5, angle=45).to_fs()
+    assert numeric["pitch"] == pytest.approx(np.pi)
+    assert "angle" not in numeric
+
+
+def test_receiver_fiber_rejects_invalid_helical_angle_configuration():
+    with pytest.raises(ValueError, match="only one of angle or pitch"):
+        ReceiverFiber(gauge_length=10, radius=0.5, pitch=2, angle=45)
+    with pytest.raises(ValueError, match="radius is required"):
+        ReceiverFiber(gauge_length=10, angle=45)
+    with pytest.raises(ValueError, match="angular quantity"):
+        ReceiverFiber(gauge_length=10, radius=0.5, angle=2 * u.m)
+
+    for angle in (0, 90, np.inf, 90 * u.deg, np.pi / 2 * u.rad):
+        with pytest.raises(ValueError, match="strictly between 0 and 90 degrees"):
+            ReceiverFiber(gauge_length=10, radius=0.5, angle=angle)
 
 
 def test_receiver_device_name_is_optional_and_omitted_when_absent():
@@ -3144,6 +3382,40 @@ def test_array_properties_materialize_to_simulation_hdf5_with_hash(tmp_path):
         assert h5[prop["dataset"]].attrs["sentinel"] == "kept"
 
 
+def test_large_model_field_coordinates_remain_inline_hdf5_attributes(tmp_path):
+    z = np.linspace(0.0, 1.0, 10_000)
+    field = xr.DataArray(
+        1.5 + z,
+        dims=("z",),
+        coords={"z": z},
+        attrs={"units": "km/s"},
+    )
+    model = ModelBase(name="model", dimension=2)
+    model += ModelSubdomain(
+        mesh_block_id=1,
+        properties={"vp": 1.5},
+        fields={"vp_base": field},
+    )
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.model = model
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+
+    simulation_file = sim.save()
+    payload = json.loads(simulation_file.read_text())
+    field_payload = payload["Model"]["subdomains"][0]["fields"]["vp_base"]
+
+    assert "dims" not in field_payload
+    assert "coords" not in field_payload
+    with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
+        dset = h5[field_payload["dataset"]]
+        np.testing.assert_array_equal(dset.attrs["z"], z)
+
+
 def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
     acq = Acquisition()
     acq.add_sources(kind="scalar", coords=[[0.5, 0.0]])
@@ -3152,7 +3424,7 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
     acq.add_receiver_group(
         name="surface",
         device=hydrophone,
-        coords=[[x, 0.0] for x in np.linspace(0.0, 1.0, 201)],
+        coords=[[x, 0.0] for x in np.linspace(0.0, 1.0, 10_000)],
     )
 
     sim = SeismicSimulation(
@@ -3176,6 +3448,11 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
         assert "inputs/acquisition/receivers/surface/coordinates" in h5
         dset = h5["inputs/acquisition/receivers/surface/coordinates"]
         assert dset.dtype == np.dtype("float64")
+        assert dset.shape == (10_000, 2)
+        assert list(dset.attrs["dims"]) == ["receiver", "coordinate"]
+        assert list(dset.attrs["coordinate"]) == ["x", "z"]
+        assert "receiver" not in dset.attrs
+        assert dset.attrs["fs_kind"] == "receiver_coordinates"
 
     acq.receiver_groups[0].coordinates = CoordsArray(
         coordinates=np.array([[x, 0.1] for x in np.linspace(0.0, 1.0, 201)])
