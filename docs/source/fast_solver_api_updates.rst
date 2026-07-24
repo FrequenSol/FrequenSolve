@@ -25,11 +25,18 @@ HDF5 Dimension Coordinates
 
 Materialized ``xarray.DataArray`` values retain a ``dims`` attribute on their
 :term:`HDF5` dataset. For each dimension named there, the attribute with the
-same name remains a one-dimensional numeric array containing the coordinate
-values. FrequenSolve creates these datasets with HDF5 attribute-order tracking,
-which enables dense attribute storage when a coordinate vector is too large for
-the compact object header. Keeping numeric coordinates inline preserves the
-existing released-solver contract while allowing large generated grids.
+same name has one of two forms:
+
+* a one-dimensional array containing the coordinate values; or
+* a scalar absolute HDF5 dataset path whose dataset contains the coordinate
+  values.
+
+The second form prevents large coordinate vectors from exceeding HDF5 object
+header limits. For example, ``attrs["x"]`` may contain
+``"/inputs/model/subdomains/1/properties/vp.__coordinates__/0"`` instead of the
+full ``x`` vector. Readers should preserve support for inline arrays and resolve
+scalar absolute paths in the same HDF5 file before constructing the property
+grid.
 
 Units and Coordinate Systems
 ----------------------------
