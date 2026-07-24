@@ -1588,11 +1588,12 @@ class ReceiverGroup(ExtraFieldsMixin):
                     attrs["units"] = unit_expression(coordinate_units)
                 if coords.system is not None:
                     attrs["system"] = coords.system
+                coordinate_dim = coords.coordinates.dims[1]
                 ref = ctx.store.put_dataarray(
                     dataset,
                     coords.coordinates,
                     attrs=attrs,
-                    coordinate_dims=("coordinate",),
+                    coordinate_dims=(coordinate_dim,),
                     dtype=np.float64,
                 )
                 coords_payload = {

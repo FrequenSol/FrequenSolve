@@ -775,6 +775,61 @@ def _expression_operand(value: Any) -> Any:
     return ureg.Quantity(values, unit_expression(units))
 
 
+def _inline_dataarray_coordinates_to_fs(data: xr.DataArray) -> Dict[str, Any]:
+    """Serialize exact dimension-coordinate metadata for an inline array value."""
+
+    coords: Dict[str, Any] = {}
+    for dim in data.dims:
+        coord = data.coords.get(dim)
+        if coord is None:
+            continue
+        coord_payload = {"data": np.asarray(coord.values).tolist()}
+        if coord.attrs.get("units"):
+            coord_payload["units"] = unit_expression(coord.attrs["units"])
+        coords[dim] = coord_payload
+    return {"dims": list(data.dims), "coords": coords}
+
+
+def _dataarray_from_inline_value(
+    value: Any,
+    *,
+    dims: Any,
+    coords: Any,
+) -> xr.DataArray:
+    """Reconstruct an inline array value with its serialized dimensions."""
+
+    if not isinstance(dims, Sequence) or isinstance(dims, (str, bytes)):
+        raise ValueError("Inline property dims must be a sequence")
+    dimension_names = [str(dim) for dim in dims]
+    if not isinstance(coords, Mapping):
+        raise ValueError("Inline property coords must be a mapping")
+
+    restored_coords: Dict[str, Any] = {}
+    for dim in dimension_names:
+        coord_payload = coords.get(dim)
+        if coord_payload is None:
+            continue
+        if isinstance(coord_payload, Mapping):
+            coord_values = coord_payload.get(
+                "data",
+                coord_payload.get("values"),
+            )
+            if coord_values is None:
+                raise ValueError(f"Inline property coord {dim!r} requires data")
+            coord = xr.DataArray(coord_values, dims=[dim])
+            if coord_payload.get("units"):
+                coord.attrs["units"] = unit_expression(coord_payload["units"])
+            restored_coords[dim] = coord
+        else:
+            restored_coords[dim] = coord_payload
+
+    return xr.DataArray(
+        data=np.asarray(value),
+        dims=dimension_names,
+        coords=restored_coords,
+    )
+
+
 def _expression_args(
     node: Mapping[str, Any],
     *,
@@ -923,6 +978,8 @@ def _evaluate_expression_node(
         "abs": np.abs,
         "exp": np.exp,
         "log": np.log,
+        "log10": np.log10,
+        "sqrt": np.sqrt,
         "sin": np.sin,
         "cos": np.cos,
         "tan": np.tan,
@@ -1552,6 +1609,7 @@ class PropertyMap(MutableMapping):
         ctx: Optional[ExportContext] = None,
         file_factory: Optional[Callable[[str, "Property"], Path]] = None,
         dataset_factory: Optional[Callable[[str, "Property"], str]] = None,
+        preserve_inline_coordinates: bool = False,
     ) -> Dict[str, Any]:
         """Serialize every stored property.
 
@@ -1562,6 +1620,9 @@ class PropertyMap(MutableMapping):
                 path for a non-constant in-memory property.
             dataset_factory: Optional callback that returns the HDF5 dataset
                 path for a non-constant in-memory property.
+            preserve_inline_coordinates: Include exact xarray dimension and
+                coordinate metadata when an array is serialized as an inline
+                value.
 
         Returns:
             Mapping from canonical property name to serialized property payload.
@@ -1585,7 +1646,12 @@ class PropertyMap(MutableMapping):
                 and prop.darr is not None
             ):
                 dataset = dataset_factory(key, prop)
-            payload[key] = prop.to_fs(ctx=ctx, file=file, dataset=dataset)
+            payload[key] = prop.to_fs(
+                ctx=ctx,
+                file=file,
+                dataset=dataset,
+                preserve_inline_coordinates=preserve_inline_coordinates,
+            )
         return payload
 
     def __repr__(self) -> str:
@@ -1961,11 +2027,28 @@ class Property:
                 )
             if "value" in payload and "file" not in payload:
                 prop_grid = payload.pop("grid", grid)
+                inline_dims = payload.pop("dims", None)
+                inline_coords = (
+                    payload.pop("coords", {}) if inline_dims is not None else None
+                )
+                prop_units = payload.pop("units", None)
+                prop_system = payload.pop("system", None)
+                prop_value = payload.pop("value")
+                if inline_dims is not None:
+                    prop_value = _dataarray_from_inline_value(
+                        prop_value,
+                        dims=inline_dims,
+                        coords=inline_coords,
+                    )
+                    if prop_units is not None:
+                        prop_value.attrs["units"] = unit_expression(prop_units)
+                    if prop_system is not None:
+                        prop_value.attrs["system"] = prop_system
                 return cls(
-                    payload.pop("value"),
+                    prop_value,
                     grid=prop_grid,
-                    units=payload.pop("units", None),
-                    system=payload.pop("system", None),
+                    units=prop_units,
+                    system=prop_system,
                     **payload,
                 )
             if "file" in payload:
@@ -2130,6 +2213,7 @@ class Property:
         ctx: Optional[ExportContext] = None,
         file: Optional[Union[str, Path]] = None,
         dataset: Optional[str] = None,
+        preserve_inline_coordinates: bool = False,
     ) -> Dict[str, Any]:
         """Serialize the property for a FrequenSolve input payload.
 
@@ -2140,6 +2224,9 @@ class Property:
                 in-memory arrays outside an HDF5 store.
             dataset: Optional HDF5 dataset path used when ``ctx`` provides a
                 store.
+            preserve_inline_coordinates: Include exact xarray dimension and
+                coordinate metadata when this property is emitted as an inline
+                array value.
 
         Returns:
             Serialized property payload containing one of ``value``, ``file``,
@@ -2173,6 +2260,8 @@ class Property:
                 payload = ref.to_fs()
             elif file is None:
                 payload = {"value": self.darr.values.tolist()}
+                if preserve_inline_coordinates:
+                    payload.update(_inline_dataarray_coordinates_to_fs(self.darr))
             else:
                 path = Path(file)
                 path.parent.mkdir(parents=True, exist_ok=True)

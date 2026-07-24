@@ -127,10 +127,38 @@ def test_subdomain_fields_are_independent_expression_data_and_roundtrip():
 
     assert payload["fields"]["vp_base"] == {
         "value": [1.5, 2.0],
+        "dims": ["z"],
+        "coords": {"z": {"data": [0.0, 1.0]}},
         "units": "km/s",
     }
     assert payload["properties"]["vp"]["expr"]["args"][0] == {"field": "vp_base"}
-    np.testing.assert_allclose(loaded.fields["vp_base"].get(), vp_base)
+    xr.testing.assert_identical(loaded.fields["vp_base"].get(), vp_base)
+    assert loaded.to_fs() == payload
+
+
+def test_subdomain_fields_roundtrip_nonuniform_multidimensional_coordinates():
+    lookup = xr.DataArray(
+        np.arange(6.0).reshape(2, 3),
+        dims=["offset", "depth"],
+        coords={"offset": [0.0, 2.0], "depth": [0.0, 0.2, 1.0]},
+        attrs={"units": "km/s"},
+    )
+    lookup.coords["offset"].attrs["units"] = "km"
+    lookup.coords["depth"].attrs["units"] = "km"
+
+    payload = ModelSubdomain(
+        mesh_block_id=1,
+        fields={"lookup": lookup},
+        properties={"Vp": Property.expr(PropertyExpression.field("lookup"))},
+    ).to_fs()
+    loaded = ModelSubdomain.from_fs(payload)
+
+    assert payload["fields"]["lookup"]["dims"] == ["offset", "depth"]
+    assert payload["fields"]["lookup"]["coords"] == {
+        "offset": {"data": [0.0, 2.0], "units": "km"},
+        "depth": {"data": [0.0, 0.2, 1.0], "units": "km"},
+    }
+    xr.testing.assert_identical(loaded.fields["lookup"].get(), lookup)
     assert loaded.to_fs() == payload
 
 
@@ -496,6 +524,28 @@ def test_property_expression_evaluates_independent_field_data():
     np.testing.assert_allclose(result.to("m/s").magnitude, [1650.0, 2200.0])
     with pytest.raises(ValueError, match="unavailable field 'vp_base'"):
         expression.evaluate({})
+
+
+def test_property_expression_evaluates_solver_sqrt_and_log10_operations():
+    expression = PropertyExpression(
+        {
+            "op": "add",
+            "args": [
+                {"op": "sqrt", "arg": {"field": "squared"}},
+                {"op": "log10", "arg": {"field": "powers"}},
+            ],
+        }
+    )
+
+    result = expression.evaluate(
+        {},
+        fields={
+            "squared": np.array([1.0, 4.0, 9.0]),
+            "powers": np.array([1.0, 10.0, 100.0]),
+        },
+    )
+
+    np.testing.assert_allclose(result, [1.0, 3.0, 5.0])
 
 
 def test_branch_property_expression_exports_case_ast():
@@ -3416,8 +3466,8 @@ def test_large_xarray_receiver_coordinates_preserve_units_when_materialized(tmp_
     hydrophone.add_component(name="p", field="pressure")
     receiver_coords = xr.DataArray(
         np.array([[0.1, z] for z in np.linspace(0.0, 200.0, 201)]),
-        dims=("receiver", "coordinate"),
-        coords={"coordinate": ["x", "z"]},
+        dims=("receiver", "axis"),
+        coords={"axis": ["x", "z"]},
         attrs={"units": "m", "system": "global"},
     )
     acq.add_receiver_group(
@@ -3446,6 +3496,9 @@ def test_large_xarray_receiver_coordinates_preserve_units_when_materialized(tmp_
     assert coords["system"] == "global"
     with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
         dset = h5["inputs/acquisition/receivers/surface/coordinates"]
+        assert list(dset.attrs["dims"]) == ["receiver", "axis"]
+        assert list(dset.attrs["axis"]) == ["x", "z"]
+        assert "coordinate" not in dset.attrs
         assert dset.attrs["units"] == "m"
         assert dset.attrs["system"] == "global"
 

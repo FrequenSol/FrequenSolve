@@ -130,6 +130,63 @@ def test_truncate_preserves_bottom_up_material_order():
     assert LayeredModel.from_fs(payload).to_fs() == payload
 
 
+@pytest.mark.parametrize(
+    ("ordering", "expected_surfaces"),
+    [
+        ("top_down", ["top", "section_bottom"]),
+        ("bottom_up", ["section_bottom", "top"]),
+    ],
+)
+def test_truncate_replaces_a_coincident_internal_surface(ordering, expected_surfaces):
+    model = _three_layer_model(ordering=ordering)
+
+    truncated = model.truncate(name="section_bottom", depth=1.0 * u.km)
+
+    assert truncated.surface_names == expected_surfaces
+    assert truncated.layer_names == ["upper"]
+    assert truncated.surfaces["section_bottom"].cutting is True
+    assert truncated.layers[0].lower is truncated.surfaces["section_bottom"]
+    assert model.surface_names == (
+        ["top", "shallow", "deep", "bottom"]
+        if ordering == "top_down"
+        else ["bottom", "deep", "shallow", "top"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("ordering", "expected_surfaces"),
+    [
+        ("top_down", ["top", "shallow", "deep", "section_bottom"]),
+        ("bottom_up", ["section_bottom", "deep", "shallow", "top"]),
+    ],
+)
+def test_truncate_replaces_a_coincident_lower_boundary(ordering, expected_surfaces):
+    model = _three_layer_model(ordering=ordering)
+
+    truncated = model.truncate(name="section_bottom", depth=3.0 * u.km)
+
+    assert truncated.surface_names == expected_surfaces
+    assert truncated.layer_names == (
+        ["upper", "middle", "lower"]
+        if ordering == "top_down"
+        else ["lower", "middle", "upper"]
+    )
+    assert truncated.surfaces["section_bottom"].cutting is True
+    boundary_layer = (
+        truncated.layers[-1] if ordering == "top_down" else truncated.layers[0]
+    )
+    assert boundary_layer.lower is truncated.surfaces["section_bottom"]
+    assert all(surface.name != "bottom" for surface in truncated.surfaces)
+
+
+@pytest.mark.parametrize("ordering", ["top_down", "bottom_up"])
+def test_truncate_rejects_a_cut_at_the_top_boundary(ordering):
+    model = _three_layer_model(ordering=ordering)
+
+    with pytest.raises(ValueError, match="removes the entire model"):
+        model.truncate(depth=0.0 * u.km)
+
+
 def test_truncate_removes_discarded_fracture_material():
     gap = xr.DataArray(
         [0.0, 0.01, 0.0],
