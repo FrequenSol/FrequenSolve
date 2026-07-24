@@ -51,22 +51,14 @@ jobs:
     concurrency:
       group: release-${{ needs.resolve-release-line.outputs.final_tag }}
       cancel-in-progress: false
+    permissions:
+      actions: write
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-
-      - name: Generate GitHub App token
-        id: generate-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
-          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
-          owner: FrequenSol
-          repositories: FrequenSolve
-          permission-actions: read
-          permission-contents: write
 
       - name: Promote release candidate
         env:
@@ -74,7 +66,7 @@ jobs:
           FINAL_TAG: ${{ needs.resolve-release-line.outputs.final_tag }}
           EXPECTED_RC_SHA: ${{ needs.resolve-release-line.outputs.rc_sha }}
           NOTES: ${{ github.event.inputs.notes }}
-          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -326,6 +318,13 @@ jobs:
           test "$(jq -r '.tagName' <<<"$published_release")" = "$final_tag"
           test "$(jq -r '.isDraft | tostring' <<<"$published_release")" = false
           test "$(jq -r '.isPrerelease | tostring' <<<"$published_release")" = false
+
+          # GITHUB_TOKEN release events do not start another workflow. An
+          # explicit dispatch is also retry-safe because package publication
+          # skips existing distributions and replaces matching release assets.
+          gh workflow run release.yml \
+            --ref "$final_tag" \
+            -f "release_tag=$final_tag"
 
           {
             echo "### Created release"

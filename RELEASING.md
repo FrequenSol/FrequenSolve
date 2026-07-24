@@ -29,16 +29,19 @@ publishing through GitHub Actions.
 
 Do not add PyPI passwords or API tokens to the repository.
 
-The default `standard` validation profile does not dispatch a Docker build.
-The optional `solver-backed` profile also requires the FrequenSolver Builder
-GitHub App secret so it can dispatch the private organization-owned
-FrequenSolveDockerImage workflow. FrequenSolve is public, so GitHub does not
-permit a direct reusable-workflow call into that private repository. The
-dispatcher requires DockerImage `main` to resolve to the reviewed commit before
-it starts, passes exact dependency commits with a high-entropy request ID, and
-rejects duplicate or returned runs whose identity differs from that pin.
-Long-running builds are polled through bounded windows with fresh read-only App
-tokens; the dispatch token has write access only to DockerImage.
+Both validation profiles require read-only FrequenSolver Builder GitHub App
+access to resolve the immutable release and commit in the internal Sauce
+repository. The default `standard` profile does not dispatch a Docker build or
+mint an App token with write access. The optional `solver-backed` profile also
+uses narrowly scoped App tokens to dispatch and read the private
+organization-owned FrequenSolveDockerImage workflow. FrequenSolve is public, so
+GitHub does not permit a direct reusable-workflow call into that private
+repository. The dispatcher requires DockerImage `main` to resolve to the
+reviewed commit before it starts, passes exact dependency commits with a
+high-entropy request ID, and rejects duplicate or returned runs whose identity
+differs from that pin. Long-running builds are polled through bounded windows
+with fresh read-only App tokens; the dispatch token has write access only to
+DockerImage.
 
 ## Local Checks
 
@@ -76,15 +79,15 @@ Use the release workflows for the normal maintainer flow:
 
   After the selected profile passes, the workflow creates the next tag in the
   release line, such as `v0.2.0rc1`, and publishes a GitHub prerelease. That
-  event triggers `Publish Package`, which builds the package, attaches the
-  distributions, and publishes `0.2.0rc1` to TestPyPI.
+  workflow explicitly dispatches `Publish Package`, which builds the package,
+  attaches the distributions, and publishes `0.2.0rc1` to TestPyPI.
 - Run `Create Release` with an approved release candidate tag such as
   `v0.2.0rc1`. The workflow derives the validation profile only from the sealed
   evidence, revalidates its exact-SHA CI and profile-specific asset set, creates
   `v0.2.0` on the same commit, and carries that asset set unchanged into the
-  final GitHub Release. The release event triggers `Publish Package`, which
-  validates the evidence again, rebuilds from the final tag, attaches the
-  distributions to the GitHub Release, and publishes `0.2.0` to PyPI.
+  final GitHub Release. The workflow explicitly dispatches `Publish Package`,
+  which validates the evidence again, rebuilds from the final tag, attaches
+  the distributions to the GitHub Release, and publishes `0.2.0` to PyPI.
 
 Release creation treats the profile-specific assets as one sealed set. A retry
 may replace the complete set while the GitHub Release is still a draft. A

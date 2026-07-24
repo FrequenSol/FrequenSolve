@@ -499,22 +499,14 @@ jobs:
         )
       }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-
-      - name: Generate release token
-        id: generate-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
-          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
-          owner: FrequenSol
-          repositories: FrequenSolve
-          permission-actions: read
-          permission-contents: write
 
       - name: Download solver-backed test evidence
         if: ${{ inputs.validation_profile == 'solver-backed' }}
@@ -522,7 +514,7 @@ jobs:
         with:
           name: frequensolve-test-evidence
           path: .solver-evidence
-          github-token: ${{ steps.generate-token.outputs.token }}
+          github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ github.run_id }}
 
@@ -552,7 +544,7 @@ jobs:
           FREQUENSOLVER_GIT_COMMIT: ${{ needs.docker-integration.outputs.frequensolver_git_commit }}
           FS_MUMPS_REF: ${{ needs.docker-integration.outputs.fs_mumps_ref }}
           FS_MUMPS_COMMIT: ${{ needs.docker-integration.outputs.fs_mumps_commit }}
-          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           case "$VALIDATION_PROFILE" in
@@ -745,7 +737,7 @@ jobs:
           TARGET_REF: ${{ inputs.target_ref }}
           TARGET_SHA: ${{ needs.prepare-evidence.outputs.target_sha }}
           NOTES: ${{ inputs.notes }}
-          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
@@ -1015,6 +1007,13 @@ jobs:
           test "$(jq -r '.tagName' <<<"$published_release")" = "$tag_name"
           test "$(jq -r '.isDraft | tostring' <<<"$published_release")" = false
           test "$(jq -r '.isPrerelease | tostring' <<<"$published_release")" = true
+
+          # GITHUB_TOKEN release events do not start another workflow. An
+          # explicit dispatch is also retry-safe because package publication
+          # skips existing distributions and replaces matching release assets.
+          gh workflow run release.yml \
+            --ref "$tag_name" \
+            -f "release_tag=$tag_name"
 
           {
             echo "### Created release candidate"
