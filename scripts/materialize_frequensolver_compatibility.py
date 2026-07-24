@@ -9,12 +9,20 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from scripts.validate_release_evidence import validate_evidence
+    from scripts.validate_release_evidence import (
+        SOLVER_BACKED_PROFILE,
+        release_evidence_profile,
+        validate_evidence,
+    )
 except ModuleNotFoundError:  # Direct execution sets sys.path to scripts/.
-    from validate_release_evidence import validate_evidence
+    from validate_release_evidence import (
+        SOLVER_BACKED_PROFILE,
+        release_evidence_profile,
+        validate_evidence,
+    )
 
 
-SCHEMA = "frequensolve-frequensolver-compatibility/v1"
+SCHEMA = "frequensolve-frequensolver-compatibility/v2"
 PACKAGE_RELEASE_RE = re.compile(
     r"^(?:0|[1-9][0-9]*)\."
     r"(?:0|[1-9][0-9]*)\."
@@ -33,6 +41,14 @@ def manifest_from_evidence(
     if not PACKAGE_RELEASE_RE.fullmatch(package_release):
         raise ValueError("package_release must be canonical X.Y.Z or X.Y.ZrcN")
     validate_evidence(evidence, package_commit)
+    profile = release_evidence_profile(evidence)
+    solver_backed = profile == SOLVER_BACKED_PROFILE
+    evidence_run_id = (
+        evidence["dockerEvidenceRunId"] if solver_backed else evidence["ciRunId"]
+    )
+    evidence_url = (
+        evidence["dockerEvidenceRunUrl"] if solver_backed else evidence["ciRunUrl"]
+    )
     return {
         "schema": SCHEMA,
         "package_release": package_release,
@@ -41,9 +57,11 @@ def manifest_from_evidence(
             "git_commit": evidence["sauceCommit"],
             "release_url": evidence["frequensolverReleaseUrl"],
         },
-        "evidence": {
-            "run_id": evidence["dockerEvidenceRunId"],
-            "url": evidence["dockerEvidenceRunUrl"],
+        "validation": {
+            "profile": profile,
+            "solver_backed": solver_backed,
+            "run_id": evidence_run_id,
+            "url": evidence_url,
         },
     }
 

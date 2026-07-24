@@ -1,6 +1,6 @@
 {
-  "schema": "frequensolve-frequensolver-compatibility/v1",
+  "schema": "frequensolve-frequensolver-compatibility/v2",
   "package_release": "0+unreleased",
   "preferred_frequensolver": null,
-  "evidence": null
+  "validation": null
 }

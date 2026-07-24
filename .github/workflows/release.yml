@@ -68,41 +68,78 @@ jobs:
           echo "Publishing ${metadata_tag} only to ${publication_target}."
           echo "target=${publication_target}" >> "$GITHUB_OUTPUT"
 
-      - name: Require exact-SHA CI and solver evidence
+      - name: Require exact-SHA CI and profile-aware release evidence
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           set -euo pipefail
           release_sha="$(git rev-parse 'HEAD^{commit}')"
+          release_assets="$(gh release view "$RELEASE_TAG" --json assets)"
+          release_evidence_count="$(
+            jq -r '[.assets[]? | select(.name == "release-evidence.json")] | length' \
+              <<<"$release_assets"
+          )"
+          heavy_archive_count="$(
+            jq -r '[.assets[]? | select(.name == "frequensolve-test-evidence.tar.gz")] | length' \
+              <<<"$release_assets"
+          )"
+          if [ "$release_evidence_count" != 1 ]; then
+            echo "${RELEASE_TAG} must contain exactly one release-evidence.json asset." >&2
+            exit 1
+          fi
+
           mkdir -p .release-evidence
           gh release download "$RELEASE_TAG" \
             --pattern release-evidence.json \
             --dir .release-evidence \
             --clobber
-          gh release download "$RELEASE_TAG" \
-            --pattern frequensolve-test-evidence.tar.gz \
-            --dir .release-evidence \
-            --clobber
           evidence_file=.release-evidence/release-evidence.json
-          heavy_archive=.release-evidence/frequensolve-test-evidence.tar.gz
-          python scripts/validate_release_evidence.py \
-            "$evidence_file" \
-            --commit "$release_sha"
-          expected_archive_sha="$(jq -r '.dockerTestArchiveSha256' "$evidence_file")"
-          actual_archive_sha="$(sha256sum "$heavy_archive" | awk '{print $1}')"
-          test "$actual_archive_sha" = "$expected_archive_sha"
-          python scripts/extract_test_evidence_archive.py \
-            "$heavy_archive" \
-            .release-evidence/heavy
-          python scripts/validate_heavy_test_evidence.py \
-            .release-evidence/heavy/frequensolve-test-evidence.json \
-            --commit "$release_sha"
-          python scripts/validate_frequensolver_identity.py \
-            .release-evidence/heavy/frequensolver-identity.json \
-            --version "$(jq -r '.frequensolverVersion' "$evidence_file")" \
-            --commit "$(jq -r '.frequensolverGitCommit' "$evidence_file")" \
-            --build-id="$(jq -r '.frequensolverBuildId' "$evidence_file")"
+          validation_profile="$(
+            python scripts/validate_release_evidence.py \
+              "$evidence_file" \
+              --commit "$release_sha" \
+              --print-profile
+          )"
+          case "$validation_profile" in
+            standard)
+              if [ "$heavy_archive_count" != 0 ]; then
+                echo "Standard release evidence must not include a heavy archive." >&2
+                exit 1
+              fi
+              ;;
+            solver-backed)
+              if [ "$heavy_archive_count" != 1 ]; then
+                echo "Solver-backed release evidence requires exactly one heavy archive." >&2
+                exit 1
+              fi
+              gh release download "$RELEASE_TAG" \
+                --pattern frequensolve-test-evidence.tar.gz \
+                --dir .release-evidence \
+                --clobber
+              heavy_archive=.release-evidence/frequensolve-test-evidence.tar.gz
+              expected_archive_sha="$(
+                jq -r '.dockerTestArchiveSha256' "$evidence_file"
+              )"
+              actual_archive_sha="$(sha256sum "$heavy_archive" | awk '{print $1}')"
+              test "$actual_archive_sha" = "$expected_archive_sha"
+              python scripts/extract_test_evidence_archive.py \
+                "$heavy_archive" \
+                .release-evidence/heavy
+              python scripts/validate_heavy_test_evidence.py \
+                .release-evidence/heavy/frequensolve-test-evidence.json \
+                --commit "$release_sha"
+              python scripts/validate_frequensolver_identity.py \
+                .release-evidence/heavy/frequensolver-identity.json \
+                --version "$(jq -r '.frequensolverVersion' "$evidence_file")" \
+                --commit "$(jq -r '.frequensolverGitCommit' "$evidence_file")" \
+                --build-id="$(jq -r '.frequensolverBuildId' "$evidence_file")"
+              ;;
+            *)
+              echo "Unexpected validated profile: ${validation_profile}" >&2
+              exit 1
+              ;;
+          esac
           ci_run_id="$(jq -r '.ciRunId' "$evidence_file")"
           python scripts/verify_ci_evidence.py \
             --repository "$GITHUB_REPOSITORY" \
@@ -179,6 +216,12 @@ jobs:
               raise SystemExit("packaged FrequenSolver metadata version mismatch")
           if manifest.preferred_frequensolver is None:
               raise SystemExit("release wheel has no preferred FrequenSolver")
+          if manifest.validation_profile not in {"standard", "solver-backed"}:
+              raise SystemExit("release wheel has no validation profile")
+          if manifest.solver_backed != (
+              manifest.validation_profile == "solver-backed"
+          ):
+              raise SystemExit("release wheel has inconsistent validation metadata")
           print(fs.__version__)
           PY
 
@@ -234,7 +277,6 @@ jobs:
   attach-release-assets:
     name: Attach distributions to GitHub release
     needs: build
-    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -248,4 +290,5 @@ jobs:
       - name: Attach package distributions
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber

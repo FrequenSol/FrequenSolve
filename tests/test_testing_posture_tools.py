@@ -13,7 +13,10 @@ from scripts.check_coverage_thresholds import (
     coverage_percentages,
     failed_thresholds,
 )
-from scripts.compare_release_evidence_pair import compare_release_evidence_pairs
+from scripts.compare_release_evidence_pair import (
+    compare_release_evidence_assets,
+    compare_release_evidence_pairs,
+)
 from scripts.extract_test_evidence_archive import extract_archive
 from scripts.materialize_frequensolver_compatibility import manifest_from_evidence
 from scripts.validate_frequensolver_identity import validate_identity
@@ -26,10 +29,14 @@ from scripts.validate_heavy_test_evidence import (
 )
 from scripts.validate_release_evidence import (
     DOCKER_WORKFLOW_PREFIX,
+    LEGACY_SCHEMA,
     SCHEMA,
+    SOLVER_BACKED_PROFILE,
+    STANDARD_PROFILE,
     TEST_ARTIFACT,
     TEST_MARKER,
     TEST_STATUS,
+    release_evidence_profile,
     validate_evidence,
 )
 from scripts.verify_ci_evidence import has_required_job, run_matches
@@ -155,6 +162,8 @@ def _release_evidence():
     }
     return {
         "schemaVersion": SCHEMA,
+        "validationProfile": SOLVER_BACKED_PROFILE,
+        "solverValidationStatus": "passed",
         "commit": COMMIT,
         "ciRunId": 123,
         "ciRunUrl": "https://github.com/FrequenSol/FrequenSolve/actions/runs/123",
@@ -194,8 +203,54 @@ def _release_evidence():
     }
 
 
+def _standard_release_evidence():
+    return {
+        "schemaVersion": SCHEMA,
+        "validationProfile": STANDARD_PROFILE,
+        "solverValidationStatus": "not-run",
+        "commit": COMMIT,
+        "ciRunId": 123,
+        "ciRunUrl": "https://github.com/FrequenSol/FrequenSolve/actions/runs/123",
+        "ciWorkflow": ".github/workflows/cicd-workflow.yml",
+        "ciRequiredJob": "Required CI",
+        "sauceRef": "v0.1.0",
+        "sauceCommit": "c" * 40,
+        "frequensolverRelease": "v0.1.0",
+        "frequensolverReleaseUrl": (
+            "https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"
+        ),
+    }
+
+
 def test_release_evidence_accepts_exact_sha_ci_and_docker_proof():
     validate_evidence(_release_evidence(), COMMIT)
+
+
+def test_release_evidence_accepts_standard_exact_tree_ci_and_solver_identity():
+    evidence = _standard_release_evidence()
+
+    validate_evidence(evidence, COMMIT)
+
+    assert release_evidence_profile(evidence) == STANDARD_PROFILE
+
+
+def test_release_evidence_maps_legacy_v2_to_solver_backed():
+    evidence = _release_evidence()
+    evidence["schemaVersion"] = LEGACY_SCHEMA
+    evidence.pop("validationProfile")
+    evidence.pop("solverValidationStatus")
+
+    validate_evidence(evidence, COMMIT)
+
+    assert release_evidence_profile(evidence) == SOLVER_BACKED_PROFILE
+
+
+def test_standard_release_evidence_forbids_solver_backed_fields():
+    evidence = _standard_release_evidence()
+    evidence["dockerEvidenceRunId"] = 789
+
+    with pytest.raises(ValueError, match="standard evidence must omit"):
+        validate_evidence(evidence, COMMIT)
 
 
 def test_materialized_frequensolver_manifest_loads(tmp_path):
@@ -214,6 +269,28 @@ def test_materialized_frequensolver_manifest_loads(tmp_path):
     assert loaded.evidence_run_id == 789
     assert loaded.evidence_url == (
         "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/789"
+    )
+    assert loaded.validation_profile == SOLVER_BACKED_PROFILE
+    assert loaded.solver_backed
+
+
+def test_standard_materialized_manifest_is_ci_backed_but_not_solver_backed(tmp_path):
+    manifest = manifest_from_evidence(
+        _standard_release_evidence(),
+        package_release="0.3.0",
+        package_commit=COMMIT,
+    )
+    manifest_path = tmp_path / "frequensolver_compatibility.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    loaded = load_frequensolver_compatibility(manifest_path)
+
+    assert loaded.preferred_frequensolver.release == "v0.1.0"
+    assert loaded.validation_profile == STANDARD_PROFILE
+    assert not loaded.solver_backed
+    assert loaded.evidence_run_id == 123
+    assert loaded.evidence_url == (
+        "https://github.com/FrequenSol/FrequenSolve/actions/runs/123"
     )
 
 
@@ -367,6 +444,35 @@ def test_release_evidence_pair_comparison_rejects_changed_archive(tmp_path):
         )
 
 
+def test_standard_release_evidence_comparison_accepts_json_only(tmp_path):
+    expected = tmp_path / "expected.json"
+    actual = tmp_path / "actual.json"
+    expected.write_text(json.dumps(_standard_release_evidence()), encoding="utf-8")
+    actual.write_text(
+        json.dumps(_standard_release_evidence(), indent=2),
+        encoding="utf-8",
+    )
+
+    compare_release_evidence_assets(expected, actual)
+
+
+def test_standard_release_evidence_comparison_rejects_heavy_archive(tmp_path):
+    expected = tmp_path / "expected.json"
+    actual = tmp_path / "actual.json"
+    archive = tmp_path / "frequensolve-test-evidence.tar.gz"
+    expected.write_text(json.dumps(_standard_release_evidence()), encoding="utf-8")
+    actual.write_text(json.dumps(_standard_release_evidence()), encoding="utf-8")
+    archive.write_bytes(b"unexpected")
+
+    with pytest.raises(ValueError, match="must not include a heavy evidence archive"):
+        compare_release_evidence_assets(
+            expected,
+            actual,
+            expected_archive_path=archive,
+            actual_archive_path=archive,
+        )
+
+
 def test_materializes_package_compatibility_from_validated_release_evidence():
     manifest = manifest_from_evidence(
         _release_evidence(),
@@ -375,14 +481,16 @@ def test_materializes_package_compatibility_from_validated_release_evidence():
     )
 
     assert manifest == {
-        "schema": "frequensolve-frequensolver-compatibility/v1",
+        "schema": "frequensolve-frequensolver-compatibility/v2",
         "package_release": "0.3.0rc1",
         "preferred_frequensolver": {
             "release": "v0.1.0",
             "git_commit": "c" * 40,
             "release_url": ("https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"),
         },
-        "evidence": {
+        "validation": {
+            "profile": "solver-backed",
+            "solver_backed": True,
             "run_id": 789,
             "url": (
                 "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/789"
