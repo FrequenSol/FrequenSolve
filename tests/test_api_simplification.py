@@ -1995,9 +1995,37 @@ def test_project_new_simulation_preserves_typed_and_extra_options(tmp_path):
         l2_projection={"enabled": True},
     )
 
-    assert sim.physics == "EM"
+    assert sim.physics == "em"
+    assert sim.to_fs()["physics"] == "em"
+    assert components_for_physics("EM") is EMComponents
     assert sim.dimension == 3
     assert sim.extra["l2_projection"] == {"enabled": True}
+
+
+@pytest.mark.parametrize(
+    "physics",
+    [
+        "em",
+        "EM",
+        "electromagnetic",
+        "Electro Magnetic",
+        "electro-magnetic",
+        "electro_magnetic",
+        "maxwell",
+        "Maxwell",
+    ],
+)
+def test_electromagnetic_aliases_emit_solver_contract_key(tmp_path, physics):
+    sim = SeismicSimulation(
+        name="em_model",
+        physics=physics,
+        dimension=3,
+        project_path=tmp_path,
+    )
+
+    assert sim.physics == "em"
+    assert sim.to_fs()["physics"] == "em"
+    assert components_for_physics(physics) is EMComponents
 
 
 def test_project_new_simulation_accepts_default_units(tmp_path):

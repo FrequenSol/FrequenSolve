@@ -7,6 +7,11 @@ declare ``physics=`` when a coupled model contains more than one material
 family. Layer properties are authored as a dictionary and are exported with
 canonical lowercase names.
 
+Physics names are case-insensitive. Electromagnetic inputs such as ``EM``,
+``electromagnetic``, and ``maxwell`` are accepted as friendly aliases and
+exported with the solver-contract key ``em``. Selecting ``em`` does not
+automatically create an electromagnetic model, mesh, sources, or boundaries.
+
 Related tutorials:
 
 - :download:`Acoustic modeling <../../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>`

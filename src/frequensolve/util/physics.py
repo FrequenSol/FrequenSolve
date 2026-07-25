@@ -29,11 +29,11 @@ _PHYSICS_ALIASES = {
     "poro-elastic": "poroelastic",
     "poro_elastic": "poroelastic",
     "biot": "poroelastic",
-    "em": "EM",
-    "electromagnetic": "EM",
-    "electro-magnetic": "EM",
-    "electro_magnetic": "EM",
-    "maxwell": "EM",
+    "em": "em",
+    "electromagnetic": "em",
+    "electro-magnetic": "em",
+    "electro_magnetic": "em",
+    "maxwell": "em",
 }
 
 _AXISYMMETRIC_PHYSICS = {
