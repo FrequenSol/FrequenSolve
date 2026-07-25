@@ -36,6 +36,17 @@ Install FrequenSolve with its optional MCP support:
 The doctor uses an in-memory connection. It does not contact the network,
 submit a simulation, or require credentials.
 
+To include the optional read-only Cloud tools, install both extras:
+
+.. code-block:: console
+
+   python -m pip install "frequensolve[mcp,cloud]"
+
+Cloud reads reuse an existing ``aws`` or ``cloud`` profile from
+``~/.frequensolve/site.toml`` and that profile's cached Cognito login. The MCP
+never accepts a password, token, account ID, or user ID. Sign in through the
+normal FrequenSolve Cloud site workflow before starting the MCP.
+
 Add it to Codex
 ---------------
 
@@ -45,17 +56,40 @@ that directory with a short safe name:
 .. code-block:: console
 
    codex mcp add frequensolve -- frequensolve-mcp serve \
-     --allow-root project=/absolute/path/to/project-root
+     --allow-root project=/absolute/path/to/project-root \
+     --cloud-profile cloud
    codex mcp list
 
 Restart Codex after adding the server. In the Codex desktop app, the same
 server can be added under **Settings > MCP servers > Add server** as a
 ``STDIO`` server. Use ``frequensolve-mcp`` as the command and enter
-``serve --allow-root project=/absolute/path/to/project-root`` as its arguments.
+``serve --allow-root project=/absolute/path/to/project-root --cloud-profile
+cloud`` as its arguments.
 
 The allowed root is optional. Without one, draft, validation, rendering,
 preview, knowledge, and explanation tools still work; saved-artifact tools
 have no files they are permitted to read.
+
+The Cloud profile is also optional. When omitted, the default profile in
+``site.toml`` is selected. If Cloud dependencies, configuration, or a cached
+login are unavailable, the local setup tools continue to work and Cloud tools
+return a short safe readiness error.
+
+Read-only Cloud tools
+---------------------
+
+Four Cloud tools help an agent monitor the signed-in user's work:
+
+- check seat, subscription, credit, storage, and compute readiness;
+- list a bounded page of the user's simulations;
+- read one simulation summary or its bounded stored diagnostics; and
+- list relative result-artifact metadata without downloading file contents.
+
+These tools use five fixed versioned queries owned by the Cloud service. They
+do not accept raw GraphQL, tenant selectors, credentials, bucket names, or
+object keys. They cannot submit, cancel, upload, download, change, or delete
+anything. Missing and unauthorized simulation IDs receive the same safe
+response.
 
 Safe file access
 ----------------

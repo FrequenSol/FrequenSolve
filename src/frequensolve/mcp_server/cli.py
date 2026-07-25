@@ -42,16 +42,24 @@ def main() -> None:
     default=2,
     show_default=True,
 )
+@click.option(
+    "--cloud-profile",
+    type=str,
+    metavar="NAME",
+    help="Use one existing aws/cloud profile from site.toml for read-only tools.",
+)
 def serve(
     root_specs: tuple[str, ...],
     timeout_seconds: float,
     max_concurrency: int,
+    cloud_profile: str | None,
 ) -> None:
     """Run the local server over STDIO."""
 
     roots = _parse_roots(root_specs)
     server = _build_server(
         roots,
+        cloud_profile=cloud_profile,
         timeout_seconds=timeout_seconds,
         max_concurrency=max_concurrency,
     )
@@ -69,14 +77,20 @@ def serve(
     metavar="ID=PATH",
     help="Verify startup with one existing allowed directory.",
 )
-def doctor(root_specs: tuple[str, ...]) -> None:
+@click.option(
+    "--cloud-profile",
+    type=str,
+    metavar="NAME",
+    help="Verify the surface with one configured aws/cloud site profile.",
+)
+def doctor(root_specs: tuple[str, ...], cloud_profile: str | None) -> None:
     """Run an in-memory MCP initialization and surface check."""
 
     roots = _parse_roots(root_specs)
     try:
         from frequensolve.mcp_server._sdk_v1 import run_in_memory_doctor
 
-        server = _build_server(roots)
+        server = _build_server(roots, cloud_profile=cloud_profile)
         result = run_in_memory_doctor(server)
     except click.ClickException:
         raise
@@ -89,12 +103,16 @@ def doctor(root_specs: tuple[str, ...]) -> None:
     except Exception:
         raise click.ClickException("The MCP startup check failed safely.") from None
     result["allowed_root_ids"] = sorted(roots)
+    result["cloud_profile_selection"] = (
+        "explicit" if cloud_profile is not None else "default"
+    )
     click.echo(json.dumps(result, sort_keys=True, separators=(",", ":")))
 
 
 def _build_server(
     roots: dict[str, Path],
     *,
+    cloud_profile: str | None = None,
     timeout_seconds: float = 15.0,
     max_concurrency: int = 2,
 ) -> SafeFastMCP:
@@ -109,6 +127,7 @@ def _build_server(
     try:
         return build_server(
             allowed_roots=roots,
+            cloud_profile=cloud_profile,
             operation_timeout_seconds=timeout_seconds,
             max_concurrency=max_concurrency,
         )
