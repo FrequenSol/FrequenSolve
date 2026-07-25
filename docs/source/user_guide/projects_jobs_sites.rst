@@ -280,7 +280,12 @@ you need to decide what to do after a completed, failed, cancelled, or timed-out
 run.
 
 Run validation explicitly with ``job.validate(raise_errors=True)`` when you
-want a local preflight check before submitting to a site.
+want a local preflight check before submitting to a site. Site submission runs
+this validation before it writes or transfers job inputs. Local validation
+checks package-owned authoring and export behavior, including acquisition file
+metadata and named ParaView model-surface selections. Cloud prevalidation still
+owns checks that require uploaded objects, the authenticated tenant, quotas, or
+deployed runtime policy.
 
 By default, ``site.submit(job)`` skips runs whose expected outputs are already
 current. Use ``site.submit(job, skip=False)`` (or ``skip="false"`` when a

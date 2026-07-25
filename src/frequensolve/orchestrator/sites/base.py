@@ -957,10 +957,10 @@ class BaseSite:
             The same job object, for fluent site implementations.
         """
 
-        if hasattr(job, "save"):
-            job.save()
         if validate and hasattr(job, "validate"):
             job.validate(raise_errors=True)
+        if hasattr(job, "save"):
+            job.save()
         project = getattr(getattr(job, "simulation", None), "_project", None)
         if sync_project and project is not None and hasattr(self, "sync"):
             self.sync(project)

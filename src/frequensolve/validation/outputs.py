@@ -122,6 +122,117 @@ def _validate_paraview_output(
     grid = getattr(output, "grid_spec", None)
     if grid is not None:
         _validate_grid_like(grid, f"{path}.grid", ctx, require_domain=False)
+    _validate_model_surface_selections(output, path, ctx)
+
+
+def _validate_model_surface_selections(
+    output: VtkOutput,
+    path: str,
+    ctx: _ValidationContext,
+) -> None:
+    selections: list[tuple[Any, str]] = [
+        (selection, f"{path}.surfaces[{index}]")
+        for index, selection in enumerate(getattr(output, "surfaces", []) or [])
+    ]
+    target = getattr(output, "target", None)
+    if isinstance(target, Mapping):
+        for index, selection in enumerate(target.get("selection", []) or []):
+            selections.append((selection, f"{path}.target.selection[{index}]"))
+
+    surfaces = list(
+        getattr(getattr(ctx.simulation, "model", None), "surfaces", []) or []
+    )
+    names = {
+        str(name) for surface in surfaces if (name := getattr(surface, "name", None))
+    }
+    for selection, selection_path in selections:
+        if isinstance(selection, str):
+            _validate_model_surface_name(selection, selection_path, names, ctx)
+            continue
+        if isinstance(selection, (int, np.integer)):
+            _validate_model_surface_index(selection, selection_path, len(surfaces), ctx)
+            continue
+        if isinstance(selection, (float, np.floating)):
+            _validate_model_surface_index(selection, selection_path, len(surfaces), ctx)
+            continue
+        if not isinstance(selection, Mapping):
+            continue
+        kind = selection.get("kind")
+        if kind not in {None, "model_surface"}:
+            continue
+        if "name" in selection:
+            _validate_model_surface_name(
+                selection.get("name"), f"{selection_path}.name", names, ctx
+            )
+        elif "index" in selection:
+            _validate_model_surface_index(
+                selection.get("index"),
+                f"{selection_path}.index",
+                len(surfaces),
+                ctx,
+            )
+        elif kind == "model_surface":
+            ctx.report.error(
+                "outputs.vtk.model_surface.reference_missing",
+                "Model-surface output must specify a surface name or one-based "
+                "surface index.",
+                path=selection_path,
+            )
+
+
+def _validate_model_surface_name(
+    value: Any,
+    path: str,
+    names: set[str],
+    ctx: _ValidationContext,
+) -> None:
+    name = str(value).strip() if value is not None else ""
+    if not name:
+        ctx.report.error(
+            "outputs.vtk.model_surface.name_missing",
+            "Model-surface output requires a non-empty surface name.",
+            path=path,
+        )
+        return
+    if name not in names:
+        hint = (
+            f"Available model surfaces are: {', '.join(sorted(names))}."
+            if names
+            else "Attach a model with named surfaces or remove this selection."
+        )
+        ctx.report.error(
+            "outputs.vtk.model_surface.unknown",
+            f"Model-surface output references unknown surface {name!r}.",
+            path=path,
+            hint=hint,
+        )
+
+
+def _validate_model_surface_index(
+    value: Any,
+    path: str,
+    surface_count: int,
+    ctx: _ValidationContext,
+) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        ctx.report.error(
+            "outputs.vtk.model_surface.index_invalid",
+            "Model-surface index must be an integer.",
+            path=path,
+        )
+        return
+    index = int(value)
+    if index < 1 or index > surface_count:
+        available = (
+            f"the available one-based range 1..{surface_count}"
+            if surface_count
+            else "the model, which has no surfaces"
+        )
+        ctx.report.error(
+            "outputs.vtk.model_surface.index_out_of_range",
+            f"Model-surface index {index} is outside {available}.",
+            path=path,
+        )
 
 
 def _validate_paraview_item(

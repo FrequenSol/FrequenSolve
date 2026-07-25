@@ -1,14 +1,17 @@
+import h5py
+import numpy as np
 import pytest
 
 from frequensolve.geometry.frame import Axis, CoordinateSystem
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
+from frequensolve.model.layered import LayeredModel
 from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverNode
-from frequensolve.seismic.sources import SourceGeometry
+from frequensolve.seismic.sources import SourceEncoding, SourceGeometry
 from frequensolve.simulation.jobs import FrequencyDomainJob
-from frequensolve.simulation.outputs import WavefieldOutput
+from frequensolve.simulation.outputs import VtkOutput, WavefieldOutput
 from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.units import ureg
 from frequensolve.validation import ValidationError
@@ -297,8 +300,11 @@ def test_validation_catches_wavefield_source_id_range(tmp_path):
 
 def test_validation_skips_source_range_when_external_count_unknown(tmp_path):
     job = _simple_job(tmp_path)
+    source_file = tmp_path / "sources.h5"
+    with h5py.File(source_file, "w") as h5:
+        h5.create_dataset("source_points", data=[[0.5, 0.25]])
     job.simulation.acquisition.sources = SourceGeometry.hdf5(
-        "sources.h5",
+        source_file,
         dataset="source_points",
         kind="scalar",
     )
@@ -315,11 +321,268 @@ def test_validation_skips_source_range_when_external_count_unknown(tmp_path):
     assert "outputs.source_id.out_of_range" not in _codes(report)
 
 
+def test_validation_rejects_missing_external_source_geometry_file(tmp_path):
+    job = _simple_job(tmp_path)
+    job.simulation.acquisition.sources = SourceGeometry.hdf5(
+        "missing-sources.h5",
+        dataset="source_points",
+        kind="scalar",
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "acquisition.source_geometry.file_missing" in _codes(report)
+    assert "missing-sources.h5" not in report.format()
+
+
+def test_validation_rejects_missing_external_source_geometry_dataset(tmp_path):
+    job = _simple_job(tmp_path)
+    source_file = tmp_path / "sources.h5"
+    with h5py.File(source_file, "w") as h5:
+        h5.create_dataset("different", data=[[0.5, 0.25]])
+    job.simulation.acquisition.sources = SourceGeometry.hdf5(
+        source_file,
+        dataset="source_points",
+        kind="scalar",
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "acquisition.source_geometry.dataset_missing" in _codes(report)
+
+
+def test_validation_rejects_external_source_geometry_outside_domain(tmp_path):
+    job = _simple_job(tmp_path)
+    source_file = tmp_path / "sources.h5"
+    with h5py.File(source_file, "w") as h5:
+        h5.create_dataset("source_points", data=[[1.5, 0.25]])
+    job.simulation.acquisition.sources = SourceGeometry.hdf5(
+        source_file,
+        dataset="source_points",
+        kind="scalar",
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "coordinates.domain.outside" in _codes(report)
+
+
+def test_validation_rejects_nonfinite_external_source_geometry(tmp_path):
+    job = _simple_job(tmp_path)
+    source_file = tmp_path / "sources.h5"
+    with h5py.File(source_file, "w") as h5:
+        h5.create_dataset("source_points", data=[[np.nan, 0.25]])
+    job.simulation.acquisition.sources = SourceGeometry.hdf5(
+        source_file,
+        dataset="source_points",
+        kind="scalar",
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "acquisition.source_geometry.dataset_nonfinite" in _codes(report)
+
+
+def test_validation_rejects_nonnumeric_external_source_geometry(tmp_path):
+    job = _simple_job(tmp_path)
+    source_file = tmp_path / "sources.h5"
+    with h5py.File(source_file, "w") as h5:
+        h5.create_dataset("source_points", data=[["0.5", "0.25"]])
+    job.simulation.acquisition.sources = SourceGeometry.hdf5(
+        source_file,
+        dataset="source_points",
+        kind="scalar",
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "acquisition.source_geometry.dataset_numeric" in _codes(report)
+
+
+def test_validation_rejects_inconsistent_external_source_encoding_metadata(tmp_path):
+    job = _simple_job(tmp_path)
+    encoding_file = tmp_path / "encoding.h5"
+    with h5py.File(encoding_file, "w") as h5:
+        h5.create_dataset("coefficients", data=np.ones((1, 2)))
+        h5.create_dataset("field_names", data=np.asarray([b"only-one"]))
+        h5.create_dataset("reference_coordinates", data=np.ones((2, 3)))
+    job.simulation.acquisition.source_encoding = SourceEncoding.hdf5(
+        encoding_file,
+        dataset="coefficients",
+        field_names_dataset="field_names",
+        reference_coordinates_dataset="reference_coordinates",
+        count=2,
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "acquisition.source_encoding.field_names.length_mismatch" in _codes(report)
+    assert "acquisition.source_encoding.reference_coordinates.shape" in _codes(report)
+
+
+@pytest.mark.parametrize(
+    ("coefficients", "code"),
+    [
+        ([["not-a-coefficient"]], "acquisition.source_encoding.dataset_numeric"),
+        ([[np.inf]], "acquisition.source_encoding.dataset_nonfinite"),
+    ],
+)
+def test_validation_rejects_invalid_external_source_encoding_coefficients(
+    tmp_path,
+    coefficients,
+    code,
+):
+    job = _simple_job(tmp_path)
+    encoding_file = tmp_path / "encoding.h5"
+    with h5py.File(encoding_file, "w") as h5:
+        h5.create_dataset("coefficients", data=coefficients)
+    job.simulation.acquisition.source_encoding = SourceEncoding.hdf5(
+        encoding_file,
+        dataset="coefficients",
+        count=1,
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert code in _codes(report)
+
+
+@pytest.mark.parametrize(
+    ("field_names", "code"),
+    [
+        ([b"field", b""], "acquisition.source_encoding.field_names.value_invalid"),
+        ([b"field", b"field"], "acquisition.source_encoding.field_names.duplicate"),
+        ([1, 2], "acquisition.source_encoding.field_names.value_invalid"),
+    ],
+)
+def test_validation_rejects_invalid_external_source_encoding_field_names(
+    tmp_path,
+    field_names,
+    code,
+):
+    job = _simple_job(tmp_path)
+    encoding_file = tmp_path / "encoding.h5"
+    with h5py.File(encoding_file, "w") as h5:
+        h5.create_dataset("coefficients", data=np.ones((1, 2)))
+        h5.create_dataset("field_names", data=field_names)
+    job.simulation.acquisition.source_encoding = SourceEncoding.hdf5(
+        encoding_file,
+        dataset="coefficients",
+        field_names_dataset="field_names",
+        count=2,
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert code in _codes(report)
+
+
+def test_validation_rejects_external_encoding_reference_outside_domain(tmp_path):
+    job = _simple_job(tmp_path)
+    encoding_file = tmp_path / "encoding.h5"
+    with h5py.File(encoding_file, "w") as h5:
+        h5.create_dataset("coefficients", data=np.ones((1, 1)))
+        h5.create_dataset("reference_coordinates", data=[[1.5, 0.25]])
+    job.simulation.acquisition.source_encoding = SourceEncoding.hdf5(
+        encoding_file,
+        dataset="coefficients",
+        reference_coordinates_dataset="reference_coordinates",
+        count=1,
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "coordinates.domain.outside" in _codes(report)
+
+
+def test_validation_rejects_encoded_source_reference_outside_domain(tmp_path):
+    job = _simple_job(tmp_path)
+    job.simulation.acquisition.source_encoding = SourceEncoding.dense(
+        [[1.0]],
+        names=["outside"],
+        reference_coordinates=[[1.5, 0.25]],
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "coordinates.domain.outside" in _codes(report)
+
+
+def _job_with_layered_model(tmp_path):
+    job = _simple_job(tmp_path)
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="layer", properties={"vp": 1.5, "rho": 1.0})
+    model.add_surface(name="bottom", depth=1.0)
+    job.simulation += model
+    return job
+
+
+def test_validation_accepts_known_paraview_model_surface(tmp_path):
+    job = _job_with_layered_model(tmp_path)
+    job += VtkOutput.surface(surfaces=["top", 2], fields=["pressure"])
+
+    report = job.validate()
+
+    assert report.ok
+    assert "outputs.vtk.model_surface.unknown" not in _codes(report)
+
+
+def test_validation_rejects_unknown_paraview_model_surface(tmp_path):
+    job = _job_with_layered_model(tmp_path)
+    job += VtkOutput.surface(surfaces="not-a-surface", fields=["pressure"])
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "outputs.vtk.model_surface.unknown" in _codes(report)
+    assert "Available model surfaces are: bottom, top." in report.format()
+
+
+def test_validation_rejects_out_of_range_paraview_model_surface_index(tmp_path):
+    job = _job_with_layered_model(tmp_path)
+    job += VtkOutput.surface(surfaces=3, fields=["pressure"])
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "outputs.vtk.model_surface.index_out_of_range" in _codes(report)
+
+
+@pytest.mark.parametrize("selection", [True, 1.5])
+def test_validation_rejects_noninteger_paraview_model_surface_index(
+    tmp_path,
+    selection,
+):
+    job = _job_with_layered_model(tmp_path)
+    job += VtkOutput.surface(
+        surfaces={"kind": "model_surface", "index": selection},
+        fields=["pressure"],
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "outputs.vtk.model_surface.index_invalid" in _codes(report)
+
+
 def test_site_prepare_job_blocks_invalid_jobs_before_submit(tmp_path):
     job = _simple_job(tmp_path, source_coords=[[1.5, 0.25]])
 
     with pytest.raises(ValidationError, match="outside model domain"):
         BaseSite().prepare_job(job)
+    assert job._file is None
+    assert job.simulation._file is None
 
 
 def test_site_prepare_job_can_skip_validation(tmp_path):
