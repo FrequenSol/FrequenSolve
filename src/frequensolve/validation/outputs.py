@@ -6,6 +6,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 import numpy as np
 
+from frequensolve.model.layered.surfaces import Fracture
 from frequensolve.model.property import canonical_property_name
 from frequensolve.simulation.outputs import (
     JobOutputs,
@@ -139,21 +140,17 @@ def _validate_model_surface_selections(
         for index, selection in enumerate(target.get("selection", []) or []):
             selections.append((selection, f"{path}.target.selection[{index}]"))
 
-    surfaces = list(
-        getattr(getattr(ctx.simulation, "model", None), "surfaces", []) or []
-    )
-    names = {
-        str(name) for surface in surfaces if (name := getattr(surface, "name", None))
-    }
+    model = getattr(ctx.simulation, "model", None)
+    names, surface_count = _solver_surface_references(model)
     for selection, selection_path in selections:
         if isinstance(selection, str):
             _validate_model_surface_name(selection, selection_path, names, ctx)
             continue
         if isinstance(selection, (int, np.integer)):
-            _validate_model_surface_index(selection, selection_path, len(surfaces), ctx)
+            _validate_model_surface_index(selection, selection_path, surface_count, ctx)
             continue
         if isinstance(selection, (float, np.floating)):
-            _validate_model_surface_index(selection, selection_path, len(surfaces), ctx)
+            _validate_model_surface_index(selection, selection_path, surface_count, ctx)
             continue
         if not isinstance(selection, Mapping):
             continue
@@ -168,7 +165,7 @@ def _validate_model_surface_selections(
             _validate_model_surface_index(
                 selection.get("index"),
                 f"{selection_path}.index",
-                len(surfaces),
+                surface_count,
                 ctx,
             )
         elif kind == "model_surface":
@@ -180,10 +177,62 @@ def _validate_model_surface_selections(
             )
 
 
+def _solver_surface_references(model: Any) -> tuple[dict[str, str], int]:
+    """Return the solver-visible surface names and expanded horizon count."""
+
+    names: dict[str, str] = {}
+    surfaces = list(getattr(model, "surfaces", []) or [])
+    expanded_count = 0
+
+    def add_name(value: Any) -> None:
+        name = str(value).strip() if value is not None else ""
+        if name:
+            names.setdefault(name.casefold(), name)
+
+    if surfaces:
+        add_name("top")
+        add_name("bottom")
+
+    for surface in surfaces:
+        base_name = str(getattr(surface, "name", "") or "").strip()
+        if isinstance(surface, Fracture):
+            extra = getattr(surface, "extra", {}) or {}
+            for side in ("top", "bottom"):
+                expanded_count += 1
+                add_name(f"surface_{expanded_count}")
+                generated_name = str(extra.get(f"{side}_name", "") or "").strip()
+                if not generated_name and base_name:
+                    generated_name = f"{base_name}_{side}"
+                add_name(generated_name or f"surface_{expanded_count}")
+            continue
+
+        expanded_count += 1
+        add_name(f"surface_{expanded_count}")
+        add_name(base_name or f"surface_{expanded_count}")
+
+    for borehole in list(getattr(model, "boreholes", []) or []):
+        borehole_name = str(getattr(borehole, "name", "") or "").strip()
+        if not borehole_name:
+            continue
+        prefix = f"{borehole_name}_"
+        for surface in list(getattr(borehole, "surfaces", []) or []):
+            local_name = str(getattr(surface, "name", "") or "").strip()
+            if not local_name:
+                continue
+            qualified_name = (
+                local_name
+                if local_name.casefold().startswith(prefix.casefold())
+                else f"{prefix}{local_name}"
+            )
+            add_name(qualified_name)
+
+    return names, expanded_count
+
+
 def _validate_model_surface_name(
     value: Any,
     path: str,
-    names: set[str],
+    names: Mapping[str, str],
     ctx: _ValidationContext,
 ) -> None:
     name = str(value).strip() if value is not None else ""
@@ -194,9 +243,11 @@ def _validate_model_surface_name(
             path=path,
         )
         return
-    if name not in names:
+    if name.casefold() not in names:
+        available_names = sorted(names.values(), key=str.casefold)
         hint = (
-            f"Available model surfaces are: {', '.join(sorted(names))}."
+            f"Available solver surface references are: "
+            f"{', '.join(available_names)}."
             if names
             else "Attach a model with named surfaces or remove this selection."
         )

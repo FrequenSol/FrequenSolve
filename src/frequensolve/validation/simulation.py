@@ -710,7 +710,10 @@ def _validate_hdf5_coordinate_values(
     system: Optional[str],
     code_prefix: str,
 ) -> None:
-    if not np.issubdtype(dataset.dtype, np.number):
+    if not (
+        np.issubdtype(dataset.dtype, np.integer)
+        or np.issubdtype(dataset.dtype, np.floating)
+    ):
         ctx.report.error(
             f"{code_prefix}.dataset_numeric",
             "Coordinate dataset values must be numeric and readable.",

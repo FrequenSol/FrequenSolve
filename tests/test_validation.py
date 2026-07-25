@@ -404,6 +404,26 @@ def test_validation_rejects_nonnumeric_external_source_geometry(tmp_path):
     assert "acquisition.source_geometry.dataset_numeric" in _codes(report)
 
 
+def test_validation_rejects_complex_external_source_geometry(tmp_path):
+    job = _simple_job(tmp_path)
+    source_file = tmp_path / "sources.h5"
+    with h5py.File(source_file, "w") as h5:
+        h5.create_dataset(
+            "source_points",
+            data=np.asarray([[0.5 + 0.1j, 0.25 + 0.0j]]),
+        )
+    job.simulation.acquisition.sources = SourceGeometry.hdf5(
+        source_file,
+        dataset="source_points",
+        kind="scalar",
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "acquisition.source_geometry.dataset_numeric" in _codes(report)
+
+
 def test_validation_rejects_inconsistent_external_source_encoding_metadata(tmp_path):
     job = _simple_job(tmp_path)
     encoding_file = tmp_path / "encoding.h5"
@@ -424,6 +444,47 @@ def test_validation_rejects_inconsistent_external_source_encoding_metadata(tmp_p
     assert not report.ok
     assert "acquisition.source_encoding.field_names.length_mismatch" in _codes(report)
     assert "acquisition.source_encoding.reference_coordinates.shape" in _codes(report)
+
+
+def test_validation_rejects_complex_external_source_reference_coordinates(tmp_path):
+    job = _simple_job(tmp_path)
+    encoding_file = tmp_path / "encoding.h5"
+    with h5py.File(encoding_file, "w") as h5:
+        h5.create_dataset("coefficients", data=np.ones((1, 1)))
+        h5.create_dataset(
+            "reference_coordinates",
+            data=np.asarray([[0.5 + 0.1j, 0.25 + 0.0j]]),
+        )
+    job.simulation.acquisition.source_encoding = SourceEncoding.hdf5(
+        encoding_file,
+        dataset="coefficients",
+        reference_coordinates_dataset="reference_coordinates",
+        count=1,
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert (
+        "acquisition.source_encoding.reference_coordinates.dataset_numeric"
+        in _codes(report)
+    )
+
+
+def test_validation_accepts_complex_external_source_encoding_coefficients(tmp_path):
+    job = _simple_job(tmp_path)
+    encoding_file = tmp_path / "encoding.h5"
+    with h5py.File(encoding_file, "w") as h5:
+        h5.create_dataset("coefficients", data=np.asarray([[1.0 + 0.5j]]))
+    job.simulation.acquisition.source_encoding = SourceEncoding.hdf5(
+        encoding_file,
+        dataset="coefficients",
+        count=1,
+    )
+
+    report = job.validate()
+
+    assert "acquisition.source_encoding.dataset_numeric" not in _codes(report)
 
 
 @pytest.mark.parametrize(
@@ -538,6 +599,82 @@ def test_validation_accepts_known_paraview_model_surface(tmp_path):
     assert "outputs.vtk.model_surface.unknown" not in _codes(report)
 
 
+def test_validation_accepts_solver_model_surface_aliases(tmp_path):
+    job = _job_with_layered_model(tmp_path)
+    job += VtkOutput.surface(
+        surfaces=["TOP", "bottom", "surface_1", "surface_2"],
+        fields=["pressure"],
+    )
+
+    report = job.validate()
+
+    assert report.ok
+    assert "outputs.vtk.model_surface.unknown" not in _codes(report)
+
+
+@pytest.mark.parametrize(
+    ("fracture_names", "expected_names"),
+    [
+        ({}, ["fault_top", "FAULT_BOTTOM"]),
+        (
+            {"top_name": "fault_upper", "bottom_name": "fault_lower"},
+            ["fault_upper", "FAULT_LOWER"],
+        ),
+    ],
+)
+def test_validation_accepts_generated_fracture_surface_references(
+    tmp_path,
+    fracture_names,
+    expected_names,
+):
+    job = _simple_job(tmp_path)
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="topography", depth=0.0)
+    model.add_layer(name="upper", properties={"vp": 1.5, "rho": 1.0})
+    model.add_fracture(
+        name="fault",
+        depth=0.5,
+        gap=[0.01],
+        **fracture_names,
+    )
+    model.add_layer(name="lower", properties={"vp": 1.8, "rho": 1.1})
+    model.add_surface(name="basement", depth=1.0)
+    job.simulation += model
+    job += VtkOutput.surface(
+        surfaces=[
+            "top",
+            "bottom",
+            *expected_names,
+            "surface_2",
+            "surface_3",
+            4,
+        ],
+        fields=["pressure"],
+    )
+
+    report = job.validate()
+
+    assert report.ok
+    assert "outputs.vtk.model_surface.unknown" not in _codes(report)
+    assert "outputs.vtk.model_surface.index_out_of_range" not in _codes(report)
+
+
+def test_validation_accepts_registered_borehole_surface_reference(tmp_path):
+    job = _job_with_layered_model(tmp_path)
+    borehole = job.simulation.model.add_borehole(name="bh1", x=0.45)
+    borehole.add_layer(
+        "fluid",
+        physics="acoustic",
+        properties={"vp": 1.48, "rho": 1.03},
+    )
+    borehole.add_surface("fluid_wall", r=0.035)
+    job += VtkOutput.surface(surfaces="BH1_FLUID_WALL", fields=["pressure"])
+
+    report = job.validate()
+
+    assert "outputs.vtk.model_surface.unknown" not in _codes(report)
+
+
 def test_validation_rejects_unknown_paraview_model_surface(tmp_path):
     job = _job_with_layered_model(tmp_path)
     job += VtkOutput.surface(surfaces="not-a-surface", fields=["pressure"])
@@ -546,7 +683,9 @@ def test_validation_rejects_unknown_paraview_model_surface(tmp_path):
 
     assert not report.ok
     assert "outputs.vtk.model_surface.unknown" in _codes(report)
-    assert "Available model surfaces are: bottom, top." in report.format()
+    assert "Available solver surface references are:" in report.format()
+    assert "bottom" in report.format()
+    assert "top" in report.format()
 
 
 def test_validation_rejects_out_of_range_paraview_model_surface_index(tmp_path):
@@ -557,6 +696,22 @@ def test_validation_rejects_out_of_range_paraview_model_surface_index(tmp_path):
 
     assert not report.ok
     assert "outputs.vtk.model_surface.index_out_of_range" in _codes(report)
+
+
+def test_validation_uses_expanded_fracture_surface_index_range(tmp_path):
+    job = _simple_job(tmp_path)
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="upper", properties={"vp": 1.5, "rho": 1.0})
+    model.add_fracture(name="fault", depth=0.5, gap=[0.01])
+    model.add_layer(name="lower", properties={"vp": 1.8, "rho": 1.1})
+    model.add_surface(name="bottom", depth=1.0)
+    job.simulation += model
+    job += VtkOutput.surface(surfaces=4, fields=["pressure"])
+
+    report = job.validate()
+
+    assert "outputs.vtk.model_surface.index_out_of_range" not in _codes(report)
 
 
 @pytest.mark.parametrize("selection", [True, 1.5])
