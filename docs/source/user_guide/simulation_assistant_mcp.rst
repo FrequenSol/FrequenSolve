@@ -45,6 +45,13 @@ To include the optional read-only Cloud tools, install both extras:
 
    /absolute/path/to/frequensolve-mcp-venv/bin/python -m pip install "frequensolve[mcp,cloud]"
 
+To use the generated starter with a configured SLURM/HPC site, install the MCP
+and HPC extras:
+
+.. code-block:: console
+
+   /absolute/path/to/frequensolve-mcp-venv/bin/python -m pip install "frequensolve[mcp,hpc]"
+
 Cloud reads reuse an existing ``aws`` or ``cloud`` profile from
 ``~/.frequensolve/site.toml`` and that profile's cached Cognito login. The MCP
 never accepts a password, token, account ID, or user ID.
@@ -111,7 +118,8 @@ These tools use five fixed versioned queries owned by the Cloud service. They
 do not accept raw GraphQL, tenant selectors, credentials, bucket names, or
 object keys. They cannot submit, cancel, upload, download, change, or delete
 anything. Missing and unauthorized simulation IDs receive the same safe
-response.
+response. The ``cloud_*`` monitoring tools are Cloud-only; they do not monitor
+jobs submitted to SLURM/HPC sites.
 
 Safe file access
 ----------------
@@ -147,11 +155,13 @@ Prepare, submit, and monitor
 The private-beta handoff has a deliberate write boundary:
 
 1. Let the MCP prepare, validate, preview, and render the starter.
-2. Review the generated Python and submit it separately through the normal
-   FrequenSolve Python or Cloud workflow. The MCP cannot perform this write.
+2. Review the generated Python and submit it separately outside the MCP with
+   ``fs.Site(profile='cloud')`` or ``fs.Site(profile='hpc')``. The generated
+   draft and rendered script are execution-site-neutral; the MCP cannot perform
+   this write.
 3. After the simulation exists, ask the agent to check readiness, list your
    simulations, read the owned simulation, and explain its bounded diagnostics
-   or result metadata.
+   or result metadata when it was submitted to Cloud.
 
 This keeps setup assistance and read-only monitoring available to the agent
 without giving the MCP submission, cancellation, upload, or delete authority.
