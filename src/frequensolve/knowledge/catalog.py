@@ -1718,7 +1718,9 @@ def _validate_starter_setup(
         raise CatalogValidationError(
             f"{setup_path}.simulation.dimension must match {path}.dimension"
         )
-    _mapping(simulation["units"], f"{setup_path}.simulation.units")
+    units = _mapping(simulation["units"], f"{setup_path}.simulation.units")
+    for unit_name, unit_value in units.items():
+        _string(unit_value, f"{setup_path}.simulation.units.{unit_name}")
 
     model = _required_mapping(
         setup["model"],
@@ -1736,21 +1738,45 @@ def _validate_starter_setup(
         raise CatalogValidationError(
             f"{setup_path}.model.dimension must match the simulation model dimension"
         )
-    _non_empty_list(model["x_limits"], f"{setup_path}.model.x_limits")
+    _number_list(
+        model["x_limits"],
+        f"{setup_path}.model.x_limits",
+        minimum_items=2,
+    )
     surfaces = _non_empty_list(model["surfaces"], f"{setup_path}.model.surfaces")
+    if len(surfaces) < 2:
+        raise CatalogValidationError(
+            f"{setup_path}.model.surfaces must contain at least 2 items"
+        )
     for index, surface in enumerate(surfaces):
-        _required_mapping(
+        surface_data = _required_mapping(
             surface,
             f"{setup_path}.model.surfaces[{index}]",
             {"name", "depth"},
         )
+        _string(surface_data["name"], f"{setup_path}.model.surfaces[{index}].name")
+        _number(surface_data["depth"], f"{setup_path}.model.surfaces[{index}].depth")
     layers = _non_empty_list(model["layers"], f"{setup_path}.model.layers")
     for index, layer in enumerate(layers):
-        _required_mapping(
+        layer_data = _required_mapping(
             layer,
             f"{setup_path}.model.layers[{index}]",
             {"name", "properties"},
         )
+        _string(layer_data["name"], f"{setup_path}.model.layers[{index}].name")
+        properties = _mapping(
+            layer_data["properties"],
+            f"{setup_path}.model.layers[{index}].properties",
+        )
+        if not properties:
+            raise CatalogValidationError(
+                f"{setup_path}.model.layers[{index}].properties must not be empty"
+            )
+        for property_name, property_value in properties.items():
+            _number(
+                property_value,
+                f"{setup_path}.model.layers[{index}].properties.{property_name}",
+            )
 
     mesh = _required_mapping(
         setup["mesh"],
@@ -1762,24 +1788,43 @@ def _validate_starter_setup(
         raise CatalogValidationError(
             f"{setup_path}.mesh.type must be 'HexMeshGenerator'"
         )
-    _non_empty_list(mesh["n"], f"{setup_path}.mesh.n")
-    _required_mapping(
+    mesh_counts = _non_empty_list(mesh["n"], f"{setup_path}.mesh.n")
+    if len(mesh_counts) < 2:
+        raise CatalogValidationError(
+            f"{setup_path}.mesh.n must contain at least 2 items"
+        )
+    for index, value in enumerate(mesh_counts):
+        _positive_integer(value, f"{setup_path}.mesh.n[{index}]")
+    adapt = _required_mapping(
         mesh["adapt"],
         f"{setup_path}.mesh.adapt",
         {"elems_per_wave", "order", "f_low", "f_high"},
     )
-    _required_mapping(
+    _positive_number(adapt["elems_per_wave"], f"{setup_path}.mesh.adapt.elems_per_wave")
+    _positive_integer(adapt["order"], f"{setup_path}.mesh.adapt.order")
+    _positive_number(adapt["f_low"], f"{setup_path}.mesh.adapt.f_low")
+    _positive_number(adapt["f_high"], f"{setup_path}.mesh.adapt.f_high")
+    source_grading = _required_mapping(
         mesh["source_grading"],
         f"{setup_path}.mesh.source_grading",
         {"d1", "d0", "factor"},
         optional={"power"},
     )
+    _positive_number(source_grading["d1"], f"{setup_path}.mesh.source_grading.d1")
+    _nonnegative_number(source_grading["d0"], f"{setup_path}.mesh.source_grading.d0")
+    _positive_number(
+        source_grading["factor"], f"{setup_path}.mesh.source_grading.factor"
+    )
+    if "power" in source_grading:
+        _positive_number(
+            source_grading["power"], f"{setup_path}.mesh.source_grading.power"
+        )
 
     boundaries = _non_empty_list(
         setup["boundary_conditions"], f"{setup_path}.boundary_conditions"
     )
     for index, boundary in enumerate(boundaries):
-        _required_mapping(
+        boundary_data = _required_mapping(
             boundary,
             f"{setup_path}.boundary_conditions[{index}]",
             {"conditions", "boundaries"},
@@ -1791,6 +1836,30 @@ def _validate_starter_setup(
                 "pml_constant",
             },
         )
+        _string_tuple(
+            boundary_data["conditions"],
+            f"{setup_path}.boundary_conditions[{index}].conditions",
+        )
+        _string_tuple(
+            boundary_data["boundaries"],
+            f"{setup_path}.boundary_conditions[{index}].boundaries",
+        )
+        if "name" in boundary_data:
+            _string(
+                boundary_data["name"],
+                f"{setup_path}.boundary_conditions[{index}].name",
+            )
+        for field_name in (
+            "pml_wavelengths",
+            "pml_exponent",
+            "pml_reflectivity",
+            "pml_constant",
+        ):
+            if field_name in boundary_data:
+                _positive_number(
+                    boundary_data[field_name],
+                    f"{setup_path}.boundary_conditions[{index}].{field_name}",
+                )
 
     acquisition = _required_mapping(
         setup["acquisition"],
@@ -1803,7 +1872,16 @@ def _validate_starter_setup(
         {"kind", "coords"},
     )
     _string(source["kind"], f"{setup_path}.acquisition.source.kind")
-    _non_empty_list(source["coords"], f"{setup_path}.acquisition.source.coords")
+    source_coordinates = _non_empty_list(
+        source["coords"], f"{setup_path}.acquisition.source.coords"
+    )
+    for index, coordinates in enumerate(source_coordinates):
+        _number_list(
+            coordinates,
+            f"{setup_path}.acquisition.source.coords[{index}]",
+            minimum_items=2,
+            maximum_items=2,
+        )
     receiver = _required_mapping(
         acquisition["receiver_group"],
         f"{setup_path}.acquisition.receiver_group",
@@ -1828,6 +1906,13 @@ def _validate_starter_setup(
         component["field"],
         f"{setup_path}.acquisition.receiver_group.component.field",
     )
+    if "direction" in component:
+        _number_list(
+            component["direction"],
+            f"{setup_path}.acquisition.receiver_group.component.direction",
+            minimum_items=2,
+            maximum_items=3,
+        )
     coordinate_line = _required_mapping(
         receiver["coordinate_line"],
         f"{setup_path}.acquisition.receiver_group.coordinate_line",
@@ -1876,12 +1961,28 @@ def _validate_starter_setup(
         f"{setup_path}.discretization",
         set(),
     )
-    _required_mapping(
+    solver = _required_mapping(
         setup["solver"],
         f"{setup_path}.solver",
         {"tolerance", "grids"},
         optional={"solve_on", "max_iter", "precision"},
     )
+    _positive_number(solver["tolerance"], f"{setup_path}.solver.tolerance")
+    _positive_integer(solver["grids"], f"{setup_path}.solver.grids")
+    if "solve_on" in solver:
+        _enum_string(
+            solver["solve_on"],
+            f"{setup_path}.solver.solve_on",
+            {"final", "all"},
+        )
+    if "max_iter" in solver:
+        _positive_integer(solver["max_iter"], f"{setup_path}.solver.max_iter")
+    if "precision" in solver:
+        _enum_string(
+            solver["precision"],
+            f"{setup_path}.solver.precision",
+            {"single", "double"},
+        )
 
     job = _required_mapping(
         setup["job"],
@@ -1894,16 +1995,51 @@ def _validate_starter_setup(
             f"{setup_path}.job.type must be 'FrequencyDomainJob'"
         )
     _string(job["name"], f"{setup_path}.job.name")
-    _non_empty_list(job["f_list"], f"{setup_path}.job.f_list")
+    frequencies = _non_empty_list(job["f_list"], f"{setup_path}.job.f_list")
+    for index, frequency in enumerate(frequencies):
+        _positive_number(frequency, f"{setup_path}.job.f_list[{index}]")
     outputs = _required_mapping(job["outputs"], f"{setup_path}.job.outputs", {"vtk"})
     vtk_outputs = _non_empty_list(outputs["vtk"], f"{setup_path}.job.outputs.vtk")
     for index, vtk_output in enumerate(vtk_outputs):
-        _required_mapping(
+        vtk_data = _required_mapping(
             vtk_output,
             f"{setup_path}.job.outputs.vtk[{index}]",
             {"name", "fields", "properties", "upscale"},
             optional={"path", "show_pml", "format", "order", "parts"},
         )
+        vtk_path = f"{setup_path}.job.outputs.vtk[{index}]"
+        _string(vtk_data["name"], f"{vtk_path}.name")
+        _string_tuple(vtk_data["fields"], f"{vtk_path}.fields")
+        _string_tuple(vtk_data["properties"], f"{vtk_path}.properties")
+        upscale = _integer(vtk_data["upscale"], f"{vtk_path}.upscale")
+        if upscale < 0 or upscale > 2:
+            raise CatalogValidationError(f"{vtk_path}.upscale must be from 0 to 2")
+        if "path" in vtk_data:
+            _repository_path(vtk_data["path"], f"{vtk_path}.path")
+        if "show_pml" in vtk_data:
+            _boolean(vtk_data["show_pml"], f"{vtk_path}.show_pml")
+        if "format" in vtk_data:
+            _enum_string(
+                vtk_data["format"],
+                f"{vtk_path}.format",
+                {"vtu", "xdmf", "xmf", "vtr"},
+            )
+        if "order" in vtk_data:
+            _positive_integer(vtk_data["order"], f"{vtk_path}.order")
+        if "parts" in vtk_data:
+            parts = vtk_data["parts"]
+            if isinstance(parts, str):
+                _enum_string(
+                    parts,
+                    f"{vtk_path}.parts",
+                    {"real", "imag", "abs"},
+                )
+            else:
+                parsed_parts = _string_tuple(parts, f"{vtk_path}.parts")
+                if not set(parsed_parts).issubset({"real", "imag", "abs"}):
+                    raise CatalogValidationError(
+                        f"{vtk_path}.parts contains unsupported values"
+                    )
 
 
 def _required_mapping(
@@ -1929,6 +2065,55 @@ def _non_empty_list(value: object, path: str) -> list[object]:
     result = _list(value, path)
     if not result:
         raise CatalogValidationError(f"{path} must not be empty")
+    return result
+
+
+def _number_list(
+    value: object,
+    path: str,
+    *,
+    minimum_items: int,
+    maximum_items: Optional[int] = None,
+) -> list[float]:
+    values = _list(value, path)
+    if len(values) < minimum_items:
+        raise CatalogValidationError(
+            f"{path} must contain at least {minimum_items} items"
+        )
+    if maximum_items is not None and len(values) > maximum_items:
+        raise CatalogValidationError(
+            f"{path} must contain at most {maximum_items} items"
+        )
+    return [_number(item, f"{path}[{index}]") for index, item in enumerate(values)]
+
+
+def _positive_number(value: object, path: str) -> float:
+    result = _number(value, path)
+    if result <= 0:
+        raise CatalogValidationError(f"{path} must be positive")
+    return result
+
+
+def _nonnegative_number(value: object, path: str) -> float:
+    result = _number(value, path)
+    if result < 0:
+        raise CatalogValidationError(f"{path} must be nonnegative")
+    return result
+
+
+def _positive_integer(value: object, path: str) -> int:
+    result = _integer(value, path)
+    if result < 1:
+        raise CatalogValidationError(f"{path} must be positive")
+    return result
+
+
+def _enum_string(value: object, path: str, allowed: set[str]) -> str:
+    result = _string(value, path)
+    if result not in allowed:
+        raise CatalogValidationError(
+            f"{path} must be one of: {', '.join(sorted(allowed))}"
+        )
     return result
 
 

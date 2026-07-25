@@ -753,6 +753,58 @@ def test_starter_constructor_mappings_keep_named_optional_fields(tmp_path):
     assert fs.validate_job(job).ok
 
 
+@pytest.mark.parametrize(
+    "invalid_frequency",
+    [0, -3, "not-a-number", float("nan"), float("inf")],
+)
+def test_runtime_starter_rejects_nonpositive_or_nonfinite_frequencies(
+    invalid_frequency,
+):
+    payload = _resource_payload(fs.CATALOG_RESOURCE)
+    payload["starter_scenarios"][0]["setup"]["job"]["f_list"] = [invalid_frequency]
+
+    with pytest.raises(
+        fs.CatalogValidationError,
+        match=r"job\.f_list\[0\].*(finite number|positive)",
+    ):
+        fs.SimulationKnowledgeCatalog.from_mapping(payload)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda setup: setup["simulation"]["units"].update({"length": 1}),
+        lambda setup: setup["model"].update({"x_limits": [0.0]}),
+        lambda setup: setup["model"]["surfaces"][0].update({"depth": "zero"}),
+        lambda setup: setup["model"]["layers"][0]["properties"].update({"Vp": "fast"}),
+        lambda setup: setup["mesh"].update({"n": [8, 0]}),
+        lambda setup: setup["mesh"]["adapt"].update({"order": 0}),
+        lambda setup: setup["mesh"]["source_grading"].update({"d0": -0.1}),
+        lambda setup: setup["boundary_conditions"][1].update({"pml_wavelengths": 0}),
+        lambda setup: setup["acquisition"]["source"].update({"coords": [[0.5]]}),
+        lambda setup: setup["acquisition"]["receiver_group"]["component"].update(
+            {"direction": [1.0]}
+        ),
+        lambda setup: setup["solver"].update({"tolerance": 0}),
+        lambda setup: setup["solver"].update({"solve_on": "sometimes"}),
+        lambda setup: setup["job"]["outputs"]["vtk"][0].update({"upscale": 3}),
+        lambda setup: setup["job"]["outputs"]["vtk"][0].update({"format": "unknown"}),
+        lambda setup: setup["job"]["outputs"]["vtk"][0].update(
+            {"parts": ["real", "real"]}
+        ),
+    ],
+)
+def test_starter_runtime_and_schema_reject_invalid_scalar_values(mutate):
+    schema = _resource_payload(fs.CATALOG_SCHEMA_RESOURCE)
+    payload = _resource_payload(fs.CATALOG_RESOURCE)
+    mutate(payload["starter_scenarios"][0]["setup"])
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(payload, schema)
+    with pytest.raises(fs.CatalogValidationError):
+        fs.SimulationKnowledgeCatalog.from_mapping(payload)
+
+
 def test_known_small_acoustic_scenario_builds_valid_contracts(tmp_path):
     catalog = fs.load_simulation_knowledge()
     scenario = catalog.get_starter_scenario()
