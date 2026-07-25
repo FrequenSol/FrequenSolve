@@ -179,6 +179,29 @@ def test_source_axis_direction_default_matches_pinned_schema():
     _sauce_acquisition_validator().validate(payload)
 
 
+def test_point_source_axis_direction_roundtrips_from_pinned_schema():
+    payload = {
+        "schema": "fs-acquisition-2",
+        "source_geometry": {
+            "_type": "Inline",
+            "kind": "vector",
+            "sources": [
+                {
+                    "name": "shot",
+                    "coordinates": [0.5, 0.05],
+                    "direction": {"direction": "z"},
+                }
+            ],
+        },
+        "receiver_groups": [],
+    }
+
+    _sauce_acquisition_validator().validate(payload)
+    loaded = Acquisition.from_fs(payload)
+
+    assert loaded.to_fs() == payload
+
+
 @pytest.mark.parametrize(
     "direction, message",
     [
@@ -278,6 +301,73 @@ def test_encoded_reference_coordinates_preserve_explicit_and_implicit_metadata()
     assert implicit_reference.units == "km"
     assert implicit_reference.system == "survey"
     assert np.allclose(implicit.source_coords(1), [0.5, 0.05])
+
+
+def test_implicit_encoded_reference_normalizes_compatible_source_units():
+    geometry = SourceGeometry.inline(
+        kind="scalar",
+        sources=[
+            PointSource(
+                name="left",
+                coordinates=CoordinateValue(
+                    [0.0, 0.05],
+                    units="km",
+                    system="survey",
+                ),
+            ),
+            PointSource(
+                name="right",
+                coordinates=CoordinateValue(
+                    [1000.0, 50.0],
+                    units="m",
+                    system="survey",
+                ),
+            ),
+        ],
+    )
+    acquisition = Acquisition(
+        source_geometry=geometry,
+        source_encoding=SourceEncoding.named(
+            [DistributedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
+        ),
+    )
+
+    reference = acquisition.source_coords(1, preserve_metadata=True)
+
+    assert isinstance(reference, CoordinateValue)
+    assert reference.units == "km"
+    assert reference.system == "survey"
+    assert np.allclose(reference.value, [0.5, 0.05])
+    assert np.allclose(acquisition.source_coords(1), [0.5, 0.05])
+
+
+def test_implicit_encoded_reference_rejects_inconsistent_source_systems():
+    geometry = SourceGeometry.inline(
+        kind="scalar",
+        sources=[
+            PointSource(
+                name="left",
+                coordinates=CoordinateValue([0.0, 0.05], units="km"),
+            ),
+            PointSource(
+                name="right",
+                coordinates=CoordinateValue(
+                    [1.0, 0.05],
+                    units="km",
+                    system="survey",
+                ),
+            ),
+        ],
+    )
+    acquisition = Acquisition(
+        source_geometry=geometry,
+        source_encoding=SourceEncoding.named(
+            [DistributedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="one coordinate system"):
+        acquisition.source_coords(1, preserve_metadata=True)
 
 
 def test_hdf5_geometry_and_encoding_match_pinned_sauce_schema_and_roundtrip():

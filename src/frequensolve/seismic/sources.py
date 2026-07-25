@@ -19,6 +19,7 @@ from frequensolve.geometry.frame import (
 from frequensolve.units import (
     is_quantity,
     unit_expression,
+    ureg,
     value_and_units_to_fs,
 )
 from frequensolve.util.mixins import (
@@ -152,6 +153,20 @@ def _source_direction_to_fs(value: Any) -> Any:
     if numeric.ndim != 1 or numeric.size == 0:
         raise ValueError("Source direction must be a non-empty numeric vector")
     return numeric.tolist()
+
+
+def _source_direction_from_fs(value: Any) -> Any:
+    """Load a source-schema direction without applying the generic shape."""
+
+    if not isinstance(value, Mapping) or "type" in value:
+        return Direction.from_fs(value)
+    payload = copy.deepcopy(dict(value))
+    allowed = {"direction", "value", "units"}
+    has_axis = "direction" in payload
+    has_value = "value" in payload
+    if set(payload).issubset(allowed) and has_axis != has_value:
+        return payload
+    return Direction.from_fs(payload)
 
 
 def _source_basis_to_fs(value: Mapping[str, Any]) -> Dict[str, Any]:
@@ -324,17 +339,67 @@ def _coordinate_array(value: Any) -> np.ndarray:
     return result
 
 
-def _coordinate_units_and_system(value: Any) -> tuple[Optional[Any], Optional[str]]:
-    """Return authored coordinate units and system without converting values."""
+def _coordinate_array_with_metadata(
+    value: Any,
+) -> tuple[np.ndarray, Optional[Any], Optional[str]]:
+    """Return one coordinate vector in its declared units and system."""
 
+    units = None
+    system = None
     if isinstance(value, CoordinateValue):
         units = value.units
-        if units is None and is_quantity(value.value):
-            units = value.value.units
-        return units, value.system
+        system = value.system
+        value = value.value
     if is_quantity(value):
-        return value.units, None
-    return None, None
+        target_units = units or value.units
+        value = value.to(target_units).magnitude
+        units = target_units
+    coordinates = np.asarray(value, dtype=float)
+    if coordinates.ndim == 2 and len(coordinates) == 1:
+        coordinates = coordinates[0]
+    if coordinates.ndim != 1 or coordinates.size == 0:
+        raise ValueError("Source reference coordinates must be a single vector")
+    return coordinates, units, system
+
+
+def _source_coordinate_matrix(
+    values: Sequence[Any],
+) -> tuple[np.ndarray, Optional[Any], Optional[str]]:
+    """Normalize source points to one compatible unit and coordinate system."""
+
+    if not values:
+        return np.empty((0, 0), dtype=float), None, None
+    first, target_units, target_system = _coordinate_array_with_metadata(values[0])
+    rows = [first]
+    target_system_key = target_system or "global"
+    for value in values[1:]:
+        coordinates, units, system = _coordinate_array_with_metadata(value)
+        if (system or "global") != target_system_key:
+            raise ValueError(
+                "Source points must use one coordinate system before an "
+                "encoded-field reference can be computed"
+            )
+        if (units is None) != (target_units is None):
+            raise ValueError(
+                "Source points must all declare compatible coordinate units "
+                "before an encoded-field reference can be computed"
+            )
+        if target_units is not None:
+            try:
+                coordinates = (
+                    (coordinates * ureg(unit_expression(units)))
+                    .to(target_units)
+                    .magnitude
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Source points must use compatible coordinate units before "
+                    "an encoded-field reference can be computed"
+                ) from exc
+        if coordinates.shape != first.shape:
+            raise ValueError("Source points must use one coordinate dimension")
+        rows.append(np.asarray(coordinates, dtype=float))
+    return np.asarray(rows, dtype=float), target_units, target_system
 
 
 @dataclass(init=False)
@@ -407,7 +472,7 @@ class PointSource(ExtraFieldsMixin):
         payload = copy.deepcopy(dict(data))
         coordinates = CoordinateValue.from_fs(payload.pop("coordinates"))
         direction = (
-            Direction.from_fs(payload.pop("direction"))
+            _source_direction_from_fs(payload.pop("direction"))
             if "direction" in payload
             else None
         )
@@ -1063,8 +1128,9 @@ class SourceEncoding(ExtraFieldsMixin):
         index_by_name: Dict[str, int] = {}
         if needs_computed_reference:
             source_values = geometry.coordinate_values()
-            source_coords = geometry.coordinates()
-            source_units, source_system = _coordinate_units_and_system(source_values[0])
+            source_coords, source_units, source_system = _source_coordinate_matrix(
+                source_values
+            )
             source_names = geometry.point_names()
             index_by_name = {name: index for index, name in enumerate(source_names)}
         refs = []
