@@ -1,0 +1,631 @@
+{
+  "contractId": "frequensol.customer-cloud-read",
+  "contractVersion": "1.0.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "audience": "customer-self",
+  "classification": "read-only",
+  "identity": {
+    "source": "verified-cognito-user-pool-token",
+    "customerArgumentsForbidden": [
+      "accountId",
+      "userId",
+      "batchJobId",
+      "executionArn",
+      "bucketName",
+      "objectKey",
+      "graphql",
+      "query",
+      "mutation"
+    ]
+  },
+  "globalLimits": {
+    "timeoutMs": 15000,
+    "maxResponseBytes": 65536,
+    "maxPageSize": 50,
+    "maxCursorChars": 4096,
+    "maxSourcePages": 5
+  },
+  "errors": [
+    {
+      "code": "AUTHENTICATION_REQUIRED",
+      "safeMessage": "Sign in to FrequenSol Cloud to use this operation.",
+      "retryable": false
+    },
+    {
+      "code": "INVALID_INPUT",
+      "safeMessage": "The request did not match the supported Cloud read contract.",
+      "retryable": false
+    },
+    {
+      "code": "NOT_FOUND_OR_ACCESS_DENIED",
+      "safeMessage": "The requested simulation was not found or is not available to this user.",
+      "retryable": false
+    },
+    {
+      "code": "RESULTS_NOT_AVAILABLE",
+      "safeMessage": "Safe result metadata is not available for this simulation.",
+      "retryable": false
+    },
+    {
+      "code": "RESPONSE_LIMIT_EXCEEDED",
+      "safeMessage": "The bounded response limit was reached. Request a smaller page.",
+      "retryable": true
+    },
+    {
+      "code": "UPSTREAM_UNAVAILABLE",
+      "safeMessage": "FrequenSol Cloud could not complete the read request.",
+      "retryable": true
+    }
+  ],
+  "globalRedaction": {
+    "neverReturn": [
+      "accountId",
+      "userId",
+      "email",
+      "bucketName",
+      "jobFileDataS3Key",
+      "outputIdentity",
+      "batchJobId",
+      "batchJobArn",
+      "stepFunctionExecutionArn",
+      "activeJobQueueName",
+      "spotJobQueueName",
+      "onDemandJobQueueName",
+      "computeConfig",
+      "outputs",
+      "parameters",
+      "token",
+      "authorization",
+      "presignedUrl"
+    ]
+  },
+  "operations": [
+    {
+      "name": "getCloudReadiness",
+      "description": "Return the signed-in user's seat, subscription, credits, and coarse storage and compute readiness.",
+      "classification": "read-only",
+      "source": {
+        "kind": "fixed-graphql-query",
+        "operationName": "GetCloudReadiness",
+        "rootFields": [
+          "getMyAccountSummary",
+          "getCreditBalance",
+          "getMyCloudInfrastructureReadiness"
+        ],
+        "document": "query GetCloudReadiness { membership: getMyAccountSummary { seatLimit hasSeat role subscriptionActive: hasActiveSubscription subscriptionStatus: primarySubscriptionStatus } credits: getCreditBalance { available: currentBalance reconciled: reconciledBalance } infrastructure: getMyCloudInfrastructureReadiness { storage compute } }",
+        "responseProjection": {
+          "source": "graphql-data",
+          "path": []
+        },
+        "variables": {},
+        "sourceOnlyFields": []
+      },
+      "ownership": {
+        "actor": "verified-cognito-sub-and-account",
+        "enforcement": "The fixed resolver verifies current tenant membership for the token subject and current token account before shaping narrow output.",
+        "parentFirst": false
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "membership": {
+            "type": "object",
+            "properties": {
+              "hasSeat": { "type": "boolean" },
+              "role": { "type": "string", "enum": ["admin", "user"] },
+              "seatLimit": { "type": "integer", "minimum": 0 },
+              "subscriptionActive": { "type": "boolean" },
+              "subscriptionStatus": { "type": "string", "maxLength": 64 }
+            },
+            "required": ["hasSeat", "subscriptionActive"],
+            "additionalProperties": false
+          },
+          "credits": {
+            "type": "object",
+            "properties": {
+              "available": { "type": "number" },
+              "reconciled": { "type": "number" }
+            },
+            "required": ["available", "reconciled"],
+            "additionalProperties": false
+          },
+          "infrastructure": {
+            "type": "object",
+            "properties": {
+              "storage": {
+                "type": "string",
+                "enum": ["READY", "MISSING", "IN_PROGRESS", "FAILED", "UNKNOWN"]
+              },
+              "compute": {
+                "type": "string",
+                "enum": ["READY", "MISSING", "IN_PROGRESS", "FAILED", "UNKNOWN"]
+              }
+            },
+            "required": ["storage", "compute"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["membership", "credits", "infrastructure"],
+        "additionalProperties": false
+      },
+      "limits": {
+        "timeoutMs": 10000,
+        "maxResponseBytes": 16384,
+        "maxPageSize": 25,
+        "maxSourcePages": 5
+      },
+      "errors": [
+        "AUTHENTICATION_REQUIRED",
+        "NOT_FOUND_OR_ACCESS_DENIED",
+        "UPSTREAM_UNAVAILABLE",
+        "RESPONSE_LIMIT_EXCEEDED"
+      ],
+      "redaction": {
+        "neverReturn": [],
+        "textMaxChars": 256,
+        "textCategories": ["token", "email", "arn", "bucket", "object-key"]
+      }
+    },
+    {
+      "name": "listMySimulations",
+      "description": "List recent simulations authorized to the signed-in user with bounded local status and project-name filtering.",
+      "classification": "read-only",
+      "source": {
+        "kind": "fixed-graphql-query",
+        "operationName": "ListMySimulations",
+        "rootFields": ["listMySimulations"],
+        "document": "query ListMySimulations($status: String, $projectName: String, $limit: Int, $cursor: String) { listMySimulations(status: $status, projectName: $projectName, limit: $limit, cursor: $cursor) { items { simulationId projectName simulationName jobName status startTime durationSeconds totalFrequencies completedFrequencies failedFrequencies abortedFrequencies requestedComputeMode effectiveComputeMode batchStatus batchStatusEnteredAt } cursor } }",
+        "responseProjection": {
+          "source": "graphql-data",
+          "path": ["listMySimulations"]
+        },
+        "variables": {
+          "status": { "source": "input.status" },
+          "projectName": { "source": "input.projectName" },
+          "limit": { "source": "input.limit", "default": 10, "maximum": 25 },
+          "cursor": { "source": "input.cursor" }
+        },
+        "sourceOnlyFields": []
+      },
+      "ownership": {
+        "actor": "verified-cognito-sub-and-account",
+        "enforcement": "The fixed resolver derives subject and account from the verified token, verifies current tenant membership, filters by both values, and rechecks every row.",
+        "parentFirst": false
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED"]
+          },
+          "projectName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 25,
+            "default": 10
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 25,
+            "items": {
+              "type": "object",
+              "properties": {
+                "simulationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "projectName": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "simulationName": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "jobName": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "status": { "type": "string", "minLength": 1, "maxLength": 64 },
+                "startTime": { "type": "string", "format": "date-time" },
+                "durationSeconds": { "type": "number", "minimum": 0 },
+                "totalFrequencies": { "type": "integer", "minimum": 0 },
+                "completedFrequencies": { "type": "integer", "minimum": 0 },
+                "failedFrequencies": { "type": "integer", "minimum": 0 },
+                "abortedFrequencies": { "type": "integer", "minimum": 0 },
+                "requestedComputeMode": { "type": "string", "maxLength": 32 },
+                "effectiveComputeMode": { "type": "string", "maxLength": 32 },
+                "batchStatus": { "type": "string", "maxLength": 64 },
+                "batchStatusEnteredAt": { "type": "string", "format": "date-time" }
+              },
+              "required": [
+                "simulationId",
+                "projectName",
+                "simulationName",
+                "jobName",
+                "status",
+                "startTime"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": ["items"],
+        "additionalProperties": false
+      },
+      "limits": {
+        "timeoutMs": 10000,
+        "maxResponseBytes": 65536,
+        "maxPageSize": 25,
+        "maxSourcePages": 5
+      },
+      "errors": [
+        "AUTHENTICATION_REQUIRED",
+        "INVALID_INPUT",
+        "NOT_FOUND_OR_ACCESS_DENIED",
+        "UPSTREAM_UNAVAILABLE",
+        "RESPONSE_LIMIT_EXCEEDED"
+      ],
+      "redaction": {
+        "neverReturn": ["jobFileDataS3Key"],
+        "textMaxChars": 256,
+        "textCategories": ["token", "email", "arn", "bucket", "object-key"]
+      }
+    },
+    {
+      "name": "getMySimulation",
+      "description": "Return safe status, progress, timing, compute-mode, and run-summary fields for one owned simulation.",
+      "classification": "read-only",
+      "source": {
+        "kind": "fixed-graphql-query",
+        "operationName": "GetMySimulation",
+        "rootFields": ["getMySimulationRead"],
+        "document": "query GetMySimulation($simulationId: String!) { getMySimulationRead(simulationId: $simulationId, includeDiagnostics: false) { simulation { simulationId projectName simulationName jobName status startTime durationSeconds progress { total completed failed aborted } requestedComputeMode effectiveComputeMode autoEscalationEnabled escalatedAt batchStatus batchStatusEnteredAt guardrail { maxEstimatedCredits maxRuntimeMinutes } } } }",
+        "responseProjection": {
+          "source": "graphql-data",
+          "path": ["getMySimulationRead", "simulation"]
+        },
+        "variables": {
+          "simulationId": { "source": "input.simulationId" }
+        },
+        "sourceOnlyFields": []
+      },
+      "ownership": {
+        "actor": "verified-cognito-sub-and-account",
+        "enforcement": "The fixed resolver verifies current tenant membership and requires the parent Simulation to match both the token subject and current token account.",
+        "parentFirst": true
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "simulationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "required": ["simulationId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "simulationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "projectName": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "simulationName": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "jobName": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "status": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "startTime": { "type": "string", "format": "date-time" },
+          "durationSeconds": { "type": "number", "minimum": 0 },
+          "progress": {
+            "type": "object",
+            "properties": {
+              "total": { "type": "integer", "minimum": 0 },
+              "completed": { "type": "integer", "minimum": 0 },
+              "failed": { "type": "integer", "minimum": 0 },
+              "aborted": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["total", "completed", "failed", "aborted"],
+            "additionalProperties": false
+          },
+          "requestedComputeMode": { "type": "string", "maxLength": 32 },
+          "effectiveComputeMode": { "type": "string", "maxLength": 32 },
+          "autoEscalationEnabled": { "type": "boolean" },
+          "escalatedAt": { "type": "string", "format": "date-time" },
+          "batchStatus": { "type": "string", "maxLength": 64 },
+          "batchStatusEnteredAt": { "type": "string", "format": "date-time" },
+          "statusMessage": { "type": "string", "maxLength": 1000 },
+          "guardrail": {
+            "type": "object",
+            "properties": {
+              "maxEstimatedCredits": { "type": "number", "minimum": 0 },
+              "maxRuntimeMinutes": { "type": "integer", "minimum": 0 },
+              "message": { "type": "string", "maxLength": 1000 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "simulationId",
+          "projectName",
+          "simulationName",
+          "jobName",
+          "status",
+          "startTime",
+          "progress"
+        ],
+        "additionalProperties": false
+      },
+      "limits": {
+        "timeoutMs": 10000,
+        "maxResponseBytes": 32768,
+        "maxSourcePages": 1
+      },
+      "errors": [
+        "AUTHENTICATION_REQUIRED",
+        "INVALID_INPUT",
+        "NOT_FOUND_OR_ACCESS_DENIED",
+        "UPSTREAM_UNAVAILABLE",
+        "RESPONSE_LIMIT_EXCEEDED"
+      ],
+      "redaction": {
+        "neverReturn": [
+          "jobFileDataS3Key",
+          "currentBatchStatusReason",
+          "guardrailMessage"
+        ],
+        "textMaxChars": 1000,
+        "textCategories": ["token", "email", "arn", "bucket", "object-key"]
+      }
+    },
+    {
+      "name": "listMySimulationDiagnostics",
+      "description": "Return bounded stored frequency-job failures and incomplete-job diagnostics beneath an owned parent simulation.",
+      "classification": "read-only",
+      "source": {
+        "kind": "fixed-graphql-query",
+        "operationName": "ListMySimulationDiagnostics",
+        "rootFields": ["getMySimulationRead"],
+        "document": "query ListMySimulationDiagnostics($simulationId: String!, $limit: Int, $cursor: String) { getMySimulationRead(simulationId: $simulationId, includeDiagnostics: true, limit: $limit, cursor: $cursor) { diagnostics { simulationId simulationStatus items { frequencyIndex frequencyHz frequencyImagHz status reasonCategory message batchStatus startTime endTime durationSeconds queueWaitSeconds runSeconds attemptNumber requestedComputeMode effectiveComputeMode autoEscalated } cursor } } }",
+        "responseProjection": {
+          "source": "graphql-data",
+          "path": ["getMySimulationRead", "diagnostics"]
+        },
+        "variables": {
+          "simulationId": { "source": "input.simulationId" },
+          "limit": { "source": "input.limit", "default": 25, "maximum": 50 },
+          "cursor": { "source": "input.cursor" }
+        },
+        "sourceOnlyFields": []
+      },
+      "ownership": {
+        "actor": "verified-cognito-sub-and-account",
+        "enforcement": "The fixed resolver verifies current tenant membership and the account-matched Simulation parent first, then returns only bounded, user-matched, non-succeeded child diagnostics.",
+        "parentFirst": true
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "simulationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 25
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": ["simulationId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "simulationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "simulationStatus": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "properties": {
+                "frequencyIndex": { "type": "integer", "minimum": 0 },
+                "frequencyHz": { "type": "number" },
+                "frequencyImagHz": { "type": "number" },
+                "status": { "type": "string", "minLength": 1, "maxLength": 64 },
+                "reasonCategory": {
+                  "type": "string",
+                  "enum": [
+                    "CAPACITY_TIMEOUT",
+                    "INFRASTRUCTURE_INTERRUPTION",
+                    "MISCONFIGURATION",
+                    "APPLICATION_FAILURE",
+                    "CANCELED",
+                    "UNKNOWN"
+                  ]
+                },
+                "message": { "type": "string", "maxLength": 1000 },
+                "batchStatus": { "type": "string", "maxLength": 64 },
+                "startTime": { "type": "string", "format": "date-time" },
+                "endTime": { "type": "string", "format": "date-time" },
+                "durationSeconds": { "type": "number", "minimum": 0 },
+                "queueWaitSeconds": { "type": "number", "minimum": 0 },
+                "runSeconds": { "type": "number", "minimum": 0 },
+                "attemptNumber": { "type": "integer", "minimum": 0 },
+                "requestedComputeMode": { "type": "string", "maxLength": 32 },
+                "effectiveComputeMode": { "type": "string", "maxLength": 32 },
+                "autoEscalated": { "type": "boolean" }
+              },
+              "required": ["frequencyIndex", "status"],
+              "additionalProperties": false
+            }
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": ["simulationId", "simulationStatus", "items"],
+        "additionalProperties": false
+      },
+      "limits": {
+        "timeoutMs": 10000,
+        "maxResponseBytes": 65536,
+        "maxPageSize": 50,
+        "maxSourcePages": 5
+      },
+      "errors": [
+        "AUTHENTICATION_REQUIRED",
+        "INVALID_INPUT",
+        "NOT_FOUND_OR_ACCESS_DENIED",
+        "UPSTREAM_UNAVAILABLE",
+        "RESPONSE_LIMIT_EXCEEDED"
+      ],
+      "redaction": {
+        "neverReturn": [
+          "errorMessage",
+          "batchStatusReason",
+          "escalationReason"
+        ],
+        "textMaxChars": 1000,
+        "textCategories": ["token", "email", "arn", "bucket", "object-key"]
+      }
+    },
+    {
+      "name": "listMySimulationResultArtifacts",
+      "description": "List bounded relative result artifact metadata beneath the verified owned result prefix.",
+      "classification": "read-only",
+      "source": {
+        "kind": "fixed-graphql-query",
+        "operationName": "ListMySimulationResultArtifacts",
+        "rootFields": ["listMySimulationResultArtifacts"],
+        "document": "query ListMySimulationResultArtifacts($simulationId: String!, $limit: Int, $after: String) { listMySimulationResultArtifacts(simulationId: $simulationId, limit: $limit, after: $after) { items { relativePath sizeBytes lastModified storageClass } nextAfter } }",
+        "responseProjection": {
+          "source": "graphql-data",
+          "path": ["listMySimulationResultArtifacts"]
+        },
+        "variables": {
+          "simulationId": { "source": "input.simulationId" },
+          "limit": { "source": "input.limit", "default": 25, "maximum": 50 },
+          "after": { "source": "input.after" }
+        },
+        "sourceOnlyFields": []
+      },
+      "ownership": {
+        "actor": "verified-cognito-sub-and-account",
+        "enforcement": "The resolver verifies current tenant membership, the Simulation parent owner, the account-matched owned storage stack, and the exact stored output prefix before one bounded S3 ListBucket call.",
+        "parentFirst": true
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "simulationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 25
+          },
+          "after": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 768,
+            "pattern": "^(?![/\\\\])(?![A-Za-z][A-Za-z0-9+.-]*:)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000-\\u001f\\u007f\\\\]+$"
+          }
+        },
+        "required": ["simulationId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "properties": {
+                "relativePath": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 768
+                },
+                "sizeBytes": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "lastModified": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "storageClass": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                }
+              },
+              "required": ["relativePath", "sizeBytes", "storageClass"],
+              "additionalProperties": false
+            }
+          },
+          "nextAfter": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 768
+          }
+        },
+        "required": ["items"],
+        "additionalProperties": false
+      },
+      "limits": {
+        "timeoutMs": 15000,
+        "maxResponseBytes": 65536,
+        "maxPageSize": 50,
+        "maxSourcePages": 5
+      },
+      "errors": [
+        "AUTHENTICATION_REQUIRED",
+        "INVALID_INPUT",
+        "NOT_FOUND_OR_ACCESS_DENIED",
+        "RESULTS_NOT_AVAILABLE",
+        "UPSTREAM_UNAVAILABLE",
+        "RESPONSE_LIMIT_EXCEEDED"
+      ],
+      "redaction": {
+        "neverReturn": [],
+        "textMaxChars": 768,
+        "textCategories": ["token", "email", "arn", "bucket", "absolute-object-key"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+[
+  {
+    "operation": "getCloudReadiness",
+    "input": {},
+    "output": {
+      "membership": {
+        "hasSeat": true,
+        "role": "user",
+        "seatLimit": 3,
+        "subscriptionActive": true,
+        "subscriptionStatus": "active"
+      },
+      "credits": {
+        "available": 42,
+        "reconciled": 42
+      },
+      "infrastructure": {
+        "storage": "READY",
+        "compute": "READY"
+      }
+    }
+  },
+  {
+    "operation": "listMySimulations",
+    "input": {
+      "status": "RUNNING",
+      "projectName": "Acoustic Demo",
+      "limit": 10
+    },
+    "output": {
+      "items": [
+        {
+          "simulationId": "sim-example-001",
+          "projectName": "Acoustic Demo",
+          "simulationName": "Layered Model",
+          "jobName": "Forward",
+          "status": "RUNNING",
+          "startTime": "2026-07-24T12:00:00.000Z",
+          "totalFrequencies": 4,
+          "completedFrequencies": 2,
+          "failedFrequencies": 0,
+          "abortedFrequencies": 0,
+          "requestedComputeMode": "AUTO",
+          "effectiveComputeMode": "SPOT",
+          "batchStatus": "RUNNING"
+        }
+      ]
+    }
+  },
+  {
+    "operation": "getMySimulation",
+    "input": {
+      "simulationId": "sim-example-001"
+    },
+    "output": {
+      "simulationId": "sim-example-001",
+      "projectName": "Acoustic Demo",
+      "simulationName": "Layered Model",
+      "jobName": "Forward",
+      "status": "RUNNING",
+      "startTime": "2026-07-24T12:00:00.000Z",
+      "progress": {
+        "total": 4,
+        "completed": 2,
+        "failed": 0,
+        "aborted": 0
+      },
+      "requestedComputeMode": "AUTO",
+      "effectiveComputeMode": "SPOT",
+      "autoEscalationEnabled": true,
+      "batchStatus": "RUNNING"
+    }
+  },
+  {
+    "operation": "listMySimulationDiagnostics",
+    "input": {
+      "simulationId": "sim-example-001",
+      "limit": 25
+    },
+    "output": {
+      "simulationId": "sim-example-001",
+      "simulationStatus": "FAILED",
+      "items": [
+        {
+          "frequencyIndex": 2,
+          "frequencyHz": 8,
+          "status": "FAILED",
+          "reasonCategory": "APPLICATION_FAILURE",
+          "message": "The frequency job did not complete (APPLICATION_FAILURE).",
+          "batchStatus": "FAILED",
+          "attemptNumber": 1,
+          "requestedComputeMode": "AUTO",
+          "effectiveComputeMode": "SPOT",
+          "autoEscalated": false
+        }
+      ]
+    }
+  },
+  {
+    "operation": "listMySimulationResultArtifacts",
+    "input": {
+      "simulationId": "sim-example-001",
+      "limit": 25
+    },
+    "output": {
+      "items": [
+        {
+          "relativePath": "frequency-0000/receiver-data.json",
+          "sizeBytes": 2048,
+          "lastModified": "2026-07-24T12:05:00.000Z",
+          "storageClass": "STANDARD"
+        }
+      ]
+    }
+  }
+]

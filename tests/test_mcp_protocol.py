@@ -20,6 +20,10 @@ from frequensolve.mcp_server.cli import main
 from frequensolve.mcp_server.server import MCP_SERVER_VERSION, build_server
 
 TOOL_NAMES = {
+    "cloud_check_readiness",
+    "cloud_get_simulation",
+    "cloud_list_result_artifacts",
+    "cloud_list_simulations",
     "find_vetted_example",
     "create_simulation_draft",
     "validate_simulation_setup",
@@ -30,6 +34,7 @@ TOOL_NAMES = {
 }
 PROMPT_NAMES = {
     "start_2d_acoustic",
+    "monitor_cloud_simulation",
     "review_simulation_setup",
     "prepare_simulation_run",
     "debug_validation",
@@ -45,6 +50,7 @@ RESOURCE_NAMES = {
     "examples",
     "glossary",
     "allowed-roots",
+    "cloud-read-contract",
 }
 
 
@@ -101,7 +107,7 @@ def test_official_client_initializes_and_lists_the_finite_closed_surface():
                 assert tool.annotations.readOnlyHint is True
                 assert tool.annotations.destructiveHint is False
                 assert tool.annotations.idempotentHint is True
-                assert tool.annotations.openWorldHint is False
+                assert tool.annotations.openWorldHint is tool.name.startswith("cloud_")
                 _assert_closed_object_schemas(tool.inputSchema)
                 assert tool.outputSchema is not None
                 _assert_closed_object_schemas(tool.outputSchema)
@@ -127,6 +133,248 @@ def test_official_client_initializes_and_lists_the_finite_closed_surface():
             assert payload["package"]["full_revisionid"]
 
     _run(check)
+
+
+def test_cloud_tools_map_to_only_the_five_fixed_read_operations(monkeypatch):
+    calls: list[tuple[str | None, str, dict[str, Any]]] = []
+    responses = {
+        "getCloudReadiness": {
+            "membership": {"hasSeat": True, "subscriptionActive": True},
+            "credits": {"available": 20.0, "reconciled": 20.0},
+            "infrastructure": {"storage": "READY", "compute": "READY"},
+        },
+        "listMySimulations": {
+            "items": [
+                {
+                    "simulationId": "simulation-1",
+                    "projectName": "project",
+                    "simulationName": "simulation",
+                    "jobName": "job",
+                    "status": "RUNNING",
+                    "startTime": "2026-07-25T00:00:00Z",
+                }
+            ]
+        },
+        "getMySimulation": {
+            "simulationId": "simulation-1",
+            "projectName": "project",
+            "simulationName": "simulation",
+            "jobName": "job",
+            "status": "RUNNING",
+            "startTime": "2026-07-25T00:00:00Z",
+            "progress": {"total": 1, "completed": 0, "failed": 0, "aborted": 0},
+        },
+        "listMySimulationDiagnostics": {
+            "simulationId": "simulation-1",
+            "simulationStatus": "RUNNING",
+            "items": [],
+        },
+        "listMySimulationResultArtifacts": {
+            "items": [
+                {
+                    "relativePath": "frequency (10 Hz)/receiver-data.h5",
+                    "sizeBytes": 12,
+                    "storageClass": "STANDARD",
+                }
+            ],
+            "nextAfter": "résult+/frequency (10 Hz)/receiver-data.h5",
+        },
+    }
+
+    async def fixed_cloud_dispatch(function, profile, operation, arguments, **kwargs):
+        del kwargs
+        assert function is server_module.cloud.execute_cloud_operation
+        calls.append((profile, operation, arguments))
+        return responses[operation]
+
+    async def check() -> None:
+        monkeypatch.setattr(
+            server_module.anyio.to_process,
+            "run_sync",
+            fixed_cloud_dispatch,
+        )
+        server = build_server(cloud_profile="staging")
+        async with create_connected_server_and_client_session(server) as session:
+            results = [
+                await session.call_tool(
+                    "cloud_check_readiness",
+                    {"request": {}},
+                ),
+                await session.call_tool(
+                    "cloud_list_simulations",
+                    {
+                        "request": {
+                            "status": "RUNNING",
+                            "project_name": "Project (α)+1",
+                            "limit": 5,
+                            "cursor": "opaque+/=cursor",
+                        }
+                    },
+                ),
+                await session.call_tool(
+                    "cloud_get_simulation",
+                    {
+                        "request": {
+                            "simulation_id": "simulation+(α)",
+                            "view": "summary",
+                        }
+                    },
+                ),
+                await session.call_tool(
+                    "cloud_get_simulation",
+                    {
+                        "request": {
+                            "simulation_id": "simulation+(α)",
+                            "view": "diagnostics",
+                            "limit": 7,
+                        }
+                    },
+                ),
+                await session.call_tool(
+                    "cloud_list_result_artifacts",
+                    {
+                        "request": {
+                            "simulation_id": "simulation+(α)",
+                            "limit": 6,
+                            "after": "folder/résult+(1).h5",
+                        }
+                    },
+                ),
+            ]
+            assert all(result.isError is False for result in results)
+            assert all(
+                result.structuredContent is not None
+                and result.structuredContent["ok"] is True
+                for result in results
+            )
+            result_content = results[-1].structuredContent
+            assert result_content is not None
+            result_payload = json.loads(result_content["payload"])
+            assert result_payload["items"][0]["relativePath"] == (
+                "frequency (10 Hz)/receiver-data.h5"
+            )
+            assert result_payload["nextAfter"] == (
+                "résult+/frequency (10 Hz)/receiver-data.h5"
+            )
+
+    _run(check)
+    assert calls == [
+        ("staging", "getCloudReadiness", {}),
+        (
+            "staging",
+            "listMySimulations",
+            {
+                "limit": 5,
+                "status": "RUNNING",
+                "projectName": "Project (α)+1",
+                "cursor": "opaque+/=cursor",
+            },
+        ),
+        (
+            "staging",
+            "getMySimulation",
+            {"simulationId": "simulation+(α)"},
+        ),
+        (
+            "staging",
+            "listMySimulationDiagnostics",
+            {"simulationId": "simulation+(α)", "limit": 7},
+        ),
+        (
+            "staging",
+            "listMySimulationResultArtifacts",
+            {
+                "simulationId": "simulation+(α)",
+                "limit": 6,
+                "after": "folder/résult+(1).h5",
+            },
+        ),
+    ]
+    serialized = json.dumps(calls)
+    for forbidden in (
+        "accountId",
+        "userId",
+        "authorization",
+        "token",
+        "mutation",
+        "subscription",
+    ):
+        assert forbidden not in serialized
+
+
+def test_cloud_identifier_probes_and_configuration_failures_are_safe(
+    monkeypatch,
+):
+    async def not_found(function, profile, operation, arguments, **kwargs):
+        del function, profile, operation, arguments, kwargs
+        raise server_module.cloud.CloudReadError(
+            "NOT_FOUND_OR_ACCESS_DENIED",
+            "The requested simulation was not found or is not available to this user.",
+            False,
+        )
+
+    async def check_not_found() -> None:
+        monkeypatch.setattr(server_module.anyio.to_process, "run_sync", not_found)
+        server = build_server()
+        async with create_connected_server_and_client_session(server) as session:
+            results = []
+            for simulation_id in ("owned-looking-id", "foreign-looking-id"):
+                results.append(
+                    await session.call_tool(
+                        "cloud_get_simulation",
+                        {
+                            "request": {
+                                "simulation_id": simulation_id,
+                                "view": "summary",
+                            }
+                        },
+                    )
+                )
+                results.append(
+                    await session.call_tool(
+                        "cloud_list_result_artifacts",
+                        {"request": {"simulation_id": simulation_id}},
+                    )
+                )
+            payloads = [result.structuredContent for result in results]
+            assert all(payload is not None for payload in payloads)
+            assert payloads[0] == payloads[1] == payloads[2] == payloads[3]
+            serialized = json.dumps(payloads)
+            assert "owned-looking-id" not in serialized
+            assert "foreign-looking-id" not in serialized
+
+    _run(check_not_found)
+
+    async def support_required(function, profile, operation, arguments, **kwargs):
+        del function, profile, operation, arguments, kwargs
+        raise server_module.cloud.CloudReadError(
+            "CLOUD_SUPPORT_REQUIRED",
+            "Cloud support is not installed.",
+            False,
+        )
+
+    async def check_support_required() -> None:
+        monkeypatch.setattr(
+            server_module.anyio.to_process,
+            "run_sync",
+            support_required,
+        )
+        server = build_server()
+        async with create_connected_server_and_client_session(server) as session:
+            result = await session.call_tool(
+                "cloud_check_readiness",
+                {"request": {}},
+            )
+            assert result.structuredContent is not None
+            assert result.structuredContent["ok"] is False
+            assert result.structuredContent["diagnostics"][0]["code"] == (
+                "cloud.cloud_support_required"
+            )
+            assert "frequensolve[mcp,cloud]" in (
+                result.structuredContent["diagnostics"][0]["remediation"]
+            )
+
+    _run(check_support_required)
 
 
 def test_canonical_2d_acoustic_agent_flow_is_deterministic_and_read_only():
@@ -271,6 +519,25 @@ def test_protocol_errors_are_stable_strict_and_do_not_reflect_input():
             (
                 "find_vetted_example",
                 {"request": {"query": sensitive * 6_000}},
+            ),
+            (
+                "cloud_get_simulation",
+                {
+                    "request": {
+                        "simulation_id": "simulation-1",
+                        "view": "summary",
+                        "limit": 1,
+                    }
+                },
+            ),
+            (
+                "cloud_list_result_artifacts",
+                {
+                    "request": {
+                        "simulation_id": "simulation-1",
+                        "after": "../private",
+                    }
+                },
             ),
         )
         async with create_connected_server_and_client_session(server) as session:
@@ -533,18 +800,45 @@ def test_programmatic_server_limits_match_the_cli(timeout, concurrency):
         )
 
 
+@pytest.mark.parametrize(
+    "profile",
+    [
+        "",
+        "Staging",
+        "../staging",
+        "has a space",
+        "https://app.example",
+        "x" * 33,
+    ],
+)
+def test_programmatic_server_rejects_unsafe_cloud_profiles(profile):
+    with pytest.raises(ValueError):
+        build_server(cloud_profile=profile)
+
+
 def test_cli_doctor_uses_the_official_in_memory_client():
     result = CliRunner().invoke(main, ["doctor"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {
         "allowed_root_ids": [],
+        "cloud_profile_selection": "default",
         "ok": True,
-        "prompts": 4,
-        "resources": 10,
-        "tools": 7,
+        "prompts": 5,
+        "resources": 11,
+        "tools": 11,
         "transport": "in-memory",
     }
+
+
+def test_cli_doctor_accepts_a_safe_explicit_cloud_profile():
+    result = CliRunner().invoke(
+        main,
+        ["doctor", "--cloud-profile", "staging"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["cloud_profile_selection"] == "explicit"
 
 
 def test_cli_missing_mcp_extra_shows_the_install_command(monkeypatch):

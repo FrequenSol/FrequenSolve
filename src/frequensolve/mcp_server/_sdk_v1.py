@@ -27,6 +27,12 @@ READ_ONLY_TOOL_ANNOTATIONS = ToolAnnotations(
     idempotentHint=True,
     openWorldHint=False,
 )
+CLOUD_READ_ONLY_TOOL_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
 
 
 class AdapterCompatibilityError(RuntimeError):
@@ -209,11 +215,17 @@ async def _run_in_memory_doctor(server: SafeFastMCP) -> dict[str, object]:
         identity = await session.read_resource(
             AnyUrl("frequensolve://simulation-assistant/identity")
         )
-        if len(tools.tools) != 7 or len(resources.resources) != 10:
+        tool_names = {tool.name for tool in tools.tools}
+        resource_uris = {str(resource.uri) for resource in resources.resources}
+        prompt_names = {prompt.name for prompt in prompts.prompts}
+        if (
+            tool_names != server._allowed_tool_names
+            or resource_uris != server._allowed_resource_uris
+        ):
             raise AdapterCompatibilityError(
                 "The MCP doctor found an incomplete server surface"
             )
-        if len(prompts.prompts) != 4 or not identity.contents:
+        if prompt_names != server._allowed_prompt_names or not identity.contents:
             raise AdapterCompatibilityError(
                 "The MCP doctor could not read the fixed surface"
             )
