@@ -1018,7 +1018,12 @@ class SourceEncoding(ExtraFieldsMixin):
         count: Optional[int] = None,
         **kwargs: Any,
     ) -> "SourceEncoding":
-        """Create HDF5 dense source encoding."""
+        """Create HDF5 dense source encoding.
+
+        The coefficient dataset uses h5py shape
+        ``(encoded_field_count, source_count, 2)``. The final axis stores the
+        real and imaginary components expected by FrequenSolver.
+        """
 
         return cls(
             encoding_type="HDF5Dense",

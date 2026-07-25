@@ -463,12 +463,20 @@ class BaseJob(
         self += wavefield(*args, **kwargs)
         return self
 
-    def validate(self, *, raise_errors: bool = False):
+    def validate(
+        self,
+        *,
+        raise_errors: bool = False,
+        allow_unverified_remote_files: bool = False,
+    ):
         """Validate this job for common pre-run authoring mistakes.
 
         Args:
             raise_errors: If ``True``, raise ``ValidationError`` when blocking
                 issues are found.
+            allow_unverified_remote_files: Treat absolute file references
+                outside the local project as target-site files that cannot be
+                checked locally.
 
         Returns:
             ``ValidationReport`` with errors and warnings.
@@ -476,7 +484,11 @@ class BaseJob(
 
         from frequensolve.validation import validate_job
 
-        return validate_job(self, raise_errors=raise_errors)
+        return validate_job(
+            self,
+            raise_errors=raise_errors,
+            allow_unverified_remote_files=allow_unverified_remote_files,
+        )
 
     def validate_outputs(self) -> None:
         """Validate output requests before saving or executing the job.

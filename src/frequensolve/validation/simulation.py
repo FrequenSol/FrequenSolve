@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Mapping, Optional
 
+import h5py
 import numpy as np
 
 from frequensolve.mesh.mesh_generators import BaseMeshGenerator
@@ -16,6 +18,7 @@ from frequensolve.seismic.receivers import (
     CoordsSurfaceCarpet,
     ReceiverGroup,
 )
+from frequensolve.units import unit_expression
 from frequensolve.util.physics import canonical_dimension, canonical_physics
 
 from .geometry import (
@@ -252,7 +255,14 @@ def _validate_source_geometry(
     defaults = getattr(geometry, "defaults", {}) or {}
     _validate_direction(defaults.get("direction"), f"{path}.defaults.direction", ctx)
 
-    if getattr(geometry, "geometry_type", None) != "Inline":
+    geometry_type = getattr(geometry, "geometry_type", None)
+    if geometry_type == "HDF5":
+        _validate_hdf5_source_geometry(geometry, path, ctx)
+        return
+    if geometry_type == "SPSFiles":
+        _validate_sps_source_geometry(geometry, path, ctx)
+        return
+    if geometry_type != "Inline":
         return
 
     sources = list(getattr(geometry, "sources", []) or [])
@@ -350,6 +360,7 @@ def _validate_source_encoding(
     point_count = getattr(geometry, "point_count", None)
     fields = list(getattr(encoding, "fields", []) or [])
     if encoding_type == "HDF5Dense":
+        _validate_hdf5_source_encoding(encoding, geometry, path, ctx)
         return
     if not fields:
         ctx.report.error(
@@ -376,6 +387,13 @@ def _validate_source_encoding(
             )
     for index, field_obj in enumerate(fields):
         field_path = f"{path}.fields[{index}]"
+        reference_coordinates = getattr(field_obj, "reference_coordinates", None)
+        if reference_coordinates is not None:
+            _validate_source_reference_coordinates(
+                reference_coordinates,
+                f"{field_path}.reference_coordinates",
+                ctx,
+            )
         if encoding_type == "Named":
             for source_name in getattr(field_obj, "terms", {}) or {}:
                 if point_names and source_name not in point_names:
@@ -393,6 +411,521 @@ def _validate_source_encoding(
                     "number of physical source points.",
                     path=f"{field_path}.coefficients",
                 )
+
+
+def _validate_hdf5_source_geometry(
+    geometry: Any,
+    path: str,
+    ctx: _ValidationContext,
+) -> None:
+    file_reference = getattr(geometry, "file", None)
+    file = _resolve_project_file(file_reference, ctx)
+    if not _validate_local_file(
+        file,
+        authored_absolute=_is_absolute_file_reference(file_reference),
+        path=f"{path}.file",
+        missing_code="acquisition.source_geometry.file_missing",
+        invalid_code="acquisition.source_geometry.file_invalid",
+        label="Source-geometry HDF5",
+        ctx=ctx,
+    ):
+        return
+
+    dataset_name = str(getattr(geometry, "dataset", "") or "")
+    try:
+        with h5py.File(file, "r") as h5:
+            dataset = h5.get(dataset_name)
+            if not isinstance(dataset, h5py.Dataset):
+                ctx.report.error(
+                    "acquisition.source_geometry.dataset_missing",
+                    "Source-geometry HDF5 dataset does not exist.",
+                    path=f"{path}.dataset",
+                    hint="Choose an existing coordinate dataset.",
+                )
+                return
+            if dataset.ndim != 2 or dataset.shape[0] < 1:
+                ctx.report.error(
+                    "acquisition.source_geometry.dataset_shape",
+                    "Source-geometry HDF5 dataset must be a non-empty "
+                    "two-dimensional coordinate array.",
+                    path=f"{path}.dataset",
+                    hint="Use shape (source_count, coordinate_dimension).",
+                )
+                return
+            if ctx.dimension and dataset.shape[1] != ctx.dimension:
+                ctx.report.error(
+                    "acquisition.source_geometry.dimension_mismatch",
+                    f"Source-geometry coordinates have dimension "
+                    f"{dataset.shape[1]}, but the simulation expects "
+                    f"{ctx.dimension}.",
+                    path=f"{path}.dataset",
+                )
+            count = getattr(geometry, "count", None)
+            if count is not None and int(count) != dataset.shape[0]:
+                ctx.report.error(
+                    "acquisition.source_geometry.count_mismatch",
+                    "Source-geometry count does not match its HDF5 dataset.",
+                    path=f"{path}.count",
+                    hint=f"Use count={dataset.shape[0]} or omit count.",
+                )
+            _validate_hdf5_coordinate_values(
+                dataset,
+                path=f"{path}.dataset",
+                ctx=ctx,
+                units=(
+                    unit_expression(geometry.units)
+                    if getattr(geometry, "units", None) is not None
+                    else _default_length_units(ctx)
+                ),
+                system=getattr(geometry, "system", None),
+                code_prefix="acquisition.source_geometry",
+            )
+    except OSError:
+        ctx.report.error(
+            "acquisition.source_geometry.file_unreadable",
+            "Source-geometry HDF5 file could not be read.",
+            path=f"{path}.file",
+            hint="Provide a valid, readable HDF5 file.",
+        )
+
+
+def _validate_sps_source_geometry(
+    geometry: Any,
+    path: str,
+    ctx: _ValidationContext,
+) -> None:
+    file_reference = getattr(geometry, "source_file", None)
+    file = _resolve_project_file(file_reference, ctx)
+    _validate_local_file(
+        file,
+        authored_absolute=_is_absolute_file_reference(file_reference),
+        path=f"{path}.source_file",
+        missing_code="acquisition.source_geometry.source_file_missing",
+        invalid_code="acquisition.source_geometry.source_file_invalid",
+        label="SPS source",
+        ctx=ctx,
+    )
+
+
+def _validate_hdf5_source_encoding(
+    encoding: Any,
+    geometry: Any,
+    path: str,
+    ctx: _ValidationContext,
+) -> None:
+    file_reference = getattr(encoding, "file", None)
+    file = _resolve_project_file(file_reference, ctx)
+    if not _validate_local_file(
+        file,
+        authored_absolute=_is_absolute_file_reference(file_reference),
+        path=f"{path}.file",
+        missing_code="acquisition.source_encoding.file_missing",
+        invalid_code="acquisition.source_encoding.file_invalid",
+        label="Source-encoding HDF5",
+        ctx=ctx,
+    ):
+        return
+
+    dataset_name = str(getattr(encoding, "dataset", "") or "")
+    try:
+        with h5py.File(file, "r") as h5:
+            matrix = h5.get(dataset_name)
+            if not isinstance(matrix, h5py.Dataset):
+                ctx.report.error(
+                    "acquisition.source_encoding.dataset_missing",
+                    "Source-encoding HDF5 dataset does not exist.",
+                    path=f"{path}.dataset",
+                    hint="Choose an existing coefficient dataset.",
+                )
+                return
+            if (
+                matrix.ndim != 3
+                or matrix.shape[2] != 2
+                or min(matrix.shape, default=0) < 1
+            ):
+                ctx.report.error(
+                    "acquisition.source_encoding.dataset_shape",
+                    "Source-encoding HDF5 dataset must use non-empty paired "
+                    "real/imaginary coefficient storage.",
+                    path=f"{path}.dataset",
+                    hint="Use shape (encoded_field_count, source_count, 2).",
+                )
+                return
+            _validate_hdf5_numeric_values(
+                matrix,
+                path=f"{path}.dataset",
+                code_prefix="acquisition.source_encoding",
+                label="Source-encoding coefficient",
+                ctx=ctx,
+            )
+
+            point_count = getattr(geometry, "point_count", None)
+            if point_count is not None and int(point_count) != matrix.shape[1]:
+                ctx.report.error(
+                    "acquisition.source_encoding.source_count_mismatch",
+                    "Source-encoding coefficient source count does not match "
+                    "the source geometry count.",
+                    path=f"{path}.dataset",
+                )
+            field_count = getattr(encoding, "count", None)
+            if field_count is not None and int(field_count) != matrix.shape[0]:
+                ctx.report.error(
+                    "acquisition.source_encoding.field_count_mismatch",
+                    "Source-encoding count does not match its HDF5 dataset.",
+                    path=f"{path}.count",
+                    hint=f"Use count={matrix.shape[0]} or omit count.",
+                )
+
+            _validate_optional_hdf5_field_names(
+                h5,
+                getattr(encoding, "field_names_dataset", None),
+                expected_length=matrix.shape[0],
+                path=f"{path}.field_names_dataset",
+                ctx=ctx,
+            )
+            _validate_optional_hdf5_references(
+                h5,
+                getattr(encoding, "reference_coordinates_dataset", None),
+                expected_fields=matrix.shape[0],
+                path=f"{path}.reference_coordinates_dataset",
+                units=(
+                    unit_expression(geometry.units)
+                    if getattr(geometry, "units", None) is not None
+                    else _default_length_units(ctx)
+                ),
+                system=getattr(geometry, "system", None),
+                ctx=ctx,
+            )
+    except OSError:
+        ctx.report.error(
+            "acquisition.source_encoding.file_unreadable",
+            "Source-encoding HDF5 file could not be read.",
+            path=f"{path}.file",
+            hint="Provide a valid, readable HDF5 file.",
+        )
+
+
+def _validate_optional_hdf5_field_names(
+    h5: h5py.File,
+    dataset_name: Any,
+    *,
+    expected_length: int,
+    path: str,
+    ctx: _ValidationContext,
+) -> None:
+    if dataset_name is None:
+        return
+    dataset = h5.get(str(dataset_name))
+    if not isinstance(dataset, h5py.Dataset):
+        ctx.report.error(
+            "acquisition.source_encoding.field_names.dataset_missing",
+            "Referenced HDF5 metadata dataset does not exist.",
+            path=path,
+        )
+        return
+    if dataset.ndim != 1 or dataset.shape[0] != expected_length:
+        ctx.report.error(
+            "acquisition.source_encoding.field_names.length_mismatch",
+            "Referenced HDF5 metadata must contain one value per encoded field.",
+            path=path,
+        )
+        return
+
+    seen: set[str] = set()
+    for start in range(0, expected_length, 65_536):
+        try:
+            values = np.asarray(dataset[start : start + 65_536]).reshape(-1)
+        except OSError:
+            ctx.report.error(
+                "acquisition.source_encoding.field_names.dataset_unreadable",
+                "Source-encoding field names could not be read.",
+                path=path,
+            )
+            return
+        for value in values:
+            if isinstance(value, bytes):
+                try:
+                    name = value.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    name = ""
+            elif isinstance(value, str):
+                name = value.strip()
+            else:
+                name = ""
+            if not name:
+                ctx.report.error(
+                    "acquisition.source_encoding.field_names.value_invalid",
+                    "Source-encoding field names must be non-empty UTF-8 strings.",
+                    path=path,
+                )
+                return
+            if name in seen:
+                ctx.report.error(
+                    "acquisition.source_encoding.field_names.duplicate",
+                    "Source-encoding field names must be unique.",
+                    path=path,
+                )
+                return
+            seen.add(name)
+
+
+def _validate_optional_hdf5_references(
+    h5: h5py.File,
+    dataset_name: Any,
+    *,
+    expected_fields: int,
+    path: str,
+    units: Optional[str],
+    system: Optional[str],
+    ctx: _ValidationContext,
+) -> None:
+    if dataset_name is None:
+        return
+    dataset = h5.get(str(dataset_name))
+    if not isinstance(dataset, h5py.Dataset):
+        ctx.report.error(
+            "acquisition.source_encoding.reference_coordinates.dataset_missing",
+            "Referenced HDF5 reference-coordinate dataset does not exist.",
+            path=path,
+        )
+        return
+    if (
+        dataset.ndim != 2
+        or dataset.shape[0] != expected_fields
+        or (ctx.dimension and dataset.shape[1] != ctx.dimension)
+    ):
+        ctx.report.error(
+            "acquisition.source_encoding.reference_coordinates.shape",
+            "HDF5 reference coordinates must contain one coordinate row per "
+            "encoded field in the simulation dimension.",
+            path=path,
+        )
+        return
+    _validate_hdf5_coordinate_values(
+        dataset,
+        path=path,
+        ctx=ctx,
+        units=units,
+        system=system,
+        code_prefix="acquisition.source_encoding.reference_coordinates",
+    )
+
+
+def _validate_hdf5_coordinate_values(
+    dataset: h5py.Dataset,
+    *,
+    path: str,
+    ctx: _ValidationContext,
+    units: Optional[str],
+    system: Optional[str],
+    code_prefix: str,
+) -> None:
+    if not (
+        np.issubdtype(dataset.dtype, np.integer)
+        or np.issubdtype(dataset.dtype, np.floating)
+    ):
+        ctx.report.error(
+            f"{code_prefix}.dataset_numeric",
+            "Coordinate dataset values must be numeric and readable.",
+            path=path,
+        )
+        return
+    lower: Optional[np.ndarray] = None
+    upper: Optional[np.ndarray] = None
+    row_count = int(dataset.shape[0])
+    for start in range(0, row_count, 65_536):
+        try:
+            values = np.asarray(dataset[start : start + 65_536])
+        except OSError:
+            ctx.report.error(
+                f"{code_prefix}.dataset_numeric",
+                "Coordinate dataset values must be numeric and readable.",
+                path=path,
+            )
+            return
+        if not np.all(np.isfinite(values)):
+            ctx.report.error(
+                f"{code_prefix}.dataset_nonfinite",
+                "Coordinate dataset contains non-finite values.",
+                path=path,
+            )
+            return
+        chunk_lower = np.min(values, axis=0)
+        chunk_upper = np.max(values, axis=0)
+        lower = chunk_lower if lower is None else np.minimum(lower, chunk_lower)
+        upper = chunk_upper if upper is None else np.maximum(upper, chunk_upper)
+    if lower is not None and upper is not None:
+        _validate_bounds(
+            lower,
+            upper,
+            path=path,
+            ctx=ctx,
+            units=units,
+            system=system,
+        )
+
+
+def _validate_hdf5_numeric_values(
+    dataset: h5py.Dataset,
+    *,
+    path: str,
+    code_prefix: str,
+    label: str,
+    ctx: _ValidationContext,
+) -> None:
+    if not (
+        np.issubdtype(dataset.dtype, np.integer)
+        or np.issubdtype(dataset.dtype, np.floating)
+    ):
+        ctx.report.error(
+            f"{code_prefix}.dataset_numeric",
+            f"{label} values must be numeric and readable.",
+            path=path,
+        )
+        return
+    row_count = int(dataset.shape[0])
+    for start in range(0, row_count, 65_536):
+        try:
+            values = np.asarray(dataset[start : start + 65_536])
+        except OSError:
+            ctx.report.error(
+                f"{code_prefix}.dataset_numeric",
+                f"{label} values must be numeric and readable.",
+                path=path,
+            )
+            return
+        if not np.all(np.isfinite(values)):
+            ctx.report.error(
+                f"{code_prefix}.dataset_nonfinite",
+                f"{label} dataset contains non-finite values.",
+                path=path,
+            )
+            return
+
+
+def _validate_source_reference_coordinates(
+    coordinates: Any,
+    path: str,
+    ctx: _ValidationContext,
+) -> None:
+    _validate_coordinate_value_metadata(coordinates, path, ctx)
+    units, system = _coordinate_units_and_system(coordinates)
+    try:
+        values = _coordinates_to_array(coordinates)
+    except (TypeError, ValueError):
+        ctx.report.error(
+            "acquisition.source_encoding.reference_coordinates.invalid",
+            "Source-field reference coordinates must be numeric.",
+            path=path,
+        )
+        return
+    if values.ndim == 1:
+        values = values.reshape(1, -1)
+    _validate_points(
+        values,
+        path=path,
+        ctx=ctx,
+        units=units or _default_length_units(ctx),
+        system=system,
+    )
+
+
+def _resolve_project_file(value: Any, ctx: _ValidationContext) -> Optional[Path]:
+    if value is None:
+        return None
+    file = Path(value).expanduser()
+    if file.is_absolute():
+        return file
+    project_path = getattr(ctx.simulation, "project_path", None)
+    if project_path is None:
+        return file
+    return Path(project_path).expanduser() / file
+
+
+def _is_absolute_file_reference(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        return Path(value).expanduser().is_absolute()
+    except TypeError:
+        return False
+
+
+def _validate_local_file(
+    file: Optional[Path],
+    *,
+    authored_absolute: bool,
+    path: str,
+    missing_code: str,
+    invalid_code: str,
+    label: str,
+    ctx: _ValidationContext,
+) -> bool:
+    if _is_unverified_remote_file(
+        file,
+        authored_absolute=authored_absolute,
+        ctx=ctx,
+    ):
+        ctx.report.warning(
+            "files.remote_unverified",
+            f"{label} uses an absolute target-site path that cannot be "
+            "verified locally.",
+            path=path,
+            hint="Confirm that the file exists and is readable on the target site.",
+        )
+        return False
+    if file is None or not file.exists():
+        ctx.report.error(
+            missing_code,
+            f"{label} file does not exist.",
+            path=path,
+            hint="Create or copy the referenced file before saving or submitting.",
+        )
+        return False
+    if not file.is_file():
+        ctx.report.error(
+            invalid_code,
+            f"{label} reference must identify a regular file.",
+            path=path,
+        )
+        return False
+    return True
+
+
+def _is_unverified_remote_file(
+    file: Optional[Path],
+    *,
+    authored_absolute: bool,
+    ctx: _ValidationContext,
+) -> bool:
+    if (
+        file is None
+        or not authored_absolute
+        or not file.is_absolute()
+        or not ctx.allow_unverified_remote_files
+    ):
+        return False
+    try:
+        if file.exists():
+            return False
+    except OSError:
+        pass
+
+    project_path = getattr(ctx.simulation, "project_path", None)
+    if project_path is None:
+        return True
+
+    try:
+        file = file.resolve(strict=False)
+        project = Path(project_path).expanduser().resolve(strict=False)
+    except OSError:
+        project = Path(project_path).expanduser()
+    try:
+        file.relative_to(project)
+        return False
+    except ValueError:
+        pass
+    return True
 
 
 def _validate_source_kind(kind: Any, path: str, report: ValidationReport) -> None:
@@ -553,16 +1086,26 @@ def _validate_receiver_coordinates(
             )
         if coords.system is not None:
             _validate_system_reference(coords.system, f"{path}.system", ctx)
-        file = _coords_file(coords)
-        if file is not None and not file.exists():
-            ctx.report.error(
-                "acquisition.receiver_coordinates.file_missing",
-                f"Receiver coordinate file does not exist: {file}",
-                path=f"{path}.file",
-            )
+        file_reference = _coords_file(coords)
+        file = _resolve_project_file(file_reference, ctx)
+        if not _validate_local_file(
+            file,
+            authored_absolute=_is_absolute_file_reference(file_reference),
+            path=f"{path}.file",
+            missing_code="acquisition.receiver_coordinates.file_missing",
+            invalid_code="acquisition.receiver_coordinates.file_invalid",
+            label="Receiver coordinate",
+            ctx=ctx,
+        ):
             return
         try:
-            lower, upper = coords.bounds
+            if coords.format == "HDF5":
+                with h5py.File(file, "r") as h5:
+                    values = h5[coords.dset or "coords"]
+                    lower = np.min(values, axis=0)
+                    upper = np.max(values, axis=0)
+            else:
+                lower, upper = coords.bounds
         except Exception as exc:
             ctx.report.error(
                 "acquisition.receiver_coordinates.unreadable",

@@ -45,9 +45,15 @@ class _ValidationContext:
     dimension: int
     systems: dict[str, CoordinateSystem]
     domain: Optional[_DomainBounds] = None
+    allow_unverified_remote_files: bool = False
 
 
-def _build_context(simulation: Any, report: ValidationReport) -> _ValidationContext:
+def _build_context(
+    simulation: Any,
+    report: ValidationReport,
+    *,
+    allow_unverified_remote_files: bool = False,
+) -> _ValidationContext:
     dimension = _simulation_model_dimension(simulation, report)
     systems = _known_coordinate_systems(simulation)
     ctx = _ValidationContext(
@@ -55,6 +61,7 @@ def _build_context(simulation: Any, report: ValidationReport) -> _ValidationCont
         report=report,
         dimension=dimension,
         systems=systems,
+        allow_unverified_remote_files=allow_unverified_remote_files,
     )
     ctx.domain = _infer_domain_bounds(ctx)
     return ctx

@@ -834,7 +834,7 @@ class AWSSite(BaseSite):
             self._emit(f"Skipping {job.name}; run is current")
             return RunHandle.skipped(self, job)
 
-        self.prepare_job(job, sync_project=True, validate=validate)
+        self.prepare_job(job, sync_project=True, validate=False)
 
         # Check if compute stack exists, create if missing
         if self.graphql_client is not None:

@@ -671,12 +671,20 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
 
         return self.validate().ok
 
-    def validate(self, *, raise_errors: bool = False):
+    def validate(
+        self,
+        *,
+        raise_errors: bool = False,
+        allow_unverified_remote_files: bool = False,
+    ):
         """Validate this simulation for common authoring mistakes.
 
         Args:
             raise_errors: If ``True``, raise ``ValidationError`` when blocking
                 issues are found.
+            allow_unverified_remote_files: Treat absolute file references
+                outside this local project as target-site files that cannot be
+                checked locally.
 
         Returns:
             ``ValidationReport`` with errors and warnings.
@@ -684,7 +692,11 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
 
         from frequensolve.validation import validate_simulation
 
-        return validate_simulation(self, raise_errors=raise_errors)
+        return validate_simulation(
+            self,
+            raise_errors=raise_errors,
+            allow_unverified_remote_files=allow_unverified_remote_files,
+        )
 
     def relocate(
         self,

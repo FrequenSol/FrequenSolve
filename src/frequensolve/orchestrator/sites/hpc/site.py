@@ -571,6 +571,11 @@ class SlurmSite(BaseSite):
     default_host: Optional[str] = None
     default_solver_executable: Optional[str] = None
 
+    def _job_validation_options(self, job: Any) -> Dict[str, Any]:
+        """Allow absolute paths whose contents are owned by the remote site."""
+
+        return {"allow_unverified_remote_files": True}
+
     def __init__(
         self,
         rel_path: Optional[Union[str, Path]] = None,
@@ -900,7 +905,7 @@ class SlurmSite(BaseSite):
                     self.fetch_outputs(job)
                 return handle
 
-        self.prepare_job(job, sync_project=True, validate=validate)
+        self.prepare_job(job, sync_project=True, validate=False)
 
         active_allocation = self.provisioned if mode in {"auto", "attached"} else False
         use_attached = mode == "attached" or (mode == "auto" and active_allocation)
