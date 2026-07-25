@@ -781,6 +781,8 @@ def test_known_secret_shapes_in_opaque_cursors_fail_closed(cursor):
         "sk_live_abcdefghijklmnop",
         "sk-proj-abcdefghijklmnop",
         "frequensol-private-user-dev-storage/full/key.dat",
+        "example-bucket.s3.us-east-1.amazonaws.com",
+        "example-bucket.s3.cn-north-1.amazonaws.com.cn",
         "access_token/opaquevalue1234567890",
         "QWxwaGFCZXRhR2FtbWExMjM0NTY3ODkwU2VjcmV0",
         "alice%2540example.com",
@@ -812,6 +814,12 @@ def test_output_text_secret_shapes_fail_closed(secret):
 
     assert exc_info.value.code == "UPSTREAM_UNAVAILABLE"
     assert secret not in str(exc_info.value)
+
+
+def test_s3_endpoint_detection_handles_long_repeated_hyphens_without_backtracking():
+    candidate = f"example.s3{'--' * 10_000}.not-amazonaws.invalid"
+
+    assert not cloud._contains_sensitive_output_text(candidate, key="message")
 
 
 def test_response_page_and_byte_limits_are_enforced():

@@ -167,7 +167,8 @@ _SENSITIVE_TEXT_PATTERNS = (
     re.compile(r"(?i)-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"),
     re.compile(r"(?i)\b(?:https?|s3|file|ssh)://[^\s]+"),
     re.compile(
-        r"(?i)\b(?:[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\.)?s3(?:[.-][a-z0-9-]+)*\.amazonaws\.com\b"
+        r"(?i)\b(?:[a-z0-9][a-z0-9.-]{0,62}\.)?"
+        r"s3[a-z0-9.-]{0,80}\.amazonaws\.com(?:\.cn)?\b"
     ),
     re.compile(
         r"(?i)\bfrequensol-[a-z0-9][a-z0-9.-]{0,49}-" r"(?:dev|staging|prod)-storage\b"
