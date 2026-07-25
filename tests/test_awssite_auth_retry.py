@@ -101,6 +101,59 @@ def _expired_refresh_auth_class(tmp_path):
     return ExpiredRefreshAuth
 
 
+def _valid_cached_auth_class(tmp_path):
+    class ValidCachedAuth:
+        instances = []
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.credentials_path = tmp_path / "credentials"
+            self.credentials_path.write_text("valid-cache")
+            self.login_calls = []
+            self.instances.append(self)
+
+        def get_cached_tokens(self):
+            return {
+                "email": "cached@example.com",
+                "id_token": "cached-id-token",
+                "access_token": "cached-access-token",
+                "refresh_token": "cached-refresh-token",
+                "expires_at": (datetime.now() + timedelta(hours=1)).isoformat(),
+            }
+
+        def login(self, email, password):
+            self.login_calls.append((email, password))
+            self.credentials_path.write_text(f"fresh-cache:{email}")
+
+        def get_aws_credentials(self):
+            return {
+                "AccessKeyId": "access",
+                "SecretKey": "secret",
+                "SessionToken": "session",
+                "Expiration": "2030-01-01T00:00:00",
+                "IdentityId": "identity-id",
+            }
+
+        def clear_cached_tokens(self):
+            self.credentials_path.unlink(missing_ok=True)
+
+    return ValidCachedAuth
+
+
+def test_aws_site_preserves_positional_verbose_and_reuses_valid_cache(
+    monkeypatch, tmp_path
+):
+    auth_cls = _valid_cached_auth_class(tmp_path)
+    aws = _install_awssite_fakes(monkeypatch, auth_cls)
+
+    site = aws.AWSSite("app.example", None, None, False, True)
+
+    auth = auth_cls.instances[0]
+    assert site.verbose is True
+    assert auth.login_calls == []
+    assert auth.credentials_path.read_text() == "valid-cache"
+
+
 def test_aws_site_reauthenticates_with_passed_credentials_without_deleting_cache(
     monkeypatch, tmp_path
 ):
@@ -155,8 +208,27 @@ def test_aws_site_noninteractive_expired_refresh_error_names_relogin_options(
     assert auth.credentials_path.read_text() == "expired-cache"
 
 
-def test_aws_site_interactive_login_replaces_a_different_profile_cache(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("cached_issuer", "cached_client", "force_login"),
+    (
+        (
+            "https://cognito-idp.us-east-1.amazonaws.com/other-pool",
+            "other-client",
+            False,
+        ),
+        (
+            "https://cognito-idp.us-east-1.amazonaws.com/pool",
+            "client",
+            True,
+        ),
+    ),
+)
+def test_aws_site_interactive_login_replaces_an_unusable_or_forced_cache(
+    monkeypatch,
+    tmp_path,
+    cached_issuer,
+    cached_client,
+    force_login,
 ):
     pytest.importorskip("boto3")
     pytest.importorskip("requests")
@@ -168,26 +240,25 @@ def test_aws_site_interactive_login_replaces_a_different_profile_cache(
     monkeypatch.setenv("FREQUENSOLVE_HOME", str(storage_root))
     credentials_path = cloud_credentials_path()
     credentials_path.parent.mkdir(parents=True, exist_ok=True)
-    wrong_issuer = "https://cognito-idp.us-east-1.amazonaws.com/other-pool"
     credentials_path.write_text(
         json.dumps(
             {
-                "email": "wrong-profile@example.com",
+                "email": "cached@example.com",
                 "id_token": _jwt(
                     {
-                        "iss": wrong_issuer,
+                        "iss": cached_issuer,
                         "token_use": "id",
-                        "aud": "other-client",
+                        "aud": cached_client,
                     }
                 ),
                 "access_token": _jwt(
                     {
-                        "iss": wrong_issuer,
+                        "iss": cached_issuer,
                         "token_use": "access",
-                        "client_id": "other-client",
+                        "client_id": cached_client,
                     }
                 ),
-                "refresh_token": "wrong-refresh",
+                "refresh_token": "cached-refresh",
                 "expires_at": (datetime.now() + timedelta(hours=1)).isoformat(),
             }
         )
@@ -260,7 +331,11 @@ def test_aws_site_interactive_login_replaces_a_different_profile_cache(
     monkeypatch.setattr("builtins.input", lambda prompt: "fresh@example.com")
     monkeypatch.setattr(aws.getpass, "getpass", lambda prompt: "fresh-password")
 
-    site = aws.AWSSite(domain="app.example", interactive=True)
+    site = aws.AWSSite(
+        domain="app.example",
+        interactive=True,
+        force_login=force_login,
+    )
 
     assert len(login_calls) == 1
     assert login_calls[0]["AuthParameters"] == {
@@ -269,3 +344,66 @@ def test_aws_site_interactive_login_replaces_a_different_profile_cache(
     }
     assert json.loads(credentials_path.read_text())["email"] == "fresh@example.com"
     assert site.config.s3_bucket == "bucket"
+
+
+def test_aws_site_failed_forced_login_preserves_existing_cache(monkeypatch, tmp_path):
+    pytest.importorskip("boto3")
+    pytest.importorskip("requests")
+    from botocore.exceptions import ClientError
+
+    from frequensolve.orchestrator.sites.aws import aws, cognito
+    from frequensolve.orchestrator.sites.aws.cache_paths import cloud_credentials_path
+
+    storage_root = tmp_path / "frequensolve-home"
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(storage_root))
+    credentials_path = cloud_credentials_path()
+    credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    original_cache = b'{"email":"cached@example.com","refresh_token":"cached-refresh"}'
+    credentials_path.write_bytes(original_cache)
+
+    class RejectingCognitoClient:
+        def initiate_auth(self, **kwargs):
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "NotAuthorizedException",
+                        "Message": "Incorrect username or password.",
+                    }
+                },
+                "InitiateAuth",
+            )
+
+    class UnusedIdentityClient:
+        pass
+
+    def fake_boto_client(service_name, **kwargs):
+        if service_name == "cognito-idp":
+            return RejectingCognitoClient()
+        if service_name == "cognito-identity":
+            return UnusedIdentityClient()
+        raise AssertionError(f"Unexpected service: {service_name}")
+
+    config = aws.AWSSiteConfig(
+        user_pool_id="pool",
+        client_id="client",
+        identity_pool_id="identity",
+        api_url="https://api.example/graphql",
+        region="us-east-1",
+        domain="app.example",
+    )
+    monkeypatch.setattr(
+        aws.AWSSiteConfig,
+        "from_domain",
+        staticmethod(lambda domain=None: config),
+    )
+    monkeypatch.setattr(cognito.boto3, "client", fake_boto_client)
+
+    with pytest.raises(ValueError, match="Invalid email or password"):
+        aws.AWSSite(
+            domain="app.example",
+            email="fresh@example.com",
+            password="wrong-password",
+            force_login=True,
+        )
+
+    assert credentials_path.read_bytes() == original_cache

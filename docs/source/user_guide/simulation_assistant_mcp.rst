@@ -56,14 +56,15 @@ with that exact name in both the login and Codex commands:
 
 .. code-block:: console
 
-   /absolute/path/to/frequensolve-mcp-venv/bin/python -c 'import frequensolve as fs; fs.Site(profile="cloud", interactive=True)'
+   /absolute/path/to/frequensolve-mcp-venv/bin/python -c 'import frequensolve as fs; fs.Site(profile="cloud", interactive=True, force_login=True)'
 
 Enter credentials only at those interactive prompts. If this is the first
 FrequenSolve site command on the machine, it creates
 ``~/.frequensolve/site.toml`` and asks you to review it. Keep the supplied
 ``cloud`` profile or add the profile from your private-beta invitation, then
 run the matching command again. Restart the MCP after any later re-login so it
-reads the refreshed cache.
+reads the refreshed cache. ``force_login=True`` leaves the current cached login
+untouched unless the new authentication succeeds.
 
 Add it to Codex
 ---------------

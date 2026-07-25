@@ -243,6 +243,7 @@ class AWSSite(BaseSite):
         password: Optional[str] = None,
         interactive: bool = False,
         verbose: bool = False,
+        force_login: bool = False,
     ):
         """Initialize AWS site with domain-based authentication.
 
@@ -256,6 +257,8 @@ class AWSSite(BaseSite):
             interactive: If True, prompt for missing credentials. Defaults to False so
                 library code never blocks unexpectedly.
             verbose: If True, print user-facing status messages in addition to logs.
+            force_login: If True, skip a valid cached login and authenticate again.
+                The existing cache is replaced only after authentication succeeds.
 
         Raises:
             ValueError: If domain cannot be determined or authentication fails.
@@ -290,6 +293,8 @@ class AWSSite(BaseSite):
 
         for attempt in range(max_retries + 1):
             try:
+                if force_login:
+                    raise ValueError("A fresh Cloud login was explicitly requested.")
                 auth.get_cached_tokens()
                 self._emit("Using cached AWS credentials")
                 auth_successful = True
