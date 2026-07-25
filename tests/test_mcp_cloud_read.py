@@ -1038,6 +1038,243 @@ def test_authenticated_transport_uses_profile_cache_and_verified_same_sub(
     assert "attacker.example" not in json.dumps(appsync_session.calls[0])
 
 
+def test_authenticated_transport_prefers_fresh_canonical_login_over_stale_profile_cache(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / ".frequensolve"
+    cache = _prepare_profile(root)
+    canonical_tokens = _fresh_tokens(sub="fresh-login-user")
+    stale_profile_tokens = _fresh_tokens(
+        sub="old-profile-user",
+        expires_in=-60,
+    )
+    canonical_path = cache / "credentials"
+    profile_path = cache / "credentials_staging"
+    canonical_path.write_text(json.dumps(canonical_tokens))
+    profile_path.write_text(json.dumps(stale_profile_tokens))
+    canonical_path.chmod(0o600)
+    profile_path.chmod(0o600)
+    original_files = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (canonical_path, profile_path)
+    }
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(root))
+    cognito_session = _FakeSession(
+        _FakeResponse(
+            {
+                "UserAttributes": [
+                    {"Name": "sub", "Value": "fresh-login-user"},
+                ]
+            }
+        )
+    )
+    appsync_session = _FakeSession(_FakeResponse({"data": {"safe": True}}))
+    fake_requests = _fake_requests_module(cognito_session, appsync_session)
+    original_import = cloud.importlib.import_module
+
+    def fake_import(name):
+        if name == "requests":
+            return fake_requests
+        return original_import(name)
+
+    monkeypatch.setattr(cloud.importlib, "import_module", fake_import)
+
+    transport = cloud._build_authenticated_transport("staging")
+
+    assert transport.id_token == canonical_tokens["id_token"]
+    assert cognito_session.calls[0]["json"] == {
+        "AccessToken": canonical_tokens["access_token"]
+    }
+    for path, (original_bytes, original_mtime) in original_files.items():
+        assert path.read_bytes() == original_bytes
+        assert path.stat().st_mtime_ns == original_mtime
+
+
+@pytest.mark.parametrize(
+    "canonical_contents",
+    [
+        b"{not-json",
+        b"",
+        b"x" * 65_537,
+        json.dumps(
+            _fresh_tokens(
+                issuer=(
+                    "https://cognito-idp.us-east-1.amazonaws.com/" "us-east-1_OtherPool"
+                )
+            )
+        ).encode(),
+    ],
+    ids=("malformed", "empty", "oversized", "wrong-profile"),
+)
+def test_present_invalid_canonical_cache_never_falls_through_to_profile_identity(
+    monkeypatch,
+    tmp_path,
+    canonical_contents,
+):
+    root = tmp_path / ".frequensolve"
+    cache = _prepare_profile(root)
+    canonical_path = cache / "credentials"
+    profile_path = cache / "credentials_staging"
+    canonical_path.write_bytes(canonical_contents)
+    profile_path.write_text(json.dumps(_fresh_tokens(sub="fallback-user")))
+    canonical_path.chmod(0o600)
+    profile_path.chmod(0o600)
+    original_files = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (canonical_path, profile_path)
+    }
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(root))
+    original_import = cloud.importlib.import_module
+
+    def fake_import(name):
+        if name == "requests":
+            return SimpleNamespace(
+                Session=lambda: pytest.fail(
+                    "an invalid canonical cache must not use the profile identity"
+                )
+            )
+        return original_import(name)
+
+    monkeypatch.setattr(cloud.importlib, "import_module", fake_import)
+
+    with pytest.raises(cloud.CloudReadError) as exc_info:
+        cloud._build_authenticated_transport("staging")
+
+    assert exc_info.value.code == "AUTHENTICATION_REQUIRED"
+    assert exc_info.value.reason == "identity-invalid"
+    for path, (original_bytes, original_mtime) in original_files.items():
+        assert path.read_bytes() == original_bytes
+        assert path.stat().st_mtime_ns == original_mtime
+
+
+def test_present_expired_canonical_cache_requires_login_without_profile_fallback(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / ".frequensolve"
+    cache = _prepare_profile(root)
+    canonical_path = cache / "credentials"
+    profile_path = cache / "credentials_staging"
+    canonical_path.write_text(json.dumps(_fresh_tokens(expires_in=-60)))
+    profile_path.write_text(json.dumps(_fresh_tokens(sub="fallback-user")))
+    canonical_path.chmod(0o600)
+    profile_path.chmod(0o600)
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(root))
+    original_import = cloud.importlib.import_module
+
+    def fake_import(name):
+        if name == "requests":
+            return SimpleNamespace(
+                Session=lambda: pytest.fail(
+                    "an expired canonical cache must require a new login"
+                )
+            )
+        return original_import(name)
+
+    monkeypatch.setattr(cloud.importlib, "import_module", fake_import)
+
+    with pytest.raises(cloud.CloudReadError) as exc_info:
+        cloud._build_authenticated_transport("staging")
+
+    assert exc_info.value.code == "AUTHENTICATION_REQUIRED"
+    assert exc_info.value.reason == "login-required"
+
+
+def test_legacy_root_cache_is_used_only_when_newer_cache_paths_are_absent(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / ".frequensolve"
+    _prepare_profile(root)
+    legacy_tokens = _fresh_tokens(sub="legacy-user")
+    legacy_path = root / "credentials"
+    legacy_path.write_text(json.dumps(legacy_tokens))
+    legacy_path.chmod(0o600)
+    original_bytes = legacy_path.read_bytes()
+    original_mtime = legacy_path.stat().st_mtime_ns
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(root))
+    profile = cloud._load_site_profile("staging")
+    config = cloud._load_cached_cloud_config(profile)
+
+    tokens, id_claims = cloud._select_cached_identity(
+        "staging",
+        config=config,
+    )
+
+    assert tokens["id_token"] == legacy_tokens["id_token"]
+    assert id_claims["sub"] == "legacy-user"
+    assert legacy_path.read_bytes() == original_bytes
+    assert legacy_path.stat().st_mtime_ns == original_mtime
+
+
+def test_present_invalid_profile_cache_blocks_legacy_identity_fallback(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / ".frequensolve"
+    cache = _prepare_profile(root)
+    profile_path = cache / "credentials_staging"
+    legacy_path = root / "credentials"
+    profile_path.write_text("{not-json")
+    legacy_path.write_text(json.dumps(_fresh_tokens(sub="legacy-user")))
+    profile_path.chmod(0o600)
+    legacy_path.chmod(0o600)
+    original_files = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (profile_path, legacy_path)
+    }
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(root))
+    profile = cloud._load_site_profile("staging")
+    config = cloud._load_cached_cloud_config(profile)
+
+    with pytest.raises(cloud.CloudReadError) as exc_info:
+        cloud._select_cached_identity("staging", config=config)
+
+    assert exc_info.value.code == "AUTHENTICATION_REQUIRED"
+    assert exc_info.value.reason == "identity-invalid"
+    for path, (original_bytes, original_mtime) in original_files.items():
+        assert path.read_bytes() == original_bytes
+        assert path.stat().st_mtime_ns == original_mtime
+
+
+def test_missing_all_credential_caches_requires_login_without_creating_files(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / ".frequensolve"
+    _prepare_profile(root)
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(root))
+    profile = cloud._load_site_profile("staging")
+    config = cloud._load_cached_cloud_config(profile)
+    expected_paths = cloud._credential_paths("staging")
+
+    with pytest.raises(cloud.CloudReadError) as exc_info:
+        cloud._select_cached_identity("staging", config=config)
+
+    assert exc_info.value.code == "AUTHENTICATION_REQUIRED"
+    assert exc_info.value.reason == "login-required"
+    assert all(not path.exists() for path in expected_paths)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX private-file policy")
+def test_insecure_canonical_cache_blocks_profile_identity_fallback(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / ".frequensolve"
+    cache = _prepare_profile(root)
+    canonical_path = cache / "credentials"
+    profile_path = cache / "credentials_staging"
+    canonical_path.write_text(json.dumps(_fresh_tokens()))
+    profile_path.write_text(json.dumps(_fresh_tokens(sub="fallback-user")))
+    canonical_path.chmod(0o644)
+    profile_path.chmod(0o600)
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(root))
+    profile = cloud._load_site_profile("staging")
+    config = cloud._load_cached_cloud_config(profile)
+
+    with pytest.raises(cloud.CloudReadError) as exc_info:
+        cloud._select_cached_identity("staging", config=config)
+
+    assert exc_info.value.code == "AUTHENTICATION_REQUIRED"
+    assert exc_info.value.reason == "identity-invalid"
+
+
 def test_authenticated_transport_rejects_get_user_sub_mismatch_without_leak(
     monkeypatch, tmp_path
 ):

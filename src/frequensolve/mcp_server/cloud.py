@@ -1023,23 +1023,8 @@ def _build_authenticated_transport(profile_name: str | None) -> _Transport:
             "cloud-extra-missing",
         ) from None
 
-    credential_path = _select_credential_path(profile.name)
     try:
-        tokens = _read_token_cache(credential_path)
-        id_claims = _decode_and_validate_token(
-            tokens.get("id_token"),
-            token_use="id",
-            config=config,
-        )
-        access_claims = _decode_and_validate_token(
-            tokens.get("access_token"),
-            token_use="access",
-            config=config,
-        )
-        if _token_needs_refresh(id_claims) or _token_needs_refresh(access_claims):
-            raise CloudReadError("AUTHENTICATION_REQUIRED", "login-required")
-        if id_claims["sub"] != access_claims["sub"]:
-            raise ValueError
+        tokens, id_claims = _select_cached_identity(profile.name, config=config)
         user = _get_verified_cognito_user(
             requests,
             config=config,
@@ -1132,35 +1117,70 @@ def _get_verified_cognito_user(
             pass
 
 
-def _select_credential_path(profile_name: str) -> Path:
+def _credential_paths(profile_name: str) -> tuple[Path, ...]:
     root = frequensolve_home()
-    candidates = (
-        root / "cloud" / f"credentials_{profile_name}",
+    return (
         root / "cloud" / "credentials",
+        # Earlier development builds could write these two cache layouts.
+        # They remain read-only compatibility fallbacks when the canonical
+        # package-owned cache above does not exist.
+        root / "cloud" / f"credentials_{profile_name}",
         root / "credentials",
     )
-    for path in candidates:
-        try:
-            _read_bounded_regular_file(
-                path,
-                max_bytes=65_536,
-                private=True,
-            )
-        except OSError:
+
+
+def _select_cached_identity(
+    profile_name: str,
+    *,
+    config: _CloudConfig,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    for path in _credential_paths(profile_name):
+        tokens = _read_token_cache(path, missing_ok=True)
+        if tokens is None:
             continue
-        return path
+        try:
+            id_claims = _decode_and_validate_token(
+                tokens.get("id_token"),
+                token_use="id",
+                config=config,
+            )
+            access_claims = _decode_and_validate_token(
+                tokens.get("access_token"),
+                token_use="access",
+                config=config,
+            )
+            if id_claims["sub"] != access_claims["sub"]:
+                raise ValueError
+        except ValueError:
+            raise CloudReadError(
+                "AUTHENTICATION_REQUIRED",
+                "identity-invalid",
+            ) from None
+        if _token_needs_refresh(id_claims) or _token_needs_refresh(access_claims):
+            raise CloudReadError("AUTHENTICATION_REQUIRED", "login-required")
+        return tokens, id_claims
     raise CloudReadError("AUTHENTICATION_REQUIRED", "login-required")
 
 
-def _read_token_cache(path: Path) -> dict[str, Any]:
+def _read_token_cache(
+    path: Path,
+    *,
+    missing_ok: bool = False,
+) -> dict[str, Any] | None:
     try:
-        document = _strict_json_loads(
-            _read_bounded_regular_file(
-                path,
-                max_bytes=65_536,
-                private=True,
-            )
+        raw = _read_bounded_regular_file(
+            path,
+            max_bytes=65_536,
+            private=True,
         )
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise CloudReadError("AUTHENTICATION_REQUIRED", "identity-invalid") from None
+    except Exception:
+        raise CloudReadError("AUTHENTICATION_REQUIRED", "identity-invalid") from None
+    try:
+        document = _strict_json_loads(raw)
     except Exception:
         raise CloudReadError("AUTHENTICATION_REQUIRED", "identity-invalid") from None
     if not isinstance(document, dict):
