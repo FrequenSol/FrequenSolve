@@ -667,6 +667,92 @@ def test_json_schema_rejects_unsupported_starter_structure(mutate):
         jsonschema.validate(payload, schema)
 
 
+@pytest.mark.parametrize(
+    "mapping_path",
+    [
+        pytest.param(("project",), id="project"),
+        pytest.param(("simulation",), id="simulation"),
+        pytest.param(("model",), id="model"),
+        pytest.param(("model", "surfaces", 0), id="model-surface"),
+        pytest.param(("model", "layers", 0), id="model-layer"),
+        pytest.param(("mesh",), id="mesh"),
+        pytest.param(("mesh", "adapt"), id="mesh-adapt"),
+        pytest.param(("mesh", "source_grading"), id="source-grading"),
+        pytest.param(("boundary_conditions", 0), id="boundary-condition"),
+        pytest.param(("acquisition",), id="acquisition"),
+        pytest.param(("acquisition", "source"), id="source"),
+        pytest.param(("acquisition", "receiver_group"), id="receiver-group"),
+        pytest.param(
+            ("acquisition", "receiver_group", "component"),
+            id="receiver-component",
+        ),
+        pytest.param(
+            ("acquisition", "receiver_group", "coordinate_line"),
+            id="receiver-line",
+        ),
+        pytest.param(
+            ("acquisition", "receiver_group", "coordinate_line", "fixed"),
+            id="receiver-line-fixed",
+        ),
+        pytest.param(("discretization",), id="discretization"),
+        pytest.param(("solver",), id="solver"),
+        pytest.param(("job",), id="job"),
+        pytest.param(("job", "outputs"), id="job-outputs"),
+        pytest.param(("job", "outputs", "vtk", 0), id="vtk-output"),
+    ],
+)
+def test_starter_constructor_mappings_reject_undeclared_fields(mapping_path):
+    schema = _resource_payload(fs.CATALOG_SCHEMA_RESOURCE)
+    payload = _resource_payload(fs.CATALOG_RESOURCE)
+    target = payload["starter_scenarios"][0]["setup"]
+    for part in mapping_path:
+        target = target[part]
+    target["unexpected_agent_directive"] = "not part of the starter contract"
+
+    with pytest.raises(jsonschema.ValidationError, match="Additional properties"):
+        jsonschema.validate(payload, schema)
+    with pytest.raises(fs.CatalogValidationError, match="contains unsupported keys"):
+        fs.SimulationKnowledgeCatalog.from_mapping(payload)
+
+
+def test_starter_constructor_mappings_keep_named_optional_fields(tmp_path):
+    schema = _resource_payload(fs.CATALOG_SCHEMA_RESOURCE)
+    payload = _resource_payload(fs.CATALOG_RESOURCE)
+    setup = payload["starter_scenarios"][0]["setup"]
+    setup["mesh"]["source_grading"]["power"] = 1.5
+    setup["boundary_conditions"][1].update(
+        {
+            "name": "absorbing",
+            "pml_exponent": 3.0,
+            "pml_reflectivity": 0.01,
+        }
+    )
+    setup["acquisition"]["receiver_group"]["component"]["direction"] = [1.0, 0.0]
+    setup["solver"].update(
+        {
+            "solve_on": "final",
+            "max_iter": 300,
+            "precision": "single",
+        }
+    )
+    setup["job"]["outputs"]["vtk"][0].update(
+        {
+            "path": "paraview",
+            "show_pml": True,
+            "format": "vtu",
+            "order": 2,
+            "parts": ["real"],
+        }
+    )
+
+    jsonschema.validate(payload, schema)
+    catalog = fs.SimulationKnowledgeCatalog.from_mapping(payload)
+    scenario = catalog.get_starter_scenario()
+    assert scenario.setup["solver"]["precision"] == "single"
+    _, job = _build_starter_job(scenario, tmp_path / "optional-starter-fields")
+    assert fs.validate_job(job).ok
+
+
 def test_known_small_acoustic_scenario_builds_valid_contracts(tmp_path):
     catalog = fs.load_simulation_knowledge()
     scenario = catalog.get_starter_scenario()

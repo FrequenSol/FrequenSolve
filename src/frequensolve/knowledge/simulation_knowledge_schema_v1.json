@@ -914,6 +914,7 @@
           "properties": {
             "project": {
               "type": "object",
+              "additionalProperties": false,
               "required": [
                 "name",
                 "pretty_name",
@@ -933,6 +934,7 @@
             },
             "simulation": {
               "type": "object",
+              "additionalProperties": false,
               "required": [
                 "name",
                 "physics",
@@ -954,12 +956,16 @@
                   ]
                 },
                 "units": {
-                  "type": "object"
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/$defs/nonEmptyString"
+                  }
                 }
               }
             },
             "model": {
               "type": "object",
+              "additionalProperties": false,
               "required": [
                 "type",
                 "name",
@@ -992,20 +998,51 @@
                   "type": "array",
                   "minItems": 2,
                   "items": {
-                    "type": "object"
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "name",
+                      "depth"
+                    ],
+                    "properties": {
+                      "name": {
+                        "$ref": "#/$defs/nonEmptyString"
+                      },
+                      "depth": {
+                        "type": "number"
+                      }
+                    }
                   }
                 },
                 "layers": {
                   "type": "array",
                   "minItems": 1,
                   "items": {
-                    "type": "object"
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "name",
+                      "properties"
+                    ],
+                    "properties": {
+                      "name": {
+                        "$ref": "#/$defs/nonEmptyString"
+                      },
+                      "properties": {
+                        "type": "object",
+                        "minProperties": 1,
+                        "additionalProperties": {
+                          "type": "number"
+                        }
+                      }
+                    }
                   }
                 }
               }
             },
             "mesh": {
               "type": "object",
+              "additionalProperties": false,
               "required": [
                 "type",
                 "n",
@@ -1025,10 +1062,59 @@
                   }
                 },
                 "adapt": {
-                  "type": "object"
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "elems_per_wave",
+                    "order",
+                    "f_low",
+                    "f_high"
+                  ],
+                  "properties": {
+                    "elems_per_wave": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "order": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "f_low": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "f_high": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    }
+                  }
                 },
                 "source_grading": {
-                  "type": "object"
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "d1",
+                    "d0",
+                    "factor"
+                  ],
+                  "properties": {
+                    "d1": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "d0": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "factor": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "power": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    }
+                  }
                 }
               }
             },
@@ -1037,6 +1123,7 @@
               "minItems": 1,
               "items": {
                 "type": "object",
+                "additionalProperties": false,
                 "required": [
                   "conditions",
                   "boundaries"
@@ -1047,12 +1134,32 @@
                   },
                   "boundaries": {
                     "$ref": "#/$defs/nonEmptyStringArray"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/nonEmptyString"
+                  },
+                  "pml_wavelengths": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "pml_exponent": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "pml_reflectivity": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "pml_constant": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
                   }
                 }
               }
             },
             "acquisition": {
               "type": "object",
+              "additionalProperties": false,
               "required": [
                 "source",
                 "receiver_group"
@@ -1060,6 +1167,7 @@
               "properties": {
                 "source": {
                   "type": "object",
+                  "additionalProperties": false,
                   "required": [
                     "kind",
                     "coords"
@@ -1076,6 +1184,7 @@
                 },
                 "receiver_group": {
                   "type": "object",
+                  "additionalProperties": false,
                   "required": [
                     "name",
                     "device_name",
@@ -1091,13 +1200,31 @@
                     },
                     "component": {
                       "type": "object",
+                      "additionalProperties": false,
                       "required": [
                         "name",
                         "field"
-                      ]
+                      ],
+                      "properties": {
+                        "name": {
+                          "$ref": "#/$defs/nonEmptyString"
+                        },
+                        "field": {
+                          "$ref": "#/$defs/nonEmptyString"
+                        },
+                        "direction": {
+                          "type": "array",
+                          "minItems": 2,
+                          "maxItems": 3,
+                          "items": {
+                            "type": "number"
+                          }
+                        }
+                      }
                     },
                     "coordinate_line": {
                       "type": "object",
+                      "additionalProperties": false,
                       "required": [
                         "axis",
                         "start",
@@ -1121,6 +1248,7 @@
                         },
                         "fixed": {
                           "type": "object",
+                          "additionalProperties": false,
                           "required": [
                             "z"
                           ],
@@ -1137,13 +1265,46 @@
               }
             },
             "discretization": {
-              "type": "object"
+              "type": "object",
+              "additionalProperties": false
             },
             "solver": {
-              "type": "object"
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "tolerance",
+                "grids"
+              ],
+              "properties": {
+                "solve_on": {
+                  "enum": [
+                    "final",
+                    "all"
+                  ]
+                },
+                "max_iter": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "tolerance": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "precision": {
+                  "enum": [
+                    "single",
+                    "double"
+                  ]
+                },
+                "grids": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
             },
             "job": {
               "type": "object",
+              "additionalProperties": false,
               "required": [
                 "type",
                 "name",
@@ -1167,6 +1328,7 @@
                 },
                 "outputs": {
                   "type": "object",
+                  "additionalProperties": false,
                   "required": [
                     "vtk"
                   ],
@@ -1175,7 +1337,71 @@
                       "type": "array",
                       "minItems": 1,
                       "items": {
-                        "type": "object"
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "name",
+                          "fields",
+                          "properties",
+                          "upscale"
+                        ],
+                        "properties": {
+                          "name": {
+                            "$ref": "#/$defs/nonEmptyString"
+                          },
+                          "path": {
+                            "$ref": "#/$defs/repositoryPath"
+                          },
+                          "fields": {
+                            "$ref": "#/$defs/nonEmptyStringArray"
+                          },
+                          "properties": {
+                            "$ref": "#/$defs/nonEmptyStringArray"
+                          },
+                          "upscale": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2
+                          },
+                          "show_pml": {
+                            "type": "boolean"
+                          },
+                          "format": {
+                            "enum": [
+                              "vtu",
+                              "xdmf",
+                              "xmf",
+                              "vtr"
+                            ]
+                          },
+                          "order": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "parts": {
+                            "oneOf": [
+                              {
+                                "enum": [
+                                  "real",
+                                  "imag",
+                                  "abs"
+                                ]
+                              },
+                              {
+                                "type": "array",
+                                "minItems": 1,
+                                "uniqueItems": true,
+                                "items": {
+                                  "enum": [
+                                    "real",
+                                    "imag",
+                                    "abs"
+                                  ]
+                                }
+                              }
+                            ]
+                          }
+                        }
                       }
                     }
                   }

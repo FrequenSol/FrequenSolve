@@ -1480,18 +1480,18 @@ def _validate_agent_knowledge_cross_references(
 ) -> None:
     api_ids = {entry.id for entry in public_api}
     glossary_ids = {entry.id for entry in glossary}
-    for entry in public_api:
-        unknown = sorted(set(entry.related_glossary) - glossary_ids)
+    for api_entry in public_api:
+        unknown = sorted(set(api_entry.related_glossary) - glossary_ids)
         if unknown:
             raise CatalogValidationError(
-                f"public API {entry.id!r} references unknown glossary entries: "
+                f"public API {api_entry.id!r} references unknown glossary entries: "
                 f"{', '.join(unknown)}"
             )
-    for entry in glossary:
-        unknown = sorted(set(entry.related_api) - api_ids)
+    for glossary_entry in glossary:
+        unknown = sorted(set(glossary_entry.related_api) - api_ids)
         if unknown:
             raise CatalogValidationError(
-                f"glossary entry {entry.id!r} references unknown public API entries: "
+                f"glossary entry {glossary_entry.id!r} references unknown public API entries: "
                 f"{', '.join(unknown)}"
             )
 
@@ -1737,8 +1737,20 @@ def _validate_starter_setup(
             f"{setup_path}.model.dimension must match the simulation model dimension"
         )
     _non_empty_list(model["x_limits"], f"{setup_path}.model.x_limits")
-    _non_empty_list(model["surfaces"], f"{setup_path}.model.surfaces")
-    _non_empty_list(model["layers"], f"{setup_path}.model.layers")
+    surfaces = _non_empty_list(model["surfaces"], f"{setup_path}.model.surfaces")
+    for index, surface in enumerate(surfaces):
+        _required_mapping(
+            surface,
+            f"{setup_path}.model.surfaces[{index}]",
+            {"name", "depth"},
+        )
+    layers = _non_empty_list(model["layers"], f"{setup_path}.model.layers")
+    for index, layer in enumerate(layers):
+        _required_mapping(
+            layer,
+            f"{setup_path}.model.layers[{index}]",
+            {"name", "properties"},
+        )
 
     mesh = _required_mapping(
         setup["mesh"],
@@ -1751,8 +1763,17 @@ def _validate_starter_setup(
             f"{setup_path}.mesh.type must be 'HexMeshGenerator'"
         )
     _non_empty_list(mesh["n"], f"{setup_path}.mesh.n")
-    _mapping(mesh["adapt"], f"{setup_path}.mesh.adapt")
-    _mapping(mesh["source_grading"], f"{setup_path}.mesh.source_grading")
+    _required_mapping(
+        mesh["adapt"],
+        f"{setup_path}.mesh.adapt",
+        {"elems_per_wave", "order", "f_low", "f_high"},
+    )
+    _required_mapping(
+        mesh["source_grading"],
+        f"{setup_path}.mesh.source_grading",
+        {"d1", "d0", "factor"},
+        optional={"power"},
+    )
 
     boundaries = _non_empty_list(
         setup["boundary_conditions"], f"{setup_path}.boundary_conditions"
@@ -1762,6 +1783,13 @@ def _validate_starter_setup(
             boundary,
             f"{setup_path}.boundary_conditions[{index}]",
             {"conditions", "boundaries"},
+            optional={
+                "name",
+                "pml_wavelengths",
+                "pml_exponent",
+                "pml_reflectivity",
+                "pml_constant",
+            },
         )
 
     acquisition = _required_mapping(
@@ -1790,6 +1818,7 @@ def _validate_starter_setup(
         receiver["component"],
         f"{setup_path}.acquisition.receiver_group.component",
         {"name", "field"},
+        optional={"direction"},
     )
     _string(
         component["name"],
@@ -1842,8 +1871,17 @@ def _validate_starter_setup(
         f"{setup_path}.acquisition.receiver_group.coordinate_line.fixed.z",
     )
 
-    _mapping(setup["discretization"], f"{setup_path}.discretization")
-    _mapping(setup["solver"], f"{setup_path}.solver")
+    _required_mapping(
+        setup["discretization"],
+        f"{setup_path}.discretization",
+        set(),
+    )
+    _required_mapping(
+        setup["solver"],
+        f"{setup_path}.solver",
+        {"tolerance", "grids"},
+        optional={"solve_on", "max_iter", "precision"},
+    )
 
     job = _required_mapping(
         setup["job"],
@@ -1860,18 +1898,30 @@ def _validate_starter_setup(
     outputs = _required_mapping(job["outputs"], f"{setup_path}.job.outputs", {"vtk"})
     vtk_outputs = _non_empty_list(outputs["vtk"], f"{setup_path}.job.outputs.vtk")
     for index, vtk_output in enumerate(vtk_outputs):
-        _mapping(vtk_output, f"{setup_path}.job.outputs.vtk[{index}]")
+        _required_mapping(
+            vtk_output,
+            f"{setup_path}.job.outputs.vtk[{index}]",
+            {"name", "fields", "properties", "upscale"},
+            optional={"path", "show_pml", "format", "order", "parts"},
+        )
 
 
 def _required_mapping(
     value: object,
     path: str,
     required: set[str],
+    *,
+    optional: Optional[set[str]] = None,
 ) -> Mapping[str, object]:
     data = _mapping(value, path)
     missing = sorted(required - set(data))
     if missing:
         raise CatalogValidationError(f"{path} is missing keys: {', '.join(missing)}")
+    extra = sorted(set(data) - required - (optional or set()))
+    if extra:
+        raise CatalogValidationError(
+            f"{path} contains unsupported keys: {', '.join(extra)}"
+        )
     return data
 
 
