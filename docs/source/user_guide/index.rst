@@ -13,6 +13,7 @@ unfamiliar, check the :doc:`../glossary`.
 
    projects_jobs_sites
    simulation_knowledge_catalog
+   simulation_assistant_mcp
    site_configuration
    stampede3_getting_started
    frequensolve_directory
