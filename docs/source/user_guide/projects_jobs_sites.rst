@@ -166,7 +166,7 @@ job, or post-process results.
    sim = fs.SeismicSimulation.load(
        "./scratch/tutorials/save_load_projects_jobs/simulations/save_load_acoustic/save_load_acoustic.json"
    )
-   job = fs.SimulationJob.load(
+   job = fs.BaseJob.load(
        "./scratch/tutorials/save_load_projects_jobs/jobs/save_load_acoustic/time/time.json"
    )
 
@@ -179,7 +179,7 @@ Use saved job loading for rerun notebooks and analysis notebooks:
 
 .. code-block:: python
 
-   loaded_job = fs.SimulationJob.load(job_file)
+   loaded_job = fs.BaseJob.load(job_file)
    result = site.submit(loaded_job).wait()
 
 For project-owned jobs, you usually do not need to spell out the full path:
@@ -208,12 +208,14 @@ run before, the object knows its project path:
 
 .. code-block:: python
 
-   saved_job = fs.SimulationJob.load(time_job)
+   saved_job = fs.BaseJob.load(time_job)
    # equivalent:
    saved_job = time_job.load_saved()
    traces = saved_job.traces.open(upscale=4)
 
-This keeps execution reproducible: the job JSON records the linked simulation,
+``BaseJob.load(...)`` returns the concrete saved job type, such as
+``TimeDomainJob`` or ``FrequencyDomainJob``. This keeps execution reproducible:
+the job JSON records the linked simulation,
 frequency list, :term:`output requests <output request>`, and result path that
 a site will stage.
 

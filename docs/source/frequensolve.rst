@@ -12,6 +12,8 @@ a class by task, start here:
      - Reference area
    * - Create or load projects
      - :doc:`frequensolve.project`
+   * - Inspect version-matched simulation knowledge
+     - :doc:`frequensolve.knowledge`
    * - Build simulations and request outputs
      - :doc:`frequensolve.simulation`
    * - Define materials, layers, surfaces, and boreholes
@@ -38,6 +40,7 @@ reference when you need constructor arguments, method names, or class members.
    :maxdepth: 4
 
    frequensolve.geometry
+   frequensolve.knowledge
    frequensolve.mesh
    frequensolve.model
    frequensolve.orchestrator

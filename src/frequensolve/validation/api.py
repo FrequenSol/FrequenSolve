@@ -39,7 +39,7 @@ def validate_simulation(
         Validation report containing errors and warnings.
     """
 
-    report = ValidationReport()
+    report = ValidationReport.for_package_validators()
     ctx = _build_context(
         simulation,
         report,
@@ -71,7 +71,7 @@ def validate_job(
         Validation report containing errors and warnings.
     """
 
-    report = ValidationReport()
+    report = ValidationReport.for_package_validators()
     simulation = getattr(job, "simulation", None)
     if simulation is None:
         report.error("job.simulation.missing", "Job requires a simulation.")

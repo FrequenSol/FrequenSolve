@@ -98,6 +98,8 @@ def test_top_level_authoring_exports_are_available():
         "plot_vtu",
         "configure_fft",
         "load",
+        "load_simulation_knowledge",
+        "AuthoringRules",
     ]
 
     for name in expected:
@@ -201,6 +203,7 @@ def test_public_package_imports_smoke():
     for name in [
         "frequensolve",
         "frequensolve.geometry",
+        "frequensolve.knowledge",
         "frequensolve.mesh",
         "frequensolve.model",
         "frequensolve.expr",

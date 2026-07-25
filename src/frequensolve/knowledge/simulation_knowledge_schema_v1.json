@@ -1,0 +1,1193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docs.frequensol.com/contracts/frequensolve-simulation-knowledge-v1.schema.json",
+  "title": "FrequenSolve simulation knowledge catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "catalog_version",
+    "contracts",
+    "authoring_rules",
+    "public_api",
+    "glossary",
+    "physics",
+    "validation_codes",
+    "examples",
+    "starter_scenarios",
+    "limitations"
+  ],
+  "properties": {
+    "schema": {
+      "const": "frequensolve-simulation-knowledge/v1"
+    },
+    "catalog_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "contracts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/contract"
+      }
+    },
+    "authoring_rules": {
+      "$ref": "#/$defs/authoringRules"
+    },
+    "public_api": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/publicApi"
+      }
+    },
+    "glossary": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/glossaryEntry"
+      }
+    },
+    "physics": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/physics"
+      }
+    },
+    "validation_codes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/validationCode"
+      }
+    },
+    "examples": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/example"
+      }
+    },
+    "starter_scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/starterScenario"
+      }
+    },
+    "limitations": {
+      "$ref": "#/$defs/nonEmptyStringArray"
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\r\\n]+$"
+    },
+    "nonEmptyStringArray": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/nonEmptyString"
+      }
+    },
+    "stringArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/nonEmptyString"
+      }
+    },
+    "catalogId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+    },
+    "repositoryPath": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        {
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!\\.codex/)[^\\\\]+$"
+        }
+      ]
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "identity",
+        "owner",
+        "source_revision"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "identity": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_revision": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "dimensionArray": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          2,
+          2.5,
+          3
+        ]
+      }
+    },
+    "authoringRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "dimensions",
+        "boundary_conditions",
+        "discretization",
+        "solver",
+        "frequencies",
+        "acquisition",
+        "file_references",
+        "outputs"
+      ],
+      "properties": {
+        "schema": {
+          "const": "frequensolve-authoring-rules/v1"
+        },
+        "dimensions": {
+          "$ref": "#/$defs/dimensionRules"
+        },
+        "boundary_conditions": {
+          "$ref": "#/$defs/boundaryRules"
+        },
+        "discretization": {
+          "$ref": "#/$defs/discretizationRules"
+        },
+        "solver": {
+          "$ref": "#/$defs/solverRules"
+        },
+        "frequencies": {
+          "$ref": "#/$defs/frequencyRules"
+        },
+        "acquisition": {
+          "$ref": "#/$defs/acquisitionRules"
+        },
+        "file_references": {
+          "$ref": "#/$defs/fileReferenceRules"
+        },
+        "outputs": {
+          "$ref": "#/$defs/outputRules"
+        }
+      }
+    },
+    "dimensionRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "supported",
+        "axisymmetric",
+        "model_dimension_for_2_5d"
+      ],
+      "properties": {
+        "supported": {
+          "$ref": "#/$defs/dimensionArray"
+        },
+        "axisymmetric": {
+          "$ref": "#/$defs/dimensionArray"
+        },
+        "model_dimension_for_2_5d": {
+          "const": 2
+        }
+      }
+    },
+    "boundaryRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conditions_required",
+        "documented_conditions",
+        "solver_specific_conditions_allowed",
+        "generated_2d_labels",
+        "generated_3d_labels",
+        "pml"
+      ],
+      "properties": {
+        "conditions_required": {
+          "type": "boolean"
+        },
+        "documented_conditions": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "solver_specific_conditions_allowed": {
+          "type": "boolean"
+        },
+        "generated_2d_labels": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "generated_3d_labels": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "pml": {
+          "$ref": "#/$defs/pmlRules"
+        }
+      }
+    },
+    "pmlRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "condition",
+        "defaults",
+        "optional_fields",
+        "fields_serialize_only_with_condition"
+      ],
+      "properties": {
+        "condition": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "pml_wavelengths",
+            "pml_exponent",
+            "pml_reflectivity"
+          ],
+          "properties": {
+            "pml_wavelengths": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "pml_exponent": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "pml_reflectivity": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1
+            }
+          }
+        },
+        "optional_fields": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "fields_serialize_only_with_condition": {
+          "type": "boolean"
+        }
+      }
+    },
+    "discretizationRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "default_payload",
+        "rejected_fields",
+        "mesh_adapt_order_path",
+        "additional_fields_status"
+      ],
+      "properties": {
+        "default_payload": {
+          "type": "object",
+          "maxProperties": 0
+        },
+        "rejected_fields": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "mesh_adapt_order_path": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "additional_fields_status": {
+          "const": "contract-dependent"
+        }
+      }
+    },
+    "solverRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "solve_on_values",
+        "precision_values",
+        "defaults",
+        "additional_fields_status"
+      ],
+      "properties": {
+        "solve_on_values": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "precision_values": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "solve_on",
+            "max_iter",
+            "tolerance",
+            "precision"
+          ],
+          "properties": {
+            "solve_on": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "max_iter": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "tolerance": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "precision": {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          }
+        },
+        "additional_fields_status": {
+          "const": "contract-dependent"
+        }
+      }
+    },
+    "frequencyRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "explicit_min_items",
+        "finite_required",
+        "positive_real_required",
+        "complex_damping_imaginary_sign",
+        "time_domain_spacing_fields",
+        "time_domain_exactly_one_spacing_field",
+        "time_domain_positive_fields",
+        "time_domain_f_max_greater_than_f_min",
+        "damping_fields",
+        "damping_fields_mutually_exclusive",
+        "damping_factor_minimum"
+      ],
+      "properties": {
+        "explicit_min_items": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "finite_required": {
+          "type": "boolean"
+        },
+        "positive_real_required": {
+          "type": "boolean"
+        },
+        "complex_damping_imaginary_sign": {
+          "enum": [
+            "nonpositive"
+          ]
+        },
+        "time_domain_spacing_fields": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "time_domain_exactly_one_spacing_field": {
+          "type": "boolean"
+        },
+        "time_domain_positive_fields": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "time_domain_f_max_greater_than_f_min": {
+          "type": "boolean"
+        },
+        "damping_fields": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "damping_fields_mutually_exclusive": {
+          "type": "boolean"
+        },
+        "damping_factor_minimum": {
+          "type": "number"
+        }
+      }
+    },
+    "acquisitionRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hdf5_dense_source_encoding"
+      ],
+      "properties": {
+        "hdf5_dense_source_encoding": {
+          "$ref": "#/$defs/hdf5DenseEncodingRules"
+        }
+      }
+    },
+    "hdf5DenseEncodingRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coefficient_dataset_rank",
+        "coefficient_axis_order",
+        "real_imag_pair_size",
+        "real_imag_order",
+        "storage_kinds",
+        "native_complex_storage_allowed",
+        "all_dimensions_non_empty"
+      ],
+      "properties": {
+        "coefficient_dataset_rank": {
+          "const": 3
+        },
+        "coefficient_axis_order": {
+          "const": [
+            "encoded_field",
+            "source",
+            "real_imag"
+          ]
+        },
+        "real_imag_pair_size": {
+          "const": 2
+        },
+        "real_imag_order": {
+          "const": [
+            "real",
+            "imag"
+          ]
+        },
+        "storage_kinds": {
+          "const": [
+            "integer",
+            "floating"
+          ]
+        },
+        "native_complex_storage_allowed": {
+          "const": false
+        },
+        "all_dimensions_non_empty": {
+          "const": true
+        }
+      }
+    },
+    "fileReferenceRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relative_paths_resolve_from",
+        "missing_project_local_severity",
+        "existing_external_files_validate_locally",
+        "remote_unverified_policy",
+        "explicit_opt_in_parameter",
+        "remote_unverified_requires_absolute_path",
+        "remote_unverified_requires_outside_project",
+        "remote_unverified_code",
+        "remote_unverified_severity",
+        "remote_warning_includes_concrete_path"
+      ],
+      "properties": {
+        "relative_paths_resolve_from": {
+          "const": "project_root"
+        },
+        "missing_project_local_severity": {
+          "const": "error"
+        },
+        "existing_external_files_validate_locally": {
+          "const": true
+        },
+        "remote_unverified_policy": {
+          "const": "slurm-or-explicit-opt-in"
+        },
+        "explicit_opt_in_parameter": {
+          "const": "allow_unverified_remote_files"
+        },
+        "remote_unverified_requires_absolute_path": {
+          "const": true
+        },
+        "remote_unverified_requires_outside_project": {
+          "const": true
+        },
+        "remote_unverified_code": {
+          "const": "files.remote_unverified"
+        },
+        "remote_unverified_severity": {
+          "const": "warning"
+        },
+        "remote_warning_includes_concrete_path": {
+          "const": false
+        }
+      }
+    },
+    "outputRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "traces_enabled_by_default",
+        "vtk_frequency_count",
+        "vtk_targets",
+        "vtk_formats",
+        "vtk_upscale_targets",
+        "vtk_upscale_minimum",
+        "vtk_upscale_maximum",
+        "vtk_grid_allows_upscale",
+        "wavefield_grid_required",
+        "source_ids_one_based",
+        "complex_parts",
+        "item_kinds",
+        "model_surfaces"
+      ],
+      "properties": {
+        "traces_enabled_by_default": {
+          "type": "boolean"
+        },
+        "vtk_frequency_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "vtk_targets": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "vtk_formats": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "vtk_upscale_targets": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "vtk_upscale_minimum": {
+          "type": "integer"
+        },
+        "vtk_upscale_maximum": {
+          "type": "integer"
+        },
+        "vtk_grid_allows_upscale": {
+          "type": "boolean"
+        },
+        "wavefield_grid_required": {
+          "type": "boolean"
+        },
+        "source_ids_one_based": {
+          "type": "boolean"
+        },
+        "complex_parts": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "item_kinds": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "model_surfaces": {
+          "$ref": "#/$defs/modelSurfaceRules"
+        }
+      }
+    },
+    "modelSurfaceRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "named_aliases",
+        "authored_and_expanded_horizon_names",
+        "indexed_prefix",
+        "index_base",
+        "case_sensitive",
+        "bottom_alias_allowed",
+        "borehole_surface_names_allowed"
+      ],
+      "properties": {
+        "named_aliases": {
+          "const": [
+            "top"
+          ]
+        },
+        "authored_and_expanded_horizon_names": {
+          "const": true
+        },
+        "indexed_prefix": {
+          "const": "surface_"
+        },
+        "index_base": {
+          "const": 1
+        },
+        "case_sensitive": {
+          "const": false
+        },
+        "bottom_alias_allowed": {
+          "const": false
+        },
+        "borehole_surface_names_allowed": {
+          "const": false
+        }
+      }
+    },
+    "publicApi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "symbol",
+        "import_path",
+        "aliases",
+        "kind",
+        "category",
+        "summary",
+        "related_glossary"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/catalogId"
+        },
+        "symbol": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "import_path": {
+          "type": "string",
+          "pattern": "^frequensolve\\.[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "aliases": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "kind": {
+          "enum": [
+            "class",
+            "function"
+          ]
+        },
+        "category": {
+          "enum": [
+            "acquisition",
+            "jobs",
+            "knowledge",
+            "loading",
+            "mesh",
+            "model",
+            "numerics",
+            "outputs",
+            "project",
+            "simulation",
+            "validation"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "related_glossary": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        }
+      }
+    },
+    "glossaryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "term",
+        "aliases",
+        "definition",
+        "related_api"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/catalogId"
+        },
+        "term": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "aliases": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "definition": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "related_api": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        }
+      }
+    },
+    "physics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "aliases",
+        "summary",
+        "supported_dimensions",
+        "property_requirements",
+        "required_properties",
+        "output_components"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "aliases": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "supported_dimensions": {
+          "$ref": "#/$defs/dimensionArray"
+        },
+        "property_requirements": {
+          "enum": [
+            "cataloged",
+            "domain-specific",
+            "not-cataloged"
+          ]
+        },
+        "material_profile": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "required_properties": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "output_components": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "guided_scenario_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "property_requirements": {
+                "const": "cataloged"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "material_profile"
+            ],
+            "properties": {
+              "required_properties": {
+                "minItems": 1
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "material_profile"
+              ]
+            },
+            "properties": {
+              "required_properties": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "validationCode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "path",
+        "explanation",
+        "remediation"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)+$"
+        },
+        "severity": {
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "explanation": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "remediation": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "example": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "summary",
+        "source_path",
+        "tested_by"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_path": {
+          "$ref": "#/$defs/repositoryPath"
+        },
+        "tested_by": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/repositoryPath"
+          }
+        },
+        "scenario_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "starterScenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "summary",
+        "physics",
+        "dimension",
+        "example_id",
+        "setup",
+        "limitations"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "physics": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "dimension": {
+          "enum": [
+            2,
+            2.5,
+            3
+          ]
+        },
+        "example_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "setup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "project",
+            "simulation",
+            "model",
+            "mesh",
+            "boundary_conditions",
+            "acquisition",
+            "discretization",
+            "solver",
+            "job"
+          ],
+          "properties": {
+            "project": {
+              "type": "object",
+              "required": [
+                "name",
+                "pretty_name",
+                "load_if_exists"
+              ],
+              "properties": {
+                "name": {
+                  "$ref": "#/$defs/nonEmptyString"
+                },
+                "pretty_name": {
+                  "$ref": "#/$defs/nonEmptyString"
+                },
+                "load_if_exists": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "simulation": {
+              "type": "object",
+              "required": [
+                "name",
+                "physics",
+                "dimension",
+                "units"
+              ],
+              "properties": {
+                "name": {
+                  "$ref": "#/$defs/nonEmptyString"
+                },
+                "physics": {
+                  "$ref": "#/$defs/nonEmptyString"
+                },
+                "dimension": {
+                  "enum": [
+                    2,
+                    2.5,
+                    3
+                  ]
+                },
+                "units": {
+                  "type": "object"
+                }
+              }
+            },
+            "model": {
+              "type": "object",
+              "required": [
+                "type",
+                "name",
+                "dimension",
+                "x_limits",
+                "surfaces",
+                "layers"
+              ],
+              "properties": {
+                "type": {
+                  "const": "LayeredModel"
+                },
+                "name": {
+                  "$ref": "#/$defs/nonEmptyString"
+                },
+                "dimension": {
+                  "enum": [
+                    2,
+                    3
+                  ]
+                },
+                "x_limits": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "type": "number"
+                  }
+                },
+                "surfaces": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "layers": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            },
+            "mesh": {
+              "type": "object",
+              "required": [
+                "type",
+                "n",
+                "adapt",
+                "source_grading"
+              ],
+              "properties": {
+                "type": {
+                  "const": "HexMeshGenerator"
+                },
+                "n": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "adapt": {
+                  "type": "object"
+                },
+                "source_grading": {
+                  "type": "object"
+                }
+              }
+            },
+            "boundary_conditions": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": [
+                  "conditions",
+                  "boundaries"
+                ],
+                "properties": {
+                  "conditions": {
+                    "$ref": "#/$defs/nonEmptyStringArray"
+                  },
+                  "boundaries": {
+                    "$ref": "#/$defs/nonEmptyStringArray"
+                  }
+                }
+              }
+            },
+            "acquisition": {
+              "type": "object",
+              "required": [
+                "source",
+                "receiver_group"
+              ],
+              "properties": {
+                "source": {
+                  "type": "object",
+                  "required": [
+                    "kind",
+                    "coords"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "$ref": "#/$defs/nonEmptyString"
+                    },
+                    "coords": {
+                      "type": "array",
+                      "minItems": 1
+                    }
+                  }
+                },
+                "receiver_group": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "device_name",
+                    "component",
+                    "coordinate_line"
+                  ],
+                  "properties": {
+                    "name": {
+                      "$ref": "#/$defs/nonEmptyString"
+                    },
+                    "device_name": {
+                      "$ref": "#/$defs/nonEmptyString"
+                    },
+                    "component": {
+                      "type": "object",
+                      "required": [
+                        "name",
+                        "field"
+                      ]
+                    },
+                    "coordinate_line": {
+                      "type": "object",
+                      "required": [
+                        "axis",
+                        "start",
+                        "stop",
+                        "count",
+                        "fixed"
+                      ],
+                      "properties": {
+                        "axis": {
+                          "const": "x"
+                        },
+                        "start": {
+                          "type": "number"
+                        },
+                        "stop": {
+                          "type": "number"
+                        },
+                        "count": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "fixed": {
+                          "type": "object",
+                          "required": [
+                            "z"
+                          ],
+                          "properties": {
+                            "z": {
+                              "type": "number"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "discretization": {
+              "type": "object"
+            },
+            "solver": {
+              "type": "object"
+            },
+            "job": {
+              "type": "object",
+              "required": [
+                "type",
+                "name",
+                "f_list",
+                "outputs"
+              ],
+              "properties": {
+                "type": {
+                  "const": "FrequencyDomainJob"
+                },
+                "name": {
+                  "$ref": "#/$defs/nonEmptyString"
+                },
+                "f_list": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                },
+                "outputs": {
+                  "type": "object",
+                  "required": [
+                    "vtk"
+                  ],
+                  "properties": {
+                    "vtk": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "limitations": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        }
+      }
+    }
+  }
+}

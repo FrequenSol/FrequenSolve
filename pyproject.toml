@@ -132,6 +132,7 @@ include = ["frequensolve*"]
 
 [tool.setuptools.package-data]
 "frequensolve" = ["frequensolver_compatibility.json"]
+"frequensolve.knowledge" = ["*.json"]
 "frequensolve.orchestrator.sites" = ["site_presets.toml"]
 "frequensolve.orchestrator.sites.hpc" = ["templates/**/*.sh", "templates/**/*.py"]
 

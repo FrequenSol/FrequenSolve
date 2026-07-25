@@ -12,6 +12,7 @@ unfamiliar, check the :doc:`../glossary`.
    :maxdepth: 2
 
    projects_jobs_sites
+   simulation_knowledge_catalog
    site_configuration
    stampede3_getting_started
    frequensolve_directory
