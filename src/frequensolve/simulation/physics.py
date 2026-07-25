@@ -118,7 +118,7 @@ _COMPONENTS_BY_PHYSICS = {
     "coupled_axisym": ElasticComponents,
     "coupled_axisym_torsion": ElasticComponents,
     "poroelastic": PoroelasticComponents,
-    "EM": EMComponents,
+    "em": EMComponents,
 }
 
 

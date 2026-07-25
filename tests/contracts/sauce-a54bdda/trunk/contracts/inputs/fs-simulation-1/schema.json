@@ -1,0 +1,1488 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-simulation-1/schema.json",
+  "title": "FS Simulation v1",
+  "description": "FrequenSolve simulation document contract.",
+  "x-fs-contract": "fs-simulation-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "type": "object",
+  "required": [
+    "project_path",
+    "physics",
+    "dimension"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-simulation-1"
+    },
+    "project_path": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+    },
+    "physics": {
+      "enum": [
+        "coupled",
+        "coupled_axisym",
+        "coupled_axisym_torsion",
+        "coupled_aep",
+        "coupled_aep_axisym",
+        "coupled2",
+        "coupled_static",
+        "acoustic",
+        "acoustic_axisym",
+        "elastic",
+        "elastic_axisym",
+        "elastic_axisym_torsion",
+        "elastic2",
+        "elastic_static",
+        "poroelastic",
+        "poroelastic_axisym",
+        "em",
+        "smooth"
+      ]
+    },
+    "axisymmetric": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, base seismic physics keys select their 2D cylindrical axisymmetric variants. Existing `_axisym` physics aliases remain accepted for compatibility."
+    },
+    "dimension": {
+      "oneOf": [
+        {
+          "enum": [
+            2,
+            3
+          ]
+        },
+        {
+          "enum": [
+            2.5
+          ]
+        }
+      ]
+    },
+    "disable_scaling": {
+      "type": "boolean",
+      "default": false
+    },
+    "scaling": {
+      "type": "string",
+      "enum": [
+        "legacy",
+        "default",
+        "manual",
+        "robust"
+      ],
+      "default": "legacy",
+      "description": "Runtime scaling policy. `robust` performs an opt-in material-probing pass and chooses reference length and mass scales from robust material centers before the final model initialization."
+    },
+    "f0": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "default": 10.0
+    },
+    "omega_nd_center": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "default": 1.0,
+      "description": "Robust scaling target for the nondimensional angular frequency at the adaptation/reference frequency."
+    },
+    "modulus_nd_center": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "description": "Optional robust scaling override for the log-centered nondimensional modulus. Defaults to omega_nd_center so first-order elastic omega*rho and omega*S terms are balanced."
+    },
+    "length_scale": {
+      "type": "number",
+      "exclusiveMinimum": 0.0
+    },
+    "time_scale": {
+      "type": "number",
+      "exclusiveMinimum": 0.0
+    },
+    "mass_scale": {
+      "type": "number",
+      "exclusiveMinimum": 0.0
+    },
+    "Units": {
+      "type": "object",
+      "properties": {
+        "defaults": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "global_coordinate_system": {
+      "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateSystem"
+    },
+    "coordinate_systems": {
+      "type": "array",
+      "items": {
+        "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateSystem"
+      }
+    },
+    "Discretization": {
+      "type": "object",
+      "properties": {
+        "order": {
+          "description": "Deprecated and no longer accepted. Use Mesh/adapt/order.",
+          "deprecated": true,
+          "not": {}
+        },
+        "method": {
+          "type": "string",
+          "default": "DPG"
+        },
+        "geometry": {
+          "type": "string",
+          "enum": [
+            "iso",
+            "exact"
+          ],
+          "default": "iso",
+          "description": "Geometry evaluator used during element integration. `iso` uses projected isoparametric geometry DOFs. `exact` evaluates curved GMP geometry directly."
+        },
+        "geom_tol": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "default": 1.0e-8,
+          "description": "Geometry coordinate tolerance used by GMP and reference-coordinate checks. This is currently configured under Discretization alongside geometry; it may move under Mesh in a future contract."
+        },
+        "force_iso_quadrature": {
+          "type": "boolean",
+          "default": false
+        },
+        "DPG_enrich": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1
+        },
+        "DPG_alpha": {
+          "type": "number",
+          "default": 1.0
+        },
+        "DPG_penalty": {
+          "type": "number",
+          "default": 10.0
+        },
+        "normal_backend": {
+          "type": "string",
+          "enum": [
+            "cpu",
+            "gpu",
+            "metal"
+          ],
+          "default": "cpu",
+          "description": "Selects the normal-system backend gate for relaxed assembly. `cpu` disables all Metal normal-system kernels, including GPU back-substitution after CPU Cholesky; `gpu`/`metal` allows explicitly requested GPU normal-system kernels. Double-precision builds default to `cpu` because the Metal normal-system backend stores factors and workspaces in single precision."
+        }
+      },
+      "additionalProperties": true
+    },
+    "Mesh": {
+      "type": "object",
+      "properties": {
+        "max_nodes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 100000
+        },
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "parallel": {
+          "type": "object",
+          "properties": {
+            "distribute": {
+              "type": "boolean"
+            },
+            "partitioner": {
+              "enum": [
+                "simple",
+                "modified_morton"
+              ],
+              "default": "simple"
+            }
+          },
+          "additionalProperties": true
+        },
+        "generator": {
+          "type": "object",
+          "description": "Optional mesh generator configuration. When omitted and Mesh/file is not set, the runtime uses LayeredMeshGenerator with horizontal bounds derived from Model coordinate limits, vertical extents driven by layered model surfaces, and coarse horizontal counts chosen from MPI rank count; z_limits are not required for this default path.",
+          "properties": {
+            "_type": {
+              "enum": [
+                "LayeredMeshGenerator",
+                "SweptBoreholeMeshGenerator"
+              ]
+            },
+            "path": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+            },
+            "l_bound": {
+              "$ref": "#/$defs/lengthVectorQuantity",
+              "description": "Lower generator bound. For LayeredMeshGenerator this may be omitted when Model horizontal coordinate limits are provided."
+            },
+            "u_bound": {
+              "$ref": "#/$defs/lengthVectorQuantity",
+              "description": "Upper generator bound. For LayeredMeshGenerator this may be omitted when Model horizontal coordinate limits are provided."
+            },
+            "n": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/intVector",
+              "description": "Optional coarse generator counts. For LayeredMeshGenerator, omitted counts are inferred so the initial layered mesh has more cells than MPI ranks; the vertical/layer direction remains model-layer driven."
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units",
+              "description": "Default length units for generator bounds. Per-bound units on l_bound or u_bound override this default."
+            },
+            "clip_to_envelope": {
+              "type": "boolean",
+              "default": false,
+              "description": "Clip layered surface frontiers against the top and bottom model envelope before emitting cells."
+            },
+            "triangulate_strips": {
+              "type": "boolean",
+              "default": false,
+              "description": "Prefer triangle decomposition for layered strip regions, collapsing same-source collinear boundary points before triangulation."
+            },
+            "share_fracture_neighbor_vertices": {
+              "type": "boolean",
+              "default": false,
+              "description": "Propagate fracture-local x breakpoints across adjacent fracture-neighbor frontiers before emitting strip cells."
+            },
+            "horizontal_spacing": {
+              "$ref": "#/$defs/horizontalSpacing"
+            },
+            "core_type": {
+              "$ref": "#/$defs/coreType"
+            },
+            "centerline": {
+              "$ref": "#/$defs/sweptBoreholeCenterline"
+            },
+            "borehole": {
+              "$ref": "#/$defs/sweptBoreholeSketch",
+              "description": "Near-wellbore borehole sketch swept along `centerline` by SweptBoreholeMeshGenerator."
+            },
+            "sketch": {
+              "$ref": "#/$defs/sweptBoreholeSketch",
+              "description": "Alias for `borehole` in SweptBoreholeMeshGenerator inputs."
+            },
+            "core_ratio": {
+              "type": "number",
+              "exclusiveMinimum": 0.0,
+              "exclusiveMaximum": 1.0,
+              "default": 0.35,
+              "description": "Radius fraction used only when core_type is `hex` in the swept borehole sketch."
+            },
+            "start_angle": {
+              "type": "number",
+              "default": 0.7853981633974483,
+              "description": "First polar sample angle, in radians, for the four-point swept borehole sketch."
+            },
+            "implicit_walls": {
+              "type": "boolean",
+              "default": false,
+              "description": "For SweptBoreholeMeshGenerator, register swept radial wall SDFs and tag radial wall quads as GMP_Implicit instead of leaving the wall faces purely linear."
+            }
+          },
+          "additionalProperties": true
+        },
+        "adapt": {
+          "type": "object",
+          "properties": {
+            "elems_per_wave": {
+              "$ref": "#/$defs/adaptPositiveNumber",
+              "description": "Target elements per wavelength used by mesh adaptivity before solver-grid refinements."
+            },
+            "order": {
+              "$ref": "#/$defs/adaptOrder",
+              "description": "Initial polynomial order assigned to the root mesh before mesh adaptivity and solver refinement. Current seismic workflows require this field."
+            },
+            "f_low": {
+              "type": "number",
+              "minimum": 0.0,
+              "default": 0.0,
+              "description": "Lower bound on the physical frequency used for mesh adaptivity."
+            },
+            "f_high": {
+              "type": "number",
+              "minimum": 0.0,
+              "default": 0.0,
+              "description": "Optional upper bound on the physical frequency used for mesh adaptivity. Zero disables the upper bound."
+            },
+            "f_adapt": {
+              "type": "number",
+              "minimum": 0.0,
+              "default": 0.0,
+              "description": "Optional explicit physical frequency used for mesh adaptivity. When present it overrides the task frequency subject to configuration validation."
+            },
+            "hmin": {
+              "type": "number",
+              "minimum": 0.0,
+              "default": 0.0,
+              "description": "Global minimum element size for adaptivity, in the simulation's default length units."
+            },
+            "hmax": {
+              "type": "number",
+              "minimum": 0.0,
+              "default": 0.0,
+              "description": "Global maximum element size for adaptivity, in the simulation's default length units."
+            },
+            "normal_growth": {
+              "type": "number",
+              "exclusiveMinimum": 1.0,
+              "description": "Maximum allowed ratio between neighboring element sizes measured in the side-normal direction. Omit to disable side-normal growth grading."
+            },
+            "geometry_error": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Enable h-adaptation based on the coordinate error between projected isoparametric geometry DOFs and exact GMP geometry."
+                },
+                "tolerance": {
+                  "type": "number",
+                  "exclusiveMinimum": 0.0,
+                  "default": 0.01,
+                  "description": "Relative geometry-error tolerance, normalized by the current element bounding-box diagonal."
+                },
+                "relative_tolerance": {
+                  "type": "number",
+                  "exclusiveMinimum": 0.0,
+                  "description": "Alias for tolerance. When both fields are present, relative_tolerance takes precedence."
+                },
+                "absolute_tolerance": {
+                  "type": "number",
+                  "minimum": 0.0,
+                  "default": 0.0,
+                  "description": "Absolute coordinate-error tolerance in the simulation's default length units. The effective threshold is the maximum of the relative and absolute tolerances."
+                },
+                "max_refinements": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 8,
+                  "description": "Maximum total geometry-error refinement passes, including passes reserved for solver hierarchy construction."
+                },
+                "reserve_refinements": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Number of geometry-error refinement passes to leave for the final h-like solver hierarchy refinements. Defaults to the configured number of h-like solver refinements."
+                }
+              },
+              "additionalProperties": true,
+              "description": "Optional geometry-resolution adaptivity. Initial mesh adaptation applies these h-refinement passes after material, source, and receiver adaptation, while reserve_refinements leaves the final passes for solver hierarchy construction."
+            },
+            "src_grading": {
+              "$ref": "#/$defs/refinementDistanceGrading"
+            },
+            "rcv_grading": {
+              "$ref": "#/$defs/refinementDistanceGrading"
+            },
+            "surface_gradings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/refinementSurfaceGrading"
+              },
+              "description": "Optional signed-surface refinement grading rules."
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "Model": {
+      "allOf": [
+        {
+          "$ref": "../fs-material-model-1/schema.json"
+        },
+        {
+          "type": "object",
+          "properties": {
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "x_limits": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/vec2"
+        },
+        "y_limits": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/vec2"
+        },
+        "layers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+        }
+      ]
+    },
+    "user_parameters": {
+      "type": "object",
+      "properties": {
+        "z_limits": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/vec2"
+        }
+      },
+      "additionalProperties": true
+    },
+    "Solver": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "fast-3"
+          ],
+          "description": "Optional user-facing solver preset. Omit this field for expert defaults; fast-3 selects the current fast 3D preset with PCG coarse solve, preg = 5e-2, sparse RHS, fp16 patch storage, and log-growth multigrid cycle visits when Solver/cycle is unset. In builds with the GPU normal-system backend enabled, fast-3 also defaults unset Discretization/normal_backend to gpu for GPU back-substitution, unset relaxed_assembly to true, and unset herk_backend to gpu while leaving cholesky_backend on cpu. Set Solver/gpu_backend to none or cpu to suppress these fast-3 GPU defaults."
+        },
+        "grids": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4
+        },
+        "refinement_flags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[HhPpAa]+$"
+          },
+          "description": "Optional per-grid refinement programs. Each array entry applies between successive solver grids, and each character is one sequential refinement step. Supported tokens are h, p, and a; repeated tokens such as pp or hh apply multiple steps before assembling the next grid."
+        },
+        "refinements": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[HhPpAa]+$"
+          },
+          "description": "Alias for refinement_flags. Each entry is a per-grid refinement program; token a runs adaptive hp refinement, choosing h for axes with large wavespeed jumps and p otherwise."
+        },
+        "hp": {
+          "type": "object",
+          "properties": {
+            "order": {
+              "$ref": "#/$defs/hpOrderPolicy",
+              "description": "Preferred adaptive hp order policy. A constant integer or case expression is evaluated per eligible element axis with variable epw."
+            },
+            "order_x": {
+              "$ref": "#/$defs/hpAxisOrder",
+              "description": "Optional x-axis adaptive hp order override or clamp. A range-only object clamps Solver/hp/order for this axis."
+            },
+            "order_y": {
+              "$ref": "#/$defs/hpAxisOrder",
+              "description": "Optional y-axis adaptive hp order override or clamp. A range-only object clamps Solver/hp/order for this axis."
+            },
+            "order_z": {
+              "$ref": "#/$defs/hpAxisOrder",
+              "description": "Optional z-axis adaptive hp order override or clamp. Ignored in two-dimensional runs."
+            },
+            "overrides": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/hpOrderOverride"
+              },
+              "description": "Classifier-specific adaptive hp order policies. Entries replace Solver/hp/order when their classifier and value match an element; unmatched elements use Solver/hp/order."
+            }
+          },
+          "additionalProperties": true
+        },
+        "hp_switch": {
+          "type": "integer",
+          "minimum": 1,
+          "deprecated": true,
+          "description": "Deprecated compatibility field. Solver h/p refinement counts are derived from refinement_flags and grids; this field is ignored by current readers."
+        },
+        "max_iter": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 500
+        },
+        "min_iter": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1
+        },
+        "coarse_grid": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1
+        },
+        "n_smooth": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1
+        },
+        "cycle": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Scalar recursive visit count for non-explicit multigrid cycles."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "coarse": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Grid index treated as the coarse-grid solve."
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "symmetric"
+                  ],
+                  "default": "symmetric"
+                },
+                "anchor": {
+                  "type": "string",
+                  "enum": [
+                    "coarse",
+                    "fine"
+                  ],
+                  "default": "coarse",
+                  "description": "Selects whether visits are indexed from the coarse grid or active fine grid."
+                },
+                "visits": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "minItems": 1,
+                  "description": "Explicit recursive visit counts. With anchor=fine, the first entry is the active fine grid and the second entry is the second-finest grid."
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "relaxed_assembly": {
+          "type": "boolean",
+          "default": false
+        },
+        "cholesky_backend": {
+          "type": "string",
+          "enum": [
+            "gpu",
+            "metal",
+            "cpu"
+          ],
+          "default": "cpu",
+          "description": "Selects the Cholesky backend used by relaxed normal-system assembly. `cpu` factors on the CPU and uploads the factor for GPU back-substitution when Metal is enabled; `gpu`/`metal` keeps the experimental Metal Cholesky path when explicitly requested."
+        },
+        "herk_backend": {
+          "type": "string",
+          "enum": [
+            "cpu",
+            "gpu",
+            "metal"
+          ],
+          "default": "cpu",
+          "description": "Selects the HERK backend used to form the relaxed complex normal-system Schur block after back-substitution. `cpu` keeps the existing double-precision CPU zherk path; `gpu`/`metal` computes the upper Hermitian product on Metal in single precision when available."
+        },
+        "coarse_solver": {
+          "type": "string",
+          "default": "MUMPS"
+        },
+        "tolerance": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "default": 1.0e-5
+        },
+        "coarse_tol": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "default": 1.0e-4
+        },
+        "sparse_rhs": {
+          "type": "boolean",
+          "default": true
+        },
+        "scale_macro": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, solve the macro system in symmetrically diagonal-scaled coordinates using per-grid scaling from the assembled macro diagonal."
+        },
+        "diagonal_scaling": {
+          "type": "boolean",
+          "default": false,
+          "description": "Alias for scale_macro."
+        },
+        "sparse_rhs_tol": {
+          "type": "number",
+          "default": 1e-8
+        },
+        "mitigate_blowup": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, PCG stores the best iterate and restores it if residual blow-up escalates past soft residual restarts. This requires one extra solution-sized buffer per active solve."
+        },
+        "blowup_window": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 10,
+          "description": "PCG residual-history window used for residual blow-up detection. A positive value enables soft true-residual restarts and later recovery/fallback escalation; zero disables this monitor."
+        },
+        "blowup_grace": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 20,
+          "description": "Number of soft true-residual PCG restarts allowed after blow-up detection before the solver treats residual blow-up as a hard PCG failure."
+        },
+        "blowup_hard_factor": {
+          "type": "number",
+          "minimum": 0.0,
+          "default": 100.0,
+          "description": "Residual growth factor relative to the best PCG residual that immediately escalates blow-up detection to hard PCG recovery or Krylov fallback. Zero disables this hard-factor cap."
+        },
+        "replace_residual": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 50,
+          "description": "Number of PCG iterations between true residual recomputation and search-direction restart. A positive value enables periodic residual replacement; zero disables it."
+        },
+        "gpu_backend": {
+          "type": "string"
+        },
+        "gpu_transfer": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "BCs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/boundaryCondition"
+      }
+    },
+    "Acquisition": {
+      "$ref": "../fs-acquisition-2/schema.json"
+    },
+    "Outputs": {
+      "$ref": "../fs-output-config-1/schema.json"
+    },
+    "l2_projection": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "alpha": {
+          "type": "number",
+          "default": 0.0
+        },
+        "smoothing_iterations": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "sparse_rhs": {
+          "type": "boolean",
+          "default": true
+        },
+        "sparse_rhs_tol": {
+          "type": "number",
+          "default": 1e-16
+        },
+        "enforce_average": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "hpOrderPolicy": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/hpPOrderValue"
+        },
+        {
+          "$ref": "#/$defs/hpPOrderCase"
+        }
+      ],
+      "description": "Adaptive hp order policy. A bare integer requests a constant p order."
+    },
+    "hpAxisOrder": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/hpOrderPolicy"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "policy": {
+              "$ref": "#/$defs/hpOrderPolicy",
+              "description": "Axis-specific order policy. If omitted, the global Solver/hp/order policy is used and then clamped by min/max."
+            },
+            "min": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Inclusive minimum order for this axis."
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Inclusive maximum order for this axis."
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "policy"
+              ]
+            },
+            {
+              "required": [
+                "min"
+              ]
+            },
+            {
+              "required": [
+                "max"
+              ]
+            }
+          ],
+          "additionalProperties": true
+        }
+      ],
+      "description": "Axis-specific adaptive hp order policy or clamp. Range-only objects clamp the global policy."
+    },
+    "hpOrderOverride": {
+      "type": "object",
+      "required": [
+        "classifier",
+        "value",
+        "order"
+      ],
+      "properties": {
+        "classifier": {
+          "type": "string",
+          "enum": [
+            "physics"
+          ],
+          "description": "Override classifier. Only physics is currently supported."
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Classifier value to match, such as a physics name when classifier is physics."
+        },
+        "order": {
+          "$ref": "#/$defs/hpOrderPolicy"
+        }
+      },
+      "additionalProperties": true,
+      "description": "Classifier-specific adaptive hp order override."
+    },
+    "hpPOrderValue": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Absolute p order to request."
+    },
+    "hpPOrderCase": {
+      "type": "object",
+      "required": [
+        "op",
+        "branches",
+        "else"
+      ],
+      "properties": {
+        "op": {
+          "const": "case"
+        },
+        "branches": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "if",
+              "then"
+            ],
+            "properties": {
+              "if": {
+                "$ref": "#/$defs/hpPOrderCondition"
+              },
+              "then": {
+                "$ref": "#/$defs/hpPOrderValue"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "else": {
+          "$ref": "#/$defs/hpPOrderValue"
+        }
+      },
+      "additionalProperties": true
+    },
+    "hpPOrderCondition": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/hpPOrderComparison"
+        },
+        {
+          "$ref": "#/$defs/hpPOrderBoolean"
+        }
+      ]
+    },
+    "hpPOrderComparison": {
+      "type": "object",
+      "required": [
+        "op",
+        "args"
+      ],
+      "properties": {
+        "op": {
+          "enum": [
+            ">",
+            ">=",
+            "<",
+            "<=",
+            "==",
+            "!="
+          ]
+        },
+        "args": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/hpPOrderNumeric"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "hpPOrderBoolean": {
+      "type": "object",
+      "required": [
+        "op",
+        "args"
+      ],
+      "properties": {
+        "op": {
+          "enum": [
+            "and",
+            "&",
+            "or",
+            "|"
+          ]
+        },
+        "args": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/hpPOrderCondition"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "hpPOrderNumeric": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "var"
+          ],
+          "properties": {
+            "var": {
+              "const": "epw"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "lengthVectorQuantity": {
+      "oneOf": [
+        {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            },
+            "scale": {
+              "type": "number",
+              "default": 1.0
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "Length vector. Numeric values use the simulation length scale unless Mesh/generator/units or per-value units are supplied."
+    },
+    "lengthQuantity": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number"
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "Length scalar. Numeric values use the simulation length scale unless units are supplied."
+    },
+    "domainRef": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ],
+      "description": "Material domain reference by mesh_block_id, material subdomain name, or GMP region label."
+    },
+    "refinementPower": {
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        {
+          "$ref": "#/$defs/axisPositiveNumber"
+        }
+      ],
+      "default": 1.0,
+      "description": "Exponent applied to the normalized grading ramp between d0 and d1. Accepts a scalar or object keyed by active global coordinate-axis names. A value of 1 is linear; 2 is quadratic with unchanged endpoints."
+    },
+    "refinementFactor": {
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 1.0
+        },
+        {
+          "$ref": "#/$defs/axisRefinementFactor"
+        }
+      ],
+      "description": "Refinement factor. Accepts a scalar or object keyed by active global coordinate-axis names."
+    },
+    "adaptPositiveNumber": {
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        {
+          "$ref": "#/$defs/axisPositiveNumber"
+        }
+      ],
+      "description": "Positive scalar or object keyed by active global coordinate-axis names."
+    },
+    "adaptOrder": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "$ref": "#/$defs/axisPositiveInteger"
+        }
+      ],
+      "description": "Polynomial order as a scalar or object keyed by active global coordinate-axis names."
+    },
+    "refinementDistanceGrading": {
+      "type": "object",
+      "properties": {
+        "d0": {
+          "$ref": "#/$defs/lengthQuantity"
+        },
+        "d1": {
+          "$ref": "#/$defs/lengthQuantity"
+        },
+        "factor": {
+          "$ref": "#/$defs/refinementFactor",
+          "description": "Refinement factor at or inside d0. Alias for factor_max; when factor_min is omitted the factor transitions to 1 at d1."
+        },
+        "factor_max": {
+          "$ref": "#/$defs/refinementFactor",
+          "description": "Refinement factor at or inside d0."
+        },
+        "factor_min": {
+          "$ref": "#/$defs/refinementFactor",
+          "default": 1.0,
+          "description": "Refinement factor at or beyond d1."
+        },
+        "power": {
+          "$ref": "#/$defs/refinementPower"
+        }
+      },
+      "additionalProperties": true,
+      "description": "Distance-based refinement grading used for source and receiver adaptivity."
+    },
+    "refinementSurfaceGrading": {
+      "type": "object",
+      "required": [
+        "surface"
+      ],
+      "properties": {
+        "surface": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Model surface name, generated fracture boundary name, registered borehole surface name, or generated surface_N alias."
+        },
+        "mode": {
+          "enum": [
+            "inside",
+            "outside",
+            "band",
+            "abs_band",
+            "none"
+          ],
+          "default": "abs_band"
+        },
+        "d0": {
+          "$ref": "#/$defs/lengthQuantity"
+        },
+        "d1": {
+          "$ref": "#/$defs/lengthQuantity"
+        },
+        "factor": {
+          "$ref": "#/$defs/refinementFactor",
+          "description": "Refinement factor at or inside d0. Alias for factor_max."
+        },
+        "factor_max": {
+          "$ref": "#/$defs/refinementFactor",
+          "description": "Refinement factor at or inside d0."
+        },
+        "factor_min": {
+          "$ref": "#/$defs/refinementFactor",
+          "default": 1.0,
+          "description": "Refinement factor at or beyond d1."
+        },
+        "phi_scale": {
+          "type": "number",
+          "default": 1.0
+        },
+        "power": {
+          "$ref": "#/$defs/refinementPower"
+        }
+      },
+      "additionalProperties": true,
+      "description": "Signed-surface refinement grading; power changes only the interpolation curve between d0 and d1."
+    },
+    "axisPositiveNumber": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "number",
+        "exclusiveMinimum": 0.0
+      }
+    },
+    "axisPositiveInteger": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "axisRefinementFactor": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 1.0
+      }
+    },
+    "sweptBoreholeCenterlinePoint": {
+      "description": "Centerline point as a raw coordinate vector or an object with value, units, and scale.",
+      "oneOf": [
+        {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            },
+            "scale": {
+              "type": "number",
+              "default": 1.0
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "sweptBoreholeCenterline": {
+      "type": "object",
+      "required": [
+        "points"
+      ],
+      "properties": {
+        "points": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/sweptBoreholeCenterlinePoint"
+          }
+        },
+        "n": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total number of sweep intervals distributed over the polyline by segment length."
+        },
+        "segment_counts": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": "Optional per-centerline-segment sweep interval counts."
+        },
+        "reference_normal": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector",
+          "description": "Optional vector used to orient the first cross-section frame."
+        },
+        "frame": {
+          "type": "object",
+          "properties": {
+            "reference_normal": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "sweptBoreholeRadius": {
+      "description": "Cumulative swept borehole wall radius. Scalars are circular; objects may carry xarray profile data.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/lengthQuantity"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true
+        }
+      ]
+    },
+    "sweptBoreholeSurface": {
+      "type": "object",
+      "required": [
+        "name",
+        "r"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "r": {
+          "$ref": "#/$defs/sweptBoreholeRadius"
+        }
+      },
+      "additionalProperties": true
+    },
+    "sweptBoreholeLayer": {
+      "type": "object",
+      "required": [
+        "mesh_block_id"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "mesh_block_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "inner_surface": {
+          "type": "string"
+        },
+        "outer_surface": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "sweptBoreholeSketch": {
+      "type": "object",
+      "required": [
+        "layers",
+        "surfaces"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "surfaces": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sweptBoreholeSurface"
+          }
+        },
+        "layers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sweptBoreholeLayer"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "coreType": {
+      "type": "string",
+      "enum": [
+        "prism",
+        "hex"
+      ],
+      "default": "prism",
+      "description": "Center topology for 3D layered boreholes and swept borehole sketches."
+    },
+    "horizontalSpacingControl": {
+      "type": "object",
+      "description": "Local horizontal mesh spacing control around a named borehole.",
+      "required": [
+        "around_borehole",
+        "max_size"
+      ],
+      "properties": {
+        "around_borehole": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of a borehole in Model/boreholes."
+        },
+        "padding": {
+          "$ref": "#/$defs/lengthQuantity",
+          "description": "Extra horizontal distance beyond the borehole radius envelope. Numeric values use the simulation length scale unless units are supplied."
+        },
+        "max_size": {
+          "$ref": "#/$defs/lengthQuantity",
+          "description": "Maximum horizontal cell size inside the controlled interval. Must be positive."
+        }
+      },
+      "additionalProperties": true
+    },
+    "horizontalSpacing": {
+      "type": "object",
+      "description": "Layered mesh generator controls for adding borehole-aligned x coordinates and local x refinement.",
+      "properties": {
+        "include_borehole_edges": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, add x coordinates at borehole layer radius boundaries and radius-profile breakpoints."
+        },
+        "max_growth": {
+          "description": "Optional adjacent horizontal cell-size growth limit. Omit or set to 0 to disable; enabled values must be greater than 1.",
+          "oneOf": [
+            {
+              "const": 0
+            },
+            {
+              "type": "number",
+              "exclusiveMinimum": 1.0
+            }
+          ],
+          "default": 0
+        },
+        "controls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/horizontalSpacingControl"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "boundaryCondition": {
+      "type": "object",
+      "required": [
+        "conditions",
+        "boundaries"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Optional diagnostic label for this boundary-condition entry."
+        },
+        "conditions": {
+          "description": "One or more boundary-condition schema names to merge for each listed boundary.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "boundaries": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "pml_wavelengths": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "pml_exponent": {
+          "type": "number"
+        },
+        "pml_constant": {
+          "type": "number"
+        },
+        "pml_reflection": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "exclusiveMaximum": 1.0
+        },
+        "stretch_limit": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "size_limit": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "domain_extension": {
+          "type": "object",
+          "description": "PML-only material-domain policy for generated PML volume elements on this boundary. Boundary-condition labels are not changed.",
+          "properties": {
+            "default": {
+              "$ref": "#/$defs/domainRef",
+              "description": "Domain assigned to PML cells unless preserved or explicitly remapped. If omitted, cells inherit the adjacent interior domain."
+            },
+            "preserve": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/domainRef"
+              },
+              "description": "Interior source domains that should still be copied into this boundary's PML."
+            },
+            "remap": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/domainRef"
+              },
+              "description": "Explicit source-domain to PML-domain remapping. Keys are source domain names, region labels, or numeric mesh_block_id strings."
+            },
+            "blend": {
+              "type": "object",
+              "description": "Depth-dependent material-property blending applied after preserve/remap have selected each generated PML cell domain. Blend source domains are kept from falling through to default so ParaView cell domains and quadrature material evaluation use the same base domain. Keys may name the post-extension PML domain directly, or an original source domain that is first passed through explicit remap entries.",
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "to"
+                ],
+                "properties": {
+                  "to": {
+                    "$ref": "#/$defs/domainRef",
+                    "description": "Target domain whose material properties are blended in toward the outer PML edge."
+                  },
+                  "profile": {
+                    "type": "string",
+                    "enum": [
+                      "linear",
+                      "smoothstep",
+                      "smooth",
+                      "smootherstep",
+                      "smoother"
+                    ],
+                    "default": "smoothstep"
+                  },
+                  "start": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "exclusiveMaximum": 1.0,
+                    "default": 0.0,
+                    "description": "Normalized PML depth where blending starts."
+                  },
+                  "end": {
+                    "type": "number",
+                    "exclusiveMinimum": 0.0,
+                    "maximum": 1.0,
+                    "default": 1.0,
+                    "description": "Normalized PML depth where blending reaches the target domain."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
