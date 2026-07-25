@@ -836,7 +836,9 @@ def test_profile_loader_uses_existing_default_aws_profile_and_ignores_secrets(
     monkeypatch, tmp_path
 ):
     root = tmp_path / ".frequensolve"
-    _prepare_profile(root)
+    cache = _prepare_profile(root)
+    (root / "site.toml").chmod(0o600)
+    (cache / "config_app.staging.frequensol.com.json").chmod(0o644)
     monkeypatch.setenv("FREQUENSOLVE_HOME", str(root))
 
     profile = cloud._load_site_profile(None)
@@ -850,6 +852,57 @@ def test_profile_loader_uses_existing_default_aws_profile_and_ignores_secrets(
     assert config.graphql_url.endswith(".amazonaws.com/graphql")
     assert "ignored-secret" not in repr(profile)
     assert "ignored@example.test" not in repr(profile)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and mode policy")
+@pytest.mark.parametrize(
+    ("target", "mode"),
+    [
+        ("site", 0o666),
+        ("config", 0o664),
+    ],
+)
+def test_profile_loader_rejects_group_or_world_writable_trust_files(
+    monkeypatch,
+    tmp_path,
+    target,
+    mode,
+):
+    root = tmp_path / ".frequensolve"
+    cache = _prepare_profile(root)
+    site_path = root / "site.toml"
+    config_path = cache / "config_app.staging.frequensol.com.json"
+    site_path.chmod(0o600)
+    config_path.chmod(0o644)
+    (site_path if target == "site" else config_path).chmod(mode)
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(root))
+
+    with pytest.raises(cloud.CloudReadError) as exc_info:
+        profile = cloud._load_site_profile(None)
+        if target == "config":
+            cloud._load_cached_cloud_config(profile)
+
+    assert exc_info.value.code == "CLOUD_CONFIGURATION_REQUIRED"
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "getuid"),
+    reason="POSIX ownership policy",
+)
+def test_profile_loader_rejects_trust_files_not_owned_by_current_user(
+    monkeypatch,
+    tmp_path,
+):
+    root = tmp_path / ".frequensolve"
+    _prepare_profile(root)
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(root))
+    actual_uid = os.getuid()
+    monkeypatch.setattr(cloud.os, "getuid", lambda: actual_uid + 1)
+
+    with pytest.raises(cloud.CloudReadError) as exc_info:
+        cloud._load_site_profile(None)
+
+    assert exc_info.value.code == "CLOUD_CONFIGURATION_REQUIRED"
 
 
 def test_profile_loader_never_creates_starter_configuration(monkeypatch, tmp_path):

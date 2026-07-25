@@ -843,7 +843,11 @@ def _validate_profile_name(profile: str) -> str:
 def _load_site_profile(profile: str | None) -> _SiteProfile:
     path = site_config_path()
     try:
-        raw = _read_bounded_regular_file(path, max_bytes=131_072)
+        raw = _read_bounded_regular_file(
+            path,
+            max_bytes=131_072,
+            integrity_protected=True,
+        )
         document = tomllib.loads(raw.decode("utf-8"))
     except Exception:
         raise CloudReadError(
@@ -923,7 +927,11 @@ def _load_cached_cloud_config(profile: _SiteProfile) -> _CloudConfig:
     path = frequensolve_home() / "cloud" / f"config_{cache_name}.json"
     try:
         document = _strict_json_loads(
-            _read_bounded_regular_file(path, max_bytes=65_536)
+            _read_bounded_regular_file(
+                path,
+                max_bytes=65_536,
+                integrity_protected=True,
+            )
         )
     except Exception:
         raise CloudReadError(
@@ -1185,6 +1193,7 @@ def _read_bounded_regular_file(
     *,
     max_bytes: int,
     private: bool = False,
+    integrity_protected: bool = False,
 ) -> bytes:
     if not hasattr(os, "O_NOFOLLOW"):
         metadata = path.lstat()
@@ -1202,11 +1211,13 @@ def _read_bounded_regular_file(
             or metadata.st_size > max_bytes
         ):
             raise OSError("file is outside the bounded regular-file policy")
-        if private and os.name == "posix":
-            if metadata.st_mode & 0o077:
-                raise OSError("private cache permissions are too broad")
+        if os.name == "posix" and (private or integrity_protected):
             if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
-                raise OSError("private cache has a different owner")
+                raise OSError("trusted cache has a different owner")
+            if private and metadata.st_mode & 0o077:
+                raise OSError("private cache permissions are too broad")
+            if integrity_protected and metadata.st_mode & 0o022:
+                raise OSError("trusted cache permissions allow external writes")
         chunks: list[bytes] = []
         remaining = max_bytes + 1
         while remaining > 0:
