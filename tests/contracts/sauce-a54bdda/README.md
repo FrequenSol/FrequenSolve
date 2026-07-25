@@ -9,6 +9,8 @@ Source paths:
 
 - `trunk/contracts/inputs/fs-simulation-1/schema.json`
 - `trunk/contracts/inputs/fs-material-model-1/schema.json`
+- `trunk/contracts/inputs/fs-output-config-1/schema.json`
+- `trunk/contracts/inputs/fs-units-1/schema.json`
 - `trunk/contracts/inputs/fs-acquisition-2/schema.json`
 - `trunk/contracts/inputs/fs-coordinate-system-1/schema.json`
 - `trunk/contracts/inputs/fs-acquisition-1/schema.json`

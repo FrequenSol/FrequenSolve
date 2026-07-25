@@ -1,0 +1,400 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-output-config-1/schema.json",
+  "title": "FS Output Configuration v1",
+  "description": "Output and Paraview configuration consumed by FrequenSolve simulations.",
+  "x-fs-contract": "fs-output-config-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "fieldSelector": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "field",
+                "property",
+                "info"
+              ]
+            },
+            "field": {
+              "type": "string"
+            },
+            "property": {
+              "type": "string"
+            },
+            "info": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            },
+            "components": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "outputUnits": {
+      "type": "object",
+      "description": "Default units for output coordinates, field dimensions, fields, and material properties.",
+      "default": {
+        "geometry": "m",
+        "dimensions": {
+          "pressure": "Pa",
+          "stress": "Pa",
+          "velocity": "mm/s",
+          "density": "g/cc"
+        },
+        "properties": {
+          "dimensions": {
+            "pressure": "MPa",
+            "stress": "MPa",
+            "velocity": "m/s",
+            "density": "g/cc",
+            "conductivity": "S/m",
+            "permittivity": "F/m",
+            "permeability": "H/m",
+            "bfield": "T"
+          }
+        }
+      },
+      "properties": {
+        "geometry": {
+          "$ref": "../fs-units-1/schema.json#/$defs/unitExpression",
+          "description": "Length unit used for exported trace, acquisition, and visualization coordinates."
+        },
+        "dimensions": {
+          "$ref": "../fs-units-1/schema.json#/$defs/defaults",
+          "description": "Dimension-default units used when a field, trace, or wavefield output does not name a more specific unit."
+        },
+        "defaults": {
+          "$ref": "../fs-units-1/schema.json#/$defs/defaults",
+          "description": "Alias for dimensions."
+        },
+        "field_dimensions": {
+          "$ref": "../fs-units-1/schema.json#/$defs/defaults",
+          "description": "Alias for fields/dimensions."
+        },
+        "attribute_dimensions": {
+          "$ref": "../fs-units-1/schema.json#/$defs/defaults",
+          "description": "Alias for fields/dimensions."
+        },
+        "property_dimensions": {
+          "$ref": "../fs-units-1/schema.json#/$defs/defaults",
+          "description": "Alias for properties/dimensions."
+        },
+        "fields": {
+          "type": "object",
+          "properties": {
+            "dimensions": {
+              "$ref": "../fs-units-1/schema.json#/$defs/defaults"
+            },
+            "defaults": {
+              "$ref": "../fs-units-1/schema.json#/$defs/defaults"
+            }
+          },
+          "additionalProperties": {
+            "$ref": "../fs-units-1/schema.json#/$defs/unitExpression"
+          },
+          "description": "Field-name-specific defaults such as acoustic:pressure or elastic:velocity, plus an optional dimensions/defaults map for field dimension fallbacks."
+        },
+        "attributes": {
+          "type": "object",
+          "properties": {
+            "dimensions": {
+              "$ref": "../fs-units-1/schema.json#/$defs/defaults"
+            },
+            "defaults": {
+              "$ref": "../fs-units-1/schema.json#/$defs/defaults"
+            }
+          },
+          "additionalProperties": {
+            "$ref": "../fs-units-1/schema.json#/$defs/unitExpression"
+          },
+          "description": "Alias for fields."
+        },
+        "properties": {
+          "type": "object",
+          "properties": {
+            "dimensions": {
+              "$ref": "../fs-units-1/schema.json#/$defs/defaults"
+            },
+            "defaults": {
+              "$ref": "../fs-units-1/schema.json#/$defs/defaults"
+            }
+          },
+          "additionalProperties": {
+            "$ref": "../fs-units-1/schema.json#/$defs/unitExpression"
+          },
+          "description": "Material-property-specific defaults such as vp, rho, or conductivity, plus an optional dimensions/defaults map for property dimension fallbacks."
+        }
+      },
+      "additionalProperties": true
+    },
+    "paraview": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "default": "paraview"
+        },
+        "path": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "execute_on": {
+          "enum": [
+            "setup",
+            "solve",
+            "output",
+            "cleanup"
+          ],
+          "default": "solve"
+        },
+        "shell": {
+          "type": "boolean",
+          "default": true
+        },
+        "show_pml": {
+          "type": "boolean",
+          "default": true
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 2
+        },
+        "upscale": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "post_process": {
+          "type": "boolean",
+          "default": false
+        },
+        "writer": {
+          "type": "object",
+          "properties": {
+            "format": {
+              "enum": [
+                "vtu",
+                "vtr",
+                "xmf",
+                "vtk",
+                "h5"
+              ],
+              "default": "vtu"
+            },
+            "encoding": {
+              "type": "string"
+            },
+            "distribution": {
+              "enum": [
+                "root",
+                "rank",
+                "parallel"
+              ],
+              "default": "root"
+            }
+          },
+          "additionalProperties": true
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "surface",
+                "volume",
+                "grid"
+              ],
+              "default": "surface"
+            }
+          },
+          "additionalProperties": true
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/fieldSelector"
+          }
+        },
+        "properties": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/fieldSelector"
+          }
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/paraview"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "wavefieldOutput": {
+      "type": "object",
+      "required": [
+        "name",
+        "grid"
+      ],
+      "properties": {
+        "_type": {
+          "const": "WavefieldOutput"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "default": "wavefields"
+        },
+        "field": {
+          "type": "string",
+          "description": "Single physics field sampled through a generated ReceiverNode device."
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "Legacy multi-field shorthand. Prefer `device` for multi-component wavefields."
+        },
+        "device": {
+          "allOf": [
+            {
+              "$ref": "../fs-acquisition-1/schema.json#/$defs/receiverGroup/properties/device"
+            },
+            {
+              "required": [
+                "components"
+              ]
+            }
+          ],
+          "description": "Receiver device with one or more components sampled on the wavefield grid."
+        },
+        "grid": {
+          "type": "object",
+          "description": "Grid sampled as receiver coordinates. Current runtime accepts CartesianGrid and XArrayGrid forms.",
+          "additionalProperties": true
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "device"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "field"
+                ]
+              },
+              {
+                "required": [
+                  "fields"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "field"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "device"
+                ]
+              },
+              {
+                "required": [
+                  "fields"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "fields"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "device"
+                ]
+              },
+              {
+                "required": [
+                  "field"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    }
+  },
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "fs-output-config-1"
+    },
+    "ParaView": {
+      "$ref": "#/$defs/paraview"
+    },
+    "Units": {
+      "$ref": "#/$defs/outputUnits"
+    },
+    "receivers": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "traces": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "wavefields": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/wavefieldOutput"
+      }
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

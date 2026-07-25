@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-units-1/schema.json",
+  "title": "FS Units v1",
+  "description": "Runtime unit scaling and unit-expression defaults. Output units are configured under Outputs/Units.",
+  "x-fs-contract": "fs-units-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "unitExpression": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A units_m expression such as km/s, kg/m^3, kN*km, or 1."
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "length": { "$ref": "#/$defs/unitExpression" },
+        "time": { "$ref": "#/$defs/unitExpression" },
+        "mass": { "$ref": "#/$defs/unitExpression" },
+        "frequency": { "$ref": "#/$defs/unitExpression" },
+        "velocity": { "$ref": "#/$defs/unitExpression" },
+        "density": { "$ref": "#/$defs/unitExpression" },
+        "pressure": { "$ref": "#/$defs/unitExpression" },
+        "stress": { "$ref": "#/$defs/unitExpression" },
+        "strain": { "$ref": "#/$defs/unitExpression" },
+        "force": { "$ref": "#/$defs/unitExpression" },
+        "moment": { "$ref": "#/$defs/unitExpression" },
+        "attenuation": { "$ref": "#/$defs/unitExpression" },
+        "wavenumber": { "$ref": "#/$defs/unitExpression" },
+        "conductivity": { "$ref": "#/$defs/unitExpression" },
+        "permittivity": { "$ref": "#/$defs/unitExpression" },
+        "permeability": { "$ref": "#/$defs/unitExpression" },
+        "efield": { "$ref": "#/$defs/unitExpression" },
+        "bfield": { "$ref": "#/$defs/unitExpression" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "fs-units-1"
+    },
+    "disable_scaling": {
+      "type": "boolean",
+      "default": false
+    },
+    "scaling": {
+      "type": "string",
+      "enum": [
+        "legacy",
+        "default",
+        "manual",
+        "robust"
+      ],
+      "default": "legacy",
+      "description": "Runtime scaling policy. `robust` is honored by simulation initialization after material probing; standalone unit initialization uses the legacy defaults until explicit scales are supplied."
+    },
+    "f0": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "default": 10.0
+    },
+    "length_scale": {
+      "type": "number",
+      "exclusiveMinimum": 0.0
+    },
+    "time_scale": {
+      "type": "number",
+      "exclusiveMinimum": 0.0
+    },
+    "mass_scale": {
+      "type": "number",
+      "exclusiveMinimum": 0.0
+    },
+    "Units": {
+      "type": "object",
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/defaults",
+          "description": "Input/default unit conventions. These do not override output units; use Outputs/Units for output formatting."
+        }
+      },
+      "additionalProperties": true
+    },
+    "units": {
+      "type": "object",
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/defaults",
+          "description": "Input/default unit conventions. These do not override output units; use Outputs/Units for output formatting."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

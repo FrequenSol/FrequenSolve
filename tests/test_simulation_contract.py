@@ -5,6 +5,7 @@ from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
 from frequensolve import SeismicSimulation
+from frequensolve.simulation.outputs import outputs
 
 CONTRACT_ROOT = (
     Path(__file__).parent / "contracts" / "sauce-a54bdda" / "trunk" / "contracts"
@@ -31,7 +32,9 @@ def test_electromagnetic_export_matches_pinned_sauce_contract(tmp_path):
     )
 
     payload = simulation.to_fs()
+    payload["Outputs"] = outputs(units={"geometry": "m"}).to_fs()
 
     _sauce_simulation_validator().validate(payload)
     assert payload["schema"] == "fs-simulation-1"
     assert payload["physics"] == "em"
+    assert payload["Outputs"]["Units"]["geometry"] == "m"
