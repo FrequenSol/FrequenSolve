@@ -1122,15 +1122,10 @@ class SourceEncoding(ExtraFieldsMixin):
         needs_computed_reference = any(
             field.reference_coordinates is None for field in self.fields
         )
-        source_coords = np.empty((0, 0), dtype=float)
-        source_units = None
-        source_system = None
+        source_values: List[Any] = []
         index_by_name: Dict[str, int] = {}
         if needs_computed_reference:
             source_values = geometry.coordinate_values()
-            source_coords, source_units, source_system = _source_coordinate_matrix(
-                source_values
-            )
             source_names = geometry.point_names()
             index_by_name = {name: index for index, name in enumerate(source_names)}
         refs = []
@@ -1142,7 +1137,7 @@ class SourceEncoding(ExtraFieldsMixin):
                 continue
 
             if self.encoding_type == "Named":
-                weights = np.zeros(len(source_coords), dtype=float)
+                weights = np.zeros(len(source_values), dtype=float)
                 for source, coefficient in field_obj.terms.items():
                     weights[index_by_name[str(source)]] += _coefficient_abs(coefficient)
             else:
@@ -1150,10 +1145,23 @@ class SourceEncoding(ExtraFieldsMixin):
                     [_coefficient_abs(value) for value in field_obj.coefficients],
                     dtype=float,
                 )
-            total = float(np.sum(weights))
+                if len(weights) != len(source_values):
+                    raise ValueError(
+                        "JsonDense coefficient count must match physical "
+                        "source-point count"
+                    )
+            active_indices = np.flatnonzero(weights != 0.0)
+            total = float(np.sum(weights[active_indices]))
             if total <= 0.0:
                 raise ValueError("Cannot compute reference coordinates for zero field")
-            reference = np.average(source_coords, axis=0, weights=weights)
+            source_coords, source_units, source_system = _source_coordinate_matrix(
+                [source_values[index] for index in active_indices]
+            )
+            reference = np.average(
+                source_coords,
+                axis=0,
+                weights=weights[active_indices],
+            )
             if source_units is not None or source_system is not None:
                 refs.append(
                     CoordinateValue(

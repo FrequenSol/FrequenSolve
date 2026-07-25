@@ -82,7 +82,7 @@ def test_to_segy_converts_source_and_receiver_coordinate_units(tmp_path):
                 "fields": [
                     {
                         "name": "explicit",
-                        "coefficients": [1.0, 0.0],
+                        "coefficients": [1.0, 0.0, 0.0],
                         "reference_coordinates": {
                             "value": [750.0, 40.0],
                             "units": "m",
@@ -92,6 +92,19 @@ def test_to_segy_converts_source_and_receiver_coordinate_units(tmp_path):
             },
             750,
             40,
+        ),
+        (
+            {
+                "_type": "JsonDense",
+                "fields": [
+                    {
+                        "name": "active_only",
+                        "coefficients": [1.0, 0.0, 0.0],
+                    }
+                ],
+            },
+            100,
+            20,
         ),
         (
             {
@@ -110,7 +123,11 @@ def test_to_segy_converts_source_and_receiver_coordinate_units(tmp_path):
             50,
         ),
     ],
-    ids=["explicit-json-dense", "implicit-multi-term"],
+    ids=[
+        "explicit-json-dense",
+        "implicit-json-dense-active-only",
+        "implicit-named-multi-term",
+    ],
 )
 def test_to_segy_uses_encoded_field_reference_coordinates(
     tmp_path,
@@ -133,6 +150,14 @@ def test_to_segy_uses_encoded_field_reference_coordinates(
                     {
                         "name": "right",
                         "coordinates": {"value": [0.9, 0.08], "units": "km"},
+                    },
+                    {
+                        "name": "inactive",
+                        "coordinates": {
+                            "value": [10.0, 10.0],
+                            "units": "s",
+                            "system": "unrelated",
+                        },
                     },
                 ],
             },

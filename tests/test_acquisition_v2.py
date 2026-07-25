@@ -303,7 +303,8 @@ def test_encoded_reference_coordinates_preserve_explicit_and_implicit_metadata()
     assert np.allclose(implicit.source_coords(1), [0.5, 0.05])
 
 
-def test_implicit_encoded_reference_normalizes_compatible_source_units():
+@pytest.mark.parametrize("encoding_type", ["Named", "JsonDense"])
+def test_implicit_encoded_reference_normalizes_compatible_source_units(encoding_type):
     geometry = SourceGeometry.inline(
         kind="scalar",
         sources=[
@@ -325,11 +326,16 @@ def test_implicit_encoded_reference_normalizes_compatible_source_units():
             ),
         ],
     )
+    encoding = (
+        SourceEncoding.named(
+            [DistributedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
+        )
+        if encoding_type == "Named"
+        else SourceEncoding.dense([[1.0], [1.0]], names=["midpoint"])
+    )
     acquisition = Acquisition(
         source_geometry=geometry,
-        source_encoding=SourceEncoding.named(
-            [DistributedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
-        ),
+        source_encoding=encoding,
     )
 
     reference = acquisition.source_coords(1, preserve_metadata=True)
@@ -341,7 +347,86 @@ def test_implicit_encoded_reference_normalizes_compatible_source_units():
     assert np.allclose(acquisition.source_coords(1), [0.5, 0.05])
 
 
-def test_implicit_encoded_reference_rejects_inconsistent_source_systems():
+@pytest.mark.parametrize("encoding_type", ["Named", "JsonDense"])
+def test_implicit_encoded_reference_ignores_inactive_source_metadata(encoding_type):
+    geometry = SourceGeometry.inline(
+        kind="scalar",
+        sources=[
+            PointSource(
+                name="left",
+                coordinates=CoordinateValue(
+                    [0.0, 0.05],
+                    units="km",
+                    system="survey",
+                ),
+            ),
+            PointSource(
+                name="right",
+                coordinates=CoordinateValue(
+                    [1000.0, 50.0],
+                    units="m",
+                    system="survey",
+                ),
+            ),
+            PointSource(
+                name="inactive",
+                coordinates=CoordinateValue(
+                    [1.0, 1.0],
+                    units="s",
+                    system="unrelated",
+                ),
+            ),
+        ],
+    )
+    encoding = (
+        SourceEncoding.named(
+            [
+                DistributedSource.named(
+                    "midpoint",
+                    {"left": 1.0, "right": 1.0, "inactive": 0.0},
+                )
+            ]
+        )
+        if encoding_type == "Named"
+        else SourceEncoding.dense([[1.0], [1.0], [0.0]], names=["midpoint"])
+    )
+    acquisition = Acquisition(
+        source_geometry=geometry,
+        source_encoding=encoding,
+    )
+
+    reference = acquisition.source_coords(1, preserve_metadata=True)
+
+    assert isinstance(reference, CoordinateValue)
+    assert reference.units == "km"
+    assert reference.system == "survey"
+    assert np.allclose(reference.value, [0.5, 0.05])
+
+
+@pytest.mark.parametrize("encoding_type", ["Named", "JsonDense"])
+@pytest.mark.parametrize(
+    "right_coordinates, message",
+    [
+        (
+            CoordinateValue(
+                [1.0, 0.05],
+                units="km",
+                system="survey",
+            ),
+            "one coordinate system",
+        ),
+        (
+            CoordinateValue([1.0, 0.05], units="s"),
+            "compatible coordinate units",
+        ),
+    ],
+    ids=["coordinate-system", "coordinate-units"],
+)
+def test_implicit_encoded_reference_rejects_incompatible_active_source_metadata(
+    encoding_type,
+    right_coordinates,
+    message,
+):
     geometry = SourceGeometry.inline(
         kind="scalar",
         sources=[
@@ -351,22 +436,23 @@ def test_implicit_encoded_reference_rejects_inconsistent_source_systems():
             ),
             PointSource(
                 name="right",
-                coordinates=CoordinateValue(
-                    [1.0, 0.05],
-                    units="km",
-                    system="survey",
-                ),
+                coordinates=right_coordinates,
             ),
         ],
     )
+    encoding = (
+        SourceEncoding.named(
+            [DistributedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
+        )
+        if encoding_type == "Named"
+        else SourceEncoding.dense([[1.0], [1.0]], names=["midpoint"])
+    )
     acquisition = Acquisition(
         source_geometry=geometry,
-        source_encoding=SourceEncoding.named(
-            [DistributedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
-        ),
+        source_encoding=encoding,
     )
 
-    with pytest.raises(ValueError, match="one coordinate system"):
+    with pytest.raises(ValueError, match=message):
         acquisition.source_coords(1, preserve_metadata=True)
 
 
