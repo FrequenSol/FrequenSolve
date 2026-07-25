@@ -418,9 +418,11 @@ def _validate_hdf5_source_geometry(
     path: str,
     ctx: _ValidationContext,
 ) -> None:
-    file = _resolve_project_file(getattr(geometry, "file", None), ctx)
+    file_reference = getattr(geometry, "file", None)
+    file = _resolve_project_file(file_reference, ctx)
     if not _validate_local_file(
         file,
+        authored_absolute=_is_absolute_file_reference(file_reference),
         path=f"{path}.file",
         missing_code="acquisition.source_geometry.file_missing",
         invalid_code="acquisition.source_geometry.file_invalid",
@@ -492,9 +494,11 @@ def _validate_sps_source_geometry(
     path: str,
     ctx: _ValidationContext,
 ) -> None:
-    file = _resolve_project_file(getattr(geometry, "source_file", None), ctx)
+    file_reference = getattr(geometry, "source_file", None)
+    file = _resolve_project_file(file_reference, ctx)
     _validate_local_file(
         file,
+        authored_absolute=_is_absolute_file_reference(file_reference),
         path=f"{path}.source_file",
         missing_code="acquisition.source_geometry.source_file_missing",
         invalid_code="acquisition.source_geometry.source_file_invalid",
@@ -509,9 +513,11 @@ def _validate_hdf5_source_encoding(
     path: str,
     ctx: _ValidationContext,
 ) -> None:
-    file = _resolve_project_file(getattr(encoding, "file", None), ctx)
+    file_reference = getattr(encoding, "file", None)
+    file = _resolve_project_file(file_reference, ctx)
     if not _validate_local_file(
         file,
+        authored_absolute=_is_absolute_file_reference(file_reference),
         path=f"{path}.file",
         missing_code="acquisition.source_encoding.file_missing",
         invalid_code="acquisition.source_encoding.file_invalid",
@@ -532,13 +538,17 @@ def _validate_hdf5_source_encoding(
                     hint="Choose an existing coefficient dataset.",
                 )
                 return
-            if matrix.ndim != 2 or min(matrix.shape, default=0) < 1:
+            if (
+                matrix.ndim != 3
+                or matrix.shape[2] != 2
+                or min(matrix.shape, default=0) < 1
+            ):
                 ctx.report.error(
                     "acquisition.source_encoding.dataset_shape",
-                    "Source-encoding HDF5 dataset must be a non-empty "
-                    "two-dimensional coefficient matrix.",
+                    "Source-encoding HDF5 dataset must use non-empty paired "
+                    "real/imaginary coefficient storage.",
                     path=f"{path}.dataset",
-                    hint="Use shape (source_count, encoded_field_count).",
+                    hint="Use shape (encoded_field_count, source_count, 2).",
                 )
                 return
             _validate_hdf5_numeric_values(
@@ -550,33 +560,33 @@ def _validate_hdf5_source_encoding(
             )
 
             point_count = getattr(geometry, "point_count", None)
-            if point_count is not None and int(point_count) != matrix.shape[0]:
+            if point_count is not None and int(point_count) != matrix.shape[1]:
                 ctx.report.error(
                     "acquisition.source_encoding.source_count_mismatch",
-                    "Source-encoding coefficient rows do not match the source "
-                    "geometry count.",
+                    "Source-encoding coefficient source count does not match "
+                    "the source geometry count.",
                     path=f"{path}.dataset",
                 )
             field_count = getattr(encoding, "count", None)
-            if field_count is not None and int(field_count) != matrix.shape[1]:
+            if field_count is not None and int(field_count) != matrix.shape[0]:
                 ctx.report.error(
                     "acquisition.source_encoding.field_count_mismatch",
                     "Source-encoding count does not match its HDF5 dataset.",
                     path=f"{path}.count",
-                    hint=f"Use count={matrix.shape[1]} or omit count.",
+                    hint=f"Use count={matrix.shape[0]} or omit count.",
                 )
 
             _validate_optional_hdf5_field_names(
                 h5,
                 getattr(encoding, "field_names_dataset", None),
-                expected_length=matrix.shape[1],
+                expected_length=matrix.shape[0],
                 path=f"{path}.field_names_dataset",
                 ctx=ctx,
             )
             _validate_optional_hdf5_references(
                 h5,
                 getattr(encoding, "reference_coordinates_dataset", None),
-                expected_fields=matrix.shape[1],
+                expected_fields=matrix.shape[0],
                 path=f"{path}.reference_coordinates_dataset",
                 units=(
                     unit_expression(geometry.units)
@@ -763,7 +773,10 @@ def _validate_hdf5_numeric_values(
     label: str,
     ctx: _ValidationContext,
 ) -> None:
-    if not np.issubdtype(dataset.dtype, np.number):
+    if not (
+        np.issubdtype(dataset.dtype, np.integer)
+        or np.issubdtype(dataset.dtype, np.floating)
+    ):
         ctx.report.error(
             f"{code_prefix}.dataset_numeric",
             f"{label} values must be numeric and readable.",
@@ -829,15 +842,38 @@ def _resolve_project_file(value: Any, ctx: _ValidationContext) -> Optional[Path]
     return Path(project_path).expanduser() / file
 
 
+def _is_absolute_file_reference(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        return Path(value).expanduser().is_absolute()
+    except TypeError:
+        return False
+
+
 def _validate_local_file(
     file: Optional[Path],
     *,
+    authored_absolute: bool,
     path: str,
     missing_code: str,
     invalid_code: str,
     label: str,
     ctx: _ValidationContext,
 ) -> bool:
+    if _is_unverified_remote_file(
+        file,
+        authored_absolute=authored_absolute,
+        ctx=ctx,
+    ):
+        ctx.report.warning(
+            "files.remote_unverified",
+            f"{label} uses an absolute target-site path that cannot be "
+            "verified locally.",
+            path=path,
+            hint="Confirm that the file exists and is readable on the target site.",
+        )
+        return False
     if file is None or not file.exists():
         ctx.report.error(
             missing_code,
@@ -853,6 +889,42 @@ def _validate_local_file(
             path=path,
         )
         return False
+    return True
+
+
+def _is_unverified_remote_file(
+    file: Optional[Path],
+    *,
+    authored_absolute: bool,
+    ctx: _ValidationContext,
+) -> bool:
+    if (
+        file is None
+        or not authored_absolute
+        or not file.is_absolute()
+        or not ctx.allow_unverified_remote_files
+    ):
+        return False
+    try:
+        if file.exists():
+            return False
+    except OSError:
+        pass
+
+    project_path = getattr(ctx.simulation, "project_path", None)
+    if project_path is None:
+        return True
+
+    try:
+        file = file.resolve(strict=False)
+        project = Path(project_path).expanduser().resolve(strict=False)
+    except OSError:
+        project = Path(project_path).expanduser()
+    try:
+        file.relative_to(project)
+        return False
+    except ValueError:
+        pass
     return True
 
 
@@ -1014,16 +1086,26 @@ def _validate_receiver_coordinates(
             )
         if coords.system is not None:
             _validate_system_reference(coords.system, f"{path}.system", ctx)
-        file = _coords_file(coords)
-        if file is not None and not file.exists():
-            ctx.report.error(
-                "acquisition.receiver_coordinates.file_missing",
-                f"Receiver coordinate file does not exist: {file}",
-                path=f"{path}.file",
-            )
+        file_reference = _coords_file(coords)
+        file = _resolve_project_file(file_reference, ctx)
+        if not _validate_local_file(
+            file,
+            authored_absolute=_is_absolute_file_reference(file_reference),
+            path=f"{path}.file",
+            missing_code="acquisition.receiver_coordinates.file_missing",
+            invalid_code="acquisition.receiver_coordinates.file_invalid",
+            label="Receiver coordinate",
+            ctx=ctx,
+        ):
             return
         try:
-            lower, upper = coords.bounds
+            if coords.format == "HDF5":
+                with h5py.File(file, "r") as h5:
+                    values = h5[coords.dset or "coords"]
+                    lower = np.min(values, axis=0)
+                    upper = np.max(values, axis=0)
+            else:
+                lower, upper = coords.bounds
         except Exception as exc:
             ctx.report.error(
                 "acquisition.receiver_coordinates.unreadable",

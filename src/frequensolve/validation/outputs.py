@@ -141,7 +141,7 @@ def _validate_model_surface_selections(
             selections.append((selection, f"{path}.target.selection[{index}]"))
 
     model = getattr(ctx.simulation, "model", None)
-    names, surface_count = _solver_surface_references(model)
+    names, surface_count = _paraview_model_surface_references(model)
     for selection, selection_path in selections:
         if isinstance(selection, str):
             _validate_model_surface_name(selection, selection_path, names, ctx)
@@ -177,8 +177,8 @@ def _validate_model_surface_selections(
             )
 
 
-def _solver_surface_references(model: Any) -> tuple[dict[str, str], int]:
-    """Return the solver-visible surface names and expanded horizon count."""
+def _paraview_model_surface_references(model: Any) -> tuple[dict[str, str], int]:
+    """Return ParaView-visible horizon names and the expanded horizon count."""
 
     names: dict[str, str] = {}
     surfaces = list(getattr(model, "surfaces", []) or [])
@@ -187,11 +187,10 @@ def _solver_surface_references(model: Any) -> tuple[dict[str, str], int]:
     def add_name(value: Any) -> None:
         name = str(value).strip() if value is not None else ""
         if name:
-            names.setdefault(name.casefold(), name)
+            names.setdefault(name.lower(), name)
 
     if surfaces:
         add_name("top")
-        add_name("bottom")
 
     for surface in surfaces:
         base_name = str(getattr(surface, "name", "") or "").strip()
@@ -210,22 +209,6 @@ def _solver_surface_references(model: Any) -> tuple[dict[str, str], int]:
         add_name(f"surface_{expanded_count}")
         add_name(base_name or f"surface_{expanded_count}")
 
-    for borehole in list(getattr(model, "boreholes", []) or []):
-        borehole_name = str(getattr(borehole, "name", "") or "").strip()
-        if not borehole_name:
-            continue
-        prefix = f"{borehole_name}_"
-        for surface in list(getattr(borehole, "surfaces", []) or []):
-            local_name = str(getattr(surface, "name", "") or "").strip()
-            if not local_name:
-                continue
-            qualified_name = (
-                local_name
-                if local_name.casefold().startswith(prefix.casefold())
-                else f"{prefix}{local_name}"
-            )
-            add_name(qualified_name)
-
     return names, expanded_count
 
 
@@ -243,8 +226,8 @@ def _validate_model_surface_name(
             path=path,
         )
         return
-    if name.casefold() not in names:
-        available_names = sorted(names.values(), key=str.casefold)
+    if name.lower() not in names:
+        available_names = sorted(names.values(), key=str.lower)
         hint = (
             f"Available solver surface references are: "
             f"{', '.join(available_names)}."

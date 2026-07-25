@@ -958,13 +958,28 @@ class BaseSite:
         """
 
         if validate and hasattr(job, "validate"):
-            job.validate(raise_errors=True)
+            report = job.validate(
+                raise_errors=True,
+                **self._job_validation_options(job),
+            )
+            self._emit_validation_warnings(job, report)
         if hasattr(job, "save"):
             job.save()
         project = getattr(getattr(job, "simulation", None), "_project", None)
         if sync_project and project is not None and hasattr(self, "sync"):
             self.sync(project)
         return job
+
+    def _job_validation_options(self, job: Any) -> Dict[str, Any]:
+        """Return execution-site-specific preflight options for one job."""
+
+        return {}
+
+    def _emit_validation_warnings(self, _job: Any, report: Any) -> None:
+        """Log each warning produced by this validation pass."""
+
+        for issue in getattr(report, "warnings", []) or []:
+            self._emit(str(issue), level=logging.WARNING)
 
     @staticmethod
     def _as_jobs(job: Any) -> tuple[list[Any], bool]:

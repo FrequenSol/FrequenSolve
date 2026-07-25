@@ -23,6 +23,7 @@ def validate_simulation(
     simulation: Any,
     *,
     raise_errors: bool = False,
+    allow_unverified_remote_files: bool = False,
 ) -> ValidationReport:
     """Validate a simulation object without requiring solver JSON Schema.
 
@@ -30,13 +31,20 @@ def validate_simulation(
         simulation: Simulation object to validate.
         raise_errors: If ``True``, raise ``ValidationError`` when blocking
             issues are found.
+        allow_unverified_remote_files: Treat absolute file references outside
+            the local project as target-site files that cannot be checked
+            locally. Such references produce warnings instead of errors.
 
     Returns:
         Validation report containing errors and warnings.
     """
 
     report = ValidationReport()
-    ctx = _build_context(simulation, report)
+    ctx = _build_context(
+        simulation,
+        report,
+        allow_unverified_remote_files=allow_unverified_remote_files,
+    )
     _validate_simulation(ctx)
     if raise_errors:
         report.raise_for_errors()
@@ -47,6 +55,7 @@ def validate_job(
     job: Any,
     *,
     raise_errors: bool = False,
+    allow_unverified_remote_files: bool = False,
 ) -> ValidationReport:
     """Validate a job before saving or submitting it.
 
@@ -54,6 +63,9 @@ def validate_job(
         job: Job object with a simulation, frequency list, and outputs.
         raise_errors: If ``True``, raise ``ValidationError`` when blocking
             issues are found.
+        allow_unverified_remote_files: Treat absolute file references outside
+            the local project as target-site files that cannot be checked
+            locally. Such references produce warnings instead of errors.
 
     Returns:
         Validation report containing errors and warnings.
@@ -67,7 +79,11 @@ def validate_job(
             report.raise_for_errors()
         return report
 
-    ctx = _build_context(simulation, report)
+    ctx = _build_context(
+        simulation,
+        report,
+        allow_unverified_remote_files=allow_unverified_remote_files,
+    )
     _validate_simulation(ctx)
     _validate_job(job, ctx)
     if raise_errors:
