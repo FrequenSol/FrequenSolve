@@ -1,3 +1,5 @@
+import base64
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -18,6 +20,13 @@ class FakeSession:
 
     def client(self, service_name, region_name=None):
         return {"service_name": service_name, "region_name": region_name}
+
+
+def _jwt(payload):
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).rstrip(b"=")
+    return f"header.{encoded.decode()}.signature"
 
 
 def _install_awssite_fakes(monkeypatch, auth_cls):
@@ -144,3 +153,119 @@ def test_aws_site_noninteractive_expired_refresh_error_names_relogin_options(
     assert 'fs.Site(profile="cloud", interactive=True)' in message
     assert auth.clear_calls == 0
     assert auth.credentials_path.read_text() == "expired-cache"
+
+
+def test_aws_site_interactive_login_replaces_a_different_profile_cache(
+    monkeypatch, tmp_path
+):
+    pytest.importorskip("boto3")
+    pytest.importorskip("requests")
+
+    from frequensolve.orchestrator.sites.aws import aws, cognito, graphql_client
+    from frequensolve.orchestrator.sites.aws.cache_paths import cloud_credentials_path
+
+    storage_root = tmp_path / "frequensolve-home"
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(storage_root))
+    credentials_path = cloud_credentials_path()
+    credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    wrong_issuer = "https://cognito-idp.us-east-1.amazonaws.com/other-pool"
+    credentials_path.write_text(
+        json.dumps(
+            {
+                "email": "wrong-profile@example.com",
+                "id_token": _jwt(
+                    {
+                        "iss": wrong_issuer,
+                        "token_use": "id",
+                        "aud": "other-client",
+                    }
+                ),
+                "access_token": _jwt(
+                    {
+                        "iss": wrong_issuer,
+                        "token_use": "access",
+                        "client_id": "other-client",
+                    }
+                ),
+                "refresh_token": "wrong-refresh",
+                "expires_at": (datetime.now() + timedelta(hours=1)).isoformat(),
+            }
+        )
+    )
+
+    expected_issuer = "https://cognito-idp.us-east-1.amazonaws.com/pool"
+    login_calls = []
+
+    class FakeCognitoClient:
+        def initiate_auth(self, **kwargs):
+            login_calls.append(kwargs)
+            return {
+                "AuthenticationResult": {
+                    "IdToken": _jwt(
+                        {
+                            "iss": expected_issuer,
+                            "token_use": "id",
+                            "aud": "client",
+                        }
+                    ),
+                    "AccessToken": _jwt(
+                        {
+                            "iss": expected_issuer,
+                            "token_use": "access",
+                            "client_id": "client",
+                        }
+                    ),
+                    "RefreshToken": "fresh-refresh",
+                    "ExpiresIn": 3600,
+                }
+            }
+
+    class FakeIdentityClient:
+        def get_id(self, **kwargs):
+            return {"IdentityId": "us-east-1:test-identity"}
+
+        def get_credentials_for_identity(self, **kwargs):
+            return {
+                "Credentials": {
+                    "AccessKeyId": "access",
+                    "SecretKey": "secret",
+                    "SessionToken": "session",
+                    "Expiration": datetime(2030, 1, 1),
+                }
+            }
+
+    def fake_boto_client(service_name, **kwargs):
+        if service_name == "cognito-idp":
+            return FakeCognitoClient()
+        if service_name == "cognito-identity":
+            return FakeIdentityClient()
+        raise AssertionError(f"Unexpected service: {service_name}")
+
+    config = aws.AWSSiteConfig(
+        user_pool_id="pool",
+        client_id="client",
+        identity_pool_id="identity",
+        api_url="https://api.example/graphql",
+        region="us-east-1",
+        domain="app.example",
+    )
+    monkeypatch.setattr(
+        aws.AWSSiteConfig,
+        "from_domain",
+        staticmethod(lambda domain=None: config),
+    )
+    monkeypatch.setattr(cognito.boto3, "client", fake_boto_client)
+    monkeypatch.setattr(graphql_client, "GraphQLClient", FakeGraphQLClient)
+    monkeypatch.setattr(aws.boto3, "Session", FakeSession)
+    monkeypatch.setattr("builtins.input", lambda prompt: "fresh@example.com")
+    monkeypatch.setattr(aws.getpass, "getpass", lambda prompt: "fresh-password")
+
+    site = aws.AWSSite(domain="app.example", interactive=True)
+
+    assert len(login_calls) == 1
+    assert login_calls[0]["AuthParameters"] == {
+        "USERNAME": "fresh@example.com",
+        "PASSWORD": "fresh-password",
+    }
+    assert json.loads(credentials_path.read_text())["email"] == "fresh@example.com"
+    assert site.config.s3_bucket == "bucket"
