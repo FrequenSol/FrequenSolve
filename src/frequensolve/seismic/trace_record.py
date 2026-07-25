@@ -49,12 +49,22 @@ def _source_group(trace: DataArray) -> SourceGroup:
     return acquisition.source(source_index)
 
 
-def _source_coordinates(trace: DataArray) -> np.ndarray:
+def _source_coordinates(
+    trace: DataArray,
+    *,
+    preserve_metadata: bool = False,
+) -> Any:
     with open(_required_trace_attribute(trace, "simulation"), "r") as f:
         sim = json.load(f)
     acquisition = Acquisition.from_fs(sim["Acquisition"])
     source_index = int(trace.attrs.get("source_id", trace.attrs.get("source_group", 1)))
-    return np.asarray(acquisition.source_coords(source_index), dtype=float)
+    coordinates = acquisition.source_coords(
+        source_index,
+        preserve_metadata=preserve_metadata,
+    )
+    if preserve_metadata:
+        return coordinates
+    return np.asarray(coordinates, dtype=float)
 
 
 def _receiver_group(trace: DataArray) -> ReceiverGroup:
@@ -105,13 +115,13 @@ def _coordinates_in_output_units(
 
 
 def _source_coordinates_in_output_units(
-    source: Any,
+    coordinates: Any,
     *,
     default_units: str,
     output_unit: Any,
     ureg,
 ) -> np.ndarray:
-    values, units, _ = coordinate_array_metadata(source.coordinates)
+    values, units, _ = coordinate_array_metadata(coordinates)
     values = _coordinates_in_output_units(
         values,
         units=units,
@@ -123,7 +133,9 @@ def _source_coordinates_in_output_units(
         raise ValueError("source coordinates must contain at least one coordinate")
     if values.ndim == 1:
         return values
-    return values.reshape(-1, values.shape[-1])[0]
+    if values.ndim == 2 and len(values) == 1:
+        return values[0]
+    raise ValueError("source reference coordinates must be a single vector")
 
 
 @register_dataarray_accessor("fs")
@@ -199,7 +211,7 @@ class TraceAccessor:
         n_samples = td.shape[0]
 
         receiver_group = self.receiver_group
-        source = self.source_group.source
+        source_coordinates = _source_coordinates(trace, preserve_metadata=True)
 
         ureg = pint.UnitRegistry()
         coordinate_units, output_unit = _segy_output_unit(units_out, ureg)
@@ -211,7 +223,7 @@ class TraceAccessor:
             ureg=ureg,
         )
         source_coords = _source_coordinates_in_output_units(
-            source,
+            source_coordinates,
             default_units=units_in,
             output_unit=output_unit,
             ureg=ureg,

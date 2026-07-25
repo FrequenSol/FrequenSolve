@@ -16,7 +16,11 @@ from frequensolve.geometry.frame import (
     coordinate_value_to_fs,
     direction_to_fs,
 )
-from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
+from frequensolve.units import (
+    is_quantity,
+    unit_expression,
+    value_and_units_to_fs,
+)
 from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
@@ -53,17 +57,109 @@ def _mechanism_to_fs(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
+def _source_direction_to_fs(value: Any) -> Any:
+    """Serialize a direction against the acquisition source-basis schema."""
+
+    if isinstance(value, Mapping) and "type" in value:
+        value = Direction.from_fs(value)
+
+    if isinstance(value, Direction):
+        if value.system is not None:
+            raise ValueError(
+                "Source Direction values cannot include a coordinate system; "
+                "express the direction in physical coordinates before export"
+            )
+        if value.extra:
+            fields = ", ".join(sorted(value.extra))
+            raise ValueError(
+                "Source Direction values cannot include extension fields "
+                f"({fields}); use a numeric vector or axis direction"
+            )
+        if value.type == "vector":
+            if value.value is None:
+                raise ValueError("Source Direction.vector requires a vector value")
+            if value.axis is not None or value.components is not None:
+                raise ValueError(
+                    "Source Direction.vector cannot include axis or components"
+                )
+            return _source_direction_to_fs(
+                value_and_units_to_fs(value.value, value.units)
+            )
+        if value.type == "coordinate_axis":
+            if not value.axis:
+                raise ValueError("Source Direction.axis_direction requires an axis")
+            if (
+                value.value is not None
+                or value.units is not None
+                or value.components is not None
+            ):
+                raise ValueError(
+                    "Source axis directions cannot include value, units, or components"
+                )
+            return {"direction": value.axis}
+        raise ValueError(
+            f"Source Direction type {value.type!r} is not supported by "
+            "fs-acquisition-2; use Direction.vector(...) or "
+            "Direction.axis_direction(...)"
+        )
+
+    direction_payload = direction_to_fs(value)
+    if isinstance(direction_payload, Mapping):
+        payload = copy.deepcopy(dict(direction_payload))
+        unknown = set(payload).difference({"direction", "value", "units"})
+        if unknown:
+            fields = ", ".join(sorted(unknown))
+            raise ValueError(
+                "Source direction mappings contain unsupported fields "
+                f"({fields}); use {{'direction': <axis>}} or "
+                "{'value': <vector>, 'units': <optional units>}"
+            )
+        has_axis = "direction" in payload
+        has_value = "value" in payload
+        if has_axis == has_value:
+            raise ValueError(
+                "Source direction mappings require exactly one of "
+                "'direction' or 'value'"
+            )
+        if has_axis:
+            if not isinstance(payload["direction"], str) or not payload["direction"]:
+                raise ValueError("Source direction axis must be a non-empty string")
+            if "units" in payload:
+                payload["units"] = unit_expression(payload["units"])
+            return payload
+
+        normalized = value_and_units_to_fs(
+            payload["value"],
+            payload.get("units"),
+        )
+        if isinstance(normalized, Mapping):
+            return copy.deepcopy(dict(normalized))
+        payload = {"value": normalized}
+        if "units" in direction_payload:
+            payload["units"] = unit_expression(direction_payload["units"])
+        return payload
+
+    normalized = value_and_units_to_fs(direction_payload)
+    if isinstance(normalized, Mapping):
+        return copy.deepcopy(dict(normalized))
+    try:
+        numeric = np.asarray(normalized, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Source direction must be a numeric vector, Direction.vector(...), "
+            "or Direction.axis_direction(...)"
+        ) from exc
+    if numeric.ndim != 1 or numeric.size == 0:
+        raise ValueError("Source direction must be a non-empty numeric vector")
+    return numeric.tolist()
+
+
 def _source_basis_to_fs(value: Mapping[str, Any]) -> Dict[str, Any]:
     """Serialize the source-basis fields defined by fs-acquisition-2."""
 
     payload = copy.deepcopy(dict(value))
     if "direction" in payload:
-        direction_payload = direction_to_fs(payload["direction"])
-        if isinstance(direction_payload, np.ndarray):
-            direction_payload = direction_payload.tolist()
-        elif isinstance(direction_payload, np.generic):
-            direction_payload = direction_payload.item()
-        payload["direction"] = direction_payload
+        payload["direction"] = _source_direction_to_fs(payload["direction"])
     if "amplitude" in payload:
         payload["amplitude"] = value_and_units_to_fs(payload["amplitude"])
     if "mechanism" in payload:
@@ -211,6 +307,34 @@ def _coefficient_abs(value: Any) -> float:
     if isinstance(value, (list, tuple)) and len(value) == 2:
         return abs(complex(value[0], value[1]))
     return abs(complex(value))
+
+
+def _coordinate_array(value: Any) -> np.ndarray:
+    """Return one numeric coordinate vector without its metadata."""
+
+    if isinstance(value, CoordinateValue):
+        value = value.value
+    if is_quantity(value):
+        value = value.magnitude
+    result = np.asarray(value, dtype=float)
+    if result.ndim == 2 and len(result) == 1:
+        result = result[0]
+    if result.ndim != 1 or result.size == 0:
+        raise ValueError("Source reference coordinates must be a single vector")
+    return result
+
+
+def _coordinate_units_and_system(value: Any) -> tuple[Optional[Any], Optional[str]]:
+    """Return authored coordinate units and system without converting values."""
+
+    if isinstance(value, CoordinateValue):
+        units = value.units
+        if units is None and is_quantity(value.value):
+            units = value.value.units
+        return units, value.system
+    if is_quantity(value):
+        return value.units, None
+    return None, None
 
 
 @dataclass(init=False)
@@ -614,6 +738,15 @@ class SourceGeometry(ExtraFieldsMixin):
             values.append(np.asarray(coords, dtype=float))
         return np.asarray(values, dtype=float)
 
+    def coordinate_values(self) -> List[Any]:
+        """Return inline source-point coordinates with authored metadata."""
+
+        if self.geometry_type != "Inline":
+            raise ValueError(
+                "Source coordinates are only available for inline geometry"
+            )
+        return [copy.deepcopy(source.coordinates) for source in self.sources]
+
 
 @dataclass
 class DistributedSource:
@@ -915,26 +1048,31 @@ class SourceEncoding(ExtraFieldsMixin):
             for index, field in enumerate(self.fields, start=1)
         ]
 
-    def reference_coordinates(self, geometry: SourceGeometry) -> np.ndarray:
-        """Return encoded field reference coordinates when computable."""
+    def reference_coordinate_values(self, geometry: SourceGeometry) -> List[Any]:
+        """Return encoded field references while preserving coordinate metadata."""
 
         if self.encoding_type == "HDF5Dense":
             raise ValueError("HDF5 source-encoding reference coordinates are external")
 
-        source_coords = geometry.coordinates()
-        source_names = geometry.point_names()
-        index_by_name = {name: index for index, name in enumerate(source_names)}
+        needs_computed_reference = any(
+            field.reference_coordinates is None for field in self.fields
+        )
+        source_coords = np.empty((0, 0), dtype=float)
+        source_units = None
+        source_system = None
+        index_by_name: Dict[str, int] = {}
+        if needs_computed_reference:
+            source_values = geometry.coordinate_values()
+            source_coords = geometry.coordinates()
+            source_units, source_system = _coordinate_units_and_system(source_values[0])
+            source_names = geometry.point_names()
+            index_by_name = {name: index for index, name in enumerate(source_names)}
         refs = []
 
         for field_obj in self.fields:
             explicit_ref = field_obj.reference_coordinates
             if explicit_ref is not None:
-                value = (
-                    explicit_ref.value
-                    if isinstance(explicit_ref, CoordinateValue)
-                    else explicit_ref
-                )
-                refs.append(np.asarray(value, dtype=float))
+                refs.append(copy.deepcopy(explicit_ref))
                 continue
 
             if self.encoding_type == "Named":
@@ -949,8 +1087,27 @@ class SourceEncoding(ExtraFieldsMixin):
             total = float(np.sum(weights))
             if total <= 0.0:
                 raise ValueError("Cannot compute reference coordinates for zero field")
-            refs.append(np.average(source_coords, axis=0, weights=weights))
-        return np.asarray(refs, dtype=float)
+            reference = np.average(source_coords, axis=0, weights=weights)
+            if source_units is not None or source_system is not None:
+                refs.append(
+                    CoordinateValue(
+                        reference.tolist(),
+                        units=source_units,
+                        system=source_system,
+                    )
+                )
+            else:
+                refs.append(reference)
+        return refs
+
+    def reference_coordinates(self, geometry: SourceGeometry) -> np.ndarray:
+        """Return encoded field reference coordinates when computable."""
+
+        refs = self.reference_coordinate_values(geometry)
+        return np.asarray(
+            [_coordinate_array(reference) for reference in refs],
+            dtype=float,
+        )
 
 
 class Source:

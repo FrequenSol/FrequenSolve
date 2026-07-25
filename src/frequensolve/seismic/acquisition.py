@@ -1162,18 +1162,34 @@ class Acquisition(ExtraFieldsMixin):
         else:
             return self.receiver_groups[group].coordinates.get()
 
-    def source_coords(self, src: Optional[int] = None):
+    def source_coords(
+        self,
+        src: Optional[int] = None,
+        *,
+        preserve_metadata: bool = False,
+    ):
         """Return source-field reference coordinates.
 
         Args:
             src: Optional one-based source index.
+            preserve_metadata: Return authored ``CoordinateValue``/quantity
+                metadata instead of only numeric values. When all coordinates
+                are requested, this returns a list of coordinate values.
         """
         if self.source_geometry is None:
-            coords = np.empty((0, 0), dtype=float)
+            coords = [] if preserve_metadata else np.empty((0, 0), dtype=float)
         elif self.source_encoding is None:
-            coords = self.source_geometry.coordinates()
+            coords = (
+                self.source_geometry.coordinate_values()
+                if preserve_metadata
+                else self.source_geometry.coordinates()
+            )
         else:
-            coords = self.source_encoding.reference_coordinates(self.source_geometry)
+            coords = (
+                self.source_encoding.reference_coordinate_values(self.source_geometry)
+                if preserve_metadata
+                else self.source_encoding.reference_coordinates(self.source_geometry)
+            )
         if src is None:
             return coords
         return coords[int(src) - 1]
