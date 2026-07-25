@@ -42,6 +42,10 @@ Choose the smallest install that matches the workflow you need:
    * - Run on FrequenSol Cloud
      - ``python -m pip install "frequensolve[cloud]"``
      - Requires a FrequenSol Cloud account and license.
+   * - Use the private-beta simulation assistant MCP
+     - ``python -m pip install "frequensolve[mcp]"``
+     - Add ``cloud`` to the extras for self-scoped read-only Cloud monitoring.
+       See :doc:`user_guide/simulation_assistant_mcp`.
    * - Run with a local solver
      - ``python -m pip install "frequensolve[parallel]"``
      - Requires an installed :term:`fast solver` configured in ``site.toml``.
@@ -64,6 +68,7 @@ All available user extras are:
    python -m pip install "frequensolve[parallel]"    # local Dask execution
    python -m pip install "frequensolve[hpc]"         # SSH and SLURM site support
    python -m pip install "frequensolve[cloud]"       # FrequenSol cloud backend
+   python -m pip install "frequensolve[mcp]"         # local simulation-assistant MCP
    python -m pip install "frequensolve[seismic-io]"  # SEG-Y/ASDF export helpers
    python -m pip install "frequensolve[fast-fft]"     # pyFFTW acceleration
    python -m pip install "frequensolve[inversion]"    # PyLops-compatible operators

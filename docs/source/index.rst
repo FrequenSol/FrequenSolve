@@ -25,6 +25,9 @@ If you're new to FrequenSolve, follow this path:
 - :doc:`installation`
 - :doc:`quickstart` to build the compact FrequenSolve Python API workflow and see where site
   execution enters
+- :doc:`user_guide/simulation_assistant_mcp` when you want an agent to prepare
+  and validate the fixed private-beta starter, then monitor your Cloud run
+  through self-scoped read-only tools
 - :download:`Acoustic modeling
   <../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>` for the
   first full runnable notebook
