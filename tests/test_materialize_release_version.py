@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -65,6 +66,21 @@ def test_materializes_requested_version_in_multi_tag_git_free_archive(
     archived_version = (ROOT / "src/frequensolve/_version.py").read_text(
         encoding="utf-8"
     )
+    for assignment, placeholder in (
+        ("git_refnames", "$Format:%d$"),
+        ("git_full", "$Format:%H$"),
+        ("git_date", "$Format:%ci$"),
+    ):
+        archived_version, replacements = re.subn(
+            rf'^    {assignment} = ".*"$',
+            lambda _match, assignment=assignment, placeholder=placeholder: (
+                f'    {assignment} = "{placeholder}"'
+            ),
+            archived_version,
+            flags=re.MULTILINE,
+        )
+        assert replacements == 1
+
     archived_version = archived_version.replace(
         "$Format:%d$", archived_refnames
     ).replace("$Format:%H$", REVISION)
