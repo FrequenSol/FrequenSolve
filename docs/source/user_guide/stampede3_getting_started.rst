@@ -161,7 +161,7 @@ pattern is:
    import frequensolve as fs
 
    # Build or load a saved FrequenSolve job first.
-   # job = fs.SimulationJob.load("/path/to/job.json")
+   # job = fs.BaseJob.load("/path/to/job.json")
 
    site = fs.Site(
        queue="skx-dev",

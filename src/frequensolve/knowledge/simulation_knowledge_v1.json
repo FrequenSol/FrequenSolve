@@ -1,0 +1,2225 @@
+{
+  "schema": "frequensolve-simulation-knowledge/v1",
+  "catalog_version": "1.0.0",
+  "contracts": [
+    {
+      "name": "simulation",
+      "identity": "fs-simulation-1",
+      "owner": "Sauce",
+      "source_revision": "a54bdda81c98780fb4b805b92cf6df6c6e8bd29a"
+    },
+    {
+      "name": "acquisition",
+      "identity": "fs-acquisition-2",
+      "owner": "Sauce",
+      "source_revision": "a54bdda81c98780fb4b805b92cf6df6c6e8bd29a"
+    },
+    {
+      "name": "job",
+      "identity": "fs-job-1",
+      "owner": "Sauce",
+      "source_revision": "a54bdda81c98780fb4b805b92cf6df6c6e8bd29a"
+    }
+  ],
+  "authoring_rules": {
+    "schema": "frequensolve-authoring-rules/v1",
+    "dimensions": {
+      "supported": [
+        2,
+        2.5,
+        3
+      ],
+      "axisymmetric": [
+        2
+      ],
+      "model_dimension_for_2_5d": 2
+    },
+    "boundary_conditions": {
+      "conditions_required": true,
+      "documented_conditions": [
+        "free",
+        "pml",
+        "fixed",
+        "impedance",
+        "dirichlet",
+        "neumann",
+        "sealed",
+        "drained",
+        "symmetric",
+        "axis",
+        "symmetric_r"
+      ],
+      "solver_specific_conditions_allowed": true,
+      "generated_2d_labels": [
+        "x_min",
+        "x_max",
+        "z_min",
+        "z_max"
+      ],
+      "generated_3d_labels": [
+        "x_min",
+        "x_max",
+        "y_min",
+        "y_max",
+        "z_min",
+        "z_max"
+      ],
+      "pml": {
+        "condition": "pml",
+        "defaults": {
+          "pml_wavelengths": 0.5,
+          "pml_exponent": 3.0,
+          "pml_reflectivity": 0.01
+        },
+        "optional_fields": [
+          "pml_constant"
+        ],
+        "fields_serialize_only_with_condition": true
+      }
+    },
+    "discretization": {
+      "default_payload": {},
+      "rejected_fields": [
+        "order"
+      ],
+      "mesh_adapt_order_path": "mesh.adapt.order",
+      "additional_fields_status": "contract-dependent"
+    },
+    "solver": {
+      "solve_on_values": [
+        "final",
+        "all"
+      ],
+      "precision_values": [
+        "single",
+        "double"
+      ],
+      "defaults": {
+        "solve_on": "final",
+        "max_iter": 300,
+        "tolerance": 0.0001,
+        "precision": "single"
+      },
+      "additional_fields_status": "contract-dependent"
+    },
+    "frequencies": {
+      "explicit_min_items": 1,
+      "finite_required": true,
+      "positive_real_required": true,
+      "complex_damping_imaginary_sign": "nonpositive",
+      "time_domain_spacing_fields": [
+        "df",
+        "T_max"
+      ],
+      "time_domain_exactly_one_spacing_field": true,
+      "time_domain_positive_fields": [
+        "df",
+        "T_max"
+      ],
+      "time_domain_f_max_greater_than_f_min": true,
+      "damping_fields": [
+        "damping_factor",
+        "laplace"
+      ],
+      "damping_fields_mutually_exclusive": true,
+      "damping_factor_minimum": 1.0
+    },
+    "acquisition": {
+      "hdf5_dense_source_encoding": {
+        "coefficient_dataset_rank": 3,
+        "coefficient_axis_order": [
+          "encoded_field",
+          "source",
+          "real_imag"
+        ],
+        "real_imag_pair_size": 2,
+        "real_imag_order": [
+          "real",
+          "imag"
+        ],
+        "storage_kinds": [
+          "integer",
+          "floating"
+        ],
+        "native_complex_storage_allowed": false,
+        "all_dimensions_non_empty": true
+      }
+    },
+    "file_references": {
+      "relative_paths_resolve_from": "project_root",
+      "missing_project_local_severity": "error",
+      "existing_external_files_validate_locally": true,
+      "remote_unverified_policy": "slurm-or-explicit-opt-in",
+      "explicit_opt_in_parameter": "allow_unverified_remote_files",
+      "remote_unverified_requires_absolute_path": true,
+      "remote_unverified_requires_outside_project": true,
+      "remote_unverified_code": "files.remote_unverified",
+      "remote_unverified_severity": "warning",
+      "remote_warning_includes_concrete_path": false
+    },
+    "outputs": {
+      "traces_enabled_by_default": true,
+      "vtk_frequency_count": 1,
+      "vtk_targets": [
+        "volume",
+        "surface",
+        "grid"
+      ],
+      "vtk_formats": [
+        "vtu",
+        "xdmf",
+        "xmf",
+        "vtr"
+      ],
+      "vtk_upscale_targets": [
+        "volume",
+        "surface"
+      ],
+      "vtk_upscale_minimum": 0,
+      "vtk_upscale_maximum": 2,
+      "vtk_grid_allows_upscale": false,
+      "wavefield_grid_required": true,
+      "source_ids_one_based": true,
+      "complex_parts": [
+        "real",
+        "imag",
+        "abs"
+      ],
+      "item_kinds": [
+        "field",
+        "property",
+        "info"
+      ],
+      "model_surfaces": {
+        "named_aliases": [
+          "top"
+        ],
+        "authored_and_expanded_horizon_names": true,
+        "indexed_prefix": "surface_",
+        "index_base": 1,
+        "case_sensitive": false,
+        "bottom_alias_allowed": false,
+        "borehole_surface_names_allowed": false
+      }
+    }
+  },
+  "public_api": [
+    {
+      "id": "project",
+      "symbol": "Project",
+      "import_path": "frequensolve.Project",
+      "aliases": [],
+      "kind": "class",
+      "category": "project",
+      "summary": "Create or load a project workspace that owns simulations and jobs.",
+      "related_glossary": [
+        "project"
+      ]
+    },
+    {
+      "id": "load",
+      "symbol": "load",
+      "import_path": "frequensolve.load",
+      "aliases": [],
+      "kind": "function",
+      "category": "loading",
+      "summary": "Load a supported saved FrequenSolve object by its serialized schema.",
+      "related_glossary": [
+        "project",
+        "simulation",
+        "job"
+      ]
+    },
+    {
+      "id": "seismic-simulation",
+      "symbol": "SeismicSimulation",
+      "import_path": "frequensolve.SeismicSimulation",
+      "aliases": [],
+      "kind": "class",
+      "category": "simulation",
+      "summary": "Represent the simulation that combines physics, model, mesh, boundaries, acquisition, and numerics.",
+      "related_glossary": [
+        "simulation"
+      ]
+    },
+    {
+      "id": "layered-model",
+      "symbol": "LayeredModel",
+      "import_path": "frequensolve.LayeredModel",
+      "aliases": [],
+      "kind": "class",
+      "category": "model",
+      "summary": "Author stratigraphic surfaces, layers, material properties, and optional boreholes.",
+      "related_glossary": [
+        "model",
+        "model-surface-selector"
+      ]
+    },
+    {
+      "id": "boundary-condition",
+      "symbol": "BoundaryCondition",
+      "import_path": "frequensolve.BoundaryCondition",
+      "aliases": [],
+      "kind": "class",
+      "category": "mesh",
+      "summary": "Assign one or more boundary conditions to named generated-mesh boundaries.",
+      "related_glossary": [
+        "boundary-condition"
+      ]
+    },
+    {
+      "id": "hex-mesh-generator",
+      "symbol": "HexMeshGenerator",
+      "import_path": "frequensolve.HexMeshGenerator",
+      "aliases": [],
+      "kind": "class",
+      "category": "mesh",
+      "summary": "Configure the supported structured hexahedral mesh generator and adaptivity inputs.",
+      "related_glossary": [
+        "mesh"
+      ]
+    },
+    {
+      "id": "acquisition",
+      "symbol": "Acquisition",
+      "import_path": "frequensolve.Acquisition",
+      "aliases": [],
+      "kind": "class",
+      "category": "acquisition",
+      "summary": "Combine current source geometry, optional source encoding, receivers, and surveys.",
+      "related_glossary": [
+        "acquisition",
+        "source-geometry",
+        "source-encoding",
+        "receiver-group"
+      ]
+    },
+    {
+      "id": "point-source",
+      "symbol": "PointSource",
+      "import_path": "frequensolve.PointSource",
+      "aliases": [],
+      "kind": "class",
+      "category": "acquisition",
+      "summary": "Represent one physical point source in inline acquisition geometry.",
+      "related_glossary": [
+        "source-geometry"
+      ]
+    },
+    {
+      "id": "source-geometry",
+      "symbol": "SourceGeometry",
+      "import_path": "frequensolve.SourceGeometry",
+      "aliases": [],
+      "kind": "class",
+      "category": "acquisition",
+      "summary": "Describe physical source points using inline, HDF5, or SPS representations.",
+      "related_glossary": [
+        "source-geometry",
+        "remote-file-reference"
+      ]
+    },
+    {
+      "id": "source-encoding",
+      "symbol": "SourceEncoding",
+      "import_path": "frequensolve.SourceEncoding",
+      "aliases": [],
+      "kind": "class",
+      "category": "acquisition",
+      "summary": "Map physical source points into named, JSON-dense, or HDF5-dense solver source fields.",
+      "related_glossary": [
+        "source-encoding",
+        "source-field",
+        "hdf5-dense-source-encoding",
+        "remote-file-reference"
+      ]
+    },
+    {
+      "id": "receiver-node",
+      "symbol": "ReceiverNode",
+      "import_path": "frequensolve.ReceiverNode",
+      "aliases": [],
+      "kind": "class",
+      "category": "acquisition",
+      "summary": "Define a point-receiver device and the physical components it records.",
+      "related_glossary": [
+        "receiver-group"
+      ]
+    },
+    {
+      "id": "sparse-survey",
+      "symbol": "SparseSurvey",
+      "import_path": "frequensolve.SparseSurvey",
+      "aliases": [],
+      "kind": "class",
+      "category": "acquisition",
+      "summary": "Select an explicit subset of source, receiver, and component trace combinations.",
+      "related_glossary": [
+        "acquisition",
+        "receiver-group"
+      ]
+    },
+    {
+      "id": "discretization",
+      "symbol": "Discretization",
+      "import_path": "frequensolve.Discretization",
+      "aliases": [],
+      "kind": "class",
+      "category": "numerics",
+      "summary": "Configure public discretization fields while mesh polynomial order remains mesh-owned.",
+      "related_glossary": [
+        "discretization"
+      ]
+    },
+    {
+      "id": "solver-config",
+      "symbol": "SolverConfig",
+      "import_path": "frequensolve.SolverConfig",
+      "aliases": [],
+      "kind": "class",
+      "category": "numerics",
+      "summary": "Configure supported solver convergence, precision, and solve-on settings.",
+      "related_glossary": [
+        "solver-configuration"
+      ]
+    },
+    {
+      "id": "base-job",
+      "symbol": "BaseJob",
+      "import_path": "frequensolve.BaseJob",
+      "aliases": [],
+      "kind": "class",
+      "category": "jobs",
+      "summary": "Load and inspect supported saved jobs without assuming a removed SimulationJob API.",
+      "related_glossary": [
+        "job"
+      ]
+    },
+    {
+      "id": "frequency-domain-job",
+      "symbol": "FrequencyDomainJob",
+      "import_path": "frequensolve.FrequencyDomainJob",
+      "aliases": [],
+      "kind": "class",
+      "category": "jobs",
+      "summary": "Create a job for one or more explicit positive modeled frequencies.",
+      "related_glossary": [
+        "job",
+        "frequency-domain"
+      ]
+    },
+    {
+      "id": "time-domain-job",
+      "symbol": "TimeDomainJob",
+      "import_path": "frequensolve.TimeDomainJob",
+      "aliases": [],
+      "kind": "class",
+      "category": "jobs",
+      "summary": "Create a time-domain job from a valid uniform frequency sweep and damping settings.",
+      "related_glossary": [
+        "job",
+        "time-domain"
+      ]
+    },
+    {
+      "id": "job-outputs",
+      "symbol": "JobOutputs",
+      "import_path": "frequensolve.JobOutputs",
+      "aliases": [],
+      "kind": "class",
+      "category": "outputs",
+      "summary": "Collect trace, ParaView, wavefield, and related output requests for a job.",
+      "related_glossary": [
+        "output-request"
+      ]
+    },
+    {
+      "id": "vtk-output",
+      "symbol": "VtkOutput",
+      "import_path": "frequensolve.VtkOutput",
+      "aliases": [
+        "ParaViewOutput"
+      ],
+      "kind": "class",
+      "category": "outputs",
+      "summary": "Request ParaView-compatible VTK output for a domain, model surface, or explicit grid.",
+      "related_glossary": [
+        "paraview-output",
+        "model-surface-selector"
+      ]
+    },
+    {
+      "id": "wavefield-output",
+      "symbol": "WavefieldOutput",
+      "import_path": "frequensolve.WavefieldOutput",
+      "aliases": [],
+      "kind": "class",
+      "category": "outputs",
+      "summary": "Request wavefield samples on an explicit output grid.",
+      "related_glossary": [
+        "output-request"
+      ]
+    },
+    {
+      "id": "validation-report",
+      "symbol": "ValidationReport",
+      "import_path": "frequensolve.ValidationReport",
+      "aliases": [],
+      "kind": "class",
+      "category": "validation",
+      "summary": "Hold structured errors and warnings returned by package validation.",
+      "related_glossary": [
+        "validation-report"
+      ]
+    },
+    {
+      "id": "validate-simulation",
+      "symbol": "validate_simulation",
+      "import_path": "frequensolve.validate_simulation",
+      "aliases": [],
+      "kind": "function",
+      "category": "validation",
+      "summary": "Validate a simulation with real package rules before export or submission.",
+      "related_glossary": [
+        "simulation",
+        "validation-report",
+        "remote-file-reference"
+      ]
+    },
+    {
+      "id": "validate-job",
+      "symbol": "validate_job",
+      "import_path": "frequensolve.validate_job",
+      "aliases": [],
+      "kind": "function",
+      "category": "validation",
+      "summary": "Validate a job and its simulation with real package rules before export or submission.",
+      "related_glossary": [
+        "job",
+        "validation-report",
+        "remote-file-reference"
+      ]
+    },
+    {
+      "id": "load-simulation-knowledge",
+      "symbol": "load_simulation_knowledge",
+      "import_path": "frequensolve.load_simulation_knowledge",
+      "aliases": [],
+      "kind": "function",
+      "category": "knowledge",
+      "summary": "Load this installed package's validated simulation knowledge and exact version identities.",
+      "related_glossary": [
+        "simulation-knowledge-catalog",
+        "solver-contract"
+      ]
+    }
+  ],
+  "glossary": [
+    {
+      "id": "simulation-knowledge-catalog",
+      "term": "simulation knowledge catalog",
+      "aliases": [],
+      "definition": "The packaged, version-matched, offline source of public setup rules, API symbols, glossary terms, diagnostics, examples, and starter scenarios.",
+      "related_api": [
+        "load-simulation-knowledge"
+      ]
+    },
+    {
+      "id": "project",
+      "term": "project",
+      "aliases": [
+        "project workspace"
+      ],
+      "definition": "A saved workspace containing simulations, jobs, and generated solver inputs or outputs.",
+      "related_api": [
+        "project"
+      ]
+    },
+    {
+      "id": "simulation",
+      "term": "simulation",
+      "aliases": [
+        "simulation setup"
+      ],
+      "definition": "A model definition that combines physics, geometry, materials, mesh, boundaries, acquisition, and numerics before it becomes a job.",
+      "related_api": [
+        "seismic-simulation"
+      ]
+    },
+    {
+      "id": "model",
+      "term": "model",
+      "aliases": [
+        "material model"
+      ],
+      "definition": "The authored geometry and material-property description used to build the computational domain.",
+      "related_api": [
+        "layered-model"
+      ]
+    },
+    {
+      "id": "mesh",
+      "term": "mesh",
+      "aliases": [
+        "computational mesh"
+      ],
+      "definition": "The discretized computational domain on which the solver evaluates the selected physics.",
+      "related_api": [
+        "hex-mesh-generator"
+      ]
+    },
+    {
+      "id": "boundary-condition",
+      "term": "boundary condition",
+      "aliases": [
+        "boundary"
+      ],
+      "definition": "A physical or numerical condition assigned to one or more named boundaries of the generated mesh.",
+      "related_api": [
+        "boundary-condition"
+      ]
+    },
+    {
+      "id": "acquisition",
+      "term": "acquisition",
+      "aliases": [
+        "acquisition layout"
+      ],
+      "definition": "The source geometry, optional source encoding, receiver groups, and survey selections used by a simulation.",
+      "related_api": [
+        "acquisition"
+      ]
+    },
+    {
+      "id": "source-geometry",
+      "term": "source geometry",
+      "aliases": [
+        "physical source geometry"
+      ],
+      "definition": "The physical source-point catalog exported in fs-acquisition-2, distinct from the solver source fields derived from those points.",
+      "related_api": [
+        "source-geometry"
+      ]
+    },
+    {
+      "id": "source-encoding",
+      "term": "source encoding",
+      "aliases": [],
+      "definition": "An optional mapping from physical source points into addressable solver source fields.",
+      "related_api": [
+        "source-encoding"
+      ]
+    },
+    {
+      "id": "source-field",
+      "term": "source field",
+      "aliases": [
+        "encoded source field"
+      ],
+      "definition": "One addressable solver right-hand side; without explicit encoding, each physical source point is one identity field.",
+      "related_api": [
+        "source-encoding"
+      ]
+    },
+    {
+      "id": "hdf5-dense-source-encoding",
+      "term": "HDF5 dense source encoding",
+      "aliases": [
+        "HDF5Dense source encoding"
+      ],
+      "definition": "A non-empty real or integer coefficient dataset shaped as encoded fields by physical sources by a final two-value real/imaginary axis; native complex storage and two-dimensional matrices are invalid.",
+      "related_api": [
+        "source-encoding"
+      ]
+    },
+    {
+      "id": "receiver-group",
+      "term": "receiver group",
+      "aliases": [
+        "receivers"
+      ],
+      "definition": "A named collection of receiver coordinates that share one receiver device and its recorded components.",
+      "related_api": [
+        "receiver-node"
+      ]
+    },
+    {
+      "id": "discretization",
+      "term": "discretization",
+      "aliases": [
+        "numerical discretization"
+      ],
+      "definition": "The public numerical settings separate from mesh-owned polynomial order and contract-dependent solver details.",
+      "related_api": [
+        "discretization"
+      ]
+    },
+    {
+      "id": "solver-configuration",
+      "term": "solver configuration",
+      "aliases": [
+        "solver settings"
+      ],
+      "definition": "The supported convergence, precision, and solve-on choices attached to a simulation.",
+      "related_api": [
+        "solver-config"
+      ]
+    },
+    {
+      "id": "job",
+      "term": "job",
+      "aliases": [
+        "simulation job"
+      ],
+      "definition": "A runnable solver request created from a simulation, selected frequencies or time sweep, and requested outputs.",
+      "related_api": [
+        "base-job"
+      ]
+    },
+    {
+      "id": "frequency-domain",
+      "term": "frequency-domain",
+      "aliases": [
+        "frequency domain"
+      ],
+      "definition": "A solver workflow that computes responses at explicitly selected modeled frequencies.",
+      "related_api": [
+        "frequency-domain-job"
+      ]
+    },
+    {
+      "id": "time-domain",
+      "term": "time-domain",
+      "aliases": [
+        "time domain"
+      ],
+      "definition": "A solver workflow represented by a valid uniform frequency sweep whose responses are transformed into time.",
+      "related_api": [
+        "time-domain-job"
+      ]
+    },
+    {
+      "id": "output-request",
+      "term": "output request",
+      "aliases": [
+        "job output"
+      ],
+      "definition": "Job configuration that asks the solver to write traces, ParaView files, wavefields, or another supported result.",
+      "related_api": [
+        "job-outputs"
+      ]
+    },
+    {
+      "id": "paraview-output",
+      "term": "ParaView output",
+      "aliases": [
+        "VTK output"
+      ],
+      "definition": "A solver output written in a ParaView-compatible VTK-family representation for a domain, surface, or grid.",
+      "related_api": [
+        "vtk-output"
+      ]
+    },
+    {
+      "id": "model-surface-selector",
+      "term": "model surface selector",
+      "aliases": [
+        "surface selector"
+      ],
+      "definition": "A case-insensitive ParaView reference to top, an authored or expanded horizon name, or a one-based surface_N alias; synthetic bottom and borehole names are not valid selectors.",
+      "related_api": [
+        "vtk-output"
+      ]
+    },
+    {
+      "id": "remote-file-reference",
+      "term": "remote file reference",
+      "aliases": [
+        "cluster-resident file"
+      ],
+      "definition": "A missing absolute path outside the resolved local project that may be solver-visible under Slurm or explicit opt-in; it produces a sanitized warning, while relative or project-local missing files remain errors and existing external files are validated locally.",
+      "related_api": [
+        "validate-simulation"
+      ]
+    },
+    {
+      "id": "solver-contract",
+      "term": "solver contract",
+      "aliases": [
+        "input contract"
+      ],
+      "definition": "The versioned JSON and HDF5 structures exported by FrequenSolve and consumed by the separately owned solver.",
+      "related_api": [
+        "load-simulation-knowledge"
+      ]
+    },
+    {
+      "id": "validation-report",
+      "term": "validation report",
+      "aliases": [
+        "preflight report"
+      ],
+      "definition": "A structured collection of stable errors and warnings produced by package validation.",
+      "related_api": [
+        "validation-report"
+      ]
+    }
+  ],
+  "physics": [
+    {
+      "id": "acoustic",
+      "aliases": [
+        "acoustic"
+      ],
+      "summary": "Scalar pressure-wave propagation in acoustic materials.",
+      "supported_dimensions": [
+        2,
+        2.5,
+        3
+      ],
+      "property_requirements": "cataloged",
+      "material_profile": "acoustic",
+      "required_properties": [
+        "vp",
+        "rho"
+      ],
+      "output_components": [
+        "pressure",
+        "velocity"
+      ],
+      "guided_scenario_id": "known-small-2d-acoustic"
+    },
+    {
+      "id": "acoustic_axisym",
+      "aliases": [
+        "acoustic_axisym"
+      ],
+      "summary": "Axisymmetric acoustic pressure-wave propagation.",
+      "supported_dimensions": [
+        2
+      ],
+      "property_requirements": "cataloged",
+      "material_profile": "acoustic",
+      "required_properties": [
+        "vp",
+        "rho"
+      ],
+      "output_components": [
+        "pressure",
+        "velocity"
+      ]
+    },
+    {
+      "id": "elastic",
+      "aliases": [
+        "elastic"
+      ],
+      "summary": "Elastic wave propagation with velocity and stress fields.",
+      "supported_dimensions": [
+        2,
+        2.5,
+        3
+      ],
+      "property_requirements": "cataloged",
+      "material_profile": "elastic:iso",
+      "required_properties": [
+        "vp",
+        "vs",
+        "rho"
+      ],
+      "output_components": [
+        "velocity",
+        "stress",
+        "strain",
+        "pressure"
+      ]
+    },
+    {
+      "id": "elastic_axisym",
+      "aliases": [
+        "elastic_axisym"
+      ],
+      "summary": "Axisymmetric elastic wave propagation.",
+      "supported_dimensions": [
+        2
+      ],
+      "property_requirements": "cataloged",
+      "material_profile": "elastic:iso",
+      "required_properties": [
+        "vp",
+        "vs",
+        "rho"
+      ],
+      "output_components": [
+        "velocity",
+        "stress",
+        "strain",
+        "pressure"
+      ]
+    },
+    {
+      "id": "elastic_axisym_torsion",
+      "aliases": [
+        "elastic_axisym_torsion"
+      ],
+      "summary": "Axisymmetric torsional elastic wave propagation.",
+      "supported_dimensions": [
+        2
+      ],
+      "property_requirements": "cataloged",
+      "material_profile": "elastic:iso",
+      "required_properties": [
+        "vp",
+        "vs",
+        "rho"
+      ],
+      "output_components": [
+        "velocity",
+        "stress",
+        "strain",
+        "pressure"
+      ]
+    },
+    {
+      "id": "coupled",
+      "aliases": [
+        "coupled"
+      ],
+      "summary": "Coupled material-domain propagation using the public elastic component surface.",
+      "supported_dimensions": [
+        2,
+        2.5,
+        3
+      ],
+      "property_requirements": "domain-specific",
+      "required_properties": [],
+      "output_components": [
+        "velocity",
+        "stress",
+        "strain",
+        "pressure"
+      ]
+    },
+    {
+      "id": "coupled_aep",
+      "aliases": [
+        "coupled_aep",
+        "coupled-aep",
+        "coupledaep"
+      ],
+      "summary": "Coupled acoustic, elastic, and poroelastic propagation.",
+      "supported_dimensions": [
+        2,
+        2.5,
+        3
+      ],
+      "property_requirements": "domain-specific",
+      "required_properties": [],
+      "output_components": [
+        "pressure",
+        "velocity",
+        "fluid_flux",
+        "stress",
+        "strain",
+        "displacement",
+        "fluid_displacement"
+      ]
+    },
+    {
+      "id": "coupled_axisym",
+      "aliases": [
+        "coupled_axisym"
+      ],
+      "summary": "Axisymmetric coupled acoustic and elastic propagation.",
+      "supported_dimensions": [
+        2
+      ],
+      "property_requirements": "domain-specific",
+      "required_properties": [],
+      "output_components": [
+        "velocity",
+        "stress",
+        "strain",
+        "pressure"
+      ]
+    },
+    {
+      "id": "coupled_axisym_torsion",
+      "aliases": [
+        "coupled_axisym_torsion"
+      ],
+      "summary": "Axisymmetric torsional coupled propagation.",
+      "supported_dimensions": [
+        2
+      ],
+      "property_requirements": "domain-specific",
+      "required_properties": [],
+      "output_components": [
+        "velocity",
+        "stress",
+        "strain",
+        "pressure"
+      ]
+    },
+    {
+      "id": "poroelastic",
+      "aliases": [
+        "poro",
+        "poroelastic",
+        "poro-elastic",
+        "poro_elastic",
+        "biot"
+      ],
+      "summary": "Poroelastic propagation coupling the solid frame and pore fluid.",
+      "supported_dimensions": [
+        2,
+        2.5,
+        3
+      ],
+      "property_requirements": "cataloged",
+      "material_profile": "poroelastic:iso",
+      "required_properties": [
+        "vp",
+        "vs",
+        "rho",
+        "k_solid",
+        "k_fluid",
+        "rho_solid",
+        "rho_fluid",
+        "porosity",
+        "tortuosity",
+        "kappa",
+        "viscosity"
+      ],
+      "output_components": [
+        "velocity",
+        "fluid_flux",
+        "stress",
+        "pressure",
+        "strain",
+        "displacement",
+        "fluid_displacement"
+      ]
+    },
+    {
+      "id": "em",
+      "aliases": [
+        "em",
+        "electromagnetic",
+        "electro-magnetic",
+        "electro_magnetic",
+        "maxwell"
+      ],
+      "summary": "Electromagnetic propagation with electric and magnetic fields.",
+      "supported_dimensions": [
+        2,
+        2.5,
+        3
+      ],
+      "property_requirements": "not-cataloged",
+      "required_properties": [],
+      "output_components": [
+        "electric",
+        "magnetic"
+      ]
+    }
+  ],
+  "validation_codes": [
+    {
+      "code": "acquisition.receiver_coordinates.file_invalid",
+      "severity": "error",
+      "path": "acquisition.receiver_groups[*].coordinates.file",
+      "explanation": "A receiver coordinate file reference does not identify a regular file.",
+      "remediation": "Point the receiver group at a readable coordinate file rather than a directory or other filesystem object."
+    },
+    {
+      "code": "acquisition.source_geometry.file_missing",
+      "severity": "error",
+      "path": "acquisition.source_geometry.file",
+      "explanation": "The configured source-geometry HDF5 file does not exist locally.",
+      "remediation": "Create or copy the HDF5 file, correct the path, or use the explicit remote-file policy for an intended target-site path."
+    },
+    {
+      "code": "acquisition.source_geometry.file_invalid",
+      "severity": "error",
+      "path": "acquisition.source_geometry.file",
+      "explanation": "The source-geometry HDF5 reference does not identify a regular file.",
+      "remediation": "Point source_geometry.file at a readable HDF5 file rather than a directory or other filesystem object."
+    },
+    {
+      "code": "acquisition.source_geometry.file_unreadable",
+      "severity": "error",
+      "path": "acquisition.source_geometry.file",
+      "explanation": "The source-geometry file exists but cannot be read as HDF5.",
+      "remediation": "Provide a valid, readable HDF5 file."
+    },
+    {
+      "code": "acquisition.source_geometry.source_file_missing",
+      "severity": "error",
+      "path": "acquisition.source_geometry.source_file",
+      "explanation": "The configured SPS source file does not exist locally.",
+      "remediation": "Create or copy the SPS file, correct the path, or use the explicit remote-file policy for an intended target-site path."
+    },
+    {
+      "code": "acquisition.source_geometry.source_file_invalid",
+      "severity": "error",
+      "path": "acquisition.source_geometry.source_file",
+      "explanation": "The SPS source reference does not identify a regular file.",
+      "remediation": "Point source_geometry.source_file at a readable SPS file rather than a directory or other filesystem object."
+    },
+    {
+      "code": "acquisition.source_geometry.dataset_missing",
+      "severity": "error",
+      "path": "acquisition.source_geometry.dataset",
+      "explanation": "The selected source-coordinate dataset does not exist in the HDF5 file.",
+      "remediation": "Choose an existing coordinate dataset."
+    },
+    {
+      "code": "acquisition.source_geometry.dataset_shape",
+      "severity": "error",
+      "path": "acquisition.source_geometry.dataset",
+      "explanation": "The source-coordinate dataset is not a non-empty two-dimensional array.",
+      "remediation": "Use shape (source_count, coordinate_dimension)."
+    },
+    {
+      "code": "acquisition.source_geometry.dataset_numeric",
+      "severity": "error",
+      "path": "acquisition.source_geometry.dataset",
+      "explanation": "The source-coordinate dataset is not stored as readable integer or floating-point values.",
+      "remediation": "Store source coordinates in a readable numeric HDF5 dataset."
+    },
+    {
+      "code": "acquisition.source_geometry.dataset_nonfinite",
+      "severity": "error",
+      "path": "acquisition.source_geometry.dataset",
+      "explanation": "The source-coordinate dataset contains a NaN or infinite value.",
+      "remediation": "Replace every non-finite coordinate with a finite value."
+    },
+    {
+      "code": "acquisition.source_geometry.dimension_mismatch",
+      "severity": "error",
+      "path": "acquisition.source_geometry.dataset",
+      "explanation": "The source-coordinate dataset width does not match the simulation dimension.",
+      "remediation": "Store one coordinate column for each simulation dimension."
+    },
+    {
+      "code": "acquisition.source_geometry.count_mismatch",
+      "severity": "error",
+      "path": "acquisition.source_geometry.count",
+      "explanation": "The declared source count differs from the number of rows in the source-coordinate dataset.",
+      "remediation": "Set count to the dataset row count or omit count."
+    },
+    {
+      "code": "acquisition.source_encoding.file_missing",
+      "severity": "error",
+      "path": "acquisition.source_encoding.file",
+      "explanation": "The configured source-encoding HDF5 file does not exist locally.",
+      "remediation": "Create or copy the HDF5 file, correct the path, or use the explicit remote-file policy for an intended target-site path."
+    },
+    {
+      "code": "acquisition.source_encoding.file_invalid",
+      "severity": "error",
+      "path": "acquisition.source_encoding.file",
+      "explanation": "The source-encoding HDF5 reference does not identify a regular file.",
+      "remediation": "Point source_encoding.file at a readable HDF5 file rather than a directory or other filesystem object."
+    },
+    {
+      "code": "acquisition.source_encoding.file_unreadable",
+      "severity": "error",
+      "path": "acquisition.source_encoding.file",
+      "explanation": "The source-encoding file exists but cannot be read as HDF5.",
+      "remediation": "Provide a valid, readable HDF5 file."
+    },
+    {
+      "code": "acquisition.source_encoding.dataset_missing",
+      "severity": "error",
+      "path": "acquisition.source_encoding.dataset",
+      "explanation": "The selected source-encoding coefficient dataset does not exist in the HDF5 file.",
+      "remediation": "Choose an existing coefficient dataset."
+    },
+    {
+      "code": "acquisition.source_encoding.dataset_shape",
+      "severity": "error",
+      "path": "acquisition.source_encoding.dataset",
+      "explanation": "The source-encoding coefficients do not use the required non-empty paired real and imaginary layout.",
+      "remediation": "Use shape (encoded_field_count, source_count, 2), with real then imaginary values on the final axis."
+    },
+    {
+      "code": "acquisition.source_encoding.dataset_numeric",
+      "severity": "error",
+      "path": "acquisition.source_encoding.dataset",
+      "explanation": "The source-encoding coefficients are not stored as readable integer or floating-point values.",
+      "remediation": "Store real and imaginary coefficient parts in a readable real numeric HDF5 dataset; native complex storage is not supported."
+    },
+    {
+      "code": "acquisition.source_encoding.dataset_nonfinite",
+      "severity": "error",
+      "path": "acquisition.source_encoding.dataset",
+      "explanation": "The source-encoding coefficient dataset contains a NaN or infinite value.",
+      "remediation": "Replace every non-finite coefficient part with a finite value."
+    },
+    {
+      "code": "acquisition.source_encoding.source_count_mismatch",
+      "severity": "error",
+      "path": "acquisition.source_encoding.dataset",
+      "explanation": "The coefficient dataset source axis does not match the physical source-geometry count.",
+      "remediation": "Use one coefficient column per physical source point."
+    },
+    {
+      "code": "acquisition.source_encoding.field_count_mismatch",
+      "severity": "error",
+      "path": "acquisition.source_encoding.count",
+      "explanation": "The declared encoded-field count differs from the coefficient dataset's first axis.",
+      "remediation": "Set count to the dataset's encoded-field count or omit count."
+    },
+    {
+      "code": "acquisition.source_encoding.field_names.dataset_missing",
+      "severity": "error",
+      "path": "acquisition.source_encoding.field_names_dataset",
+      "explanation": "The optional HDF5 field-name metadata dataset does not exist.",
+      "remediation": "Choose an existing metadata dataset or omit field_names_dataset."
+    },
+    {
+      "code": "acquisition.source_encoding.field_names.length_mismatch",
+      "severity": "error",
+      "path": "acquisition.source_encoding.field_names_dataset",
+      "explanation": "The field-name metadata does not contain exactly one value per encoded field.",
+      "remediation": "Use a one-dimensional dataset whose length matches the encoded-field count."
+    },
+    {
+      "code": "acquisition.source_encoding.field_names.dataset_unreadable",
+      "severity": "error",
+      "path": "acquisition.source_encoding.field_names_dataset",
+      "explanation": "The HDF5 field-name metadata cannot be read.",
+      "remediation": "Provide a readable one-dimensional string dataset."
+    },
+    {
+      "code": "acquisition.source_encoding.field_names.value_invalid",
+      "severity": "error",
+      "path": "acquisition.source_encoding.field_names_dataset",
+      "explanation": "A source-encoding field name is empty or is not valid UTF-8 text.",
+      "remediation": "Store every field name as a non-empty UTF-8 string."
+    },
+    {
+      "code": "acquisition.source_encoding.field_names.duplicate",
+      "severity": "error",
+      "path": "acquisition.source_encoding.field_names_dataset",
+      "explanation": "The HDF5 field-name metadata contains a duplicate name.",
+      "remediation": "Give every encoded source field a unique name."
+    },
+    {
+      "code": "acquisition.source_encoding.reference_coordinates.dataset_missing",
+      "severity": "error",
+      "path": "acquisition.source_encoding.reference_coordinates_dataset",
+      "explanation": "The optional HDF5 reference-coordinate dataset does not exist.",
+      "remediation": "Choose an existing coordinate dataset or omit reference_coordinates_dataset."
+    },
+    {
+      "code": "acquisition.source_encoding.reference_coordinates.shape",
+      "severity": "error",
+      "path": "acquisition.source_encoding.reference_coordinates_dataset",
+      "explanation": "The HDF5 reference coordinates do not contain one coordinate row per encoded field in the simulation dimension.",
+      "remediation": "Use shape (encoded_field_count, simulation_dimension)."
+    },
+    {
+      "code": "acquisition.source_encoding.reference_coordinates.dataset_numeric",
+      "severity": "error",
+      "path": "acquisition.source_encoding.reference_coordinates_dataset",
+      "explanation": "The HDF5 reference coordinates are not stored as readable integer or floating-point values.",
+      "remediation": "Store reference coordinates in a readable real numeric HDF5 dataset."
+    },
+    {
+      "code": "acquisition.source_encoding.reference_coordinates.dataset_nonfinite",
+      "severity": "error",
+      "path": "acquisition.source_encoding.reference_coordinates_dataset",
+      "explanation": "The HDF5 reference-coordinate dataset contains a NaN or infinite value.",
+      "remediation": "Replace every non-finite reference coordinate with a finite value."
+    },
+    {
+      "code": "acquisition.source_encoding.reference_coordinates.invalid",
+      "severity": "error",
+      "path": "acquisition.source_encoding.fields[*].reference_coordinates",
+      "explanation": "Inline source-field reference coordinates are not numeric.",
+      "remediation": "Provide a finite numeric coordinate vector in the simulation dimension."
+    },
+    {
+      "code": "files.remote_unverified",
+      "severity": "warning",
+      "path": "acquisition.source_geometry.file, acquisition.source_geometry.source_file, acquisition.source_encoding.file, or acquisition.receiver_groups[*].coordinates.file",
+      "explanation": "An opted-in missing absolute file path outside the resolved local project is intended for a target site and cannot be verified locally.",
+      "remediation": "Confirm that the file exists and is readable on the target site; keep relative and project-local paths available for local validation."
+    },
+    {
+      "code": "outputs.vtk.model_surface.reference_missing",
+      "severity": "error",
+      "path": "outputs.vtk[*].surfaces[*] or outputs.vtk[*].target.selection[*]",
+      "explanation": "A model-surface output selection provides neither a name nor a one-based index.",
+      "remediation": "Specify top, an authored or expanded horizon name, a surface_N alias, or a valid one-based surface index."
+    },
+    {
+      "code": "outputs.vtk.model_surface.name_missing",
+      "severity": "error",
+      "path": "outputs.vtk[*].surfaces[*].name or outputs.vtk[*].target.selection[*].name",
+      "explanation": "A model-surface output selection has an empty surface name.",
+      "remediation": "Provide top, an authored or expanded horizon name, or a surface_N alias."
+    },
+    {
+      "code": "outputs.vtk.model_surface.unknown",
+      "severity": "error",
+      "path": "outputs.vtk[*].surfaces[*].name or outputs.vtk[*].target.selection[*].name",
+      "explanation": "A model-surface output names a surface that is not visible to the solver.",
+      "remediation": "Use top, an authored or expanded horizon name, or a one-based surface_N alias; do not use a synthetic bottom alias or borehole name."
+    },
+    {
+      "code": "outputs.vtk.model_surface.index_invalid",
+      "severity": "error",
+      "path": "outputs.vtk[*].surfaces[*].index or outputs.vtk[*].target.selection[*].index",
+      "explanation": "A model-surface output index is not an integer.",
+      "remediation": "Use a one-based integer surface index."
+    },
+    {
+      "code": "outputs.vtk.model_surface.index_out_of_range",
+      "severity": "error",
+      "path": "outputs.vtk[*].surfaces[*].index or outputs.vtk[*].target.selection[*].index",
+      "explanation": "A model-surface output index is outside the model's expanded horizon range.",
+      "remediation": "Use an integer from 1 through the expanded horizon count."
+    },
+    {
+      "code": "simulation.physics.unsupported",
+      "severity": "error",
+      "path": "physics",
+      "explanation": "The simulation names a physics formulation that this FrequenSolve package does not recognize.",
+      "remediation": "Choose a canonical physics id or alias returned by lookup_physics."
+    },
+    {
+      "code": "simulation.dimension.unsupported",
+      "severity": "error",
+      "path": "dimension",
+      "explanation": "The simulation dimension cannot be normalized to 2D, 2.5D, or 3D.",
+      "remediation": "Use 2, 2.5, or 3 and follow any formulation-specific dimension constraints."
+    },
+    {
+      "code": "model.missing",
+      "severity": "warning",
+      "path": "model",
+      "explanation": "The simulation has no material model attached.",
+      "remediation": "Attach a supported model before treating the setup as runnable."
+    },
+    {
+      "code": "mesh.missing",
+      "severity": "warning",
+      "path": "mesh",
+      "explanation": "The simulation has no mesh or mesh generator attached.",
+      "remediation": "Attach a generated or supplied mesh before creating a runnable job."
+    },
+    {
+      "code": "acquisition.missing",
+      "severity": "warning",
+      "path": "acquisition",
+      "explanation": "The simulation has no acquisition geometry.",
+      "remediation": "Add at least one supported source geometry and the receivers needed by the workflow."
+    },
+    {
+      "code": "acquisition.sources.missing",
+      "severity": "warning",
+      "path": "acquisition.source_geometry",
+      "explanation": "The acquisition has no physical source geometry.",
+      "remediation": "Add an inline, HDF5, or SPS source geometry supported by the current package."
+    },
+    {
+      "code": "coordinates.domain.outside",
+      "severity": "error",
+      "path": "acquisition.*.coordinates",
+      "explanation": "One or more source, receiver, or output coordinates lie outside the modeled domain.",
+      "remediation": "Move the coordinates inside the model bounds or intentionally expand the model and mesh."
+    },
+    {
+      "code": "bounds.units.incompatible",
+      "severity": "error",
+      "path": "acquisition.*.coordinates",
+      "explanation": "Coordinate units cannot be converted to the units used by the model domain.",
+      "remediation": "Use compatible length units or attach the intended coordinate-system metadata."
+    },
+    {
+      "code": "field.unsupported",
+      "severity": "error",
+      "path": "acquisition.*.components[*] or outputs.*.fields[*]",
+      "explanation": "A receiver or output requests a field that is unavailable for the selected physics.",
+      "remediation": "Choose one of the output components returned by lookup_physics for this formulation."
+    },
+    {
+      "code": "job.frequencies.empty",
+      "severity": "error",
+      "path": "f_list",
+      "explanation": "The job contains no modeled frequency.",
+      "remediation": "Provide at least one finite positive frequency."
+    },
+    {
+      "code": "job.frequency.nonpositive",
+      "severity": "error",
+      "path": "f_list[*]",
+      "explanation": "A modeled frequency has a real component that is zero or negative.",
+      "remediation": "Use a frequency with a positive real component."
+    },
+    {
+      "code": "outputs.vtk.frequency_count",
+      "severity": "error",
+      "path": "outputs.vtk",
+      "explanation": "A VTK output was requested from a job containing more than one modeled frequency.",
+      "remediation": "Create one FrequencyDomainJob per plotted frequency."
+    },
+    {
+      "code": "acquisition.receiver_component.units.invalid",
+      "severity": "error",
+      "path": "acquisition.receiver_groups[*].device.components[*].units",
+      "explanation": "A receiver component contains an invalid unit expression.",
+      "remediation": "Use a valid Pint-compatible unit expression for the receiver component."
+    },
+    {
+      "code": "acquisition.receiver_coordinates.file_missing",
+      "severity": "error",
+      "path": "acquisition.receiver_groups[*].coordinates.file",
+      "explanation": "A receiver coordinate file cannot be found at the configured path.",
+      "remediation": "Correct the file path or create the coordinate file before validation and submission."
+    },
+    {
+      "code": "acquisition.receiver_coordinates.type.invalid",
+      "severity": "error",
+      "path": "acquisition.receiver_groups[*].coordinates",
+      "explanation": "The receiver coordinates use a container type that the package validator cannot interpret.",
+      "remediation": "Use a supported inline, carpet, grid, or file-backed receiver coordinate representation."
+    },
+    {
+      "code": "acquisition.receiver_coordinates.units.invalid",
+      "severity": "error",
+      "path": "acquisition.receiver_groups[*].coordinates.units",
+      "explanation": "Receiver coordinates contain an invalid unit expression.",
+      "remediation": "Use a valid length unit that is compatible with the simulation coordinate system."
+    },
+    {
+      "code": "acquisition.receiver_coordinates.unreadable",
+      "severity": "error",
+      "path": "acquisition.receiver_groups[*].coordinates",
+      "explanation": "The validator could not read bounds from a receiver coordinate source.",
+      "remediation": "Check that the coordinate source exists, is readable, and uses the expected supported format."
+    },
+    {
+      "code": "acquisition.receiver_group.components.missing",
+      "severity": "error",
+      "path": "acquisition.receiver_groups[*].device.components",
+      "explanation": "A receiver device has no components to record.",
+      "remediation": "Add at least one named receiver component with a field supported by the selected physics."
+    },
+    {
+      "code": "acquisition.receiver_group.coordinates.missing",
+      "severity": "error",
+      "path": "acquisition.receiver_groups[*].coordinates",
+      "explanation": "A receiver group has no receiver coordinates.",
+      "remediation": "Provide supported inline, carpet, grid, or file-backed receiver coordinates."
+    },
+    {
+      "code": "acquisition.receiver_group.name.missing",
+      "severity": "error",
+      "path": "acquisition.receiver_groups[*].name",
+      "explanation": "A receiver group has no non-empty name.",
+      "remediation": "Give every receiver group a unique, non-empty name."
+    },
+    {
+      "code": "acquisition.source.coordinates.missing",
+      "severity": "error",
+      "path": "acquisition.source_geometry.sources[*].coordinates",
+      "explanation": "An inline source point has no coordinates.",
+      "remediation": "Provide one coordinate vector per physical source point."
+    },
+    {
+      "code": "acquisition.source.kind.mismatch",
+      "severity": "error",
+      "path": "acquisition.source_geometry.sources[*].kind",
+      "explanation": "An inline source point declares a kind that differs from its containing source geometry.",
+      "remediation": "Use the same supported source kind for the geometry and every contained source point."
+    },
+    {
+      "code": "acquisition.source.kind.missing",
+      "severity": "error",
+      "path": "acquisition.source_geometry.kind",
+      "explanation": "The source geometry does not declare a source kind.",
+      "remediation": "Set the source geometry kind to a value supported by the selected physics and source representation."
+    },
+    {
+      "code": "acquisition.source.kind.unsupported",
+      "severity": "error",
+      "path": "acquisition.source_geometry.kind",
+      "explanation": "The source geometry declares a source kind that FrequenSolve does not support.",
+      "remediation": "Choose one of the supported source kinds listed in the diagnostic message."
+    },
+    {
+      "code": "acquisition.source_encoding.coefficients.length",
+      "severity": "error",
+      "path": "acquisition.source_encoding.fields[*].coefficients",
+      "explanation": "A dense source-encoding coefficient vector does not match the number of physical sources.",
+      "remediation": "Provide exactly one coefficient for each physical source point."
+    },
+    {
+      "code": "acquisition.source_encoding.fields.empty",
+      "severity": "error",
+      "path": "acquisition.source_encoding.fields",
+      "explanation": "Explicit source encoding contains no encoded fields.",
+      "remediation": "Add at least one encoded field or remove the explicit encoding block."
+    },
+    {
+      "code": "acquisition.source_encoding.names.required",
+      "severity": "error",
+      "path": "acquisition.source_geometry.sources",
+      "explanation": "Named source encoding is in use, but one or more inline physical sources have no name.",
+      "remediation": "Assign a unique explicit name to every inline source referenced by name."
+    },
+    {
+      "code": "acquisition.source_encoding.source.unknown",
+      "severity": "error",
+      "path": "acquisition.source_encoding.fields[*].terms",
+      "explanation": "A source-encoding term references a physical source name that does not exist.",
+      "remediation": "Correct the term to reference an existing named physical source."
+    },
+    {
+      "code": "acquisition.source_encoding.type.unsupported",
+      "severity": "error",
+      "path": "acquisition.source_encoding.type",
+      "explanation": "The acquisition uses a source-encoding type that the package validator does not support.",
+      "remediation": "Use a supported source-encoding representation or remove the unsupported encoding."
+    },
+    {
+      "code": "acquisition.source_geometry.units.invalid",
+      "severity": "error",
+      "path": "acquisition.source_geometry.units",
+      "explanation": "The source geometry contains an invalid unit expression.",
+      "remediation": "Use a valid length unit compatible with the simulation coordinate system."
+    },
+    {
+      "code": "acquisition.sources.empty",
+      "severity": "error",
+      "path": "acquisition.source_geometry.sources",
+      "explanation": "Inline source geometry is present but contains no physical source points.",
+      "remediation": "Add at least one physical source point or use another supported source representation."
+    },
+    {
+      "code": "acquisition.sources.names.duplicate",
+      "severity": "error",
+      "path": "acquisition.source_geometry.sources",
+      "explanation": "Two or more inline source points use the same explicit name.",
+      "remediation": "Give each named physical source a unique name."
+    },
+    {
+      "code": "bounds.dimension.mismatch",
+      "severity": "error",
+      "path": "*.bounds",
+      "explanation": "Coordinate bounds do not have the number of dimensions required by their axes or simulation.",
+      "remediation": "Provide one lower and upper value for every active model axis."
+    },
+    {
+      "code": "bounds.nonfinite",
+      "severity": "error",
+      "path": "*.bounds",
+      "explanation": "Coordinate bounds contain NaN or infinite values.",
+      "remediation": "Replace every bound with a finite numeric value."
+    },
+    {
+      "code": "bounds.shape.mismatch",
+      "severity": "error",
+      "path": "*.bounds",
+      "explanation": "The lower and upper coordinate bounds have different shapes.",
+      "remediation": "Provide matching lower and upper bound vectors."
+    },
+    {
+      "code": "coordinate_system.axis.direction.unsupported",
+      "severity": "error",
+      "path": "coordinate_systems[*].axes[*].direction",
+      "explanation": "A coordinate-system axis maps to an unsupported physical direction.",
+      "remediation": "Map the axis direction to x, y, or z."
+    },
+    {
+      "code": "coordinate_system.axis.invalid",
+      "severity": "error",
+      "path": "coordinate_systems[*].axes[*]",
+      "explanation": "A coordinate-system axis definition is not a string or Axis object.",
+      "remediation": "Define each axis with a supported axis name or Axis object."
+    },
+    {
+      "code": "coordinate_system.axis.name.duplicate",
+      "severity": "error",
+      "path": "coordinate_systems[*].axes[*].name",
+      "explanation": "A coordinate system declares the same axis name more than once.",
+      "remediation": "Give every axis in the coordinate system a unique name."
+    },
+    {
+      "code": "coordinate_system.axis.name.missing",
+      "severity": "error",
+      "path": "coordinate_systems[*].axes[*].name",
+      "explanation": "A coordinate-system axis has no non-empty name.",
+      "remediation": "Give every coordinate-system axis a non-empty name."
+    },
+    {
+      "code": "coordinate_system.axis.origin.units.invalid",
+      "severity": "error",
+      "path": "coordinate_systems[*].axes[*].origin.units",
+      "explanation": "A coordinate-system axis origin contains an invalid unit expression.",
+      "remediation": "Use a valid length unit for the axis origin."
+    },
+    {
+      "code": "coordinate_system.fixed_axis.value_missing",
+      "severity": "error",
+      "path": "coordinate_systems[*].fixed_axis",
+      "explanation": "A coordinate system declares a fixed axis without its fixed coordinate value.",
+      "remediation": "Provide fixed_value or remove fixed_axis."
+    },
+    {
+      "code": "coordinate_system.fixed_value.units.invalid",
+      "severity": "error",
+      "path": "coordinate_systems[*].fixed_value.units",
+      "explanation": "A fixed coordinate value contains an invalid unit expression.",
+      "remediation": "Use a valid length unit for the fixed coordinate value."
+    },
+    {
+      "code": "coordinate_system.kind.unsupported",
+      "severity": "error",
+      "path": "coordinate_systems[*].type",
+      "explanation": "A coordinate system uses a coordinate-system type that the package does not support.",
+      "remediation": "Choose one of the coordinate-system types listed in the diagnostic message."
+    },
+    {
+      "code": "coordinate_system.name.duplicate",
+      "severity": "error",
+      "path": "coordinate_systems[*].name",
+      "explanation": "Two registered coordinate systems use the same name.",
+      "remediation": "Give every registered coordinate system a unique name."
+    },
+    {
+      "code": "coordinate_system.name.missing",
+      "severity": "error",
+      "path": "coordinate_systems[*].name",
+      "explanation": "A registered coordinate system has no non-empty name.",
+      "remediation": "Give every registered coordinate system a non-empty name."
+    },
+    {
+      "code": "coordinate_system.ndim.unsupported",
+      "severity": "error",
+      "path": "coordinate_systems[*].ndim",
+      "explanation": "A coordinate system declares a dimension other than two or three.",
+      "remediation": "Set the coordinate-system dimension to 2 or 3."
+    },
+    {
+      "code": "coordinate_system.reference.unknown",
+      "severity": "error",
+      "path": "*.system",
+      "explanation": "A configuration references a coordinate-system name that is not registered on the simulation.",
+      "remediation": "Register the named coordinate system or correct the reference to an existing system."
+    },
+    {
+      "code": "coordinate_system.type.invalid",
+      "severity": "error",
+      "path": "coordinate_systems[*]",
+      "explanation": "A registered coordinate-system entry is not a CoordinateSystem object.",
+      "remediation": "Register a valid CoordinateSystem instance."
+    },
+    {
+      "code": "coordinates.dimension.invalid",
+      "severity": "error",
+      "path": "*.coordinates",
+      "explanation": "Coordinates are not a two-dimensional array of points and coordinate components.",
+      "remediation": "Provide coordinates shaped as (number of points, model dimension)."
+    },
+    {
+      "code": "coordinates.dimension.mismatch",
+      "severity": "error",
+      "path": "*.coordinates",
+      "explanation": "Coordinate points have a different number of components than the simulation model dimension.",
+      "remediation": "Provide one coordinate component for every active model axis."
+    },
+    {
+      "code": "coordinates.invalid",
+      "severity": "error",
+      "path": "*.coordinates",
+      "explanation": "Coordinates could not be converted to numeric values.",
+      "remediation": "Replace unsupported coordinate values with finite numbers or supported quantities."
+    },
+    {
+      "code": "coordinates.nonfinite",
+      "severity": "error",
+      "path": "*.coordinates",
+      "explanation": "Coordinates contain NaN or infinite values.",
+      "remediation": "Replace every coordinate component with a finite numeric value."
+    },
+    {
+      "code": "coordinates.units.invalid",
+      "severity": "error",
+      "path": "*.coordinates.units",
+      "explanation": "A coordinate value contains an invalid unit expression.",
+      "remediation": "Use a valid length unit compatible with the selected coordinate system."
+    },
+    {
+      "code": "direction.axis.unsupported",
+      "severity": "error",
+      "path": "*.direction.axis",
+      "explanation": "A direction references an axis that the selected coordinate system does not expose.",
+      "remediation": "Choose an axis exposed by the active coordinate system."
+    },
+    {
+      "code": "direction.nonfinite",
+      "severity": "error",
+      "path": "*.direction",
+      "explanation": "A direction vector contains NaN or infinite values.",
+      "remediation": "Replace every direction component with a finite numeric value."
+    },
+    {
+      "code": "direction.type.unsupported",
+      "severity": "error",
+      "path": "*.direction.type",
+      "explanation": "A direction uses a representation type that the package validator does not support.",
+      "remediation": "Use a supported vector, axis, radial, normal, or other listed direction type."
+    },
+    {
+      "code": "direction.units.invalid",
+      "severity": "error",
+      "path": "*.direction.units",
+      "explanation": "A direction contains an invalid unit expression.",
+      "remediation": "Use a valid unit expression appropriate for the direction value."
+    },
+    {
+      "code": "domain.id.invalid",
+      "severity": "error",
+      "path": "*.domain",
+      "explanation": "A referenced model-domain id is not an integer.",
+      "remediation": "Use an integer mesh-block id from a declared model subdomain."
+    },
+    {
+      "code": "domain.id.unknown",
+      "severity": "error",
+      "path": "*.domain",
+      "explanation": "A referenced model-domain id does not match any declared model subdomain.",
+      "remediation": "Use one of the known mesh-block ids listed in the diagnostic message."
+    },
+    {
+      "code": "field.missing",
+      "severity": "error",
+      "path": "acquisition.*.components[*] or outputs.*.fields[*]",
+      "explanation": "A receiver component or output selection has no field name.",
+      "remediation": "Choose a non-empty field supported by the selected physics."
+    },
+    {
+      "code": "grid.axis.unsupported",
+      "severity": "error",
+      "path": "*.grid.dims",
+      "explanation": "A grid uses dimension names that the selected coordinate system does not expose.",
+      "remediation": "Use only axes exposed by the active coordinate system."
+    },
+    {
+      "code": "grid.coordinate.empty",
+      "severity": "error",
+      "path": "*.grid.coords.*",
+      "explanation": "A grid coordinate axis contains no coordinate values.",
+      "remediation": "Provide at least one finite value for every grid dimension."
+    },
+    {
+      "code": "grid.coordinate.invalid",
+      "severity": "error",
+      "path": "*.grid.coords.*",
+      "explanation": "A grid coordinate axis could not be interpreted as numeric values.",
+      "remediation": "Use finite numeric coordinate values or supported quantities."
+    },
+    {
+      "code": "grid.coordinate.missing",
+      "severity": "error",
+      "path": "*.grid.coords.*",
+      "explanation": "A named grid dimension has no corresponding coordinate array.",
+      "remediation": "Provide a coordinate array for every grid dimension."
+    },
+    {
+      "code": "grid.coordinate.nonfinite",
+      "severity": "error",
+      "path": "*.grid.coords.*",
+      "explanation": "A grid coordinate axis contains NaN or infinite values.",
+      "remediation": "Replace every grid coordinate with a finite numeric value."
+    },
+    {
+      "code": "grid.coordinate.not_monotonic",
+      "severity": "error",
+      "path": "*.grid.coords.*",
+      "explanation": "A grid coordinate axis is not strictly increasing or strictly decreasing.",
+      "remediation": "Sort the axis and remove duplicate coordinate values so it is strictly monotonic."
+    },
+    {
+      "code": "grid.coordinate_units.invalid",
+      "severity": "error",
+      "path": "*.grid.coords.*.units",
+      "explanation": "A grid coordinate axis contains an invalid unit expression.",
+      "remediation": "Use a valid length unit compatible with the grid coordinate system."
+    },
+    {
+      "code": "grid.dimension.mismatch",
+      "severity": "error",
+      "path": "*.grid.dims",
+      "explanation": "A grid has a different number of dimensions than its coordinate system requires.",
+      "remediation": "Provide one grid dimension and coordinate array for every active axis."
+    },
+    {
+      "code": "grid.dims.duplicate",
+      "severity": "error",
+      "path": "*.grid.dims",
+      "explanation": "A grid repeats one or more dimension names.",
+      "remediation": "Give every grid dimension a unique name."
+    },
+    {
+      "code": "grid.dims.missing",
+      "severity": "error",
+      "path": "*.grid.dims",
+      "explanation": "An xarray-backed grid has no dimension names.",
+      "remediation": "Declare the grid dimensions and corresponding coordinate arrays."
+    },
+    {
+      "code": "grid.unchecked",
+      "severity": "warning",
+      "path": "*.grid",
+      "explanation": "The package validator does not know how to inspect this grid representation.",
+      "remediation": "Use a supported Cartesian or xarray grid, or validate the custom grid separately."
+    },
+    {
+      "code": "grid.units.invalid",
+      "severity": "error",
+      "path": "*.grid.units",
+      "explanation": "A grid contains an invalid default unit expression.",
+      "remediation": "Use a valid length unit compatible with the grid coordinate system."
+    },
+    {
+      "code": "job.frequencies.missing",
+      "severity": "error",
+      "path": "f_list",
+      "explanation": "The job has no frequency-list value.",
+      "remediation": "Provide at least one finite frequency with a positive real component."
+    },
+    {
+      "code": "job.frequency.invalid",
+      "severity": "error",
+      "path": "f_list[*]",
+      "explanation": "A job frequency cannot be interpreted as a real or complex number.",
+      "remediation": "Replace the value with a numeric frequency."
+    },
+    {
+      "code": "job.frequency.nonfinite",
+      "severity": "error",
+      "path": "f_list[*]",
+      "explanation": "A job frequency contains NaN or an infinite real or imaginary component.",
+      "remediation": "Use a finite numeric frequency."
+    },
+    {
+      "code": "job.outputs.invalid",
+      "severity": "error",
+      "path": "outputs",
+      "explanation": "The job output configuration cannot be interpreted as JobOutputs.",
+      "remediation": "Use supported trace, VTK, or wavefield output configuration objects."
+    },
+    {
+      "code": "job.simulation.missing",
+      "severity": "error",
+      "path": "simulation",
+      "explanation": "The job has no simulation attached.",
+      "remediation": "Attach a configured simulation before validating or submitting the job."
+    },
+    {
+      "code": "mesh.file.format_missing",
+      "severity": "error",
+      "path": "mesh.format",
+      "explanation": "A file-backed mesh does not declare its file format.",
+      "remediation": "Set the mesh format to the format used by the supplied mesh file."
+    },
+    {
+      "code": "mesh.generator.bounds.dimension_mismatch",
+      "severity": "error",
+      "path": "mesh.generator",
+      "explanation": "Mesh-generator bounds do not match the simulation model dimension.",
+      "remediation": "Provide one lower and upper mesh bound for every model axis."
+    },
+    {
+      "code": "mesh.generator.bounds.incomplete",
+      "severity": "error",
+      "path": "mesh.generator",
+      "explanation": "A mesh generator has only one of its lower and upper bounds.",
+      "remediation": "Provide both l_bound and u_bound."
+    },
+    {
+      "code": "mesh.generator.bounds.invalid",
+      "severity": "error",
+      "path": "mesh.generator",
+      "explanation": "Mesh-generator bounds cannot be interpreted as numeric coordinate vectors.",
+      "remediation": "Use matching finite numeric lower and upper bound vectors."
+    },
+    {
+      "code": "mesh.generator.bounds.nonfinite",
+      "severity": "error",
+      "path": "mesh.generator",
+      "explanation": "Mesh-generator bounds contain NaN or infinite values.",
+      "remediation": "Replace every mesh bound with a finite numeric value."
+    },
+    {
+      "code": "mesh.generator.bounds.shape_mismatch",
+      "severity": "error",
+      "path": "mesh.generator",
+      "explanation": "Mesh-generator lower and upper bounds have different lengths.",
+      "remediation": "Provide matching lower and upper bound vectors."
+    },
+    {
+      "code": "mesh.generator.units.invalid",
+      "severity": "error",
+      "path": "mesh.generator.units",
+      "explanation": "A mesh generator contains an invalid unit expression.",
+      "remediation": "Use a valid length unit compatible with the simulation model."
+    },
+    {
+      "code": "mesh.type.invalid",
+      "severity": "error",
+      "path": "mesh",
+      "explanation": "The attached mesh is neither a supported MeshManager nor a supported mesh generator.",
+      "remediation": "Attach a MeshManager, a supported mesh generator, or a valid file-backed mesh configuration."
+    },
+    {
+      "code": "model.dimension.mismatch",
+      "severity": "error",
+      "path": "model.dimension",
+      "explanation": "The material model dimension does not match the simulation model dimension.",
+      "remediation": "Rebuild the model with the spatial dimension required by the simulation."
+    },
+    {
+      "code": "model.property.coordinate_units.invalid",
+      "severity": "error",
+      "path": "model.subdomains[*].properties.*.coordinate_units",
+      "explanation": "A model property uses an invalid coordinate-unit expression.",
+      "remediation": "Use valid coordinate length units for the model property."
+    },
+    {
+      "code": "model.property.units.invalid",
+      "severity": "error",
+      "path": "model.subdomains[*].properties.*.units",
+      "explanation": "A model property uses an invalid value-unit expression.",
+      "remediation": "Use valid physical units appropriate for the model property."
+    },
+    {
+      "code": "model.subdomain.mesh_block_id.duplicate",
+      "severity": "error",
+      "path": "model.subdomains[*].mesh_block_id",
+      "explanation": "Two or more model subdomains use the same mesh-block id.",
+      "remediation": "Give every model subdomain a unique integer mesh-block id."
+    },
+    {
+      "code": "outputs.property.model_empty",
+      "severity": "warning",
+      "path": "outputs.*.properties[*]",
+      "explanation": "A property output was requested, but the model declares no properties that can be checked.",
+      "remediation": "Attach the intended material model and confirm the requested property names before running."
+    },
+    {
+      "code": "outputs.source_id.invalid",
+      "severity": "error",
+      "path": "outputs.*.sources[*]",
+      "explanation": "An output source id is not a one-based positive integer.",
+      "remediation": "Use integer source ids starting at 1."
+    },
+    {
+      "code": "outputs.source_id.out_of_range",
+      "severity": "error",
+      "path": "outputs.*.sources[*]",
+      "explanation": "An output source id is greater than the number of available physical sources.",
+      "remediation": "Choose a source id within the available one-based source range."
+    },
+    {
+      "code": "outputs.units.dimension_name.invalid",
+      "severity": "error",
+      "path": "outputs.Units.dimensions",
+      "explanation": "An output-units mapping contains an empty dimension name.",
+      "remediation": "Use a non-empty physical-dimension name for every output-units entry."
+    },
+    {
+      "code": "outputs.units.invalid",
+      "severity": "error",
+      "path": "outputs.*.units",
+      "explanation": "An output contains an invalid unit expression.",
+      "remediation": "Use valid Pint-compatible output unit expressions."
+    },
+    {
+      "code": "outputs.vtk.item.kind.unsupported",
+      "severity": "error",
+      "path": "outputs.vtk[*].items[*].kind",
+      "explanation": "A VTK item uses an unsupported item kind.",
+      "remediation": "Use one of the cataloged field, property, or info item kinds."
+    },
+    {
+      "code": "outputs.vtk.item.type.invalid",
+      "severity": "error",
+      "path": "outputs.vtk[*].items[*]",
+      "explanation": "A VTK item is not a supported VtkItem or field/property selection.",
+      "remediation": "Construct the item with the supported VTK output helpers."
+    },
+    {
+      "code": "outputs.vtk.name.missing",
+      "severity": "error",
+      "path": "outputs.vtk[*].name",
+      "explanation": "A VTK output has no non-empty name.",
+      "remediation": "Give every VTK output a non-empty name."
+    },
+    {
+      "code": "outputs.wavefield.component_units.invalid",
+      "severity": "error",
+      "path": "outputs.wavefield[*].component_units",
+      "explanation": "A wavefield output contains an invalid component-unit expression.",
+      "remediation": "Use valid physical units for every wavefield component."
+    },
+    {
+      "code": "outputs.wavefield.grid.missing",
+      "severity": "error",
+      "path": "outputs.wavefield[*].grid",
+      "explanation": "A wavefield output does not define the grid where fields should be sampled.",
+      "remediation": "Attach a supported sampling grid to the WavefieldOutput."
+    },
+    {
+      "code": "outputs.wavefield.name.missing",
+      "severity": "error",
+      "path": "outputs.wavefield[*].name",
+      "explanation": "A wavefield output has no non-empty name.",
+      "remediation": "Give every wavefield output a non-empty name."
+    },
+    {
+      "code": "projection.axis.unsupported",
+      "severity": "error",
+      "path": "*.projection.axis",
+      "explanation": "A projection references an axis that the selected coordinate system does not expose.",
+      "remediation": "Choose an axis exposed by the active coordinate system."
+    },
+    {
+      "code": "projection.component.unsupported",
+      "severity": "error",
+      "path": "*.projection.components[*]",
+      "explanation": "A projection references a component that the selected coordinate system does not expose.",
+      "remediation": "Choose only components exposed by the active coordinate system."
+    },
+    {
+      "code": "simulation.dimension.missing",
+      "severity": "error",
+      "path": "dimension",
+      "explanation": "The simulation does not declare a dimension.",
+      "remediation": "Set the simulation dimension to a value supported by the selected physics."
+    },
+    {
+      "code": "simulation.name.missing",
+      "severity": "error",
+      "path": "name",
+      "explanation": "The simulation has no non-empty name.",
+      "remediation": "Give the simulation a non-empty name."
+    },
+    {
+      "code": "simulation.physics.missing",
+      "severity": "error",
+      "path": "physics",
+      "explanation": "The simulation does not declare a physics formulation.",
+      "remediation": "Choose a canonical physics id or alias returned by lookup_physics."
+    },
+    {
+      "code": "simulation.units.invalid",
+      "severity": "error",
+      "path": "units.*",
+      "explanation": "The simulation default or scale units contain an invalid unit expression.",
+      "remediation": "Use valid Pint-compatible unit expressions for simulation unit defaults and scales."
+    }
+  ],
+  "examples": [
+    {
+      "id": "quickstart-2d-acoustic",
+      "title": "Known-small 2D acoustic quickstart",
+      "summary": "A two-layer acoustic model with a generated mesh, scalar source, pressure receivers, and a single-frequency VTK request.",
+      "source_path": "docs/source/quickstart.rst",
+      "tested_by": [
+        "tests/test_simulation_knowledge.py",
+        "tests/test_ex01_simple.py"
+      ],
+      "scenario_id": "known-small-2d-acoustic"
+    },
+    {
+      "id": "saved-project-job-workflow",
+      "title": "Saved project and job workflow",
+      "summary": "Save, reload, inspect, and resubmit concrete FrequenSolve job types through BaseJob and Project helpers.",
+      "source_path": "examples/tutorials/02_sites/04_save_load_projects_jobs.ipynb",
+      "tested_by": [
+        "tests/test_project_job_lifecycle.py"
+      ]
+    }
+  ],
+  "starter_scenarios": [
+    {
+      "id": "known-small-2d-acoustic",
+      "title": "Known-small 2D acoustic starter",
+      "summary": "A complete deterministic authoring setup for local validation and first-run guidance without starting a solver.",
+      "physics": "acoustic",
+      "dimension": 2,
+      "example_id": "quickstart-2d-acoustic",
+      "setup": {
+        "project": {
+          "name": "project",
+          "pretty_name": "Known-small 2D acoustic",
+          "load_if_exists": false
+        },
+        "simulation": {
+          "name": "known_small_2d_acoustic",
+          "physics": "acoustic",
+          "dimension": 2,
+          "units": {
+            "length": "km",
+            "velocity": "km/s",
+            "density": "g/cm^3"
+          }
+        },
+        "model": {
+          "type": "LayeredModel",
+          "name": "model",
+          "dimension": 2,
+          "x_limits": [
+            0.0,
+            1.0
+          ],
+          "surfaces": [
+            {
+              "name": "top",
+              "depth": 0.0
+            },
+            {
+              "name": "interface",
+              "depth": 0.25
+            },
+            {
+              "name": "bottom",
+              "depth": 0.5
+            }
+          ],
+          "layers": [
+            {
+              "name": "upper_layer",
+              "properties": {
+                "Vp": 2.0,
+                "Rho": 2.2
+              }
+            },
+            {
+              "name": "lower_layer",
+              "properties": {
+                "Vp": 2.8,
+                "Rho": 2.4
+              }
+            }
+          ]
+        },
+        "mesh": {
+          "type": "HexMeshGenerator",
+          "n": [
+            8,
+            4
+          ],
+          "adapt": {
+            "elems_per_wave": 2.0,
+            "order": 4,
+            "f_low": 5.0,
+            "f_high": 30.0
+          },
+          "source_grading": {
+            "d1": 0.08,
+            "d0": 0.02,
+            "factor": 2.0
+          }
+        },
+        "boundary_conditions": [
+          {
+            "conditions": [
+              "free"
+            ],
+            "boundaries": [
+              "z_min"
+            ]
+          },
+          {
+            "conditions": [
+              "pml"
+            ],
+            "boundaries": [
+              "x_min",
+              "x_max",
+              "z_max"
+            ],
+            "pml_wavelengths": 0.75
+          }
+        ],
+        "acquisition": {
+          "source": {
+            "kind": "scalar",
+            "coords": [
+              [
+                0.5,
+                0.025
+              ]
+            ]
+          },
+          "receiver_group": {
+            "name": "surface",
+            "device_name": "hydrophone",
+            "component": {
+              "name": "p",
+              "field": "pressure"
+            },
+            "coordinate_line": {
+              "axis": "x",
+              "start": 0.0,
+              "stop": 1.0,
+              "count": 101,
+              "fixed": {
+                "z": 0.05
+              }
+            }
+          }
+        },
+        "discretization": {},
+        "solver": {
+          "tolerance": 0.0001,
+          "grids": 3
+        },
+        "job": {
+          "type": "FrequencyDomainJob",
+          "name": "frequency_10hz",
+          "f_list": [
+            10.0
+          ],
+          "outputs": {
+            "vtk": [
+              {
+                "name": "pressure",
+                "fields": [
+                  "pressure"
+                ],
+                "properties": [
+                  "vp",
+                  "rho"
+                ],
+                "upscale": 1
+              }
+            ]
+          }
+        }
+      },
+      "limitations": [
+        "This scenario validates authoring and export shape but does not run FrequenSolver.",
+        "The teaching mesh and frequency are intentionally small and are not production sizing guidance.",
+        "Always use the installed package validators before upload or submission."
+      ]
+    }
+  ],
+  "limitations": [
+    "Automatic guided setup is initially limited to the known-small 2D acoustic scenario.",
+    "Other physics entries support lookup and explanation but not automatic setup generation.",
+    "Cataloged material profiles cover the public acoustic, elastic isotropic, and poroelastic isotropic baselines; coupled materials remain domain-specific and em material requirements are not yet cataloged.",
+    "Additional solver and discretization fields are contract-dependent and must not be guessed from this catalog.",
+    "The catalog does not replace package validation, solver contracts, or Cloud-only authorization and storage checks.",
+    "Loading the catalog never runs a solver, calls a Cloud API, or reads customer data."
+  ]
+}

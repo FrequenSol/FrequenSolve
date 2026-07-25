@@ -8,7 +8,12 @@ raise a single exception after preflight validation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal, Mapping, Optional
+
+from frequensolve._validation_registry import (
+    ValidationCodeSpec,
+    load_validation_code_registry,
+)
 
 __all__ = [
     "ValidationError",
@@ -49,10 +54,27 @@ class ValidationReport:
     """Collection of validation diagnostics.
 
     Args:
-        issues: Initial diagnostics.
+        issues: Initial diagnostics. Reports created directly remain open to
+            application-defined diagnostic codes.
     """
 
     issues: list[ValidationIssue] = field(default_factory=list)
+    _catalog_registry: Optional[Mapping[str, ValidationCodeSpec]] = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    @classmethod
+    def for_package_validators(cls) -> "ValidationReport":
+        """Create a report that enforces the packaged diagnostic registry.
+
+        Returns:
+            Empty report whose additions must use a cataloged code and its
+            declared severity.
+        """
+
+        return cls(_catalog_registry=load_validation_code_registry())
 
     @property
     def errors(self) -> list[ValidationIssue]:
@@ -101,8 +123,25 @@ class ValidationReport:
             message: Human-readable explanation.
             path: Optional dotted object path.
             hint: Optional remediation guidance.
+
+        Raises:
+            RuntimeError: If an internal package validator emits an
+                uncataloged code or disagrees with its cataloged severity.
         """
 
+        if self._catalog_registry is not None:
+            try:
+                specification = self._catalog_registry[code]
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"Package validator emitted uncataloged diagnostic code {code!r}"
+                ) from exc
+            if specification.severity != severity:
+                raise RuntimeError(
+                    f"Package validator emitted {code!r} with severity "
+                    f"{severity!r}; the catalog declares "
+                    f"{specification.severity!r}"
+                )
         self.issues.append(
             ValidationIssue(
                 severity=severity,
@@ -158,7 +197,14 @@ class ValidationReport:
             other: Report whose issues should be appended in order.
         """
 
-        self.issues.extend(other.issues)
+        for issue in other.issues:
+            self.add(
+                issue.severity,
+                issue.code,
+                issue.message,
+                path=issue.path,
+                hint=issue.hint,
+            )
 
     def raise_for_errors(self) -> "ValidationReport":
         """Raise ``ValidationError`` if the report contains blocking issues.

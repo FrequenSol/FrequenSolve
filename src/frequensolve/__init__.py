@@ -14,6 +14,8 @@ from frequensolve.frequensolver import *  # noqa: F403
 from frequensolve.frequensolver import __all__ as _frequensolver_all
 from frequensolve.geometry import *  # noqa: F403
 from frequensolve.geometry import __all__ as _geometry_all
+from frequensolve.knowledge import *  # noqa: F403
+from frequensolve.knowledge import __all__ as _knowledge_all
 from frequensolve.mesh import *  # noqa: F403
 from frequensolve.mesh import __all__ as _mesh_all
 from frequensolve.model import *  # noqa: F403
@@ -45,6 +47,7 @@ __all__ = [
         _project_all,
         _units_all,
         _geometry_all,
+        _knowledge_all,
         _frequensolver_all,
         _model_all,
         _mesh_all,

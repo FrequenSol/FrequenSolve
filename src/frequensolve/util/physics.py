@@ -6,6 +6,9 @@ from typing import Any
 
 __all__ = [
     "canonical_physics",
+    "physics_aliases",
+    "supported_dimensions_for_physics",
+    "supported_physics",
     "canonical_dimension",
     "model_dimension",
     "normalize_simulation_physics",
@@ -49,6 +52,59 @@ _AXISYMMETRIC_DEFAULTS = {
     "elastic": "elastic_axisym",
     "coupled": "coupled_axisym",
 }
+
+
+def supported_physics() -> tuple[str, ...]:
+    """Return every canonical physics name accepted by the public API.
+
+    Returns:
+        Canonical solver-facing physics names in stable catalog order.
+    """
+
+    return tuple(dict.fromkeys(_PHYSICS_ALIASES.values()))
+
+
+def physics_aliases(physics: str) -> tuple[str, ...]:
+    """Return every public alias for a supported physics formulation.
+
+    Args:
+        physics: Canonical physics name or supported alias.
+
+    Returns:
+        Accepted aliases in stable catalog order.
+
+    Raises:
+        ValueError: If ``physics`` is not recognized.
+    """
+
+    canonical = canonical_physics(physics)
+    return tuple(
+        alias for alias, target in _PHYSICS_ALIASES.items() if target == canonical
+    )
+
+
+def supported_dimensions_for_physics(
+    physics: str,
+) -> tuple[int | float, ...]:
+    """Return dimensions accepted by the public simulation configuration.
+
+    Axisymmetric formulations require a 2D model. Other public formulations
+    accept 2D, 2.5D, and 3D simulation dimensions.
+
+    Args:
+        physics: Canonical physics name or supported alias.
+
+    Returns:
+        Supported simulation dimensions in stable order.
+
+    Raises:
+        ValueError: If ``physics`` is not recognized.
+    """
+
+    canonical = canonical_physics(physics)
+    if canonical in _AXISYMMETRIC_PHYSICS:
+        return (2,)
+    return (2, 2.5, 3)
 
 
 def canonical_physics(physics: str) -> str:
