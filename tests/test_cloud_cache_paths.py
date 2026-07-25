@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 from datetime import datetime, timedelta
@@ -10,6 +11,42 @@ from frequensolve.orchestrator.sites.aws.cache_paths import (
     legacy_config_cache_path,
     legacy_credentials_path,
 )
+
+
+def _jwt(payload):
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).rstrip(b"=")
+    return f"header.{encoded.decode()}.signature"
+
+
+def _cached_tokens(
+    *,
+    user_pool_id="pool",
+    client_id="client",
+    id_overrides=None,
+    access_overrides=None,
+):
+    issuer = f"https://cognito-idp.us-east-1.amazonaws.com/{user_pool_id}"
+    id_claims = {
+        "iss": issuer,
+        "token_use": "id",
+        "aud": client_id,
+    }
+    id_claims.update(id_overrides or {})
+    access_claims = {
+        "iss": issuer,
+        "token_use": "access",
+        "client_id": client_id,
+    }
+    access_claims.update(access_overrides or {})
+    return {
+        "email": "user@example.com",
+        "id_token": _jwt(id_claims),
+        "access_token": _jwt(access_claims),
+        "refresh_token": "refresh",
+        "expires_at": (datetime.now() + timedelta(hours=1)).isoformat(),
+    }
 
 
 def test_cloud_cache_paths_are_grouped_under_cloud_directory(monkeypatch, tmp_path):
@@ -105,7 +142,7 @@ def test_cognito_auth_reads_legacy_tokens_and_migrates_them(monkeypatch, tmp_pat
     monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(cognito.boto3, "client", lambda *args, **kwargs: object())
-    tokens = {"email": "user@example.com", "id_token": "token"}
+    tokens = _cached_tokens()
     legacy_path = legacy_credentials_path()
     legacy_path.parent.mkdir(parents=True, exist_ok=True)
     legacy_path.write_text(json.dumps(tokens))
@@ -128,7 +165,7 @@ def test_cognito_auth_cached_token_reads_are_debug_logs(monkeypatch, tmp_path, c
     monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(cognito.boto3, "client", lambda *args, **kwargs: object())
-    tokens = {"email": "user@example.com", "id_token": "token"}
+    tokens = _cached_tokens()
     auth = cognito.CognitoAuth(
         user_pool_id="pool",
         client_id="client",
@@ -145,3 +182,65 @@ def test_cognito_auth_cached_token_reads_are_debug_logs(monkeypatch, tmp_path, c
         if record.levelno == logging.INFO
         and record.message == "Using cached credentials"
     ]
+
+
+@pytest.mark.parametrize(
+    ("id_overrides", "access_overrides"),
+    (
+        (
+            {
+                "iss": "https://cognito-idp.us-east-1.amazonaws.com/other-pool",
+            },
+            None,
+        ),
+        (
+            None,
+            {
+                "iss": "https://cognito-idp.us-east-1.amazonaws.com/other-pool",
+            },
+        ),
+        ({"token_use": "access"}, None),
+        (None, {"token_use": "id"}),
+        ({"aud": "other-client"}, None),
+        (None, {"client_id": "other-client"}),
+    ),
+)
+def test_cognito_auth_rejects_tokens_from_another_cloud_profile(
+    monkeypatch, tmp_path, id_overrides, access_overrides
+):
+    pytest.importorskip("boto3")
+
+    from frequensolve.orchestrator.sites.aws import cognito
+
+    monkeypatch.delenv("FREQUENSOLVE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cognito.boto3, "client", lambda *args, **kwargs: object())
+    auth = cognito.CognitoAuth(
+        user_pool_id="pool",
+        client_id="client",
+        identity_pool_id="identity",
+    )
+    tokens = _cached_tokens(
+        id_overrides=id_overrides,
+        access_overrides=access_overrides,
+    )
+    auth.save_tokens(tokens)
+
+    with pytest.raises(ValueError) as exc_info:
+        auth.get_cached_tokens()
+
+    message = str(exc_info.value)
+    assert "do not match the selected FrequenSol Cloud profile" in message
+    assert tokens["email"] not in message
+    assert tokens["id_token"] not in message
+
+
+def test_cognito_issuer_uses_the_aws_partition_dns_suffix():
+    pytest.importorskip("boto3")
+
+    from frequensolve.orchestrator.sites.aws.cognito import _cognito_issuer
+
+    assert _cognito_issuer(
+        region="cn-north-1",
+        user_pool_id="cn-north-1_TestPool",
+    ) == ("https://cognito-idp.cn-north-1.amazonaws.com.cn/" "cn-north-1_TestPool")

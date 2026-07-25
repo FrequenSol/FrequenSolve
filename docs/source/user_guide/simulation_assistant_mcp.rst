@@ -26,12 +26,15 @@ provide raw GraphQL access.
 Install and check
 -----------------
 
-Install FrequenSolve with its optional MCP support:
+Install FrequenSolve with its optional MCP support in a long-lived virtual
+environment. Replace the example absolute path once, then use that same path
+when configuring Codex:
 
 .. code-block:: console
 
-   python -m pip install "frequensolve[mcp]"
-   frequensolve-mcp doctor
+   python -m venv /absolute/path/to/frequensolve-mcp-venv
+   /absolute/path/to/frequensolve-mcp-venv/bin/python -m pip install "frequensolve[mcp]"
+   /absolute/path/to/frequensolve-mcp-venv/bin/frequensolve-mcp doctor
 
 The doctor uses an in-memory connection. It does not contact the network,
 submit a simulation, or require credentials.
@@ -40,12 +43,28 @@ To include the optional read-only Cloud tools, install both extras:
 
 .. code-block:: console
 
-   python -m pip install "frequensolve[mcp,cloud]"
+   /absolute/path/to/frequensolve-mcp-venv/bin/python -m pip install "frequensolve[mcp,cloud]"
 
 Cloud reads reuse an existing ``aws`` or ``cloud`` profile from
 ``~/.frequensolve/site.toml`` and that profile's cached Cognito login. The MCP
-never accepts a password, token, account ID, or user ID. Sign in through the
-normal FrequenSolve Cloud site workflow before starting the MCP.
+never accepts a password, token, account ID, or user ID.
+
+Before starting the MCP, create or refresh the cached login once in a normal
+interactive terminal. The examples below use the supplied ``cloud`` profile.
+If your private-beta invitation names a different profile, replace ``cloud``
+with that exact name in both the login and Codex commands:
+
+.. code-block:: console
+
+   /absolute/path/to/frequensolve-mcp-venv/bin/python -c 'import frequensolve as fs; fs.Site(profile="cloud", interactive=True, force_login=True)'
+
+Enter credentials only at those interactive prompts. If this is the first
+FrequenSolve site command on the machine, it creates
+``~/.frequensolve/site.toml`` and asks you to review it. Keep the supplied
+``cloud`` profile or add the profile from your private-beta invitation, then
+run the matching command again. Restart the MCP after any later re-login so it
+reads the refreshed cache. ``force_login=True`` leaves the current cached login
+untouched unless the new authentication succeeds.
 
 Add it to Codex
 ---------------
@@ -55,16 +74,19 @@ that directory with a short safe name:
 
 .. code-block:: console
 
-   codex mcp add frequensolve -- frequensolve-mcp serve \
+   codex mcp add frequensolve -- \
+     /absolute/path/to/frequensolve-mcp-venv/bin/frequensolve-mcp serve \
      --allow-root project=/absolute/path/to/project-root \
      --cloud-profile cloud
    codex mcp list
 
 Restart Codex after adding the server. In the Codex desktop app, the same
 server can be added under **Settings > MCP servers > Add server** as a
-``STDIO`` server. Use ``frequensolve-mcp`` as the command and enter
-``serve --allow-root project=/absolute/path/to/project-root --cloud-profile
-cloud`` as its arguments.
+``STDIO`` server. Use
+``/absolute/path/to/frequensolve-mcp-venv/bin/frequensolve-mcp`` as the command
+and enter ``serve --allow-root project=/absolute/path/to/project-root
+--cloud-profile cloud`` as its arguments. The absolute executable path keeps
+the server working when Codex does not inherit the shell's ``PATH``.
 
 The allowed root is optional. Without one, draft, validation, rendering,
 preview, knowledge, and explanation tools still work; saved-artifact tools
@@ -118,3 +140,18 @@ Ask the agent:
 The agent should use the server's version-matched resources, create a bounded
 draft, validate it with the installed package, and show the deterministic
 preview and starter code. Review the result before using it in a real project.
+
+Prepare, submit, and monitor
+----------------------------
+
+The private-beta handoff has a deliberate write boundary:
+
+1. Let the MCP prepare, validate, preview, and render the starter.
+2. Review the generated Python and submit it separately through the normal
+   FrequenSolve Python or Cloud workflow. The MCP cannot perform this write.
+3. After the simulation exists, ask the agent to check readiness, list your
+   simulations, read the owned simulation, and explain its bounded diagnostics
+   or result metadata.
+
+This keeps setup assistance and read-only monitoring available to the agent
+without giving the MCP submission, cancellation, upload, or delete authority.

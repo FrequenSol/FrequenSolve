@@ -34,6 +34,13 @@ except ModuleNotFoundError as exc:
 logger = logging.getLogger(__name__)
 
 
+def _cognito_issuer(*, region: str, user_pool_id: str) -> str:
+    """Return the partition-correct Cognito issuer for a user pool."""
+
+    dns_suffix = "amazonaws.com.cn" if region.startswith("cn-") else "amazonaws.com"
+    return f"https://cognito-idp.{region}.{dns_suffix}/{user_pool_id}"
+
+
 def _decode_jwt_payload(token: str) -> dict:
     """Decode JWT payload without verification (for reading our own token claims).
 
@@ -298,13 +305,15 @@ class CognitoAuth:
             Dict containing cached tokens
 
         Raises:
-            ValueError: If credentials file not found or invalid
+            ValueError: If credentials are missing, invalid, or belong to a
+                different Cloud profile
         """
         if not self.credentials_path.exists():
             if self.legacy_credentials_path.exists():
                 try:
                     with open(self.legacy_credentials_path, "r") as f:
                         tokens = json.load(f)
+                    self._validate_cached_token_scope(tokens)
                     self.save_tokens(tokens)
                     logger.info("Migrated cached credentials to cloud cache directory")
                     return tokens
@@ -318,10 +327,50 @@ class CognitoAuth:
         try:
             with open(self.credentials_path, "r") as f:
                 tokens = json.load(f)
+            self._validate_cached_token_scope(tokens)
             logger.debug("Using cached credentials")
             return tokens
         except (json.JSONDecodeError, IOError) as e:
             raise ValueError(f"Failed to read credentials file: {e}") from e
+
+    def _validate_cached_token_scope(self, tokens: object) -> None:
+        """Reject cached tokens issued for another configured Cloud profile."""
+
+        if not isinstance(tokens, dict):
+            raise ValueError("Cached credentials are invalid. Please login again.")
+
+        expected_issuer = _cognito_issuer(
+            region=self.region,
+            user_pool_id=self.user_pool_id,
+        )
+        token_contracts = (
+            ("id_token", "id", "aud"),
+            ("access_token", "access", "client_id"),
+        )
+        for token_name, token_use, client_claim in token_contracts:
+            token = tokens.get(token_name)
+            if not isinstance(token, str) or not token:
+                raise ValueError(
+                    "Cached credentials are incomplete. Please login again."
+                )
+            try:
+                # This is only a local scope check. AWS services (and the MCP's
+                # Cloud adapter) still perform the authenticity verification.
+                claims = _decode_jwt_payload(token)
+            except ValueError as exc:
+                raise ValueError(
+                    "Cached credentials are invalid. Please login again."
+                ) from exc
+            if (
+                not isinstance(claims, dict)
+                or claims.get("iss") != expected_issuer
+                or claims.get("token_use") != token_use
+                or claims.get(client_claim) != self.client_id
+            ):
+                raise ValueError(
+                    "Cached credentials do not match the selected FrequenSol "
+                    "Cloud profile. Please login again."
+                )
 
     def save_tokens(self, tokens: Dict[str, str]) -> None:
         """Save tokens to local cache file.
