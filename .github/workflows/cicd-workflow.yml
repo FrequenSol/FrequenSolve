@@ -322,6 +322,10 @@ jobs:
                 raise SystemExit(f"missing installed-package export: {name}")
         print(fs.__version__)
         PY
+        if [ "$DISTRIBUTION" = wheel ]; then
+          python -m pip install "${package}[mcp]"
+          frequensolve-mcp doctor
+        fi
 
   required-ci:
     name: Required CI
