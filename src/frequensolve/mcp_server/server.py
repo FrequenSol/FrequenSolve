@@ -16,13 +16,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from frequensolve._version import get_versions
 from frequensolve.knowledge import load_simulation_knowledge
 from frequensolve.mcp_server import artifacts, cloud, core
-from frequensolve.mcp_server._sdk_v1 import (
+from frequensolve.mcp_server._sdk_v2 import (
     CLOUD_READ_ONLY_TOOL_ANNOTATIONS,
     READ_ONLY_TOOL_ANNOTATIONS,
-    SafeFastMCP,
+    SafeMCPServer,
 )
 
-MCP_SERVER_VERSION = "1.1.0"
+MCP_SERVER_VERSION = "2.0.0"
 RESPONSE_SCHEMA = "frequensolve-simulation-assistant-response/v1"
 MAX_RESPONSE_BYTES = 131_072
 SAFE_NAME_PATTERN = r"^[a-z][a-z0-9_-]{0,63}$"
@@ -292,7 +292,7 @@ def build_server(
     cloud_profile: str | None = None,
     operation_timeout_seconds: float = 15.0,
     max_concurrency: int = 2,
-) -> SafeFastMCP:
+) -> SafeMCPServer:
     """Build the finite local MCP surface."""
 
     if (
@@ -317,7 +317,7 @@ def build_server(
     roots = artifacts.normalize_allowed_roots(allowed_roots or {})
     identity = _identity()
     limiter = anyio.CapacityLimiter(max_concurrency)
-    server = SafeFastMCP(
+    server = SafeMCPServer(
         name="FrequenSolve Simulation Assistant",
         version=MCP_SERVER_VERSION,
         instructions=SERVER_INSTRUCTIONS,
@@ -691,7 +691,7 @@ def _resource_documents(roots: Mapping[str, str]) -> dict[str, Any]:
 
 
 def _register_json_resource(
-    server: SafeFastMCP,
+    server: SafeMCPServer,
     *,
     uri: str,
     name: str,
@@ -713,7 +713,7 @@ def _register_json_resource(
     )(read_fixed_resource)
 
 
-def _register_prompt(server: SafeFastMCP, *, name: str, text: str) -> None:
+def _register_prompt(server: SafeMCPServer, *, name: str, text: str) -> None:
     async def render_fixed_prompt() -> str:
         return text
 
