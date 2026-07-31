@@ -7,10 +7,11 @@ designed to help a user start a small supported simulation without guessing
 package APIs or solver fields.
 
 The server implements the stable ``2026-07-28`` Model Context Protocol with the
-official MCP Python SDK 2.x and the standard ``stdio`` transport. It has no
-dependency on Codex, Claude, Cursor, or another AI vendor. The official SDK
-also negotiates the earlier handshake-era protocol with older compliant
-clients.
+official MCP Python SDK 2.x. The local server uses standard ``stdio``. Reusable
+hosted profiles use standard stateless Streamable HTTP with JSON responses by
+default. It has no dependency on Codex, Claude, Cursor, or another AI vendor.
+The official SDK also negotiates the earlier handshake-era protocol with older
+compliant clients.
 
 The local server can:
 
@@ -28,6 +29,38 @@ claim that another frequency is supported by this fixed starter mesh.
 
 It cannot submit, run, upload, change, or delete a simulation. It does not
 provide raw GraphQL access.
+
+Capability profiles
+-------------------
+
+The package defines three explicit capability manifests. A manifest fixes the
+exact tools, resources, prompts, schema identities, size and concurrency
+limits, package version, and source revision for that profile. Adding a tool to
+the package does not add it to any profile until its reviewed manifest is also
+changed.
+
+``local``
+  Preserves the released local surface: seven setup/file tools, four optional
+  self-scoped Cloud reads, eleven resources, and five prompts over ``stdio``.
+  This is the default used by ``frequensolve-mcp serve`` and ``doctor``.
+
+``public-onboarding``
+  Provides six bounded setup tools, nine package-knowledge resources, and four
+  prompts. Its input schemas accept only the fixed vetted scenario and
+  in-memory drafts. It has no allowed-root, filesystem, Cloud, credential,
+  account selector, external-reference, or network capability.
+
+``authenticated-cloud``
+  Provides only four customer Cloud tools, the identity and Cloud-read-contract
+  resources, and the monitoring prompt. It requires an executor supplied by an
+  authenticated host. It cannot reuse a local ``site.toml`` profile or cached
+  Cognito credentials, and the package revalidates every host result against
+  the packaged fixed read contract.
+
+Read ``frequensolve://simulation-assistant/identity`` to inspect the active
+machine-readable manifest. Hosted service authentication, authorization,
+deployment, rate limits, audit logging, and environment promotion are owned by
+the hosting application, not this package.
 
 Install and check
 -----------------
@@ -129,6 +162,51 @@ primitives only. A current client negotiates protocol ``2026-07-28`` through
 ``server/discover``. A handshake-era client negotiates the newest earlier
 version supported by that client and the official SDK. The server does not use
 sampling, roots, vendor extensions, or a host-specific transport.
+
+Hosted transport embedding
+--------------------------
+
+Hosting code can build the public profile and obtain a self-contained ASGI
+application for one exact MCP endpoint:
+
+.. code-block:: python
+
+   from frequensolve.mcp_server.server import build_server
+
+   server = build_server(capability_profile="public-onboarding")
+   application = server.create_streamable_http_app(
+       path="/mcp",
+       allowed_hosts=("mcp.sandbox.example",),
+       allowed_origins=("https://approved-client.example",),
+   )
+
+The application runs the official SDK session manager in stateless mode,
+rejects requests outside the exact path, enforces the package request-size
+limit before parsing, and enables host/origin protection. Standard ASGI
+lifespan is included. The default emits one JSON response per bounded request;
+set ``json_response=False`` only when the host needs the official SDK's
+request-scoped SSE behavior.
+
+The authenticated profile must be given an async host executor:
+
+.. code-block:: python
+
+   async def execute_customer_read(operation, arguments):
+       # The host derives identity from its verified request context and invokes
+       # only the matching fixed, self-scoped read operation.
+       return await customer_read_service.execute(operation, arguments)
+
+   server = build_server(
+       capability_profile="authenticated-cloud",
+       hosted_cloud_executor=execute_customer_read,
+   )
+
+The executor receives only a reviewed operation name and bounded arguments. It
+must derive the user and tenant from verified host authentication rather than
+accepting identity selectors. Do not pass a bearer token, password, raw query,
+AWS client, or environment endpoint through an MCP tool argument. The actual
+host should wrap the ASGI application with its authentication, rate-limit,
+audit, and observability middleware before deployment.
 
 The official MCP Inspector can launch the same executable and arguments over
 ``stdio`` when troubleshooting client setup. The Inspector is a diagnostic
