@@ -43,6 +43,7 @@ __all__ = [
     "CloudReadClient",
     "CloudReadError",
     "execute_cloud_operation",
+    "validate_cloud_operation_output",
 ]
 
 CLOUD_READ_CONTRACT_ID = "frequensol.customer-cloud-read"
@@ -379,6 +380,67 @@ def execute_cloud_operation(
     if operation not in CLOUD_READ_OPERATIONS or not isinstance(arguments, dict):
         raise CloudReadError("INVALID_INPUT", "input-invalid")
     return CloudReadClient(profile)._execute(operation, arguments)
+
+
+def validate_cloud_operation_output(
+    operation: str,
+    arguments: Mapping[str, Any],
+    output: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one host-executed result against the packaged fixed contract."""
+
+    try:
+        if operation not in CLOUD_READ_OPERATIONS or not isinstance(arguments, dict):
+            raise CloudReadError("INVALID_INPUT", "input-invalid")
+        selected = _load_contract()["operationsByName"][operation]
+        normalized_arguments = dict(arguments)
+        _validate_value(
+            normalized_arguments,
+            selected["inputSchema"],
+            path="input",
+        )
+    except CloudReadError as error:
+        if error.code == "INVALID_INPUT":
+            raise
+        raise CloudReadError(
+            "UPSTREAM_UNAVAILABLE",
+            "upstream-unavailable",
+        ) from None
+    except Exception:
+        raise CloudReadError("INVALID_INPUT", "input-invalid") from None
+
+    try:
+        pruned = _prune_optional_nulls(dict(output), selected["outputSchema"])
+        validated = _validate_value(
+            pruned,
+            selected["outputSchema"],
+            path="output",
+        )
+        if not isinstance(validated, dict):
+            raise CloudReadError("UPSTREAM_UNAVAILABLE", "upstream-unavailable")
+        _reject_forbidden_output(selected, validated)
+        encoded = json.dumps(
+            validated,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        if len(encoded) > selected["limits"]["maxResponseBytes"]:
+            raise CloudReadError("RESPONSE_LIMIT_EXCEEDED", "response-too-large")
+        return validated
+    except CloudReadError as error:
+        if error.code == "RESPONSE_LIMIT_EXCEEDED":
+            raise
+        raise CloudReadError(
+            "UPSTREAM_UNAVAILABLE",
+            "upstream-unavailable",
+        ) from None
+    except Exception:
+        raise CloudReadError(
+            "UPSTREAM_UNAVAILABLE",
+            "upstream-unavailable",
+        ) from None
 
 
 @lru_cache(maxsize=1)

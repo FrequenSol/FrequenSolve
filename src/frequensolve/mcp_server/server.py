@@ -6,6 +6,8 @@ import json
 import math
 import re
 import tempfile
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, Mapping, Union
 
@@ -23,7 +25,9 @@ from frequensolve.mcp_server._sdk_v2 import (
 )
 
 MCP_SERVER_VERSION = "2.0.0"
+MCP_PROTOCOL_VERSION = "2026-07-28"
 RESPONSE_SCHEMA = "frequensolve-simulation-assistant-response/v1"
+MAX_REQUEST_BYTES = 262_144
 MAX_RESPONSE_BYTES = 131_072
 SAFE_NAME_PATTERN = r"^[a-z][a-z0-9_-]{0,63}$"
 SAFE_ROOT_ID_PATTERN = r"^[a-z][a-z0-9_-]{0,31}$"
@@ -47,6 +51,98 @@ SERVER_INSTRUCTIONS = (
     "cached user profile and five fixed read queries. They never expose raw "
     "GraphQL, credentials, result contents, tenant selectors, or write actions."
 )
+
+CapabilityProfileName = Literal[
+    "local",
+    "public-onboarding",
+    "authenticated-cloud",
+]
+HostedCloudExecutor = Callable[
+    [str, Mapping[str, Any]],
+    Awaitable[Mapping[str, Any]],
+]
+
+
+@dataclass(frozen=True)
+class CapabilityProfile:
+    """Reviewed finite MCP surface for one deployment purpose."""
+
+    name: CapabilityProfileName
+    tools: tuple[str, ...]
+    resources: tuple[str, ...]
+    prompts: tuple[str, ...]
+
+
+_LOCAL_TOOLS = (
+    "find_vetted_example",
+    "create_simulation_draft",
+    "validate_simulation_setup",
+    "render_starter_python",
+    "inspect_simulation_artifact",
+    "preview_simulation",
+    "explain_validation",
+    "cloud_check_readiness",
+    "cloud_list_simulations",
+    "cloud_get_simulation",
+    "cloud_list_result_artifacts",
+)
+_PUBLIC_TOOLS = (
+    "find_vetted_example",
+    "create_simulation_draft",
+    "validate_simulation_setup",
+    "render_starter_python",
+    "preview_simulation",
+    "explain_validation",
+)
+_CLOUD_TOOLS = (
+    "cloud_check_readiness",
+    "cloud_list_simulations",
+    "cloud_get_simulation",
+    "cloud_list_result_artifacts",
+)
+_KNOWLEDGE_RESOURCES = (
+    "identity",
+    "contracts",
+    "catalog",
+    "public-api",
+    "physics",
+    "authoring-rules",
+    "validation-codes",
+    "examples",
+    "glossary",
+)
+_LOCAL_PROMPTS = (
+    "start_2d_acoustic",
+    "review_simulation_setup",
+    "prepare_simulation_run",
+    "debug_validation",
+    "monitor_cloud_simulation",
+)
+CAPABILITY_PROFILES: Mapping[CapabilityProfileName, CapabilityProfile] = {
+    "local": CapabilityProfile(
+        name="local",
+        tools=_LOCAL_TOOLS,
+        resources=(*_KNOWLEDGE_RESOURCES, "allowed-roots", "cloud-read-contract"),
+        prompts=_LOCAL_PROMPTS,
+    ),
+    "public-onboarding": CapabilityProfile(
+        name="public-onboarding",
+        tools=_PUBLIC_TOOLS,
+        resources=_KNOWLEDGE_RESOURCES,
+        prompts=(
+            "start_2d_acoustic",
+            "review_simulation_setup",
+            "prepare_simulation_run",
+            "debug_validation",
+        ),
+    ),
+    "authenticated-cloud": CapabilityProfile(
+        name="authenticated-cloud",
+        tools=_CLOUD_TOOLS,
+        resources=("identity", "cloud-read-contract"),
+        prompts=("monitor_cloud_simulation",),
+    ),
+}
 
 
 class ClosedModel(BaseModel):
@@ -139,6 +235,10 @@ class FindExampleRequest(ClosedModel):
     )
 
 
+class PublicFindExampleRequest(ClosedModel):
+    scenario_id: Literal["known-small-2d-acoustic"] = "known-small-2d-acoustic"
+
+
 class CreateDraftRequest(ClosedModel):
     project_name: str = Field(
         default="project",
@@ -189,6 +289,10 @@ class ValidateRequest(ClosedModel):
     source: SimulationSource
 
 
+class PublicValidateRequest(ClosedModel):
+    source: DraftSource
+
+
 class RenderRequest(ClosedModel):
     draft: DraftDocument
 
@@ -199,6 +303,10 @@ class InspectRequest(ClosedModel):
 
 class PreviewRequest(ClosedModel):
     source: SimulationSource
+
+
+class PublicPreviewRequest(ClosedModel):
+    source: DraftSource
 
 
 class ExplainRequest(ClosedModel):
@@ -288,12 +396,14 @@ class CloudListResultArtifactsRequest(ClosedModel):
 
 def build_server(
     *,
+    capability_profile: CapabilityProfileName = "local",
     allowed_roots: Mapping[str, str | Path] | None = None,
     cloud_profile: str | None = None,
+    hosted_cloud_executor: HostedCloudExecutor | None = None,
     operation_timeout_seconds: float = 15.0,
     max_concurrency: int = 2,
 ) -> SafeMCPServer:
-    """Build the finite local MCP surface."""
+    """Build one finite transport-independent MCP capability profile."""
 
     if (
         isinstance(operation_timeout_seconds, bool)
@@ -314,16 +424,47 @@ def build_server(
     ):
         raise ValueError("cloud profile must be a safe site profile name")
 
+    try:
+        profile = CAPABILITY_PROFILES[capability_profile]
+    except (KeyError, TypeError):
+        raise ValueError("capability profile is not supported") from None
+    if profile.name != "local" and allowed_roots:
+        raise ValueError("hosted capability profiles do not accept allowed roots")
+    if profile.name != "local" and cloud_profile is not None:
+        raise ValueError("hosted capability profiles do not use local Cloud profiles")
+    if profile.name == "authenticated-cloud":
+        if hosted_cloud_executor is None or not callable(hosted_cloud_executor):
+            raise ValueError(
+                "authenticated-cloud requires an injected hosted Cloud executor"
+            )
+    elif hosted_cloud_executor is not None:
+        raise ValueError(
+            "the hosted Cloud executor is only valid for authenticated-cloud"
+        )
+
     roots = artifacts.normalize_allowed_roots(allowed_roots or {})
     identity = _identity()
     limiter = anyio.CapacityLimiter(max_concurrency)
+    resource_uris = {
+        f"frequensolve://simulation-assistant/{name}" for name in profile.resources
+    }
     server = SafeMCPServer(
         name="FrequenSolve Simulation Assistant",
         version=MCP_SERVER_VERSION,
-        instructions=SERVER_INSTRUCTIONS,
+        instructions=_server_instructions(profile.name),
+        max_request_bytes=MAX_REQUEST_BYTES,
+        allowed_tool_names=profile.tools,
+        allowed_resource_uris=resource_uris,
+        allowed_prompt_names=profile.prompts,
     )
 
-    resource_documents = _resource_documents(roots)
+    resource_documents = _resource_documents(
+        roots,
+        profile=profile,
+        identity=identity,
+        operation_timeout_seconds=operation_timeout_seconds,
+        max_concurrency=max_concurrency,
+    )
     for resource_name, payload in resource_documents.items():
         uri = f"frequensolve://simulation-assistant/{resource_name}"
         _register_json_resource(
@@ -333,52 +474,44 @@ def build_server(
             payload=payload,
         )
 
-    prompt_text = {
-        "start_2d_acoustic": (
-            "Start with the known-small 2D acoustic scenario. Read the identity, "
-            "physics, authoring-rules, and examples resources. Call "
-            "create_simulation_draft, validate_simulation_setup, "
-            "render_starter_python, and preview_simulation in that order. Do not "
-            "save, submit, run, upload, or invent fields."
-        ),
-        "review_simulation_setup": (
-            "Review a structured draft or explicitly rooted saved artifact. Use "
-            "validate_simulation_setup and explain_validation. Treat package "
-            "diagnostics as authoritative and do not run or change anything."
-        ),
-        "prepare_simulation_run": (
-            "Prepare a simulation for a later user-approved run by validating and "
-            "previewing it. Report exact task count, frequencies, assumptions, and "
-            "expected output kinds. This server cannot submit or run it."
-        ),
-        "debug_validation": (
-            "Use validate_simulation_setup, then pass the returned stable codes to "
-            "explain_validation. Fix only the draft or source code outside this "
-            "server; never bypass validation or reveal unrestricted file paths."
-        ),
-        "monitor_cloud_simulation": (
-            "Use only the fixed Cloud read tools. Check readiness, list the signed-in "
-            "user's simulations, then request either the summary or stored "
-            "diagnostics for one returned simulation ID. List result metadata only "
-            "after success. Never submit, cancel, download, mutate, or invent a raw "
-            "GraphQL request."
-        ),
-    }
+    prompt_text = _prompt_text(profile.name)
     for prompt_name, text in prompt_text.items():
         _register_prompt(server, name=prompt_name, text=text)
 
-    @server.tool(
-        name="find_vetted_example",
-        description="Find the closest vetted package example without network access.",
-        annotations=READ_ONLY_TOOL_ANNOTATIONS,
-        structured_output=True,
-    )
-    async def find_vetted_example(request: FindExampleRequest) -> ToolEnvelope:
-        return await _safe_call(
-            identity,
-            "application/json",
-            lambda: core.find_vetted_example(request.query),
+    if profile.name == "public-onboarding":
+
+        @server.tool(
+            name="find_vetted_example",
+            description="Return the fixed vetted public onboarding example.",
+            annotations=READ_ONLY_TOOL_ANNOTATIONS,
+            structured_output=True,
         )
+        async def find_public_vetted_example(
+            request: PublicFindExampleRequest,
+        ) -> ToolEnvelope:
+            del request
+            return await _safe_call(
+                identity,
+                "application/json",
+                lambda: core.find_vetted_example("known small 2D acoustic"),
+            )
+
+    else:
+
+        @server.tool(
+            name="find_vetted_example",
+            description=(
+                "Find the closest vetted package example without network access."
+            ),
+            annotations=READ_ONLY_TOOL_ANNOTATIONS,
+            structured_output=True,
+        )
+        async def find_vetted_example(request: FindExampleRequest) -> ToolEnvelope:
+            return await _safe_call(
+                identity,
+                "application/json",
+                lambda: core.find_vetted_example(request.query),
+            )
 
     @server.tool(
         name="create_simulation_draft",
@@ -398,14 +531,17 @@ def build_server(
             ),
         )
 
-    @server.tool(
-        name="validate_simulation_setup",
-        description="Validate a draft or supported rooted artifact with FrequenSolve.",
-        annotations=READ_ONLY_TOOL_ANNOTATIONS,
-        structured_output=True,
-    )
-    async def validate_simulation_setup(request: ValidateRequest) -> ToolEnvelope:
-        if isinstance(request.source, DraftSource):
+    if profile.name == "public-onboarding":
+
+        @server.tool(
+            name="validate_simulation_setup",
+            description="Validate one bounded draft with FrequenSolve.",
+            annotations=READ_ONLY_TOOL_ANNOTATIONS,
+            structured_output=True,
+        )
+        async def validate_public_simulation_setup(
+            request: PublicValidateRequest,
+        ) -> ToolEnvelope:
             draft = request.source.draft.model_dump(mode="json", by_alias=True)
             with tempfile.TemporaryDirectory(prefix="frequensolve-mcp-draft-") as temp:
                 return await _safe_process_call(
@@ -417,14 +553,42 @@ def build_server(
                     limiter=limiter,
                     timeout_seconds=operation_timeout_seconds,
                 )
-        return await _artifact_call(
-            identity,
-            request.source.artifact,
-            roots,
-            mode="validate",
-            limiter=limiter,
-            timeout_seconds=operation_timeout_seconds,
+
+    else:
+
+        @server.tool(
+            name="validate_simulation_setup",
+            description=(
+                "Validate a draft or supported rooted artifact with FrequenSolve."
+            ),
+            annotations=READ_ONLY_TOOL_ANNOTATIONS,
+            structured_output=True,
         )
+        async def validate_simulation_setup(
+            request: ValidateRequest,
+        ) -> ToolEnvelope:
+            if isinstance(request.source, DraftSource):
+                draft = request.source.draft.model_dump(mode="json", by_alias=True)
+                with tempfile.TemporaryDirectory(
+                    prefix="frequensolve-mcp-draft-"
+                ) as temp:
+                    return await _safe_process_call(
+                        identity,
+                        "application/json",
+                        core.validate_simulation_draft,
+                        draft,
+                        str(Path(temp) / "project"),
+                        limiter=limiter,
+                        timeout_seconds=operation_timeout_seconds,
+                    )
+            return await _artifact_call(
+                identity,
+                request.source.artifact,
+                roots,
+                mode="validate",
+                limiter=limiter,
+                timeout_seconds=operation_timeout_seconds,
+            )
 
     @server.tool(
         name="render_starter_python",
@@ -457,14 +621,19 @@ def build_server(
             timeout_seconds=operation_timeout_seconds,
         )
 
-    @server.tool(
-        name="preview_simulation",
-        description="Preview exact frequencies, task count, assumptions, and outputs.",
-        annotations=READ_ONLY_TOOL_ANNOTATIONS,
-        structured_output=True,
-    )
-    async def preview_simulation(request: PreviewRequest) -> ToolEnvelope:
-        if isinstance(request.source, DraftSource):
+    if profile.name == "public-onboarding":
+
+        @server.tool(
+            name="preview_simulation",
+            description=(
+                "Preview exact frequencies, task count, assumptions, and outputs."
+            ),
+            annotations=READ_ONLY_TOOL_ANNOTATIONS,
+            structured_output=True,
+        )
+        async def preview_public_simulation(
+            request: PublicPreviewRequest,
+        ) -> ToolEnvelope:
             return await _safe_process_call(
                 identity,
                 "application/json",
@@ -473,14 +642,35 @@ def build_server(
                 limiter=limiter,
                 timeout_seconds=operation_timeout_seconds,
             )
-        return await _artifact_call(
-            identity,
-            request.source.artifact,
-            roots,
-            mode="preview",
-            limiter=limiter,
-            timeout_seconds=operation_timeout_seconds,
+
+    else:
+
+        @server.tool(
+            name="preview_simulation",
+            description=(
+                "Preview exact frequencies, task count, assumptions, and outputs."
+            ),
+            annotations=READ_ONLY_TOOL_ANNOTATIONS,
+            structured_output=True,
         )
+        async def preview_simulation(request: PreviewRequest) -> ToolEnvelope:
+            if isinstance(request.source, DraftSource):
+                return await _safe_process_call(
+                    identity,
+                    "application/json",
+                    core.preview_simulation,
+                    request.source.draft.model_dump(mode="json", by_alias=True),
+                    limiter=limiter,
+                    timeout_seconds=operation_timeout_seconds,
+                )
+            return await _artifact_call(
+                identity,
+                request.source.artifact,
+                roots,
+                mode="preview",
+                limiter=limiter,
+                timeout_seconds=operation_timeout_seconds,
+            )
 
     @server.tool(
         name="explain_validation",
@@ -507,9 +697,10 @@ def build_server(
         request: CloudCheckReadinessRequest,
     ) -> ToolEnvelope:
         del request
-        return await _safe_cloud_process_call(
+        return await _safe_cloud_call(
             identity,
             cloud_profile,
+            hosted_cloud_executor,
             "getCloudReadiness",
             {},
             limiter=limiter,
@@ -532,9 +723,10 @@ def build_server(
             arguments["projectName"] = request.project_name
         if request.cursor is not None:
             arguments["cursor"] = request.cursor
-        return await _safe_cloud_process_call(
+        return await _safe_cloud_call(
             identity,
             cloud_profile,
+            hosted_cloud_executor,
             "listMySimulations",
             arguments,
             limiter=limiter,
@@ -557,9 +749,10 @@ def build_server(
             arguments["limit"] = request.limit if request.limit is not None else 25
             if request.cursor is not None:
                 arguments["cursor"] = request.cursor
-        return await _safe_cloud_process_call(
+        return await _safe_cloud_call(
             identity,
             cloud_profile,
+            hosted_cloud_executor,
             operation,
             arguments,
             limiter=limiter,
@@ -581,9 +774,10 @@ def build_server(
         }
         if request.after is not None:
             arguments["after"] = request.after
-        return await _safe_cloud_process_call(
+        return await _safe_cloud_call(
             identity,
             cloud_profile,
+            hosted_cloud_executor,
             "listMySimulationResultArtifacts",
             arguments,
             limiter=limiter,
@@ -591,23 +785,9 @@ def build_server(
         )
 
     server.finalize_safety_contract(
-        tool_names={
-            "cloud_check_readiness",
-            "cloud_get_simulation",
-            "cloud_list_result_artifacts",
-            "cloud_list_simulations",
-            "find_vetted_example",
-            "create_simulation_draft",
-            "validate_simulation_setup",
-            "render_starter_python",
-            "inspect_simulation_artifact",
-            "preview_simulation",
-            "explain_validation",
-        },
-        prompt_names=set(prompt_text),
-        resource_uris={
-            f"frequensolve://simulation-assistant/{name}" for name in resource_documents
-        },
+        tool_names=profile.tools,
+        prompt_names=profile.prompts,
+        resource_uris=resource_uris,
     )
     return server
 
@@ -644,50 +824,138 @@ def _identity() -> AssistantIdentity:
     )
 
 
-def _resource_documents(roots: Mapping[str, str]) -> dict[str, Any]:
-    names = (
-        "identity",
-        "contracts",
-        "catalog",
-        "public-api",
-        "physics",
-        "authoring-rules",
-        "validation-codes",
-        "examples",
-        "glossary",
-    )
-    documents: dict[str, Any] = {name: core.resource_payload(name) for name in names}
-    documents["allowed-roots"] = {
-        "schema": "frequensolve-mcp-allowed-roots/v1",
-        "root_ids": sorted(roots),
-        "policy": (
-            "Artifact tools accept only a configured root ID and POSIX relative "
-            "JSON path. Absolute paths, traversal, symlinks, and external data "
-            "references are rejected."
+def _resource_documents(
+    roots: Mapping[str, str],
+    *,
+    profile: CapabilityProfile,
+    identity: AssistantIdentity,
+    operation_timeout_seconds: float,
+    max_concurrency: int,
+) -> dict[str, Any]:
+    documents: dict[str, Any] = {
+        name: core.resource_payload(name)
+        for name in _KNOWLEDGE_RESOURCES
+        if name in profile.resources
+    }
+    if "identity" in documents:
+        documents["identity"]["mcp_server"] = {
+            "schema": "frequensolve-mcp-capability-manifest/v1",
+            "version": MCP_SERVER_VERSION,
+            "protocol_version": MCP_PROTOCOL_VERSION,
+            "profile": profile.name,
+            "tools": list(profile.tools),
+            "resources": [
+                f"frequensolve://simulation-assistant/{name}"
+                for name in profile.resources
+            ],
+            "prompts": list(profile.prompts),
+            "schema_identities": {
+                "mcp_contract": identity.mcp_contract,
+                "draft_contract": identity.draft_contract,
+                "catalog_schema": identity.catalog_schema,
+                "cloud_read_contract_id": identity.cloud_read_contract_id,
+                "cloud_read_contract_version": identity.cloud_read_contract_version,
+            },
+            "limits": {
+                "max_request_bytes": MAX_REQUEST_BYTES,
+                "max_response_bytes": MAX_RESPONSE_BYTES,
+                "operation_timeout_seconds": operation_timeout_seconds,
+                "max_concurrency": max_concurrency,
+            },
+            "package": {
+                "version": identity.package_version,
+                "source_revision": identity.source_revision,
+                "source_dirty": identity.source_dirty,
+            },
+            "transports": ["stdio", "streamable-http"],
+        }
+    if "allowed-roots" in profile.resources:
+        documents["allowed-roots"] = {
+            "schema": "frequensolve-mcp-allowed-roots/v1",
+            "root_ids": sorted(roots),
+            "policy": (
+                "Artifact tools accept only a configured root ID and POSIX relative "
+                "JSON path. Absolute paths, traversal, symlinks, and external data "
+                "references are rejected."
+            ),
+        }
+    if "cloud-read-contract" in profile.resources:
+        documents["cloud-read-contract"] = {
+            "schema": "frequensolve-mcp-cloud-read-contract/v1",
+            "contract_id": cloud.CONTRACT_ID,
+            "contract_version": cloud.CONTRACT_VERSION,
+            "classification": "customer-self-read-only",
+            "profile_selection": "configured-at-server-startup",
+            "tools": list(_CLOUD_TOOLS),
+            "forbidden": [
+                "accountId",
+                "userId",
+                "token",
+                "query",
+                "mutation",
+                "resultContents",
+            ],
+        }
+    return documents
+
+
+def _server_instructions(profile: CapabilityProfileName) -> str:
+    if profile == "public-onboarding":
+        return (
+            SERVER_INSTRUCTIONS
+            + " This public onboarding profile accepts only bounded in-memory drafts; "
+            "it has no filesystem, Cloud, credential, or external-network capability."
+        )
+    if profile == "authenticated-cloud":
+        return (
+            "FrequenSolve authenticated Cloud monitor. Use only the four fixed, "
+            "self-scoped customer read tools supplied by the authenticated host. "
+            "Never submit, cancel, mutate, download, reveal credentials, accept "
+            "tenant selectors, or construct raw GraphQL."
+        )
+    return SERVER_INSTRUCTIONS
+
+
+def _prompt_text(profile: CapabilityProfileName) -> dict[str, str]:
+    prompts = {
+        "start_2d_acoustic": (
+            "Start with the known-small 2D acoustic scenario. Read the identity, "
+            "physics, authoring-rules, and examples resources. Call "
+            "create_simulation_draft, validate_simulation_setup, "
+            "render_starter_python, and preview_simulation in that order. Do not "
+            "save, submit, run, upload, or invent fields."
+        ),
+        "review_simulation_setup": (
+            "Review a structured draft or explicitly rooted saved artifact. Use "
+            "validate_simulation_setup and explain_validation. Treat package "
+            "diagnostics as authoritative and do not run or change anything."
+        ),
+        "prepare_simulation_run": (
+            "Prepare a simulation for a later user-approved run by validating and "
+            "previewing it. Report exact task count, frequencies, assumptions, and "
+            "expected output kinds. This server cannot submit or run it."
+        ),
+        "debug_validation": (
+            "Use validate_simulation_setup, then pass the returned stable codes to "
+            "explain_validation. Fix only the draft or source code outside this "
+            "server; never bypass validation or reveal unrestricted file paths."
+        ),
+        "monitor_cloud_simulation": (
+            "Use only the fixed Cloud read tools. Check readiness, list the signed-in "
+            "user's simulations, then request either the summary or stored "
+            "diagnostics for one returned simulation ID. List result metadata only "
+            "after success. Never submit, cancel, download, mutate, or invent a raw "
+            "GraphQL request."
         ),
     }
-    documents["cloud-read-contract"] = {
-        "schema": "frequensolve-mcp-cloud-read-contract/v1",
-        "contract_id": cloud.CONTRACT_ID,
-        "contract_version": cloud.CONTRACT_VERSION,
-        "classification": "customer-self-read-only",
-        "profile_selection": "configured-at-server-startup",
-        "tools": [
-            "cloud_check_readiness",
-            "cloud_list_simulations",
-            "cloud_get_simulation",
-            "cloud_list_result_artifacts",
-        ],
-        "forbidden": [
-            "accountId",
-            "userId",
-            "token",
-            "query",
-            "mutation",
-            "resultContents",
-        ],
-    }
-    return documents
+    if profile == "public-onboarding":
+        prompts["review_simulation_setup"] = (
+            "Review only the bounded structured draft in this conversation. Use "
+            "validate_simulation_setup and explain_validation. Do not request or "
+            "invent file paths, URLs, imports, code execution, or Cloud access."
+        )
+    selected = CAPABILITY_PROFILES[profile].prompts
+    return {name: prompts[name] for name in selected}
 
 
 def _register_json_resource(
@@ -774,9 +1042,10 @@ async def _safe_process_call(
         )
 
 
-async def _safe_cloud_process_call(
+async def _safe_cloud_call(
     identity: AssistantIdentity,
     profile: str | None,
+    hosted_executor: HostedCloudExecutor | None,
     operation: str,
     arguments: Mapping[str, Any],
     *,
@@ -785,14 +1054,26 @@ async def _safe_cloud_process_call(
 ) -> ToolEnvelope:
     try:
         with anyio.fail_after(timeout_seconds):
-            result = await anyio.to_process.run_sync(
-                cloud.execute_cloud_operation,
-                profile,
-                operation,
-                dict(arguments),
-                cancellable=True,
-                limiter=limiter,
-            )
+            if hosted_executor is None:
+                result = await anyio.to_process.run_sync(
+                    cloud.execute_cloud_operation,
+                    profile,
+                    operation,
+                    dict(arguments),
+                    cancellable=True,
+                    limiter=limiter,
+                )
+            else:
+                async with limiter:
+                    hosted_result = await hosted_executor(
+                        operation,
+                        dict(arguments),
+                    )
+                result = cloud.validate_cloud_operation_output(
+                    operation,
+                    arguments,
+                    hosted_result,
+                )
         return _success(
             identity,
             "application/json",

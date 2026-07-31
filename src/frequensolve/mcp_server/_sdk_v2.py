@@ -11,15 +11,19 @@ import inspect
 import json
 import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, TypeVar, get_type_hints
+from urllib.parse import urlsplit
 
 import anyio
 from mcp import Client
 from mcp.server import Server
 from mcp.server.context import ServerRequestContext
 from mcp.server.stdio import stdio_server
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
 from mcp.types import (
     INVALID_PARAMS,
@@ -42,6 +46,8 @@ from mcp.types import (
     ToolAnnotations,
 )
 from pydantic import BaseModel, ValidationError
+from starlette.responses import PlainTextResponse
+from starlette.types import Receive, Scope, Send
 
 MINIMUM_SDK_VERSION = (2, 0, 0)
 
@@ -99,6 +105,9 @@ class SafeMCPServer(Server[dict[str, Any]]):
         version: str,
         instructions: str,
         max_request_bytes: int = 262_144,
+        allowed_tool_names: Iterable[str] | None = None,
+        allowed_resource_uris: Iterable[str] | None = None,
+        allowed_prompt_names: Iterable[str] | None = None,
     ) -> None:
         _require_supported_sdk()
         self._tools: dict[str, _ToolRegistration] = {}
@@ -108,6 +117,19 @@ class SafeMCPServer(Server[dict[str, Any]]):
         self._allowed_prompt_names: frozenset[str] = frozenset()
         self._allowed_resource_uris: frozenset[str] = frozenset()
         self._max_request_bytes = max_request_bytes
+        self._registration_tool_names = (
+            frozenset(allowed_tool_names) if allowed_tool_names is not None else None
+        )
+        self._registration_resource_uris = (
+            frozenset(allowed_resource_uris)
+            if allowed_resource_uris is not None
+            else None
+        )
+        self._registration_prompt_names = (
+            frozenset(allowed_prompt_names)
+            if allowed_prompt_names is not None
+            else None
+        )
         self._finalized = False
         super().__init__(
             name,
@@ -138,6 +160,11 @@ class SafeMCPServer(Server[dict[str, Any]]):
 
         def decorator(function: _CallableT) -> _CallableT:
             self._require_registration_open()
+            if (
+                self._registration_tool_names is not None
+                and name not in self._registration_tool_names
+            ):
+                return function
             if name in self._tools:
                 raise AdapterCompatibilityError("An MCP tool name was registered twice")
             signature = inspect.signature(function)
@@ -199,6 +226,11 @@ class SafeMCPServer(Server[dict[str, Any]]):
 
         def decorator(function: _CallableT) -> _CallableT:
             self._require_registration_open()
+            if (
+                self._registration_resource_uris is not None
+                and uri not in self._registration_resource_uris
+            ):
+                return function
             if uri in self._resources:
                 raise AdapterCompatibilityError(
                     "An MCP resource URI was registered twice"
@@ -232,6 +264,11 @@ class SafeMCPServer(Server[dict[str, Any]]):
 
         def decorator(function: _CallableT) -> _CallableT:
             self._require_registration_open()
+            if (
+                self._registration_prompt_names is not None
+                and name not in self._registration_prompt_names
+            ):
+                return function
             if name in self._prompts:
                 raise AdapterCompatibilityError("An MCP prompt was registered twice")
             if inspect.signature(
@@ -290,6 +327,42 @@ class SafeMCPServer(Server[dict[str, Any]]):
 
         self._require_finalized()
         anyio.run(self._run_stdio_async)
+
+    def create_streamable_http_app(
+        self,
+        *,
+        path: str = "/mcp",
+        allowed_hosts: Iterable[str],
+        allowed_origins: Iterable[str] = (),
+        json_response: bool = True,
+    ) -> "StreamableHTTPApplication":
+        """Create one official stateless Streamable HTTP ASGI binding."""
+
+        self._require_finalized()
+        normalized_path = _validated_http_path(path)
+        hosts = _validated_header_allowlist(allowed_hosts, label="host")
+        origins = _validated_header_allowlist(
+            allowed_origins,
+            label="origin",
+            allow_empty=True,
+        )
+        if not isinstance(json_response, bool):
+            raise ValueError("json_response must be a boolean")
+        manager = StreamableHTTPSessionManager(
+            self,
+            json_response=json_response,
+            stateless=True,
+            security_settings=TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=list(hosts),
+                allowed_origins=list(origins),
+            ),
+            max_request_body_size=self._max_request_bytes,
+        )
+        return StreamableHTTPApplication(
+            manager=manager,
+            path=normalized_path,
+        )
 
     async def _run_stdio_async(self) -> None:
         async with stdio_server() as (read_stream, write_stream):
@@ -444,6 +517,72 @@ class SafeMCPServer(Server[dict[str, Any]]):
             raise AdapterCompatibilityError("The MCP safety contract was not finalized")
 
 
+@dataclass(frozen=True)
+class StreamableHTTPApplication:
+    """Self-contained ASGI app for one exact Streamable HTTP endpoint."""
+
+    manager: StreamableHTTPSessionManager
+    path: str
+
+    @property
+    def session_manager(self) -> StreamableHTTPSessionManager:
+        """Expose the official manager for framework-native lifespan adapters."""
+
+        return self.manager
+
+    @asynccontextmanager
+    async def run(self) -> Any:
+        """Run the official manager in an embedding framework's lifespan."""
+
+        async with self.manager.run():
+            yield
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if scope["type"] == "lifespan":
+            await self._handle_lifespan(receive, send)
+            return
+        if scope["type"] != "http" or scope.get("path") != self.path:
+            await PlainTextResponse("Not found", status_code=404)(
+                scope,
+                receive,
+                send,
+            )
+            return
+        await self.manager.handle_request(scope, receive, send)
+
+    async def _handle_lifespan(self, receive: Receive, send: Send) -> None:
+        first = await receive()
+        if first["type"] != "lifespan.startup":
+            raise RuntimeError("ASGI lifespan did not begin with startup")
+        started = False
+        try:
+            async with self.manager.run():
+                await send({"type": "lifespan.startup.complete"})
+                started = True
+                while True:
+                    message = await receive()
+                    if message["type"] == "lifespan.shutdown":
+                        break
+            await send({"type": "lifespan.shutdown.complete"})
+        except BaseException as exc:
+            await send(
+                {
+                    "type": (
+                        "lifespan.shutdown.failed"
+                        if started
+                        else "lifespan.startup.failed"
+                    ),
+                    "message": type(exc).__name__,
+                }
+            )
+            raise
+
+
 def run_in_memory_doctor(server: SafeMCPServer) -> dict[str, object]:
     """Verify the modern protocol through the official in-memory client."""
 
@@ -590,3 +729,72 @@ def _validate_request_budget(value: Any, *, maximum_bytes: int) -> None:
             raise _UnsafeRequest
         if estimated_bytes > maximum_bytes:
             raise _UnsafeRequest
+
+
+def _validated_http_path(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) > 64
+        or not value.startswith("/")
+        or value.endswith("/")
+        or "//" in value
+        or any(segment in {"", ".", ".."} for segment in value.split("/")[1:])
+        or any(
+            not (character.isascii() and (character.isalnum() or character in "-_/"))
+            for character in value
+        )
+    ):
+        raise ValueError("Streamable HTTP path must be one exact safe absolute path")
+    return value
+
+
+def _validated_header_allowlist(
+    values: Iterable[str],
+    *,
+    label: str,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
+    normalized = tuple(values)
+    if (
+        len(normalized) > 32
+        or len(set(normalized)) != len(normalized)
+        or (not normalized and not allow_empty)
+    ):
+        raise ValueError(f"Streamable HTTP {label} allowlist is invalid")
+    for value in normalized:
+        if not isinstance(value, str) or not value or len(value) > 512:
+            raise ValueError(f"Streamable HTTP {label} allowlist is invalid")
+        candidate = value
+        if label == "origin":
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("Streamable HTTP origin allowlist is invalid")
+            candidate = parsed.netloc
+        host, separator, port = candidate.rpartition(":")
+        if not separator:
+            host = candidate
+            port = ""
+        if (
+            not host
+            or host.startswith(".")
+            or host.endswith(".")
+            or any(
+                not (character.isascii() and (character.isalnum() or character in ".-"))
+                for character in host
+            )
+            or (
+                port
+                and port != "*"
+                and (not port.isdigit() or not 1 <= int(port) <= 65535)
+            )
+        ):
+            raise ValueError(f"Streamable HTTP {label} allowlist is invalid")
+    return normalized
