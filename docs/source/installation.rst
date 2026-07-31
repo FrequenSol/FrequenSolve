@@ -42,7 +42,7 @@ Choose the smallest install that matches the workflow you need:
    * - Run on FrequenSol Cloud
      - ``python -m pip install "frequensolve[cloud]"``
      - Requires a FrequenSol Cloud account and license.
-   * - Use the private-beta simulation assistant MCP
+   * - Use the local simulation assistant MCP
      - ``python -m pip install "frequensolve[mcp]"``
      - Add ``cloud`` to the extras for self-scoped read-only Cloud monitoring.
        See :doc:`user_guide/simulation_assistant_mcp`.

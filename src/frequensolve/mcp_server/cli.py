@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Iterable
 import click
 
 if TYPE_CHECKING:
-    from frequensolve.mcp_server._sdk_v1 import SafeFastMCP
+    from frequensolve.mcp_server._sdk_v2 import SafeMCPServer
 
 _ROOT_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
@@ -64,7 +64,7 @@ def serve(
         max_concurrency=max_concurrency,
     )
     try:
-        server.run("stdio")
+        server.run_stdio()
     except Exception:
         raise click.ClickException("The MCP server stopped unexpectedly.") from None
 
@@ -88,7 +88,7 @@ def doctor(root_specs: tuple[str, ...], cloud_profile: str | None) -> None:
 
     roots = _parse_roots(root_specs)
     try:
-        from frequensolve.mcp_server._sdk_v1 import run_in_memory_doctor
+        from frequensolve.mcp_server._sdk_v2 import run_in_memory_doctor
 
         server = _build_server(roots, cloud_profile=cloud_profile)
         result = run_in_memory_doctor(server)
@@ -115,7 +115,7 @@ def _build_server(
     cloud_profile: str | None = None,
     timeout_seconds: float = 15.0,
     max_concurrency: int = 2,
-) -> SafeFastMCP:
+) -> SafeMCPServer:
     try:
         from frequensolve.mcp_server.server import build_server
     except ModuleNotFoundError as exc:
