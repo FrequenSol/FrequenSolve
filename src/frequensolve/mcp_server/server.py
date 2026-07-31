@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import re
@@ -17,7 +18,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from frequensolve._version import get_versions
 from frequensolve.knowledge import load_simulation_knowledge
-from frequensolve.mcp_server import artifacts, cloud, core
+from frequensolve.mcp_server import core
+from frequensolve.mcp_server._contracts import (
+    CLOUD_READ_CONTRACT_ID,
+    CLOUD_READ_CONTRACT_VERSION,
+)
 from frequensolve.mcp_server._sdk_v2 import (
     CLOUD_READ_ONLY_TOOL_ANNOTATIONS,
     READ_ONLY_TOOL_ANNOTATIONS,
@@ -40,6 +45,17 @@ SAFE_RESULT_AFTER_PATTERN = (
     r"^(?![/\\])(?![A-Za-z][A-Za-z0-9+.-]*:)"
     r"(?!.*(?:^|/)\.\.?(?:/|$))[^\x00-\x1f\x7f\\]+$"
 )
+
+
+def __getattr__(name: str) -> Any:
+    """Load profile-specific implementation modules only on explicit access."""
+
+    if name not in {"artifacts", "cloud"}:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = importlib.import_module(f"frequensolve.mcp_server.{name}")
+    globals()[name] = module
+    return module
+
 
 SERVER_INSTRUCTIONS = (
     "FrequenSolve setup assistant. Use it only to explain, draft, validate, "
@@ -442,7 +458,12 @@ def build_server(
             "the hosted Cloud executor is only valid for authenticated-cloud"
         )
 
-    roots = artifacts.normalize_allowed_roots(allowed_roots or {})
+    if profile.name == "local":
+        from frequensolve.mcp_server import artifacts
+
+        roots = artifacts.normalize_allowed_roots(allowed_roots or {})
+    else:
+        roots = {}
     identity = _identity()
     limiter = anyio.CapacityLimiter(max_concurrency)
     resource_uris = {
@@ -810,8 +831,8 @@ def _identity() -> AssistantIdentity:
         preferred_frequensolver_release=identities.preferred_frequensolver_release,
         preferred_frequensolver_commit=identities.preferred_frequensolver_commit,
         solver_validation_profile=identities.solver_validation_profile,
-        cloud_read_contract_id=cloud.CONTRACT_ID,
-        cloud_read_contract_version=cloud.CONTRACT_VERSION,
+        cloud_read_contract_id=CLOUD_READ_CONTRACT_ID,
+        cloud_read_contract_version=CLOUD_READ_CONTRACT_VERSION,
         contracts=tuple(
             ContractIdentity(
                 name=item.name,
@@ -882,8 +903,8 @@ def _resource_documents(
     if "cloud-read-contract" in profile.resources:
         documents["cloud-read-contract"] = {
             "schema": "frequensolve-mcp-cloud-read-contract/v1",
-            "contract_id": cloud.CONTRACT_ID,
-            "contract_version": cloud.CONTRACT_VERSION,
+            "contract_id": CLOUD_READ_CONTRACT_ID,
+            "contract_version": CLOUD_READ_CONTRACT_VERSION,
             "classification": "customer-self-read-only",
             "profile_selection": "configured-at-server-startup",
             "tools": list(_CLOUD_TOOLS),
@@ -1052,6 +1073,8 @@ async def _safe_cloud_call(
     limiter: anyio.CapacityLimiter,
     timeout_seconds: float,
 ) -> ToolEnvelope:
+    from frequensolve.mcp_server import cloud
+
     try:
         with anyio.fail_after(timeout_seconds):
             if hosted_executor is None:
@@ -1137,6 +1160,8 @@ async def _artifact_call(
     limiter: anyio.CapacityLimiter,
     timeout_seconds: float,
 ) -> ToolEnvelope:
+    from frequensolve.mcp_server import artifacts
+
     with tempfile.TemporaryDirectory(prefix="frequensolve-mcp-artifact-") as temp:
         return await _safe_process_call(
             identity,

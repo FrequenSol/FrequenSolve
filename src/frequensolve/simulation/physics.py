@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC
 from typing import ClassVar, Iterable, List, Mapping
 
+from frequensolve._physics_components import family_components
 from frequensolve.util.fields import FIELD_ALIASES
 from frequensolve.util.physics import (
     canonical_dimension,
@@ -77,34 +78,34 @@ class ValidComponents(ABC):
 class AcousticComponents(ValidComponents):
     """Valid output components for acoustic simulations."""
 
-    primary = ["pressure", "velocity"]
+    primary = list(family_components("acoustic")[0])
 
 
 class EMComponents(ValidComponents):
     """Valid output components for electromagnetic simulations."""
 
-    primary = ["electric", "magnetic"]
+    primary = list(family_components("electromagnetic")[0])
 
 
 class ElasticComponents(ValidComponents):
     """Valid output components for elastic simulations."""
 
-    primary = ["velocity", "stress"]
-    secondary = ["strain", "pressure"]
+    primary = list(family_components("elastic")[0])
+    secondary = list(family_components("elastic")[1])
 
 
 class PoroelasticComponents(ValidComponents):
     """Valid output components for poroelastic simulations."""
 
-    primary = ["velocity", "fluid_flux", "stress", "pressure"]
-    secondary = ["strain", "displacement", "fluid_displacement"]
+    primary = list(family_components("poroelastic")[0])
+    secondary = list(family_components("poroelastic")[1])
 
 
 class CoupledAEPComponents(ValidComponents):
     """Valid output components for coupled acoustic-elastic-poroelastic runs."""
 
-    primary = ["pressure", "velocity", "fluid_flux", "stress"]
-    secondary = ["strain", "displacement", "fluid_displacement"]
+    primary = list(family_components("coupled-aep")[0])
+    secondary = list(family_components("coupled-aep")[1])
 
 
 _COMPONENTS_BY_PHYSICS = {

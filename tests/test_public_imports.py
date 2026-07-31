@@ -18,6 +18,75 @@ for name in ['Project', 'LayeredModel', 'LocalSite', 'Stampede3Site', 'AWSSite']
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
+def test_bare_top_level_import_is_lazy_until_public_export_access():
+    code = """
+import sys
+import frequensolve
+
+unexpected = sorted(
+    name
+    for name in {
+        'frequensolve.geometry',
+        'frequensolve.mesh',
+        'frequensolve.model',
+        'frequensolve.orchestrator',
+        'frequensolve.plotting',
+        'frequensolve.project',
+        'frequensolve.seismic',
+        'frequensolve.simulation',
+    }
+    if name in sys.modules
+)
+if unexpected:
+    raise SystemExit('eager public imports: ' + ', '.join(unexpected))
+if not frequensolve.__version__:
+    raise SystemExit('package version unavailable')
+if frequensolve.Project is None:
+    raise SystemExit('lazy public export unavailable')
+if 'Project' not in frequensolve.__all__:
+    raise SystemExit('lazy __all__ was not hydrated')
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_mcp_server_import_does_not_hydrate_unrelated_root_modules():
+    code = """
+import sys
+from frequensolve.mcp_server.server import build_server
+
+if build_server is None:
+    raise SystemExit('MCP server import failed')
+unexpected = sorted(
+    name
+    for name in {
+        'frequensolve.orchestrator',
+        'frequensolve.plotting',
+        'frequensolve.project',
+        'frequensolve.seismic',
+        'frequensolve.simulation',
+    }
+    if name in sys.modules
+)
+if unexpected:
+    raise SystemExit('unrelated MCP imports: ' + ', '.join(unexpected))
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_named_and_star_root_imports_remain_compatible():
+    code = """
+from frequensolve import Project
+
+namespace = {}
+exec('from frequensolve import *', namespace)
+if namespace['Project'] is not Project:
+    raise SystemExit('star import did not preserve the public Project export')
+if namespace['LayeredModel'] is None:
+    raise SystemExit('star import omitted LayeredModel')
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
 def test_top_level_import_does_not_load_optional_backends():
     code = """
 import sys

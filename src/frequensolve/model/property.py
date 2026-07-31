@@ -12,6 +12,9 @@ import numpy as np
 import xarray as xr
 from numpy.typing import ArrayLike
 
+from frequensolve._property_names import (
+    canonical_property_name as _canonical_property_name,
+)
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.dispersion import DispersionScaling
 from frequensolve.units import is_quantity, quantity_to_fs, unit_expression, ureg
@@ -32,36 +35,10 @@ __all__ = [
 ]
 
 
-PROPERTY_ALIASES = {
-    "vp": "vp",
-    "vs": "vs",
-    "rho": "rho",
-    "density": "rho",
-    "qp": "qp",
-    "qs": "qs",
-    "vadapt": "vadapt",
-    "epsilon": "epsilon",
-    "gamma": "gamma",
-    "delta": "delta",
-    "phi": "phi",
-    "theta": "theta",
-}
-
-
 def canonical_property_name(name: str) -> str:
-    """Normalize a user-facing material property name.
+    """Normalize a user-facing material-property name."""
 
-    Args:
-        name: Property name or alias, such as ``"Vp"``, ``"density"``, or
-            ``"rho"``.
-
-    Returns:
-        The canonical lowercase name used in serialized model payloads.
-    """
-
-    key = str(name).strip()
-    normalized = key.lower()
-    return PROPERTY_ALIASES.get(normalized, normalized)
+    return _canonical_property_name(name)
 
 
 def _is_hdf5_locator(value: Any) -> bool:
