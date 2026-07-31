@@ -26,6 +26,10 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
 
+from frequensolve.mcp_server._contracts import (
+    CLOUD_READ_CONTRACT_ID,
+    CLOUD_READ_CONTRACT_VERSION,
+)
 from frequensolve.orchestrator.sites.config_file import site_config_path
 from frequensolve.storage import frequensolve_home
 
@@ -46,8 +50,6 @@ __all__ = [
     "validate_cloud_operation_output",
 ]
 
-CLOUD_READ_CONTRACT_ID = "frequensol.customer-cloud-read"
-CLOUD_READ_CONTRACT_VERSION = "1.0.0"
 CONTRACT_ID = CLOUD_READ_CONTRACT_ID
 CONTRACT_VERSION = CLOUD_READ_CONTRACT_VERSION
 CLOUD_READ_CATALOG_SHA256 = (

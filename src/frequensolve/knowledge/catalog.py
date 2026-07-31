@@ -17,13 +17,13 @@ from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional, Union
 
+from frequensolve._physics_components import allowed_components_for_physics
+from frequensolve._property_names import canonical_property_name
 from frequensolve._version import get_versions
 from frequensolve.frequensolver import (
     FrequenSolverCompatibilityManifest,
     load_frequensolver_compatibility,
 )
-from frequensolve.model.property import canonical_property_name
-from frequensolve.simulation.physics import components_for_physics
 from frequensolve.util.physics import (
     canonical_dimension,
     canonical_physics,
@@ -2160,9 +2160,7 @@ def _validate_physics_entries(entries: tuple[PhysicsKnowledge, ...]) -> None:
                 f"catalog dimensions for {entry.id!r} must match "
                 "supported_dimensions_for_physics()"
             )
-        expected_components = tuple(
-            components_for_physics(entry.id).allowed_components()
-        )
+        expected_components = tuple(allowed_components_for_physics(entry.id))
         if entry.output_components != expected_components:
             raise CatalogValidationError(
                 f"catalog output components for {entry.id!r} must match "

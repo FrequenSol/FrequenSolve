@@ -14,7 +14,7 @@ import os
 import re
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Mapping, Union, cast
+from typing import TYPE_CHECKING, Any, Mapping, Union, cast
 
 from frequensolve._version import get_versions
 from frequensolve.knowledge.catalog import (
@@ -22,16 +22,31 @@ from frequensolve.knowledge.catalog import (
     load_simulation_knowledge,
 )
 from frequensolve.mcp_server.rendering import render_starter_python_source
-from frequensolve.mesh.boundary_conditions import BoundaryCondition
-from frequensolve.model.layered.model import LayeredModel
-from frequensolve.project.project import Project
-from frequensolve.seismic.acquisition import Acquisition
-from frequensolve.seismic.receivers import ReceiverNode
-from frequensolve.simulation.discretization import Discretization
-from frequensolve.simulation.jobs.forward import FrequencyDomainJob
-from frequensolve.simulation.outputs import VtkOutput
-from frequensolve.simulation.solver import SolverConfig
-from frequensolve.validation.api import validate_job
+
+if TYPE_CHECKING:
+    from frequensolve.project.project import Project
+    from frequensolve.simulation.jobs.forward import FrequencyDomainJob
+
+_LAZY_AUTHORING_TYPES = {
+    "Project": ("frequensolve.project.project", "Project"),
+    "FrequencyDomainJob": (
+        "frequensolve.simulation.jobs.forward",
+        "FrequencyDomainJob",
+    ),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Preserve internal test/introspection access without eager imports."""
+
+    try:
+        module_name, attribute_name = _LAZY_AUTHORING_TYPES[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    value = getattr(__import__(module_name, fromlist=[attribute_name]), attribute_name)
+    globals()[name] = value
+    return value
+
 
 MCP_CONTRACT = "frequensolve-simulation-assistant/v1"
 DRAFT_CONTRACT = "frequensolve-simulation-draft/v1"
@@ -265,6 +280,8 @@ def validate_simulation_draft(
     root = _safe_project_path(project_path)
     try:
         _project, job = _build_job(normalized, root)
+        from frequensolve.validation.api import validate_job
+
         report = validate_job(job)
     except CoreInputError:
         raise
@@ -485,6 +502,19 @@ def _build_job(
     draft: dict[str, Any],
     project_path: Path,
 ) -> tuple[Project, FrequencyDomainJob]:
+    # These scientific authoring modules are needed only by validation tools.
+    # Keeping them out of module initialization lets discovery-only MCP clients
+    # connect without importing the complete simulation object graph.
+    from frequensolve.mesh.boundary_conditions import BoundaryCondition
+    from frequensolve.model.layered.model import LayeredModel
+    from frequensolve.project.project import Project
+    from frequensolve.seismic.acquisition import Acquisition
+    from frequensolve.seismic.receivers import ReceiverNode
+    from frequensolve.simulation.discretization import Discretization
+    from frequensolve.simulation.jobs.forward import FrequencyDomainJob
+    from frequensolve.simulation.outputs import VtkOutput
+    from frequensolve.simulation.solver import SolverConfig
+
     setup = _setup_from_draft(draft)
     project_config = dict(setup["project"])
     project_config.update(

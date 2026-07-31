@@ -1,75 +1,102 @@
 """Public package entrypoint for the FrequenSolve Python API.
 
-The root namespace re-exports the stable authoring API from the main
-subpackages so users can write ``import frequensolve as fs``. Optional execution
-backends are guarded in ``frequensolve.orchestrator.sites``: their names are
-always importable, but missing extras fail with an install hint when used.
+The root namespace lazily re-exports the stable authoring API from the main
+subpackages so users can continue to write ``import frequensolve as fs``.  A
+submodule import such as ``frequensolve.mcp_server.server`` must not pay the
+startup cost of unrelated plotting, orchestration, and IO modules.
+
+Optional execution backends remain guarded in ``frequensolve.orchestrator.sites``:
+their names are always available after the public facade is hydrated, while
+missing extras fail with an install hint when used.
 """
 
-from frequensolve._exports import unique_exports
-from frequensolve._loading import *  # noqa: F403
-from frequensolve._loading import __all__ as _loading_all
-from frequensolve._version import get_versions
-from frequensolve.frequensolver import *  # noqa: F403
-from frequensolve.frequensolver import __all__ as _frequensolver_all
-from frequensolve.geometry import *  # noqa: F403
-from frequensolve.geometry import __all__ as _geometry_all
-from frequensolve.knowledge import *  # noqa: F403
-from frequensolve.knowledge import __all__ as _knowledge_all
-from frequensolve.mesh import *  # noqa: F403
-from frequensolve.mesh import __all__ as _mesh_all
-from frequensolve.model import *  # noqa: F403
-from frequensolve.model import __all__ as _model_all
-from frequensolve.orchestrator import *  # noqa: F403
-from frequensolve.orchestrator import __all__ as _orchestrator_all
-from frequensolve.plotting import *  # noqa: F403
-from frequensolve.plotting import __all__ as _plotting_all
-from frequensolve.project import *  # noqa: F403
-from frequensolve.project import __all__ as _project_all
-from frequensolve.seismic import *  # noqa: F403
-from frequensolve.seismic import __all__ as _seismic_all
-from frequensolve.simulation import *  # noqa: F403
-from frequensolve.simulation import __all__ as _simulation_all
-from frequensolve.units import *  # noqa: F403
-from frequensolve.units import __all__ as _units_all
-from frequensolve.util import *  # noqa: F403
-from frequensolve.util import __all__ as _util_all
-from frequensolve.validation import *  # noqa: F403
-from frequensolve.validation import __all__ as _validation_all
+from __future__ import annotations
 
-_colormap_all = ["get_colormap", "RdYlBu", "RdYlBu_r", "BuGrOr", "BuGrOr_r"]
+import importlib
+import threading
+from types import ModuleType
+from typing import Any
+
+from frequensolve._exports import unique_exports
+from frequensolve._version import get_versions
+
+_PUBLIC_MODULE_ORDER = (
+    "_loading",
+    "frequensolver",
+    "geometry",
+    "knowledge",
+    "mesh",
+    "model",
+    "orchestrator",
+    "plotting",
+    "project",
+    "seismic",
+    "simulation",
+    "units",
+    "util",
+    "validation",
+)
+_PUBLIC_EXPORT_ORDER = (
+    "project",
+    "units",
+    "geometry",
+    "knowledge",
+    "frequensolver",
+    "model",
+    "mesh",
+    "seismic",
+    "plotting",
+    "simulation",
+    "orchestrator",
+    "util",
+    "validation",
+    "_loading",
+)
+_COLORMAP_EXPORTS = ("get_colormap", "RdYlBu", "RdYlBu_r", "BuGrOr", "BuGrOr_r")
+_PUBLIC_API_LOCK = threading.RLock()
+_PUBLIC_API_LOADED = False
 
 __version__ = get_versions()["version"]
 
-__all__ = [
-    "__version__",
-    *unique_exports(
-        _project_all,
-        _units_all,
-        _geometry_all,
-        _knowledge_all,
-        _frequensolver_all,
-        _model_all,
-        _mesh_all,
-        _seismic_all,
-        _plotting_all,
-        _simulation_all,
-        _orchestrator_all,
-        _util_all,
-        _validation_all,
-        _loading_all,
-        _colormap_all,
-    ),
-]
+
+def _load_public_api() -> None:
+    """Hydrate the historical root exports exactly once on first use."""
+
+    global _PUBLIC_API_LOADED, __all__
+    if _PUBLIC_API_LOADED:
+        return
+    with _PUBLIC_API_LOCK:
+        if _PUBLIC_API_LOADED:
+            return
+        modules: dict[str, ModuleType] = {}
+        for module_name in _PUBLIC_MODULE_ORDER:
+            module = importlib.import_module(f"frequensolve.{module_name}")
+            modules[module_name] = module
+            for export_name in module.__all__:
+                globals()[export_name] = getattr(module, export_name)
+
+        __all__ = [
+            "__version__",
+            *unique_exports(
+                *(modules[name].__all__ for name in _PUBLIC_EXPORT_ORDER),
+                _COLORMAP_EXPORTS,
+            ),
+        ]
+        _PUBLIC_API_LOADED = True
 
 
-def __getattr__(name):
-    if name in _colormap_all:
-        from frequensolve.util import colormaps
+def __getattr__(name: str) -> Any:
+    if name in _COLORMAP_EXPORTS:
+        colormaps = importlib.import_module("frequensolve.util.colormaps")
 
         return getattr(colormaps, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    _load_public_api()
+    try:
+        return globals()[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
 
 
-def __dir__():
+def __dir__() -> list[str]:
+    _load_public_api()
     return sorted({*globals(), *__all__})
