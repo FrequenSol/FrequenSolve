@@ -164,7 +164,6 @@ class ContractIdentity(ClosedModel):
 
 
 class AssistantIdentity(ClosedModel):
-    capability_profile: CapabilityProfileName
     package_version: str
     source_revision: str
     source_dirty: bool
@@ -444,7 +443,7 @@ def build_server(
         )
 
     roots = artifacts.normalize_allowed_roots(allowed_roots or {})
-    identity = _identity(profile.name)
+    identity = _identity()
     limiter = anyio.CapacityLimiter(max_concurrency)
     resource_uris = {
         f"frequensolve://simulation-assistant/{name}" for name in profile.resources
@@ -793,12 +792,11 @@ def build_server(
     return server
 
 
-def _identity(profile: CapabilityProfileName) -> AssistantIdentity:
+def _identity() -> AssistantIdentity:
     catalog = load_simulation_knowledge()
     versions = get_versions()
     identities = catalog.identities
     return AssistantIdentity(
-        capability_profile=profile,
         package_version=identities.package_version,
         source_revision=str(versions["full-revisionid"]),
         source_dirty=bool(versions["dirty"]),

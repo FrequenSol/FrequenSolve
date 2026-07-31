@@ -364,10 +364,7 @@ def test_authenticated_cloud_profile_requires_and_validates_host_execution(
             assert readiness.is_error is False
             assert readiness.structured_content is not None
             assert readiness.structured_content["ok"] is True
-            assert (
-                readiness.structured_content["identity"]["capability_profile"]
-                == "authenticated-cloud"
-            )
+            assert "capability_profile" not in readiness.structured_content["identity"]
             assert calls == [("getCloudReadiness", {})]
 
             for excluded in (
@@ -412,7 +409,7 @@ def test_authenticated_host_executor_respects_the_declared_concurrency_limit():
                 active -= 1
 
         limiter = anyio.CapacityLimiter(1)
-        identity = server_module._identity("authenticated-cloud")
+        identity = server_module._identity()
 
         async def invoke() -> None:
             await server_module._safe_cloud_call(
@@ -520,8 +517,8 @@ def test_standard_stateless_streamable_http_serves_current_protocol_json():
             assert isinstance(called, dict)
             assert called["result"]["structuredContent"]["ok"] is True
             assert (
-                called["result"]["structuredContent"]["identity"]["capability_profile"]
-                == "public-onboarding"
+                "capability_profile"
+                not in called["result"]["structuredContent"]["identity"]
             )
 
             invalid_status, invalid = await _asgi_post(
