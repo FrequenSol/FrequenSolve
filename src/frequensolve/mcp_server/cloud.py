@@ -30,8 +30,6 @@ from frequensolve.mcp_server._contracts import (
     CLOUD_READ_CONTRACT_ID,
     CLOUD_READ_CONTRACT_VERSION,
 )
-from frequensolve.orchestrator.sites.config_file import site_config_path
-from frequensolve.storage import frequensolve_home
 
 try:
     import tomllib
@@ -906,6 +904,8 @@ def _validate_profile_name(profile: str) -> str:
 
 
 def _load_site_profile(profile: str | None) -> _SiteProfile:
+    from frequensolve.orchestrator.sites.config_file import site_config_path
+
     path = site_config_path()
     try:
         raw = _read_bounded_regular_file(
@@ -988,6 +988,8 @@ def _validate_domain(value: str) -> str:
 
 
 def _load_cached_cloud_config(profile: _SiteProfile) -> _CloudConfig:
+    from frequensolve.storage import frequensolve_home
+
     cache_name = profile.domain.replace(":", "_")
     path = frequensolve_home() / "cloud" / f"config_{cache_name}.json"
     try:
@@ -1182,6 +1184,8 @@ def _get_verified_cognito_user(
 
 
 def _credential_paths(profile_name: str) -> tuple[Path, ...]:
+    from frequensolve.storage import frequensolve_home
+
     root = frequensolve_home()
     return (
         root / "cloud" / "credentials",

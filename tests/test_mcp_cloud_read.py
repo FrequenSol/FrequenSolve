@@ -1545,16 +1545,68 @@ def test_requests_transport_normalizes_http_network_and_size_errors():
         assert session.closed is True
 
 
-def test_module_import_does_not_require_cloud_extras():
+def test_hosted_contract_path_does_not_require_cloud_or_scientific_runtime():
     script = """
 import builtins
+import json
+import sys
+from importlib.resources import files
+
 real_import = builtins.__import__
+forbidden = {
+    'boto3',
+    'botocore',
+    'h5py',
+    'numpy',
+    'pandas',
+    'requests',
+    'scipy',
+    'xarray',
+    'frequensolve.orchestrator',
+    'frequensolve.simulation',
+}
 def guarded(name, *args, **kwargs):
-    if name.split('.', 1)[0] in {'boto3', 'botocore', 'requests'}:
+    if any(name == item or name.startswith(item + '.') for item in forbidden):
         raise ModuleNotFoundError(name)
     return real_import(name, *args, **kwargs)
 builtins.__import__ = guarded
+
 import frequensolve.mcp_server.cloud as cloud
+from frequensolve.mcp_server.server import build_server
+
+async def hosted_executor(operation, arguments):
+    raise AssertionError('construction must not execute an operation')
+
+server = build_server(
+    capability_profile='authenticated-cloud',
+    hosted_cloud_executor=hosted_executor,
+)
+if server is None:
+    raise SystemExit('authenticated Cloud profile construction failed')
+
+fixtures = json.loads(
+    files('frequensolve.mcp_server')
+    .joinpath('contracts/customer_cloud_read_v1_fixtures.json')
+    .read_text(encoding='utf-8')
+)
+fixture = next(
+    item for item in fixtures if item['operation'] == 'getCloudReadiness'
+)
+validated = cloud.validate_cloud_operation_output(
+    fixture['operation'],
+    fixture['input'],
+    fixture['output'],
+)
+if validated != fixture['output']:
+    raise SystemExit('hosted contract validation changed the fixture')
+
+loaded = sorted(
+    name
+    for name in sys.modules
+    if any(name == item or name.startswith(item + '.') for item in forbidden)
+)
+if loaded:
+    raise SystemExit('hosted path imported forbidden modules: ' + ', '.join(loaded))
 print(cloud.CLOUD_READ_CONTRACT_VERSION)
 """
     environment = dict(os.environ)
