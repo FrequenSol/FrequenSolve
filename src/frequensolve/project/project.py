@@ -485,11 +485,18 @@ class Project:
 
         path = Path(name).expanduser()
         if path.suffix == ".json" or path.exists():
-            return BaseJob.load(path, project_path=self.path)
-        return BaseJob.load(
-            self.job_file(str(name), simulation=simulation),
-            project_path=self.path,
-        )
+            job = BaseJob.load(path, project_path=self.path)
+        else:
+            job = BaseJob.load(
+                self.job_file(str(name), simulation=simulation),
+                project_path=self.path,
+            )
+
+        # Deserialization creates a fresh simulation object. Rebind it so
+        # remote sites can synchronize the complete owning project before
+        # submitting the loaded job.
+        job.simulation._project = self
+        return job
 
     def terminate_jobs(self) -> None:
         """Terminate all active job futures tracked by this project."""

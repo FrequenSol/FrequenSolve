@@ -2,6 +2,8 @@
 
 from typing import Any, Dict, Optional
 
+import pytest
+
 from frequensolve.orchestrator.sites.aws.graphql_client import GraphQLClient
 
 
@@ -77,6 +79,25 @@ class StackQueryCapturingGraphQLClient(GraphQLClient):
         }
 
 
+class CapabilityGraphQLClient(GraphQLClient):
+    def __init__(self, query_fields=(), mutation_fields=()):
+        super().__init__("https://example.invalid/graphql", auth=object())
+        self.query_fields = query_fields
+        self.mutation_fields = mutation_fields
+
+    def execute(
+        self, query: str, variables: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        assert "__type" in query
+        assert variables is None
+        return {
+            "queryType": {"fields": [{"name": name} for name in self.query_fields]},
+            "mutationType": {
+                "fields": [{"name": name} for name in self.mutation_fields]
+            },
+        }
+
+
 def test_check_compute_stack_exists_filters_by_account_id():
     client = StackQueryCapturingGraphQLClient()
 
@@ -94,6 +115,30 @@ def test_check_compute_stack_exists_filters_by_account_id():
             ],
         }
     }
+
+
+def test_compute_provisioning_mode_detects_shared_runtime_catalog():
+    client = CapabilityGraphQLClient(
+        query_fields=("fetchAvailableComputeRuntimes",),
+        mutation_fields=("deployComputeInfrastructure",),
+    )
+
+    assert client.get_compute_provisioning_mode() == "shared"
+
+
+def test_compute_provisioning_mode_detects_legacy_per_user_mutation():
+    client = CapabilityGraphQLClient(
+        mutation_fields=("deployComputeInfrastructure",),
+    )
+
+    assert client.get_compute_provisioning_mode() == "per-user"
+
+
+def test_compute_provisioning_mode_rejects_unknown_contract():
+    client = CapabilityGraphQLClient(query_fields=("listStacks",))
+
+    with pytest.raises(RuntimeError, match="does not expose a supported compute"):
+        client.get_compute_provisioning_mode()
 
 
 def test_deploy_storage_stack_does_not_send_environment_argument():

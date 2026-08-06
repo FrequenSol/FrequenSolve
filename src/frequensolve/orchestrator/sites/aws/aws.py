@@ -804,7 +804,8 @@ class AWSSite(BaseSite):
     def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit a simulation job.
 
-        Automatically creates compute stack if it doesn't exist.
+        Uses platform-managed shared compute when advertised by the Cloud API,
+        while retaining legacy per-user compute-stack provisioning.
 
         If using Cognito authentication, submits via GraphQL API.
         Otherwise, uses the traditional REST API method.
@@ -841,9 +842,25 @@ class AWSSite(BaseSite):
 
         self.prepare_job(job, sync_project=True, validate=False)
 
-        # Check if compute stack exists, create if missing
+        # Current Cloud deployments use platform-managed shared compute. Older
+        # deployments require a per-user compute stack. Discover the contract
+        # before invoking any deployment mutation so a removed legacy field is
+        # never called speculatively.
         if self.graphql_client is not None:
-            if not self.graphql_client._check_compute_stack_exists():
+            try:
+                compute_mode = self.graphql_client.get_compute_provisioning_mode()
+            except Exception as capability_error:
+                raise RuntimeError(
+                    "Failed to determine whether this FrequenSolve Cloud "
+                    "environment uses shared or per-user compute. No compute "
+                    "infrastructure was changed. Update FrequenSolve or contact "
+                    f"the Cloud environment owner. Details: {capability_error}"
+                ) from capability_error
+
+            if (
+                compute_mode == "per-user"
+                and not self.graphql_client._check_compute_stack_exists()
+            ):
                 # Compute stack doesn't exist, create it
                 self._emit(
                     "AWS compute stack not found; creating compute infrastructure."

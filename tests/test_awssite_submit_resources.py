@@ -12,9 +12,26 @@ from frequensolve.orchestrator.sites.aws.aws import AWSSite
 class FakeGraphQLClient:
     def __init__(self):
         self.submit_calls = []
+        self.compute_stack_checks = 0
+        self.compute_mode = "shared"
+        self.compute_stack_exists = True
+        self.compute_deployments = 0
+        self.compute_waits = []
+
+    def get_compute_provisioning_mode(self):
+        return self.compute_mode
 
     def _check_compute_stack_exists(self):
-        return True
+        self.compute_stack_checks += 1
+        return self.compute_stack_exists
+
+    def deploy_compute_stack(self):
+        self.compute_deployments += 1
+        return {"stackId": "legacy-compute-stack"}
+
+    def wait_for_stack_ready(self, stack_type, expected_stack_id=None):
+        self.compute_waits.append((stack_type, expected_stack_id))
+        return {"stackId": expected_stack_id, "status": "CREATE_COMPLETE"}
 
     def submit_job(self, **kwargs):
         self.submit_calls.append(kwargs)
@@ -103,6 +120,43 @@ def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
 
     assert site.graphql_client.submit_calls[0]["vcpu"] is None
     assert site.graphql_client.submit_calls[0]["memory"] is None
+    assert site.graphql_client.compute_stack_checks == 0
+
+
+def test_graphql_submit_checks_legacy_per_user_compute_stack():
+    site = make_graphql_site()
+    site.graphql_client.compute_mode = "per-user"
+
+    site.submit(FakeJob())
+
+    assert site.graphql_client.compute_stack_checks == 1
+
+
+def test_graphql_submit_provisions_missing_legacy_per_user_compute_stack():
+    site = make_graphql_site()
+    site.graphql_client.compute_mode = "per-user"
+    site.graphql_client.compute_stack_exists = False
+
+    site.submit(FakeJob())
+
+    assert site.graphql_client.compute_deployments == 1
+    assert site.graphql_client.compute_waits == [("compute", "legacy-compute-stack")]
+    assert len(site.graphql_client.submit_calls) == 1
+
+
+def test_graphql_submit_fails_closed_when_compute_capability_is_unknown():
+    site = make_graphql_site()
+
+    def fail_capability_probe():
+        raise RuntimeError("introspection unavailable")
+
+    site.graphql_client.get_compute_provisioning_mode = fail_capability_probe
+
+    with pytest.raises(RuntimeError, match="Failed to determine whether"):
+        site.submit(FakeJob())
+
+    assert site.graphql_client.submit_calls == []
+    assert site.graphql_client.compute_stack_checks == 0
 
 
 def test_graphql_submit_sends_explicit_resource_overrides():

@@ -56,6 +56,65 @@ class GraphQLClient:
             "Content-Type": "application/json",
         }
 
+    def get_compute_provisioning_mode(self) -> str:
+        """Discover whether the Cloud API uses shared or per-user compute.
+
+        The current Cloud API exposes ``fetchAvailableComputeRuntimes`` and
+        submits work to platform-managed shared queues. Older deployments
+        expose ``deployComputeInfrastructure`` for a per-user compute stack.
+        Inspecting both root operation types lets one client remain compatible
+        without blindly invoking a mutation that may not exist.
+
+        Returns:
+            ``"shared"`` for the runtime-catalog API or ``"per-user"`` for
+            the legacy compute-deployment API.
+
+        Raises:
+            RuntimeError: If the API exposes neither recognizable contract or
+                its capability response is incomplete.
+        """
+
+        capability_query = """
+            query FrequenSolveCloudComputeCapabilities {
+                queryType: __type(name: "Query") {
+                    fields {
+                        name
+                    }
+                }
+                mutationType: __type(name: "Mutation") {
+                    fields {
+                        name
+                    }
+                }
+            }
+        """
+        result = self.execute(capability_query)
+
+        def field_names(type_name: str) -> set[str]:
+            type_result = result.get(type_name)
+            if not isinstance(type_result, dict):
+                return set()
+            fields = type_result.get("fields")
+            if not isinstance(fields, list):
+                return set()
+            return {
+                field["name"]
+                for field in fields
+                if isinstance(field, dict) and isinstance(field.get("name"), str)
+            }
+
+        query_fields = field_names("queryType")
+        mutation_fields = field_names("mutationType")
+        if "fetchAvailableComputeRuntimes" in query_fields:
+            return "shared"
+        if "deployComputeInfrastructure" in mutation_fields:
+            return "per-user"
+        raise RuntimeError(
+            "The FrequenSolve Cloud API does not expose a supported compute "
+            "submission contract. Update FrequenSolve or contact the Cloud "
+            "environment owner before submitting a job."
+        )
+
     def execute(
         self, query: str, variables: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
