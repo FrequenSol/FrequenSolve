@@ -51,7 +51,7 @@ __all__ = [
 CONTRACT_ID = CLOUD_READ_CONTRACT_ID
 CONTRACT_VERSION = CLOUD_READ_CONTRACT_VERSION
 CLOUD_READ_CATALOG_SHA256 = (
-    "d4290a58887aae079e13f008579e9c06d727f5a6167897e68cba615dc4e166f2"
+    "520846921445e62128dbdfbd18a8b8b61b90c56d3e3fe3b8ac29d78c0a7a1091"
 )
 CLOUD_READ_OPERATIONS = (
     "getCloudReadiness",
@@ -447,7 +447,7 @@ def validate_cloud_operation_output(
 def _load_contract() -> dict[str, Any]:
     try:
         resource = files("frequensolve.mcp_server").joinpath(
-            "contracts/customer_cloud_read_v1.json"
+            "contracts/customer_cloud_read_v2.json"
         )
         raw = resource.read_bytes()
         if hashlib.sha256(raw).hexdigest() != CLOUD_READ_CATALOG_SHA256:

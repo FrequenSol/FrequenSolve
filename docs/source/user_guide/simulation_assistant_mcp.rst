@@ -217,7 +217,8 @@ Read-only Cloud tools
 
 Four Cloud tools help an agent monitor the signed-in user's work:
 
-- check seat, subscription, credit, storage, and compute readiness;
+- check seat, subscription, SCU availability and usage, storage, and compute
+  readiness;
 - list a bounded page of the user's simulations;
 - read one simulation summary or its bounded stored diagnostics; and
 - list relative result-artifact metadata without downloading file contents.

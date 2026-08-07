@@ -25,7 +25,7 @@ def _resource_bytes(name: str) -> bytes:
 
 def _fixtures() -> list[dict[str, Any]]:
     return json.loads(
-        _resource_bytes("customer_cloud_read_v1_fixtures.json").decode("utf-8")
+        _resource_bytes("customer_cloud_read_v2_fixtures.json").decode("utf-8")
     )
 
 
@@ -243,14 +243,14 @@ def _fake_requests_module(*sessions: _FakeSession) -> SimpleNamespace:
 
 
 def test_exact_cloud_contract_and_fixture_snapshots_are_vendored():
-    catalog = _resource_bytes("customer_cloud_read_v1.json")
-    fixtures = _resource_bytes("customer_cloud_read_v1_fixtures.json")
+    catalog = _resource_bytes("customer_cloud_read_v2.json")
+    fixtures = _resource_bytes("customer_cloud_read_v2_fixtures.json")
 
     assert hashlib.sha256(catalog).hexdigest() == (
-        "d4290a58887aae079e13f008579e9c06d727f5a6167897e68cba615dc4e166f2"
+        "520846921445e62128dbdfbd18a8b8b61b90c56d3e3fe3b8ac29d78c0a7a1091"
     )
     assert hashlib.sha256(fixtures).hexdigest() == (
-        "8f7b24852af437739364c9ea0a28e856948f2333c865f5a34f21e9ed3b6063f4"
+        "ef406b2ad10780ebf8a60d2c7efde978d8662d3258f5f9fb953bd60b11c950c3"
     )
 
 
@@ -289,7 +289,7 @@ def test_contract_contains_only_fixed_bounded_queries():
 
 
 @pytest.mark.parametrize("fixture", _fixtures(), ids=lambda item: item["operation"])
-def test_all_five_public_methods_project_exact_v1_fixture_outputs(fixture):
+def test_all_five_public_methods_project_exact_v2_fixture_outputs(fixture):
     operation = cloud._load_contract()["operationsByName"][fixture["operation"]]
     calls: list[dict[str, Any]] = []
     client = cloud.CloudReadClient(
@@ -493,8 +493,7 @@ def test_optional_output_nulls_are_pruned_in_nested_objects():
     output = json.loads(json.dumps(fixture["output"]))
     output["durationSeconds"] = None
     output["guardrail"] = {
-        "maxEstimatedCredits": 5,
-        "maxRuntimeMinutes": None,
+        "maxRuntimeMinutes": 60,
         "message": None,
     }
     operation = cloud._load_contract()["operationsByName"]["getMySimulation"]
@@ -507,7 +506,7 @@ def test_optional_output_nulls_are_pruned_in_nested_objects():
     result = client.get_simulation(simulation_id="sim-example-001")
 
     assert "durationSeconds" not in result
-    assert result["guardrail"] == {"maxEstimatedCredits": 5}
+    assert result["guardrail"] == {"maxRuntimeMinutes": 60}
 
 
 @pytest.mark.parametrize(
@@ -1586,7 +1585,7 @@ if server is None:
 
 fixtures = json.loads(
     files('frequensolve.mcp_server')
-    .joinpath('contracts/customer_cloud_read_v1_fixtures.json')
+    .joinpath('contracts/customer_cloud_read_v2_fixtures.json')
     .read_text(encoding='utf-8')
 )
 fixture = next(
@@ -1621,4 +1620,4 @@ print(cloud.CLOUD_READ_CONTRACT_VERSION)
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "1.0.0"
+    assert result.stdout.strip() == "2.0.0"

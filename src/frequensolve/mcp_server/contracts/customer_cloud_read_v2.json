@@ -1,6 +1,6 @@
 {
   "contractId": "frequensol.customer-cloud-read",
-  "contractVersion": "1.0.0",
+  "contractVersion": "2.0.0",
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "audience": "customer-self",
   "classification": "read-only",
@@ -82,17 +82,17 @@
   "operations": [
     {
       "name": "getCloudReadiness",
-      "description": "Return the signed-in user's seat, subscription, credits, and coarse storage and compute readiness.",
+      "description": "Return the signed-in user's seat, subscription, Solver Compute Unit entitlement, and coarse storage and compute readiness.",
       "classification": "read-only",
       "source": {
         "kind": "fixed-graphql-query",
         "operationName": "GetCloudReadiness",
         "rootFields": [
           "getMyAccountSummary",
-          "getCreditBalance",
+          "getScuUsage",
           "getMyCloudInfrastructureReadiness"
         ],
-        "document": "query GetCloudReadiness { membership: getMyAccountSummary { seatLimit hasSeat role subscriptionActive: hasActiveSubscription subscriptionStatus: primarySubscriptionStatus } credits: getCreditBalance { available: currentBalance reconciled: reconciledBalance } infrastructure: getMyCloudInfrastructureReadiness { storage compute } }",
+        "document": "query GetCloudReadiness { membership: getMyAccountSummary { seatLimit hasSeat role subscriptionActive: hasActiveSubscription subscriptionStatus: primarySubscriptionStatus } scu: getScuUsage { meterVersion available: availableScu reserved: reservedScu pending: pendingScu finalized: finalizedScu credited: creditedScu reviewRequired: reviewRequiredScu } infrastructure: getMyCloudInfrastructureReadiness { storage compute } }",
         "responseProjection": {
           "source": "graphql-data",
           "path": []
@@ -126,13 +126,50 @@
             "required": ["hasSeat", "subscriptionActive"],
             "additionalProperties": false
           },
-          "credits": {
+          "scu": {
             "type": "object",
             "properties": {
-              "available": { "type": "number" },
-              "reconciled": { "type": "number" }
+              "meterVersion": { "type": "string", "enum": ["scu-v1"] },
+              "available": {
+                "type": "string",
+                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+                "maxLength": 64
+              },
+              "reserved": {
+                "type": "string",
+                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+                "maxLength": 64
+              },
+              "pending": {
+                "type": "string",
+                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+                "maxLength": 64
+              },
+              "finalized": {
+                "type": "string",
+                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+                "maxLength": 64
+              },
+              "credited": {
+                "type": "string",
+                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+                "maxLength": 64
+              },
+              "reviewRequired": {
+                "type": "string",
+                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+                "maxLength": 64
+              }
             },
-            "required": ["available", "reconciled"],
+            "required": [
+              "meterVersion",
+              "available",
+              "reserved",
+              "pending",
+              "finalized",
+              "credited",
+              "reviewRequired"
+            ],
             "additionalProperties": false
           },
           "infrastructure": {
@@ -151,7 +188,7 @@
             "additionalProperties": false
           }
         },
-        "required": ["membership", "credits", "infrastructure"],
+        "required": ["membership", "scu", "infrastructure"],
         "additionalProperties": false
       },
       "limits": {
@@ -297,7 +334,7 @@
         "kind": "fixed-graphql-query",
         "operationName": "GetMySimulation",
         "rootFields": ["getMySimulationRead"],
-        "document": "query GetMySimulation($simulationId: String!) { getMySimulationRead(simulationId: $simulationId, includeDiagnostics: false) { simulation { simulationId projectName simulationName jobName status startTime durationSeconds progress { total completed failed aborted } requestedComputeMode effectiveComputeMode autoEscalationEnabled escalatedAt batchStatus batchStatusEnteredAt guardrail { maxEstimatedCredits maxRuntimeMinutes } } } }",
+        "document": "query GetMySimulation($simulationId: String!) { getMySimulationRead(simulationId: $simulationId, includeDiagnostics: false) { simulation { simulationId projectName simulationName jobName status startTime durationSeconds progress { total completed failed aborted } requestedComputeMode effectiveComputeMode autoEscalationEnabled escalatedAt batchStatus batchStatusEnteredAt guardrail { maxRuntimeMinutes } } } }",
         "responseProjection": {
           "source": "graphql-data",
           "path": ["getMySimulationRead", "simulation"]
@@ -355,7 +392,6 @@
           "guardrail": {
             "type": "object",
             "properties": {
-              "maxEstimatedCredits": { "type": "number", "minimum": 0 },
               "maxRuntimeMinutes": { "type": "integer", "minimum": 0 },
               "message": { "type": "string", "maxLength": 1000 }
             },

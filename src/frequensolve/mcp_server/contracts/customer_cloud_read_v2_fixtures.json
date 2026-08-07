@@ -10,9 +10,14 @@
         "subscriptionActive": true,
         "subscriptionStatus": "active"
       },
-      "credits": {
-        "available": 42,
-        "reconciled": 42
+      "scu": {
+        "meterVersion": "scu-v1",
+        "available": "42",
+        "reserved": "2",
+        "pending": "1",
+        "finalized": "8",
+        "credited": "0",
+        "reviewRequired": "0"
       },
       "infrastructure": {
         "storage": "READY",
