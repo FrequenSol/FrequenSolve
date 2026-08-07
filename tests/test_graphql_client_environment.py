@@ -192,3 +192,18 @@ def test_submit_job_can_send_status_email_override_and_fresh_run():
         "sendSimulationStatusEmail": True,
         "forceRun": True,
     }
+
+
+def test_submit_job_explains_when_cloud_does_not_support_fresh_runs(monkeypatch):
+    client = CapturingGraphQLClient()
+
+    def reject_force_run(query, variables=None):
+        raise RuntimeError(
+            "GraphQL errors: Unknown argument 'forceRun' on field "
+            "'Mutation.submitJob'."
+        )
+
+    monkeypatch.setattr(client, "execute", reject_force_run)
+
+    with pytest.raises(RuntimeError, match="Submit without force=True"):
+        client.submit_job("project/jobs/job.json", fresh=True)

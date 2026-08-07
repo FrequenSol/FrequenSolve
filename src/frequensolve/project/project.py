@@ -492,10 +492,17 @@ class Project:
                 project_path=self.path,
             )
 
-        # Deserialization creates a fresh simulation object. Rebind it so
-        # remote sites can synchronize the complete owning project before
-        # submitting the loaded job.
-        job.simulation._project = self
+        # Keep the job and project on one simulation object. Remote submission
+        # saves the job and then saves/synchronizes the whole project; leaving
+        # two same-named objects here could let the project save overwrite
+        # edits made through ``job.simulation`` with stale inputs.
+        try:
+            project_simulation = self.simulations[job.simulation.name]
+        except ValueError:
+            project_simulation = job.simulation
+            self.simulations.append(project_simulation)
+        job.simulation = project_simulation
+        project_simulation._project = self
         return job
 
     def terminate_jobs(self) -> None:

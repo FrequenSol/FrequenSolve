@@ -559,7 +559,25 @@ class GraphQLClient:
         if fresh:
             variables["forceRun"] = True
 
-        result = self.execute(mutation, variables)
+        try:
+            result = self.execute(mutation, variables)
+        except RuntimeError as exc:
+            error_message = str(exc)
+            unsupported_force_run = (
+                fresh
+                and "forceRun" in error_message
+                and (
+                    "Unknown argument" in error_message
+                    or "UnknownArgument" in error_message
+                )
+            )
+            if unsupported_force_run:
+                raise RuntimeError(
+                    "Fresh Cloud reruns are not supported by this environment. "
+                    "Submit without force=True, rerun=True, or skip=False, or "
+                    "update the Cloud backend before retrying."
+                ) from exc
+            raise
 
         if "submitJob" not in result or not result["submitJob"]:
             raise RuntimeError("Job submission failed: No response from API")
