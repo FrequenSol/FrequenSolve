@@ -535,7 +535,14 @@ def test_project_load_job_finds_saved_job_by_simulation_and_unique_name(tmp_path
     assert project.job_file("freq", simulation=sim) == freq_file
     assert project.job_file("freq", simulation="simple") == freq_file
     assert project.load_job("time")._file == time_file
-    assert project.load_job("freq", simulation="simple")._file == freq_file
+    loaded = project.load_job("freq", simulation="simple")
+    assert loaded._file == freq_file
+    assert loaded.simulation is project.simulations["simple"]
+    assert loaded.simulation is sim
+    assert loaded.simulation._project is project
+    loaded.simulation.dimension = 3
+    project.save()
+    assert json.loads(sim._file.read_text())["dimension"] == 3
 
 
 def test_project_list_jobs_reports_result_status(tmp_path):

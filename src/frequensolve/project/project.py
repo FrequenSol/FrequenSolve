@@ -485,11 +485,25 @@ class Project:
 
         path = Path(name).expanduser()
         if path.suffix == ".json" or path.exists():
-            return BaseJob.load(path, project_path=self.path)
-        return BaseJob.load(
-            self.job_file(str(name), simulation=simulation),
-            project_path=self.path,
-        )
+            job = BaseJob.load(path, project_path=self.path)
+        else:
+            job = BaseJob.load(
+                self.job_file(str(name), simulation=simulation),
+                project_path=self.path,
+            )
+
+        # Keep the job and project on one simulation object. Remote submission
+        # saves the job and then saves/synchronizes the whole project; leaving
+        # two same-named objects here could let the project save overwrite
+        # edits made through ``job.simulation`` with stale inputs.
+        try:
+            project_simulation = self.simulations[job.simulation.name]
+        except ValueError:
+            project_simulation = job.simulation
+            self.simulations.append(project_simulation)
+        job.simulation = project_simulation
+        project_simulation._project = self
+        return job
 
     def terminate_jobs(self) -> None:
         """Terminate all active job futures tracked by this project."""
