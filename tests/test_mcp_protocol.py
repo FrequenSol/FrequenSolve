@@ -332,7 +332,15 @@ def test_authenticated_cloud_profile_requires_and_validates_host_execution(
         calls.append((operation, dict(arguments)))
         return {
             "membership": {"hasSeat": True, "subscriptionActive": True},
-            "credits": {"available": 20.0, "reconciled": 20.0},
+            "scu": {
+                "meterVersion": "scu-v1",
+                "available": "20",
+                "reserved": "0",
+                "pending": "0",
+                "finalized": "1",
+                "credited": "0",
+                "reviewRequired": "0",
+            },
             "infrastructure": {"storage": "READY", "compute": "READY"},
         }
 
@@ -402,7 +410,15 @@ def test_authenticated_host_executor_respects_the_declared_concurrency_limit():
                     await release_first.wait()
                 return {
                     "membership": {"hasSeat": True, "subscriptionActive": True},
-                    "credits": {"available": 20.0, "reconciled": 20.0},
+                    "scu": {
+                        "meterVersion": "scu-v1",
+                        "available": "20",
+                        "reserved": "0",
+                        "pending": "0",
+                        "finalized": "1",
+                        "credited": "0",
+                        "reviewRequired": "0",
+                    },
                     "infrastructure": {"storage": "READY", "compute": "READY"},
                 }
             finally:
@@ -449,7 +465,15 @@ def test_hosted_executor_output_must_match_the_packaged_cloud_contract():
                 "subscriptionActive": True,
                 "accountId": "must-not-cross-boundary",
             },
-            "credits": {"available": 20.0, "reconciled": 20.0},
+            "scu": {
+                "meterVersion": "scu-v1",
+                "available": "20",
+                "reserved": "0",
+                "pending": "0",
+                "finalized": "1",
+                "credited": "0",
+                "reviewRequired": "0",
+            },
             "infrastructure": {"storage": "READY", "compute": "READY"},
         }
 
@@ -700,7 +724,15 @@ def test_cloud_tools_map_to_only_the_five_fixed_read_operations(monkeypatch):
     responses = {
         "getCloudReadiness": {
             "membership": {"hasSeat": True, "subscriptionActive": True},
-            "credits": {"available": 20.0, "reconciled": 20.0},
+            "scu": {
+                "meterVersion": "scu-v1",
+                "available": "20",
+                "reserved": "0",
+                "pending": "0",
+                "finalized": "1",
+                "credited": "0",
+                "reviewRequired": "0",
+            },
             "infrastructure": {"storage": "READY", "compute": "READY"},
         },
         "listMySimulations": {

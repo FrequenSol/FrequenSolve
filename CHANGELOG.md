@@ -29,6 +29,9 @@ prepared.
 - Public Python docs are published through the `FrequenSol/cloud-amplify` docs
   application instead of the removed `docs/host` Terraform stack.
 - CI verifies Python 3.10 through 3.14.
+- Versioned the customer Cloud readiness contract to `2.0.0`; readiness now
+  reports authoritative Solver Compute Unit availability and usage instead of
+  the retired legacy compute-credit balance.
 
 ## 0.0.1
 
