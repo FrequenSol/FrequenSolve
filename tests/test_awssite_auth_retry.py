@@ -154,6 +154,35 @@ def test_aws_site_preserves_positional_verbose_and_reuses_valid_cache(
     assert auth.credentials_path.read_text() == "valid-cache"
 
 
+def test_aws_site_receives_internal_profile_and_reports_cached_identity(
+    monkeypatch, tmp_path, capsys
+):
+    auth_cls = _valid_cached_auth_class(tmp_path)
+
+    def cached_identity(self, tokens):
+        return {
+            "email": tokens["email"],
+            "account": "sandbox-account",
+        }
+
+    auth_cls.cached_identity = cached_identity
+    aws = _install_awssite_fakes(monkeypatch, auth_cls)
+
+    aws.AWSSite(
+        domain="app.example",
+        verbose=True,
+        _credential_profile="cloud_sandbox_test",
+    )
+
+    auth = auth_cls.instances[0]
+    assert auth.kwargs["profile_name"] == "cloud_sandbox_test"
+    assert auth.kwargs["domain"] == "app.example"
+    output = capsys.readouterr().out
+    assert "profile=cloud_sandbox_test" in output
+    assert "email=cached@example.com" in output
+    assert "account=sandbox-account" in output
+
+
 def test_aws_site_reauthenticates_with_passed_credentials_without_deleting_cache(
     monkeypatch, tmp_path
 ):

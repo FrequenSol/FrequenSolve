@@ -244,6 +244,7 @@ class AWSSite(BaseSite):
         interactive: bool = False,
         verbose: bool = False,
         force_login: bool = False,
+        _credential_profile: Optional[str] = None,
     ):
         """Initialize AWS site with domain-based authentication.
 
@@ -259,6 +260,8 @@ class AWSSite(BaseSite):
             verbose: If True, print user-facing status messages in addition to logs.
             force_login: If True, skip a valid cached login and authenticate again.
                 The existing cache is replaced only after authentication succeeds.
+            _credential_profile: Internal profile name supplied by ``fs.Site()``
+                so cached credentials stay isolated across configured sites.
 
         Raises:
             ValueError: If domain cannot be determined or authentication fails.
@@ -268,6 +271,7 @@ class AWSSite(BaseSite):
         from frequensolve.orchestrator.sites.aws.graphql_client import GraphQLClient
 
         self.verbose = verbose
+        self._site_profile = _credential_profile
 
         # Load configuration from domain
         self._emit(
@@ -285,6 +289,9 @@ class AWSSite(BaseSite):
             client_id=config.client_id,
             identity_pool_id=config.identity_pool_id,
             region=config.region,
+            profile_name=_credential_profile,
+            domain=domain or config.domain,
+            expected_email=email,
         )
 
         # Try to use cached tokens first
@@ -295,8 +302,26 @@ class AWSSite(BaseSite):
             try:
                 if force_login:
                     raise ValueError("A fresh Cloud login was explicitly requested.")
-                auth.get_cached_tokens()
-                self._emit("Using cached AWS credentials")
+                cached_tokens = auth.get_cached_tokens()
+                identity_reader = getattr(auth, "cached_identity", None)
+                identity = (
+                    identity_reader(cached_tokens) if callable(identity_reader) else {}
+                )
+                identity_details = ", ".join(
+                    f"{name}={value}" for name, value in identity.items()
+                )
+                profile_details = (
+                    f"profile={_credential_profile}"
+                    if _credential_profile is not None
+                    else ""
+                )
+                details = ", ".join(
+                    value for value in (profile_details, identity_details) if value
+                )
+                self._emit(
+                    "Using cached AWS credentials"
+                    + (f" ({details})" if details else "")
+                )
                 auth_successful = True
                 break
             except ValueError:
@@ -356,11 +381,14 @@ class AWSSite(BaseSite):
                         client_id=config.client_id,
                         identity_pool_id=config.identity_pool_id,
                         region=config.region,
+                        profile_name=_credential_profile,
+                        domain=domain or config.domain,
+                        expected_email=email,
                     )
 
-                    # Clear old credentials since they're for wrong User Pool
-                    auth.clear_cached_tokens()
-                    self._emit("Cleared outdated cached AWS credentials")
+                    # Leave the previous cache untouched until a successful login
+                    # atomically replaces it. Binding validation rejects it below.
+                    self._emit("Cloud credential binding changed; login is required")
 
                     # Continue to next iteration to try again with new config
                     continue

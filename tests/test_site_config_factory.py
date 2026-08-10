@@ -198,6 +198,7 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
         "domain": "app.frequensol.com",
         "interactive": True,
         "verbose": True,
+        "_credential_profile": "cloud",
     }
     assert _host_tmp_path_for_config(config_path) == Path(tempfile.gettempdir())
 
@@ -238,6 +239,7 @@ verbose = true
         "domain": "dev.frequensol.example",
         "interactive": True,
         "verbose": True,
+        "_credential_profile": "cloud",
     }
     assert local_site.kwargs == {
         "shutdown_on_completion": True,

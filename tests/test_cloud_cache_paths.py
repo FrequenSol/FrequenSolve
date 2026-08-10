@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from frequensolve._cloud_credentials import CREDENTIAL_CACHE_BINDING_KEY
 from frequensolve.orchestrator.sites.aws.cache_paths import (
     cloud_config_cache_path,
     cloud_credentials_path,
@@ -77,6 +78,20 @@ def test_cloud_cache_paths_use_frequensolve_home_override(monkeypatch, tmp_path)
     assert legacy_config_cache_path("localhost:5173/api") == (
         storage_root / "config_localhost_5173_api.json"
     )
+
+
+def test_cloud_profile_credential_paths_are_isolated_and_opaque(monkeypatch, tmp_path):
+    storage_root = tmp_path / "fs-user-storage"
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(storage_root))
+
+    sandbox_path = cloud_credentials_path("cloud_sandbox_test")
+    production_path = cloud_credentials_path("cloud")
+
+    assert sandbox_path.parent == storage_root / "cloud"
+    assert production_path.parent == storage_root / "cloud"
+    assert sandbox_path != production_path
+    assert "cloud_sandbox_test" not in sandbox_path.name
+    assert sandbox_path.name.endswith(".json")
 
 
 def test_aws_site_config_reads_legacy_cache_and_migrates_it(monkeypatch, tmp_path):
@@ -184,6 +199,109 @@ def test_cognito_auth_cached_token_reads_are_debug_logs(monkeypatch, tmp_path, c
     ]
 
 
+def test_profile_bound_cognito_caches_coexist_for_same_cognito_client(
+    monkeypatch, tmp_path
+):
+    pytest.importorskip("boto3")
+
+    from frequensolve.orchestrator.sites.aws import cognito
+
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(tmp_path / "frequensolve-home"))
+    monkeypatch.setattr(cognito.boto3, "client", lambda *args, **kwargs: object())
+
+    sandbox_auth = cognito.CognitoAuth(
+        user_pool_id="pool",
+        client_id="client",
+        identity_pool_id="identity",
+        profile_name="cloud_sandbox_test",
+        domain="sandbox.example",
+    )
+    production_auth = cognito.CognitoAuth(
+        user_pool_id="pool",
+        client_id="client",
+        identity_pool_id="identity",
+        profile_name="cloud",
+        domain="app.example",
+    )
+    sandbox_tokens = {**_cached_tokens(), "email": "sandbox@example.com"}
+    production_tokens = {**_cached_tokens(), "email": "production@example.com"}
+
+    sandbox_auth.save_tokens({**sandbox_tokens, "password": "must-not-be-written"})
+    production_auth.save_tokens(production_tokens)
+
+    assert sandbox_auth.credentials_path != production_auth.credentials_path
+    assert sandbox_auth.get_cached_tokens() == sandbox_tokens
+    assert production_auth.get_cached_tokens() == production_tokens
+    sandbox_document = json.loads(sandbox_auth.credentials_path.read_text())
+    production_document = json.loads(production_auth.credentials_path.read_text())
+    assert sandbox_document[CREDENTIAL_CACHE_BINDING_KEY]["profile"] == (
+        "cloud_sandbox_test"
+    )
+    assert production_document[CREDENTIAL_CACHE_BINDING_KEY]["profile"] == "cloud"
+    assert "password" not in sandbox_document
+
+
+def test_profile_bound_cognito_ignores_unbound_cache_without_migrating(
+    monkeypatch, tmp_path
+):
+    pytest.importorskip("boto3")
+
+    from frequensolve.orchestrator.sites.aws import cognito
+
+    storage_root = tmp_path / "frequensolve-home"
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(storage_root))
+    monkeypatch.setattr(cognito.boto3, "client", lambda *args, **kwargs: object())
+    legacy_tokens = _cached_tokens()
+    unbound_path = cloud_credentials_path()
+    unbound_path.write_text(json.dumps(legacy_tokens))
+    original_bytes = unbound_path.read_bytes()
+    auth = cognito.CognitoAuth(
+        user_pool_id="pool",
+        client_id="client",
+        identity_pool_id="identity",
+        profile_name="cloud_sandbox_test",
+        domain="sandbox.example",
+    )
+
+    with pytest.raises(ValueError, match="No cached credentials"):
+        auth.get_cached_tokens()
+
+    assert not auth.credentials_path.exists()
+    assert unbound_path.read_bytes() == original_bytes
+
+
+def test_profile_bound_cognito_rejects_changed_binding_without_deleting_cache(
+    monkeypatch, tmp_path
+):
+    pytest.importorskip("boto3")
+
+    from frequensolve.orchestrator.sites.aws import cognito
+
+    monkeypatch.setenv("FREQUENSOLVE_HOME", str(tmp_path / "frequensolve-home"))
+    monkeypatch.setattr(cognito.boto3, "client", lambda *args, **kwargs: object())
+    original_auth = cognito.CognitoAuth(
+        user_pool_id="pool",
+        client_id="client",
+        identity_pool_id="identity",
+        profile_name="cloud_sandbox_test",
+        domain="sandbox.example",
+    )
+    original_auth.save_tokens(_cached_tokens())
+    original_bytes = original_auth.credentials_path.read_bytes()
+    changed_auth = cognito.CognitoAuth(
+        user_pool_id="pool",
+        client_id="client",
+        identity_pool_id="changed-identity",
+        profile_name="cloud_sandbox_test",
+        domain="sandbox.example",
+    )
+
+    with pytest.raises(ValueError, match="do not match the selected"):
+        changed_auth.get_cached_tokens()
+
+    assert changed_auth.credentials_path.read_bytes() == original_bytes
+
+
 @pytest.mark.parametrize(
     ("id_overrides", "access_overrides"),
     (
@@ -243,4 +361,4 @@ def test_cognito_issuer_uses_the_aws_partition_dns_suffix():
     assert _cognito_issuer(
         region="cn-north-1",
         user_pool_id="cn-north-1_TestPool",
-    ) == ("https://cognito-idp.cn-north-1.amazonaws.com.cn/" "cn-north-1_TestPool")
+    ) == ("https://cognito-idp.cn-north-1.amazonaws.com.cn/cn-north-1_TestPool")
