@@ -156,3 +156,24 @@ def test_fetch_output_files_downloads_paraview_outputs(tmp_path):
 
     assert site.fetch_output_files(job) == job._result_path
     assert calls == [job]
+
+
+@pytest.mark.parametrize(
+    ("kind", "suffix"),
+    [
+        ("hdf5", None),
+        (None, ".h5"),
+        ("vtk", ".h5"),
+    ],
+)
+def test_fetch_output_files_skips_unsupported_filters(tmp_path, kind, suffix):
+    site = AWSSite.__new__(AWSSite)
+    calls = []
+    site.fetch_paraview = calls.append
+    job = SimpleNamespace(
+        _result_path=tmp_path / "results",
+        outputs=SimpleNamespace(paraview=[object()]),
+    )
+
+    assert site.fetch_output_files(job, kind=kind, suffix=suffix) == job._result_path
+    assert calls == []

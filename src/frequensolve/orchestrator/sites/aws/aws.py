@@ -681,10 +681,31 @@ class AWSSite(BaseSite):
 
         return self.fetch_vtk(job, path=path)
 
-    def fetch_output_files(self, job: BaseJob) -> Path:
-        """Fetch filesystem-backed AWS outputs used by result discovery."""
+    def fetch_output_files(
+        self,
+        job: BaseJob,
+        *,
+        kind: Optional[str] = None,
+        suffix: Optional[Union[str, tuple[str, ...]]] = None,
+    ) -> Path:
+        """Fetch supported filesystem-backed AWS outputs used by discovery."""
 
-        if getattr(getattr(job, "outputs", None), "paraview", None):
+        vtk_kinds = {"vtk", "vtu", "vtr", "vtp", "vts"}
+        normalized_kind = str(kind).strip().lower() if kind is not None else None
+        suffixes = (suffix,) if isinstance(suffix, str) else (suffix or ())
+        vtk_suffixes = (".vtk", ".vtu", ".vtr", ".vtp", ".vts")
+        suffix_can_match_vtk = not suffixes or any(
+            not str(requested_suffix)
+            or str(requested_suffix).lower().endswith(vtk_suffixes)
+            for requested_suffix in suffixes
+        )
+        can_fetch_paraview = (
+            normalized_kind in {None, *vtk_kinds} and suffix_can_match_vtk
+        )
+
+        if can_fetch_paraview and getattr(
+            getattr(job, "outputs", None), "paraview", None
+        ):
             self.fetch_paraview(job)
         return job._result_path
 

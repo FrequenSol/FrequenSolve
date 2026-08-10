@@ -565,7 +565,7 @@ class RunResult:
         if not callable(fetch_output_files):
             return files
 
-        fetch_output_files(self.job)
+        fetch_output_files(self.job, kind=kind, suffix=suffix)
         metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
         if metadata is None:
             return []

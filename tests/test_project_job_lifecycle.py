@@ -423,9 +423,11 @@ def test_run_result_fetches_remote_output_files_when_matching_files_are_missing(
     class FetchingSite:
         def __init__(self):
             self.calls = 0
+            self.filters = None
 
-        def fetch_output_files(self, job):
+        def fetch_output_files(self, job, *, kind=None, suffix=None):
             self.calls += 1
+            self.filters = (kind, suffix)
             expected.parent.mkdir(parents=True)
             expected.write_text("<VTKFile></VTKFile>")
 
@@ -439,6 +441,7 @@ def test_run_result_fetches_remote_output_files_when_matching_files_are_missing(
 
     assert result.output_files(suffix=".vtu", existing=True) == [expected]
     assert site.calls == 1
+    assert site.filters == (None, ".vtu")
 
 
 def test_run_result_can_skip_remote_output_file_fetch(tmp_path):
@@ -446,7 +449,7 @@ def test_run_result_can_skip_remote_output_file_fetch(tmp_path):
         def __init__(self):
             self.calls = 0
 
-        def fetch_output_files(self, job):
+        def fetch_output_files(self, job, *, kind=None, suffix=None):
             self.calls += 1
 
     site = FetchingSite()
