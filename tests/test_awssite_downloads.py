@@ -109,3 +109,50 @@ def test_fetch_vtk_reraises_download_failures(tmp_path):
 
     with pytest.raises(RuntimeError, match="download failed"):
         site.fetch_vtk(job)
+
+
+def test_fetch_vtk_downloads_only_configured_output_paths(tmp_path):
+    key = "project-a/jobs/simulation-a/job-a/results/paraview/pv_00000.vtu"
+    s3_client = FakeS3Client({key: "mesh"})
+    site = make_site(s3_client)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    job = SimpleNamespace(
+        project_path=tmp_path,
+        name="job-a",
+        outputs=SimpleNamespace(paraview=[SimpleNamespace(path="paraview")]),
+        simulation=SimpleNamespace(
+            name="simulation-a",
+            project_path=tmp_path / "project-a",
+        ),
+    )
+
+    site.fetch_vtk(job)
+
+    assert (
+        tmp_path / "jobs/simulation-a/job-a/results/paraview/pv_00000.vtu"
+    ).read_text() == "mesh"
+    assert {
+        "Bucket": "bucket",
+        "Prefix": "project-a/jobs/simulation-a/job-a/results/paraview/",
+    } in s3_client.paginate_calls
+    assert {
+        "Bucket": "bucket",
+        "Prefix": "project-a/jobs/simulation-a/job-a/results/ParaView/",
+    } not in s3_client.paginate_calls
+
+
+def test_fetch_output_files_downloads_paraview_outputs(tmp_path):
+    site = AWSSite.__new__(AWSSite)
+    calls = []
+
+    def fetch_paraview(job):
+        calls.append(job)
+
+    site.fetch_paraview = fetch_paraview
+    job = SimpleNamespace(
+        _result_path=tmp_path / "results",
+        outputs=SimpleNamespace(paraview=[object()]),
+    )
+
+    assert site.fetch_output_files(job) == job._result_path
+    assert calls == [job]

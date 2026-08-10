@@ -7,7 +7,7 @@ import subprocess
 import uuid
 import warnings
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Union
 
 from frequensolve._optional import optional_dependency_error
@@ -644,22 +644,35 @@ class AWSSite(BaseSite):
         project_name = Path(job.simulation.project_path).name
         simulation_name = job.simulation.name
         job_name = job.name
-        results_vtk_path = f"jobs/{simulation_name}/{job_name}/results/ParaView"
-        s3_results_path = (
-            f"s3://{self.config.s3_bucket}/{project_name}/{results_vtk_path}"
-        )
-        local_results_path = path / results_vtk_path
+        vtk_paths: List[str] = []
+        outputs = getattr(getattr(job, "outputs", None), "paraview", None) or []
+        for output in outputs:
+            output_path = getattr(output, "path", None)
+            if output_path is None:
+                continue
+            normalized = PurePosixPath(str(output_path)).as_posix().strip("/")
+            if normalized and normalized != "." and normalized not in vtk_paths:
+                vtk_paths.append(normalized)
+        if not vtk_paths:
+            vtk_paths.append("ParaView")
 
-        try:
-            logger.info(
-                "Fetching VTK outputs from %s to %s",
-                s3_results_path,
-                local_results_path,
+        for vtk_path in vtk_paths:
+            results_vtk_path = f"jobs/{simulation_name}/{job_name}/results/{vtk_path}"
+            s3_results_path = (
+                f"s3://{self.config.s3_bucket}/{project_name}/{results_vtk_path}"
             )
-            self.get(s3_results_path, local_results_path)
-        except Exception as e:
-            logger.exception("Error downloading VTK outputs: %s", str(e))
-            raise
+            local_results_path = path / results_vtk_path
+
+            try:
+                logger.info(
+                    "Fetching VTK outputs from %s to %s",
+                    s3_results_path,
+                    local_results_path,
+                )
+                self.get(s3_results_path, local_results_path)
+            except Exception as e:
+                logger.exception("Error downloading VTK outputs: %s", str(e))
+                raise
 
     def fetch_paraview(
         self, job: BaseJob, path: Optional[Union[str, Path]] = None
@@ -667,6 +680,13 @@ class AWSSite(BaseSite):
         """Fetch visualization files using the historical method name."""
 
         return self.fetch_vtk(job, path=path)
+
+    def fetch_output_files(self, job: BaseJob) -> Path:
+        """Fetch filesystem-backed AWS outputs used by result discovery."""
+
+        if getattr(getattr(job, "outputs", None), "paraview", None):
+            self.fetch_paraview(job)
+        return job._result_path
 
     def _validate_config(self):
         """Validate AWS configuration."""
@@ -1052,11 +1072,22 @@ class AWSSite(BaseSite):
 
     def _poll_run(self, run: RunHandle) -> JobStatus:
         if self.graphql_client is not None:
-            raw_status = self.graphql_client.get_simulation_status(str(run.id))
-            raw = {"status": raw_status, "source": "graphql"}
+            details_getter = getattr(
+                self.graphql_client, "get_simulation_status_details", None
+            )
+            if callable(details_getter):
+                status_details = details_getter(str(run.id))
+                raw_status = status_details["status"]
+                raw = {**status_details, "source": "graphql"}
+                message = str(status_details.get("failureMessage") or "")
+            else:
+                raw_status = self.graphql_client.get_simulation_status(str(run.id))
+                raw = {"status": raw_status, "source": "graphql"}
+                message = ""
         else:
             raw = self.get_job_status_from_api(str(run.id))
             raw_status = raw.get("status", "UNKNOWN")
+            message = str(raw.get("failureMessage") or "")
         state = {
             "PENDING": "pending",
             "SUBMITTED": "pending",
@@ -1076,6 +1107,7 @@ class AWSSite(BaseSite):
             state=state,
             return_code=return_code,
             job_id=str(run.id),
+            message=message,
             raw=raw,
         )
 

@@ -98,6 +98,34 @@ class CapabilityGraphQLClient(GraphQLClient):
         }
 
 
+class SimulationStatusGraphQLClient(GraphQLClient):
+    def __init__(self, *, legacy=False):
+        super().__init__("https://example.invalid/graphql", auth=object())
+        self.legacy = legacy
+        self.queries = []
+
+    def execute(self, query, variables=None):
+        self.queries.append(query)
+        if self.legacy and "failureMessage" in query:
+            raise RuntimeError(
+                "GraphQL errors: Cannot query field 'failureMessage' on type 'Simulation'"
+            )
+        return {
+            "getSimulation": {
+                "id": variables["id"],
+                "status": "FAILED",
+                **(
+                    {}
+                    if self.legacy
+                    else {
+                        "failureCode": "SCU_BALANCE_INSUFFICIENT",
+                        "failureMessage": "This simulation needs more SCUs.",
+                    }
+                ),
+            }
+        }
+
+
 def test_check_compute_stack_exists_filters_by_account_id():
     client = StackQueryCapturingGraphQLClient()
 
@@ -139,6 +167,25 @@ def test_compute_provisioning_mode_rejects_unknown_contract():
 
     with pytest.raises(RuntimeError, match="does not expose a supported compute"):
         client.get_compute_provisioning_mode()
+
+
+def test_simulation_status_details_include_customer_safe_failure_message():
+    client = SimulationStatusGraphQLClient()
+
+    assert client.get_simulation_status_details("simulation-1") == {
+        "id": "simulation-1",
+        "status": "FAILED",
+        "failureCode": "SCU_BALANCE_INSUFFICIENT",
+        "failureMessage": "This simulation needs more SCUs.",
+    }
+    assert len(client.queries) == 1
+
+
+def test_simulation_status_details_fall_back_for_older_cloud_schemas():
+    client = SimulationStatusGraphQLClient(legacy=True)
+
+    assert client.get_simulation_status("simulation-legacy") == "FAILED"
+    assert len(client.queries) == 2
 
 
 def test_deploy_storage_stack_does_not_send_environment_argument():
