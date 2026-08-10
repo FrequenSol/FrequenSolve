@@ -26,6 +26,12 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
 
+from frequensolve._cloud_credentials import (
+    CREDENTIAL_CACHE_BINDING_KEY,
+    credential_cache_binding,
+    credential_cache_binding_matches,
+    profile_credentials_path,
+)
 from frequensolve.mcp_server._contracts import (
     CLOUD_READ_CONTRACT_ID,
     CLOUD_READ_CONTRACT_VERSION,
@@ -137,6 +143,10 @@ _DOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _REGION_PATTERN = re.compile(r"^[a-z]{2}(?:-gov)?-[a-z]+-\d$")
 _USER_POOL_SUFFIX_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _CLIENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_IDENTITY_POOL_SUFFIX_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 _SUB_PATTERN = re.compile(r"^[A-Za-z0-9:_-]{1,128}$")
 _RELATIVE_RESULT_PATTERN = re.compile(
     r"^(?![/\\])(?![A-Za-z][A-Za-z0-9+.-]*:)"
@@ -239,6 +249,7 @@ class _CloudConfig:
     region: str
     user_pool_id: str
     client_id: str
+    identity_pool_id: str
     graphql_url: str
 
 
@@ -1011,6 +1022,7 @@ def _load_cached_cloud_config(profile: _SiteProfile) -> _CloudConfig:
         api = document["api"]
         user_pool_id = auth["userPoolId"]
         client_id = auth["clientId"]
+        identity_pool_id = auth["identityPoolId"]
         graphql_url = api["graphqlUrl"]
     except (KeyError, TypeError):
         raise CloudReadError(
@@ -1025,6 +1037,10 @@ def _load_cached_cloud_config(profile: _SiteProfile) -> _CloudConfig:
         or _USER_POOL_SUFFIX_PATTERN.fullmatch(user_pool_id[len(region) + 1 :]) is None
         or not isinstance(client_id, str)
         or _CLIENT_ID_PATTERN.fullmatch(client_id) is None
+        or not isinstance(identity_pool_id, str)
+        or not identity_pool_id.startswith(f"{region}:")
+        or _IDENTITY_POOL_SUFFIX_PATTERN.fullmatch(identity_pool_id[len(region) + 1 :])
+        is None
         or not isinstance(graphql_url, str)
         or not _is_safe_appsync_url(graphql_url, region)
     ):
@@ -1036,6 +1052,7 @@ def _load_cached_cloud_config(profile: _SiteProfile) -> _CloudConfig:
         region=region,
         user_pool_id=user_pool_id,
         client_id=client_id,
+        identity_pool_id=identity_pool_id,
         graphql_url=graphql_url,
     )
 
@@ -1090,7 +1107,11 @@ def _build_authenticated_transport(profile_name: str | None) -> _Transport:
         ) from None
 
     try:
-        tokens, id_claims = _select_cached_identity(profile.name, config=config)
+        tokens, id_claims = _select_cached_identity(
+            profile.name,
+            domain=profile.domain,
+            config=config,
+        )
         user = _get_verified_cognito_user(
             requests,
             config=config,
@@ -1186,24 +1207,29 @@ def _get_verified_cognito_user(
 def _credential_paths(profile_name: str) -> tuple[Path, ...]:
     from frequensolve.storage import frequensolve_home
 
-    root = frequensolve_home()
-    return (
-        root / "cloud" / "credentials",
-        # Earlier development builds could write these two cache layouts.
-        # They remain read-only compatibility fallbacks when the canonical
-        # package-owned cache above does not exist.
-        root / "cloud" / f"credentials_{profile_name}",
-        root / "credentials",
-    )
+    return (profile_credentials_path(frequensolve_home(), profile_name),)
 
 
 def _select_cached_identity(
     profile_name: str,
     *,
+    domain: str,
     config: _CloudConfig,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    expected_binding = credential_cache_binding(
+        profile_name=profile_name,
+        domain=domain,
+        region=config.region,
+        user_pool_id=config.user_pool_id,
+        client_id=config.client_id,
+        identity_pool_id=config.identity_pool_id,
+    )
     for path in _credential_paths(profile_name):
-        tokens = _read_token_cache(path, missing_ok=True)
+        tokens = _read_token_cache(
+            path,
+            missing_ok=True,
+            expected_binding=expected_binding,
+        )
         if tokens is None:
             continue
         try:
@@ -1234,6 +1260,7 @@ def _read_token_cache(
     path: Path,
     *,
     missing_ok: bool = False,
+    expected_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     try:
         raw = _read_bounded_regular_file(
@@ -1259,8 +1286,13 @@ def _read_token_cache(
         "access_token",
         "refresh_token",
         "expires_at",
+        CREDENTIAL_CACHE_BINDING_KEY,
     }
     if any(not isinstance(key, str) or key not in allowed for key in document):
+        raise CloudReadError("AUTHENTICATION_REQUIRED", "identity-invalid")
+    if expected_binding is not None and not credential_cache_binding_matches(
+        document, expected_binding
+    ):
         raise CloudReadError("AUTHENTICATION_REQUIRED", "identity-invalid")
     for required in ("id_token", "access_token"):
         value = document.get(required)

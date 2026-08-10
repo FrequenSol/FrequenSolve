@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from frequensolve._cloud_credentials import profile_credentials_filename
 from frequensolve.storage import frequensolve_home
 
 
@@ -16,14 +17,21 @@ def _safe_domain(domain: str) -> str:
     return domain.replace(":", "_").replace("/", "_")
 
 
-def cloud_credentials_path() -> Path:
+def cloud_credentials_path(profile_name: str | None = None) -> Path:
     """Return the current cloud credentials cache path.
+
+    Profile-aware callers receive an isolated cache entry. The unscoped path is
+    retained for direct ``CognitoAuth`` compatibility, but configured sites do
+    not use or migrate it.
 
     Returns:
         Path to the credentials file under the cloud-specific cache directory.
     """
 
-    return cloud_cache_dir() / "credentials"
+    cache_dir = cloud_cache_dir()
+    if profile_name is not None:
+        return cache_dir / profile_credentials_filename(profile_name)
+    return cache_dir / "credentials"
 
 
 def legacy_credentials_path() -> Path:

@@ -263,6 +263,8 @@ def Site(
     site_type = _site_type(site_config)
     kwargs = _site_kwargs(site_config, site_type)
     site_class = _resolve_site_class(site_type)
+    if _SITE_TYPES.get(_normalize_site_type(site_type)) == "AWSSite":
+        kwargs["_credential_profile"] = selected_profile
     site = site_class(**kwargs)
     site._site_config_path = site_config_path(config_path)
     site._site_profile = selected_profile

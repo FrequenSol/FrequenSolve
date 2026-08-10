@@ -11,9 +11,16 @@ import base64
 import json
 import logging
 import os
+import tempfile
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, Optional
 
+from frequensolve._cloud_credentials import (
+    CREDENTIAL_CACHE_BINDING_KEY,
+    credential_cache_binding,
+    credential_cache_binding_matches,
+)
 from frequensolve._optional import optional_dependency_error
 from frequensolve.orchestrator.sites.aws.cache_paths import (
     cloud_credentials_path,
@@ -32,6 +39,14 @@ except ModuleNotFoundError as exc:
     ) from exc
 
 logger = logging.getLogger(__name__)
+
+_TOKEN_CACHE_FIELDS = (
+    "email",
+    "id_token",
+    "access_token",
+    "refresh_token",
+    "expires_at",
+)
 
 
 def _cognito_issuer(*, region: str, user_pool_id: str) -> str:
@@ -73,7 +88,7 @@ class CognitoAuth:
 
     This class manages the complete authentication flow:
     1. Authenticate with Cognito User Pool (email/password)
-    2. Store tokens locally (~/.frequensolve/cloud/credentials)
+    2. Store tokens in a profile-scoped local cache for configured sites
     3. Automatically refresh expired tokens
     4. Exchange ID token for AWS credentials via Identity Pool
 
@@ -82,6 +97,9 @@ class CognitoAuth:
         client_id: Cognito App Client ID
         identity_pool_id: Cognito Identity Pool ID
         region: AWS region (default: us-east-1)
+        profile_name: Selected site profile for an isolated credential cache.
+        domain: Cloud domain included in the profile cache binding.
+        expected_email: Optional configured user that cached tokens must match.
     """
 
     def __init__(
@@ -90,19 +108,36 @@ class CognitoAuth:
         client_id: str,
         identity_pool_id: str,
         region: str = "us-east-1",
+        profile_name: Optional[str] = None,
+        domain: Optional[str] = None,
+        expected_email: Optional[str] = None,
     ):
         self.user_pool_id = user_pool_id
         self.client_id = client_id
         self.identity_pool_id = identity_pool_id
         self.region = region
+        self.profile_name = profile_name
+        self.expected_email = expected_email
 
         # Initialize AWS clients
         self.cognito_client = boto3.client("cognito-idp", region_name=region)
         self.identity_client = boto3.client("cognito-identity", region_name=region)
 
         # Path to credentials file
-        self.credentials_path = cloud_credentials_path()
+        self.credentials_path = cloud_credentials_path(profile_name)
         self.legacy_credentials_path = legacy_credentials_path()
+        self.cache_binding = (
+            credential_cache_binding(
+                profile_name=profile_name,
+                domain=domain or "",
+                region=region,
+                user_pool_id=user_pool_id,
+                client_id=client_id,
+                identity_pool_id=identity_pool_id,
+            )
+            if profile_name is not None
+            else None
+        )
 
     def login(self, email: str, password: str) -> Dict[str, str]:
         """Authenticate user with Cognito User Pool.
@@ -309,11 +344,11 @@ class CognitoAuth:
                 different Cloud profile
         """
         if not self.credentials_path.exists():
-            if self.legacy_credentials_path.exists():
+            if self.cache_binding is None and self.legacy_credentials_path.exists():
                 try:
                     with open(self.legacy_credentials_path, "r") as f:
                         tokens = json.load(f)
-                    self._validate_cached_token_scope(tokens)
+                    tokens = self._validate_cached_tokens(tokens)
                     self.save_tokens(tokens)
                     logger.info("Migrated cached credentials to cloud cache directory")
                     return tokens
@@ -321,17 +356,50 @@ class CognitoAuth:
                     raise ValueError(f"Failed to read credentials file: {e}") from e
             raise ValueError(
                 "No cached credentials found. Please login first.\n"
-                'Run: site = AWSSite.from_cognito(email="your@email.com", password="...")'
+                "Run fs.Site() for an interactive configured login, or pass "
+                "email and password to AWSSite."
             )
 
         try:
             with open(self.credentials_path, "r") as f:
-                tokens = json.load(f)
-            self._validate_cached_token_scope(tokens)
+                document = json.load(f)
+            tokens = self._validate_cached_tokens(document)
             logger.debug("Using cached credentials")
             return tokens
         except (json.JSONDecodeError, IOError) as e:
             raise ValueError(f"Failed to read credentials file: {e}") from e
+
+    def _validate_cached_tokens(self, document: object) -> Dict[str, str]:
+        """Validate cache binding and token scope, returning only token fields."""
+
+        if not isinstance(document, dict):
+            raise ValueError("Cached credentials are invalid. Please login again.")
+        if self.cache_binding is not None and not credential_cache_binding_matches(
+            document, self.cache_binding
+        ):
+            raise ValueError(
+                "Cached credentials do not match the selected FrequenSol Cloud "
+                "profile. Please login again."
+            )
+        allowed_fields = {*_TOKEN_CACHE_FIELDS, CREDENTIAL_CACHE_BINDING_KEY}
+        if any(
+            not isinstance(key, str) or key not in allowed_fields for key in document
+        ):
+            raise ValueError("Cached credentials are invalid. Please login again.")
+
+        tokens = dict(document)
+        tokens.pop(CREDENTIAL_CACHE_BINDING_KEY, None)
+        self._validate_cached_token_scope(tokens)
+        cached_email = tokens.get("email")
+        if self.expected_email is not None and (
+            not isinstance(cached_email, str)
+            or cached_email.casefold() != self.expected_email.casefold()
+        ):
+            raise ValueError(
+                "Cached credentials do not match the configured FrequenSol Cloud "
+                "user. Please login again."
+            )
+        return tokens
 
     def _validate_cached_token_scope(self, tokens: object) -> None:
         """Reject cached tokens issued for another configured Cloud profile."""
@@ -378,11 +446,45 @@ class CognitoAuth:
         Args:
             tokens: Dict containing tokens to save
         """
-        with open(self.credentials_path, "w") as f:
-            json.dump(tokens, f, indent=2)
+        document = {
+            field: tokens[field] for field in _TOKEN_CACHE_FIELDS if field in tokens
+        }
+        if self.cache_binding is not None:
+            document[CREDENTIAL_CACHE_BINDING_KEY] = self.cache_binding
 
-        # Make file readable only by owner (chmod 600)
-        os.chmod(self.credentials_path, 0o600)
+        temporary_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=self.credentials_path.parent,
+                prefix=f".{self.credentials_path.name}.",
+                delete=False,
+            ) as file:
+                temporary_path = Path(file.name)
+                os.chmod(temporary_path, 0o600)
+                json.dump(document, file, indent=2)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary_path, self.credentials_path)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
+
+    def cached_identity(self, tokens: Dict[str, str]) -> Dict[str, str]:
+        """Return non-secret identity details suitable for verbose status output."""
+
+        identity: Dict[str, str] = {}
+        email = tokens.get("email")
+        if isinstance(email, str) and email:
+            identity["email"] = email
+        try:
+            claims = _decode_jwt_payload(tokens["id_token"])
+        except (KeyError, ValueError, TypeError):
+            return identity
+        account_id = claims.get("custom:accountId")
+        if isinstance(account_id, str) and account_id:
+            identity["account"] = account_id
+        return identity
 
     def _is_token_expired(self, tokens: Dict[str, str]) -> bool:
         """Check if ID token is expired.
@@ -405,7 +507,10 @@ class CognitoAuth:
 
     def clear_cached_tokens(self) -> None:
         """Remove cached credentials file."""
-        for path in (self.credentials_path, self.legacy_credentials_path):
+        paths = [self.credentials_path]
+        if self.cache_binding is None:
+            paths.append(self.legacy_credentials_path)
+        for path in paths:
             if path.exists():
                 path.unlink()
 
