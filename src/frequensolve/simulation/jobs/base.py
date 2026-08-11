@@ -24,6 +24,7 @@ from frequensolve.simulation.outputs import (
     TraceOutput,
 )
 from frequensolve.simulation.simulation import BaseSimulation
+from frequensolve.units import ureg
 
 __all__ = [
     "JobLayout",
@@ -391,9 +392,7 @@ class BaseJob(
             if len(self.k_weights) != len(self.k_list):
                 raise ValueError("BaseJob k_weights must match k_list length")
         if self.k_units is not None:
-            self.k_units = str(self.k_units).strip()
-            if not self.k_units:
-                raise ValueError("BaseJob k_units must be a non-empty string")
+            self.k_units = self._normalize_wavenumber_units(self.k_units)
         if not isinstance(self.outputs, JobOutputs):
             self.outputs = JobOutputs(self.outputs)
 
@@ -411,6 +410,19 @@ class BaseJob(
         if not np.all(np.isfinite(array)):
             raise ValueError(f"BaseJob {field_name} values must be finite")
         return array.tolist()
+
+    @staticmethod
+    def _normalize_wavenumber_units(units: str) -> str:
+        units = str(units).strip()
+        if not units:
+            raise ValueError("BaseJob k_units must be a non-empty string")
+        try:
+            ureg.Quantity(1.0, units).to("1/m")
+        except Exception as exc:
+            raise ValueError(
+                "BaseJob k_units must be valid inverse-length units"
+            ) from exc
+        return units
 
     def __iadd__(self, output: Union[Output, Iterable[Output]]) -> "BaseJob":
         self.outputs += output

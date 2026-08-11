@@ -310,6 +310,30 @@ def test_validation_requires_k_list_for_half_dimension_jobs(tmp_path):
     assert "job.k_list.required" in _codes(report)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("k_list", [[-0.01, 0.0, 0.01]], "job.k_list.invalid"),
+        ("k_list", [float("nan")], "job.k_list.invalid"),
+        ("k_list", ["not-a-number"], "job.k_list.invalid"),
+        ("k_weights", [[0.5, 1.0, 0.5]], "job.k_weights.invalid"),
+        ("k_weights", [float("inf")], "job.k_weights.invalid"),
+        ("k_units", "m", "job.k_units.incompatible"),
+        ("k_units", "not-a-unit", "job.k_units.incompatible"),
+    ],
+)
+def test_validation_rechecks_mutated_wavenumber_contract(tmp_path, field, value, code):
+    job = _simple_job(tmp_path)
+    job.simulation.dimension = 2.5
+    job.k_list = [-0.01, 0.0, 0.01]
+    setattr(job, field, value)
+
+    report = job.validate()
+
+    assert not report.ok
+    assert code in _codes(report)
+
+
 def test_validation_skips_source_range_when_external_count_unknown(tmp_path):
     job = _simple_job(tmp_path)
     source_file = tmp_path / "sources.h5"

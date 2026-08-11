@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
 from frequensolve.simulation.outputs import JobOutputs
+from frequensolve.units import ureg
 from frequensolve.util.physics import canonical_dimension
 
 from .geometry import _build_context, _ValidationContext
@@ -115,35 +118,82 @@ def _validate_half_dimension_wavenumbers(job: Any, ctx: _ValidationContext) -> N
     except ValueError:
         return
 
-    k_list = getattr(job, "k_list", None)
-    k_count = _optional_sequence_length(k_list)
-    if dimension == 2.5 and k_count == 0:
+    k_count, k_present, k_valid = _validate_wavenumber_sequence(
+        getattr(job, "k_list", None),
+        field_name="k_list",
+        code="job.k_list.invalid",
+        ctx=ctx,
+    )
+    if dimension == 2.5 and not k_present:
         ctx.report.error(
             "job.k_list.required",
             "2.5D jobs require signed physical k_list wavenumbers.",
             path="k_list",
         )
 
-    k_weights = getattr(job, "k_weights", None)
-    k_weight_count = _optional_sequence_length(k_weights)
-    if k_weight_count and k_count == 0:
+    k_weight_count, k_weights_present, k_weights_valid = _validate_wavenumber_sequence(
+        getattr(job, "k_weights", None),
+        field_name="k_weights",
+        code="job.k_weights.invalid",
+        ctx=ctx,
+    )
+    if k_weights_present and k_weights_valid and not k_present:
         ctx.report.error(
             "job.k_weights.requires_k_list",
             "k_weights requires matching k_list values.",
             path="k_weights",
         )
-    elif k_weight_count and k_weight_count != k_count:
+    elif (
+        k_weights_present
+        and k_weights_valid
+        and k_present
+        and k_valid
+        and k_weight_count != k_count
+    ):
         ctx.report.error(
             "job.k_weights.length_mismatch",
             "k_weights must have the same number of values as k_list.",
             path="k_weights",
         )
 
+    k_units = getattr(job, "k_units", None)
+    if k_units is not None:
+        try:
+            units = str(k_units).strip()
+            if not units:
+                raise ValueError("empty unit expression")
+            ureg.Quantity(1.0, units).to("1/m")
+        except Exception:
+            ctx.report.error(
+                "job.k_units.incompatible",
+                "k_units must be valid inverse-length units.",
+                path="k_units",
+            )
 
-def _optional_sequence_length(value: Any) -> int:
+
+def _validate_wavenumber_sequence(
+    value: Any,
+    *,
+    field_name: str,
+    code: str,
+    ctx: _ValidationContext,
+) -> tuple[int, bool, bool]:
     if value is None:
-        return 0
+        return 0, False, True
     try:
-        return len(value)
-    except TypeError:
-        return 0
+        array = np.asarray(value, dtype=float)
+    except (TypeError, ValueError):
+        array = None
+    if (
+        array is None
+        or array.ndim != 1
+        or array.size == 0
+        or not np.all(np.isfinite(array))
+    ):
+        ctx.report.error(
+            code,
+            f"{field_name} must be a nonempty 1D list of finite numbers.",
+            path=field_name,
+        )
+        return 0, True, False
+    return int(array.size), True, True

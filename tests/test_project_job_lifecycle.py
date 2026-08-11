@@ -712,6 +712,7 @@ def test_time_domain_job_exports_half_dimension_wavenumber_contract(tmp_path):
     ("kwargs", "message"),
     [
         ({"k_list": []}, "must contain at least one"),
+        ({"k_list": [[-0.01, 0.0, 0.01]]}, "must be a 1D list"),
         ({"k_list": [0.0, float("nan")]}, "must be finite"),
         ({"k_weights": [1.0]}, "requires k_list"),
         (
@@ -719,6 +720,14 @@ def test_time_domain_job_exports_half_dimension_wavenumber_contract(tmp_path):
             "must match k_list length",
         ),
         ({"k_list": [0.0], "k_units": "  "}, "must be a non-empty string"),
+        (
+            {"k_list": [0.0], "k_units": "m"},
+            "must be valid inverse-length units",
+        ),
+        (
+            {"k_list": [0.0], "k_units": "not-a-unit"},
+            "must be valid inverse-length units",
+        ),
     ],
 )
 def test_job_rejects_invalid_wavenumber_contract(tmp_path, kwargs, message):
