@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from frequensolve.simulation.outputs import JobOutputs
+from frequensolve.util.physics import canonical_dimension
 
 from .geometry import _build_context, _ValidationContext
 from .outputs import _validate_frequencies, _validate_outputs
@@ -93,6 +94,7 @@ def validate_job(
 
 def _validate_job(job: Any, ctx: _ValidationContext) -> None:
     _validate_frequencies(getattr(job, "f_list", None), ctx.report)
+    _validate_half_dimension_wavenumbers(job, ctx)
     outputs = getattr(job, "outputs", None)
     if not isinstance(outputs, JobOutputs):
         try:
@@ -105,3 +107,43 @@ def _validate_job(job: Any, ctx: _ValidationContext) -> None:
             )
             return
     _validate_outputs(outputs, job, ctx)
+
+
+def _validate_half_dimension_wavenumbers(job: Any, ctx: _ValidationContext) -> None:
+    try:
+        dimension = canonical_dimension(getattr(ctx.simulation, "dimension", None))
+    except ValueError:
+        return
+
+    k_list = getattr(job, "k_list", None)
+    k_count = _optional_sequence_length(k_list)
+    if dimension == 2.5 and k_count == 0:
+        ctx.report.error(
+            "job.k_list.required",
+            "2.5D jobs require signed physical k_list wavenumbers.",
+            path="k_list",
+        )
+
+    k_weights = getattr(job, "k_weights", None)
+    k_weight_count = _optional_sequence_length(k_weights)
+    if k_weight_count and k_count == 0:
+        ctx.report.error(
+            "job.k_weights.requires_k_list",
+            "k_weights requires matching k_list values.",
+            path="k_weights",
+        )
+    elif k_weight_count and k_weight_count != k_count:
+        ctx.report.error(
+            "job.k_weights.length_mismatch",
+            "k_weights must have the same number of values as k_list.",
+            path="k_weights",
+        )
+
+
+def _optional_sequence_length(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return len(value)
+    except TypeError:
+        return 0

@@ -300,6 +300,16 @@ def test_validation_catches_wavefield_source_id_range(tmp_path):
     assert "outputs.source_id.out_of_range" in _codes(report)
 
 
+def test_validation_requires_k_list_for_half_dimension_jobs(tmp_path):
+    job = _simple_job(tmp_path)
+    job.simulation.dimension = 2.5
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "job.k_list.required" in _codes(report)
+
+
 def test_validation_skips_source_range_when_external_count_unknown(tmp_path):
     job = _simple_job(tmp_path)
     source_file = tmp_path / "sources.h5"

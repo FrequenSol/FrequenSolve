@@ -677,6 +677,62 @@ def test_time_domain_job_supports_damping_factor_and_direct_laplace(tmp_path):
     assert [freq.imag for freq in direct.f_list] == pytest.approx([-0.25, -0.25])
 
 
+def test_time_domain_job_exports_half_dimension_wavenumber_contract(tmp_path):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(
+        name="acoustic_25d",
+        physics="acoustic",
+        dimension=2.5,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    sim.save()
+    job = TimeDomainJob(
+        name="time",
+        simulation=sim,
+        f_min=0.0,
+        f_max=1.0,
+        T_max=2.0,
+        k_list=[-0.01, 0.0, 0.01],
+        k_weights=[0.5, 1.0, 0.5],
+        k_units="1/km",
+    )
+
+    payload = job.to_fs(project_relative=True)
+    loaded = BaseJob.from_fs(payload, project_path=project.path)
+
+    assert payload["k_list"] == [-0.01, 0.0, 0.01]
+    assert payload["k_weights"] == [0.5, 1.0, 0.5]
+    assert payload["k_units"] == "1/km"
+    assert loaded.k_list == [-0.01, 0.0, 0.01]
+    assert loaded.k_weights == [0.5, 1.0, 0.5]
+    assert loaded.k_units == "1/km"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"k_list": []}, "must contain at least one"),
+        ({"k_list": [0.0, float("nan")]}, "must be finite"),
+        ({"k_weights": [1.0]}, "requires k_list"),
+        (
+            {"k_list": [-0.01, 0.0, 0.01], "k_weights": [1.0]},
+            "must match k_list length",
+        ),
+        ({"k_list": [0.0], "k_units": "  "}, "must be a non-empty string"),
+    ],
+)
+def test_job_rejects_invalid_wavenumber_contract(tmp_path, kwargs, message):
+    _, sim = _project_with_trace_simulation(tmp_path)
+
+    with pytest.raises(ValueError, match=message):
+        FrequencyDomainJob(
+            name="freq",
+            simulation=sim,
+            f_list=[1.0],
+            **kwargs,
+        )
+
+
 def test_local_submit_autosaves_job_and_simulation(monkeypatch, tmp_path):
     monkeypatch.setattr(LocalSite, "_get_solver_path", lambda self: "/bin/echo")
     _, sim = _project_with_trace_simulation(tmp_path)
