@@ -584,14 +584,15 @@ class GraphQLClient:
 
         return result["submitJob"]
 
-    def get_simulation_status(self, simulation_id: str) -> str:
-        """Get simulation status by ID.
+    def get_simulation_status_details(self, simulation_id: str) -> Dict[str, Any]:
+        """Get simulation status and customer-safe failure details by ID.
 
         Args:
             simulation_id: The simulation ID to query.
 
         Returns:
-            Simulation status string (e.g., 'PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELED').
+            Mapping containing ``status`` and any customer-safe failure fields
+            exposed by the Cloud environment.
 
         Raises:
             RuntimeError: If query fails or simulation not found.
@@ -601,26 +602,57 @@ class GraphQLClient:
                 getSimulation(id: $id) {
                     id
                     status
+                    failureCode
+                    failureMessage
                 }
             }
         """
 
         variables = {"id": simulation_id}
-
-        result = self.execute(query, variables)
+        try:
+            result = self.execute(query, variables)
+        except RuntimeError as exc:
+            error_message = str(exc)
+            unsupported_failure_fields = (
+                "failureCode" in error_message or "failureMessage" in error_message
+            ) and (
+                "Cannot query field" in error_message or "is undefined" in error_message
+            )
+            if not unsupported_failure_fields:
+                raise
+            legacy_query = """
+                query GetSimulation($id: ID!) {
+                    getSimulation(id: $id) {
+                        id
+                        status
+                    }
+                }
+            """
+            result = self.execute(legacy_query, variables)
 
         if "getSimulation" not in result or not result["getSimulation"]:
             raise RuntimeError(
                 f"Simulation not found or access denied: {simulation_id}"
             )
 
-        status = result["getSimulation"].get("status")
+        details = result["getSimulation"]
+        status = details.get("status")
         if not status:
             raise RuntimeError(
                 f"Simulation status not found in response: {simulation_id}"
             )
 
-        return status
+        return {
+            "id": details.get("id"),
+            "status": status,
+            "failureCode": details.get("failureCode"),
+            "failureMessage": details.get("failureMessage"),
+        }
+
+    def get_simulation_status(self, simulation_id: str) -> str:
+        """Get a simulation status string by ID."""
+
+        return str(self.get_simulation_status_details(simulation_id)["status"])
 
     def deploy_storage_stack(self, environment: Optional[str] = None) -> Dict[str, Any]:
         """Deploy storage infrastructure stack.

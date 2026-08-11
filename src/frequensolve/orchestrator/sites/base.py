@@ -531,6 +531,7 @@ class RunResult:
         suffix: Optional[Union[str, tuple[str, ...]]] = None,
         base: Optional[Union[str, Path]] = None,
         existing: bool = False,
+        fetch_missing: bool = True,
     ) -> list[Path]:
         """Return output files reported by the completed run.
 
@@ -540,11 +541,31 @@ class RunResult:
             base: Optional base directory used to resolve relative artifact
                 paths.
             existing: If ``True``, return only files that currently exist.
+            fetch_missing: If ``True`` and this run is remote-backed, ask the
+                site to fetch filesystem outputs when no matching files are
+                already available locally.
 
         Returns:
             List of matching output paths.
         """
 
+        metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
+        if metadata is None:
+            return []
+        files = metadata.output_files(
+            kind=kind,
+            suffix=suffix,
+            base=base,
+            existing=existing,
+        )
+        if files or self.site is None or not fetch_missing:
+            return files
+
+        fetch_output_files = getattr(self.site, "fetch_output_files", None)
+        if not callable(fetch_output_files):
+            return files
+
+        fetch_output_files(self.job, kind=kind, suffix=suffix)
         metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
         if metadata is None:
             return []

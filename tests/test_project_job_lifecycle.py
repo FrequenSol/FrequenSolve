@@ -414,6 +414,56 @@ def test_run_metadata_filters_output_files(tmp_path):
     ]
 
 
+def test_run_result_fetches_remote_output_files_when_matching_files_are_missing(
+    tmp_path,
+):
+    result_path = tmp_path / "results"
+    expected = result_path / "ParaView" / "pv_00000.vtu"
+
+    class FetchingSite:
+        def __init__(self):
+            self.calls = 0
+            self.filters = None
+
+        def fetch_output_files(self, job, *, kind=None, suffix=None):
+            self.calls += 1
+            self.filters = (kind, suffix)
+            expected.parent.mkdir(parents=True)
+            expected.write_text("<VTKFile></VTKFile>")
+
+    site = FetchingSite()
+    result = RunResult(
+        job=object(),
+        status=JobStatus(state="completed", return_code=0),
+        site=site,
+        run_metadata=RunMetadata(result_path=result_path),
+    )
+
+    assert result.output_files(suffix=".vtu", existing=True) == [expected]
+    assert site.calls == 1
+    assert site.filters == (None, ".vtu")
+
+
+def test_run_result_can_skip_remote_output_file_fetch(tmp_path):
+    class FetchingSite:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_output_files(self, job, *, kind=None, suffix=None):
+            self.calls += 1
+
+    site = FetchingSite()
+    result = RunResult(
+        job=object(),
+        status=JobStatus(state="completed", return_code=0),
+        site=site,
+        run_metadata=RunMetadata(result_path=tmp_path / "results"),
+    )
+
+    assert result.output_files(suffix=".vtu", fetch_missing=False) == []
+    assert site.calls == 0
+
+
 def test_run_metadata_discovers_unregistered_vtu_files(tmp_path):
     result_path = tmp_path / "results"
     paraview = result_path / "ParaView"
