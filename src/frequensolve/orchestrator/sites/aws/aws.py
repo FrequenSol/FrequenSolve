@@ -3,7 +3,9 @@
 import getpass
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import uuid
 import warnings
 from dataclasses import dataclass
@@ -1218,6 +1220,8 @@ class AWSSite(BaseSite):
             TypeError: If any supplied item is not an ``ImagingJob``.
             ValueError: If an image directory is outside its project root and
                 therefore cannot be mapped to the Cloud project prefix.
+            FileNotFoundError: If the remote output has no aggregate
+                ``image.h5`` for the completed run.
         """
 
         jobs, single = self._as_jobs(job)
@@ -1237,11 +1241,27 @@ class AWSSite(BaseSite):
                     "project-relative output path."
                 ) from exc
 
-            s3_image_path = (
-                f"s3://{self.config.s3_bucket}/{project_path.name}/"
-                f"{relative_image_path.as_posix()}"
-            )
-            self.get(s3_image_path, local_image_path)
+            image_key = project_path.name
+            if relative_image_path != Path("."):
+                image_key = f"{image_key}/{relative_image_path.as_posix()}"
+            s3_image_path = f"s3://{self.config.s3_bucket}/{image_key}"
+
+            with tempfile.TemporaryDirectory(prefix="frequensolve-images-") as temp:
+                staged_image_path = Path(temp) / "imaging"
+                self.get(s3_image_path, staged_image_path)
+                staged_aggregate = staged_image_path / "image.h5"
+                if not staged_aggregate.is_file():
+                    raise FileNotFoundError(
+                        f"AWS imaging output {s3_image_path} does not contain "
+                        "the required aggregate image.h5. The existing local "
+                        "image directory was not used."
+                    )
+                local_image_path.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(
+                    staged_image_path,
+                    local_image_path,
+                    dirs_exist_ok=True,
+                )
             self._emit(f"Fetched AWS images from {s3_image_path}")
             images[item.name] = item.load_images()
 

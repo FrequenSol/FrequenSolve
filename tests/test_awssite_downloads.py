@@ -137,3 +137,48 @@ def test_fetch_image_downloads_project_relative_image_directory(tmp_path):
             "Prefix": "imaging-project/jobs/model/rtm/results/imaging/",
         }
     ]
+
+
+def test_fetch_image_omits_dot_segment_for_project_root_output(tmp_path):
+    project_path = tmp_path / "imaging-project"
+    image_key = "imaging-project/image.h5"
+    s3_client = FakeS3Client({image_key: "current image"})
+    site = make_site(s3_client)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+
+    job = object.__new__(ImagingJob)
+    job.name = "rtm"
+    job.simulation = SimpleNamespace(project_path=project_path, name="model")
+    job.save_path = project_path
+    expected = object()
+    job.load_images = lambda: expected
+
+    images = site.fetch_image(job)
+
+    assert images is expected
+    assert (project_path / "image.h5").read_text() == "current image"
+    assert s3_client.paginate_calls == [
+        {"Bucket": "bucket", "Prefix": "imaging-project/"}
+    ]
+
+
+def test_fetch_image_rejects_missing_remote_aggregate_before_using_local(tmp_path):
+    project_path = tmp_path / "imaging-project"
+    image_path = project_path / "jobs" / "model" / "rtm" / "results" / "imaging"
+    image_path.mkdir(parents=True)
+    (image_path / "image.h5").write_text("stale image")
+    image_key = "imaging-project/jobs/model/rtm/results/imaging/image_1.h5"
+    s3_client = FakeS3Client({image_key: "current shard"})
+    site = make_site(s3_client)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+
+    job = object.__new__(ImagingJob)
+    job.name = "rtm"
+    job.simulation = SimpleNamespace(project_path=project_path, name="model")
+    job.save_path = image_path
+    job.load_images = lambda: pytest.fail("stale local images must not be opened")
+
+    with pytest.raises(FileNotFoundError, match="required aggregate image.h5"):
+        site.fetch_image(job)
+
+    assert (image_path / "image.h5").read_text() == "stale image"
