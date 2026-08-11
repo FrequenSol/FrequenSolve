@@ -17,6 +17,17 @@ from frequensolve.simulation.simulation import CustomJSONEncoder
 if TYPE_CHECKING:
     from frequensolve.simulation.jobs.base import JobLayout
 
+_PROJECT_FILE_REFERENCE_KEYS = frozenset(
+    {
+        "file",
+        "layout_file",
+        "receiver_file",
+        "relation_file",
+        "source_file",
+        "srf_file",
+    }
+)
+
 
 class JobRemoteMixin:
     """Save and stage job inputs for local and remote execution.
@@ -424,10 +435,11 @@ class JobRemoteMixin:
     @staticmethod
     def _iter_file_references(value: Any) -> Iterable[str]:
         if isinstance(value, Mapping):
-            file_ref = value.get("file")
-            if isinstance(file_ref, (str, Path)):
-                yield JobRemoteMixin._strip_file_locator(file_ref)
-            for item in value.values():
+            for key, item in value.items():
+                if key in _PROJECT_FILE_REFERENCE_KEYS and isinstance(
+                    item, (str, Path)
+                ):
+                    yield JobRemoteMixin._strip_file_locator(item)
                 yield from JobRemoteMixin._iter_file_references(item)
         elif isinstance(value, list):
             for item in value:
