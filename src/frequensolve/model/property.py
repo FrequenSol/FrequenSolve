@@ -1132,13 +1132,24 @@ def remap(
 
     if outside_mode == "preserve":
         condition = (value_expr >= interval_lower) & (value_expr <= interval_upper)
+        lower_mag = _remap_bound_magnitude(to_lower, range_units)
+        upper_mag = _remap_bound_magnitude(to_upper, range_units)
+        clamp_lower, clamp_upper = (
+            (to_lower_node, to_upper_node)
+            if lower_mag <= upper_mag
+            else (to_upper_node, to_lower_node)
+        )
+        bounded_expression = {
+            "op": "clamp",
+            "args": [expression.to_fs(), clamp_lower, clamp_upper],
+        }
         return PropertyExpression(
             {
                 "op": "case",
                 "branches": [
                     {
                         "if": condition.to_fs(),
-                        "then": expression.to_fs(),
+                        "then": bounded_expression,
                     }
                 ],
                 "else": value_expr.to_fs(),

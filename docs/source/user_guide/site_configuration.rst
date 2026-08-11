@@ -593,6 +593,15 @@ a verified control socket are non-interactive and bounded by connection and
 command timeouts, so an expired socket produces an exception instead of an
 invisible credential prompt.
 
+The site CLI uses a bounded remote probe rather than relying only on the local
+OpenSSH master process when deciding that a shared connection is alive. Inspect
+managed connections with ``frequensolve site connections``. Close the default
+profile with ``frequensolve site disconnect``, select another one with
+``--profile``, or close every configured SSH connection with
+``frequensolve site disconnect --all``. A timed-out probe causes
+``frequensolve site connect`` to close and remove the stale socket before it
+authenticates again.
+
 At DEBUG logging level, ``rsync`` streams file names and ``-P`` transfer
 progress to the console. At INFO and higher levels, FrequenSolve runs rsync
 quietly with partial-transfer preservation and includes captured stderr only

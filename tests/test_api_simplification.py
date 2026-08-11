@@ -719,22 +719,29 @@ def test_remap_expression_macro_can_preserve_values_outside_source_range():
                     ],
                 },
                 "then": {
-                    "op": "add",
+                    "op": "clamp",
                     "args": [
-                        {"value": 600, "units": "m/s"},
                         {
-                            "op": "mul",
+                            "op": "add",
                             "args": [
+                                {"value": 600, "units": "m/s"},
                                 {
-                                    "op": "sub",
+                                    "op": "mul",
                                     "args": [
-                                        base_node,
-                                        {"value": 800, "units": "m/s"},
+                                        {
+                                            "op": "sub",
+                                            "args": [
+                                                base_node,
+                                                {"value": 800, "units": "m/s"},
+                                            ],
+                                        },
+                                        {"value": 2.0},
                                     ],
                                 },
-                                {"value": 2.0},
                             ],
                         },
+                        {"value": 600, "units": "m/s"},
+                        {"value": 1000, "units": "m/s"},
                     ],
                 },
             }
@@ -1748,6 +1755,7 @@ def test_wavefield_output_uses_grid_contract():
     output = WavefieldOutput(
         name="movie",
         field="pressure",
+        properties=["Vp", "Vs", "Rho"],
         dims=("z", "r"),
         coords={
             "z": [0.0, 0.1, 0.25, 0.5],
@@ -1762,6 +1770,7 @@ def test_wavefield_output_uses_grid_contract():
     assert output.grid["dims"] == ["z", "r"]
     assert payload["_type"] == "WavefieldOutput"
     assert payload["field"] == "pressure"
+    assert payload["properties"] == ["Vp", "Vs", "Rho"]
     assert "fields" not in payload
     assert payload["grid"]["_type"] == "XArrayGrid"
     assert payload["grid"]["dims"] == ["z", "r"]
@@ -4035,6 +4044,7 @@ def test_job_wavefields_use_output_requests_not_trace_receiver_groups(tmp_path):
     job += WavefieldOutput(
         name="pressure_wavefield",
         field="pressure",
+        properties=["Vp", "Vs", "Rho"],
         grid=wavefield_grid,
     )
     job.save()
@@ -4060,6 +4070,15 @@ def test_job_wavefields_use_output_requests_not_trace_receiver_groups(tmp_path):
     assert job.wavefield_outputs["pressure_wavefield"]["components"] == [
         "pressure_wavefield:pressure"
     ]
+    assert job.wavefield_outputs["pressure_wavefield"]["requested_properties"] == [
+        "Vp",
+        "Vs",
+        "Rho",
+    ]
+    assert job.wavefield_outputs["pressure_wavefield"]["properties"]["Vp"] == {
+        "dataset": "/properties/Vp",
+        "static": True,
+    }
     payload = job.to_fs()
     assert payload["Outputs"]["wavefields"][0]["name"] == "pressure_wavefield"
     assert "pressure_wavefield" not in {
@@ -4717,6 +4736,37 @@ def test_trace_dataset_uses_named_wavefield_packed_products(tmp_path):
 
     assert full_fd.values[:, 0].real.tolist() == [1.0, 2.0]
     assert fracture_fd.values[:, 0].real.tolist() == [3.0, 4.0]
+
+
+def test_trace_dataset_reads_static_wavefield_properties(tmp_path):
+    packed = tmp_path / "wavefield.h5"
+    _write_indexed_packed_trace_product(
+        packed,
+        "wavefield",
+        frequencies=[1.0],
+        values=[1.0],
+    )
+    with h5py.File(packed, "a") as h5:
+        vp = h5.create_dataset("properties/Vp", data=[1500.0])
+        vp.attrs["units"] = ["m/s"]
+
+    store = TraceStore(
+        metadata={
+            "groups": ["wavefield"],
+            "f_map": {1: 1.0},
+            "df": 1.0,
+            "f_max": 1.0,
+        },
+        files=[packed],
+    )
+    store.consolidate()
+    traces = TraceDataset.__new__(TraceDataset)
+    traces._store = store
+
+    assert traces.properties("wavefield") == ["Vp"]
+    values = traces.property("wavefield", "Vp")
+    assert values.values.tolist() == [1500.0]
+    assert values.attrs["units"] == "m/s"
 
 
 def test_trace_dataset_reports_packed_product_with_no_requested_frequencies(tmp_path):

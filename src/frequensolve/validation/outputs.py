@@ -333,6 +333,9 @@ def _validate_wavefield_output(
         _validate_source_id(source_id, source_count, f"{path}.sources", ctx.report)
     for field_index, requested_field in enumerate(getattr(output, "fields", []) or []):
         _validate_field(requested_field, f"{path}.fields[{field_index}]", ctx)
+    properties = getattr(output, "properties", None) or []
+    if properties:
+        _validate_requested_properties(properties, f"{path}.properties", ctx)
     device = getattr(output, "device", None)
     if device is not None:
         for component_index, component in enumerate(device.components):

@@ -597,6 +597,11 @@ class TraceDataset:
 
         return self.store.receivers(group)
 
+    def properties(self, group: str) -> list[str]:
+        """Return realized material properties stored with a wavefield group."""
+
+        return self.store.properties(group)
+
     def frequencies(self, group: Optional[str] = None):
         """Return available modeled frequencies.
 
@@ -785,3 +790,8 @@ class TraceDataset:
             T_max=T_max,
             **kwargs,
         )
+
+    def property(self, group: str, name: str):
+        """Read one realized material property on a wavefield grid."""
+
+        return self.store.material_property(group, name)

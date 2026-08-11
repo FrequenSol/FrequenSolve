@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional
 
@@ -25,6 +26,29 @@ from frequensolve.orchestrator.sites.config_file import (
 STAMPEDE3_DEFAULT_DURATION = "00:30:00"
 STAMPEDE3_DEFAULT_RANKS_PER_NODE = 2
 SSH_CONTROL_PERSIST = "8h"
+SSH_CONTROL_COMMAND_TIMEOUT_SECONDS = 5
+SSH_CONNECTION_PROBE_TIMEOUT_SECONDS = 10
+SSH_SITE_TYPES = {
+    "slurm",
+    "slurmsite",
+    "stampede3",
+    "stampede3site",
+    "tacc",
+}
+
+
+@dataclass(frozen=True)
+class _SSHConnection:
+    """Configured FrequenSolve-managed SSH connection."""
+
+    profile: str
+    username: str
+    hostname: str
+    control_path: Path
+
+    @property
+    def target(self) -> str:
+        return f"{self.username}@{self.hostname}"
 
 
 @click.group()
@@ -101,18 +125,14 @@ def connect(profile: Optional[str], config_path: Optional[Path]) -> None:
     if ssh is None:
         raise click.ClickException("OpenSSH is required, but 'ssh' was not found.")
 
-    username = str(settings["username"])
-    hostname = str(settings["hostname"])
-    target = f"{username}@{hostname}"
-    control_path = _control_socket_path(username, hostname)
-    _ensure_control_directory(control_path.parent)
+    connection = _connection_from_settings(profile or "default", settings)
+    _ensure_control_directory(connection.control_path.parent)
 
-    check_command = [ssh, "-q", "-S", str(control_path), "-O", "check", target]
-    if _run_control_check(check_command):
-        click.echo(f"SSH connection to {hostname} is already available.")
+    if _connection_is_live(ssh, connection):
+        click.echo(f"SSH connection to {connection.hostname} is already available.")
         return
-    if control_path.exists():
-        control_path.unlink()
+    if connection.control_path.exists():
+        _close_control_connection(ssh, connection)
 
     command = [
         ssh,
@@ -122,7 +142,7 @@ def connect(profile: Optional[str], config_path: Optional[Path]) -> None:
         "-o",
         f"ControlPersist={SSH_CONTROL_PERSIST}",
         "-o",
-        f"ControlPath={control_path}",
+        f"ControlPath={connection.control_path}",
         "-o",
         "ServerAliveInterval=30",
         "-o",
@@ -134,24 +154,134 @@ def connect(profile: Optional[str], config_path: Optional[Path]) -> None:
         if not key_path.is_file():
             raise click.ClickException(f"Configured SSH key does not exist: {key_path}")
         command.extend(["-i", str(key_path)])
-    command.append(target)
+    command.append(connection.target)
 
     click.echo(
-        f"Authenticating with {hostname}; respond to any SSH password or MFA prompts."
+        f"Authenticating with {connection.hostname}; respond to any SSH password "
+        "or MFA prompts."
     )
-    result = subprocess.run(command, check=False)
+    try:
+        result = subprocess.run(command, check=False)
+    except KeyboardInterrupt:
+        _close_control_connection(ssh, connection)
+        raise
+    except OSError as exc:
+        _close_control_connection(ssh, connection)
+        raise click.ClickException(f"Could not start OpenSSH: {exc}") from exc
     if result.returncode != 0:
+        _close_control_connection(ssh, connection)
         raise click.ClickException(
             f"SSH authentication failed with exit code {result.returncode}."
         )
-    if not _run_control_check(check_command):
+    if not _connection_is_live(ssh, connection):
+        _close_control_connection(ssh, connection)
         raise click.ClickException(
             "SSH authenticated but the shared connection could not be verified."
         )
     click.echo(
-        f"Connected to {hostname}. FrequenSolve scripts and transfers will reuse "
+        f"Connected to {connection.hostname}. FrequenSolve scripts and transfers will reuse "
         f"this connection for up to {SSH_CONTROL_PERSIST}."
     )
+
+
+@site.command("connections")
+@click.option("--profile", help="Show only one configured site profile.")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Site config path (defaults to ~/.frequensolve/site.toml).",
+)
+def connections(profile: Optional[str], config_path: Optional[Path]) -> None:
+    """List configured SSH connections and their live status."""
+
+    resolved_path = site_config_path(config_path)
+    try:
+        configured = _configured_ssh_connections(resolved_path, profile=profile)
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    ssh = shutil.which("ssh")
+    if ssh is None:
+        raise click.ClickException("OpenSSH is required, but 'ssh' was not found.")
+    if not configured:
+        click.echo("No SSH-backed site profiles were found.")
+        return
+
+    rows = []
+    for connection in configured:
+        if not connection.control_path.exists():
+            status = "closed"
+        elif _connection_is_live(ssh, connection):
+            status = "active"
+        else:
+            status = "stale"
+        rows.append(
+            (connection.profile, status, connection.target, connection.control_path)
+        )
+
+    profile_width = max(len("PROFILE"), *(len(row[0]) for row in rows))
+    click.echo(f"{'PROFILE':<{profile_width}}  STATUS  TARGET  SOCKET")
+    for profile_name, status, target, control_path in rows:
+        click.echo(
+            f"{profile_name:<{profile_width}}  {status:<6}  {target}  {control_path}"
+        )
+
+
+@site.command("disconnect")
+@click.option(
+    "--profile", help="Configured site profile (defaults to site.toml default)."
+)
+@click.option(
+    "--all",
+    "all_connections",
+    is_flag=True,
+    help="Close every configured SSH connection.",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Site config path (defaults to ~/.frequensolve/site.toml).",
+)
+def disconnect(
+    profile: Optional[str], config_path: Optional[Path], all_connections: bool
+) -> None:
+    """Close FrequenSolve-managed SSH connections."""
+
+    if profile and all_connections:
+        raise click.UsageError("Use either --profile or --all, not both.")
+
+    resolved_path = site_config_path(config_path)
+    try:
+        if all_connections:
+            configured = _configured_ssh_connections(resolved_path)
+        else:
+            settings = _ssh_settings(resolved_path, profile=profile)
+            configured = [_connection_from_settings(profile or "default", settings)]
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    ssh = shutil.which("ssh")
+    if ssh is None:
+        raise click.ClickException("OpenSSH is required, but 'ssh' was not found.")
+
+    found = False
+    closed_paths: set[Path] = set()
+    for connection in configured:
+        if (
+            connection.control_path in closed_paths
+            or not connection.control_path.exists()
+        ):
+            continue
+        found = True
+        closed_paths.add(connection.control_path)
+        graceful = _close_control_connection(ssh, connection)
+        action = "Closed" if graceful else "Removed stale socket for"
+        click.echo(f"{action} SSH connection to {connection.hostname}.")
+
+    if not found:
+        click.echo("No FrequenSolve-managed SSH connections are open.")
 
 
 @site.command("check")
@@ -271,15 +401,18 @@ def _single_line_value(value: str, *, name: str) -> str:
 
 def _ssh_settings(path: Path, *, profile: Optional[str]) -> Mapping[str, Any]:
     config = load_site_config(path)
+    return _ssh_settings_from_config(config, profile=profile)
+
+
+def _ssh_settings_from_config(
+    config: Mapping[str, Any], *, profile: Optional[str]
+) -> Mapping[str, Any]:
     values = _resolve_site_preset(_site_config_table(config, profile=profile))
     site_type = values.get("type")
-    if not isinstance(site_type, str) or _normalize_site_type(site_type) not in {
-        "slurm",
-        "slurmsite",
-        "stampede3",
-        "stampede3site",
-        "tacc",
-    }:
+    if (
+        not isinstance(site_type, str)
+        or _normalize_site_type(site_type) not in SSH_SITE_TYPES
+    ):
         raise ValueError("The selected site profile is not an SSH-backed SLURM site.")
     hostname = values.get("hostname")
     username = (
@@ -292,6 +425,52 @@ def _ssh_settings(path: Path, *, profile: Optional[str]) -> Mapping[str, Any]:
     if not isinstance(username, str) or not username.strip():
         raise ValueError("The selected site profile has no SSH username.")
     return {**values, "hostname": hostname.strip(), "username": username.strip()}
+
+
+def _connection_from_settings(
+    profile: str, settings: Mapping[str, Any]
+) -> _SSHConnection:
+    username = str(settings["username"])
+    hostname = str(settings["hostname"])
+    return _SSHConnection(
+        profile=profile,
+        username=username,
+        hostname=hostname,
+        control_path=_control_socket_path(username, hostname),
+    )
+
+
+def _configured_ssh_connections(
+    path: Path, *, profile: Optional[str] = None
+) -> list[_SSHConnection]:
+    config = load_site_config(path)
+    if profile is not None:
+        names = [profile]
+    else:
+        sites = config.get("sites")
+        if not isinstance(sites, Mapping):
+            raise ValueError(
+                "FrequenSolve site config must contain top-level default and "
+                "[sites.<profile>] tables"
+            )
+        names = [str(name) for name in sites]
+
+    configured = []
+    for name in names:
+        values = _resolve_site_preset(_site_config_table(config, profile=name))
+        site_type = values.get("type")
+        if (
+            isinstance(site_type, str)
+            and _normalize_site_type(site_type) not in SSH_SITE_TYPES
+        ):
+            if profile is not None:
+                raise ValueError(
+                    "The selected site profile is not an SSH-backed SLURM site."
+                )
+            continue
+        settings = _ssh_settings_from_config(config, profile=name)
+        configured.append(_connection_from_settings(name, settings))
+    return configured
 
 
 def _control_socket_path(username: str, hostname: str) -> Path:
@@ -307,8 +486,86 @@ def _ensure_control_directory(path: Path) -> None:
 
 
 def _run_control_check(command: list[str]) -> bool:
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=SSH_CONTROL_COMMAND_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
     return result.returncode == 0
+
+
+def _connection_is_live(ssh: str, connection: _SSHConnection) -> bool:
+    """Return whether a control master can complete a bounded remote command."""
+
+    check_command = [
+        ssh,
+        "-q",
+        "-S",
+        str(connection.control_path),
+        "-O",
+        "check",
+        connection.target,
+    ]
+    if not _run_control_check(check_command):
+        return False
+
+    probe_command = [
+        ssh,
+        "-q",
+        "-S",
+        str(connection.control_path),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ConnectionAttempts=1",
+        connection.target,
+        "true",
+    ]
+    try:
+        result = subprocess.run(
+            probe_command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=SSH_CONNECTION_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _close_control_connection(ssh: str, connection: _SSHConnection) -> bool:
+    """Ask a control master to exit, then remove any socket it left behind."""
+
+    close_command = [
+        ssh,
+        "-q",
+        "-S",
+        str(connection.control_path),
+        "-O",
+        "exit",
+        connection.target,
+    ]
+    try:
+        result = subprocess.run(
+            close_command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=SSH_CONTROL_COMMAND_TIMEOUT_SECONDS,
+        )
+        graceful = result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        graceful = False
+    connection.control_path.unlink(missing_ok=True)
+    return graceful
 
 
 def _create_site(*, config_path: Optional[Path], profile: Optional[str]):

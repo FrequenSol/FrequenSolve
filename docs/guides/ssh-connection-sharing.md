@@ -37,8 +37,26 @@ The command:
    eight hours.
 
 It does **not** modify `~/.ssh/config`. Running it again is idempotent: when the
-shared connection is still active, the command reports that it is already
-available and does not request another authentication.
+shared connection can still run a remote command, the command reports that it
+is already available and does not request another authentication. A local
+master whose remote transport no longer responds is closed and replaced.
+
+List every SSH-backed profile and the state of its managed connection with:
+
+```bash
+frequensolve site connections
+```
+
+The status is `active`, `stale`, or `closed`. To close the default profile's
+connection, or every configured connection, run:
+
+```bash
+frequensolve site disconnect
+frequensolve site disconnect --all
+```
+
+Use `--profile PROFILE` with `connect`, `connections`, or `disconnect` to
+operate on one non-default profile.
 
 After it connects, run as many separate scripts or notebooks as needed:
 
@@ -112,12 +130,11 @@ normal `ssh` commands create the shared socket.
 For the recommended FrequenSolve-managed connection, run:
 
 ```bash
-frequensolve site connect
+frequensolve site connections
 ```
 
-An active connection produces an `already available` message without another
-authentication prompt. Then verify the complete FrequenSolve site
-configuration:
+An active connection is reported as `active` without another authentication
+prompt. Then verify the complete FrequenSolve site configuration:
 
 ```bash
 frequensolve site check
@@ -153,7 +170,9 @@ the socket explicitly to each `rsync` subprocess.
 
 Laptop sleep, network changes, idle expiration, and restarts can end the
 background master. Re-run `frequensolve site connect`; stale
-FrequenSolve-managed sockets are checked and replaced automatically.
+FrequenSolve-managed sockets are tested with a bounded remote command, closed,
+and replaced automatically. Run `frequensolve site disconnect` first if you
+want to close the connection without reconnecting.
 
 ### OpenSSH reports a changed host key
 

@@ -457,6 +457,49 @@ class TraceStore:
             ind = np.where(dims == "receiver")[0][0]
             return np.arange(1, dset.shape[ind] + 1)
 
+    def properties(self, group: str) -> list[str]:
+        """Return static material properties stored with a wavefield group."""
+
+        with h5py.File(self._trace_file_for_group(group), "r") as h5:
+            if "properties" not in h5 or not isinstance(h5["properties"], h5py.Group):
+                return []
+            return list(h5["properties"].keys())
+
+    def material_property(self, group: str, name: str) -> DataArray:
+        """Read one realized material property on a wavefield receiver grid."""
+
+        path = f"properties/{name}"
+        with h5py.File(self._trace_file_for_group(group), "r") as h5:
+            if path not in h5:
+                properties = h5.get("properties")
+                available = (
+                    list(properties.keys())
+                    if isinstance(properties, h5py.Group)
+                    else []
+                )
+                raise KeyError(
+                    f"Property {name!r} not found for {group!r}; "
+                    f"available: {available}"
+                )
+            dset = h5[path]
+            values = np.asarray(dset[()]).reshape(-1)
+            units = _decode_h5_strings(dset.attrs.get("units", [])).reshape(-1)
+
+        receiver = np.asarray(self.receivers(group))
+        if receiver.size != values.size:
+            receiver = np.arange(1, values.size + 1)
+        return DataArray(
+            values,
+            dims=("receiver",),
+            coords={"receiver": receiver},
+            name=name,
+            attrs={
+                "units": str(units[0]) if units.size else "",
+                "receiver_group": group,
+                "static": True,
+            },
+        )
+
     def survey_tables(self) -> Dict[str, Any]:
         """Return embedded survey metadata tables from the trace store."""
 

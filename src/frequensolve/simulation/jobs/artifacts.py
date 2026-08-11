@@ -1297,6 +1297,16 @@ class JobArtifactMixin:
                 "sources": source_ids,
                 "grid": copy.deepcopy(out.grid),
             }
+            if out.properties:
+                wavefield["requested_properties"] = list(out.properties)
+                wavefield["property_output"] = "packed_static"
+                wavefield["properties"] = {
+                    name: {
+                        "dataset": f"/properties/{name}",
+                        "static": True,
+                    }
+                    for name in out.properties
+                }
             if out.device is not None:
                 wavefield["device"] = out.device.to_fs()
             wavefields[out.name] = wavefield
@@ -1376,6 +1386,16 @@ class JobArtifactMixin:
                 "component_specs": component_specs,
                 "sources": sources,
             }
+            if out.properties:
+                wave_out[out.name]["requested_properties"] = list(out.properties)
+                wave_out[out.name]["property_output"] = "packed_static"
+                wave_out[out.name]["properties"] = {
+                    name: {
+                        "dataset": f"/properties/{name}",
+                        "static": True,
+                    }
+                    for name in out.properties
+                }
             if out.device is not None:
                 wave_out[out.name]["device"] = out.device.to_fs()
         return wave_out
