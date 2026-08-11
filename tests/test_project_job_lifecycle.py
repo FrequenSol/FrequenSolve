@@ -12,7 +12,7 @@ import sympy as sp
 import frequensolve as fs
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
-from frequensolve.orchestrator.sites.base import JobStatus, RunResult
+from frequensolve.orchestrator.sites.base import JobStatus, RunFailedError, RunResult
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project.project import Project
 from frequensolve.seismic.traces import TraceDataset
@@ -412,6 +412,39 @@ def test_run_metadata_filters_output_files(tmp_path):
     assert result.output_files(kind="vtk", suffix=".vtu", base="pressure_1") == [
         result_path / "ParaView/pressure_1.vtu"
     ]
+
+
+def test_run_result_images_delegates_to_site_after_success():
+    expected = object()
+    job = object()
+
+    class ImageSite:
+        def fetch_image(self, requested_job):
+            assert requested_job is job
+            return expected
+
+    result = RunResult(
+        job=job,
+        status=JobStatus(state="completed", return_code=0),
+        site=ImageSite(),
+    )
+
+    assert result.images() is expected
+
+
+def test_run_result_images_preserves_primary_failure():
+    class ImageSite:
+        def fetch_image(self, _job):
+            raise AssertionError("failed results must not fetch image artifacts")
+
+    result = RunResult(
+        job=object(),
+        status=JobStatus(state="failed", return_code=1),
+        site=ImageSite(),
+    )
+
+    with pytest.raises(RunFailedError):
+        result.images()
 
 
 def test_run_metadata_discovers_unregistered_vtu_files(tmp_path):

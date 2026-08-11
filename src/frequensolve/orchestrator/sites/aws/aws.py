@@ -32,7 +32,7 @@ from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.jobs import BaseJob, SkipPolicy
+from frequensolve.simulation.jobs import BaseJob, ImagingJob, SkipPolicy
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
@@ -1201,6 +1201,53 @@ class AWSSite(BaseSite):
         if len(db_map) == 1:
             return db_map[jobs[0].name]
         return db_map
+
+    def fetch_image(
+        self,
+        job: Union[ImagingJob, List[ImagingJob]],
+    ):
+        """Download and open imaging outputs from AWS storage.
+
+        Args:
+            job: One imaging job or a list of imaging jobs.
+
+        Returns:
+            ``ImageDatabase`` for one job, or a mapping keyed by job name.
+
+        Raises:
+            TypeError: If any supplied item is not an ``ImagingJob``.
+            ValueError: If an image directory is outside its project root and
+                therefore cannot be mapped to the Cloud project prefix.
+        """
+
+        jobs, single = self._as_jobs(job)
+        images = {}
+        for item in jobs:
+            if not isinstance(item, ImagingJob):
+                raise TypeError("fetch_image expects an ImagingJob or a list of them")
+
+            project_path = Path(item.project_path).resolve()
+            local_image_path = Path(item._local_image_path).resolve()
+            try:
+                relative_image_path = local_image_path.relative_to(project_path)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Imaging output path {local_image_path} is outside project "
+                    f"root {project_path}; AWS image results must use a "
+                    "project-relative output path."
+                ) from exc
+
+            s3_image_path = (
+                f"s3://{self.config.s3_bucket}/{project_path.name}/"
+                f"{relative_image_path.as_posix()}"
+            )
+            self.get(s3_image_path, local_image_path)
+            self._emit(f"Fetched AWS images from {s3_image_path}")
+            images[item.name] = item.load_images()
+
+        if single:
+            return images[jobs[0].name]
+        return images
 
     def fetch_outputs(self, job: BaseJob):
         """Fetch common AWS result artifacts for a completed job.

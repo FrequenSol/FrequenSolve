@@ -7,6 +7,7 @@ pytest.importorskip("boto3")
 from botocore.exceptions import ClientError
 
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
+from frequensolve.simulation.jobs import ImagingJob
 
 
 class FakePaginator:
@@ -109,3 +110,30 @@ def test_fetch_vtk_reraises_download_failures(tmp_path):
 
     with pytest.raises(RuntimeError, match="download failed"):
         site.fetch_vtk(job)
+
+
+def test_fetch_image_downloads_project_relative_image_directory(tmp_path):
+    project_path = tmp_path / "imaging-project"
+    image_path = project_path / "jobs" / "model" / "rtm" / "results" / "imaging"
+    image_key = "imaging-project/jobs/model/rtm/results/imaging/image.h5"
+    s3_client = FakeS3Client({image_key: "image payload"})
+    site = make_site(s3_client)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+
+    job = object.__new__(ImagingJob)
+    job.name = "rtm"
+    job.simulation = SimpleNamespace(project_path=project_path, name="model")
+    job.save_path = image_path
+    expected = object()
+    job.load_images = lambda: expected
+
+    images = site.fetch_image(job)
+
+    assert images is expected
+    assert (image_path / "image.h5").read_text() == "image payload"
+    assert s3_client.paginate_calls == [
+        {
+            "Bucket": "bucket",
+            "Prefix": "imaging-project/jobs/model/rtm/results/imaging/",
+        }
+    ]

@@ -524,6 +524,19 @@ class RunResult:
             return self.site.fetch_wavefields(self.job, upscale=upscale)
         return self.job.wavefields.open(upscale=upscale)
 
+    def images(self):
+        """Open imaging outputs for this run.
+
+        Returns:
+            ``ImageDatabase`` fetched through the execution site, or opened
+            from the job's local image directory when no site is attached.
+        """
+
+        self.raise_for_status()
+        if self.site is not None:
+            return self.site.fetch_image(self.job)
+        return self.job.load_images()
+
     def output_files(
         self,
         *,
