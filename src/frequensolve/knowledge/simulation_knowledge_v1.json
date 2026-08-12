@@ -1810,6 +1810,48 @@
       "remediation": "Use a finite numeric frequency."
     },
     {
+      "code": "job.k_list.required",
+      "severity": "error",
+      "path": "k_list",
+      "explanation": "A 2.5D job does not define the signed physical Fourier wavenumbers required by the solver contract.",
+      "remediation": "Provide a nonempty signed k_list with explicit k_units, then refine the wavenumber grid until the 2.5D result is converged."
+    },
+    {
+      "code": "job.k_list.invalid",
+      "severity": "error",
+      "path": "k_list",
+      "explanation": "The physical Fourier-wavenumber grid is empty, nested, nonnumeric, or contains a nonfinite value.",
+      "remediation": "Provide k_list as one nonempty list of finite numeric wavenumbers."
+    },
+    {
+      "code": "job.k_weights.length_mismatch",
+      "severity": "error",
+      "path": "k_weights",
+      "explanation": "The optional 2.5D quadrature weights do not have the same number of values as k_list.",
+      "remediation": "Provide exactly one k_weight per k_list value, or omit k_weights to use the solver contract's trapezoid weights."
+    },
+    {
+      "code": "job.k_weights.invalid",
+      "severity": "error",
+      "path": "k_weights",
+      "explanation": "The optional wavenumber quadrature weights are empty, nested, nonnumeric, or contain a nonfinite value.",
+      "remediation": "Provide k_weights as one nonempty list of finite numeric values, or omit it to use trapezoid weights."
+    },
+    {
+      "code": "job.k_weights.requires_k_list",
+      "severity": "error",
+      "path": "k_weights",
+      "explanation": "A job provides 2.5D quadrature weights without the corresponding physical wavenumber grid.",
+      "remediation": "Provide the matching k_list or remove k_weights."
+    },
+    {
+      "code": "job.k_units.incompatible",
+      "severity": "error",
+      "path": "k_units",
+      "explanation": "The wavenumber unit expression is invalid or cannot be converted to inverse length.",
+      "remediation": "Use a valid inverse-length unit such as 1/m or 1/km."
+    },
+    {
       "code": "job.outputs.invalid",
       "severity": "error",
       "path": "outputs",

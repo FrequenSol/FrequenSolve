@@ -341,6 +341,9 @@ class ImagingJob(BaseJob):
         save_path: Optional image-output directory.
         reassemble_adjoint: Request adjoint reassembly from stored pieces.
         outputs: Optional output request or output collection for this job.
+        k_list: Optional signed physical Fourier wavenumbers for 2.5D jobs.
+        k_weights: Optional quadrature weights paired with ``k_list``.
+        k_units: Optional units for ``k_list`` and ``k_weights``.
         **kwargs: Extra imaging payload fields preserved on export.
 
     Raises:
@@ -379,6 +382,9 @@ class ImagingJob(BaseJob):
         save_path: Optional[Union[str, Path]] = None,
         reassemble_adjoint: bool = False,
         outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
+        k_list: Optional[Iterable[float]] = None,
+        k_weights: Optional[Iterable[float]] = None,
+        k_units: Optional[str] = None,
         **kwargs,
     ) -> None:
         """Create an imaging job.
@@ -399,6 +405,9 @@ class ImagingJob(BaseJob):
             f_list=f_list,
             workflow="RTM",
             outputs=JobOutputs(outputs),
+            k_list=k_list,
+            k_weights=k_weights,
+            k_units=k_units,
         )
 
         f_sim = self.trace_outputs.path
@@ -678,6 +687,9 @@ class ImagingJob(BaseJob):
             weights=image_data.pop("weights", None),
             reassemble_adjoint=image_data.pop("reassemble_adjoint", None),
             outputs=JobOutputs.from_fs(data.pop("Outputs", None)),
+            k_list=data.pop("k_list", None),
+            k_weights=data.pop("k_weights", None),
+            k_units=data.pop("k_units", None),
             **image_data,
         )
         job.misfit = misfit

@@ -32,6 +32,9 @@ class FrequencyDomainJob(BaseJob):
             their imaginary component; damping is normalized to a negative
             imaginary value for the solver.
         outputs: Optional output request or output collection.
+        k_list: Optional signed physical Fourier wavenumbers for 2.5D jobs.
+        k_weights: Optional quadrature weights paired with ``k_list``.
+        k_units: Optional units for ``k_list`` and ``k_weights``.
     """
 
     def __init__(
@@ -40,17 +43,23 @@ class FrequencyDomainJob(BaseJob):
         simulation: BaseSimulation,
         f_list: List[Union[float, complex]],
         outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
+        k_list: Optional[Iterable[float]] = None,
+        k_weights: Optional[Iterable[float]] = None,
+        k_units: Optional[str] = None,
     ):
         workflow = "forward"
         frequencies = np.asarray(f_list)
         if np.iscomplexobj(frequencies):
             frequencies = np.asarray([f.real - 1j * abs(f.imag) for f in frequencies])
         super().__init__(
-            name,
-            simulation,
-            workflow,
-            frequencies.tolist(),
-            JobOutputs(outputs),
+            name=name,
+            simulation=simulation,
+            workflow=workflow,
+            f_list=frequencies.tolist(),
+            outputs=JobOutputs(outputs),
+            k_list=k_list,
+            k_weights=k_weights,
+            k_units=k_units,
         )
 
     @classmethod
@@ -85,6 +94,9 @@ class FrequencyDomainJob(BaseJob):
             simulation=sim,
             f_list=f_list,
             outputs=JobOutputs.from_fs(d.get("Outputs")),
+            k_list=d.get("k_list"),
+            k_weights=d.get("k_weights"),
+            k_units=d.get("k_units"),
         )
         job._job_id = d.get("job_id")
         return job
@@ -107,6 +119,9 @@ class TimeDomainJob(BaseJob):
         df: Frequency spacing. Mutually exclusive with ``T_max``.
         T_max: Time-domain period used to derive ``df`` as ``1 / T_max``.
         outputs: Optional output request or output collection.
+        k_list: Optional signed physical Fourier wavenumbers for 2.5D jobs.
+        k_weights: Optional quadrature weights paired with ``k_list``.
+        k_units: Optional units for ``k_list`` and ``k_weights``.
 
     Raises:
         ValueError: If damping options conflict, neither ``df`` nor ``T_max``
@@ -125,6 +140,9 @@ class TimeDomainJob(BaseJob):
         df: Optional[float] = None,
         T_max: Optional[float] = None,
         outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
+        k_list: Optional[Iterable[float]] = None,
+        k_weights: Optional[Iterable[float]] = None,
+        k_units: Optional[str] = None,
     ):
         if damping_factor is not None and laplace is not None:
             raise ValueError("Specify only one of damping_factor or laplace")
@@ -156,7 +174,16 @@ class TimeDomainJob(BaseJob):
             f_list = f_list + 1j * laplace
 
         workflow = "forward"
-        super().__init__(name, simulation, workflow, f_list, JobOutputs(outputs))
+        super().__init__(
+            name=name,
+            simulation=simulation,
+            workflow=workflow,
+            f_list=f_list,
+            outputs=JobOutputs(outputs),
+            k_list=k_list,
+            k_weights=k_weights,
+            k_units=k_units,
+        )
 
     @classmethod
     def from_fs(
@@ -210,6 +237,9 @@ class TimeDomainJob(BaseJob):
             df=df,
             laplace=laplace,
             outputs=JobOutputs.from_fs(d.get("Outputs")),
+            k_list=d.get("k_list"),
+            k_weights=d.get("k_weights"),
+            k_units=d.get("k_units"),
         )
         job._job_id = d.get("job_id")
         return job

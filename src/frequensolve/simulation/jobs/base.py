@@ -5,6 +5,7 @@ project paths, frequency metadata, output validation, serialization hooks, and
 run-state mixins used by concrete forward and imaging jobs.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
@@ -24,6 +25,7 @@ from frequensolve.simulation.outputs import (
     TraceOutput,
 )
 from frequensolve.simulation.simulation import BaseSimulation
+from frequensolve.units import ureg
 
 __all__ = [
     "JobLayout",
@@ -355,6 +357,9 @@ class BaseJob(
         f_list: One frequency per solver task. Complex values encode Laplace
             damping in their imaginary component.
         outputs: Output configuration or output requests for this job.
+        k_list: Optional signed physical Fourier wavenumbers for 2.5D jobs.
+        k_weights: Optional quadrature weights paired with ``k_list``.
+        k_units: Optional units for ``k_list`` and ``k_weights``.
 
     Raises:
         ValueError: If the name, simulation, or frequency list is invalid.
@@ -365,6 +370,9 @@ class BaseJob(
     workflow: str
     f_list: List[Union[float, complex]]
     outputs: JobOutputs = field(default_factory=JobOutputs)
+    k_list: Optional[List[float]] = None
+    k_weights: Optional[List[float]] = None
+    k_units: Optional[str] = None
     _file: Optional[Path] = None
     _job_id: Optional[str] = None
 
@@ -377,8 +385,47 @@ class BaseJob(
         if frequencies.size == 0:
             raise ValueError("BaseJob requires at least one frequency")
         self.f_list = frequencies.tolist()
+        self.k_list = self._normalize_optional_real_list(self.k_list, "k_list")
+        self.k_weights = self._normalize_optional_real_list(self.k_weights, "k_weights")
+        if self.k_weights is not None:
+            if self.k_list is None:
+                raise ValueError("BaseJob k_weights requires k_list")
+            if len(self.k_weights) != len(self.k_list):
+                raise ValueError("BaseJob k_weights must match k_list length")
+        if self.k_units is not None:
+            self.k_units = self._normalize_wavenumber_units(self.k_units)
         if not isinstance(self.outputs, JobOutputs):
             self.outputs = JobOutputs(self.outputs)
+
+    @staticmethod
+    def _normalize_optional_real_list(
+        values: Optional[Iterable[float]], field_name: str
+    ) -> Optional[List[float]]:
+        if values is None:
+            return None
+        if isinstance(values, Iterator):
+            values = list(values)
+        array = np.asarray(values, dtype=float)
+        if array.size == 0:
+            raise ValueError(f"BaseJob {field_name} must contain at least one value")
+        if array.ndim != 1:
+            raise ValueError(f"BaseJob {field_name} must be a 1D list")
+        if not np.all(np.isfinite(array)):
+            raise ValueError(f"BaseJob {field_name} values must be finite")
+        return array.tolist()
+
+    @staticmethod
+    def _normalize_wavenumber_units(units: str) -> str:
+        units = str(units).strip()
+        if not units:
+            raise ValueError("BaseJob k_units must be a non-empty string")
+        try:
+            ureg.Quantity(1.0, units).to("1/m")
+        except Exception as exc:
+            raise ValueError(
+                "BaseJob k_units must be valid inverse-length units"
+            ) from exc
+        return units
 
     def __iadd__(self, output: Union[Output, Iterable[Output]]) -> "BaseJob":
         self.outputs += output

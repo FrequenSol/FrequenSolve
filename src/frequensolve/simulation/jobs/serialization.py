@@ -141,6 +141,7 @@ class JobSerializationMixin:
             "f_list": f_list,
             "Outputs": self.outputs.to_fs(),
         }
+        payload.update(self._wavenumber_payload())
         if self._job_id is not None:
             payload["job_id"] = self._job_id
         return payload
@@ -159,14 +160,16 @@ class JobSerializationMixin:
         if self.simulation._file is None:
             raise ValueError("Simulation must be saved before fingerprinting a job")
         simulation_hash = self._hash_json_file(self.simulation._file)
+        job_fingerprint = {
+            "_type": job_data["_type"],
+            "workflow": job_data["workflow"],
+            "f_list": job_data["f_list"],
+            "Outputs": job_data["Outputs"],
+        }
+        job_fingerprint.update(self._wavenumber_payload())
         return {
             "schema": "frequensolve-job-fingerprint-1",
-            "job": {
-                "_type": job_data["_type"],
-                "workflow": job_data["workflow"],
-                "f_list": job_data["f_list"],
-                "Outputs": job_data["Outputs"],
-            },
+            "job": job_fingerprint,
             "simulation": {"hash": simulation_hash},
         }
 
@@ -204,13 +207,15 @@ class JobSerializationMixin:
         if self.simulation._file is None:
             raise ValueError("Simulation must be saved before fingerprinting a task")
         simulation_hash = self._hash_json_file(self.simulation._file)
+        job_fingerprint = {
+            "_type": job_data["_type"],
+            "workflow": job_data["workflow"],
+            "Outputs": job_data["Outputs"],
+        }
+        job_fingerprint.update(self._wavenumber_payload())
         return {
             "schema": "frequensolve-job-task-fingerprint-1",
-            "job": {
-                "_type": job_data["_type"],
-                "workflow": job_data["workflow"],
-                "Outputs": job_data["Outputs"],
-            },
+            "job": job_fingerprint,
             "simulation": {"hash": simulation_hash},
             "frequency": self._canonical_frequency_value(self.f_list[task - 1]),
         }
@@ -319,6 +324,16 @@ class JobSerializationMixin:
         if np.iscomplexobj(f_list):
             return np.asarray([[f.real, -abs(f.imag)] for f in f_list])
         return np.asarray(f_list)
+
+    def _wavenumber_payload(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if self.k_list is not None:
+            payload["k_list"] = list(self.k_list)
+        if self.k_weights is not None:
+            payload["k_weights"] = list(self.k_weights)
+        if self.k_units is not None:
+            payload["k_units"] = self.k_units
+        return payload
 
     def _simulation_path(self, *, project_relative: bool = False) -> str:
         if self.simulation._file is None:

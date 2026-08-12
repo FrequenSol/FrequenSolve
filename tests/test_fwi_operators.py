@@ -246,17 +246,30 @@ def test_imaging_job_save_and_load_round_trips_project_relative_simulation(tmp_p
         frequencies=[5.0],
         parameters=["vp", "rho"],
         grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        k_list=[-0.01, 0.0, 0.01],
+        k_weights=[0.25, 0.5, 0.25],
+        k_units="1/m",
     )
 
     job_file = job.save()
     saved_text = job_file.read_text()
+    saved = json.loads(saved_text)
     loaded = BaseJob.load(job_file)
 
     assert "simulations/smooth/smooth.json" in saved_text
     assert str(tmp_path / "jobs" / "smooth") not in saved_text
+    assert saved["k_list"] == [-0.01, 0.0, 0.01]
+    assert saved["k_weights"] == [0.25, 0.5, 0.25]
+    assert saved["k_units"] == "1/m"
+    assert "k_list" not in saved["Image"]
+    assert "k_weights" not in saved["Image"]
+    assert "k_units" not in saved["Image"]
     assert isinstance(loaded, ImagingJob)
     assert loaded.name == "rtm"
     assert loaded.simulation.name == sim.name
+    assert loaded.k_list == [-0.01, 0.0, 0.01]
+    assert loaded.k_weights == [0.25, 0.5, 0.25]
+    assert loaded.k_units == "1/m"
     assert loaded.images == {"FWI_Vp": "FWI:Vp", "FWI_Rho": "FWI:Rho"}
     assert loaded.grid.shape == (2, 3)
     loaded_group = loaded.misfit.receiver_groups[0]
