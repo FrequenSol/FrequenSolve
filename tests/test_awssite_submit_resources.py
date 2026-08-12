@@ -154,6 +154,26 @@ def test_graphql_submit_stages_inputs_for_loaded_job_without_project_owner():
     ]
 
 
+def test_poll_run_preserves_customer_safe_cloud_failure_message():
+    site = AWSSite.__new__(AWSSite)
+    site.graphql_client = SimpleNamespace(
+        get_simulation_status_details=lambda simulation_id: {
+            "id": simulation_id,
+            "status": "FAILED",
+            "failureCode": "SCU_BALANCE_INSUFFICIENT",
+            "failureMessage": "This simulation needs more SCUs. No solver work was charged.",
+        }
+    )
+
+    status = site._poll_run(SimpleNamespace(id="simulation-1"))
+
+    assert status.state == "failed"
+    assert status.message == (
+        "This simulation needs more SCUs. No solver work was charged."
+    )
+    assert status.raw["failureCode"] == "SCU_BALANCE_INSUFFICIENT"
+
+
 def test_graphql_submit_checks_legacy_per_user_compute_stack():
     site = make_graphql_site()
     site.graphql_client.compute_mode = "per-user"
