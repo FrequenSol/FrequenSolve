@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from frequensolve.geometry.frame import Axis, CoordinateSystem
+from frequensolve.mesh.boundary_conditions import BoundaryCondition
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.model.layered import LayeredModel
@@ -60,6 +61,58 @@ def test_valid_job_has_clean_validation_report(tmp_path):
 
     assert report.ok
     assert report.issues == []
+
+
+def test_validation_rejects_generic_symmetry_on_axisymmetric_radial_axis(tmp_path):
+    job = _simple_job(tmp_path)
+    job.simulation.axisymmetric = True
+    job.simulation += BoundaryCondition(
+        conditions=["symmetric"],
+        boundaries=["x_min"],
+    )
+
+    report = job.validate()
+
+    assert not report.ok
+    assert "boundary.axisymmetric.symmetric.invalid" in _codes(report)
+    assert job.simulation.BCs[0].conditions == ["symmetric"]
+    with pytest.raises(ValidationError, match="Use 'symmetric_r'"):
+        job.validate(raise_errors=True)
+
+
+@pytest.mark.parametrize("condition", ["symmetric_r", "axis"])
+def test_validation_accepts_explicit_axisymmetric_radial_condition(
+    tmp_path,
+    condition,
+):
+    job = _simple_job(tmp_path)
+    job.simulation.axisymmetric = True
+    job.simulation += BoundaryCondition(
+        conditions=[condition],
+        boundaries=["x_min"],
+    )
+
+    report = job.validate()
+
+    assert report.ok
+    assert "boundary.axisymmetric.symmetric.invalid" not in _codes(report)
+
+
+def test_validation_allows_generic_symmetry_away_from_radial_origin(tmp_path):
+    job = _simple_job(tmp_path)
+    job.simulation.axisymmetric = True
+    job.simulation.mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0.25, 0.0], u_bound=[1.0, 1.0], n=[1, 1])
+    )
+    job.simulation += BoundaryCondition(
+        conditions=["symmetric"],
+        boundaries=["x_min"],
+    )
+
+    report = job.validate()
+
+    assert report.ok
+    assert "boundary.axisymmetric.symmetric.invalid" not in _codes(report)
 
 
 def test_surface_carpet_on_surface_coordinates_validate_in_3d(tmp_path):

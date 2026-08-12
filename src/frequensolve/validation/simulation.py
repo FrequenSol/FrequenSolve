@@ -28,6 +28,7 @@ from .geometry import (
     _coords_file,
     _default_coordinate_axes,
     _default_length_units,
+    _infer_domain_bounds,
     _validate_bounds,
     _validate_coordinate_systems,
     _validate_coordinate_value_metadata,
@@ -51,6 +52,7 @@ def _validate_simulation(ctx: _ValidationContext) -> None:
     _validate_unit_config(getattr(simulation, "units", None), ctx.report)
     _validate_model(getattr(simulation, "model", None), ctx)
     _validate_mesh(getattr(simulation, "mesh", None), ctx)
+    _validate_axisymmetric_boundary_conditions(simulation, ctx)
     _validate_acquisition(getattr(simulation, "acquisition", None), ctx)
 
 
@@ -195,6 +197,45 @@ def _validate_mesh(mesh: Any, ctx: _ValidationContext) -> None:
             "Mesh generator requires both l_bound and u_bound.",
             path="mesh.generator",
         )
+
+
+def _validate_axisymmetric_boundary_conditions(
+    simulation: Any,
+    ctx: _ValidationContext,
+) -> None:
+    if not getattr(simulation, "axisymmetric", False):
+        return
+
+    generic_symmetry_path = None
+    has_axis_condition = False
+    for bc_index, boundary_condition in enumerate(getattr(simulation, "BCs", []) or []):
+        if "x_min" not in (getattr(boundary_condition, "boundaries", []) or []):
+            continue
+        for condition_index, condition in enumerate(
+            getattr(boundary_condition, "conditions", []) or []
+        ):
+            condition = str(condition).strip().lower()
+            if condition in {"axis", "symmetric_r"}:
+                has_axis_condition = True
+            elif condition == "symmetric" and generic_symmetry_path is None:
+                generic_symmetry_path = f"BCs[{bc_index}].conditions[{condition_index}]"
+
+    if generic_symmetry_path is None or has_axis_condition:
+        return
+
+    domain = _infer_domain_bounds(ctx)
+    if domain is None or not domain.axes or domain.lower.size == 0:
+        return
+    if domain.axes[0] not in {"r", "x"} or float(domain.lower[0]) != 0.0:
+        return
+
+    ctx.report.error(
+        "boundary.axisymmetric.symmetric.invalid",
+        "The 'symmetric' condition does not impose full axis regularity "
+        "at r = 0 for an axisymmetric simulation.",
+        path=generic_symmetry_path,
+        hint="Use 'symmetric_r' (or the equivalent 'axis') on x_min.",
+    )
 
 
 def _validate_acquisition(acquisition: Any, ctx: _ValidationContext) -> None:
