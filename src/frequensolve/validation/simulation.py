@@ -28,7 +28,6 @@ from .geometry import (
     _coords_file,
     _default_coordinate_axes,
     _default_length_units,
-    _infer_domain_bounds,
     _validate_bounds,
     _validate_coordinate_systems,
     _validate_coordinate_value_metadata,
@@ -223,7 +222,7 @@ def _validate_axisymmetric_boundary_conditions(
     if generic_symmetry_path is None or has_axis_condition:
         return
 
-    domain = _infer_domain_bounds(ctx)
+    domain = ctx.domain
     if domain is None or not domain.axes or domain.lower.size == 0:
         return
     if domain.axes[0] not in {"r", "x"} or float(domain.lower[0]) != 0.0:

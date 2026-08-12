@@ -115,6 +115,24 @@ def test_validation_allows_generic_symmetry_away_from_radial_origin(tmp_path):
     assert "boundary.axisymmetric.symmetric.invalid" not in _codes(report)
 
 
+def test_axisymmetric_boundary_validation_reuses_domain_diagnostics(tmp_path):
+    job = _simple_job(tmp_path)
+    job.simulation.axisymmetric = True
+    job.simulation.mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0.0, 0.0], u_bound=[1.0], n=[1, 1])
+    )
+    job.simulation += BoundaryCondition(
+        conditions=["symmetric"],
+        boundaries=["x_min"],
+    )
+
+    report = job.validate()
+
+    assert [issue.code for issue in report.issues].count(
+        "mesh.generator.bounds.shape_mismatch"
+    ) == 1
+
+
 def test_surface_carpet_on_surface_coordinates_validate_in_3d(tmp_path):
     simulation = SeismicSimulation(
         name="simple",
