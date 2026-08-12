@@ -5,6 +5,7 @@ project paths, frequency metadata, output validation, serialization hooks, and
 run-state mixins used by concrete forward and imaging jobs.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
@@ -402,6 +403,8 @@ class BaseJob(
     ) -> Optional[List[float]]:
         if values is None:
             return None
+        if isinstance(values, Iterator):
+            values = list(values)
         array = np.asarray(values, dtype=float)
         if array.size == 0:
             raise ValueError(f"BaseJob {field_name} must contain at least one value")

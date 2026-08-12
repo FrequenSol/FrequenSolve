@@ -708,10 +708,29 @@ def test_time_domain_job_exports_half_dimension_wavenumber_contract(tmp_path):
     assert loaded.k_units == "1/km"
 
 
+def test_job_materializes_wavenumber_generators(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    sim.save()
+    job = FrequencyDomainJob(
+        name="freq",
+        simulation=sim,
+        f_list=[1.0],
+        k_list=(value for value in [-0.01, 0.0, 0.01]),
+        k_weights=(value for value in [0.5, 1.0, 0.5]),
+    )
+    payload = job.to_fs(project_relative=True)
+
+    assert job.k_list == [-0.01, 0.0, 0.01]
+    assert job.k_weights == [0.5, 1.0, 0.5]
+    assert payload["k_list"] == [-0.01, 0.0, 0.01]
+    assert payload["k_weights"] == [0.5, 1.0, 0.5]
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         ({"k_list": []}, "must contain at least one"),
+        ({"k_list": "123"}, "must be a 1D list"),
         ({"k_list": [[-0.01, 0.0, 0.01]]}, "must be a 1D list"),
         ({"k_list": [0.0, float("nan")]}, "must be finite"),
         ({"k_weights": [1.0]}, "requires k_list"),
