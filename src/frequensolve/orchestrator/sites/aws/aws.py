@@ -814,20 +814,10 @@ class AWSSite(BaseSite):
         except Exception as e:
             raise RuntimeError(f"Unexpected error syncing {local_path} to S3: {e}")
 
-    def sync(self, project):
-        """Sync the project to S3.
+    def _ensure_storage_bucket(self) -> None:
+        """Load or create the authenticated user's Cloud storage bucket."""
 
-        Automatically creates storage stack if it doesn't exist.
-
-        Args:
-            project: The Project to sync.
-
-        Raises:
-            RuntimeError: If sync fails or stack creation fails.
-        """
-        # Ensure we have a bucket name (create storage stack if needed)
         if self.graphql_client is not None:
-            # Check if we need to get/create storage stack
             if (
                 not self.config.s3_bucket
                 or not self.graphql_client._check_storage_stack_exists()
@@ -866,9 +856,37 @@ class AWSSite(BaseSite):
                             f"Failed to create storage stack: {create_error}"
                         ) from create_error
 
+    def sync(self, project):
+        """Sync the project to S3.
+
+        Automatically creates storage stack if it doesn't exist.
+
+        Args:
+            project: The Project to sync.
+
+        Raises:
+            RuntimeError: If sync fails or stack creation fails.
+        """
+
+        self._ensure_storage_bucket()
+
         self._emit(f"Syncing project '{project.name}' to S3")
         project._transfer(self)
         self._emit(f"Project '{project.name}' synced to S3")
+
+    def _sync_loaded_job_inputs(self, job: BaseJob, remote_project: str) -> None:
+        """Stage simulation inputs when a loaded job has no live Project owner."""
+
+        self._ensure_storage_bucket()
+        local_simulation, remote_simulation = job.save_simulation_for_remote(
+            self.__class__.__name__, remote_project
+        )
+        self.sync_s3(local_simulation, remote_simulation)
+        self._emit(f"Synced simulation file to S3: {remote_simulation}")
+
+        for local_file, remote_file in job.remote_input_files(remote_project):
+            self.sync_s3(local_file, remote_file)
+            self._emit(f"Synced simulation input to S3: {remote_file}")
 
     def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit a simulation job.
@@ -910,6 +928,10 @@ class AWSSite(BaseSite):
             return RunHandle.skipped(self, job)
 
         self.prepare_job(job, sync_project=True, validate=False)
+
+        project = job.project_path.name
+        if getattr(job.simulation, "_project", None) is None:
+            self._sync_loaded_job_inputs(job, project)
 
         # Current Cloud deployments use platform-managed shared compute. Older
         # deployments require a per-user compute stack. Discover the contract
@@ -956,7 +978,6 @@ class AWSSite(BaseSite):
 
         try:
             # Sync job file to S3
-            project = job.project_path.name
             local_job, remote_job = job.save_for_remote(
                 self.__class__.__name__, project
             )

@@ -303,6 +303,40 @@ def test_remote_input_files_maps_stale_absolute_refs_to_copied_inputs(tmp_path):
     ) in pairs
 
 
+def test_remote_input_files_include_external_acquisition_contract_files(tmp_path):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+
+    input_names = {
+        "layout_file": "survey-layout.h5",
+        "source_file": "survey.sps",
+        "receiver_file": "survey.rps",
+        "relation_file": "survey.xps",
+    }
+    input_dir = project.path / "inputs"
+    input_dir.mkdir()
+    for name in input_names.values():
+        (input_dir / name).write_text(name)
+
+    simulation_file = project.path / "simulations" / "simple" / "simple.json"
+    payload = json.loads(simulation_file.read_text())
+    payload["Acquisition"] = {
+        "surveys": [{key: str(input_dir / name) for key, name in input_names.items()}]
+    }
+    simulation_file.write_text(json.dumps(payload))
+
+    pairs = job.remote_input_files(Path("/remote/project"))
+
+    for name in input_names.values():
+        assert (
+            input_dir / name,
+            Path("/remote/project/inputs") / name,
+        ) in pairs
+
+
 def test_project_copy_rewrites_saved_job_and_simulation_roots(tmp_path):
     original = Project(name="project", path=tmp_path / "original")
     sim = original.new_simulation(name="simple", physics="acoustic", dimension=2)

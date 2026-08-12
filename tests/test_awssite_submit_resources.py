@@ -43,7 +43,10 @@ class FakeJob:
 
     def __init__(self):
         self.project_path = Path("project-a")
-        self.simulation = SimpleNamespace(project_path=Path("project-a"))
+        self.simulation = SimpleNamespace(
+            project_path=Path("project-a"),
+            _project=object(),
+        )
         self._job_id = None
 
     def is_run_current(self):
@@ -121,6 +124,34 @@ def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
     assert site.graphql_client.submit_calls[0]["vcpu"] is None
     assert site.graphql_client.submit_calls[0]["memory"] is None
     assert site.graphql_client.compute_stack_checks == 0
+
+
+def test_graphql_submit_stages_inputs_for_loaded_job_without_project_owner():
+    site = make_graphql_site()
+    site._ensure_storage_bucket = lambda: None
+    sync_calls = []
+    site.sync_s3 = lambda local, remote: sync_calls.append((local, remote)) or remote
+
+    job = FakeJob()
+    job.simulation._project = None
+    job.save_simulation_for_remote = lambda site_name, project: (
+        "staged-simulation.json",
+        "project-a/simulations/model/model.json",
+    )
+    job.remote_input_files = lambda project: [
+        ("local-input.h5", "project-a/inputs/model.h5")
+    ]
+
+    site.submit(job)
+
+    assert sync_calls == [
+        (
+            "staged-simulation.json",
+            "project-a/simulations/model/model.json",
+        ),
+        ("local-input.h5", "project-a/inputs/model.h5"),
+        ("local-job.json", "project-a/jobs/job.json"),
+    ]
 
 
 def test_poll_run_preserves_customer_safe_cloud_failure_message():
