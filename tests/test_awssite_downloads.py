@@ -150,6 +150,18 @@ def test_get_stops_after_one_refresh_and_sanitizes_provider_failure(tmp_path):
         assert secret not in diagnostic
 
 
+def test_get_rejects_object_key_that_escapes_destination(tmp_path):
+    outside = tmp_path / "outside.txt"
+    s3_client = FakeS3Client({"path/results/../../outside.txt": "private content"})
+    site = make_site(s3_client)
+
+    with pytest.raises(RuntimeError, match="S3 transfer failed"):
+        site.get("s3://bucket/path/results/", tmp_path / "downloads")
+
+    assert not outside.exists()
+    assert s3_client.downloads == []
+
+
 def test_fetch_vtk_reraises_download_failures(tmp_path):
     site = AWSSite.__new__(AWSSite)
     site.config = SimpleNamespace(s3_bucket="bucket")

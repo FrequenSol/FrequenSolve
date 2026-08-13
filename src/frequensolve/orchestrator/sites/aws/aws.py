@@ -1516,15 +1516,36 @@ class AWSSite(BaseSite):
             bucket = path_parts[0]
             key = path_parts[1] if len(path_parts) > 1 else ""
 
+            def _local_target(relative_key: str) -> Path:
+                relative = PurePosixPath(relative_key)
+                if (
+                    not relative_key
+                    or relative.is_absolute()
+                    or "\\" in relative_key
+                    or any(part in {"", ".", ".."} for part in relative.parts)
+                ):
+                    raise RuntimeError(
+                        "Cloud storage returned an unsafe result object path"
+                    )
+                root = local_path.resolve(strict=False)
+                candidate = local_path.joinpath(*relative.parts).resolve(strict=False)
+                try:
+                    candidate.relative_to(root)
+                except ValueError:
+                    raise RuntimeError(
+                        "Cloud storage returned an unsafe result object path"
+                    ) from None
+                return candidate
+
             def _download_object(object_key: str) -> int:
                 if local_path.exists() and local_path.is_dir():
-                    local_file = local_path / Path(object_key).name
+                    local_file = _local_target(PurePosixPath(object_key).name)
                 elif local_path.exists():
                     local_file = local_path
                 elif local_path.suffix:
                     local_file = local_path
                 else:
-                    local_file = local_path / Path(object_key).name
+                    local_file = _local_target(PurePosixPath(object_key).name)
                 local_file.parent.mkdir(parents=True, exist_ok=True)
                 self.s3_client.download_file(bucket, object_key, str(local_file))
                 return 1
@@ -1561,7 +1582,7 @@ class AWSSite(BaseSite):
                         continue
                     # Preserve relative path under prefix
                     rel_key = key[len(prefix) :] if prefix else key
-                    local_file = local_path / rel_key
+                    local_file = _local_target(rel_key)
                     local_file.parent.mkdir(parents=True, exist_ok=True)
                     self.s3_client.download_file(bucket, key, str(local_file))
                     downloaded += 1

@@ -65,11 +65,13 @@ class FakeS3Client:
 
 
 def _worker(tmp_path, **kwargs):
+    kwargs.setdefault("upload_id_factory", lambda: "a" * 32)
     return batch_worker.BatchWorker(
         "private-bucket",
         "us-test-2",
         local_base=tmp_path / "worker",
         connect_aws=False,
+        owns_local_base=True,
         **kwargs,
     )
 
@@ -275,7 +277,7 @@ def test_simulation_task_rejects_invalid_inputs(tmp_path, task_id, analysis):
 
 def test_result_upload_verifies_size_and_preserves_nested_paths(tmp_path):
     s3 = FakeS3Client()
-    worker = _worker(tmp_path, s3_client=s3, clock=lambda: 1700.2)
+    worker = _worker(tmp_path, s3_client=s3)
     results = tmp_path / "results"
     (results / "nested").mkdir(parents=True)
     (results / "summary.json").write_text("{}")
@@ -283,10 +285,10 @@ def test_result_upload_verifies_size_and_preserves_nested_paths(tmp_path):
 
     key = worker.upload_results_to_s3(results, "run-prefix")
 
-    assert key == "run-prefix/results/1700"
+    assert key == f"run-prefix/results/{'a' * 32}"
     assert set(s3.objects) == {
-        "run-prefix/results/1700/summary.json",
-        "run-prefix/results/1700/nested/trace.bin",
+        f"run-prefix/results/{'a' * 32}/summary.json",
+        f"run-prefix/results/{'a' * 32}/nested/trace.bin",
     }
     assert s3.deleted == []
 
@@ -295,7 +297,7 @@ def test_partial_result_upload_rolls_back_exact_uploaded_keys_without_leaking(
     tmp_path, caplog
 ):
     s3 = FakeS3Client(fail_upload_number=2)
-    worker = _worker(tmp_path, s3_client=s3, clock=lambda: 1700)
+    worker = _worker(tmp_path, s3_client=s3)
     results = tmp_path / "results"
     results.mkdir()
     (results / "a.txt").write_text("a")
@@ -315,7 +317,7 @@ def test_partial_result_upload_rolls_back_exact_uploaded_keys_without_leaking(
 
 def test_result_size_mismatch_removes_uploaded_object(tmp_path):
     s3 = FakeS3Client(reported_size=999)
-    worker = _worker(tmp_path, s3_client=s3, clock=lambda: 1700)
+    worker = _worker(tmp_path, s3_client=s3)
     results = tmp_path / "results"
     results.mkdir()
     (results / "result.bin").write_bytes(b"data")
@@ -324,7 +326,7 @@ def test_result_size_mismatch_removes_uploaded_object(tmp_path):
         worker.upload_results_to_s3(results, "prefix")
 
     assert s3.objects == {}
-    assert s3.deleted == [("private-bucket", "prefix/results/1700/result.bin")]
+    assert s3.deleted == [("private-bucket", f"prefix/results/{'a' * 32}/result.bin")]
 
 
 @pytest.mark.parametrize("prefix", ["", "../escape", "/absolute", r"windows\escape"])
@@ -368,6 +370,59 @@ def test_cleanup_is_idempotent(tmp_path):
     worker.cleanup()
 
     assert not worker.local_base.exists()
+
+
+def test_separate_workers_own_unique_temporary_roots():
+    first = batch_worker.BatchWorker("", connect_aws=False)
+    second = batch_worker.BatchWorker("", connect_aws=False)
+
+    try:
+        assert first.local_base != second.local_base
+        assert first.local_base.is_dir()
+        assert second.local_base.is_dir()
+    finally:
+        first.cleanup()
+        second.cleanup()
+
+
+def test_task_cleanup_removes_only_unique_owned_root(tmp_path):
+    worker = batch_worker.BatchWorker("", connect_aws=False)
+    owned_root = worker.local_base
+    external_simulation = tmp_path / "simulation"
+    external_job = tmp_path / "job"
+    external_simulation.mkdir()
+    external_job.mkdir()
+    worker.simulation_dir = external_simulation
+    worker.job_dir = external_job
+
+    worker.cleanup()
+
+    assert not owned_root.exists()
+    assert external_simulation.is_dir()
+    assert external_job.is_dir()
+
+
+def test_repeated_uploads_use_distinct_result_prefixes(tmp_path):
+    upload_ids = iter(["a" * 32, "b" * 32])
+    s3 = FakeS3Client()
+    worker = batch_worker.BatchWorker(
+        "private-bucket",
+        local_base=tmp_path / "worker",
+        s3_client=s3,
+        batch_client=FakeBatchClient(),
+        connect_aws=False,
+        upload_id_factory=lambda: next(upload_ids),
+    )
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "result.txt").write_text("result")
+
+    first = worker.upload_results_to_s3(results, "prefix")
+    second = worker.upload_results_to_s3(results, "prefix")
+
+    assert first == f"prefix/results/{'a' * 32}"
+    assert second == f"prefix/results/{'b' * 32}"
+    assert len(s3.objects) == 2
 
 
 class FakeCliWorker:

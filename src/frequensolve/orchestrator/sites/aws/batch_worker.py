@@ -12,7 +12,9 @@ import json
 import logging
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -50,6 +52,12 @@ def _client_error_code(error: BaseException) -> str:
     return str(code) if code else "unknown"
 
 
+def _new_upload_id() -> str:
+    """Return a collision-resistant identifier for one result upload."""
+
+    return uuid.uuid4().hex
+
+
 class BatchWorker:
     """Worker class for running on AWS Batch instances."""
 
@@ -63,7 +71,9 @@ class BatchWorker:
         local_base: Optional[Path] = None,
         process_runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
         clock: Callable[[], float] = time.time,
+        upload_id_factory: Callable[[], str] = _new_upload_id,
         connect_aws: bool = True,
+        owns_local_base: Optional[bool] = None,
     ):
         """Initialize the batch worker.
 
@@ -75,6 +85,7 @@ class BatchWorker:
         self.region = region
         self._run_process = process_runner
         self._clock = clock
+        self._upload_id_factory = upload_id_factory
         self.s3_client = s3_client
         self.batch_client = batch_client
         if connect_aws:
@@ -84,7 +95,12 @@ class BatchWorker:
                 self.batch_client = boto3.client("batch", region_name=region)
 
         # Local paths for downloaded data
-        self.local_base = Path(local_base or "/tmp/frequensolve")
+        if local_base is None:
+            self.local_base = Path(tempfile.mkdtemp(prefix="frequensolve-batch-"))
+            self._owns_local_base = True
+        else:
+            self.local_base = Path(local_base)
+            self._owns_local_base = bool(owns_local_base)
         self.simulation_dir = self.local_base / "simulation"
         self.job_dir = self.local_base / "job"
 
@@ -365,8 +381,14 @@ class BatchWorker:
             if self.s3_client is None:
                 raise RuntimeError("S3 client is unavailable")
 
-            timestamp = int(self._clock())
-            s3_key = f"{s3_prefix}/results/{timestamp}"
+            upload_id = self._upload_id_factory()
+            if (
+                not isinstance(upload_id, str)
+                or len(upload_id) != 32
+                or any(character not in "0123456789abcdef" for character in upload_id)
+            ):
+                raise RuntimeError("result upload identifier was malformed")
+            s3_key = f"{s3_prefix}/results/{upload_id}"
 
             logger.info("Uploading batch-worker results to S3")
 
@@ -414,6 +436,9 @@ class BatchWorker:
 
     def cleanup(self) -> None:
         """Clean up local files."""
+        if not self._owns_local_base:
+            logger.debug("Skipping cleanup of an externally managed local directory")
+            return
         try:
             import shutil
 
