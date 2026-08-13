@@ -1,7 +1,24 @@
 """Utility helpers for orchestration backends."""
 
 from importlib import import_module
-from typing import Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from frequensolve.orchestrator.utils.credentials import (
+        CloudCredentials as CloudCredentials,
+    )
+    from frequensolve.orchestrator.utils.credentials import Credentials as Credentials
+    from frequensolve.orchestrator.utils.pool import PoolInfo as PoolInfo
+    from frequensolve.orchestrator.utils.pool import PoolStatus as PoolStatus
+    from frequensolve.orchestrator.utils.progress import RunMonitor as RunMonitor
+    from frequensolve.orchestrator.utils.progress import (
+        status_table_html as status_table_html,
+    )
+    from frequensolve.orchestrator.utils.progress import status_text as status_text
+    from frequensolve.orchestrator.utils.progress import wait as wait
+    from frequensolve.orchestrator.utils.progress import wait_all as wait_all
+    from frequensolve.orchestrator.utils.ssh import SSHClientClass as SSHClientClass
+    from frequensolve.orchestrator.utils.ssh import SSHProxy as SSHProxy
 
 _EXPORT_MODULES: Final[dict[str, str]] = {
     "CloudCredentials": "frequensolve.orchestrator.utils.credentials",
@@ -20,7 +37,7 @@ _EXPORT_MODULES: Final[dict[str, str]] = {
 __all__: list[str] = list(_EXPORT_MODULES)
 
 
-def __getattr__(name: str) -> object:
+def __getattr__(name: str) -> Any:
     if name in _EXPORT_MODULES:
         value = getattr(import_module(_EXPORT_MODULES[name]), name)
         globals()[name] = value

@@ -1,5 +1,9 @@
 import json
+import os
+import subprocess
+import sys
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -122,6 +126,45 @@ def test_baseline_writer_removes_promoted_diagnostic_headroom(tmp_path):
     assert written == Counter(
         {Diagnostic("src/frequensolve/model/model.py", "arg-type"): 2}
     )
+
+
+def test_lazy_utility_exports_retain_consumer_types(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    consumer = tmp_path / "consumer.py"
+    consumer.write_text(
+        "\n".join(
+            (
+                "from frequensolve.orchestrator.utils import (",
+                "    Credentials,",
+                "    PoolInfo,",
+                "    status_text,",
+                ")",
+                "credentials = Credentials(username='typed-user')",
+                "pool = PoolInfo()",
+                "summary: str = status_text([], {})",
+            )
+        )
+        + "\n"
+    )
+    environment = dict(os.environ)
+    environment["MYPYPATH"] = str(root / "src")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--config-file",
+            str(root / "pyproject.toml"),
+            str(consumer),
+        ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_baseline_allows_environment_with_fewer_diagnostics(monkeypatch, tmp_path):
