@@ -12,14 +12,24 @@ test:
 	python scripts/check_coverage_thresholds.py tests/output/coverage.json
 
 .PHONY: test-optional-extras
-test-optional-extras:
-	MPLBACKEND=Agg PYVISTA_OFF_SCREEN=true python -m pytest \
-	-ra \
-	-o addopts='' \
-	--strict-markers \
-	-m "not integration and not cloud and not hpc and not interactive" \
-	--mpl --mpl-baseline-path=tests/reference_images/ --mpl-generate-summary=html --mpl-results-path=tests/output/ \
-	tests/test_ex01_simple.py tests/test_seismic_plotting.py tests/test_trace_record.py
+test-optional-extras: validate-optional-extra-contracts
+	python scripts/check_optional_extra_contracts.py \
+		--run visual \
+		--coverage-output tests/output/optional-visual-coverage.json
+	python scripts/check_optional_extra_contracts.py \
+		--run seismic-io \
+		--coverage-output tests/output/optional-seismic-io-coverage.json
+
+.PHONY: validate-optional-extra-contracts
+validate-optional-extra-contracts:
+	python scripts/check_optional_extra_contracts.py --validate
+
+.PHONY: test-optional-extra-contract
+test-optional-extra-contract:
+	@test -n "$(EXTRA)" || (echo "EXTRA is required" >&2; exit 2)
+	python scripts/check_optional_extra_contracts.py \
+		--run "$(EXTRA)" \
+		--coverage-output "tests/output/optional-$(EXTRA)-coverage.json"
 
 .PHONY: typecheck
 typecheck:

@@ -1,0 +1,209 @@
+{
+  "schema": "frequensolve-optional-extra-contracts-1",
+  "excluded_project_extras": [
+    "dev",
+    "docs"
+  ],
+  "aliases": {
+    "parallel": "hpc"
+  },
+  "contracts": [
+    {
+      "name": "base",
+      "distribution": "sdist",
+      "imports": [
+        "frequensolve"
+      ],
+      "selectors": [
+        "tests/test_base_package_contract.py",
+        "tests/test_public_imports.py::test_top_level_import_smoke_in_clean_process",
+        "tests/test_public_imports.py::test_bare_top_level_import_is_lazy_until_public_export_access",
+        "tests/test_public_imports.py::test_top_level_import_does_not_load_optional_backends",
+        "tests/test_public_imports.py::test_units_registry_is_lazy_but_usable"
+      ],
+      "coverage_prefixes": [
+        "frequensolve/_exports.py",
+        "frequensolve/_loading.py",
+        "frequensolve/units.py"
+      ],
+      "coverage_floor": 25.0
+    },
+    {
+      "name": "fast-fft",
+      "distribution": "wheel",
+      "imports": [
+        "pyfftw"
+      ],
+      "selectors": [
+        "tests/test_fft_backend.py"
+      ],
+      "coverage_prefixes": [
+        "frequensolve/util/fft.py"
+      ],
+      "coverage_floor": 80.0
+    },
+    {
+      "name": "cloud",
+      "distribution": "wheel",
+      "imports": [
+        "boto3",
+        "requests"
+      ],
+      "selectors": [
+        "tests/test_awssite_auth_retry.py",
+        "tests/test_cloud_cache_paths.py"
+      ],
+      "coverage_prefixes": [
+        "frequensolve/orchestrator/sites/aws/"
+      ],
+      "coverage_floor": 18.0
+    },
+    {
+      "name": "mcp",
+      "distribution": "wheel",
+      "imports": [
+        "mcp"
+      ],
+      "selectors": [
+        "tests/test_mcp_protocol.py::test_official_client_initializes_and_lists_the_finite_closed_surface",
+        "tests/test_mcp_protocol.py::test_cli_doctor_uses_the_official_in_memory_client"
+      ],
+      "coverage_prefixes": [
+        "frequensolve/mcp_server/"
+      ],
+      "coverage_floor": 20.0
+    },
+    {
+      "name": "hpc",
+      "distribution": "wheel",
+      "imports": [
+        "bokeh",
+        "dask",
+        "dask_jobqueue",
+        "distributed",
+        "keyring",
+        "paramiko",
+        "pyfftw"
+      ],
+      "selectors": [
+        "tests/test_slurm_site_refactor.py::test_generic_slurm_site_can_be_instantiated_without_site_specific_class",
+        "tests/test_slurm_site_refactor.py::test_slurm_state_and_sbatch_parsing_helpers",
+        "tests/test_slurm_site_refactor.py::test_slurm_runtime_environment_expands_only_simple_braced_references",
+        "tests/test_slurm_site_refactor.py::test_slurm_site_config_resolves_partition_shapes_and_rejects_unknown"
+      ],
+      "coverage_prefixes": [
+        "frequensolve/orchestrator/sites/hpc/"
+      ],
+      "coverage_floor": 20.0
+    },
+    {
+      "name": "parallel",
+      "distribution": "wheel",
+      "imports": [
+        "bokeh",
+        "dask",
+        "dask_jobqueue",
+        "distributed",
+        "keyring",
+        "paramiko",
+        "pyfftw"
+      ],
+      "selectors": [
+        "tests/test_local_site_lifecycle.py::test_initialize_dask_preserves_auto_requested_settings",
+        "tests/test_local_site_lifecycle.py::test_close_uses_cluster_close_without_retiring_workers",
+        "tests/test_local_site_lifecycle.py::test_local_dask_dashboard_uses_loopback_without_wildcard_origin",
+        "tests/test_local_site_lifecycle.py::test_dask_logging_preload_quiets_distributed_core_connection_noise"
+      ],
+      "coverage_prefixes": [
+        "frequensolve/orchestrator/sites/local/"
+      ],
+      "coverage_floor": 22.0
+    },
+    {
+      "name": "inversion",
+      "distribution": "wheel",
+      "imports": [
+        "pylops"
+      ],
+      "selectors": [
+        "tests/test_fwi_optional.py"
+      ],
+      "coverage_prefixes": [
+        "frequensolve/simulation/jobs/fwi.py"
+      ],
+      "coverage_floor": 22.0
+    },
+    {
+      "name": "seismic-io",
+      "distribution": "wheel",
+      "imports": [
+        "bitarray",
+        "pyasdf",
+        "segyio",
+        "sklearn",
+        "zfpy"
+      ],
+      "selectors": [
+        "tests/test_trace_record.py"
+      ],
+      "coverage_prefixes": [
+        "frequensolve/seismic/trace_record.py"
+      ],
+      "coverage_floor": 55.0
+    },
+    {
+      "name": "visual",
+      "distribution": "wheel",
+      "imports": [
+        "matplotlib",
+        "pyvista"
+      ],
+      "selectors": [
+        "tests/test_seismic_plotting.py",
+        "tests/test_ex01_simple.py::test_model_plot",
+        "tests/test_ex01_simple.py::test_time_domain_wavelet_time_plot",
+        "tests/test_ex01_simple.py::test_time_domain_wavelet_freq_plot"
+      ],
+      "pytest_args": [
+        "--mpl",
+        "--mpl-baseline-path=tests/reference_images/",
+        "--mpl-generate-summary=html",
+        "--mpl-results-path=tests/output/visual-comparisons"
+      ],
+      "coverage_prefixes": [
+        "frequensolve/plotting/"
+      ],
+      "coverage_floor": 60.0,
+      "environment": {
+        "MPLBACKEND": "Agg",
+        "PYVISTA_OFF_SCREEN": "true"
+      }
+    }
+  ],
+  "approval_markers": {
+    "cloud": {
+      "minimum_cases": 1,
+      "role": "real cloud execution approval independent of interactivity"
+    },
+    "hpc": {
+      "minimum_cases": 0,
+      "role": "reserved for the opt-in real scheduler canary tracked by issue 83"
+    },
+    "interactive": {
+      "minimum_cases": 1,
+      "role": "manual input or authenticated-session approval"
+    },
+    "integration": {
+      "minimum_cases": 1,
+      "role": "solver binary or external service approval"
+    },
+    "unit": {
+      "minimum_cases": 1,
+      "role": "explicit deterministic contract-tool unit tests"
+    },
+    "visual": {
+      "minimum_cases": 1,
+      "role": "image comparison or plotting behavior"
+    }
+  }
+}

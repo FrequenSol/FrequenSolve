@@ -55,6 +55,10 @@ jobs:
       if: matrix.python-version == '3.10'
       run: pre-commit run --show-diff-on-failure --color=always --all-files
 
+    - name: Validate optional-extra and approval-marker contracts
+      if: matrix.python-version == '3.10'
+      run: make validate-optional-extra-contracts
+
     - name: Run incremental strict type check
       if: matrix.python-version == '3.10'
       run: make typecheck
@@ -99,10 +103,12 @@ jobs:
         files: ./coverage.xml
         disable_search: true
 
-  optional-extras:
-    name: Optional visual and seismic extras
+  optional-extra-matrix:
+    name: Build optional-extra test matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.contracts.outputs.matrix }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -111,20 +117,93 @@ jobs:
       with:
         python-version: "3.12"
 
-    - name: Install visual and seismic dependencies
+    - name: Load executable package contract matrix
+      id: contracts
+      run: |
+        python -m pip install packaging toml
+        echo "matrix=$(python scripts/check_optional_extra_contracts.py --matrix)" >> "$GITHUB_OUTPUT"
+
+  optional-extras:
+    name: Optional contract (${{ matrix.contract }}, ${{ matrix.distribution }})
+    needs: [build-package, optional-extra-matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.optional-extra-matrix.outputs.matrix) }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Python 3.10 for lower-bound resolution
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: "3.10"
+
+    - name: Download built distributions
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: dist
+        path: dist/
+
+    - name: Resolve declared direct lower bounds
+      env:
+        CONTRACT: ${{ matrix.contract }}
       run: |
         python -m pip install --upgrade pip
-        python -m pip install -e ".[dev,parallel,visual,seismic-io]"
+        python -m pip install packaging toml
+        python scripts/check_optional_extra_contracts.py \
+          --lower-bound-requirements "$CONTRACT" \
+          > "/tmp/frequensolve-${CONTRACT}-lower-bounds.txt"
+        python -m pip install \
+          --dry-run \
+          --ignore-installed \
+          -r "/tmp/frequensolve-${CONTRACT}-lower-bounds.txt"
 
-    - name: Run optional visual and seismic tests
-      run: make test-optional-extras
+    - name: Set up Python 3.12 for built-package behavior
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: "3.12"
 
-    - name: Upload visual comparison output
+    - name: Install clean built-package contract
+      env:
+        CONTRACT: ${{ matrix.contract }}
+        DISTRIBUTION: ${{ matrix.distribution }}
+      run: |
+        set -euo pipefail
+        if [ "$DISTRIBUTION" = wheel ]; then
+          package="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+        else
+          package="$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
+        fi
+        test -n "$package"
+        python -m pip install \
+          "pytest>=8.0.0,<9.0.0" \
+          "pytest-cov>=4.1.0,<7.0.0" \
+          "pytest-mpl>=0.16.1,<0.18.0" \
+          "pytest-mock>=3.12.0,<4.0.0" \
+          "pytest-timeout>=2.2.0,<3.0.0"
+        if [ "$CONTRACT" = base ]; then
+          python -m pip install "$package"
+        else
+          python -m pip install "${package}[${CONTRACT}]"
+        fi
+
+    - name: Run installed-package behavior contract
+      env:
+        CONTRACT: ${{ matrix.contract }}
+      run: |
+        python scripts/check_optional_extra_contracts.py \
+          --run "$CONTRACT" \
+          --coverage-output "tests/output/optional-${CONTRACT}-coverage.json"
+
+    - name: Upload optional contract coverage
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
-        name: optional-extras-output
-        path: tests/output/
+        name: optional-${{ matrix.contract }}-coverage
+        path: |
+          tests/output/optional-${{ matrix.contract }}-coverage.json
+          tests/output/visual-comparisons/
         if-no-files-found: error
         retention-days: 7
 
@@ -333,6 +412,7 @@ jobs:
     needs:
       - unit-test
       - coverage-upload
+      - optional-extra-matrix
       - optional-extras
       - docs
       - build-package
@@ -345,6 +425,7 @@ jobs:
         UNIT_TEST_RESULT: ${{ needs.unit-test.result }}
         COVERAGE_UPLOAD_RESULT: ${{ needs.coverage-upload.result }}
         OPTIONAL_EXTRAS_RESULT: ${{ needs.optional-extras.result }}
+        OPTIONAL_EXTRA_MATRIX_RESULT: ${{ needs.optional-extra-matrix.result }}
         DOCS_RESULT: ${{ needs.docs.result }}
         BUILD_PACKAGE_RESULT: ${{ needs.build-package.result }}
         PACKAGE_SMOKE_RESULT: ${{ needs.package-smoke.result }}
@@ -353,6 +434,7 @@ jobs:
         for result in \
           "$UNIT_TEST_RESULT" \
           "$COVERAGE_UPLOAD_RESULT" \
+          "$OPTIONAL_EXTRA_MATRIX_RESULT" \
           "$OPTIONAL_EXTRAS_RESULT" \
           "$DOCS_RESULT" \
           "$BUILD_PACKAGE_RESULT" \
