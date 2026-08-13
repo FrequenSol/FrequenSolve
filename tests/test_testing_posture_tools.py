@@ -841,6 +841,13 @@ def test_heavy_test_evidence_rejects_path_escape(tmp_path):
             "below manifest floor 538",
         ),
         (
+            lambda evidence: evidence["pytest"]["junit"]["counts"].update(
+                tests=538,
+                skipped=534,
+            ),
+            "passed test count 4",
+        ),
+        (
             lambda evidence: evidence["pytest"]["coverage"]["rates"].update(
                 lineRate=0.72,
                 linesCovered=7200,

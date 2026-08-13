@@ -278,15 +278,25 @@ def _coverage_xml_rates(
 
 def _enforce_manifest_minimums(
     tests: Any,
+    skipped: Any,
     rates: Mapping[str, Any],
     minimums: Mapping[str, Any],
     errors: list[str],
 ) -> None:
     minimum_tests = minimums["tests"]
-    if isinstance(tests, int) and not isinstance(tests, bool) and tests < minimum_tests:
-        errors.append(
-            f"pytest.junit.counts.tests {tests} is below manifest floor {minimum_tests}"
-        )
+    if (
+        isinstance(tests, int)
+        and not isinstance(tests, bool)
+        and isinstance(skipped, int)
+        and not isinstance(skipped, bool)
+        and skipped >= 0
+    ):
+        passed = tests - skipped
+        if passed < minimum_tests:
+            errors.append(
+                f"pytest.junit passed test count {passed} is below manifest floor "
+                f"{minimum_tests}"
+            )
     for name in ("lineRate", "branchRate"):
         value = rates.get(name)
         minimum = minimums[name]
@@ -421,7 +431,7 @@ def validate_heavy_test_evidence(
                 errors.append(
                     f"pytest.coverage.rates.{name} does not match measured counts"
                 )
-    _enforce_manifest_minimums(tests, rates, minimums, errors)
+    _enforce_manifest_minimums(tests, skipped, rates, minimums, errors)
     if coverage_path is not None:
         _coverage_xml_rates(coverage_path, rates, errors)
 
