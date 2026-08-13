@@ -268,7 +268,12 @@ def test_rsync_configuration_uses_authenticated_sftp_without_control_socket(
             transferred.append((source, target))
 
         def stat(self, target):
+            if target == "/work/input.json":
+                raise FileNotFoundError(target)
             return SimpleNamespace(st_size=Path(transferred[-1][0]).stat().st_size)
+
+        def chmod(self, target, mode):
+            pass
 
         def posix_rename(self, source, target):
             published.append((source, target))
@@ -310,7 +315,12 @@ def test_sftp_directory_put_uses_configured_tmp_dirs(tmp_path):
             transfers.append((Path(source), target))
 
         def stat(self, target):
+            if not target.split("/")[-1].startswith("."):
+                raise FileNotFoundError(target)
             return SimpleNamespace(st_size=transfers[-1][0].stat().st_size)
+
+        def chmod(self, target, mode):
+            pass
 
         def posix_rename(self, source, target):
             pass

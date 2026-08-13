@@ -1,4 +1,5 @@
 import socket
+import stat
 import subprocess
 import tarfile
 from pathlib import Path
@@ -256,7 +257,12 @@ def test_sftp_upload_size_mismatch_removes_only_temporary_object(tmp_path):
             self.uploaded.append(target)
 
         def stat(self, target):
+            if target == "/work/input.bin":
+                raise FileNotFoundError(target)
             return SimpleNamespace(st_size=999)
+
+        def chmod(self, target, mode):
+            pass
 
         def posix_rename(self, source, target):
             self.published.append((source, target))
@@ -285,6 +291,11 @@ def test_sftp_provider_failure_is_sanitized_and_cleans_partial_upload(tmp_path):
         def __init__(self):
             self.removed = []
 
+        def stat(self, target):
+            if target == "/work/input.bin":
+                raise FileNotFoundError(target)
+            return SimpleNamespace(st_size=7)
+
         def put(self, source, target):
             raise OSError("private remote path and token")
 
@@ -304,6 +315,110 @@ def test_sftp_provider_failure_is_sanitized_and_cleans_partial_upload(tmp_path):
     assert len(sftp.removed) == 1
     assert "private remote path" not in str(exc_info.value)
     assert "token" not in str(exc_info.value)
+
+
+def test_sftp_upload_falls_back_to_standard_rename_for_new_destination(tmp_path):
+    local = tmp_path / "run.sh"
+    local.write_bytes(b"#!/bin/sh\n")
+    local.chmod(0o750)
+    calls = []
+
+    class FakeSFTP:
+        def stat(self, target):
+            if target == "/work/run.sh":
+                raise FileNotFoundError(target)
+            return SimpleNamespace(st_size=local.stat().st_size)
+
+        def put(self, source, target):
+            calls.append(("put", source, target))
+
+        def chmod(self, target, mode):
+            calls.append(("chmod", target, mode))
+
+        def posix_rename(self, source, target):
+            raise OSError("unsupported extension")
+
+        def rename(self, source, target):
+            calls.append(("rename", source, target))
+
+        def remove(self, target):
+            calls.append(("remove", target))
+
+        def close(self):
+            pass
+
+    SlurmTransferManager(_sftp_site(FakeSFTP())).put(local, "/work/run.sh")
+
+    assert any(call[0] == "rename" for call in calls)
+    assert next(call for call in calls if call[0] == "chmod")[2] == 0o750
+    assert not any(call[0] == "remove" for call in calls)
+
+
+def test_sftp_replacement_preserves_remote_mode(tmp_path):
+    local = tmp_path / "run.sh"
+    local.write_bytes(b"#!/bin/sh\n")
+    local.chmod(0o600)
+    modes = []
+
+    class FakeSFTP:
+        def stat(self, target):
+            if target == "/work/run.sh":
+                return SimpleNamespace(st_mode=0o100775, st_size=999)
+            return SimpleNamespace(st_mode=0o100600, st_size=local.stat().st_size)
+
+        def put(self, source, target):
+            pass
+
+        def chmod(self, target, mode):
+            modes.append(mode)
+
+        def posix_rename(self, source, target):
+            pass
+
+        def remove(self, target):
+            pass
+
+        def close(self):
+            pass
+
+    SlurmTransferManager(_sftp_site(FakeSFTP())).put(local, "/work/run.sh")
+
+    assert modes == [0o775]
+
+
+def test_sftp_replacement_requires_atomic_server_support(tmp_path):
+    local = tmp_path / "run.sh"
+    local.write_bytes(b"#!/bin/sh\n")
+    removed = []
+
+    class FakeSFTP:
+        def stat(self, target):
+            if target == "/work/run.sh":
+                return SimpleNamespace(st_mode=0o100755, st_size=999)
+            return SimpleNamespace(st_mode=0o100600, st_size=local.stat().st_size)
+
+        def put(self, source, target):
+            pass
+
+        def chmod(self, target, mode):
+            pass
+
+        def posix_rename(self, source, target):
+            raise OSError("unsupported extension")
+
+        def rename(self, source, target):
+            raise AssertionError("non-atomic replacement must not be attempted")
+
+        def remove(self, target):
+            removed.append(target)
+
+        def close(self):
+            pass
+
+    with pytest.raises(RuntimeError, match="cannot atomically replace"):
+        SlurmTransferManager(_sftp_site(FakeSFTP())).put(local, "/work/run.sh")
+
+    assert len(removed) == 1
 
 
 def test_sftp_download_mismatch_preserves_existing_destination(tmp_path):
@@ -327,6 +442,45 @@ def test_sftp_download_mismatch_preserves_existing_destination(tmp_path):
 
     assert destination.read_bytes() == b"existing"
     assert list(tmp_path.glob("*.partial")) == []
+
+
+def test_sftp_download_preserves_existing_destination_mode(tmp_path):
+    destination = tmp_path / "result.bin"
+    destination.write_bytes(b"existing")
+    destination.chmod(0o640)
+
+    class FakeSFTP:
+        def stat(self, target):
+            return SimpleNamespace(st_mode=0o100755, st_size=3)
+
+        def get(self, source, target):
+            Path(target).write_bytes(b"new")
+
+        def close(self):
+            pass
+
+    SlurmTransferManager(_sftp_site(FakeSFTP())).get("/work/result.bin", destination)
+
+    assert destination.read_bytes() == b"new"
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o640
+
+
+def test_sftp_download_new_destination_uses_remote_mode(tmp_path):
+    destination = tmp_path / "result.bin"
+
+    class FakeSFTP:
+        def stat(self, target):
+            return SimpleNamespace(st_mode=0o100750, st_size=3)
+
+        def get(self, source, target):
+            Path(target).write_bytes(b"new")
+
+        def close(self):
+            pass
+
+    SlurmTransferManager(_sftp_site(FakeSFTP())).get("/work/result.bin", destination)
+
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o750
 
 
 def test_directory_download_failure_preserves_existing_tree_and_cleans_remote(
@@ -393,7 +547,14 @@ def test_directory_upload_failure_cleans_remote_archive_and_hides_stderr(tmp_pat
             uploaded_source = Path(source_path)
 
         def stat(self, target):
+            if target.startswith("/remote/tmp/frequensolve-") and not target.endswith(
+                ".partial"
+            ):
+                raise FileNotFoundError(target)
             return SimpleNamespace(st_size=uploaded_source.stat().st_size)
+
+        def chmod(self, target, mode):
+            pass
 
         def posix_rename(self, source_path, target):
             pass
