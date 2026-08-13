@@ -2,14 +2,17 @@
 
 import copy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Union
+from typing import Any, Dict, List, Literal, Mapping, Optional, Union
 
-from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
+from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
 
 __all__ = ["SolverConfig", "SuperPatch"]
 
 
-def _serialize_solver_extra(extra: Dict[str, Any], ctx=None) -> Dict[str, Any]:
+def _serialize_solver_extra(
+    extra: Dict[str, Any],
+    ctx: Optional[ExportContext] = None,
+) -> Dict[str, Any]:
     from frequensolve.mesh.mesh_manager import (
         _serialize_adapt_value,
         _serialize_hp_payload,
@@ -54,8 +57,8 @@ class SuperPatch(ExtraFieldsMixin):
         grid: int,
         domain: Union[int, List[int]],
         warning_acknowledged: bool = False,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         """Create an advanced super-patch definition.
 
         ``warning_acknowledged`` must be set explicitly to avoid accidental use
@@ -77,7 +80,7 @@ class SuperPatch(ExtraFieldsMixin):
         self._init_extra(None, **kwargs)
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "SuperPatch":
+    def from_fs(cls, data: Mapping[str, Any]) -> "SuperPatch":
         """Deserialize a super-patch solver payload.
 
         Args:
@@ -87,7 +90,7 @@ class SuperPatch(ExtraFieldsMixin):
             ``SuperPatch`` instance.
         """
 
-        data = copy.deepcopy(data)
+        data = dict(copy.deepcopy(data))
         return cls(
             grid=data.pop("grid"),
             domain=data.pop("domain"),
@@ -95,7 +98,7 @@ class SuperPatch(ExtraFieldsMixin):
             **data,
         )
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize this super patch for solver input.
 
         Args:
@@ -137,8 +140,8 @@ class SolverConfig(ExtraFieldsMixin):
         max_iter: int = 300,
         tolerance: float = 1.0e-4,
         precision: Literal["single", "double"] = "single",
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         """Create iterative solver settings."""
 
         if precision not in {"single", "double"}:
@@ -150,7 +153,7 @@ class SolverConfig(ExtraFieldsMixin):
         self._init_extra(None, **kwargs)
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "SolverConfig":
+    def from_fs(cls, data: Mapping[str, Any]) -> "SolverConfig":
         """Deserialize solver settings from solver JSON.
 
         Args:
@@ -160,7 +163,7 @@ class SolverConfig(ExtraFieldsMixin):
             ``SolverConfig`` instance.
         """
 
-        data = copy.deepcopy(data)
+        data = dict(copy.deepcopy(data))
         obj = cls(
             solve_on=data.pop("solve_on", "final"),
             max_iter=data.pop("max_iter", 300),
@@ -186,7 +189,7 @@ class SolverConfig(ExtraFieldsMixin):
             self.extra["super_patches"].append(other.to_fs())
         return self
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize solver settings for solver input.
 
         Args:
