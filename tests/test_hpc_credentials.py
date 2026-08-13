@@ -5,6 +5,8 @@ from frequensolve.orchestrator.sites.hpc.site import SlurmSite
 from frequensolve.orchestrator.sites.hpc.stampede3 import TACCLoginCredentials
 from frequensolve.orchestrator.utils.credentials import Credentials
 
+pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
+
 
 class MemoryCredentialStore:
     def __init__(self, values=None):

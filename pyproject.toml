@@ -165,6 +165,7 @@ filterwarnings = [
 markers = [
     "cloud: requires AWS/Cognito/S3 or the FrequenSol cloud control plane",
     "hpc: requires SLURM, SSH, or a configured remote cluster",
+    "hpc_hermetic: deterministic HPC adapter behavior with no SSH, scheduler, or credentials",
     "integration: requires solver binaries or external services",
     "interactive: requires manual input or an already authenticated user session",
     "unit: deterministic unit test with no solver, network, credentials, or scheduler",

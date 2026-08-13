@@ -321,7 +321,7 @@ class SSHProxy:
                 capture_output=True,
                 timeout=effective_timeout,
             )
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             logger.error(
                 "SSH command timed out after %.1fs for target %s",
                 time.monotonic() - started,
@@ -330,7 +330,12 @@ class SSHProxy:
             raise TimeoutError(
                 f"SSH command to {target} timed out after "
                 f"{effective_timeout} seconds"
-            ) from exc
+            ) from None
+        except OSError as exc:
+            logger.error("SSH command could not start (%s)", type(exc).__name__)
+            raise RuntimeError(
+                f"SSH command could not start ({type(exc).__name__})"
+            ) from None
         logger.debug(
             "SSH command finished in %.3fs for target %s with return code %s",
             time.monotonic() - started,
@@ -338,9 +343,7 @@ class SSHProxy:
             result.returncode,
         )
         if result.returncode == 255:
-            stderr = result.stderr.decode(errors="replace").strip()
-            detail = stderr or "OpenSSH reported a connection or authentication error"
-            raise RuntimeError(f"SSH connection to {target} failed: {detail}")
+            raise RuntimeError(f"SSH connection to {target} failed with status 255")
         return result
 
     def close(self) -> None:

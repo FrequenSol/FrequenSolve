@@ -40,6 +40,8 @@ from frequensolve.simulation.jobs import FrequencyDomainJob, SkipPolicy
 from frequensolve.simulation.jobs.imaging import ImagingJob
 from frequensolve.simulation.outputs import WavefieldOutput
 
+pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
+
 
 class DummyStream:
     def __init__(self, text=""):

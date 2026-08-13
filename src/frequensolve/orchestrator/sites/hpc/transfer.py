@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
+import shutil
 import stat
 import subprocess
 import tarfile
 import tempfile
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Union
 
 from frequensolve.orchestrator.sites.base import _wait_for_path
@@ -19,6 +21,26 @@ from frequensolve.orchestrator.utils.ssh import control_socket_ssh_options
 from frequensolve.util.setup_logger import init_logger
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
+
+_REMOTE_USERNAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
+_REMOTE_HOST = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:]+\])\Z")
+
+
+def _validated_remote_path(value: Union[str, Path]) -> PurePosixPath:
+    """Return an absolute remote path that is safe for SSH shell commands."""
+
+    raw = str(value)
+    if (
+        not raw
+        or "\x00" in raw
+        or "\n" in raw
+        or "\r" in raw
+        or "\\" in raw
+        or not raw.startswith("/")
+        or any(part == ".." for part in raw.split("/"))
+    ):
+        raise ValueError("remote path must be an absolute traversal-free POSIX path")
+    return PurePosixPath(raw)
 
 
 class SlurmTransferManager:
@@ -45,16 +67,16 @@ class SlurmTransferManager:
         """
 
         site = self.site
-        logger.debug("Transferring %s to %s", local_path, remote_path)
+        logger.debug("Starting HPC upload")
         if not _wait_for_path(local_path):
             logger.error("Local path %s does not exist", local_path)
             raise FileNotFoundError(f"Local path {local_path} does not exist")
 
         local_path = Path(local_path)
-        remote_path = Path(remote_path)
+        remote_path = _validated_remote_path(remote_path)
 
         try:
-            site.run_login(f"mkdir -p {remote_path.parent}")
+            site.run_login(f"mkdir -p {shlex.quote(str(remote_path.parent))}")
 
             if self._uses_sftp():
                 sftp = site.login_client.open_sftp()
@@ -62,7 +84,7 @@ class SlurmTransferManager:
                     if local_path.is_dir():
                         self._put_dir(sftp, local_path, remote_path)
                     else:
-                        sftp.put(str(local_path), str(remote_path))
+                        self._put_file(sftp, local_path, remote_path)
                 finally:
                     sftp.close()
             else:
@@ -71,11 +93,11 @@ class SlurmTransferManager:
 
             logger.debug("Transfer completed successfully")
 
-        except Exception:
-            logger.exception(
-                "Error during file transfer: %s -> %s", local_path, remote_path
-            )
+        except (FileNotFoundError, ValueError, RuntimeError):
             raise
+        except Exception as exc:
+            logger.error("HPC upload failed (%s)", type(exc).__name__)
+            raise RuntimeError(f"HPC upload failed ({type(exc).__name__})") from None
 
     def get(
         self,
@@ -96,10 +118,10 @@ class SlurmTransferManager:
         """
 
         site = self.site
-        logger.debug("Attempting to transfer from %s to %s", remote_path, local_path)
+        logger.debug("Starting HPC download")
 
         local_path = Path(local_path)
-        remote_path = Path(remote_path)
+        remote_path = _validated_remote_path(remote_path)
 
         try:
             local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,7 +132,7 @@ class SlurmTransferManager:
                     if self._sftp_is_dir(sftp, remote_path):
                         self._get_dir(sftp, remote_path, local_path)
                     else:
-                        sftp.get(str(remote_path), str(local_path))
+                        self._get_file(sftp, remote_path, local_path)
                 finally:
                     sftp.close()
             else:
@@ -122,17 +144,24 @@ class SlurmTransferManager:
 
             logger.debug("Transfer completed successfully")
 
-        except Exception:
-            logger.exception(
-                "Error during file transfer: %s -> %s", remote_path, local_path
-            )
+        except (FileNotFoundError, ValueError, RuntimeError):
             raise
+        except Exception as exc:
+            logger.error("HPC download failed (%s)", type(exc).__name__)
+            raise RuntimeError(f"HPC download failed ({type(exc).__name__})") from None
 
     def _remote_spec(self, remote_path: Union[str, Path]) -> str:
-        return (
-            f"{self.site.credentials.username}@"
-            f"{self.site.config.hostname}:{remote_path}"
-        )
+        username = str(self.site.credentials.username)
+        hostname = str(self.site.config.hostname)
+        raw_path = str(remote_path)
+        trailing_slash = raw_path.endswith("/")
+        path = _validated_remote_path(raw_path)
+        if not _REMOTE_USERNAME.fullmatch(username) or not _REMOTE_HOST.fullmatch(
+            hostname
+        ):
+            raise ValueError("SSH username or hostname contains unsafe characters")
+        rendered_path = str(path) + ("/" if trailing_slash else "")
+        return f"{username}@{hostname}:{shlex.quote(rendered_path)}"
 
     def _run_rsync(self, source: str, target: str) -> None:
         debug_output = logger.isEnabledFor(logging.DEBUG)
@@ -156,8 +185,54 @@ class SlurmTransferManager:
         else:
             result = subprocess.run(rsync_cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            detail = result.stderr or "see the streamed rsync output above"
-            raise RuntimeError(f"rsync failed: {detail}")
+            raise RuntimeError(f"rsync transfer failed with status {result.returncode}")
+
+    @staticmethod
+    def _verify_sftp_size(sftp, remote_path: PurePosixPath, local_path: Path) -> None:
+        """Verify one SFTP object against its local counterpart."""
+
+        remote_size = sftp.stat(str(remote_path)).st_size
+        if remote_size != local_path.stat().st_size:
+            raise RuntimeError("SFTP transfer size verification failed")
+
+    def _put_file(self, sftp, local_path: Path, remote_path: PurePosixPath) -> None:
+        """Upload and verify one file before atomically publishing it."""
+
+        temporary = remote_path.with_name(
+            f".{remote_path.name}.frequensolve-{uuid.uuid4().hex}.partial"
+        )
+        try:
+            sftp.put(str(local_path), str(temporary))
+            self._verify_sftp_size(sftp, temporary, local_path)
+            publish = getattr(sftp, "posix_rename", None) or sftp.rename
+            publish(str(temporary), str(remote_path))
+        except Exception:
+            try:
+                sftp.remove(str(temporary))
+            except OSError:
+                pass
+            raise
+
+    def _get_file(self, sftp, remote_path: PurePosixPath, local_path: Path) -> None:
+        """Download and verify one file before atomically publishing it."""
+
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{local_path.name}.frequensolve-",
+            suffix=".partial",
+            dir=local_path.parent,
+        )
+        os.close(fd)
+        temporary = Path(temporary_name)
+        try:
+            sftp.get(str(remote_path), str(temporary))
+            self._verify_sftp_size(sftp, remote_path, temporary)
+            os.replace(temporary, local_path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
     def _uses_sftp(self) -> bool:
         """Return whether transfers should use the authenticated SFTP channel."""
@@ -182,64 +257,120 @@ class SlurmTransferManager:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _remote_tmp_file(self, suffix: str) -> Path:
-        tmp_dir = Path(getattr(self.site, "remote_tmp_dir", None) or "/tmp")
+    def _remote_tmp_file(self, suffix: str) -> PurePosixPath:
+        tmp_dir = _validated_remote_path(
+            getattr(self.site, "remote_tmp_dir", None) or "/tmp"
+        )
         return tmp_dir / f"frequensolve-{uuid.uuid4().hex}{suffix}"
 
-    def _put_dir(self, sftp, local_dir: Path, remote_dir: Path):
+    def _remove_remote_tmp_file(self, path: Union[str, Path]) -> None:
+        """Best-effort cleanup for a uniquely owned remote staging file."""
+
+        try:
+            self.site.run_login(f"rm -f {shlex.quote(str(path))}")
+        except Exception as exc:
+            logger.warning(
+                "Remote transfer staging cleanup failed (%s)", type(exc).__name__
+            )
+
+    def _put_dir(self, sftp, local_dir: Path, remote_dir: PurePosixPath):
         with tempfile.NamedTemporaryFile(
             suffix=".tar.gz",
             dir=self._local_tmp_parent(),
         ) as tmp:
             with tarfile.open(tmp.name, "w:gz") as tar:
-                tar.add(local_dir, arcname=local_dir.name)
+                tar.add(local_dir, arcname=remote_dir.name)
 
             remote_tar = self._remote_tmp_file(".tar.gz")
             self.site.run_login(f"mkdir -p {shlex.quote(str(remote_tar.parent))}")
-            sftp.put(tmp.name, str(remote_tar))
+            self._put_file(sftp, Path(tmp.name), remote_tar)
 
+            try:
+                _, _, stderr = self.site.run_login_cmd(
+                    f"cd {shlex.quote(str(remote_dir.parent))} && "
+                    f"tar xzf {shlex.quote(str(remote_tar))}"
+                )
+
+                err = stderr.read().decode().strip()
+                if err:
+                    raise RuntimeError("Remote directory extraction failed")
+            finally:
+                self._remove_remote_tmp_file(remote_tar)
+
+    def _get_dir(self, sftp, remote_dir: PurePosixPath, local_dir: Path):
+        remote_tar = self._remote_tmp_file(".tar.gz")
+        try:
             _, _, stderr = self.site.run_login_cmd(
+                f"mkdir -p {shlex.quote(str(remote_tar.parent))} && "
                 f"cd {shlex.quote(str(remote_dir.parent))} && "
-                f"tar xzf {shlex.quote(str(remote_tar))} && "
-                f"rm -f {shlex.quote(str(remote_tar))}"
+                f"tar czf {shlex.quote(str(remote_tar))} "
+                f"{shlex.quote(remote_dir.name)}"
             )
 
             err = stderr.read().decode().strip()
             if err:
-                logger.error("Error extracting directory on remote: %s", err)
-                raise RuntimeError(f"Failed to extract directory on remote: {err}")
+                raise RuntimeError("Remote directory archive failed")
 
-    def _get_dir(self, sftp, remote_dir: Path, local_dir: Path):
-        remote_tar = self._remote_tmp_file(".tar.gz")
-        _, _, stderr = self.site.run_login_cmd(
-            f"mkdir -p {shlex.quote(str(remote_tar.parent))} && "
-            f"cd {shlex.quote(str(remote_dir.parent))} && "
-            f"tar czf {shlex.quote(str(remote_tar))} "
-            f"{shlex.quote(remote_dir.name)}"
-        )
+            with tempfile.NamedTemporaryFile(
+                suffix=".tar.gz",
+                dir=self._local_tmp_parent(),
+                delete=False,
+            ) as tmp:
+                local_tar = tmp.name
 
-        err = stderr.read().decode().strip()
-        if err:
-            raise RuntimeError(f"Failed to create tar payload on remote: {err}")
-
-        with tempfile.NamedTemporaryFile(
-            suffix=".tar.gz",
-            dir=self._local_tmp_parent(),
-            delete=False,
-        ) as tmp:
-            local_tar = tmp.name
-
-        try:
-            sftp.get(str(remote_tar), local_tar)
-
-            with tarfile.open(local_tar, "r:gz") as tar:
-                tar.extractall(path=local_dir.parent, filter="data")
-        finally:
             try:
-                os.remove(local_tar)
-            except FileNotFoundError:
-                pass
-            self.site.run_login(f"rm -f {shlex.quote(str(remote_tar))}")
+                sftp.get(str(remote_tar), local_tar)
+                self._verify_sftp_size(
+                    sftp,
+                    remote_tar,
+                    Path(local_tar),
+                )
+
+                with tarfile.open(local_tar, "r:gz") as tar:
+                    with tempfile.TemporaryDirectory(
+                        prefix=f".{local_dir.name}.frequensolve-",
+                        dir=local_dir.parent,
+                    ) as staging_name:
+                        staging = Path(staging_name)
+                        tar.extractall(path=staging, filter="data")
+                        extracted = staging / remote_dir.name
+                        if not extracted.exists():
+                            raise RuntimeError(
+                                "Remote directory archive did not contain its root"
+                            )
+
+                        backup = None
+                        if local_dir.exists():
+                            backup = local_dir.with_name(
+                                f".{local_dir.name}.frequensolve-"
+                                f"{uuid.uuid4().hex}.backup"
+                            )
+                            os.replace(local_dir, backup)
+                        try:
+                            os.replace(extracted, local_dir)
+                        except Exception:
+                            if backup is not None and not local_dir.exists():
+                                os.replace(backup, local_dir)
+                            raise
+                        else:
+                            if backup is not None:
+                                try:
+                                    if backup.is_dir():
+                                        shutil.rmtree(backup)
+                                    else:
+                                        backup.unlink()
+                                except OSError as exc:
+                                    logger.warning(
+                                        "Could not remove replaced local result (%s)",
+                                        type(exc).__name__,
+                                    )
+            finally:
+                try:
+                    os.remove(local_tar)
+                except FileNotFoundError:
+                    pass
+        finally:
+            self._remove_remote_tmp_file(remote_tar)
 
     @staticmethod
     def _sftp_is_dir(sftp, remote_path: Union[str, Path]) -> bool:

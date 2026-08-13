@@ -75,6 +75,9 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     temporary_text_file as _temporary_text_file,
 )
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
+    validate_slurm_job_id as _validate_slurm_job_id,
+)
 from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
 from frequensolve.orchestrator.utils.credential_store import CredentialStore
 from frequensolve.orchestrator.utils.credentials import Credentials
@@ -1208,6 +1211,7 @@ class SlurmSite(BaseSite):
         if not job_id:
             self.pool._status.status = "unknown"
             return "unknown"
+        job_id = _validate_slurm_job_id(job_id)
 
         # Get job status
         queue_status = self.run_login(f"squeue -j {job_id} -h -o %t").strip()
@@ -1572,8 +1576,17 @@ class SlurmSite(BaseSite):
         if not job_id:
             logger.debug("No SLURM job id supplied; skipping cancellation")
             return False
-        _, stdout, _ = self.run_login_cmd(f"scancel {job_id}")
-        logger.info("Job %s cancelled: %s", job_id, stdout.read().decode().strip())
+        job_id = _validate_slurm_job_id(job_id)
+        cancelled_ids = getattr(self, "_cancelled_job_ids", set())
+        if job_id in cancelled_ids:
+            logger.debug("SLURM job %s was already cancelled by this site", job_id)
+            return False
+        _, _, stderr = self.run_login_cmd(f"scancel {job_id}")
+        if _read_stream(stderr):
+            raise RuntimeError("SLURM cancellation failed")
+        cancelled_ids.add(job_id)
+        self._cancelled_job_ids = cancelled_ids
+        logger.info("SLURM job %s cancellation requested", job_id)
         return True
 
     def deprovision(self, **kwargs):
@@ -2613,6 +2626,7 @@ class SlurmSite(BaseSite):
 
     def _is_running(self, job_id: int):
         """Check if a job is running."""
+        job_id = _validate_slurm_job_id(job_id)
         status = self.run_login(f"squeue -j {job_id} -h -o %t")
         return status == "R"
 

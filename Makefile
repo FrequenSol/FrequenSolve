@@ -31,6 +31,19 @@ test-optional-extra-contract:
 		--run "$(EXTRA)" \
 		--coverage-output "tests/output/optional-$(EXTRA)-coverage.json"
 
+.PHONY: test-hpc-hermetic
+test-hpc-hermetic:
+	python -m pytest \
+	-ra \
+	-o addopts='' \
+	--strict-markers \
+	-m hpc_hermetic \
+	--cov=src/frequensolve/orchestrator/sites/hpc \
+	--cov-branch \
+	--cov-report=term \
+	--cov-fail-under=67.5 \
+	tests/
+
 .PHONY: typecheck
 typecheck:
 	python scripts/check_mypy_baseline.py

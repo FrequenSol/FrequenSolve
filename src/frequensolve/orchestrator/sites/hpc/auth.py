@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -28,6 +29,7 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import validate_slurm_job_id
 from frequensolve.orchestrator.utils.ssh import (
     SSH_CONNECT_TIMEOUT_SECONDS,
     SSHProxy,
@@ -36,6 +38,8 @@ from frequensolve.orchestrator.utils.ssh import (
 from frequensolve.util.setup_logger import init_logger
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
+
+_COMPUTE_HOST = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:]+\])\Z")
 
 
 def _verify_server_host_key(transport: Transport, host: str) -> None:
@@ -130,7 +134,9 @@ class SlurmAuthenticator:
                     continue
                 except Exception as exc:
                     logger.debug(
-                        "Failed to use control socket %s: %s", control_path, exc
+                        "Failed to use control socket %s (%s)",
+                        control_path,
+                        type(exc).__name__,
                     )
                     continue
         return self._interactive_authentication(host)
@@ -150,6 +156,7 @@ class SlurmAuthenticator:
         """
 
         site = self.site
+        job_id = validate_slurm_job_id(job_id)
         status = site.run_login(f"squeue -j {job_id} -h -o %t").strip()
         if status != "R":
             raise RuntimeError(f"Job {job_id} is not running")
@@ -157,6 +164,8 @@ class SlurmAuthenticator:
         hostname = site.run_login(f"squeue -j {job_id} -h -o %B").strip()
         if not hostname:
             raise RuntimeError(f"Could not get hostname for job {job_id}")
+        if not _COMPUTE_HOST.fullmatch(hostname):
+            raise RuntimeError("SLURM returned an invalid compute-node hostname")
 
         return hostname
 
@@ -187,24 +196,35 @@ class SlurmAuthenticator:
         if not transport:
             raise RuntimeError("No transport available for SSH tunneling")
 
-        channel = transport.open_channel("direct-tcpip", (job_host, 22), ("", 0))
+        try:
+            channel = transport.open_channel("direct-tcpip", (job_host, 22), ("", 0))
+        except Exception as exc:
+            raise RuntimeError(
+                f"SSH compute-node tunnel failed ({type(exc).__name__})"
+            ) from None
         job_client = SSHClient()
-        job_client.load_system_host_keys()
 
         try:
+            job_client.load_system_host_keys()
             job_client.connect(
                 job_host,
                 username=site.credentials.username,
                 sock=channel,
                 allow_agent=True,
                 look_for_keys=False,
+                timeout=SSH_CONNECT_TIMEOUT_SECONDS,
+                banner_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
+                auth_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
             )
             logger.info("Connected to job host: %s", job_host)
             return job_client
-        except Exception:
-            logger.exception("Failed to connect to job host: %s", job_host)
+        except Exception as exc:
+            logger.error("Failed to connect to job host (%s)", type(exc).__name__)
+            job_client.close()
             channel.close()
-            raise
+            raise RuntimeError(
+                f"SSH compute-node connection failed ({type(exc).__name__})"
+            ) from None
 
     def _interactive_authentication(self, host: str):
         """Normal authentication flow when a control socket is not available."""
@@ -212,10 +232,28 @@ class SlurmAuthenticator:
         site = self.site
         login_client = SSHClient()
 
-        sock = socket.create_connection((host, 22), timeout=SSH_CONNECT_TIMEOUT_SECONDS)
-        transport = Transport(sock)
         try:
-            transport.start_client()
+            sock = socket.create_connection(
+                (host, 22), timeout=SSH_CONNECT_TIMEOUT_SECONDS
+            )
+        except (socket.timeout, TimeoutError):
+            raise TimeoutError(
+                "SSH login connection timed out after "
+                f"{SSH_CONNECT_TIMEOUT_SECONDS} seconds"
+            ) from None
+        except OSError as exc:
+            raise RuntimeError(
+                f"SSH login connection failed ({type(exc).__name__})"
+            ) from None
+        try:
+            transport = Transport(sock)
+        except Exception as exc:
+            sock.close()
+            raise RuntimeError(
+                f"SSH transport setup failed ({type(exc).__name__})"
+            ) from None
+        try:
+            transport.start_client(timeout=SSH_CONNECT_TIMEOUT_SECONDS)
             _verify_server_host_key(transport, host)
         except Exception:
             transport.close()
@@ -234,10 +272,14 @@ class SlurmAuthenticator:
                         authenticated = True
                         break
                 except Exception as exc:
-                    logger.debug("Agent key authentication failed: %s", exc)
+                    logger.debug(
+                        "Agent key authentication failed (%s)", type(exc).__name__
+                    )
                     continue
         except Exception as exc:
-            logger.debug("Agent-based authentication exception: %s", exc)
+            logger.debug(
+                "Agent-based authentication exception (%s)", type(exc).__name__
+            )
 
         if not authenticated:
             logger.debug("Attempting configured private-key authentication.")
@@ -246,7 +288,10 @@ class SlurmAuthenticator:
                 transport.auth_publickey(site.credentials.username, key)
                 authenticated = transport.is_authenticated()
             except (FileNotFoundError, OSError, SSHException) as exc:
-                logger.debug("Private-key authentication unavailable: %s", exc)
+                logger.debug(
+                    "Private-key authentication unavailable (%s)",
+                    type(exc).__name__,
+                )
 
         if not authenticated:
             logger.debug("Attempting keyboard-interactive authentication.")
@@ -274,12 +319,14 @@ class SlurmAuthenticator:
                 else:
                     logger.debug("Keyboard-interactive authentication failed.")
             except Exception as exc:
-                logger.debug("Keyboard-interactive authentication exception: %s", exc)
+                logger.debug(
+                    "Keyboard-interactive authentication exception (%s)",
+                    type(exc).__name__,
+                )
 
         if not transport.is_authenticated():
-            logger.error(
-                "Authentication failed for user: %s", site.credentials.username
-            )
+            logger.error("Authentication failed for the configured SSH user")
+            transport.close()
             raise AuthenticationException("Authentication failed.")
 
         transport.set_keepalive(120)
