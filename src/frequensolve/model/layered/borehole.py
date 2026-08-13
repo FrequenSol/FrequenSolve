@@ -9,7 +9,17 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import numpy as np
 import xarray as xr
@@ -17,7 +27,7 @@ import xarray as xr
 from frequensolve.model.model import ModelSubdomain
 from frequensolve.model.property import Property
 from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
-from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
+from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
 from frequensolve.util.named_list import NamedList
 
 from ._utils import (
@@ -42,7 +52,7 @@ __all__ = [
 ]
 
 
-def _borehole_surface_ref(value: Any) -> Dict[str, Any]:
+def _borehole_surface_ref(value: Any) -> Union[int, Dict[str, Any]]:
     if isinstance(value, SimpleSurface):
         return {"surface": value.name}
     if isinstance(value, str):
@@ -85,7 +95,7 @@ def _validate_borehole_radius_profile(radius: Property) -> None:
 
 def _borehole_radius_to_fs(
     radius: Property,
-    ctx=None,
+    ctx: Optional[ExportContext] = None,
     *,
     borehole_name: Optional[str] = None,
     radius_name: Optional[str] = None,
@@ -110,7 +120,7 @@ def _borehole_radius_to_fs(
         and not radius.is_constant
         and radius.file_path is None
         and ctx is not None
-        and getattr(ctx, "path", None) is not None
+        and ctx.path is not None
         and borehole_name is not None
         and radius_name is not None
     ):
@@ -196,8 +206,8 @@ class BoreholeAnnularPadding(ExtraFieldsMixin):
         outer_radius: Optional[Any] = None,
         power: float = 1.0,
         extra: Optional[Mapping[str, Any]] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         self.n = _padding_count(n)
         self.outer_radius = (
             copy.deepcopy(dict(outer_radius))
@@ -234,7 +244,7 @@ class BoreholeAnnularPadding(ExtraFieldsMixin):
             )
         return cls(**copy.deepcopy(dict(data)))
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize annular padding for the solver borehole contract."""
 
         payload: Dict[str, Any] = {"n": self.n}
@@ -278,8 +288,8 @@ class BoreholeSurface(ExtraFieldsMixin):
         units: Optional[Any] = None,
         system: Optional[str] = None,
         extra: Optional[Mapping[str, Any]] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         if r is None and name is not None and not isinstance(name, str):
             r = name
             name = None
@@ -320,7 +330,7 @@ class BoreholeSurface(ExtraFieldsMixin):
 
     def to_fs(
         self,
-        ctx=None,
+        ctx: Optional[ExportContext] = None,
         *,
         borehole_name: Optional[str] = None,
         radius_name: Optional[str] = None,
@@ -396,8 +406,8 @@ class BoreholeLayer:
         inner_surface: Optional[str] = None,
         outer_surface: Optional[str] = None,
         extra: Optional[Mapping[str, Any]] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         if "coordinate_system" in kwargs:
             coordinate_system = kwargs.pop("coordinate_system")
             if system is not None and system != coordinate_system:
@@ -464,8 +474,8 @@ class BoreholePart:
         units: Optional[Any] = None,
         system: Optional[str] = None,
         extra: Optional[Mapping[str, Any]] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         unsupported = {
             "role",
             "cells",
@@ -536,7 +546,7 @@ class BoreholePart:
 
     def to_fs(
         self,
-        ctx=None,
+        ctx: Optional[ExportContext] = None,
         *,
         borehole_name: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -610,8 +620,8 @@ class BoreholePlug:
         units: Optional[Any] = None,
         system: Optional[str] = None,
         extra: Optional[Mapping[str, Any]] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         if "coordinate_system" in kwargs:
             coordinate_system = kwargs.pop("coordinate_system")
             if system is not None and system != coordinate_system:
@@ -689,7 +699,7 @@ class BoreholePlug:
 
     def to_fs(
         self,
-        ctx=None,
+        ctx: Optional[ExportContext] = None,
         *,
         borehole_name: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -761,17 +771,17 @@ class Borehole:
         name: str,
         axis: Mapping[str, Any],
         extent: Mapping[str, Any],
-        parts: Optional[List[Union[BoreholePart, Mapping[str, Any]]]] = None,
-        layers: Optional[List[Union[BoreholePart, Mapping[str, Any]]]] = None,
-        surfaces: Optional[List[Union[BoreholeSurface, Mapping[str, Any]]]] = None,
-        plugs: Optional[List[Union[BoreholePlug, Mapping[str, Any]]]] = None,
+        parts: Optional[Sequence[Union[BoreholePart, Mapping[str, Any]]]] = None,
+        layers: Optional[Sequence[Union[BoreholePart, Mapping[str, Any]]]] = None,
+        surfaces: Optional[Sequence[Union[BoreholeSurface, Mapping[str, Any]]]] = None,
+        plugs: Optional[Sequence[Union[BoreholePlug, Mapping[str, Any]]]] = None,
         annular_padding: Optional[
             Union[BoreholeAnnularPadding, Mapping[str, Any]]
         ] = None,
         model: Optional["LayeredModel"] = None,
         extra: Optional[Mapping[str, Any]] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         if parts is not None and layers is not None:
             raise ValueError("Specify only one of borehole parts or layers")
         self.name = name
@@ -812,7 +822,7 @@ class Borehole:
         self.extra.update(kwargs)
 
     @staticmethod
-    def _surfaces_from_parts(parts: List[BoreholePart]) -> List[BoreholeSurface]:
+    def _surfaces_from_parts(parts: Sequence[BoreholePart]) -> List[BoreholeSurface]:
         surfaces: List[BoreholeSurface] = []
         if parts:
             inner = parts[0].extra.get("inner_surface")
@@ -902,7 +912,7 @@ class Borehole:
         )
         return borehole
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize borehole geometry, layers, surfaces, and plugs.
 
         Args:
@@ -1049,7 +1059,12 @@ class Borehole:
             return 0 if self.surfaces and self.surfaces[0].is_axis() else None
         return self._outer_surface_index(part_index - 1)
 
-    def _layer_to_fs(self, part: BoreholePart, index: int, ctx=None) -> Dict[str, Any]:
+    def _layer_to_fs(
+        self,
+        part: BoreholePart,
+        index: int,
+        ctx: Optional[ExportContext] = None,
+    ) -> Dict[str, Any]:
         payload = merge_extra(
             {
                 "name": part.name,
@@ -1069,7 +1084,7 @@ class Borehole:
         self,
         index: int,
         surface: BoreholeSurface,
-        ctx=None,
+        ctx: Optional[ExportContext] = None,
     ) -> Dict[str, Any]:
         name = self._surface_name(index)
         return surface.to_fs(
@@ -1078,7 +1093,12 @@ class Borehole:
             radius_name=name,
         )
 
-    def _part_to_fs(self, part: BoreholePart, index: int, ctx=None) -> Dict[str, Any]:
+    def _part_to_fs(
+        self,
+        part: BoreholePart,
+        index: int,
+        ctx: Optional[ExportContext] = None,
+    ) -> Dict[str, Any]:
         payload = self._layer_to_fs(part, index, ctx)
         surface_index = self._outer_surface_index(index)
         payload["r"] = _borehole_radius_to_fs(
@@ -1163,7 +1183,7 @@ class Borehole:
         units: Optional[Any] = None,
         system: Optional[str] = None,
         subdomain_name: Optional[str] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> Optional[BoreholeSurface]:
         """Add a pending radial material layer.
 
@@ -1262,7 +1282,7 @@ class Borehole:
         scale: float = 1.0,
         units: Optional[Any] = None,
         system: Optional[str] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> BoreholeSurface:
         """Add a cumulative-radius surface and close the pending layer.
 
@@ -1401,7 +1421,7 @@ class Borehole:
         units: Optional[Any] = None,
         system: Optional[str] = None,
         subdomain_name: Optional[str] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> BoreholePlug:
         """Add a local plug or tool body inside the borehole.
 
@@ -1487,7 +1507,9 @@ class Borehole:
         self.plugs.append(plug)
         return plug
 
-    def __iadd__(self, other):
+    def __iadd__(
+        self, other: Union[BoreholeLayer, BoreholeSurface, BoreholePlug]
+    ) -> "Borehole":
         if isinstance(other, BoreholeLayer):
             self._add_layer_object(other)
         elif isinstance(other, BoreholeSurface):
