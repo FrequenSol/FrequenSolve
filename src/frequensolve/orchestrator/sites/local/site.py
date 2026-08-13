@@ -14,7 +14,7 @@ import warnings
 from dataclasses import dataclass, field
 from logging import ERROR
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Union
 from urllib.parse import urlparse
 
 from frequensolve._optional import optional_dependency_error
@@ -29,8 +29,6 @@ except ModuleNotFoundError as exc:
         dependencies=("dask", "distributed"),
         error=exc,
     ) from exc
-
-from numpy.typing import ArrayLike
 
 from frequensolve.frequensolver import (
     FrequenSolverCompatibility,
@@ -56,7 +54,7 @@ from frequensolve.orchestrator.utils.environment import (
 )
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
-from frequensolve.simulation.jobs.imaging import ImagingJob
+from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +277,9 @@ def _summary_task_status(summary: Mapping[str, int]) -> Dict[str, int]:
     }
 
 
-def _normalize_failure_tolerance(value: Any, *, default: Optional[int] = 4):
+def _normalize_failure_tolerance(
+    value: Any, *, default: Optional[int] = 4
+) -> Optional[int]:
     if value is None:
         return None
     if isinstance(value, bool):
@@ -313,12 +313,12 @@ def run_task(
     job_file: str,
     task_id: int,
     executable: str,
-    env: dict,
+    env: Dict[str, str],
     n_ranks: int = 1,
     n_threads: int = 1,
-    stdout_dir: str = None,
+    stdout_dir: Optional[str] = None,
     fresh: bool = False,
-) -> dict:
+) -> Dict[str, Any]:
     """Run a single task and return its results.
 
     Args:
@@ -396,7 +396,7 @@ def run_task(
             solver_convergence is not None and solver_convergence.get("failed")
         )
 
-        result = {
+        result: Dict[str, Any] = {
             "task_id": task_id,
             "status": "error" if solver_failed else "success",
             "complete": True,
@@ -416,6 +416,7 @@ def run_task(
         if solver_convergence is not None:
             result["solver"] = {"convergence": solver_convergence}
         if solver_failed:
+            assert solver_convergence is not None
             residual = solver_convergence.get(
                 "residual", solver_convergence.get("final_residual")
             )
@@ -484,8 +485,8 @@ class LocalSite(BaseSite):
     """
 
     config: LocalSiteConfig = field(init=False)
-    executable: str = field(init=False)
-    env: dict = field(default_factory=dict)
+    executable: Optional[str] = field(init=False)
+    env: Dict[str, str] = field(default_factory=dict)
     solver: Optional[Union[str, Path]] = None
     frequensolver_policy: Optional[str] = None
     environment: Mapping[str, object] = field(default_factory=dict)
@@ -512,7 +513,7 @@ class LocalSite(BaseSite):
 
     # ----------------- lifecycle -----------------
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.config = LocalSiteConfig()
         self.executable = self._get_solver_path()
         explicit_environment = {
@@ -528,7 +529,7 @@ class LocalSite(BaseSite):
         )
         self._quiet_dependency_loggers()
 
-    def submit(self, job: BaseJob, **kwargs) -> RunHandle:
+    def submit(self, job: BaseJob, **kwargs: Any) -> RunHandle:
         """Submit job and return an awaitable run handle.
 
         Args:
@@ -682,11 +683,12 @@ class LocalSite(BaseSite):
 
         if self._dask_client is None:
             self._ensure_dask_for_tasks(1)
-        smooth_future = self._dask_client.submit(
+        client = self._dask_client_or_raise()
+        smooth_future = client.submit(
             run_task,
             run.job._file,
             SMOOTH_TASK_ID,
-            self.executable,
+            self._solver_executable(),
             self.env,
             n_ranks=1,
             n_threads=self._current_threads_per_worker(),
@@ -1164,7 +1166,7 @@ class LocalSite(BaseSite):
     def _wait_local_smooth_only(self, run: RunHandle) -> RunResult:
         """Run only the imaging smooth/stack postprocess for current shards."""
 
-        all_futures = []
+        all_futures: List[Future] = []
         try:
             smooth_future = self._submit_local_smooth_task(run, all_futures)
             cached_smooth_result = run.backend.get("smooth_result")
@@ -1264,7 +1266,7 @@ class LocalSite(BaseSite):
         reuse: bool = True,
         residual: Optional[float] = None,
         ignore_solver_options: Optional[bool] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> LocalTaskSubmission:
         """Submit job tasks to the local Dask executor.
 
@@ -1275,8 +1277,7 @@ class LocalSite(BaseSite):
         Returns:
             LocalTaskSubmission containing Dask futures and the task plan.
         """
-        if not self.executable:
-            raise RuntimeError("Solver executable not found, cannot submit job")
+        executable = self._solver_executable()
 
         job_file = job.save()
         plan_kwargs = {}
@@ -1296,6 +1297,7 @@ class LocalSite(BaseSite):
             return LocalTaskSubmission(futures=[], task_plan=task_plan)
 
         self._ensure_dask_for_tasks(1)
+        client = self._dask_client_or_raise()
 
         n_ranks = kwargs.get("procs_per_job", 1)
 
@@ -1316,11 +1318,11 @@ class LocalSite(BaseSite):
 
         # Mesh and size first
         init_threads = self._current_threads_per_worker()
-        future = self._dask_client.submit(
+        future = client.submit(
             run_task,
             job_file,
             MESH_TASK_ID,
-            self.executable,
+            executable,
             self.env,
             n_ranks=1,
             n_threads=init_threads,
@@ -1348,15 +1350,16 @@ class LocalSite(BaseSite):
             self._release_futures([future])
 
         self._ensure_dask_for_tasks(len(pending_indices))
+        client = self._dask_client_or_raise()
 
         # Loop tasks in reverse order for improved load balancing.
         for i in sorted(pending_indices, reverse=True):
             try:
-                future = self._dask_client.submit(
+                future = client.submit(
                     run_task,
                     job_file,
                     i,
-                    self.executable,
+                    executable,
                     self.env,
                     n_ranks=n_ranks,
                     n_threads=self._current_threads_per_worker(),
@@ -1414,6 +1417,9 @@ class LocalSite(BaseSite):
         job: Union[BaseJob, List[BaseJob]],
         upscale: int = 1,
         path: Optional[Union[str, Path]] = None,
+        *,
+        project_path: Optional[Union[str, Path]] = None,
+        **_: Any,
     ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
         """Open wavefield outputs from completed local jobs.
 
@@ -1426,7 +1432,10 @@ class LocalSite(BaseSite):
             Wavefield dataset for a single job or a mapping keyed by job name.
         """
 
-        project_path = Path(path).resolve() if path is not None else None
+        selected_path = project_path if project_path is not None else path
+        project_path = (
+            Path(selected_path).resolve() if selected_path is not None else None
+        )
         if isinstance(job, BaseJob):
             return job.wavefields.open(upscale=upscale, project_path=project_path)
         db_map = {}
@@ -1440,7 +1449,7 @@ class LocalSite(BaseSite):
     def fetch_image(
         self,
         job: Union[ImagingJob, List[ImagingJob]],
-    ) -> ArrayLike:
+    ) -> Union[ImageDatabase, Dict[str, ImageDatabase]]:
         """Open and accumulate imaging outputs.
 
         Args:
@@ -1454,7 +1463,7 @@ class LocalSite(BaseSite):
             jobs = [job]
         else:
             jobs = job
-        images = {}
+        images: Dict[str, ImageDatabase] = {}
         for job in jobs:
             images[job.name] = job.load_images()
 
@@ -1463,7 +1472,9 @@ class LocalSite(BaseSite):
         else:
             return images
 
-    def fetch_vtk(self, job: BaseJob, path: Optional[Union[str, Path]] = None):
+    def fetch_vtk(
+        self, job: BaseJob, path: Optional[Union[str, Path]] = None
+    ) -> Dict[str, Any]:
         """Return local VTK/visualization output paths for a job.
 
         Args:
@@ -1476,7 +1487,9 @@ class LocalSite(BaseSite):
         """
         return job.vtk_outputs
 
-    def fetch_paraview(self, job: BaseJob, path: Optional[Union[str, Path]] = None):
+    def fetch_paraview(
+        self, job: BaseJob, path: Optional[Union[str, Path]] = None
+    ) -> Dict[str, Any]:
         """Fetch visualization files using the historical method name."""
 
         return self.fetch_vtk(job, path=path)
@@ -1486,7 +1499,7 @@ class LocalSite(BaseSite):
         """Local execution is always immediately available."""
         return True
 
-    def sync(self, project):
+    def sync(self, project: Any) -> Any:
         """Return ``project`` because local execution needs no synchronization.
 
         Args:
@@ -1497,7 +1510,7 @@ class LocalSite(BaseSite):
         """
         return project
 
-    def _sync_project(self, project):
+    def _sync_project(self, project: Any) -> Any:
         """Local execution does not require explicit synchronization."""
         return project
 
@@ -1506,7 +1519,7 @@ class LocalSite(BaseSite):
         remote_path: Union[str, Path],
         local_path: Union[str, Path],
         overwrite: bool = False,
-    ):
+    ) -> Path:
         """Copy a local file or directory.
 
         Args:
@@ -1535,7 +1548,7 @@ class LocalSite(BaseSite):
             shutil.copy2(remote_path, local_path)
         return local_path
 
-    def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
+    def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]) -> Path:
         """Copy a file or directory into the local-site namespace.
 
         Args:
@@ -1556,7 +1569,7 @@ class LocalSite(BaseSite):
         """
         return self._dashboard_url
 
-    def cancel_job(self, job_id: str):
+    def cancel_job(self, job_id: str) -> None:
         """Cancel a running job.
 
         Args:
@@ -1569,7 +1582,7 @@ class LocalSite(BaseSite):
         except ValueError:
             raise ValueError(f"Invalid process ID: {job_id}")
 
-    def _initialize_dask(self, n_workers: Optional[int] = None):
+    def _initialize_dask(self, n_workers: Optional[int] = None) -> None:
         """Initialize Dask client and cluster."""
 
         if self._dask_client is not None:
@@ -1707,6 +1720,18 @@ class LocalSite(BaseSite):
             self.close(wait=True, retire=True)
         self._initialize_dask(n_workers)
 
+    def _dask_client_or_raise(self) -> Client:
+        client = self._dask_client
+        if client is None:
+            raise RuntimeError("Dask client initialization did not complete")
+        return client
+
+    def _solver_executable(self) -> str:
+        executable = self.executable
+        if not executable:
+            raise RuntimeError("Solver executable not found, cannot submit job")
+        return executable
+
     def _worker_count_for_task_count(self, task_count: int) -> int:
         if self.n_workers is not None:
             return max(1, int(self.n_workers))
@@ -1756,7 +1781,9 @@ class LocalSite(BaseSite):
         return 1
 
     @staticmethod
-    def _with_dask_logging_preload(value) -> List[str]:
+    def _with_dask_logging_preload(
+        value: Optional[Union[str, Iterable[str]]],
+    ) -> List[str]:
         if value is None:
             modules = []
         elif isinstance(value, str):
@@ -1782,7 +1809,7 @@ class LocalSite(BaseSite):
         level = cls._dependency_log_level()
         configure_dependency_logging(level)
 
-    def __del__(self):
+    def __del__(self) -> None:
         """Cleanup when object is destroyed."""
         try:
             self.close(wait=False, retire=False, timeout=2.0)
@@ -1794,18 +1821,20 @@ class LocalSite(BaseSite):
 
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Literal[False]:
         """Close the local cluster when leaving a context manager."""
 
         self.close()
         return False
 
-    def close(self, *, wait: bool = True, retire: bool = True, timeout: float = 30.0):
+    def close(
+        self, *, wait: bool = True, retire: bool = True, timeout: float = 30.0
+    ) -> None:
         """Close Dask client/cluster resources owned by this site.
 
         Args:
-            wait: Whether to wait for orderly cluster shutdown.
-            retire: Accepted for compatibility with older shutdown semantics.
+            wait: Retained for compatibility; current Dask owns orderly teardown.
+            retire: Retained for compatibility with older shutdown semantics.
             timeout: Maximum Dask close timeout in seconds.
         """
 
@@ -1834,7 +1863,7 @@ class LocalSite(BaseSite):
 
         try:
             if self._dask_cluster is not None:
-                self._dask_cluster.close(timeout=timeout, fast=not wait)
+                self._dask_cluster.close(timeout=timeout)
         except Exception:
             pass
         finally:
@@ -1845,7 +1874,7 @@ class LocalSite(BaseSite):
             self._active_threads_per_worker = None
             self._active_memory_per_worker = None
 
-    def stop(self):
+    def stop(self) -> None:
         """Alias for ``close()`` used by interactive workflows."""
 
         self.close()
@@ -1892,7 +1921,7 @@ class LocalSite(BaseSite):
                 active.append(future)
         self._futures = active
 
-    def _get_solver_path(self) -> str:
+    def _get_solver_path(self) -> Optional[str]:
         """Get the solver path."""
         executable = self.solver
         if not executable:

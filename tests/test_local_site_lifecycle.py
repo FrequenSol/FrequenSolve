@@ -748,8 +748,8 @@ def test_close_uses_cluster_close_without_retiring_workers(monkeypatch):
         def scale(self, workers):
             raise AssertionError("close should not scale local cluster to zero")
 
-        def close(self, timeout=30.0, fast=False):
-            calls.append(("cluster.close", timeout, fast))
+        def close(self, timeout=30.0):
+            calls.append(("cluster.close", timeout))
 
     future = DummyFuture()
     site._dask_client = FakeClient()
@@ -765,7 +765,7 @@ def test_close_uses_cluster_close_without_retiring_workers(monkeypatch):
     assert calls == [
         ("cancel", [future], True),
         ("client.close", 7.0),
-        ("cluster.close", 7.0, False),
+        ("cluster.close", 7.0),
     ]
     assert site._dask_client is None
     assert site._dask_cluster is None

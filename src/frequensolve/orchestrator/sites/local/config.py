@@ -22,7 +22,7 @@ class LocalSiteConfig(BaseSiteConfig):
     memory: int
     mpi_wrapper: str = "mpirun"
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Detect local CPU and memory defaults for local execution."""
 
         system_info = SystemInfo()
