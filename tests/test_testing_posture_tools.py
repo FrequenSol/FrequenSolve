@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tarfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from scripts.validate_heavy_test_evidence import (
 )
 from scripts.validate_heavy_test_evidence import SCHEMA as HEAVY_SCHEMA
 from scripts.validate_heavy_test_evidence import (
+    load_scenario_manifest,
     validate_heavy_test_evidence,
 )
 from scripts.validate_release_evidence import (
@@ -66,18 +68,18 @@ def _heavy_evidence():
             "junit": {
                 "path": "junit.xml",
                 "present": True,
-                "counts": {"tests": 501, "failures": 0, "errors": 0, "skipped": 0},
+                "counts": {"tests": 538, "failures": 0, "errors": 0, "skipped": 0},
             },
             "coverage": {
                 "path": "coverage.xml",
                 "present": True,
                 "rates": {
-                    "lineRate": 0.69,
-                    "branchRate": 0.52,
-                    "linesValid": 100,
-                    "linesCovered": 69,
-                    "branchesValid": 100,
-                    "branchesCovered": 52,
+                    "lineRate": 0.7203,
+                    "branchRate": 0.552,
+                    "linesValid": 10000,
+                    "linesCovered": 7203,
+                    "branchesValid": 10000,
+                    "branchesCovered": 5520,
                 },
             },
             "visual": {"path": "fig_comparison.html", "present": True},
@@ -607,13 +609,93 @@ def test_frequensolver_identity_cli_accepts_leading_hyphen_build_id(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_heavy_test_evidence_requires_real_test_outputs(tmp_path):
-    (tmp_path / "junit.xml").write_text("<testsuites />", encoding="utf-8")
-    (tmp_path / "coverage.xml").write_text("<coverage />", encoding="utf-8")
+def _write_heavy_test_artifacts(
+    tmp_path,
+    evidence,
+    *,
+    missing_scenario=None,
+    duplicate_scenario=None,
+    renamed_scenario=None,
+    scenario_outcome=None,
+):
+    manifest = load_scenario_manifest()
+    cases = []
+    for scenario in manifest["requiredScenarios"]:
+        if scenario["id"] == missing_scenario:
+            continue
+        name = scenario["junit"]["name"]
+        if scenario["id"] == renamed_scenario:
+            name += "_renamed"
+        case = {
+            "classname": scenario["junit"]["classname"],
+            "name": name,
+            "outcome": (
+                scenario_outcome[1]
+                if scenario_outcome and scenario["id"] == scenario_outcome[0]
+                else None
+            ),
+        }
+        cases.append(case)
+        if scenario["id"] == duplicate_scenario:
+            cases.append(dict(case))
+
+    minimum_tests = manifest["minimums"]["tests"]
+    filler_count = minimum_tests - len(cases)
+    cases.extend(
+        {
+            "classname": "tests.test_release_baseline",
+            "name": f"test_baseline_{index:04d}",
+            "outcome": None,
+        }
+        for index in range(filler_count)
+    )
+    testsuites = ET.Element("testsuites")
+    testsuite = ET.SubElement(testsuites, "testsuite")
+    derived = {"tests": len(cases), "failures": 0, "errors": 0, "skipped": 0}
+    for case in cases:
+        testcase = ET.SubElement(
+            testsuite,
+            "testcase",
+            {"classname": case["classname"], "name": case["name"]},
+        )
+        if case["outcome"]:
+            ET.SubElement(testcase, case["outcome"])
+            derived[
+                {
+                    "failure": "failures",
+                    "error": "errors",
+                    "skipped": "skipped",
+                }[case["outcome"]]
+            ] += 1
+    testsuite.attrib.update({name: str(value) for name, value in derived.items()})
+    ET.ElementTree(testsuites).write(
+        tmp_path / "junit.xml", encoding="utf-8", xml_declaration=True
+    )
+
+    rates = evidence["pytest"]["coverage"]["rates"]
+    ET.ElementTree(
+        ET.Element(
+            "coverage",
+            {
+                "line-rate": str(rates["lineRate"]),
+                "branch-rate": str(rates["branchRate"]),
+                "lines-valid": str(rates["linesValid"]),
+                "lines-covered": str(rates["linesCovered"]),
+                "branches-valid": str(rates["branchesValid"]),
+                "branches-covered": str(rates["branchesCovered"]),
+            },
+        )
+    ).write(tmp_path / "coverage.xml", encoding="utf-8", xml_declaration=True)
     (tmp_path / "fig_comparison.html").write_text("visual evidence", encoding="utf-8")
+    evidence["pytest"]["junit"]["counts"] = derived
+
+
+def test_heavy_test_evidence_requires_real_test_outputs(tmp_path):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
 
     validate_heavy_test_evidence(
-        _heavy_evidence(),
+        evidence,
         COMMIT,
         evidence_root=tmp_path,
     )
@@ -664,15 +746,122 @@ def test_heavy_test_evidence_rejects_identity_selection_and_branch_mutations(
 
 
 def test_heavy_test_evidence_rejects_missing_visual_member(tmp_path):
-    (tmp_path / "junit.xml").write_text("<testsuites />", encoding="utf-8")
-    (tmp_path / "coverage.xml").write_text("<coverage />", encoding="utf-8")
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
+    (tmp_path / "fig_comparison.html").unlink()
 
     with pytest.raises(ValueError, match="pytest.visual.path does not exist"):
         validate_heavy_test_evidence(
-            _heavy_evidence(),
+            evidence,
             COMMIT,
             evidence_root=tmp_path,
         )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            {"missing_scenario": "local-2d-acoustic-solve"},
+            "local-2d-acoustic-solve.*found 0",
+        ),
+        (
+            {"duplicate_scenario": "acquisition-v2-init-sizing"},
+            "acquisition-v2-init-sizing.*found 2",
+        ),
+        (
+            {"renamed_scenario": "local-2d-acoustic-gather-visual"},
+            "local-2d-acoustic-gather-visual.*found 0",
+        ),
+        (
+            {
+                "scenario_outcome": (
+                    "local-2d-acoustic-common-frequency-visual",
+                    "skipped",
+                )
+            },
+            "local-2d-acoustic-common-frequency-visual.*must pass",
+        ),
+    ],
+)
+def test_heavy_test_evidence_requires_each_manifest_scenario_once_and_passed(
+    tmp_path,
+    mutation,
+    message,
+):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence, **mutation)
+
+    with pytest.raises(ValueError, match=message):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+def test_heavy_test_evidence_rejects_inconsistent_junit_summary(tmp_path):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
+    evidence["pytest"]["junit"]["counts"]["tests"] += 1
+
+    with pytest.raises(ValueError, match="counts.tests must match JUnit XML"):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+def test_heavy_test_evidence_rejects_inconsistent_coverage_summary(tmp_path):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
+    evidence["pytest"]["coverage"]["rates"]["lineRate"] = 0.73
+
+    with pytest.raises(ValueError, match="lineRate must match coverage XML"):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+@pytest.mark.parametrize("artifact", ["junit.xml", "coverage.xml"])
+def test_heavy_test_evidence_rejects_truncated_xml(tmp_path, artifact):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
+    (tmp_path / artifact).write_text("<truncated", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not complete, valid XML"):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+def test_heavy_test_evidence_rejects_path_escape(tmp_path):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
+    evidence["pytest"]["junit"]["path"] = "../junit.xml"
+
+    with pytest.raises(ValueError, match="must stay within the evidence artifact"):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda evidence: evidence["pytest"]["junit"]["counts"].update(tests=537),
+            "below manifest floor 538",
+        ),
+        (
+            lambda evidence: evidence["pytest"]["coverage"]["rates"].update(
+                lineRate=0.72,
+                linesCovered=7200,
+            ),
+            "lineRate.*below manifest floor",
+        ),
+        (
+            lambda evidence: evidence["pytest"]["coverage"]["rates"].update(
+                branchRate=0.5519,
+                branchesCovered=5519,
+            ),
+            "branchRate.*below manifest floor",
+        ),
+    ],
+)
+def test_heavy_test_evidence_rejects_below_manifest_floors(mutation, message):
+    evidence = _heavy_evidence()
+    mutation(evidence)
+
+    with pytest.raises(ValueError, match=message):
+        validate_heavy_test_evidence(evidence, COMMIT)
 
 
 def _write_tar_member(archive, name, content=b"evidence", *, member_type=None):
