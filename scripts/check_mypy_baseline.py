@@ -18,6 +18,8 @@ BASELINE_FILE = "mypy-baseline.json"
 PHASE_ONE_STRICT_PATHS = (
     "scripts/check_mypy_baseline.py",
     "src/frequensolve/geometry/",
+    "src/frequensolve/model/attenuation.py",
+    "src/frequensolve/model/dispersion.py",
     "src/frequensolve/units.py",
     "src/frequensolve/validation/",
 )
