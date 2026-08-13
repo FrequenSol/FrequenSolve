@@ -57,7 +57,7 @@ jobs:
       - name: Install exact checkout
         run: |
           python -m pip install --upgrade pip
-          python -m pip install .
+          python -m pip install . "dask>=2025.1.0,<2026.0.0"
 
       - name: Execute every SDK scenario once
         run: |
@@ -95,7 +95,7 @@ jobs:
       - name: Install exact checkout
         run: |
           python -m pip install --upgrade pip
-          python -m pip install .
+          python -m pip install . "dask>=2025.1.0,<2026.0.0"
 
       - name: Collect bounded repeated evidence
         shell: bash

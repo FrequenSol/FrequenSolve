@@ -35,6 +35,7 @@ from frequensolve.simulation.simulation import CustomJSONEncoder
 SCHEMA = "frequensolve-sdk-performance/v1"
 BASELINE_SCHEMA = "frequensolve-sdk-performance-baseline/v1"
 DEPENDENCIES = (
+    "dask",
     "frequensolve",
     "h5py",
     "jsonschema",
