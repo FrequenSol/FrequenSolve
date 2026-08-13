@@ -23,6 +23,7 @@ PHASE_ONE_STRICT_PATHS = (
 
 PHASE_TWO_STRICT_PATHS = (
     "src/frequensolve/orchestrator/sites/base.py",
+    "src/frequensolve/orchestrator/sites/local/",
     "src/frequensolve/orchestrator/utils/__init__.py",
     "src/frequensolve/orchestrator/utils/credential_store.py",
     "src/frequensolve/orchestrator/utils/credentials.py",
@@ -53,9 +54,7 @@ PHASES = (
         "order": 2,
         "name": "core-orchestration-and-result-loading",
         "strict_now": list(PHASE_TWO_STRICT_PATHS),
-        "remaining_prefixes": [
-            "src/frequensolve/orchestrator/sites/local/",
-        ],
+        "remaining_prefixes": [],
     },
     {
         "order": 3,

@@ -476,51 +476,6 @@
       "file": "src/frequensolve/orchestrator/sites/hpc/transfer.py"
     },
     {
-      "code": "no-untyped-def",
-      "count": 1,
-      "file": "src/frequensolve/orchestrator/sites/local/config.py"
-    },
-    {
-      "code": "assignment",
-      "count": 1,
-      "file": "src/frequensolve/orchestrator/sites/local/dask_logging.py"
-    },
-    {
-      "code": "assignment",
-      "count": 3,
-      "file": "src/frequensolve/orchestrator/sites/local/site.py"
-    },
-    {
-      "code": "call-arg",
-      "count": 1,
-      "file": "src/frequensolve/orchestrator/sites/local/site.py"
-    },
-    {
-      "code": "no-untyped-def",
-      "count": 17,
-      "file": "src/frequensolve/orchestrator/sites/local/site.py"
-    },
-    {
-      "code": "override",
-      "count": 1,
-      "file": "src/frequensolve/orchestrator/sites/local/site.py"
-    },
-    {
-      "code": "return-value",
-      "count": 4,
-      "file": "src/frequensolve/orchestrator/sites/local/site.py"
-    },
-    {
-      "code": "union-attr",
-      "count": 5,
-      "file": "src/frequensolve/orchestrator/sites/local/site.py"
-    },
-    {
-      "code": "var-annotated",
-      "count": 1,
-      "file": "src/frequensolve/orchestrator/sites/local/site.py"
-    },
-    {
       "code": "assignment",
       "count": 1,
       "file": "src/frequensolve/plotting/animate.py"
@@ -1332,11 +1287,10 @@
     {
       "name": "core-orchestration-and-result-loading",
       "order": 2,
-      "remaining_prefixes": [
-        "src/frequensolve/orchestrator/sites/local/"
-      ],
+      "remaining_prefixes": [],
       "strict_now": [
         "src/frequensolve/orchestrator/sites/base.py",
+        "src/frequensolve/orchestrator/sites/local/",
         "src/frequensolve/orchestrator/utils/__init__.py",
         "src/frequensolve/orchestrator/utils/credential_store.py",
         "src/frequensolve/orchestrator/utils/credentials.py",
@@ -1366,6 +1320,7 @@
     "src/frequensolve/units.py",
     "src/frequensolve/validation/",
     "src/frequensolve/orchestrator/sites/base.py",
+    "src/frequensolve/orchestrator/sites/local/",
     "src/frequensolve/orchestrator/utils/__init__.py",
     "src/frequensolve/orchestrator/utils/credential_store.py",
     "src/frequensolve/orchestrator/utils/credentials.py",
