@@ -341,7 +341,7 @@ class SimpleSurface:
             interface=interface,
             depth=depth,
             cutting=data.get("cutting", False),
-            **({"grid": grid} if grid is not None else {}),
+            grid=grid,
         )
 
     def to_fs(self, ctx=None):
