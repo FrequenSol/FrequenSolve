@@ -566,16 +566,6 @@
       "file": "src/frequensolve/seismic/survey.py"
     },
     {
-      "code": "call-arg",
-      "count": 1,
-      "file": "src/frequensolve/seismic/trace_record.py"
-    },
-    {
-      "code": "no-untyped-def",
-      "count": 5,
-      "file": "src/frequensolve/seismic/trace_record.py"
-    },
-    {
       "code": "arg-type",
       "count": 1,
       "file": "src/frequensolve/seismic/trace_store.py"
@@ -1119,6 +1109,7 @@
         "src/frequensolve/model/layered/surfaces.py",
         "src/frequensolve/model/model.py",
         "src/frequensolve/seismic/trace_geometry.py",
+        "src/frequensolve/seismic/trace_record.py",
         "src/frequensolve/simulation/discretization.py",
         "src/frequensolve/simulation/sampling.py",
         "src/frequensolve/simulation/solver.py",
@@ -1169,6 +1160,7 @@
     "src/frequensolve/model/layered/surfaces.py",
     "src/frequensolve/model/model.py",
     "src/frequensolve/seismic/trace_geometry.py",
+    "src/frequensolve/seismic/trace_record.py",
     "src/frequensolve/simulation/discretization.py",
     "src/frequensolve/simulation/sampling.py",
     "src/frequensolve/simulation/solver.py",
