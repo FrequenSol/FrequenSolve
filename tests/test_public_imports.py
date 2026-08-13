@@ -3,6 +3,7 @@ import importlib.util
 import subprocess
 import sys
 from pathlib import Path
+from types import MappingProxyType
 
 import toml
 
@@ -322,6 +323,31 @@ def test_super_patch_acknowledgement_is_inspectable_and_roundtrips():
     assert patch.warning_acknowledged is True
     assert "warning_acknowledged=True" in repr(patch)
     assert fs.SuperPatch.from_fs(patch.to_fs()).warning_acknowledged is True
+
+
+def test_simulation_settings_accept_immutable_mapping_payloads():
+    import frequensolve as fs
+
+    discretization = fs.Discretization.from_fs(
+        MappingProxyType({"geometry_tolerance": 1.0e-6})
+    )
+    solver = fs.SolverConfig.from_fs(
+        MappingProxyType({"precision": "double", "custom_option": True})
+    )
+    patch = fs.SuperPatch.from_fs(
+        MappingProxyType({"grid": 2, "domain": [7], "warning_acknowledged": True})
+    )
+
+    assert discretization.to_fs() == {"geometry_tolerance": 1.0e-6}
+    assert solver.to_fs() == {
+        "solve_on": "final",
+        "max_iter": 300,
+        "tolerance": 1.0e-4,
+        "precision": "double",
+        "custom_option": True,
+    }
+    assert patch.grid == 2
+    assert patch.domain == [7]
 
 
 def test_removed_legacy_public_names_are_not_exported():

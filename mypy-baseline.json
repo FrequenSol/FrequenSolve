@@ -711,11 +711,6 @@
       "file": "src/frequensolve/simulation/config.py"
     },
     {
-      "code": "no-untyped-def",
-      "count": 2,
-      "file": "src/frequensolve/simulation/discretization.py"
-    },
-    {
       "code": "arg-type",
       "count": 3,
       "file": "src/frequensolve/simulation/jobs/artifacts.py"
@@ -991,11 +986,6 @@
       "file": "src/frequensolve/simulation/simulation.py"
     },
     {
-      "code": "no-untyped-def",
-      "count": 5,
-      "file": "src/frequensolve/simulation/solver.py"
-    },
-    {
       "code": "arg-type",
       "count": 1,
       "file": "src/frequensolve/simulation/study.py"
@@ -1148,6 +1138,8 @@
         "src/frequensolve/model/layered/model.py",
         "src/frequensolve/model/layered/surfaces.py",
         "src/frequensolve/model/model.py",
+        "src/frequensolve/simulation/discretization.py",
+        "src/frequensolve/simulation/solver.py",
         "src/frequensolve/units.py",
         "src/frequensolve/validation/"
       ]
@@ -1194,6 +1186,8 @@
     "src/frequensolve/model/layered/model.py",
     "src/frequensolve/model/layered/surfaces.py",
     "src/frequensolve/model/model.py",
+    "src/frequensolve/simulation/discretization.py",
+    "src/frequensolve/simulation/solver.py",
     "src/frequensolve/units.py",
     "src/frequensolve/validation/",
     "src/frequensolve/orchestrator/sites/base.py",

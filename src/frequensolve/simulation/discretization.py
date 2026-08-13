@@ -2,9 +2,9 @@
 
 import copy
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Mapping, Optional
 
-from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
+from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
 
 __all__ = ["Discretization"]
 
@@ -26,8 +26,8 @@ class Discretization(ExtraFieldsMixin):
 
     def __init__(
         self,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         """Create discretization settings.
 
         Solver order is now configured through mesh adaptivity, so legacy
@@ -42,13 +42,13 @@ class Discretization(ExtraFieldsMixin):
         self._init_extra(None, **kwargs)
 
     @classmethod
-    def from_fs(cls, data: Dict[str, Any]) -> "Discretization":
+    def from_fs(cls, data: Mapping[str, Any]) -> "Discretization":
         """Deserialize discretization settings from solver JSON."""
 
-        data = copy.deepcopy(data)
-        return cls(**data)
+        payload = copy.deepcopy(dict(data))
+        return cls(**payload)
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize discretization settings for solver input."""
 
         return merge_extra({}, self.extra, "Discretization")
