@@ -277,10 +277,10 @@ def test_exact_cloud_contract_and_fixture_snapshots_are_vendored():
     fixtures = _resource_bytes("customer_cloud_read_v2_fixtures.json")
 
     assert hashlib.sha256(catalog).hexdigest() == (
-        "520846921445e62128dbdfbd18a8b8b61b90c56d3e3fe3b8ac29d78c0a7a1091"
+        "c4442203f098f9b82217bdabdf7925298792078bc404f44e1eb1dd1a52f0322f"
     )
     assert hashlib.sha256(fixtures).hexdigest() == (
-        "ef406b2ad10780ebf8a60d2c7efde978d8662d3258f5f9fb953bd60b11c950c3"
+        "56d8ca773b299c4818422ce53ac2aa43c487669ff3f9f8ae80d6efc192042027"
     )
 
 
