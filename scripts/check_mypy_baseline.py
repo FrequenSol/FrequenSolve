@@ -186,10 +186,16 @@ def _format_delta(label: str, delta: Counter[Diagnostic]) -> list[str]:
 
 def run(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    update_group = parser.add_mutually_exclusive_group()
+    update_group.add_argument(
         "--update",
         action="store_true",
-        help="replace the baseline after reviewing intentional typing changes",
+        help="widen ceilings after reviewing diagnostics from another environment",
+    )
+    update_group.add_argument(
+        "--replace",
+        action="store_true",
+        help="replace ceilings after reviewing reductions across all environments",
     )
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[1]
@@ -201,11 +207,15 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         print("\n".join(_format_delta("added", promoted_errors)), file=sys.stderr)
         return 1
 
-    if args.update:
-        _write_baseline(baseline_path, current)
+    if args.update or args.replace:
+        updated = current
+        if args.update and baseline_path.exists():
+            _, expected = _load_baseline(baseline_path)
+            updated = expected | current
+        _write_baseline(baseline_path, updated)
         print(
-            f"Updated {baseline_path} with {sum(current.values())} reviewed "
-            "whole-package diagnostics"
+            f"Updated {baseline_path} with {sum(updated.values())} reviewed "
+            "whole-package diagnostic ceilings"
         )
         return 0
 
@@ -219,19 +229,25 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     _, expected = _load_baseline(baseline_path)
     added = current - expected
     removed = expected - current
-    if added or removed:
-        lines = ["Whole-package mypy diagnostics differ from the reviewed baseline."]
+    if added:
+        lines = ["Whole-package mypy diagnostics exceed the reviewed baseline."]
         lines.extend(_format_delta("added", added))
-        lines.extend(_format_delta("removed", removed))
         lines.append(
-            "Fix regressions or review the improvements, then run "
-            "`python scripts/check_mypy_baseline.py --update`."
+            "Fix regressions, or review the environment-specific diagnostics "
+            "and widen ceilings with `python scripts/check_mypy_baseline.py "
+            "--update`."
         )
         print("\n".join(lines), file=sys.stderr)
         return 1
 
+    if removed:
+        print(
+            "Whole-package mypy baseline has improvement headroom; "
+            "review it before lowering cross-environment ceilings:\n"
+            + "\n".join(_format_delta("below", removed))
+        )
     print(
-        f"Whole-package mypy baseline matched: {sum(current.values())} "
+        f"Whole-package mypy baseline passed: {sum(current.values())} "
         f"diagnostics; {len(STRICT_PATHS)} promoted paths remain error-free"
     )
     return 0
