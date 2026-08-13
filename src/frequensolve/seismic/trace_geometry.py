@@ -469,20 +469,20 @@ def wavefield_grid_display(
     axis_index = {dims[0]: 0, dims[1]: 1}
     x_index = axis_index[x_dim]
     y_index = axis_index[y_dim]
-    x_values = np.linspace(grid.x0[x_index], grid.x1[x_index], grid.n[x_index])
-    y_values = np.linspace(grid.x0[y_index], grid.x1[y_index], grid.n[y_index])
+    grid_x_values = np.linspace(grid.x0[x_index], grid.x1[x_index], grid.n[x_index])
+    grid_y_values = np.linspace(grid.x0[y_index], grid.x1[y_index], grid.n[y_index])
     return {
         "dimensions": (dims[0], dims[1]),
         "extent": [
-            float(x_values[0]) * L_scale,
-            float(x_values[-1]) * L_scale,
-            float(y_values[-1]) * L_scale,
-            float(y_values[0]) * L_scale,
+            float(grid_x_values[0]) * L_scale,
+            float(grid_x_values[-1]) * L_scale,
+            float(grid_y_values[-1]) * L_scale,
+            float(grid_y_values[0]) * L_scale,
         ],
         "xlabel": f"{x_dim.upper()}{units}",
         "ylabel": f"{y_dim.upper()}{units}",
-        "x": x_values * L_scale,
-        "y": y_values * L_scale,
+        "x": grid_x_values * L_scale,
+        "y": grid_y_values * L_scale,
         "uniform": True,
         "transpose": transpose,
     }
