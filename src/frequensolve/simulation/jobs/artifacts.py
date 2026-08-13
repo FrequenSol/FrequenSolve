@@ -1685,6 +1685,8 @@ def _kind_suffixes(kind: Optional[str]) -> tuple[str, ...]:
         return ()
     if normalized == "vtk":
         return (".vtk", ".vtu", ".vtr", ".vtp", ".vts")
+    if normalized == "xdmf":
+        return (".xmf",)
     if normalized in {
         "vtu",
         "vtr",
