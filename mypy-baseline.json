@@ -98,21 +98,6 @@
     {
       "code": "arg-type",
       "count": 1,
-      "file": "src/frequensolve/mesh/mesh_generators.py"
-    },
-    {
-      "code": "no-untyped-def",
-      "count": 5,
-      "file": "src/frequensolve/mesh/mesh_generators.py"
-    },
-    {
-      "code": "override",
-      "count": 4,
-      "file": "src/frequensolve/mesh/mesh_generators.py"
-    },
-    {
-      "code": "arg-type",
-      "count": 1,
       "file": "src/frequensolve/mesh/mesh_manager.py"
     },
     {
@@ -1155,6 +1140,7 @@
       "strict_now": [
         "scripts/check_mypy_baseline.py",
         "src/frequensolve/geometry/",
+        "src/frequensolve/mesh/mesh_generators.py",
         "src/frequensolve/model/attenuation.py",
         "src/frequensolve/model/dispersion.py",
         "src/frequensolve/model/layered/_utils.py",
@@ -1200,6 +1186,7 @@
   "strict_paths": [
     "scripts/check_mypy_baseline.py",
     "src/frequensolve/geometry/",
+    "src/frequensolve/mesh/mesh_generators.py",
     "src/frequensolve/model/attenuation.py",
     "src/frequensolve/model/dispersion.py",
     "src/frequensolve/model/layered/_utils.py",

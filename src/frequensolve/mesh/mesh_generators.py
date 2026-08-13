@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional, Union
 from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
 
 from ..util.class_registry import class_registry, register_class
-from ..util.mixins import TypeTaggedMixin, merge_extra
+from ..util.mixins import ExportContext, TypeTaggedMixin, merge_extra
 
 __all__ = [
     "BaseMeshGenerator",
@@ -76,7 +76,7 @@ class BaseMeshGenerator(TypeTaggedMixin, ABC):
     """Base class for type-tagged mesh generator configurations."""
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "BaseMeshGenerator":
+    def from_fs(cls, data: Mapping[str, Any]) -> "BaseMeshGenerator":
         """Deserialize a registered mesh generator payload.
 
         Args:
@@ -125,7 +125,7 @@ class HorizontalSpacingControl:
             extra=payload,
         )
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize this local spacing control for solver input.
 
         Args:
@@ -202,7 +202,7 @@ class HorizontalSpacing:
         *,
         padding: Optional[Any] = None,
         max_size: Optional[Any] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> "HorizontalSpacing":
         """Add a local spacing control around a borehole.
 
@@ -227,7 +227,7 @@ class HorizontalSpacing:
         )
         return self
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize the horizontal spacing policy for solver input.
 
         Args:
@@ -279,7 +279,7 @@ class HexMeshGenerator(BaseMeshGenerator):
     triangulate_strips: Optional[bool] = None
     horizontal_spacing: Optional[Union[HorizontalSpacing, Dict[str, Any]]] = None
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize the mesh generator for solver input.
 
         Args:
@@ -290,16 +290,14 @@ class HexMeshGenerator(BaseMeshGenerator):
             JSON-compatible mesh generator payload.
         """
 
-        rel_path = getattr(ctx, "rel_path", Path())
-        if self.l_bound is not None:
-            assert self.u_bound is not None
-            l_bound, u_bound, units = _mesh_bounds_and_units(
-                self.l_bound,
-                self.u_bound,
-                self.units,
-            )
-        else:
-            units = self.units
+        rel_path = ctx.rel_path if ctx is not None else Path()
+        if self.l_bound is None or self.u_bound is None:
+            raise ValueError("Mesh generator requires l_bound and u_bound")
+        l_bound, u_bound, units = _mesh_bounds_and_units(
+            self.l_bound,
+            self.u_bound,
+            self.units,
+        )
 
         if self.n is None:
             self.n = [8] * len(self.l_bound)
@@ -341,7 +339,7 @@ class HexMeshGenerator(BaseMeshGenerator):
         max_size: Optional[Any] = None,
         include_edges: Optional[bool] = True,
         max_growth: Optional[float] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> "HexMeshGenerator":
         """Request local horizontal refinement around a borehole.
 
@@ -376,7 +374,7 @@ class HexMeshGenerator(BaseMeshGenerator):
         return self
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "HexMeshGenerator":
+    def from_fs(cls, data: Mapping[str, Any]) -> "HexMeshGenerator":
         """Deserialize a structured hexahedral mesh generator.
 
         Args:
@@ -412,7 +410,7 @@ class LayeredMeshGenerator(HexMeshGenerator):
     """
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "LayeredMeshGenerator":
+    def from_fs(cls, data: Mapping[str, Any]) -> "LayeredMeshGenerator":
         """Deserialize a layered structured mesh generator.
 
         Args:
@@ -455,7 +453,7 @@ class TetMeshGenerator(HexMeshGenerator):
     """
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "TetMeshGenerator":
+    def from_fs(cls, data: Mapping[str, Any]) -> "TetMeshGenerator":
         """Deserialize a tetrahedral mesh generator.
 
         Args:
