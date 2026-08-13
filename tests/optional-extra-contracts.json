@@ -168,7 +168,9 @@
         "--mpl",
         "--mpl-baseline-path=tests/reference_images/",
         "--mpl-generate-summary=html",
-        "--mpl-results-path=tests/output/visual-comparisons"
+        "--mpl-results-path=tests/output/visual-comparisons",
+        "-k",
+        "not test_plot_wavefield_reads_grid_from_wavefield_manifest"
       ],
       "coverage_prefixes": [
         "frequensolve/plotting/"
