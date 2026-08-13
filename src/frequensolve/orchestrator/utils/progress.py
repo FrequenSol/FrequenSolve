@@ -198,7 +198,10 @@ class RunMonitor:
         check: bool,
     ) -> RunResult:
         result = run._complete_from_status(status)
-        if fetch and (result.successful or not check):
+        configured_fetch = run._fetch_fn is not None
+        if result.successful and (fetch or configured_fetch):
+            run.fetch()
+        elif fetch and not check:
             run.fetch()
         return result
 

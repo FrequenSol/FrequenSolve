@@ -7,6 +7,7 @@ pytest.importorskip("boto3")
 from botocore.exceptions import ClientError
 
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
+from frequensolve.orchestrator.sites.base import JobStatus
 
 
 class FakePaginator:
@@ -201,3 +202,82 @@ def test_fetch_output_files_skips_unsupported_filters(tmp_path, kind, suffix):
 
     assert site.fetch_output_files(job, kind=kind, suffix=suffix) == job._result_path
     assert calls == []
+
+
+def test_fetch_run_metadata_downloads_job_run_directory(tmp_path):
+    site = AWSSite.__new__(AWSSite)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    downloads = []
+    messages = []
+    site.get = lambda remote, local: downloads.append((remote, local))
+    site._emit = messages.append
+    manifest_path = (
+        tmp_path / "project-a/jobs/simulation-a/job-a/results/_fs_run/run_manifest.json"
+    )
+    job = SimpleNamespace(
+        project_path=tmp_path / "project-a",
+        _result_path=tmp_path / "project-a/jobs/simulation-a/job-a/results",
+        simulation=SimpleNamespace(name="simulation-a"),
+        name="job-a",
+        collect_task_run_manifests=lambda: manifest_path,
+    )
+
+    assert site.fetch_run_metadata(job) == manifest_path
+    assert downloads == [
+        (
+            "s3://bucket/project-a/jobs/simulation-a/job-a/results/_fs_run",
+            job._result_path / "_fs_run",
+        )
+    ]
+    assert messages == [
+        "Fetched AWS run metadata from "
+        "s3://bucket/project-a/jobs/simulation-a/job-a/results/_fs_run"
+    ]
+
+
+def test_fetch_outputs_downloads_complete_configured_artifact_set():
+    site = AWSSite.__new__(AWSSite)
+    calls = []
+    site.fetch_run_metadata = lambda job: calls.append("metadata")
+    site.fetch_traces = lambda job: calls.append("traces") or "trace-data"
+    site.fetch_wavefields = lambda job: calls.append("wavefields") or "wave-data"
+    site.fetch_paraview = lambda job: calls.append("paraview")
+    job = SimpleNamespace(
+        outputs=SimpleNamespace(wavefields=[object()], paraview=[object()])
+    )
+
+    assert site.fetch_outputs(job) == {
+        "traces": "trace-data",
+        "wavefields": "wave-data",
+    }
+    assert calls == ["metadata", "traces", "wavefields", "paraview"]
+
+
+def test_aws_run_handle_honors_submit_time_fetch_after_success():
+    site = AWSSite.__new__(AWSSite)
+    fetch_calls = []
+    site._poll_run = lambda run: JobStatus(
+        state="completed",
+        return_code=0,
+        job_id=str(run.id),
+    )
+    site.fetch_outputs = lambda job: fetch_calls.append(job)
+    site._emit_status = lambda *args, **kwargs: None
+    job = SimpleNamespace(
+        name="job-a",
+        trace_manifest=None,
+        _stdout_path=None,
+        run_metadata=None,
+    )
+    run = site._make_run_handle(
+        job,
+        "simulation-1",
+        poll_interval=0.0,
+        fetch=True,
+        check=True,
+    )
+
+    result = run.wait()
+
+    assert result.successful
+    assert fetch_calls == [job]
