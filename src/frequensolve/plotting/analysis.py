@@ -204,12 +204,15 @@ def compute_nrms(
     baseline = select_time(as_trace_array(baseline), T_max)
     monitor = select_time(as_trace_array(monitor), T_max)
     require_dims(reference, "time", "receiver")
-    reference, baseline, monitor = xr.align(
+    aligned = xr.align(
         reference.transpose("time", "receiver"),
         baseline.transpose("time", "receiver"),
         monitor.transpose("time", "receiver"),
         join="exact",
     )
+    reference = aligned[0]
+    baseline = aligned[1]
+    monitor = aligned[2]
     rate = sampling_rate(reference)
     baseline_window, _ = window_first_arrivals(
         reference,

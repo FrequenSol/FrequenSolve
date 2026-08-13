@@ -23,4 +23,4 @@ test-optional-extras:
 
 .PHONY: typecheck
 typecheck:
-	python -m mypy
+	python scripts/check_mypy_baseline.py

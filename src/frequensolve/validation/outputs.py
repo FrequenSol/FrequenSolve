@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional
 
 import numpy as np
 
@@ -68,10 +68,10 @@ def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) ->
         if acquisition is not None and hasattr(acquisition, "known_source_field_count")
         else 0
     )
-    for index, output in enumerate(outputs.vtk):
-        _validate_paraview_output(output, index, source_count, ctx)
-    for index, output in enumerate(outputs.wavefields):
-        _validate_wavefield_output(output, index, source_count, ctx)
+    for index, vtk_output in enumerate(outputs.vtk):
+        _validate_paraview_output(vtk_output, index, source_count, ctx)
+    for index, wavefield_output in enumerate(outputs.wavefields):
+        _validate_wavefield_output(wavefield_output, index, source_count, ctx)
 
 
 def _validate_output_units(units: Any, report: ValidationReport) -> None:
@@ -496,7 +496,7 @@ def _validate_frequencies(
             )
 
 
-def _iter_unit_values(units: Any):
+def _iter_unit_values(units: Any) -> Iterator[tuple[str, Any]]:
     geometry = getattr(units, "geometry", None)
     if geometry is not None:
         yield "outputs.Units.geometry", geometry

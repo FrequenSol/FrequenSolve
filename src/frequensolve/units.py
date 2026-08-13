@@ -7,11 +7,14 @@ contract form: {"value": ..., "units": "..."}.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
 
 import numpy as np
 
 from frequensolve.util.mixins import merge_extra
+
+if TYPE_CHECKING:
+    import pint
 
 __all__ = [
     "Q_",
@@ -24,7 +27,7 @@ __all__ = [
 ]
 
 
-def _load_pint():
+def _load_pint() -> Any:
     try:
         import pint
     except ModuleNotFoundError as exc:
@@ -43,9 +46,9 @@ class UnitRegistryProxy:
     is used.
     """
 
-    _registry = None
+    _registry: Optional["pint.UnitRegistry"] = None
 
-    def _load(self):
+    def _load(self) -> "pint.UnitRegistry":
         if self._registry is None:
             self._registry = _load_pint().UnitRegistry()
         return self._registry
@@ -53,7 +56,7 @@ class UnitRegistryProxy:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._load(), name)
 
-    def __call__(self, *args, **kwargs) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Forward calls to the lazily created Pint unit registry.
 
         Args:
@@ -75,7 +78,7 @@ class UnitRegistryProxy:
 ureg = UnitRegistryProxy()
 
 
-def Q_(*args, **kwargs):
+def Q_(*args: Any, **kwargs: Any) -> Any:
     """Construct a Pint quantity using FrequenSolve's shared unit registry.
 
     Args:
@@ -257,7 +260,7 @@ class UnitConfig:
             defaults=defaults, scales=scales, units_extra=units, extra=payload, **known
         )
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize unit configuration for solver input.
 
         Args:
