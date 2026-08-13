@@ -63,6 +63,11 @@ def test_valid_job_has_clean_validation_report(tmp_path):
     assert report.issues == []
 
 
+def test_mesh_generator_export_requires_bounds():
+    with pytest.raises(ValueError, match="requires l_bound and u_bound"):
+        HexMeshGenerator().to_fs()
+
+
 def test_validation_rejects_generic_symmetry_on_axisymmetric_radial_axis(tmp_path):
     job = _simple_job(tmp_path)
     job.simulation.axisymmetric = True
