@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, cast
 
 import numpy as np
+import xarray as xr
 
 from frequensolve.geometry.frame import Axis, CoordinateSystem, CoordinateValue
 from frequensolve.mesh.mesh_generators import BaseMeshGenerator
@@ -852,7 +853,7 @@ def _axis_index(axes: Sequence[str], axis: str) -> Optional[int]:
         return list(axes).index(axis)
     aliases = {"r": "x", "x": "r", "depth": "z"}
     alias = aliases.get(axis)
-    if alias in axes:
+    if alias is not None and alias in axes:
         return list(axes).index(alias)
     return None
 
@@ -967,7 +968,7 @@ def _convert_units_array(
 
 
 def _coords_array_axes(coords: CoordsArray) -> Optional[list[str]]:
-    coordinate = coords.coordinates.coords.get("coordinate")
+    coordinate = cast(xr.DataArray, coords.coordinates).coords.get("coordinate")
     if coordinate is None:
         return None
     try:

@@ -1,0 +1,1431 @@
+{
+  "diagnostics": [
+    {
+      "code": "name-defined",
+      "count": 2,
+      "file": "src/frequensolve/__init__.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 2,
+      "file": "src/frequensolve/_loading.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/commands/job_info.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 1,
+      "file": "src/frequensolve/commands/job_info.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/commands/job_info.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/commands/site.py"
+    },
+    {
+      "code": "unused-ignore",
+      "count": 1,
+      "file": "src/frequensolve/frequensolver.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/geometry/frame.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 12,
+      "file": "src/frequensolve/geometry/frame.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/geometry/grids.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 6,
+      "file": "src/frequensolve/geometry/grids.py"
+    },
+    {
+      "code": "override",
+      "count": 2,
+      "file": "src/frequensolve/geometry/grids.py"
+    },
+    {
+      "code": "call-arg",
+      "count": 14,
+      "file": "src/frequensolve/mcp_server/_sdk_v2.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/mcp_server/core.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 1,
+      "file": "src/frequensolve/mcp_server/core.py"
+    },
+    {
+      "code": "dict-item",
+      "count": 1,
+      "file": "src/frequensolve/mcp_server/core.py"
+    },
+    {
+      "code": "operator",
+      "count": 1,
+      "file": "src/frequensolve/mcp_server/core.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/mcp_server/server.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 2,
+      "file": "src/frequensolve/mesh/boundary_conditions.py"
+    },
+    {
+      "code": "assignment",
+      "count": 3,
+      "file": "src/frequensolve/mesh/boundary_conditions.py"
+    },
+    {
+      "code": "misc",
+      "count": 1,
+      "file": "src/frequensolve/mesh/boundary_conditions.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 3,
+      "file": "src/frequensolve/mesh/boundary_conditions.py"
+    },
+    {
+      "code": "operator",
+      "count": 1,
+      "file": "src/frequensolve/mesh/boundary_conditions.py"
+    },
+    {
+      "code": "override",
+      "count": 5,
+      "file": "src/frequensolve/mesh/boundary_conditions.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/mesh/mesh_generators.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 5,
+      "file": "src/frequensolve/mesh/mesh_generators.py"
+    },
+    {
+      "code": "override",
+      "count": 4,
+      "file": "src/frequensolve/mesh/mesh_generators.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/mesh/mesh_manager.py"
+    },
+    {
+      "code": "assignment",
+      "count": 4,
+      "file": "src/frequensolve/mesh/mesh_manager.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 21,
+      "file": "src/frequensolve/mesh/mesh_manager.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 4,
+      "file": "src/frequensolve/mesh/mesh_manager.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/model/attenuation.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 3,
+      "file": "src/frequensolve/model/dispersion.py"
+    },
+    {
+      "code": "override",
+      "count": 3,
+      "file": "src/frequensolve/model/dispersion.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/model/layered/_utils.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/model/layered/_utils.py"
+    },
+    {
+      "code": "return-value",
+      "count": 1,
+      "file": "src/frequensolve/model/layered/_utils.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 1,
+      "file": "src/frequensolve/model/layered/_utils.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 7,
+      "file": "src/frequensolve/model/layered/authoring.py"
+    },
+    {
+      "code": "assignment",
+      "count": 2,
+      "file": "src/frequensolve/model/layered/authoring.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 40,
+      "file": "src/frequensolve/model/layered/authoring.py"
+    },
+    {
+      "code": "has-type",
+      "count": 24,
+      "file": "src/frequensolve/model/layered/authoring.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 8,
+      "file": "src/frequensolve/model/layered/authoring.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 3,
+      "file": "src/frequensolve/model/layered/borehole.py"
+    },
+    {
+      "code": "has-type",
+      "count": 2,
+      "file": "src/frequensolve/model/layered/borehole.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 19,
+      "file": "src/frequensolve/model/layered/borehole.py"
+    },
+    {
+      "code": "return-value",
+      "count": 1,
+      "file": "src/frequensolve/model/layered/borehole.py"
+    },
+    {
+      "code": "misc",
+      "count": 1,
+      "file": "src/frequensolve/model/layered/model.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 6,
+      "file": "src/frequensolve/model/layered/model.py"
+    },
+    {
+      "code": "return-value",
+      "count": 2,
+      "file": "src/frequensolve/model/layered/model.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 6,
+      "file": "src/frequensolve/model/layered/sampling.py"
+    },
+    {
+      "code": "assignment",
+      "count": 4,
+      "file": "src/frequensolve/model/layered/sampling.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 44,
+      "file": "src/frequensolve/model/layered/sampling.py"
+    },
+    {
+      "code": "index",
+      "count": 4,
+      "file": "src/frequensolve/model/layered/sampling.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 10,
+      "file": "src/frequensolve/model/layered/sampling.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 4,
+      "file": "src/frequensolve/model/layered/surfaces.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/model/layered/surfaces.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 1,
+      "file": "src/frequensolve/model/layered/surfaces.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 15,
+      "file": "src/frequensolve/model/layered/surfaces.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 5,
+      "file": "src/frequensolve/model/model.py"
+    },
+    {
+      "code": "operator",
+      "count": 2,
+      "file": "src/frequensolve/model/model.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 20,
+      "file": "src/frequensolve/model/property.py"
+    },
+    {
+      "code": "assignment",
+      "count": 6,
+      "file": "src/frequensolve/model/property.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 2,
+      "file": "src/frequensolve/model/property.py"
+    },
+    {
+      "code": "dict-item",
+      "count": 1,
+      "file": "src/frequensolve/model/property.py"
+    },
+    {
+      "code": "index",
+      "count": 1,
+      "file": "src/frequensolve/model/property.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 18,
+      "file": "src/frequensolve/model/property.py"
+    },
+    {
+      "code": "return-value",
+      "count": 1,
+      "file": "src/frequensolve/model/property.py"
+    },
+    {
+      "code": "type-var",
+      "count": 2,
+      "file": "src/frequensolve/model/property.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 19,
+      "file": "src/frequensolve/model/property.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 9,
+      "file": "src/frequensolve/orchestrator/sites/aws/aws.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 7,
+      "file": "src/frequensolve/orchestrator/sites/aws/aws.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 14,
+      "file": "src/frequensolve/orchestrator/sites/aws/aws.py"
+    },
+    {
+      "code": "operator",
+      "count": 3,
+      "file": "src/frequensolve/orchestrator/sites/aws/aws.py"
+    },
+    {
+      "code": "override",
+      "count": 2,
+      "file": "src/frequensolve/orchestrator/sites/aws/aws.py"
+    },
+    {
+      "code": "return",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/aws/aws.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 2,
+      "file": "src/frequensolve/orchestrator/sites/aws/aws.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/aws/batch_worker.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/aws/cognito.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/aws/graphql_client.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 4,
+      "file": "src/frequensolve/orchestrator/sites/base.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 2,
+      "file": "src/frequensolve/orchestrator/sites/base.py"
+    },
+    {
+      "code": "name-defined",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/base.py"
+    },
+    {
+      "code": "no-redef",
+      "count": 2,
+      "file": "src/frequensolve/orchestrator/sites/base.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 15,
+      "file": "src/frequensolve/orchestrator/sites/base.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 3,
+      "file": "src/frequensolve/orchestrator/sites/config_file.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 5,
+      "file": "src/frequensolve/orchestrator/sites/hpc/auth.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 36,
+      "file": "src/frequensolve/orchestrator/sites/hpc/site.py"
+    },
+    {
+      "code": "assignment",
+      "count": 5,
+      "file": "src/frequensolve/orchestrator/sites/hpc/site.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 49,
+      "file": "src/frequensolve/orchestrator/sites/hpc/site.py"
+    },
+    {
+      "code": "override",
+      "count": 3,
+      "file": "src/frequensolve/orchestrator/sites/hpc/site.py"
+    },
+    {
+      "code": "return-value",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/hpc/site.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 7,
+      "file": "src/frequensolve/orchestrator/sites/hpc/site.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 3,
+      "file": "src/frequensolve/orchestrator/sites/hpc/slurm_helpers.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/hpc/stampede3.py"
+    },
+    {
+      "code": "assignment",
+      "count": 2,
+      "file": "src/frequensolve/orchestrator/sites/hpc/stampede3.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 17,
+      "file": "src/frequensolve/orchestrator/sites/hpc/templates/sweep/adaptive_scheduler.py"
+    },
+    {
+      "code": "operator",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/hpc/templates/sweep/adaptive_scheduler.py"
+    },
+    {
+      "code": "var-annotated",
+      "count": 4,
+      "file": "src/frequensolve/orchestrator/sites/hpc/templates/sweep/adaptive_scheduler.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 8,
+      "file": "src/frequensolve/orchestrator/sites/hpc/transfer.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/local/config.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/local/dask_logging.py"
+    },
+    {
+      "code": "assignment",
+      "count": 3,
+      "file": "src/frequensolve/orchestrator/sites/local/site.py"
+    },
+    {
+      "code": "call-arg",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/local/site.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 17,
+      "file": "src/frequensolve/orchestrator/sites/local/site.py"
+    },
+    {
+      "code": "override",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/local/site.py"
+    },
+    {
+      "code": "return-value",
+      "count": 4,
+      "file": "src/frequensolve/orchestrator/sites/local/site.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 5,
+      "file": "src/frequensolve/orchestrator/sites/local/site.py"
+    },
+    {
+      "code": "var-annotated",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/sites/local/site.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 2,
+      "file": "src/frequensolve/orchestrator/utils/__init__.py"
+    },
+    {
+      "code": "assignment",
+      "count": 2,
+      "file": "src/frequensolve/orchestrator/utils/credentials.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 9,
+      "file": "src/frequensolve/orchestrator/utils/credentials.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/utils/pool.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/utils/progress.py"
+    },
+    {
+      "code": "return-value",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/utils/progress.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 4,
+      "file": "src/frequensolve/orchestrator/utils/progress.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/orchestrator/utils/ssh.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 21,
+      "file": "src/frequensolve/orchestrator/utils/ssh.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/plotting/animate.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 13,
+      "file": "src/frequensolve/plotting/animate.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 7,
+      "file": "src/frequensolve/plotting/layered.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 20,
+      "file": "src/frequensolve/plotting/traces.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 3,
+      "file": "src/frequensolve/plotting/vtu.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/plotting/vtu.py"
+    },
+    {
+      "code": "index",
+      "count": 2,
+      "file": "src/frequensolve/plotting/vtu.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 25,
+      "file": "src/frequensolve/plotting/vtu.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 2,
+      "file": "src/frequensolve/project/project.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 11,
+      "file": "src/frequensolve/project/project.py"
+    },
+    {
+      "code": "call-overload",
+      "count": 1,
+      "file": "src/frequensolve/project/project.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 12,
+      "file": "src/frequensolve/project/project.py"
+    },
+    {
+      "code": "operator",
+      "count": 5,
+      "file": "src/frequensolve/project/project.py"
+    },
+    {
+      "code": "type-arg",
+      "count": 1,
+      "file": "src/frequensolve/project/project.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 2,
+      "file": "src/frequensolve/project/project.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 2,
+      "file": "src/frequensolve/seismic/acquisition.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/seismic/acquisition.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 1,
+      "file": "src/frequensolve/seismic/acquisition.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 8,
+      "file": "src/frequensolve/seismic/acquisition.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 2,
+      "file": "src/frequensolve/seismic/acquisition.py"
+    },
+    {
+      "code": "var-annotated",
+      "count": 1,
+      "file": "src/frequensolve/seismic/acquisition.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 3,
+      "file": "src/frequensolve/seismic/receivers.py"
+    },
+    {
+      "code": "assignment",
+      "count": 4,
+      "file": "src/frequensolve/seismic/receivers.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 1,
+      "file": "src/frequensolve/seismic/receivers.py"
+    },
+    {
+      "code": "call-overload",
+      "count": 2,
+      "file": "src/frequensolve/seismic/receivers.py"
+    },
+    {
+      "code": "index",
+      "count": 1,
+      "file": "src/frequensolve/seismic/receivers.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 25,
+      "file": "src/frequensolve/seismic/receivers.py"
+    },
+    {
+      "code": "operator",
+      "count": 2,
+      "file": "src/frequensolve/seismic/receivers.py"
+    },
+    {
+      "code": "override",
+      "count": 16,
+      "file": "src/frequensolve/seismic/receivers.py"
+    },
+    {
+      "code": "return-value",
+      "count": 3,
+      "file": "src/frequensolve/seismic/receivers.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 5,
+      "file": "src/frequensolve/seismic/receivers.py"
+    },
+    {
+      "code": "var-annotated",
+      "count": 1,
+      "file": "src/frequensolve/seismic/receivers.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 5,
+      "file": "src/frequensolve/seismic/sources.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/seismic/sources.py"
+    },
+    {
+      "code": "operator",
+      "count": 3,
+      "file": "src/frequensolve/seismic/sources.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 1,
+      "file": "src/frequensolve/seismic/sources.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/seismic/sparse_survey.py"
+    },
+    {
+      "code": "no-redef",
+      "count": 1,
+      "file": "src/frequensolve/seismic/sparse_survey.py"
+    },
+    {
+      "code": "return-value",
+      "count": 1,
+      "file": "src/frequensolve/seismic/sparse_survey.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 5,
+      "file": "src/frequensolve/seismic/survey.py"
+    },
+    {
+      "code": "assignment",
+      "count": 2,
+      "file": "src/frequensolve/seismic/survey.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 8,
+      "file": "src/frequensolve/seismic/survey.py"
+    },
+    {
+      "code": "dict-item",
+      "count": 1,
+      "file": "src/frequensolve/seismic/survey.py"
+    },
+    {
+      "code": "misc",
+      "count": 2,
+      "file": "src/frequensolve/seismic/survey.py"
+    },
+    {
+      "code": "operator",
+      "count": 1,
+      "file": "src/frequensolve/seismic/survey.py"
+    },
+    {
+      "code": "var-annotated",
+      "count": 4,
+      "file": "src/frequensolve/seismic/survey.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/seismic/trace_geometry.py"
+    },
+    {
+      "code": "return-value",
+      "count": 2,
+      "file": "src/frequensolve/seismic/trace_geometry.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 1,
+      "file": "src/frequensolve/seismic/trace_geometry.py"
+    },
+    {
+      "code": "call-arg",
+      "count": 1,
+      "file": "src/frequensolve/seismic/trace_record.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 5,
+      "file": "src/frequensolve/seismic/trace_record.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/seismic/trace_store.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/seismic/trace_store.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 2,
+      "file": "src/frequensolve/seismic/trace_store.py"
+    },
+    {
+      "code": "call-overload",
+      "count": 6,
+      "file": "src/frequensolve/seismic/trace_store.py"
+    },
+    {
+      "code": "exit-return",
+      "count": 1,
+      "file": "src/frequensolve/seismic/trace_store.py"
+    },
+    {
+      "code": "misc",
+      "count": 2,
+      "file": "src/frequensolve/seismic/trace_store.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 33,
+      "file": "src/frequensolve/seismic/trace_store.py"
+    },
+    {
+      "code": "operator",
+      "count": 7,
+      "file": "src/frequensolve/seismic/trace_store.py"
+    },
+    {
+      "code": "return-value",
+      "count": 8,
+      "file": "src/frequensolve/seismic/trace_store.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/seismic/traces.py"
+    },
+    {
+      "code": "call-overload",
+      "count": 3,
+      "file": "src/frequensolve/seismic/traces.py"
+    },
+    {
+      "code": "exit-return",
+      "count": 1,
+      "file": "src/frequensolve/seismic/traces.py"
+    },
+    {
+      "code": "misc",
+      "count": 1,
+      "file": "src/frequensolve/seismic/traces.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 21,
+      "file": "src/frequensolve/seismic/traces.py"
+    },
+    {
+      "code": "return-value",
+      "count": 1,
+      "file": "src/frequensolve/seismic/traces.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 13,
+      "file": "src/frequensolve/seismic/wavelet.py"
+    },
+    {
+      "code": "assignment",
+      "count": 7,
+      "file": "src/frequensolve/seismic/wavelet.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 1,
+      "file": "src/frequensolve/seismic/wavelet.py"
+    },
+    {
+      "code": "index",
+      "count": 4,
+      "file": "src/frequensolve/seismic/wavelet.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 10,
+      "file": "src/frequensolve/seismic/wavelet.py"
+    },
+    {
+      "code": "return-value",
+      "count": 1,
+      "file": "src/frequensolve/seismic/wavelet.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 3,
+      "file": "src/frequensolve/simulation/config.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 2,
+      "file": "src/frequensolve/simulation/config.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/simulation/config.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 2,
+      "file": "src/frequensolve/simulation/discretization.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 3,
+      "file": "src/frequensolve/simulation/jobs/artifacts.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/artifacts.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 31,
+      "file": "src/frequensolve/simulation/jobs/artifacts.py"
+    },
+    {
+      "code": "call-overload",
+      "count": 2,
+      "file": "src/frequensolve/simulation/jobs/artifacts.py"
+    },
+    {
+      "code": "misc",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/artifacts.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 6,
+      "file": "src/frequensolve/simulation/jobs/artifacts.py"
+    },
+    {
+      "code": "var-annotated",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/artifacts.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 12,
+      "file": "src/frequensolve/simulation/jobs/base.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 6,
+      "file": "src/frequensolve/simulation/jobs/forward.py"
+    },
+    {
+      "code": "assignment",
+      "count": 2,
+      "file": "src/frequensolve/simulation/jobs/forward.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 2,
+      "file": "src/frequensolve/simulation/jobs/forward.py"
+    },
+    {
+      "code": "operator",
+      "count": 4,
+      "file": "src/frequensolve/simulation/jobs/forward.py"
+    },
+    {
+      "code": "var-annotated",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/forward.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 2,
+      "file": "src/frequensolve/simulation/jobs/fwi.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/fwi.py"
+    },
+    {
+      "code": "misc",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/fwi.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 3,
+      "file": "src/frequensolve/simulation/jobs/fwi.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 3,
+      "file": "src/frequensolve/simulation/jobs/imaging.py"
+    },
+    {
+      "code": "assignment",
+      "count": 2,
+      "file": "src/frequensolve/simulation/jobs/imaging.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 6,
+      "file": "src/frequensolve/simulation/jobs/imaging.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 20,
+      "file": "src/frequensolve/simulation/jobs/imaging.py"
+    },
+    {
+      "code": "operator",
+      "count": 3,
+      "file": "src/frequensolve/simulation/jobs/imaging.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 3,
+      "file": "src/frequensolve/simulation/jobs/imaging.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/records.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 9,
+      "file": "src/frequensolve/simulation/jobs/records.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 9,
+      "file": "src/frequensolve/simulation/jobs/records.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 13,
+      "file": "src/frequensolve/simulation/jobs/remote.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 3,
+      "file": "src/frequensolve/simulation/jobs/remote.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 3,
+      "file": "src/frequensolve/simulation/jobs/run_state.py"
+    },
+    {
+      "code": "assignment",
+      "count": 3,
+      "file": "src/frequensolve/simulation/jobs/run_state.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 98,
+      "file": "src/frequensolve/simulation/jobs/run_state.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/run_state.py"
+    },
+    {
+      "code": "return-value",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/run_state.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/serialization.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 25,
+      "file": "src/frequensolve/simulation/jobs/serialization.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/serialization.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 2,
+      "file": "src/frequensolve/simulation/jobs/timings.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/simulation/jobs/timings.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 8,
+      "file": "src/frequensolve/simulation/jobs/timings.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 4,
+      "file": "src/frequensolve/simulation/outputs.py"
+    },
+    {
+      "code": "assignment",
+      "count": 9,
+      "file": "src/frequensolve/simulation/outputs.py"
+    },
+    {
+      "code": "index",
+      "count": 1,
+      "file": "src/frequensolve/simulation/outputs.py"
+    },
+    {
+      "code": "no-redef",
+      "count": 1,
+      "file": "src/frequensolve/simulation/outputs.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 30,
+      "file": "src/frequensolve/simulation/outputs.py"
+    },
+    {
+      "code": "override",
+      "count": 4,
+      "file": "src/frequensolve/simulation/outputs.py"
+    },
+    {
+      "code": "return-value",
+      "count": 1,
+      "file": "src/frequensolve/simulation/outputs.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 1,
+      "file": "src/frequensolve/simulation/outputs.py"
+    },
+    {
+      "code": "var-annotated",
+      "count": 1,
+      "file": "src/frequensolve/simulation/outputs.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 15,
+      "file": "src/frequensolve/simulation/sampling.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 7,
+      "file": "src/frequensolve/simulation/simulation.py"
+    },
+    {
+      "code": "assignment",
+      "count": 2,
+      "file": "src/frequensolve/simulation/simulation.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 1,
+      "file": "src/frequensolve/simulation/simulation.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 17,
+      "file": "src/frequensolve/simulation/simulation.py"
+    },
+    {
+      "code": "operator",
+      "count": 1,
+      "file": "src/frequensolve/simulation/simulation.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 5,
+      "file": "src/frequensolve/simulation/simulation.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 5,
+      "file": "src/frequensolve/simulation/solver.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/simulation/study.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/simulation/study.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 2,
+      "file": "src/frequensolve/simulation/study.py"
+    },
+    {
+      "code": "operator",
+      "count": 1,
+      "file": "src/frequensolve/simulation/study.py"
+    },
+    {
+      "code": "name-defined",
+      "count": 2,
+      "file": "src/frequensolve/util/__init__.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/util/class_registry.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/util/colormaps.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/util/colormaps.py"
+    },
+    {
+      "code": "no-redef",
+      "count": 1,
+      "file": "src/frequensolve/util/encoders.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 3,
+      "file": "src/frequensolve/util/encoders.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 1,
+      "file": "src/frequensolve/util/mixins.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 11,
+      "file": "src/frequensolve/util/mixins.py"
+    },
+    {
+      "code": "misc",
+      "count": 1,
+      "file": "src/frequensolve/util/named_list.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 4,
+      "file": "src/frequensolve/util/named_list.py"
+    },
+    {
+      "code": "override",
+      "count": 5,
+      "file": "src/frequensolve/util/named_list.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 2,
+      "file": "src/frequensolve/util/printing.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/util/setup_logger.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 2,
+      "file": "src/frequensolve/util/setup_logger.py"
+    },
+    {
+      "code": "name-defined",
+      "count": 1,
+      "file": "src/frequensolve/util/setup_logger.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 3,
+      "file": "src/frequensolve/util/setup_logger.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 2,
+      "file": "src/frequensolve/util/stochastic_fields.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 6,
+      "file": "src/frequensolve/util/store.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 2,
+      "file": "src/frequensolve/util/store.py"
+    },
+    {
+      "code": "assignment",
+      "count": 4,
+      "file": "src/frequensolve/util/system_info.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 2,
+      "file": "src/frequensolve/util/system_info.py"
+    },
+    {
+      "code": "return-value",
+      "count": 2,
+      "file": "src/frequensolve/util/system_info.py"
+    }
+  ],
+  "phases": [
+    {
+      "name": "public-authoring-validation-units-serialization",
+      "order": 1,
+      "remaining_prefixes": [
+        "src/frequensolve/geometry/",
+        "src/frequensolve/mesh/",
+        "src/frequensolve/model/",
+        "src/frequensolve/project/",
+        "src/frequensolve/seismic/",
+        "src/frequensolve/simulation/"
+      ],
+      "strict_now": [
+        "scripts/check_mypy_baseline.py",
+        "src/frequensolve/units.py",
+        "src/frequensolve/validation/"
+      ]
+    },
+    {
+      "name": "core-orchestration-and-result-loading",
+      "order": 2,
+      "remaining_prefixes": [
+        "src/frequensolve/orchestrator/sites/base.py",
+        "src/frequensolve/orchestrator/sites/local/",
+        "src/frequensolve/orchestrator/utils/",
+        "src/frequensolve/storage.py"
+      ]
+    },
+    {
+      "name": "cloud-hpc-visual-and-optional-backends",
+      "order": 3,
+      "remaining_prefixes": [
+        "src/frequensolve/orchestrator/sites/aws/",
+        "src/frequensolve/orchestrator/sites/hpc/",
+        "src/frequensolve/plotting/",
+        "src/frequensolve/mcp_server/",
+        "src/frequensolve/commands/"
+      ]
+    }
+  ],
+  "schema": "frequensolve-mypy-baseline-1",
+  "scope": "src/frequensolve",
+  "strict_paths": [
+    "scripts/check_mypy_baseline.py",
+    "src/frequensolve/units.py",
+    "src/frequensolve/validation/"
+  ]
+}
