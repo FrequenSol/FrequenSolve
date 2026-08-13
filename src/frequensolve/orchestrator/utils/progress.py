@@ -189,7 +189,7 @@ class RunMonitor:
         check: bool,
     ) -> None:
         run._complete_from_status(status)
-        configured_fetch = run._fetch_fn is not None
+        configured_fetch = run._fetch_on_wait or run._fetch_fn is not None
         if run._result.successful and (fetch or configured_fetch):
             run.fetch()
         elif fetch and not check:
