@@ -92,7 +92,7 @@ def test_strict_path_filter_covers_promoted_phase_one_and_two_modules():
                 "src/frequensolve/orchestrator/utils/progress.py", "union-attr"
             ): 3,
             Diagnostic("src/frequensolve/storage.py", "return-value"): 1,
-            Diagnostic("src/frequensolve/model/model.py", "arg-type"): 4,
+            Diagnostic("src/frequensolve/model/property.py", "arg-type"): 4,
         }
     )
 
@@ -116,7 +116,7 @@ def test_baseline_writer_removes_promoted_diagnostic_headroom(tmp_path):
                 "src/frequensolve/orchestrator/utils/credentials.py",
                 "no-untyped-def",
             ): 4,
-            Diagnostic("src/frequensolve/model/model.py", "arg-type"): 2,
+            Diagnostic("src/frequensolve/model/property.py", "arg-type"): 2,
         }
     )
 
@@ -124,7 +124,7 @@ def test_baseline_writer_removes_promoted_diagnostic_headroom(tmp_path):
     _, written = _load_baseline(baseline_path)
 
     assert written == Counter(
-        {Diagnostic("src/frequensolve/model/model.py", "arg-type"): 2}
+        {Diagnostic("src/frequensolve/model/property.py", "arg-type"): 2}
     )
 
 

@@ -7,7 +7,7 @@ payloads before they are serialized into FrequenSolve's solver contracts.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union, overload
 
 import numpy as np
 import xarray as xr
@@ -28,15 +28,29 @@ def _property_units(prop: Property) -> Optional[str]:
 
 def _axis_units(units: Optional[Dict[str, Any]]) -> Dict[str, Optional[str]]:
     units = dict(units or {})
-    out = {"x": None, "y": None, "z": None}
+    out: Dict[str, Optional[str]] = {"x": None, "y": None, "z": None}
     for key, value in units.items():
         out[key] = unit_expression(value) if value is not None else None
     return out
 
 
+@overload
 def _convert_units(
     value: float, source_units: Optional[str], target_units: Optional[str]
-):
+) -> float: ...
+
+
+@overload
+def _convert_units(
+    value: np.ndarray, source_units: Optional[str], target_units: Optional[str]
+) -> np.ndarray: ...
+
+
+def _convert_units(
+    value: Union[float, np.ndarray],
+    source_units: Optional[str],
+    target_units: Optional[str],
+) -> Union[float, np.ndarray]:
     if not source_units or not target_units or source_units == target_units:
         return value
     return (value * ureg(source_units)).to(target_units).magnitude
@@ -150,6 +164,8 @@ def _inline_dataarray_to_fs(data: xr.DataArray) -> Dict[str, Any]:
 
 
 def _dataarray_with_property_metadata(prop: Property) -> xr.DataArray:
+    if prop.darr is None:
+        raise ValueError("Inline property serialization requires array data")
     data = prop.darr.copy(deep=True)
     if prop.units is not None and not data.attrs.get("units"):
         data.attrs["units"] = prop.units

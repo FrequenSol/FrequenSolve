@@ -189,7 +189,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         )
 
     @property
-    def surface_names(self):
+    def surface_names(self) -> List[str]:
         """Return model surface names in their current ordering.
 
         Returns:
@@ -199,7 +199,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         return [surf.name for surf in self.surfaces]
 
     @property
-    def layer_names(self):
+    def layer_names(self) -> List[str]:
         """Return stratigraphic layer names in their current ordering.
 
         Returns:
@@ -209,7 +209,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         return [layer.name for layer in self.layers]
 
     @property
-    def borehole_names(self):
+    def borehole_names(self) -> List[str]:
         """Return names of boreholes attached to this model.
 
         Returns:
@@ -219,7 +219,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         return [borehole.name for borehole in self.boreholes]
 
     @property
-    def layers(self):
+    def layers(self) -> NamedList:
         """Return formation layer subdomains.
 
         Returns:
@@ -232,7 +232,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         )
 
     @property
-    def z_limits(self):
+    def z_limits(self) -> Tuple[float, float]:
         """Return model depth limits implied by the first and last surfaces.
 
         Returns:
@@ -540,7 +540,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
 
         return model
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize the layered model to the solver model contract.
 
         Args:
@@ -613,16 +613,16 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
                 return self.surfaces[-1]
 
         if isinstance(layer, int):
-            return self.layers[layer].upper
+            return self._require_layer_surface(self.layers[layer], "upper")
         elif isinstance(layer, str):
-            return self.layers[layer].upper
+            return self._require_layer_surface(self.layers[layer], "upper")
         elif isinstance(layer, Layer):
-            return layer.upper
+            return self._require_layer_surface(layer, "upper")
         elif isinstance(layer, ModelSubdomain):
             mesh_block_id = layer.mesh_block_id
             for candidate in self.layers:
                 if candidate.mesh_block_id == mesh_block_id:
-                    return candidate.upper
+                    return self._require_layer_surface(candidate, "upper")
         raise ValueError(f"Layer not found: {layer}")
 
     def lower_surface(
@@ -652,17 +652,26 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
                 return self.surfaces[0]
 
         if isinstance(layer, int):
-            return self.layers[layer].lower
+            return self._require_layer_surface(self.layers[layer], "lower")
         elif isinstance(layer, str):
-            return self.layers[layer].lower
+            return self._require_layer_surface(self.layers[layer], "lower")
         elif isinstance(layer, Layer):
-            return layer.lower
+            return self._require_layer_surface(layer, "lower")
         elif isinstance(layer, ModelSubdomain):
             mesh_block_id = layer.mesh_block_id
             for candidate in self.layers:
                 if candidate.mesh_block_id == mesh_block_id:
-                    return candidate.lower
+                    return self._require_layer_surface(candidate, "lower")
         raise ValueError(f"Layer not found: {layer}")
+
+    @staticmethod
+    def _require_layer_surface(
+        layer: Layer, bound: Literal["upper", "lower"]
+    ) -> SimpleSurface:
+        surface = layer.upper if bound == "upper" else layer.lower
+        if surface is None:
+            raise ValueError(f"Layer '{layer.name}' has no {bound} surface")
+        return surface
 
     def _validate_bounds_for_meshing(self) -> None:
         if len(self.surfaces) < 2:
