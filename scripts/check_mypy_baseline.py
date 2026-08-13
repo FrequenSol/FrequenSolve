@@ -28,6 +28,7 @@ PHASE_TWO_STRICT_PATHS = (
     "src/frequensolve/orchestrator/utils/environment.py",
     "src/frequensolve/orchestrator/utils/pool.py",
     "src/frequensolve/orchestrator/utils/progress.py",
+    "src/frequensolve/orchestrator/utils/ssh.py",
     "src/frequensolve/storage.py",
 )
 
@@ -54,7 +55,6 @@ PHASES = (
         "remaining_prefixes": [
             "src/frequensolve/orchestrator/sites/base.py",
             "src/frequensolve/orchestrator/sites/local/",
-            "src/frequensolve/orchestrator/utils/ssh.py",
         ],
     },
     {
