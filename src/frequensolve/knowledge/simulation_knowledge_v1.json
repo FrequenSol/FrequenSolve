@@ -1530,6 +1530,13 @@
       "remediation": "Provide matching lower and upper bound vectors."
     },
     {
+      "code": "boundary.axisymmetric.symmetric.invalid",
+      "severity": "error",
+      "path": "BCs[*].conditions[*]",
+      "explanation": "The generic symmetric condition does not impose full radial-axis regularity at r = 0 for an axisymmetric simulation.",
+      "remediation": "Use symmetric_r, or the equivalent axis condition, on the x_min boundary at the radial origin."
+    },
+    {
       "code": "coordinate_system.axis.direction.unsupported",
       "severity": "error",
       "path": "coordinate_systems[*].axes[*].direction",
