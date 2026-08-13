@@ -664,11 +664,7 @@ class AWSSite(BaseSite):
             local_results_path = path / results_vtk_path
 
             try:
-                logger.info(
-                    "Fetching VTK outputs from %s to %s",
-                    s3_results_path,
-                    local_results_path,
-                )
+                logger.info("Fetching configured VTK outputs from AWS storage")
                 self.get(s3_results_path, local_results_path)
             except Exception as e:
                 logger.exception("Error downloading VTK outputs: %s", str(e))
@@ -1428,8 +1424,11 @@ class AWSSite(BaseSite):
         # Check simulation status
         try:
             status = self.graphql_client.get_simulation_status(job_id)
-        except RuntimeError as e:
-            raise RuntimeError(f"Failed to get simulation status: {e}") from e
+        except RuntimeError:
+            raise RuntimeError(
+                "Could not check the Cloud simulation status before cancellation; "
+                "retry after confirming Cloud connectivity"
+            ) from None
 
         # Check if simulation is in a cancellable state
         if status in ["SUCCEEDED", "FAILED", "CANCELED"]:
@@ -1442,9 +1441,9 @@ class AWSSite(BaseSite):
         # For now, raise an error indicating cancellation is not yet implemented
         # This will be implemented when the cancelSimulation GraphQL mutation is available
         raise NotImplementedError(
-            f"Simulation cancellation is not yet implemented. "
-            f"Simulation {job_id} is currently in state: {status}. "
-            f"Please cancel it manually through the web interface."
+            "Simulation cancellation is not yet implemented in this SDK. "
+            f"The simulation is currently in state {status}. "
+            "Cancel it through the Cloud application."
         )
 
     def put(
@@ -1504,7 +1503,7 @@ class AWSSite(BaseSite):
             local_path: Local path to transfer to
             overwrite: Overwrite existing files (not used; always overwrites)
         """
-        logger.debug("Attempting to transfer from %s to %s", s3_path, local_path)
+        logger.debug("Attempting an AWS S3 result transfer")
 
         local_path = Path(local_path)
         s3_path_str = str(s3_path)
@@ -1567,24 +1566,39 @@ class AWSSite(BaseSite):
                     self.s3_client.download_file(bucket, key, str(local_file))
                     downloaded += 1
 
+            if downloaded == 0:
+                raise FileNotFoundError(
+                    "No S3 objects matched the requested Cloud result path"
+                )
             logger.debug("Transfer completed successfully (%d files)", downloaded)
 
-        try:
-            _do_get()
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code in ("ExpiredToken", "InvalidToken") and hasattr(
-                self, "cognito_auth"
-            ):
-                logger.info("Credentials expired, refreshing from Identity Pool...")
-                self._refresh_s3_credentials()
+        refreshed = False
+        while True:
+            try:
                 _do_get()
-            else:
-                logger.error("S3 transfer failed: %s", e)
-                raise RuntimeError(f"S3 transfer failed: {e}") from e
-        except Exception as e:
-            logger.exception("Error during S3 file transfer: %s", str(e))
-            raise
+                return
+            except ClientError as exc:
+                error_code = exc.response.get("Error", {}).get("Code", "unknown")
+                if (
+                    error_code in ("ExpiredToken", "InvalidToken")
+                    and not refreshed
+                    and hasattr(self, "cognito_auth")
+                ):
+                    logger.info("Credentials expired, refreshing from Identity Pool...")
+                    self._refresh_s3_credentials()
+                    refreshed = True
+                    continue
+                logger.error("S3 transfer failed (AWS error code %s)", error_code)
+                raise RuntimeError(
+                    f"S3 transfer failed (AWS error code {error_code})"
+                ) from None
+            except FileNotFoundError:
+                raise
+            except Exception as exc:
+                logger.error("S3 transfer failed (%s)", type(exc).__name__)
+                raise RuntimeError(
+                    f"S3 transfer failed ({type(exc).__name__})"
+                ) from None
 
 
 # if __name__ == "__main__":

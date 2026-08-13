@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from frequensolve._optional import optional_dependency_error
 
@@ -34,12 +34,37 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+MAX_TASKS = 10_000
+
+
+def _client_error_code(error: BaseException) -> str:
+    """Return an AWS error code without serializing private request details."""
+
+    response = getattr(error, "response", {})
+    if not isinstance(response, dict):
+        return "unknown"
+    details = response.get("Error", {})
+    if not isinstance(details, dict):
+        return "unknown"
+    code = details.get("Code")
+    return str(code) if code else "unknown"
 
 
 class BatchWorker:
     """Worker class for running on AWS Batch instances."""
 
-    def __init__(self, s3_bucket: str, region: str = "us-east-1"):
+    def __init__(
+        self,
+        s3_bucket: str,
+        region: str = "us-east-1",
+        *,
+        s3_client: Any = None,
+        batch_client: Any = None,
+        local_base: Optional[Path] = None,
+        process_runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+        clock: Callable[[], float] = time.time,
+        connect_aws: bool = True,
+    ):
         """Initialize the batch worker.
 
         Args:
@@ -47,11 +72,19 @@ class BatchWorker:
             region: AWS region for S3 operations.
         """
         self.s3_bucket = s3_bucket
-        self.s3_client = boto3.client("s3", region_name=region)
-        self.batch_client = boto3.client("batch", region_name=region)
+        self.region = region
+        self._run_process = process_runner
+        self._clock = clock
+        self.s3_client = s3_client
+        self.batch_client = batch_client
+        if connect_aws:
+            if self.s3_client is None:
+                self.s3_client = boto3.client("s3", region_name=region)
+            if self.batch_client is None:
+                self.batch_client = boto3.client("batch", region_name=region)
 
         # Local paths for downloaded data
-        self.local_base = Path("/tmp/frequensolve")
+        self.local_base = Path(local_base or "/tmp/frequensolve")
         self.simulation_dir = self.local_base / "simulation"
         self.job_dir = self.local_base / "job"
 
@@ -71,7 +104,7 @@ class BatchWorker:
             RuntimeError: If download fails.
         """
         try:
-            logger.info(f"Downloading {s3_key} to {local_path}")
+            logger.info("Downloading an S3 input prefix")
 
             # Use aws s3 sync for efficient downloading
             sync_command = [
@@ -81,22 +114,34 @@ class BatchWorker:
                 f"s3://{self.s3_bucket}/{s3_key}",
                 str(local_path),
                 "--region",
-                "us-east-1",  # TODO: Make this configurable
+                self.region,
             ]
 
-            result = subprocess.run(
+            result = self._run_process(
                 sync_command, capture_output=True, text=True, check=True
             )
 
             if result.returncode != 0:
-                raise RuntimeError(f"aws s3 sync failed: {result.stderr}")
+                raise RuntimeError(
+                    f"AWS CLI S3 sync exited with status {result.returncode}"
+                )
 
-            logger.info(f"Successfully downloaded {s3_key}")
+            logger.info("S3 input download completed")
 
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to download {s3_key} from S3: {e}")
-        except ClientError as e:
-            raise RuntimeError(f"Failed to download {s3_key} from S3: {e}")
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "AWS CLI is unavailable; install and configure it before running "
+                "the batch worker"
+            ) from None
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"S3 input download failed with AWS CLI status {exc.returncode}"
+            ) from None
+        except ClientError as exc:
+            raise RuntimeError(
+                "S3 input download failed with AWS error code "
+                f"{_client_error_code(exc)}"
+            ) from None
 
     def run_preliminary_analysis(self) -> Dict[str, Any]:
         """Run preliminary analysis on the simulation data.
@@ -125,7 +170,7 @@ class BatchWorker:
             )
             if config_files:
                 logger.info(
-                    f"Found configuration files: {[f.name for f in config_files]}"
+                    "Found %d simulation configuration file(s)", len(config_files)
                 )
 
             # Look for mesh files
@@ -133,10 +178,10 @@ class BatchWorker:
                 self.simulation_dir.glob("*.nc")
             )
             if mesh_files:
-                logger.info(f"Found mesh files: {[f.name for f in mesh_files]}")
+                logger.info("Found %d simulation mesh file(s)", len(mesh_files))
 
-        except Exception as e:
-            logger.warning(f"Error during file analysis: {e}")
+        except OSError as exc:
+            logger.warning("Simulation file analysis failed (%s)", type(exc).__name__)
 
         logger.info("Preliminary analysis completed")
         return analysis_results
@@ -157,7 +202,20 @@ class BatchWorker:
         logger.info("Submitting task jobs to AWS Batch...")
 
         n_tasks = analysis_results.get("tasks_required", 1)
+        if (
+            not isinstance(n_tasks, int)
+            or isinstance(n_tasks, bool)
+            or not 0 <= n_tasks <= MAX_TASKS
+        ):
+            raise ValueError(f"tasks_required must be an integer from 0 to {MAX_TASKS}")
+        if not isinstance(job_queue, str) or not job_queue.strip():
+            raise ValueError("job_queue must be a non-empty string")
+        if not isinstance(job_definition, str) or not job_definition.strip():
+            raise ValueError("job_definition must be a non-empty string")
+        if self.batch_client is None:
+            raise RuntimeError("AWS Batch client is unavailable")
         job_ids = []
+        submitted_at = int(self._clock())
 
         for task_id in range(n_tasks):
             try:
@@ -171,7 +229,7 @@ class BatchWorker:
 
                 # Submit task job
                 response = self.batch_client.submit_job(
-                    jobName=f"frequensolve-task-{task_id}-{int(time.time())}",
+                    jobName=f"frequensolve-task-{task_id}-{submitted_at}",
                     jobQueue=job_queue,
                     jobDefinition=job_definition,
                     parameters=task_params,
@@ -191,12 +249,20 @@ class BatchWorker:
                     },
                 )
 
-                job_id = response["jobId"]
+                job_id = response.get("jobId") if isinstance(response, dict) else None
+                if not isinstance(job_id, str) or not job_id:
+                    raise RuntimeError(
+                        f"AWS Batch response for task {task_id} did not contain a job ID"
+                    )
                 job_ids.append(job_id)
-                logger.info(f"Submitted task {task_id} job: {job_id}")
+                logger.info("Submitted task %d", task_id)
 
-            except ClientError as e:
-                logger.error(f"Failed to submit task {task_id} job: {e}")
+            except ClientError as exc:
+                logger.error(
+                    "Failed to submit task %d (AWS error code %s)",
+                    task_id,
+                    _client_error_code(exc),
+                )
                 continue
 
         logger.info(f"Submitted {len(job_ids)} task jobs")
@@ -216,6 +282,22 @@ class BatchWorker:
         """
         logger.info(f"Running simulation task {task_id}")
 
+        if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id < 0:
+            raise ValueError("task_id must be a non-negative integer")
+        if not isinstance(analysis_results, dict):
+            raise ValueError("analysis_results must be an object")
+        if not self.simulation_dir.is_dir() or not self.job_dir.is_dir():
+            raise ValueError(
+                "simulation_dir and job_dir must identify existing directories"
+            )
+        timeout = analysis_results.get("estimated_runtime", 3600)
+        if (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or timeout <= 0
+        ):
+            raise ValueError("estimated_runtime must be a positive number")
+
         try:
             # This is a placeholder - implement your actual simulation logic here
             # You would typically:
@@ -225,7 +307,7 @@ class BatchWorker:
 
             # Example simulation command (replace with your actual executable)
             cmd = [
-                "python",
+                sys.executable,
                 "-c",
                 f"print('Running task {task_id} simulation...'); "
                 f"import time; time.sleep(5); "
@@ -233,26 +315,30 @@ class BatchWorker:
             ]
 
             # Run simulation
-            result = subprocess.run(
+            result = self._run_process(
                 cmd,
                 capture_output=True,
                 text=True,
                 cwd=self.simulation_dir,
-                timeout=analysis_results.get("estimated_runtime", 3600),
+                timeout=timeout,
             )
 
             if result.returncode == 0:
                 logger.info(f"Task {task_id} completed successfully")
                 return True
             else:
-                logger.error(f"Task {task_id} failed: {result.stderr}")
+                logger.error(
+                    "Task %d failed with process status %d",
+                    task_id,
+                    result.returncode,
+                )
                 return False
 
         except subprocess.TimeoutExpired:
             logger.error(f"Task {task_id} timed out")
             return False
-        except Exception as e:
-            logger.error(f"Task {task_id} failed with error: {e}")
+        except OSError as exc:
+            logger.error("Task %d could not start (%s)", task_id, type(exc).__name__)
             return False
 
     def upload_results_to_s3(self, results_dir: Path, s3_prefix: str) -> str:
@@ -266,40 +352,84 @@ class BatchWorker:
             S3 key where results were uploaded.
         """
         try:
-            timestamp = int(time.time())
+            if not results_dir.is_dir():
+                raise ValueError("results_dir must identify an existing directory")
+            if (
+                not isinstance(s3_prefix, str)
+                or not s3_prefix.strip("/")
+                or Path(s3_prefix).is_absolute()
+                or ".." in Path(s3_prefix).parts
+                or "\\" in s3_prefix
+            ):
+                raise ValueError("s3_prefix must be a non-empty relative prefix")
+            if self.s3_client is None:
+                raise RuntimeError("S3 client is unavailable")
+
+            timestamp = int(self._clock())
             s3_key = f"{s3_prefix}/results/{timestamp}"
 
-            logger.info(f"Uploading results to S3: {s3_key}")
+            logger.info("Uploading batch-worker results to S3")
 
-            # Upload all files in results directory
-            for file_path in results_dir.rglob("*"):
-                if file_path.is_file():
-                    relative_path = file_path.relative_to(results_dir)
-                    file_s3_key = f"{s3_key}/{relative_path}"
+            result_files = sorted(
+                file_path for file_path in results_dir.rglob("*") if file_path.is_file()
+            )
+            if not result_files:
+                raise ValueError("results_dir contains no result files")
+            if any(file_path.is_symlink() for file_path in result_files):
+                raise ValueError("results_dir must not contain symbolic links")
 
-                    self.s3_client.upload_file(
-                        str(file_path), self.s3_bucket, file_s3_key
-                    )
-                    logger.debug(f"Uploaded {file_path} to {file_s3_key}")
+            # Upload all regular files in results directory
+            uploaded_keys: list[str] = []
+            for file_path in result_files:
+                relative_path = file_path.relative_to(results_dir)
+                file_s3_key = f"{s3_key}/{relative_path}"
 
-            logger.info(f"Results uploaded successfully to {s3_key}")
+                self.s3_client.upload_file(str(file_path), self.s3_bucket, file_s3_key)
+                uploaded_keys.append(file_s3_key)
+                metadata = self.s3_client.head_object(
+                    Bucket=self.s3_bucket,
+                    Key=file_s3_key,
+                )
+                remote_size = metadata.get("ContentLength")
+                if remote_size is not None and remote_size != file_path.stat().st_size:
+                    raise RuntimeError("uploaded result size verification failed")
+                logger.debug("Uploaded one batch-worker result file")
+
+            logger.info("Batch-worker result upload completed")
             return s3_key
 
-        except ClientError as e:
-            raise RuntimeError(f"Failed to upload results to S3: {e}")
+        except (ClientError, OSError, RuntimeError) as exc:
+            client = self.s3_client
+            for uploaded_key in locals().get("uploaded_keys", []):
+                try:
+                    client.delete_object(Bucket=self.s3_bucket, Key=uploaded_key)
+                except Exception as cleanup_exc:  # pragma: no cover - best effort
+                    logger.warning(
+                        "Failed to remove a partial S3 result (%s)",
+                        _client_error_code(cleanup_exc),
+                    )
+            code = _client_error_code(exc)
+            detail = f" (AWS error code {code})" if code != "unknown" else ""
+            raise RuntimeError(f"Batch-worker result upload failed{detail}") from None
 
     def cleanup(self) -> None:
         """Clean up local files."""
         try:
             import shutil
 
-            shutil.rmtree(self.local_base)
+            shutil.rmtree(self.local_base, ignore_errors=False)
             logger.info("Cleaned up local files")
-        except Exception as e:
-            logger.warning(f"Failed to cleanup local files: {e}")
+        except FileNotFoundError:
+            logger.debug("Local batch-worker files were already clean")
+        except OSError as exc:
+            logger.warning("Failed to clean local files (%s)", type(exc).__name__)
 
 
-def main():
+def main(
+    argv: Optional[Sequence[str]] = None,
+    *,
+    worker_factory: Callable[..., BatchWorker] = BatchWorker,
+) -> int:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         description="AWS Batch Worker for FrequenSolve",
@@ -322,7 +452,7 @@ def main():
     )
 
     # S3 parameters
-    parser.add_argument("--bucket", required=True, help="S3 bucket name")
+    parser.add_argument("--bucket", help="S3 bucket name (required for main mode)")
 
     parser.add_argument(
         "--region", default="us-east-1", help="AWS region (default: us-east-1)"
@@ -369,18 +499,29 @@ def main():
         help="Upload results to S3 after completion",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
+    if args.mode == "main" and not args.bucket:
+        parser.error("--bucket is required for main mode")
+    if args.mode == "main" and (not args.simulation_key or not args.job_key):
+        parser.error("--simulation-key and --job-key are required for main mode")
+    if args.mode == "task" and (
+        args.task_id is None or not args.simulation_dir or not args.job_dir
+    ):
+        parser.error(
+            "--task-id, --simulation-dir, and --job-dir are required for task mode"
+        )
+
+    worker: Optional[BatchWorker] = None
     try:
-        worker = BatchWorker(args.bucket, args.region)
+        worker = worker_factory(
+            args.bucket or "",
+            args.region,
+            connect_aws=args.mode == "main",
+        )
 
         if args.mode == "main":
             # Main orchestrator mode
-            if not args.simulation_key or not args.job_key:
-                parser.error(
-                    "--simulation-key and --job-key are required for main mode"
-                )
-
             # Download data from S3
             worker.download_from_s3(args.simulation_key, worker.simulation_dir)
             worker.download_from_s3(args.job_key, worker.job_dir)
@@ -393,7 +534,7 @@ def main():
                 job_ids = worker.submit_task_jobs(
                     analysis_results, args.job_queue, args.job_definition
                 )
-                logger.info(f"Submitted {len(job_ids)} task jobs: {job_ids}")
+                logger.info("Submitted %d task jobs", len(job_ids))
             else:
                 logger.info(
                     "No job queue/definition provided, skipping task submission"
@@ -401,23 +542,18 @@ def main():
 
             # Upload results if requested
             if args.upload_results:
-                results_dir = Path("/tmp/results")
+                results_dir = worker.local_base / "results"
                 results_dir.mkdir(exist_ok=True)
 
                 # Save analysis results
                 with open(results_dir / "analysis.json", "w") as f:
                     json.dump(analysis_results, f, indent=2)
 
-                s3_key = worker.upload_results_to_s3(results_dir, args.results_prefix)
-                logger.info(f"Results uploaded to: {s3_key}")
+                worker.upload_results_to_s3(results_dir, args.results_prefix)
+                logger.info("Results upload completed")
 
         elif args.mode == "task":
             # Individual task mode
-            if args.task_id is None or not args.simulation_dir or not args.job_dir:
-                parser.error(
-                    "--task-id, --simulation-dir, and --job-dir are required for task mode"
-                )
-
             # Set local directories
             worker.simulation_dir = Path(args.simulation_dir)
             worker.job_dir = Path(args.job_dir)
@@ -427,18 +563,19 @@ def main():
 
             if success:
                 logger.info(f"Task {args.task_id} completed successfully")
-                sys.exit(0)
+                return 0
             else:
                 logger.error(f"Task {args.task_id} failed")
-                sys.exit(1)
+                return 1
 
-        # Cleanup
-        worker.cleanup()
-
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
+        return 0
+    except Exception as exc:
+        logger.error("Batch worker failed (%s)", type(exc).__name__)
+        return 1
+    finally:
+        if worker is not None:
+            worker.cleanup()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

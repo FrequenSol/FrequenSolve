@@ -174,6 +174,48 @@ def test_poll_run_preserves_customer_safe_cloud_failure_message():
     assert status.raw["failureCode"] == "SCU_BALANCE_INSUFFICIENT"
 
 
+@pytest.mark.parametrize("status", ["SUCCEEDED", "FAILED", "CANCELED"])
+def test_cancel_job_treats_terminal_states_as_idempotent(status):
+    site = AWSSite.__new__(AWSSite)
+    site.graphql_client = SimpleNamespace(
+        get_simulation_status=lambda simulation_id: status
+    )
+
+    assert site.cancel_job("private-simulation-id") is None
+
+
+def test_cancel_job_running_state_has_actionable_sdk_boundary_without_id():
+    site = AWSSite.__new__(AWSSite)
+    site.graphql_client = SimpleNamespace(
+        get_simulation_status=lambda simulation_id: "RUNNING"
+    )
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        site.cancel_job("private-simulation-id")
+
+    diagnostic = str(exc_info.value)
+    assert "Cancel it through the Cloud application" in diagnostic
+    assert "private-simulation-id" not in diagnostic
+
+
+def test_cancel_job_sanitizes_status_lookup_failure():
+    site = AWSSite.__new__(AWSSite)
+
+    def fail_status(simulation_id):
+        raise RuntimeError(
+            "token=private-token account=private-account object=private/key"
+        )
+
+    site.graphql_client = SimpleNamespace(get_simulation_status=fail_status)
+
+    with pytest.raises(RuntimeError, match="confirming Cloud connectivity") as exc_info:
+        site.cancel_job("private-simulation-id")
+
+    diagnostic = str(exc_info.value)
+    for secret in ("private-token", "private-account", "private/key"):
+        assert secret not in diagnostic
+
+
 def test_graphql_submit_checks_legacy_per_user_compute_stack():
     site = make_graphql_site()
     site.graphql_client.compute_mode = "per-user"
