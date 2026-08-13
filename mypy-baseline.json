@@ -548,16 +548,6 @@
     {
       "code": "assignment",
       "count": 1,
-      "file": "src/frequensolve/orchestrator/utils/ssh.py"
-    },
-    {
-      "code": "no-untyped-def",
-      "count": 21,
-      "file": "src/frequensolve/orchestrator/utils/ssh.py"
-    },
-    {
-      "code": "assignment",
-      "count": 1,
       "file": "src/frequensolve/plotting/animate.py"
     },
     {
@@ -1369,8 +1359,7 @@
       "order": 2,
       "remaining_prefixes": [
         "src/frequensolve/orchestrator/sites/base.py",
-        "src/frequensolve/orchestrator/sites/local/",
-        "src/frequensolve/orchestrator/utils/ssh.py"
+        "src/frequensolve/orchestrator/sites/local/"
       ],
       "strict_now": [
         "src/frequensolve/orchestrator/utils/__init__.py",
@@ -1379,6 +1368,7 @@
         "src/frequensolve/orchestrator/utils/environment.py",
         "src/frequensolve/orchestrator/utils/pool.py",
         "src/frequensolve/orchestrator/utils/progress.py",
+        "src/frequensolve/orchestrator/utils/ssh.py",
         "src/frequensolve/storage.py"
       ]
     },
@@ -1406,6 +1396,7 @@
     "src/frequensolve/orchestrator/utils/environment.py",
     "src/frequensolve/orchestrator/utils/pool.py",
     "src/frequensolve/orchestrator/utils/progress.py",
+    "src/frequensolve/orchestrator/utils/ssh.py",
     "src/frequensolve/storage.py"
   ]
 }
