@@ -119,7 +119,8 @@ The project includes several Makefile targets for running tests:
 - `make validate-optional-extra-contracts`: Validates that
   `tests/optional-extra-contracts.json` covers every advertised runtime extra,
   preserves aliases, selects behavior tests, and matches the strict marker
-  policy.
+  policy. Run it in the full test environment with `dev`, `parallel`, and
+  `cloud` installed; required CI owns this validation.
 
 - `make test-optional-extra-contract EXTRA=visual`: Runs one manifest-owned
   behavior and package-coverage contract in an environment where that extra is

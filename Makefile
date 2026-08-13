@@ -12,7 +12,7 @@ test:
 	python scripts/check_coverage_thresholds.py tests/output/coverage.json
 
 .PHONY: test-optional-extras
-test-optional-extras: validate-optional-extra-contracts
+test-optional-extras:
 	python scripts/check_optional_extra_contracts.py \
 		--run visual \
 		--coverage-output tests/output/optional-visual-coverage.json

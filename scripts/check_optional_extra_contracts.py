@@ -13,8 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-from packaging.requirements import Requirement
-
 SCHEMA = "frequensolve-optional-extra-contracts-1"
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests/optional-extra-contracts.json"
@@ -165,6 +163,8 @@ def _contract(contracts: Sequence[Contract], name: str) -> Contract:
 
 
 def _lower_bound_requirement(raw: str) -> str:
+    from packaging.requirements import Requirement
+
     requirement = Requirement(raw)
     lower_bounds = [
         item.version for item in requirement.specifier if item.operator in {">=", "=="}
@@ -329,12 +329,18 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--validate", action="store_true")
     action.add_argument("--matrix", action="store_true")
+    action.add_argument("--verify-imports", metavar="CONTRACT")
     action.add_argument("--lower-bound-requirements", metavar="CONTRACT")
     action.add_argument("--run", metavar="CONTRACT")
     parser.add_argument("--coverage-output", type=Path)
     args = parser.parse_args(argv)
 
     payload = load_manifest(args.manifest)
+    if args.verify_imports:
+        contract = _contract(contracts_from_manifest(payload), args.verify_imports)
+        _verify_imports(contract)
+        print(f"Verified {contract.name} optional-extra imports")
+        return 0
     pyproject = _load_toml(args.pyproject)
     contracts = validate_manifest(payload, pyproject)
     if args.validate:

@@ -176,16 +176,20 @@ jobs:
           package="$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
         fi
         test -n "$package"
-        python -m pip install \
-          "pytest>=8.0.0,<9.0.0" \
-          "pytest-cov>=4.1.0,<7.0.0" \
-          "pytest-mpl>=0.16.1,<0.18.0" \
-          "pytest-mock>=3.12.0,<4.0.0" \
-          "pytest-timeout>=2.2.0,<3.0.0"
         if [ "$CONTRACT" = base ]; then
           python -m pip install "$package"
         else
           python -m pip install "${package}[${CONTRACT}]"
+        fi
+        python scripts/check_optional_extra_contracts.py \
+          --verify-imports "$CONTRACT"
+        python -m pip install \
+          "pytest>=8.0.0,<9.0.0" \
+          "pytest-cov>=4.1.0,<7.0.0" \
+          "pytest-mock>=3.12.0,<4.0.0" \
+          "pytest-timeout>=2.2.0,<3.0.0"
+        if [ "$CONTRACT" = visual ]; then
+          python -m pip install "pytest-mpl>=0.16.1,<0.18.0"
         fi
 
     - name: Run installed-package behavior contract

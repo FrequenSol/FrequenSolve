@@ -13,6 +13,7 @@ from scripts.check_optional_extra_contracts import (
     load_manifest,
     lower_bound_requirements,
     matrix_rows,
+    run,
     validate_manifest,
 )
 
@@ -107,3 +108,39 @@ def test_manifest_is_stable_json():
 
     assert json.loads(json.dumps(payload))["schema"] == payload["schema"]
     assert Path(DEFAULT_MANIFEST).name == "optional-extra-contracts.json"
+
+
+def test_import_verification_does_not_require_package_metadata(tmp_path):
+    manifest = tmp_path / "contracts.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "frequensolve-optional-extra-contracts-1",
+                "contracts": [
+                    {
+                        "name": "base",
+                        "distribution": "sdist",
+                        "imports": ["json"],
+                        "selectors": ["tests/test_placeholder.py"],
+                        "coverage_prefixes": ["frequensolve/example.py"],
+                        "coverage_floor": 0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        run(
+            [
+                "--manifest",
+                str(manifest),
+                "--pyproject",
+                str(tmp_path / "missing.toml"),
+                "--verify-imports",
+                "base",
+            ]
+        )
+        == 0
+    )
