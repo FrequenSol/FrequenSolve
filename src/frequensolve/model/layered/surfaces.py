@@ -11,7 +11,7 @@ import copy
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union, cast
 
 import numpy as np
 import xarray as xr
@@ -89,14 +89,14 @@ def _coerce_length_values(value: Any, units: Optional[str]) -> np.ndarray:
         return np.asarray(quantity.magnitude, dtype=float)
 
     if isinstance(value, xr.DataArray):
-        source_units = value.attrs.get("units")
+        array_source_units = value.attrs.get("units")
         values = np.asarray(value.values, dtype=float)
-        if source_units is not None and units is not None:
-            source_units = unit_expression(source_units)
-            if source_units != units:
+        if array_source_units is not None and units is not None:
+            array_source_units = unit_expression(array_source_units)
+            if array_source_units != units:
                 from frequensolve.units import ureg
 
-                values = (values * ureg(source_units)).to(units).magnitude
+                values = (values * ureg(array_source_units)).to(units).magnitude
         return np.asarray(values, dtype=float)
 
     if (
@@ -128,7 +128,11 @@ def _coerce_point(
     if isinstance(point, Mapping):
         values = [point[name] for name in names]
     else:
-        values = list(point)
+        converted = _coerce_length_values(point, units).reshape(-1)
+        if converted.size != len(names):
+            joined = ", ".join(names)
+            raise ValueError(f"Plane point must contain ({joined})")
+        return converted
     if len(values) != len(names):
         joined = ", ".join(names)
         raise ValueError(f"Plane point must contain ({joined})")
@@ -282,14 +286,16 @@ class SimpleSurface:
         self,
         name: str,
         interface: bool,
-        depth: Optional[Union[float, str, Path, xr.DataArray, Dict[str, Any]]] = None,
+        depth: Optional[
+            Union[float, str, Path, xr.DataArray, Mapping[str, Any]]
+        ] = None,
         grid: Optional[xr.DataArray] = None,
         scale: float = 1.0,
         units: Optional[Any] = None,
         system: Optional[str] = None,
         cutting: bool = False,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         # Legacy argument naming convention
         if "xarr" in kwargs:
             grid = kwargs.pop("xarr")
@@ -307,7 +313,7 @@ class SimpleSurface:
         self.interface = interface
         self.cutting = bool(cutting)
         self.depth = Property(
-            data=depth,
+            data=cast(Any, depth),
             grid=grid,
             scale=scale,
             units=units,
@@ -315,7 +321,7 @@ class SimpleSurface:
         )
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "SimpleSurface":
+    def from_fs(cls, data: Mapping[str, Any]) -> "SimpleSurface":
         """Deserialize a simple surface from a solver payload.
 
         Args:
@@ -325,7 +331,7 @@ class SimpleSurface:
             A ``SimpleSurface`` with depth metadata restored from the payload.
         """
 
-        data = copy.deepcopy(data)
+        data = copy.deepcopy(dict(data))
         name = data["name"]
         interface = data["interface"]
         depth = data.get("depth", None)
@@ -344,7 +350,7 @@ class SimpleSurface:
             grid=grid,
         )
 
-    def to_fs(self, ctx=None):
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize this surface and its depth property.
 
         Args:
@@ -355,7 +361,7 @@ class SimpleSurface:
             Solver-ready surface payload.
         """
 
-        data = {
+        data: Dict[str, Any] = {
             "name": self.name,
             "interface": self.interface,
             **({"cutting": True} if self.cutting else {}),
@@ -376,7 +382,7 @@ class SimpleSurface:
         return data
 
     @property
-    def data(self):
+    def data(self) -> Optional[xr.DataArray]:
         """Return the materialized surface depth data, when available.
 
         Returns:
@@ -387,7 +393,7 @@ class SimpleSurface:
         return self.depth.data
 
     @property
-    def extrema(self):
+    def extrema(self) -> Tuple[Any, Any]:
         """Return minimum and maximum surface depths.
 
         Returns:
@@ -409,7 +415,7 @@ class SimpleSurface:
         L0: Union[float, List[float]] = 1.0,
         nu: float = 1.0,
         seed: Optional[int] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Apply an additive von Karman perturbation to surface depth.
 
@@ -445,7 +451,7 @@ class SimpleSurface:
             type="additive",
         )
 
-    def plot(self, limits: Dict[str, ArrayLike], **kwargs):
+    def plot(self, limits: Dict[str, ArrayLike], **kwargs: Any) -> None:
         """Plot the surface over the provided coordinate limits.
 
         Args:
@@ -534,7 +540,10 @@ class Layer(ModelSubdomain):
             ``LayeredModel``.
     """
 
-    def __init__(self, *args, **kwargs):
+    upper: Optional[SimpleSurface]
+    lower: Optional[SimpleSurface]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.lower = None
         self.upper = None
@@ -548,7 +557,7 @@ class Layer(ModelSubdomain):
         anisotropy: Optional[List[float]] = None,
         grid: Optional[xr.DataArray] = None,
         seed: Optional[int] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Apply multiplicative stochastic perturbations to layer properties.
 
@@ -572,7 +581,7 @@ class Layer(ModelSubdomain):
             grid = kwargs.pop("xarr")
 
         if grid is None:
-            grid = self.grid
+            grid = self.properties.grid
 
         if isinstance(property, str):
             property_names = [property]
@@ -602,7 +611,7 @@ class Layer(ModelSubdomain):
                 type="multiplicative",
             )
 
-    def set_property(self, key: str, value: Union[float, xr.DataArray]):
+    def set_property(self, key: str, value: Union[float, xr.DataArray]) -> None:
         """Set or replace one material property on the layer.
 
         Args:
@@ -628,7 +637,7 @@ class LayerBounds:
     lower: Optional[SimpleSurface] = None
     layer: Layer
 
-    def __str__(self):
+    def __str__(self) -> str:
         out = f"Layer {self.layer.name}\n"
 
         if self.upper is not None:
@@ -642,7 +651,7 @@ class LayerBounds:
             out += "  lower: None\n"
         return out
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return str(self)
 
     @staticmethod
@@ -718,8 +727,8 @@ class Fracture(SimpleSurface):
         property_system: Optional[str] = None,
         mesh_block_id: Optional[int] = None,
         subdomain_name: Optional[str] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         super().__init__(
             name=name,
             interface=interface,
@@ -763,7 +772,7 @@ class Fracture(SimpleSurface):
             **payload,
         )
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize fracture geometry, aperture, and optional mesh metadata.
 
         Args:
@@ -787,7 +796,7 @@ class Fracture(SimpleSurface):
 
     @staticmethod
     def _coerce_gap(
-        value: Union[xr.DataArray, Mapping[str, Any], ArrayLike],
+        value: Union[Property, xr.DataArray, Mapping[str, Any], ArrayLike],
         *,
         grid: Optional[xr.DataArray] = None,
         units: Optional[Any] = None,
@@ -798,7 +807,7 @@ class Fracture(SimpleSurface):
         elif isinstance(value, Mapping) and {"dims", "data"}.issubset(value):
             prop = Property(_inline_dataarray_from_fs(value))
         else:
-            prop = Property(value, grid=grid, units=units, system=system)
+            prop = Property(cast(Any, value), grid=grid, units=units, system=system)
         if prop.darr is not None and not prop.is_constant and prop.darr.ndim != 1:
             raise ValueError("Fracture gap must be one-dimensional")
         return prop
@@ -808,7 +817,7 @@ class Fracture(SimpleSurface):
         prop: Property,
         *,
         field: str,
-        ctx=None,
+        ctx: Optional[ExportContext] = None,
     ) -> Dict[str, Any]:
         ctx = ctx or ExportContext()
         dataset = f"inputs/model/surfaces/{self.name}/{field}"

@@ -202,26 +202,6 @@
     },
     {
       "code": "arg-type",
-      "count": 4,
-      "file": "src/frequensolve/model/layered/surfaces.py"
-    },
-    {
-      "code": "assignment",
-      "count": 1,
-      "file": "src/frequensolve/model/layered/surfaces.py"
-    },
-    {
-      "code": "attr-defined",
-      "count": 1,
-      "file": "src/frequensolve/model/layered/surfaces.py"
-    },
-    {
-      "code": "no-untyped-def",
-      "count": 15,
-      "file": "src/frequensolve/model/layered/surfaces.py"
-    },
-    {
-      "code": "arg-type",
       "count": 20,
       "file": "src/frequensolve/model/property.py"
     },
@@ -1199,6 +1179,7 @@
         "src/frequensolve/model/dispersion.py",
         "src/frequensolve/model/layered/_utils.py",
         "src/frequensolve/model/layered/model.py",
+        "src/frequensolve/model/layered/surfaces.py",
         "src/frequensolve/model/model.py",
         "src/frequensolve/units.py",
         "src/frequensolve/validation/"
@@ -1242,6 +1223,7 @@
     "src/frequensolve/model/dispersion.py",
     "src/frequensolve/model/layered/_utils.py",
     "src/frequensolve/model/layered/model.py",
+    "src/frequensolve/model/layered/surfaces.py",
     "src/frequensolve/model/model.py",
     "src/frequensolve/units.py",
     "src/frequensolve/validation/",

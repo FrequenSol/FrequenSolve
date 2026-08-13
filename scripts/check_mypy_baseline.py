@@ -22,6 +22,7 @@ PHASE_ONE_STRICT_PATHS = (
     "src/frequensolve/model/dispersion.py",
     "src/frequensolve/model/layered/_utils.py",
     "src/frequensolve/model/layered/model.py",
+    "src/frequensolve/model/layered/surfaces.py",
     "src/frequensolve/model/model.py",
     "src/frequensolve/units.py",
     "src/frequensolve/validation/",

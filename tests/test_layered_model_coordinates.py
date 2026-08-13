@@ -19,6 +19,7 @@ from frequensolve.model.layered import (
     BoreholePlug,
     BoreholeSurface,
     Fracture,
+    Layer,
     LayeredModel,
     dipping_plane_2d,
     dipping_plane_3d,
@@ -28,6 +29,34 @@ from frequensolve.model.model import ModelSubdomain
 from frequensolve.model.property import Property, PropertyExpression, coord, prop
 from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.units import ureg as u
+
+
+def test_layer_perturb_defaults_to_the_property_map_grid(monkeypatch):
+    grid = xr.DataArray(
+        np.ones(2),
+        dims=["x"],
+        coords={"x": [0.0, 1.0]},
+    )
+    layer = Layer(
+        name="layer",
+        mesh_block_id=1,
+        properties={"vp": grid},
+        grid=grid,
+    )
+    call = {}
+
+    def record_perturbation(**kwargs):
+        call.update(kwargs)
+
+    monkeypatch.setattr(
+        layer.properties["vp"],
+        "stochastic_perturbation",
+        record_perturbation,
+    )
+
+    layer.perturb("vp", std=0.1)
+
+    assert call["grid"] is grid
 
 
 def test_inline_property_metadata_requires_array_data():
