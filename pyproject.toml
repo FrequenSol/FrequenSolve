@@ -167,6 +167,7 @@ markers = [
     "hpc: requires SLURM, SSH, or a configured remote cluster",
     "integration: requires solver binaries or external services",
     "interactive: requires manual input or an already authenticated user session",
+    "property_contract: bounded generated testing for Python SDK contracts",
     "unit: deterministic unit test with no solver, network, credentials, or scheduler",
     "visual: image comparison or plotting test",
 ]

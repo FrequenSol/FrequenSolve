@@ -11,6 +11,20 @@ test:
 	tests/
 	python scripts/check_coverage_thresholds.py tests/output/coverage.json
 
+.PHONY: test-property-contracts
+test-property-contracts:
+	PYTHONPATH="$(CURDIR)/src" \
+	FREQUENSOLVE_HYPOTHESIS_PROFILE=pr python -m pytest \
+		-ra \
+		-o addopts='' \
+		--strict-markers \
+		-m property_contract \
+		tests/
+
+.PHONY: test-property-campaign
+test-property-campaign:
+	python scripts/run_property_campaign.py
+
 .PHONY: test-optional-extras
 test-optional-extras:
 	MPLBACKEND=Agg PYVISTA_OFF_SCREEN=true python -m pytest \
