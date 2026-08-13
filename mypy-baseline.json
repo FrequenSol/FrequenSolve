@@ -936,11 +936,6 @@
       "file": "src/frequensolve/simulation/outputs.py"
     },
     {
-      "code": "no-untyped-def",
-      "count": 15,
-      "file": "src/frequensolve/simulation/sampling.py"
-    },
-    {
       "code": "arg-type",
       "count": 7,
       "file": "src/frequensolve/simulation/simulation.py"
@@ -1125,6 +1120,7 @@
         "src/frequensolve/model/model.py",
         "src/frequensolve/seismic/trace_geometry.py",
         "src/frequensolve/simulation/discretization.py",
+        "src/frequensolve/simulation/sampling.py",
         "src/frequensolve/simulation/solver.py",
         "src/frequensolve/units.py",
         "src/frequensolve/validation/"
@@ -1174,6 +1170,7 @@
     "src/frequensolve/model/model.py",
     "src/frequensolve/seismic/trace_geometry.py",
     "src/frequensolve/simulation/discretization.py",
+    "src/frequensolve/simulation/sampling.py",
     "src/frequensolve/simulation/solver.py",
     "src/frequensolve/units.py",
     "src/frequensolve/validation/",
