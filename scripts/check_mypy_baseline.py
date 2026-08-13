@@ -15,17 +15,29 @@ from typing import Iterable, NamedTuple, Optional, Sequence
 SCHEMA = "frequensolve-mypy-baseline-1"
 BASELINE_FILE = "mypy-baseline.json"
 
-STRICT_PATHS = (
+PHASE_ONE_STRICT_PATHS = (
     "scripts/check_mypy_baseline.py",
     "src/frequensolve/units.py",
     "src/frequensolve/validation/",
 )
 
+PHASE_TWO_STRICT_PATHS = (
+    "src/frequensolve/orchestrator/utils/__init__.py",
+    "src/frequensolve/orchestrator/utils/credential_store.py",
+    "src/frequensolve/orchestrator/utils/credentials.py",
+    "src/frequensolve/orchestrator/utils/environment.py",
+    "src/frequensolve/orchestrator/utils/pool.py",
+    "src/frequensolve/orchestrator/utils/progress.py",
+    "src/frequensolve/storage.py",
+)
+
+STRICT_PATHS = (*PHASE_ONE_STRICT_PATHS, *PHASE_TWO_STRICT_PATHS)
+
 PHASES = (
     {
         "order": 1,
         "name": "public-authoring-validation-units-serialization",
-        "strict_now": list(STRICT_PATHS),
+        "strict_now": list(PHASE_ONE_STRICT_PATHS),
         "remaining_prefixes": [
             "src/frequensolve/geometry/",
             "src/frequensolve/mesh/",
@@ -38,11 +50,11 @@ PHASES = (
     {
         "order": 2,
         "name": "core-orchestration-and-result-loading",
+        "strict_now": list(PHASE_TWO_STRICT_PATHS),
         "remaining_prefixes": [
             "src/frequensolve/orchestrator/sites/base.py",
             "src/frequensolve/orchestrator/sites/local/",
-            "src/frequensolve/orchestrator/utils/",
-            "src/frequensolve/storage.py",
+            "src/frequensolve/orchestrator/utils/ssh.py",
         ],
     },
     {
@@ -160,16 +172,21 @@ def _run_mypy(root: Path) -> Counter[Diagnostic]:
     return parse_diagnostics(result.stdout, root)
 
 
-def _load_baseline(path: Path) -> tuple[dict, Counter[Diagnostic]]:
+def _load_baseline(
+    path: Path,
+    *,
+    validate_plan: bool = True,
+) -> tuple[dict, Counter[Diagnostic]]:
     payload = json.loads(path.read_text())
     if payload.get("schema") != SCHEMA:
         raise ValueError(f"Unsupported mypy baseline schema: {payload.get('schema')!r}")
-    if payload.get("phases") != list(PHASES):
+    if validate_plan and payload.get("phases") != list(PHASES):
         raise ValueError("Mypy phase order differs from the executable plan")
     return payload, _counter_from_rows(payload.get("diagnostics", []))
 
 
 def _write_baseline(path: Path, diagnostics: Counter[Diagnostic]) -> None:
+    diagnostics = diagnostics - strict_diagnostics(diagnostics)
     payload = {
         "schema": SCHEMA,
         "scope": "src/frequensolve",
@@ -215,8 +232,9 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     if args.update or args.replace:
         updated = current
         if args.update and baseline_path.exists():
-            _, expected = _load_baseline(baseline_path)
+            _, expected = _load_baseline(baseline_path, validate_plan=False)
             updated = expected | current
+        updated = updated - strict_diagnostics(updated)
         _write_baseline(baseline_path, updated)
         print(
             f"Updated {baseline_path} with {sum(updated.values())} reviewed "
