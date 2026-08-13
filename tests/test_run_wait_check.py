@@ -90,6 +90,27 @@ def test_run_handle_wait_honors_submit_time_fetch_after_success():
     assert fetch_calls == ["run-1"]
 
 
+def test_precompleted_fetch_intent_retries_after_fetch_failure():
+    fetch_calls = []
+    run = RunHandle.skipped(DummySite(), DummyJob())
+
+    def fetch(run):
+        fetch_calls.append(run.id)
+        if len(fetch_calls) == 1:
+            raise RuntimeError("temporary download failure")
+
+    run._fetch_fn = fetch
+    run._fetch_on_wait = True
+
+    with pytest.raises(RuntimeError, match="temporary download failure"):
+        run.wait()
+
+    assert run.wait().successful
+    assert fetch_calls == [None, None]
+    assert run.wait().successful
+    assert fetch_calls == [None, None]
+
+
 def test_run_handle_wait_raises_by_default_for_failed_run():
     run = failed_run()
 

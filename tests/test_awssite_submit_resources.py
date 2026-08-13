@@ -112,6 +112,26 @@ def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
     assert site.graphql_client.compute_stack_checks == 0
 
 
+def test_graphql_submit_current_job_fetches_once_when_waited():
+    site = make_graphql_site()
+    site._emit_status = lambda *args, **kwargs: None
+    fetch_calls = []
+    site.fetch_outputs = lambda job: fetch_calls.append(job)
+    job = FakeJob()
+    job.is_run_current = lambda: True
+    job.write_run_state = lambda **kwargs: None
+
+    run = site.submit(job, fetch=True)
+
+    assert fetch_calls == []
+    result = run.wait()
+    assert result.successful
+    assert fetch_calls == [job]
+    assert run.wait() is result
+    assert fetch_calls == [job]
+    assert site.graphql_client.submit_calls == []
+
+
 def test_graphql_submit_checks_legacy_per_user_compute_stack():
     site = make_graphql_site()
     site.graphql_client.compute_mode = "per-user"
