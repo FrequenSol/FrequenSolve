@@ -230,25 +230,79 @@ def _job_scenario(root: Path, size: str, frequency_count: int) -> Scenario:
 
 def _write_trace_product(path: Path, *, frequencies: int, receivers: int) -> None:
     string_dtype = h5py.string_dtype(encoding="utf-8")
+    frequency_values = np.linspace(1.0, float(frequencies), frequencies)
+    dataset_numbers = np.arange(1, frequencies + 1, dtype=np.int32)
     with h5py.File(path, "w") as h5:
-        h5.create_dataset(
-            "frequency", data=np.linspace(1.0, float(frequencies), frequencies)
-        )
+        h5.create_dataset("frequency", data=frequency_values)
         h5.create_dataset("laplace", data=np.zeros(frequencies, dtype=np.float64))
+        h5.create_dataset("task_id", data=dataset_numbers)
         h5.create_dataset(
             "survey/packed_layout_kind",
-            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+            data=np.array(["indexed_frequency_trace_v1"], dtype=string_dtype),
         )
-        data = np.arange(
-            frequencies * receivers * 2,
-            dtype=np.float32,
-        ).reshape(frequencies, 1, 1, receivers, 2)
-        dataset = h5.create_dataset("surface", data=data)
-        dataset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
-        dataset.attrs["layout_kind"] = ["dense_trace_v1"]
-        dataset.attrs["receiver"] = np.arange(1, receivers + 1, dtype=np.int32)
-        dataset.attrs["component"] = np.array(["p"], dtype=string_dtype)
-        dataset.attrs["shot"] = np.array([1], dtype=np.int32)
+        catalog = h5.require_group("survey/receiver_groups/_catalog")
+        catalog.create_dataset(
+            "group_name", data=np.array(["surface"], dtype=string_dtype)
+        )
+        catalog.create_dataset(
+            "dataset_path", data=np.array(["/surface"], dtype=string_dtype)
+        )
+        catalog.create_dataset(
+            "layout_kind", data=np.array(["dense_trace_v1"], dtype=string_dtype)
+        )
+        trace_group = h5.require_group("survey/receiver_groups/surface/traces")
+        trace_group.create_dataset(
+            "receiver_id", data=np.arange(1, receivers + 1, dtype=np.int32)
+        )
+        trace_group.create_dataset("source_id", data=np.array([1], dtype=np.int32))
+        trace_group.create_dataset(
+            "component_name", data=np.array(["p"], dtype=string_dtype)
+        )
+
+        h5.require_group("trace_index/datasets")
+        h5.create_dataset(
+            "trace_index/schema_version",
+            data=np.array(["fs-trace-index-1"], dtype=string_dtype),
+        )
+        h5.create_dataset(
+            "trace_index/layout_kind",
+            data=np.array(["indexed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        h5.create_dataset(
+            "trace_index/data_root",
+            data=np.array(["/trace_data"], dtype=string_dtype),
+        )
+        h5.create_dataset("trace_index/dataset_number", data=dataset_numbers)
+        h5.create_dataset("trace_index/frequency", data=frequency_values)
+        h5.create_dataset(
+            "trace_index/laplace", data=np.zeros(frequencies, dtype=np.float64)
+        )
+        h5.create_dataset("trace_index/task_id", data=dataset_numbers)
+        h5.create_dataset("trace_index/datasets/dataset_number", data=dataset_numbers)
+        h5.create_dataset(
+            "trace_index/datasets/source_path",
+            data=np.array(["/surface"] * frequencies, dtype=string_dtype),
+        )
+        h5.create_dataset(
+            "trace_index/datasets/packed_path",
+            data=np.array(
+                [f"/trace_data/surface/{number:06d}" for number in dataset_numbers],
+                dtype=string_dtype,
+            ),
+        )
+
+        values = np.arange(frequencies * receivers * 2, dtype=np.float32).reshape(
+            frequencies, 1, 1, receivers, 2
+        )
+        for index, number in enumerate(dataset_numbers):
+            dataset = h5.create_dataset(
+                f"trace_data/surface/{number:06d}", data=values[index]
+            )
+            dataset.attrs["dims"] = ["receiver", "component", "shot"]
+            dataset.attrs["layout_kind"] = ["dense_trace_v1"]
+            dataset.attrs["receiver"] = np.arange(1, receivers + 1, dtype=np.int32)
+            dataset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+            dataset.attrs["shot"] = np.array([1], dtype=np.int32)
 
 
 def _trace_scenario(
@@ -263,6 +317,9 @@ def _trace_scenario(
     expected_frequencies = {index: float(index) for index in range(1, frequencies + 1)}
 
     def operation() -> Mapping[str, Any]:
+        with h5py.File(path, "r") as h5:
+            if not TraceStore._is_indexed_packed_h5(h5) or "surface" in h5:
+                raise RuntimeError("trace fixture did not select indexed packed access")
         store = TraceStore(
             metadata={
                 "groups": ["surface"],
@@ -280,6 +337,7 @@ def _trace_scenario(
                 raise RuntimeError("trace access returned an unexpected shape")
             return {
                 "frequencies": frequencies,
+                "layout": "indexed_frequency_trace_v1",
                 "receivers": receivers,
                 "values": int(materialized.size),
             }

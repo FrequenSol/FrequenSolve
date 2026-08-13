@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import h5py
 import pytest
 
+from frequensolve.seismic.trace_store import TraceStore
 from scripts.run_sdk_performance import (
     BASELINE_SCHEMA,
     SCHEMA,
     Scenario,
+    _write_trace_product,
     compare_to_baseline,
     comparison_dependency_versions,
     comparison_runner_identity,
@@ -92,6 +95,16 @@ def test_measurement_retains_raw_samples_and_variance_statistics():
     assert measured["wallTimeSeconds"]["median"] > 0
     assert measured["pythonHeapPeakBytes"]["median"] > 0
     assert measured["wallTimeSeconds"]["coefficientOfVariation"] >= 0
+
+
+def test_trace_fixture_selects_indexed_packed_access(tmp_path):
+    path = tmp_path / "traces.h5"
+    _write_trace_product(path, frequencies=3, receivers=4)
+
+    with h5py.File(path, "r") as h5:
+        assert TraceStore._is_indexed_packed_h5(h5)
+        assert "surface" not in h5
+        assert len(h5["trace_index/datasets/packed_path"]) == 3
 
 
 @pytest.mark.parametrize(
