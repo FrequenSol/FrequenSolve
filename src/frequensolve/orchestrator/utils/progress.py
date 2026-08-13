@@ -187,10 +187,14 @@ class RunMonitor:
         *,
         fetch: bool,
         check: bool,
-    ) -> None:
-        run._complete_from_status(status)
-        if fetch and (run._result.successful or not check):
+    ) -> RunResult:
+        result = run._complete_from_status(status)
+        configured_fetch = run._fetch_fn is not None
+        if result.successful and (fetch or configured_fetch):
             run.fetch()
+        elif fetch and not check:
+            run.fetch()
+        return result
 
     @staticmethod
     def _timeout(run: RunHandle, status: JobStatus, *, fetch: bool) -> None:

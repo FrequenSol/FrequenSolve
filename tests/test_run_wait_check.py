@@ -61,6 +61,35 @@ def failed_run(site=None):
     )
 
 
+def successful_run(site=None):
+    site = site or DummySite()
+    job = DummyJob()
+    return RunHandle(
+        site=site,
+        job=job,
+        id="run-1",
+        poll_interval=0.0,
+        _status_fn=lambda run: JobStatus(
+            state="completed",
+            return_code=0,
+            job_id="run-1",
+        ),
+    )
+
+
+def test_run_handle_wait_honors_submit_time_fetch_after_success():
+    fetch_calls = []
+    run = successful_run()
+    run._fetch_fn = lambda run: fetch_calls.append(run.id)
+
+    result = run.wait()
+
+    assert result.successful
+    assert fetch_calls == ["run-1"]
+    assert run.wait() is result
+    assert fetch_calls == ["run-1"]
+
+
 def test_run_handle_wait_raises_by_default_for_failed_run():
     run = failed_run()
 
@@ -147,6 +176,60 @@ def test_wait_all_check_true_does_not_fetch_failed_outputs():
         wait_all([run], fetch=True, poll_interval=0.0)
 
     assert fetch_calls == []
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled"])
+def test_submit_time_fetch_skips_unsuccessful_terminal_runs(state):
+    fetch_calls = []
+    run = RunHandle(
+        site=DummySite(),
+        job=DummyJob(),
+        id="run-1",
+        poll_interval=0.0,
+        _status_fn=lambda run: JobStatus(
+            state=state,
+            return_code=1,
+            job_id="run-1",
+        ),
+        _fetch_fn=lambda run: fetch_calls.append(run.id),
+    )
+
+    with pytest.raises(RunFailedError):
+        run.wait()
+
+    assert fetch_calls == []
+
+
+def test_submit_time_fetch_skips_timed_out_run():
+    fetch_calls = []
+    run = RunHandle(
+        site=DummySite(),
+        job=DummyJob(),
+        id="run-1",
+        poll_interval=0.0,
+        _status_fn=lambda run: JobStatus(
+            state="running",
+            return_code=-1,
+            job_id="run-1",
+        ),
+        _fetch_fn=lambda run: fetch_calls.append(run.id),
+    )
+
+    with pytest.raises(RunFailedError):
+        run.wait(timeout=0.0)
+
+    assert fetch_calls == []
+
+
+def test_explicit_non_strict_wait_all_preserves_failed_output_fetch():
+    fetch_calls = []
+    run = failed_run()
+    run._fetch_fn = lambda run: fetch_calls.append(run.id)
+
+    [result] = wait_all([run], fetch=True, check=False, poll_interval=0.0)
+
+    assert not result.successful
+    assert fetch_calls == ["run-1"]
 
 
 def test_failed_run_result_traces_raise_before_fetching_outputs():

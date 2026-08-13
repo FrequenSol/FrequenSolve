@@ -1109,6 +1109,21 @@ class AWSSite(BaseSite):
             return db_map[jobs[0].name]
         return db_map
 
+    def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
+        """Fetch ``_fs_run`` metadata and aggregate task manifests locally."""
+
+        project_name = Path(job.project_path).name
+        simulation_name = job.simulation.name
+        job_name = job.name
+        results_run_path = f"jobs/{simulation_name}/{job_name}/results/_fs_run"
+        s3_results_path = (
+            f"s3://{self.config.s3_bucket}/{project_name}/{results_run_path}"
+        )
+        local_run_path = job._result_path / "_fs_run"
+        self.get(s3_results_path, local_run_path)
+        self._emit(f"Fetched AWS run metadata from {s3_results_path}")
+        return job.collect_task_run_manifests()
+
     def fetch_outputs(self, job: BaseJob):
         """Fetch common AWS result artifacts for a completed job.
 
@@ -1120,6 +1135,7 @@ class AWSSite(BaseSite):
             mapping containing traces and wavefields when those outputs exist.
         """
 
+        self.fetch_run_metadata(job)
         if hasattr(job, "result_manifest_file"):
             project_name = job.project_path.name
             output_dir = job.output_directory.relative_to(job._result_path)
@@ -1138,6 +1154,8 @@ class AWSSite(BaseSite):
         wavefields = None
         if getattr(job.outputs, "wavefields", None):
             wavefields = self.fetch_wavefields(job)
+        if getattr(job.outputs, "paraview", None):
+            self.fetch_paraview(job)
         if wavefields is None:
             return traces
         return {"traces": traces, "wavefields": wavefields}
