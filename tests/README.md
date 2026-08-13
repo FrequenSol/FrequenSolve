@@ -160,24 +160,36 @@ pushes, and can also be started manually. It includes:
    - Uploads per-contract coverage JSON and enforces reviewed package-level
      floors without contacting a solver, cloud service, or scheduler
 
-3. **Integration Test Job**:
+3. **Native Platform Behavior**:
+   - Pull requests that change package/runtime behavior install the exact built
+     wheel on native `macos-15` and run the full deterministic suite against the
+     installed package with the normal line, branch, and combined ratchets
+   - The public-preview native `ubuntu-24.04-arm` contract is manual-only while
+     runner reliability is measured; it installs only the base wheel and runs a
+     representative path/process, serialization, units, geometry, validation,
+     and result-loading suite
+   - Both contracts fail on an unexpected OS/architecture or checkout-source
+     coverage and retain exact commit/artifact, pip resolver, Python/platform,
+     NumPy/BLAS, FFT, JUnit, and coverage evidence for 14 days
+
+4. **Integration Test Job**:
    - Triggers the `FrequenSol/FrequenSolveDockerImage` CI workflow with the
      current FrequenSolve branch
    - Waits for that downstream workflow to finish
    - Downloads the downstream test artifacts into `tests/output/`
    - Requires the GitHub App secrets configured for the repository workflow
 
-4. **Documentation Job**:
+5. **Documentation Job**:
    - Builds the project documentation
    - Uploads documentation as an artifact
 
-5. **Build And Package Smoke Jobs**:
+6. **Build And Package Smoke Jobs**:
    - Builds the Python package
    - Checks package metadata with `twine`
    - Uploads the `dist/` artifact
    - Installs and imports both the wheel and sdist on Ubuntu and macOS
 
-6. **Required CI Job**:
+7. **Required CI Job**:
    - Aggregates every PR-safe lane under the stable `Required CI` name used by
      branch rules and release evidence
 
