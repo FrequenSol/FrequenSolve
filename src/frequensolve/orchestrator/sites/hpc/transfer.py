@@ -202,10 +202,25 @@ class SlurmTransferManager:
             f".{remote_path.name}.frequensolve-{uuid.uuid4().hex}.partial"
         )
         try:
+            try:
+                destination_mode = stat.S_IMODE(sftp.stat(str(remote_path)).st_mode)
+                destination_exists = True
+            except OSError:
+                destination_mode = stat.S_IMODE(local_path.stat().st_mode)
+                destination_exists = False
+
             sftp.put(str(local_path), str(temporary))
             self._verify_sftp_size(sftp, temporary, local_path)
-            publish = getattr(sftp, "posix_rename", None) or sftp.rename
-            publish(str(temporary), str(remote_path))
+            sftp.chmod(str(temporary), destination_mode)
+            try:
+                sftp.posix_rename(str(temporary), str(remote_path))
+            except (AttributeError, OSError):
+                if destination_exists:
+                    raise RuntimeError(
+                        "SFTP server cannot atomically replace an existing file; "
+                        "use rsync or enable the POSIX rename extension"
+                    ) from None
+                sftp.rename(str(temporary), str(remote_path))
         except Exception:
             try:
                 sftp.remove(str(temporary))
@@ -225,8 +240,13 @@ class SlurmTransferManager:
         os.close(fd)
         temporary = Path(temporary_name)
         try:
+            if local_path.exists():
+                destination_mode = stat.S_IMODE(local_path.stat().st_mode)
+            else:
+                destination_mode = stat.S_IMODE(sftp.stat(str(remote_path)).st_mode)
             sftp.get(str(remote_path), str(temporary))
             self._verify_sftp_size(sftp, remote_path, temporary)
+            temporary.chmod(destination_mode)
             os.replace(temporary, local_path)
         finally:
             try:
