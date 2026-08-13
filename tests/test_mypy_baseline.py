@@ -156,6 +156,8 @@ def test_lazy_utility_exports_retain_consumer_types(tmp_path):
             "mypy",
             "--config-file",
             str(root / "pyproject.toml"),
+            "--python-version",
+            f"{sys.version_info.major}.{sys.version_info.minor}",
             str(consumer),
         ],
         cwd=root,
