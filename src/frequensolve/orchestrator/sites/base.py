@@ -672,6 +672,7 @@ class RunHandle:
     _generic_wait: bool = True
     _cancel_fn: Optional[Callable[["RunHandle"], None]] = None
     _fetch_fn: Optional[Callable[["RunHandle"], Any]] = None
+    _fetch_on_wait: bool = False
     _result: Optional[RunResult] = None
     _last_status: JobStatus = field(default_factory=JobStatus)
 
@@ -774,6 +775,7 @@ class RunHandle:
         if self._result is not None:
             if effective_check:
                 self._result.raise_for_status()
+            self._fetch_pending_outputs()
             return self._result
         if not self._generic_wait and self._wait_fn is not None:
             self._result = self._wait_fn(self, timeout, poll_interval)
@@ -814,6 +816,8 @@ class RunHandle:
         if self._result is not None:
             if effective_check:
                 self._result.raise_for_status()
+            if self._fetch_on_wait and self._result.successful:
+                await asyncio.to_thread(self._fetch_pending_outputs)
             return self._result
         if not self._generic_wait and self._wait_async_fn is not None:
             self._result = await self._wait_async_fn(self, timeout, poll_interval)
@@ -885,10 +889,19 @@ class RunHandle:
         """
 
         if self._fetch_fn is not None:
-            return self._fetch_fn(self)
-        if hasattr(self.site, "fetch_outputs"):
-            return self.site.fetch_outputs(self.job)
-        return None
+            result = self._fetch_fn(self)
+        elif hasattr(self.site, "fetch_outputs"):
+            result = self.site.fetch_outputs(self.job)
+        else:
+            result = None
+        self._fetch_on_wait = False
+        return result
+
+    def _fetch_pending_outputs(self) -> None:
+        """Fetch one successful pre-completed run when submit requested it."""
+
+        if self._fetch_on_wait and self._result is not None and self._result.successful:
+            self.fetch()
 
     def traces(self, upscale: int = 1) -> Any:
         """Fetch outputs if needed and open receiver traces.
