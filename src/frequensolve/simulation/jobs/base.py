@@ -94,7 +94,7 @@ class JobLayout:
         """
 
         project = Path(payload["project_path"])
-        job_name = cls._layout_name(payload["name"], field="name")
+        job_name = str(payload["name"])
         simulation_relpath = cls._project_relative(payload["simulation"], project)
         simulation_name = cls._layout_name(
             Path(payload["simulation"]).stem,

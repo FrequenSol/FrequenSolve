@@ -340,6 +340,42 @@ def test_job_frequency_payload_regression_is_plain_json_data():
         assert job.to_fs()["f_list"] == [1.0, 2.0]
 
 
+def test_new_job_with_path_separator_fails_before_save():
+    with tempfile.TemporaryDirectory() as temporary:
+        project = Project(name="project", path=Path(temporary))
+        simulation = project.new_simulation(
+            name="simulation",
+            physics="acoustic",
+            dimension=2,
+        )
+        job = FrequencyDomainJob(
+            name="group/frequency",
+            simulation=simulation,
+            f_list=[1.0],
+        )
+
+        with pytest.raises(ValueError, match="name.*unsafe path"):
+            job.save()
+
+        assert simulation._file is None
+
+
+def test_legacy_job_name_with_path_separator_remains_loadable():
+    layout = JobLayout.from_payload(
+        {
+            "project_path": "/bounded/project",
+            "simulation": "simulations/simulation/simulation.json",
+            "result_path": "jobs/simulation/group/frequency/results",
+            "name": "group/frequency",
+        }
+    )
+
+    assert layout.job_name == "group/frequency"
+    assert layout.result_dir == Path(
+        "/bounded/project/jobs/simulation/group/frequency/results"
+    )
+
+
 @given(
     case=ACQUISITION_CASES,
     extra_names=st.integers(min_value=1, max_value=3),
