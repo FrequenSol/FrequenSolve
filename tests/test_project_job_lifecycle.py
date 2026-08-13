@@ -407,6 +407,10 @@ def test_run_metadata_filters_output_files(tmp_path):
                     "relative_path": "traces/traces_1.h5",
                     "kind": "hdf5",
                 },
+                {
+                    "relative_path": "ParaView/pv.xmf",
+                    "kind": "vtk",
+                },
             ]
         },
         result_path=result_path,
@@ -438,6 +442,9 @@ def test_run_metadata_filters_output_files(tmp_path):
         suffix=".vtu",
         base="pressure_2.vtu",
     ) == [result_path / "ParaView/pressure_2.vtu"]
+    assert metadata.output_files(kind="xmf") == [result_path / "ParaView/pv.xmf"]
+    assert metadata.output_files(kind="xdmf") == [result_path / "ParaView/pv.xmf"]
+    assert metadata.output_files(suffix=".xmf") == [result_path / "ParaView/pv.xmf"]
     result = RunResult(
         job=object(),
         status=JobStatus(state="completed", return_code=0),
