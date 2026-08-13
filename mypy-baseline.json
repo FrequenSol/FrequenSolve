@@ -956,26 +956,6 @@
       "file": "src/frequensolve/simulation/simulation.py"
     },
     {
-      "code": "arg-type",
-      "count": 1,
-      "file": "src/frequensolve/simulation/study.py"
-    },
-    {
-      "code": "assignment",
-      "count": 1,
-      "file": "src/frequensolve/simulation/study.py"
-    },
-    {
-      "code": "attr-defined",
-      "count": 2,
-      "file": "src/frequensolve/simulation/study.py"
-    },
-    {
-      "code": "operator",
-      "count": 1,
-      "file": "src/frequensolve/simulation/study.py"
-    },
-    {
       "code": "name-defined",
       "count": 2,
       "file": "src/frequensolve/util/__init__.py"
@@ -1113,6 +1093,7 @@
         "src/frequensolve/simulation/discretization.py",
         "src/frequensolve/simulation/sampling.py",
         "src/frequensolve/simulation/solver.py",
+        "src/frequensolve/simulation/study.py",
         "src/frequensolve/units.py",
         "src/frequensolve/validation/"
       ]
@@ -1164,6 +1145,7 @@
     "src/frequensolve/simulation/discretization.py",
     "src/frequensolve/simulation/sampling.py",
     "src/frequensolve/simulation/solver.py",
+    "src/frequensolve/simulation/study.py",
     "src/frequensolve/units.py",
     "src/frequensolve/validation/",
     "src/frequensolve/orchestrator/sites/base.py",

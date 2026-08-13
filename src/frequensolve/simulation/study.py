@@ -71,9 +71,9 @@ class SimulationCase:
         study case has been built successfully.
         """
 
-        self._require_materialization_context()
+        name = self._require_materialization_context()
         return self._study.project._create_simulation(
-            name=self.name,
+            name=name,
             physics=physics,
             dimension=dimension,
             attach=False,
@@ -83,7 +83,7 @@ class SimulationCase:
     def clone(self, base: SeismicSimulation) -> SeismicSimulation:
         """Return an independent, detached copy of ``base`` for this case."""
 
-        self._require_materialization_context()
+        name = self._require_materialization_context()
         if not isinstance(base, SeismicSimulation):
             raise TypeError(
                 "SimulationCase.clone() requires a SeismicSimulation; "
@@ -103,19 +103,20 @@ class SimulationCase:
                 f"Could not clone base simulation {base.name!r}: {exc}"
             ) from exc
 
-        simulation.name = self.name
+        simulation.name = name
         simulation._file = None
         simulation._project = self._study.project
         simulation.relocate(self._study.project.path)
         return simulation
 
-    def _require_materialization_context(self) -> None:
+    def _require_materialization_context(self) -> str:
         if self.index is None or self.name is None:
             raise RuntimeError(
                 "This case is only a selection specification. Use it in "
                 "study.materialize(cases=[...]); case.new_simulation() and "
                 "case.clone() are available inside the @study.simulation builder."
             )
+        return self.name
 
 
 class SimulationStudy:
@@ -155,7 +156,7 @@ class SimulationStudy:
         self.name = name
         self.max_cases = max_cases
         self._parameters = self._normalize_parameters(parameters)
-        self.name_template = name_template or self._default_name_template()
+        self.name_template: str = name_template or self._default_name_template()
         self._builder: Optional[Callable[[SimulationCase], SeismicSimulation]] = None
         self._validate_name_template()
 
@@ -328,6 +329,7 @@ class SimulationStudy:
                 raise ValueError(
                     "name_template conversions such as !r are not supported"
                 )
+            format_spec = format_spec or ""
             if "{" in format_spec or "}" in format_spec:
                 raise ValueError(
                     "Nested fields in name_template format specs are not supported"
