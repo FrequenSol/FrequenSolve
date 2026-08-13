@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Mapping, Optional, Union
+from typing import Any, Dict, Literal, Mapping, Optional, Union, cast
 
 import numpy as np
 
@@ -118,7 +118,7 @@ class AttenuationConfig(ExtraFieldsMixin):
             extra=payload,
         )
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize the canonical solver attenuation block.
 
         Args:
@@ -161,7 +161,7 @@ def _normalize_model(model: Any) -> AttenuationModel:
         raise ValueError(
             f"Unsupported attenuation model {model!r}; supported models: {supported}"
         )
-    return normalized  # type: ignore[return-value]
+    return cast(AttenuationModel, normalized)
 
 
 def _normalize_reference_frequency(value: Any) -> Any:

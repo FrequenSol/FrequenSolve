@@ -131,21 +131,6 @@
       "file": "src/frequensolve/mesh/mesh_manager.py"
     },
     {
-      "code": "no-untyped-def",
-      "count": 1,
-      "file": "src/frequensolve/model/attenuation.py"
-    },
-    {
-      "code": "no-untyped-def",
-      "count": 3,
-      "file": "src/frequensolve/model/dispersion.py"
-    },
-    {
-      "code": "override",
-      "count": 3,
-      "file": "src/frequensolve/model/dispersion.py"
-    },
-    {
       "code": "assignment",
       "count": 1,
       "file": "src/frequensolve/model/layered/_utils.py"
@@ -1255,6 +1240,8 @@
       "strict_now": [
         "scripts/check_mypy_baseline.py",
         "src/frequensolve/geometry/",
+        "src/frequensolve/model/attenuation.py",
+        "src/frequensolve/model/dispersion.py",
         "src/frequensolve/units.py",
         "src/frequensolve/validation/"
       ]
@@ -1293,6 +1280,8 @@
   "strict_paths": [
     "scripts/check_mypy_baseline.py",
     "src/frequensolve/geometry/",
+    "src/frequensolve/model/attenuation.py",
+    "src/frequensolve/model/dispersion.py",
     "src/frequensolve/units.py",
     "src/frequensolve/validation/",
     "src/frequensolve/orchestrator/sites/base.py",
