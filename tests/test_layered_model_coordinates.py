@@ -23,10 +23,28 @@ from frequensolve.model.layered import (
     dipping_plane_2d,
     dipping_plane_3d,
 )
+from frequensolve.model.layered._utils import _dataarray_with_property_metadata
 from frequensolve.model.model import ModelSubdomain
 from frequensolve.model.property import Property, PropertyExpression, coord, prop
 from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.units import ureg as u
+
+
+def test_inline_property_metadata_requires_array_data():
+    with pytest.raises(
+        ValueError,
+        match="Inline property serialization requires array data",
+    ):
+        _dataarray_with_property_metadata(Property.expr("vp"))
+
+
+def test_layer_surface_lookup_rejects_an_unbounded_layer():
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(depth=0.0, name="top")
+    model.add_layer(name="incomplete")
+
+    with pytest.raises(ValueError, match="Layer 'incomplete' has no lower surface"):
+        model.lower_surface(model.layers[0])
 
 
 def test_dipping_plane_2d_samples_depth_along_dip():
