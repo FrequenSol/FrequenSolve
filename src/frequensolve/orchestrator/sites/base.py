@@ -1,13 +1,26 @@
 """Shared run-handle and site abstractions for local, cloud, and HPC execution."""
 
 import asyncio
+import builtins
 import html
 import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Union
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Generator,
+    Iterable,
+    Mapping,
+    Optional,
+    Protocol,
+    Union,
+    cast,
+)
 
 from frequensolve.simulation.jobs.run_state import SkipPolicy
 
@@ -40,6 +53,13 @@ STATUS_COLORS = {
 }
 STATUS_PREFIX_COLOR = "\033[38;5;244m"
 STATUS_RESET = "\033[0m"
+
+
+class _TraceFetchingSite(Protocol):
+    """Optional receiver-trace capability implemented by concrete sites."""
+
+    def fetch_traces(self, job: Any, upscale: int = 1) -> Any: ...
+
 
 __all__ = [
     "BaseSite",
@@ -109,6 +129,8 @@ def _task_plan_current_tasks(task_plan: Mapping[str, Any]) -> set[int]:
                 task = int(record["task_id"]) + 1
             except (TypeError, ValueError):
                 task = None
+        if task is None:
+            continue
         try:
             current.add(int(task))
         except (TypeError, ValueError):
@@ -149,16 +171,10 @@ def _wait_for_path(
 
 def _check_if_notebook() -> bool:
     """Check if we're running in a Jupyter notebook."""
-    try:
-        shell = get_ipython().__class__.__name__
-        if shell == "ZMQInteractiveShell":
-            return True  # Jupyter notebook or qtconsole
-        elif shell == "TerminalInteractiveShell":
-            return False  # Terminal running IPython
-        else:
-            return False  # Other type
-    except NameError:
-        return False  # Probably standard Python interpreter
+    get_ipython = getattr(builtins, "get_ipython", None)
+    if not callable(get_ipython):
+        return False
+    return get_ipython().__class__.__name__ == "ZMQInteractiveShell"
 
 
 @dataclass
@@ -491,7 +507,7 @@ class RunResult:
         if not self.successful:
             raise RunFailedError(self)
 
-    def traces(self, upscale: int = 1):
+    def traces(self, upscale: int = 1) -> Any:
         """Open receiver trace outputs for this run.
 
         Args:
@@ -504,12 +520,13 @@ class RunResult:
 
         self.raise_for_status()
         if self.site is not None:
-            return self.site.fetch_traces(self.job, upscale=upscale)
+            site = cast(_TraceFetchingSite, self.site)
+            return site.fetch_traces(self.job, upscale=upscale)
         from frequensolve.seismic.traces import TraceDataset
 
         return TraceDataset.from_job(self.job, upscale=upscale)
 
-    def wavefields(self, upscale: int = 1):
+    def wavefields(self, upscale: int = 1) -> Any:
         """Open wavefield outputs for this run.
 
         Args:
@@ -576,7 +593,7 @@ class RunResult:
             existing=existing,
         )
 
-    def logs(self, **kwargs):
+    def logs(self, **kwargs: Any) -> Any:
         """Return or fetch run logs.
 
         Args:
@@ -689,7 +706,7 @@ class RunHandle:
             site._emit_status(status)
         return handle
 
-    def __await__(self):
+    def __await__(self) -> Generator[Any, None, RunResult]:
         return self.wait_async().__await__()
 
     def _make_result(self, status: JobStatus) -> RunResult:
@@ -725,7 +742,9 @@ class RunHandle:
             self._result = self._make_result(status)
         return self._result
 
-    def _run_record_finalizer(self):
+    def _run_record_finalizer(
+        self,
+    ) -> Optional[Callable[["RunHandle", JobStatus], Any]]:
         if self.mode != "batch":
             return None
         finalize = getattr(self.site, "_finalize_run_record", None)
@@ -857,7 +876,7 @@ class RunHandle:
             return
         self.site.cancel_job(self.id)
 
-    def fetch(self):
+    def fetch(self) -> Any:
         """Fetch completed run outputs using the site implementation.
 
         Returns:
@@ -871,7 +890,7 @@ class RunHandle:
             return self.site.fetch_outputs(self.job)
         return None
 
-    def traces(self, upscale: int = 1):
+    def traces(self, upscale: int = 1) -> Any:
         """Fetch outputs if needed and open receiver traces.
 
         Args:
@@ -882,9 +901,10 @@ class RunHandle:
         """
 
         self.fetch()
-        return self.site.fetch_traces(self.job, upscale=upscale)
+        site = cast(_TraceFetchingSite, self.site)
+        return site.fetch_traces(self.job, upscale=upscale)
 
-    def wavefields(self, upscale: int = 1):
+    def wavefields(self, upscale: int = 1) -> Any:
         """Fetch outputs if needed and open wavefield traces.
 
         Args:
@@ -897,7 +917,7 @@ class RunHandle:
         self.fetch()
         return self.site.fetch_wavefields(self.job, upscale=upscale)
 
-    def logs(self, **kwargs):
+    def logs(self, **kwargs: Any) -> Any:
         """Return or fetch logs for this run.
 
         Args:
@@ -957,11 +977,11 @@ class BaseSite:
 
     def prepare_job(
         self,
-        job,
+        job: Any,
         *,
         sync_project: bool = False,
         validate: bool = True,
-    ):
+    ) -> Any:
         """Persist local job inputs before a run is submitted.
 
         Site implementations call this before checking run fingerprints or
@@ -1194,7 +1214,7 @@ class BaseSite:
 
     def dry_run(
         self,
-        job,
+        job: Any,
         *,
         skip: Optional[Any] = None,
         skip_policy: Optional[Any] = None,
@@ -1269,8 +1289,10 @@ class BaseSite:
                 ignore_solver_options=ignore_solver_options,
             )
             pending = tuple(int(index) + 1 for index in task_plan["pending_indices"])
-            current = _task_numbers(task_plan.get("strict_current_tasks", ()), total)
-            reused = _task_numbers(
+            planned_current = _task_numbers(
+                task_plan.get("strict_current_tasks", ()), total
+            )
+            planned_reused = _task_numbers(
                 (
                     record.get("task")
                     for record in task_plan.get("reused_tasks", [])
@@ -1283,7 +1305,12 @@ class BaseSite:
                 task_plan.get("accepted_failed_tasks", ()),
                 total,
             )
-            skipped = {*current, *reused, *accepted, *accepted_failed}
+            skipped = {
+                *planned_current,
+                *planned_reused,
+                *accepted,
+                *accepted_failed,
+            }
             failed_existing = (
                 () if fresh_run else self._failed_existing_tasks(job, total, skipped)
             )
@@ -1292,8 +1319,8 @@ class BaseSite:
                 site=self,
                 total_tasks=total,
                 pending_tasks=pending,
-                current_tasks=current,
-                reused_tasks=reused,
+                current_tasks=planned_current,
+                reused_tasks=planned_reused,
                 accepted_tasks=accepted,
                 accepted_failed_tasks=accepted_failed,
                 failed_existing_tasks=failed_existing,
@@ -1325,8 +1352,11 @@ class BaseSite:
             for record in job.reusable_task_outputs():
                 if not isinstance(record, Mapping):
                     continue
+                raw_task = record.get("task")
+                if raw_task is None:
+                    continue
                 try:
-                    task_number = int(record.get("task"))
+                    task_number = int(raw_task)
                 except (TypeError, ValueError):
                     continue
                 if 1 <= task_number <= total and task_number not in current_set:
@@ -1365,8 +1395,11 @@ class BaseSite:
         for row in job.frequency_status():
             if not isinstance(row, Mapping):
                 continue
+            raw_task = row.get("task")
+            if raw_task is None:
+                continue
             try:
-                task_number = int(row.get("task"))
+                task_number = int(raw_task)
             except (TypeError, ValueError):
                 continue
             if (
@@ -1378,7 +1411,7 @@ class BaseSite:
                 failed_values.append(task_number)
         return tuple(sorted(set(failed_values)))
 
-    def submit(self, job, *, check: bool = False, **kwargs) -> RunHandle:
+    def submit(self, job: Any, *, check: bool = False, **kwargs: Any) -> RunHandle:
         """Submit a job and return an awaitable run handle.
 
         Args:
@@ -1394,12 +1427,12 @@ class BaseSite:
 
     def run(
         self,
-        job,
+        job: Any,
         *,
         timeout: Optional[float] = None,
         poll_interval: Optional[float] = None,
         check: bool = False,
-        **submit_kwargs,
+        **submit_kwargs: Any,
     ) -> RunResult:
         """Submit a job and block until completion.
 
@@ -1481,7 +1514,7 @@ class BaseSite:
         )
 
     def handle(
-        self, job, job_id: Optional[str] = None, mode: str = "attached"
+        self, job: Any, job_id: Optional[str] = None, mode: str = "attached"
     ) -> RunHandle:
         """Create a run handle for an existing submitted job.
 
@@ -1505,6 +1538,10 @@ class BaseSite:
             raise NotImplementedError(
                 f"{self.__class__.__name__} cannot poll existing submitted jobs"
             )
+
+        def cancel(run: RunHandle) -> None:
+            self.cancel_job(str(run.id))
+
         return RunHandle(
             site=self,
             job=job,
@@ -1512,7 +1549,7 @@ class BaseSite:
             mode=mode,
             poll_interval=getattr(getattr(self, "config", None), "poll_interval", 5),
             _status_fn=poll,
-            _cancel_fn=lambda run: self.cancel_job(str(run.id)),
+            _cancel_fn=cancel,
         )
 
     def cancel_job(self, job_id: str) -> bool | None:
