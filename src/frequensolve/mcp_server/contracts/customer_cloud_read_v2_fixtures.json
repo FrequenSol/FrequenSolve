@@ -62,18 +62,20 @@
       "projectName": "Acoustic Demo",
       "simulationName": "Layered Model",
       "jobName": "Forward",
-      "status": "RUNNING",
+      "status": "FAILED",
       "startTime": "2026-07-24T12:00:00.000Z",
       "progress": {
         "total": 4,
-        "completed": 2,
+        "completed": 3,
         "failed": 0,
-        "aborted": 0
+        "aborted": 1
       },
       "requestedComputeMode": "AUTO",
       "effectiveComputeMode": "SPOT",
       "autoEscalationEnabled": true,
-      "batchStatus": "RUNNING"
+      "batchStatus": "FAILED",
+      "failureCode": "SCU_BALANCE_EXHAUSTED",
+      "failureMessage": "This simulation stopped because the account ran out of SCUs. Completed results remain available."
     }
   },
   {

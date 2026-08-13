@@ -328,13 +328,13 @@
     },
     {
       "name": "getMySimulation",
-      "description": "Return safe status, progress, timing, compute-mode, and run-summary fields for one owned simulation.",
+      "description": "Return safe status, progress, timing, compute-mode, run-summary, and terminal-failure fields for one owned simulation.",
       "classification": "read-only",
       "source": {
         "kind": "fixed-graphql-query",
         "operationName": "GetMySimulation",
         "rootFields": ["getMySimulationRead"],
-        "document": "query GetMySimulation($simulationId: String!) { getMySimulationRead(simulationId: $simulationId, includeDiagnostics: false) { simulation { simulationId projectName simulationName jobName status startTime durationSeconds progress { total completed failed aborted } requestedComputeMode effectiveComputeMode autoEscalationEnabled escalatedAt batchStatus batchStatusEnteredAt guardrail { maxRuntimeMinutes } } } }",
+        "document": "query GetMySimulation($simulationId: String!) { getMySimulationRead(simulationId: $simulationId, includeDiagnostics: false) { simulation { simulationId projectName simulationName jobName status startTime durationSeconds progress { total completed failed aborted } requestedComputeMode effectiveComputeMode autoEscalationEnabled escalatedAt batchStatus batchStatusEnteredAt failureCode failureMessage guardrail { maxRuntimeMinutes } } } }",
         "responseProjection": {
           "source": "graphql-data",
           "path": ["getMySimulationRead", "simulation"]
@@ -388,6 +388,8 @@
           "escalatedAt": { "type": "string", "format": "date-time" },
           "batchStatus": { "type": "string", "maxLength": 64 },
           "batchStatusEnteredAt": { "type": "string", "format": "date-time" },
+          "failureCode": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "failureMessage": { "type": "string", "minLength": 1, "maxLength": 1000 },
           "statusMessage": { "type": "string", "maxLength": 1000 },
           "guardrail": {
             "type": "object",
