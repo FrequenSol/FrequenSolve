@@ -5,7 +5,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
 
 import numpy as np
 
@@ -35,6 +35,9 @@ from frequensolve.util.physics import (
 )
 from frequensolve.util.store import SimulationStore, compact_hdf5_file
 
+if TYPE_CHECKING:
+    from frequensolve.project.project import Project
+
 __all__ = [
     "BaseSimulation",
     "SeismicSimulation",
@@ -56,6 +59,7 @@ class BaseSimulation(SimulationConfig):
     BCs: BoundaryConditions = field(default_factory=BoundaryConditions)
     solver: SolverConfig = field(default_factory=SolverConfig)
     discretization: Discretization = field(default_factory=Discretization)
+    _project: Optional["Project"] = None
 
     def __post_init__(self):
         """Normalize member objects supplied as mappings or generators."""

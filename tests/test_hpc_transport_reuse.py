@@ -1,3 +1,5 @@
+import os
+import pty
 import subprocess
 import tarfile
 from pathlib import Path
@@ -74,6 +76,30 @@ def test_ssh_proxy_reuses_control_socket_for_login_commands(monkeypatch):
     assert "BatchMode=yes" in argv
     assert "ControlPath=/tmp/control.sock" in argv
     assert kwargs["timeout"] == SSH_COMMAND_TIMEOUT_SECONDS
+
+
+def test_ssh_proxy_interactive_shell_preserves_binary_streams(monkeypatch):
+    popen_calls = []
+    master_file = SimpleNamespace(flush=lambda: None)
+    process = SimpleNamespace(stdin=None, stdout=None)
+
+    def fake_popen(argv, **kwargs):
+        popen_calls.append((argv, kwargs))
+        return process
+
+    monkeypatch.setattr(pty, "openpty", lambda: (10, 11))
+    monkeypatch.setattr(os, "close", lambda fd: None)
+    monkeypatch.setattr(os, "fdopen", lambda *args, **kwargs: master_file)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    proxy = SSHProxy("/tmp/control.sock", "user", "login.example.edu")
+
+    assert proxy.invoke_shell() is process
+    _, kwargs = popen_calls[0]
+    assert "text" not in kwargs
+    assert "universal_newlines" not in kwargs
+    assert process.stdin is master_file
+    assert process.stdout is master_file
 
 
 def test_ssh_proxy_reports_command_timeout(monkeypatch):

@@ -6,6 +6,7 @@ avoid re-authenticating each time a connection is made.
 import shlex
 import subprocess
 import time
+from typing import Any, Protocol, cast
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.util.setup_logger import init_logger
@@ -36,7 +37,38 @@ SSH_SERVER_ALIVE_COUNT_MAX = 2
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
 
 
-def control_socket_ssh_options(control_path) -> list[str]:
+class _CommandResult(Protocol):
+    @property
+    def stdout(self) -> bytes | str: ...
+
+    @property
+    def stderr(self) -> bytes | str: ...
+
+    @property
+    def returncode(self) -> int: ...
+
+
+class ReadableByteStream(Protocol):
+    """Minimal common stdout/stderr contract for Paramiko and SSHProxy."""
+
+    def read(self) -> bytes: ...
+
+
+class SSHTransport(Protocol):
+    """Paramiko transport behavior used to open a compute-node tunnel."""
+
+    def open_channel(
+        self,
+        kind: str,
+        dest_addr: tuple[str, int],
+        src_addr: tuple[str, int],
+    ) -> object: ...
+
+
+SSHCommandResult = tuple[object, ReadableByteStream, ReadableByteStream]
+
+
+def control_socket_ssh_options(control_path: str) -> list[str]:
     """Return non-interactive OpenSSH options for a verified control socket."""
 
     return [
@@ -59,23 +91,21 @@ class BytesIO:
     """Small byte-stream adapter matching Paramiko stdout/stderr objects.
 
     Args:
-        initial_bytes: Initial byte or string payload.
+        initial_bytes: Initial byte payload.
     """
 
-    def __init__(self, initial_bytes):
+    def __init__(self, initial_bytes: bytes):
         self._bytes = initial_bytes
         self._pos = 0
 
-    def read(self):
+    def read(self) -> bytes:
         """Return all remaining bytes and advance to end-of-stream."""
 
         remaining = self._bytes[self._pos :]
         self._pos = len(self._bytes)
-        if isinstance(remaining, str):
-            return remaining.encode()
         return remaining
 
-    def readline(self):
+    def readline(self) -> bytes:
         """Return the next line as bytes, or ``b""`` at end-of-stream."""
 
         if self._pos >= len(self._bytes):
@@ -89,7 +119,7 @@ class BytesIO:
             self._pos = newline_pos + 1
         return line
 
-    def decode(self):
+    def decode(self) -> str:
         """Decode the underlying bytes payload as text."""
 
         return self._bytes.decode()
@@ -107,12 +137,12 @@ class SSHProxy:
 
     def __init__(
         self,
-        control_path,
-        username,
-        host,
-        compute_host=None,
-        command_timeout=SSH_COMMAND_TIMEOUT_SECONDS,
-    ):
+        control_path: str,
+        username: str,
+        host: str,
+        compute_host: str | None = None,
+        command_timeout: float = SSH_COMMAND_TIMEOUT_SECONDS,
+    ) -> None:
         self.control_path = control_path
         self.username = username
         self.host = host
@@ -126,7 +156,7 @@ class SSHProxy:
             f"{self.username}@{self.host}",
         ]
 
-    def invoke_shell(self):
+    def invoke_shell(self) -> subprocess.Popen[bytes]:
         """Create an interactive shell using subprocess.Popen."""
         import os
         import pty
@@ -141,7 +171,6 @@ class SSHProxy:
             stdout=slave,
             stderr=subprocess.PIPE,
             preexec_fn=os.setsid,
-            universal_newlines=True,
         )
 
         os.close(slave)
@@ -162,7 +191,7 @@ class SSHProxy:
 
         return process
 
-    def _filter_output(self, result):
+    def _filter_output(self, result: _CommandResult) -> tuple[bytes, bytes]:
         """Filter unwanted messages from command output."""
         stdout = result.stdout
         stderr = result.stderr
@@ -186,7 +215,9 @@ class SSHProxy:
 
         return ("\n".join(stdout_lines).encode(), "\n".join(stderr_lines).encode())
 
-    def exec_command(self, command, *, timeout=None):
+    def exec_command(
+        self, command: str, *, timeout: float | None = None
+    ) -> SSHCommandResult:
         """Execute a command through the proxy.
 
         Args:
@@ -204,15 +235,11 @@ class SSHProxy:
         else:
             result = self._exec_on_login(command, timeout=timeout)
 
-        stdout, stderr = self._filter_output(result)
+        stdout_bytes, stderr_bytes = self._filter_output(result)
 
-        stdin = BytesIO(b"")
-        stdout = BytesIO(stdout)
-        stderr = BytesIO(stderr)
+        return (BytesIO(b""), BytesIO(stdout_bytes), BytesIO(stderr_bytes))
 
-        return (stdin, stdout, stderr)
-
-    def exec_command_term(self, command):
+    def exec_command_term(self, command: str) -> SSHCommandResult:
         """Execute a login-node command with a pseudo-terminal.
 
         Args:
@@ -223,23 +250,28 @@ class SSHProxy:
         """
 
         result = self._exec_on_login(command, term=True)
-        stdout, stderr = self._filter_output(result)
+        stdout_bytes, stderr_bytes = self._filter_output(result)
 
-        stdin = BytesIO(b"")
-        stdout = BytesIO(stdout)
-        stderr = BytesIO(stderr)
+        return (BytesIO(b""), BytesIO(stdout_bytes), BytesIO(stderr_bytes))
 
-        return (stdin, stdout, stderr)
-
-    def _exec_on_login(self, command, term=False, timeout=None):
+    def _exec_on_login(
+        self,
+        command: str,
+        term: bool = False,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
         cmd = self._login_ssh_command()
         if term:
             cmd.insert(-1, "-t")
         cmd.append(command)
         return self._run_ssh(cmd, target=self.host, timeout=timeout)
 
-    def _exec_on_compute(self, command, timeout=None):
+    def _exec_on_compute(
+        self, command: str, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
         """Execute a command on a compute node via the login node."""
+        if self.compute_host is None:
+            raise RuntimeError("Compute host is not configured")
         proxy_command = shlex.join(
             [
                 *self._login_ssh_command()[:-1],
@@ -267,7 +299,13 @@ class SSHProxy:
         ]
         return self._run_ssh(cmd, target=self.compute_host, timeout=timeout)
 
-    def _run_ssh(self, cmd, *, target, timeout=None):
+    def _run_ssh(
+        self,
+        cmd: list[str],
+        *,
+        target: str,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
         effective_timeout = self.command_timeout if timeout is None else timeout
         logger.debug(
             "Running non-interactive SSH command via control socket: target=%s "
@@ -305,7 +343,7 @@ class SSHProxy:
             raise RuntimeError(f"SSH connection to {target} failed: {detail}")
         return result
 
-    def close(self):
+    def close(self) -> None:
         """Close the proxy.
 
         Existing SSH control sockets are owned by the user's SSH process, so
@@ -314,7 +352,7 @@ class SSHProxy:
 
         pass  # Nothing to close - using existing socket
 
-    def get_transport(self):
+    def get_transport(self) -> None:
         """Return ``None`` because subprocess SSH proxies expose no transport."""
 
         return None  # No transport for proxy
@@ -330,8 +368,11 @@ class SSHClientClass:
         ValueError: If ``client`` is not a supported SSH client type.
     """
 
-    def __init__(self, client):
-        self.client = client
+    def __init__(self, client: SSHClient | SSHProxy) -> None:
+        # Paramiko is an optional, incompletely typed boundary. Public wrapper
+        # methods below expose the shared contract instead of leaking it.
+        self.client: Any = client
+        self._proxy: SSHProxy | None = None
         if isinstance(client, SSHClient):
             _, stdout, _ = self.client.exec_command("echo $HOSTNAME")
             out = stdout.read().decode().strip()
@@ -350,7 +391,9 @@ class SSHClientClass:
         """Get the hostname."""
         return self._hostname
 
-    def exec_command(self, command, *, timeout=None):
+    def exec_command(
+        self, command: str, *, timeout: float | None = None
+    ) -> SSHCommandResult:
         """Execute a remote command.
 
         Args:
@@ -361,25 +404,27 @@ class SSHClientClass:
             ``(stdin, stdout, stderr)`` as returned by the underlying client.
         """
         if timeout is not None:
-            return self.client.exec_command(command, timeout=timeout)
-        return self.client.exec_command(command)
+            result = self.client.exec_command(command, timeout=timeout)
+        else:
+            result = self.client.exec_command(command)
+        return cast(SSHCommandResult, result)
 
-    def close(self):
+    def close(self) -> None:
         """Close the underlying SSH connection or proxy."""
         self.client.close()
 
-    def get_transport(self):
+    def get_transport(self) -> SSHTransport | None:
         """Get the Paramiko transport when available."""
         if isinstance(self.client, SSHClient):
-            return self.client.get_transport()
+            return cast(SSHTransport | None, self.client.get_transport())
         return None
 
-    def is_proxy(self):
+    def is_proxy(self) -> bool:
         """Return whether the underlying client is an ``SSHProxy``."""
         return self._is_proxy
 
-    def get_proxy_details(self):
+    def get_proxy_details(self) -> tuple[str | None, str | None]:
         """Return proxy control path and username when using ``SSHProxy``."""
-        if self.is_proxy():
+        if self._proxy is not None:
             return self._proxy.control_path, self._proxy.username
         return None, None

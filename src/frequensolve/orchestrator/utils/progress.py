@@ -74,6 +74,15 @@ def wait_all(
     )
 
 
+def _require_result(run: RunHandle) -> RunResult:
+    """Return a completed run result or fail on an invalid monitor state."""
+
+    result = run._result
+    if result is None:
+        raise RuntimeError(f"Run {run.id or '<unknown>'} completed without a result")
+    return result
+
+
 @dataclass
 class RunMonitor:
     """Poll and render progress for one or more submitted runs.
@@ -119,7 +128,7 @@ class RunMonitor:
         while len(completed) < len(handles):
             for index, run in enumerate(handles):
                 if index in completed:
-                    statuses[index] = run._result.status
+                    statuses[index] = _require_result(run).status
                     continue
                 if run._result is not None:
                     statuses[index] = run._result.status
@@ -131,9 +140,9 @@ class RunMonitor:
                 statuses[index] = status
 
                 if status.is_complete:
-                    self._complete(run, status, fetch=fetch, check=check)
+                    result = self._complete(run, status, fetch=fetch, check=check)
                     completed.add(index)
-                    statuses[index] = run._result.status
+                    statuses[index] = result.status
 
             self._emit(handles, statuses)
             if len(completed) == len(handles):
@@ -150,15 +159,15 @@ class RunMonitor:
                     )
                     run._last_status = status
                     statuses[index] = status
-                    self._timeout(run, status, fetch=False)
+                    result = self._timeout(run, status, fetch=False)
                     completed.add(index)
-                    statuses[index] = run._result.status
+                    statuses[index] = result.status
                 self._emit(handles, statuses)
                 break
 
             time.sleep(interval)
 
-        results = [run._result for run in handles]
+        results = [_require_result(run) for run in handles]
         if check:
             for result in results:
                 result.raise_for_status()
@@ -187,19 +196,22 @@ class RunMonitor:
         *,
         fetch: bool,
         check: bool,
-    ) -> None:
-        run._complete_from_status(status)
-        if fetch and (run._result.successful or not check):
+    ) -> RunResult:
+        result = run._complete_from_status(status)
+        if fetch and (result.successful or not check):
             run.fetch()
+        return result
 
     @staticmethod
-    def _timeout(run: RunHandle, status: JobStatus, *, fetch: bool) -> None:
+    def _timeout(run: RunHandle, status: JobStatus, *, fetch: bool) -> RunResult:
         if run._timeout_fn is not None:
-            run._result = run._timeout_fn(run, status)
+            result = run._timeout_fn(run, status)
         else:
-            run._result = run._make_result(status)
+            result = run._make_result(status)
+        run._result = result
         if fetch:
             run.fetch()
+        return result
 
     def _emit(self, runs: list[RunHandle], statuses: Dict[int, JobStatus]) -> None:
         signature = _status_signature(runs, statuses)

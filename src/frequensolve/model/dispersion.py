@@ -1,7 +1,7 @@
 """Frequency-dependent material-property dispersion models."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.mixins import TypeTaggedMixin
@@ -19,7 +19,7 @@ class DispersionRelation(TypeTaggedMixin, ABC):
     """Abstract base class for frequency-dependent material scaling."""
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "DispersionRelation":
+    def from_fs(cls, data: Mapping[str, Any]) -> "DispersionRelation":
         """Deserialize a registered dispersion relation payload.
 
         Args:
@@ -32,7 +32,7 @@ class DispersionRelation(TypeTaggedMixin, ABC):
         return cls.dispatch_from_fs(data, class_registry)
 
     @abstractmethod
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize the dispersion relation for solver input.
 
         Args:
@@ -70,7 +70,7 @@ class PowerLawDispersion(DispersionRelation):
         alpha: Power-law exponent.
     """
 
-    def __init__(self, f0: float, alpha: float):
+    def __init__(self, f0: float, alpha: float) -> None:
         """Create a power-law dispersion model.
 
         Args:
@@ -82,7 +82,7 @@ class PowerLawDispersion(DispersionRelation):
         self.alpha = alpha
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "PowerLawDispersion":
+    def from_fs(cls, data: Mapping[str, Any]) -> "PowerLawDispersion":
         """Deserialize a power-law dispersion payload.
 
         Args:
@@ -92,9 +92,9 @@ class PowerLawDispersion(DispersionRelation):
             ``PowerLawDispersion`` instance.
         """
 
-        return cls(**data)
+        return cls(**dict(data))
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize this power-law dispersion relation.
 
         Args:
@@ -124,7 +124,7 @@ class TablulatedDispersion(DispersionRelation):
         values: List[float],
         interpolation: str = "linear",
         extrapolation: str = "nearest",
-    ):
+    ) -> None:
         """Create a table-based dispersion relation.
 
         Args:
@@ -140,7 +140,7 @@ class TablulatedDispersion(DispersionRelation):
         self.extrapolation = extrapolation
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "TablulatedDispersion":
+    def from_fs(cls, data: Mapping[str, Any]) -> "TablulatedDispersion":
         """Deserialize a tabulated dispersion payload.
 
         Args:
@@ -150,9 +150,9 @@ class TablulatedDispersion(DispersionRelation):
             ``TablulatedDispersion`` instance.
         """
 
-        return cls(**data)
+        return cls(**dict(data))
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize this tabulated dispersion relation.
 
         Args:
@@ -180,7 +180,7 @@ class DispersionScaling:
         dispersion: Dispersion relation applied to the property.
     """
 
-    def __init__(self, property: Any, dispersion: DispersionRelation):
+    def __init__(self, property: Any, dispersion: DispersionRelation) -> None:
         """Create a property/dispersion pair."""
 
         self.property = property

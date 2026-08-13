@@ -92,9 +92,11 @@ class SystemInfo:
         if psutil:
             cpu_info["physical_cores"] = psutil.cpu_count(logical=False)
             cpu_info["logical_cores"] = psutil.cpu_count(logical=True)
-            cpu_info["cpu_freq"] = (
-                psutil.cpu_freq()._asdict() if psutil.cpu_freq() else {}
+            read_cpu_frequency = getattr(psutil, "cpu_freq", None)
+            cpu_frequency = (
+                read_cpu_frequency() if callable(read_cpu_frequency) else None
             )
+            cpu_info["cpu_freq"] = cpu_frequency._asdict() if cpu_frequency else {}
             cpu_info["memory"] = psutil.virtual_memory().total / 1024**2
         else:
             # Fallback if psutil is not installed

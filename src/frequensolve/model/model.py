@@ -65,8 +65,8 @@ class ModelSubdomain(ExtraFieldsMixin):
         system: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
         fields: Optional[Dict[str, Union[float, str, Path, xr.DataArray]]] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         # Legacy argument naming convention
         if "xarr" in kwargs:
             grid = kwargs.pop("xarr")
@@ -105,7 +105,7 @@ class ModelSubdomain(ExtraFieldsMixin):
             )
         self._init_extra(extra, **kwargs)
 
-    def set_property(self, key: str, value: Union[float, xr.DataArray]):
+    def set_property(self, key: str, value: Union[float, xr.DataArray]) -> None:
         """Set or replace a material property.
 
         Args:
@@ -125,7 +125,7 @@ class ModelSubdomain(ExtraFieldsMixin):
 
         self.fields[key] = value
 
-    def __getitem__(self, key: str):
+    def __getitem__(self, key: str) -> Any:
         """Return the materialized value for one subdomain property.
 
         Args:
@@ -152,12 +152,16 @@ class ModelSubdomain(ExtraFieldsMixin):
         ctx = ctx or ExportContext()
 
         def property_file(key: str, prop: Property) -> Path:
+            if ctx.path is None:
+                raise RuntimeError("Property file export requires an output path")
             return ctx.path / f"layer_{self.mesh_block_id}_{key}.bin"
 
         def property_dataset(key: str, prop: Property) -> str:
             return f"inputs/model/subdomains/{self.mesh_block_id}/properties/{key}"
 
         def field_file(key: str, prop: Property) -> Path:
+            if ctx.path is None:
+                raise RuntimeError("Field file export requires an output path")
             return ctx.path / f"layer_{self.mesh_block_id}_field_{key}.bin"
 
         def field_dataset(key: str, prop: Property) -> str:
@@ -219,10 +223,10 @@ class ModelSubdomain(ExtraFieldsMixin):
             properties=props,
             fields=fields,
             extra=data,
-            **({"grid": grid} if grid is not None else {}),
+            grid=grid,
         )
 
-    def like(self, grid: xr.DataArray, **kwargs) -> None:
+    def like(self, grid: xr.DataArray, **kwargs: Any) -> None:
         """Interpolate all compatible properties onto another grid in place.
 
         Args:
@@ -402,7 +406,7 @@ class ModelBase(ExtraFieldsMixin):
             subdomain.name = f"unlabeled_{len(self.subdomains)}"
         self.subdomains.append(subdomain)
 
-    def __iadd__(self, other):
+    def __iadd__(self, other: ModelSubdomain) -> "ModelBase":
         self.add_subdomain(other)
         return self
 

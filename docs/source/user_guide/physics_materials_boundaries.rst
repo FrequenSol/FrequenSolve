@@ -239,9 +239,12 @@ reflection target extremely small.
    * - ``drained``
      - Poroelastic pore-pressure trace ``p_hat = 0``.
      - Drained pore boundary, commonly paired with ``free``.
-   * - ``symmetric`` / ``axis`` / ``symmetric_r``
-     - Symmetry-axis regularity. For non-torsional axisymmetric elastic runs, ``u_hat_r = 0`` and ``t_hat_z = 0``.
-     - Symmetry-reduced and axisymmetric models.
+   * - ``symmetric``
+     - Normal-component symmetry; it does not impose full radial-axis regularity.
+     - Plane-symmetry boundaries, including boundaries away from ``r = 0`` in an axisymmetric model.
+   * - ``axis`` / ``symmetric_r``
+     - Radial-axis regularity. For non-torsional axisymmetric elastic runs, ``u_hat_r = 0`` and ``t_hat_z = 0``.
+     - The ``r = 0`` boundary of an axisymmetric model; use ``symmetric_r`` when spelling the condition explicitly.
 
 Poroelastic free surfaces usually combine mechanical and fluid conditions:
 

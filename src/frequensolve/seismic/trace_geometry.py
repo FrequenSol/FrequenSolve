@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 import numpy as np
 import xarray as xr
@@ -331,7 +331,7 @@ def receiver_grid_shape(
     )
 
 
-def receiver_grid(trace: xr.DataArray):
+def receiver_grid(trace: xr.DataArray) -> CartesianGrid | None:
     """Return the ``CartesianGrid`` backing a trace receiver group, if present."""
 
     for key in ("wavefield_grid", "receiver_grid", "grid"):
@@ -350,7 +350,7 @@ def receiver_grid(trace: xr.DataArray):
                 pass
 
     try:
-        return trace.fs.receiver_group.grid
+        return cast(CartesianGrid | None, trace.fs.receiver_group.grid)
     except Exception:
         return None
 
@@ -469,20 +469,20 @@ def wavefield_grid_display(
     axis_index = {dims[0]: 0, dims[1]: 1}
     x_index = axis_index[x_dim]
     y_index = axis_index[y_dim]
-    x_values = np.linspace(grid.x0[x_index], grid.x1[x_index], grid.n[x_index])
-    y_values = np.linspace(grid.x0[y_index], grid.x1[y_index], grid.n[y_index])
+    grid_x_values = np.linspace(grid.x0[x_index], grid.x1[x_index], grid.n[x_index])
+    grid_y_values = np.linspace(grid.x0[y_index], grid.x1[y_index], grid.n[y_index])
     return {
         "dimensions": (dims[0], dims[1]),
         "extent": [
-            float(x_values[0]) * L_scale,
-            float(x_values[-1]) * L_scale,
-            float(y_values[-1]) * L_scale,
-            float(y_values[0]) * L_scale,
+            float(grid_x_values[0]) * L_scale,
+            float(grid_x_values[-1]) * L_scale,
+            float(grid_y_values[-1]) * L_scale,
+            float(grid_y_values[0]) * L_scale,
         ],
         "xlabel": f"{x_dim.upper()}{units}",
         "ylabel": f"{y_dim.upper()}{units}",
-        "x": x_values * L_scale,
-        "y": y_values * L_scale,
+        "x": grid_x_values * L_scale,
+        "y": grid_y_values * L_scale,
         "uniform": True,
         "transpose": transpose,
     }
@@ -513,6 +513,7 @@ def _resolve_wavefield_display_dims(
     elif y is None:
         y = next(dim for dim in available if dim != x)
 
+    assert x is not None and y is not None
     if x == y:
         raise ValueError("x and y must select different wavefield grid dimensions")
     return y, x, (y, x) == (native_x, native_y)
@@ -529,7 +530,13 @@ def _receiver_grid_display_shape(
     payload = _wavefield_grid_payload(trace)
     if payload is not None:
         dims = _wavefield_grid_display_dims(payload, caller=caller)
-        shape = tuple(_coord_payload_values(payload, dim).size for dim in dims)
+        if dims is None:
+            raise ValueError(f"{caller} requires a 2D wavefield grid")
+        y_dim, x_dim = dims
+        shape = (
+            _coord_payload_values(payload, y_dim).size,
+            _coord_payload_values(payload, x_dim).size,
+        )
         full_shape = tuple(
             _coord_payload_values(payload, dim).size for dim in payload["dims"]
         )
@@ -543,13 +550,13 @@ def _receiver_grid_display_shape(
     grid = receiver_grid(trace)
     if grid is None or len(grid.n) < 2:
         raise ValueError(f"{caller} requires wavefield grid metadata")
-    shape = tuple(int(n) for n in grid.n)
-    if int(np.prod(shape[:2])) != trace.sizes["receiver"]:
+    grid_shape = tuple(int(n) for n in grid.n)
+    if int(np.prod(grid_shape[:2])) != trace.sizes["receiver"]:
         raise ValueError(
             f"{caller} receiver grid does not match receiver count "
-            f"({shape[:2]} vs {trace.sizes['receiver']})"
+            f"({grid_shape[:2]} vs {trace.sizes['receiver']})"
         )
-    return shape[1], shape[0]
+    return grid_shape[1], grid_shape[0]
 
 
 def _wavefield_grid_display_dims(

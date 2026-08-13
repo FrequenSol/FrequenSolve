@@ -690,17 +690,17 @@ class AWSSite(BaseSite):
     ) -> Path:
         """Fetch supported filesystem-backed AWS outputs used by discovery."""
 
-        vtk_kinds = {"vtk", "vtu", "vtr", "vtp", "vts"}
+        paraview_kinds = {"vtk", "vtu", "vtr", "vtp", "vts", "xmf", "xdmf"}
         normalized_kind = str(kind).strip().lower() if kind is not None else None
         suffixes = (suffix,) if isinstance(suffix, str) else (suffix or ())
-        vtk_suffixes = (".vtk", ".vtu", ".vtr", ".vtp", ".vts")
-        suffix_can_match_vtk = not suffixes or any(
+        paraview_suffixes = (".vtk", ".vtu", ".vtr", ".vtp", ".vts", ".xmf")
+        suffix_can_match_paraview = not suffixes or any(
             not str(requested_suffix)
-            or str(requested_suffix).lower().endswith(vtk_suffixes)
+            or str(requested_suffix).lower().endswith(paraview_suffixes)
             for requested_suffix in suffixes
         )
         can_fetch_paraview = (
-            normalized_kind in {None, *vtk_kinds} and suffix_can_match_vtk
+            normalized_kind in {None, *paraview_kinds} and suffix_can_match_paraview
         )
 
         if can_fetch_paraview and getattr(

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import logging
+from types import ModuleType
 from typing import Any, Iterable, Optional, Union
 
+dask_config: Optional[ModuleType]
 try:
-    from dask import config as dask_config
+    from dask import config as _dask_config
+
+    dask_config = _dask_config
 except ModuleNotFoundError:  # pragma: no cover - only imported by Dask workers.
     dask_config = None
 

@@ -71,7 +71,7 @@ class PoolInfo:
     _status: PoolStatus = field(default_factory=PoolStatus)
 
     @property
-    def status(self):
+    def status(self) -> str:
         """Return the public pool state string."""
 
         return self._status.status

@@ -88,7 +88,7 @@ def _receiver_group(trace: DataArray) -> ReceiverGroup:
     return ReceiverGroup.from_fs(receiver_group)
 
 
-def _segy_output_unit(units_out: str, ureg) -> tuple[int, Any]:
+def _segy_output_unit(units_out: str, ureg: Any) -> tuple[int, Any]:
     units_out = units_out.lower()
     if units_out not in {"m", "ft"}:
         raise ValueError("units_out must be 'm' or 'ft'")
@@ -97,7 +97,12 @@ def _segy_output_unit(units_out: str, ureg) -> tuple[int, Any]:
     return 2, ureg.foot
 
 
-def _coordinate_scale(units: Any, default_units: str, output_unit: Any, ureg) -> float:
+def _coordinate_scale(
+    units: Any,
+    default_units: str,
+    output_unit: Any,
+    ureg: Any,
+) -> float:
     input_units = unit_expression(units) if units is not None else default_units
     return float(ureg(input_units).to(output_unit).magnitude)
 
@@ -108,7 +113,7 @@ def _coordinates_in_output_units(
     units: Any = None,
     default_units: str,
     output_unit: Any,
-    ureg,
+    ureg: Any,
 ) -> np.ndarray:
     scale = _coordinate_scale(units, default_units, output_unit, ureg)
     return np.asarray(values, dtype=float) * scale
@@ -119,7 +124,7 @@ def _source_coordinates_in_output_units(
     *,
     default_units: str,
     output_unit: Any,
-    ureg,
+    ureg: Any,
 ) -> np.ndarray:
     values, units, _ = coordinate_array_metadata(coordinates)
     values = _coordinates_in_output_units(
@@ -172,7 +177,7 @@ class TraceAccessor:
         file: str | Path,
         units_in: str = "km",
         units_out: str = "m",
-        **kwargs,
+        **kwargs: Any,
     ) -> Path:
         """Write a time-domain trace gather to a SEG-Y file.
 
@@ -213,10 +218,10 @@ class TraceAccessor:
         receiver_group = self.receiver_group
         source_coordinates = _source_coordinates(trace, preserve_metadata=True)
 
-        ureg = pint.UnitRegistry()
+        ureg: pint.UnitRegistry = pint.UnitRegistry()
         coordinate_units, output_unit = _segy_output_unit(units_out, ureg)
         receiver_coords = _coordinates_in_output_units(
-            receiver_group.coordinates.get(),
+            receiver_group.coordinates.get(None),
             units=getattr(receiver_group.coordinates, "units", None),
             default_units=units_in,
             output_unit=output_unit,
@@ -328,7 +333,7 @@ def array_to_segy(
             error=exc,
         ) from exc
 
-    ureg = pint.UnitRegistry()
+    ureg: pint.UnitRegistry = pint.UnitRegistry()
     if units_out not in {"m", "ft"}:
         raise ValueError("units_out must be 'm' or 'ft'")
     iunit = ureg(units_in)

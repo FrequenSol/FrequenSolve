@@ -43,6 +43,8 @@ class LayeredAuthoringMixin:
     within their model collections.
     """
 
+    subdomains: NamedList
+
     def add_layer(
         self,
         name: Optional[str] = None,
