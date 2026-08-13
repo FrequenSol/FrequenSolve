@@ -54,11 +54,12 @@ class Credentials:
         credential: Optional[str] = None,
         ssh_key: Optional[Union[str, Path]] = None,
         credential_store: Optional[CredentialStore] = None,
-    ):
+    ) -> None:
         self._configured_username = username
         self.credential = credential or type(self).__name__
         self.ssh_key_path = Path(ssh_key).expanduser() if ssh_key else None
         self._pending_secrets: dict[str, str] = {}
+        self.credential_store: Optional[CredentialStore] = None
         if credential_store is not None:
             self.credential_store = credential_store
         else:
@@ -73,7 +74,7 @@ class Credentials:
                 self.credential_store = None
 
     @cached_property
-    def username(self):
+    def username(self) -> str:
         """Return the SSH username from the environment or an interactive prompt."""
 
         user = self._configured_username or os.getenv(self.user_env)
@@ -82,7 +83,7 @@ class Credentials:
         return user
 
     @cached_property
-    def password(self):
+    def password(self) -> str:
         """Return the SSH password from the environment or an interactive prompt."""
 
         pw = os.getenv(self.pw_env)
@@ -95,7 +96,7 @@ class Credentials:
         return pw
 
     @cached_property
-    def ssh_key(self):
+    def ssh_key(self) -> PKey:
         """Load the configured private key for SSH authentication.
 
         Returns:
@@ -114,7 +115,7 @@ class Credentials:
                 raise
 
     @cached_property
-    def _ssh_passphrase(self):
+    def _ssh_passphrase(self) -> str:
         passphrase = os.getenv(self.ssh_key_env)
         if passphrase:
             return passphrase
@@ -158,16 +159,16 @@ class Credentials:
             )
 
     @property
-    def duo_code(self):
+    def duo_code(self) -> str:
         """Prompt for and return a site two-factor authentication code."""
 
         return getpass.getpass("Site 2FA code: ")
 
-    def __str__(self):
+    def __str__(self) -> str:
         """Don't print credentials."""
         return ""
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """Don't print credentials."""
         return ""
 
@@ -188,11 +189,11 @@ class CloudCredentials:
     secret_env: str
 
     @cached_property
-    def access_key(self):
+    def access_key(self) -> Optional[str]:
         """Retrieve AWS access key ID from the configured environment variable."""
         return os.getenv(self.key_env)
 
     @cached_property
-    def secret_key(self):
+    def secret_key(self) -> Optional[str]:
         """Retrieve AWS secret access key from the configured environment variable."""
         return os.getenv(self.secret_env)
