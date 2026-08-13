@@ -21,6 +21,19 @@ test-optional-extras:
 	--mpl --mpl-baseline-path=tests/reference_images/ --mpl-generate-summary=html --mpl-results-path=tests/output/ \
 	tests/test_ex01_simple.py tests/test_seismic_plotting.py tests/test_trace_record.py
 
+.PHONY: test-hpc-hermetic
+test-hpc-hermetic:
+	python -m pytest \
+	-ra \
+	-o addopts='' \
+	--strict-markers \
+	-m hpc_hermetic \
+	--cov=src/frequensolve/orchestrator/sites/hpc \
+	--cov-branch \
+	--cov-report=term \
+	--cov-fail-under=67.5 \
+	tests/
+
 .PHONY: typecheck
 typecheck:
 	python -m mypy

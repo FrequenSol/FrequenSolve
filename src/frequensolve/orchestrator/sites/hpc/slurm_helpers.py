@@ -40,6 +40,8 @@ SLURM_STATUS_COLORS = {
     "unknown": "\033[38;5;244m",
 }
 
+_SLURM_JOB_ID = re.compile(r"\d+(?:_\d+)?\Z")
+
 
 def hms_to_seconds(hms: str) -> int:
     """Convert HH:MM:SS or D-HH:MM:SS to seconds."""
@@ -92,6 +94,15 @@ def parse_sbatch_job_id(output: str) -> str:
     if not match:
         raise ValueError(f"failed to get job ID from sbatch output: {output}")
     return match.group(1)
+
+
+def validate_slurm_job_id(job_id: Union[str, int]) -> str:
+    """Return a command-safe SLURM job or array-task id."""
+
+    value = str(job_id)
+    if not _SLURM_JOB_ID.fullmatch(value):
+        raise ValueError("SLURM job id must be numeric")
+    return value
 
 
 def as_list(value, item_type) -> Tuple[List[Any], bool]:
