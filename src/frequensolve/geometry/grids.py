@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Mapping, Optional, Tuple, cast
 
 import numpy as np
 import xarray as xr
@@ -33,7 +33,7 @@ class Grid(TypeTaggedMixin, ABC):
     @abstractmethod
     def generate_coords(
         self, slices: Optional[List[slice]] = None
-    ) -> Generator[np.ndarray, None, None]:
+    ) -> Generator[List[np.float64], None, None]:
         """Generates coordinates for all grid points or a subset defined by slices.
 
         Args:
@@ -46,7 +46,7 @@ class Grid(TypeTaggedMixin, ABC):
         pass
 
     @abstractmethod
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize the grid to a solver payload.
 
         Args:
@@ -58,7 +58,7 @@ class Grid(TypeTaggedMixin, ABC):
         pass
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "Grid":
+    def from_fs(cls, data: Mapping[Any, Any]) -> "Grid":
         """Deserialize a registered grid payload.
 
         Args:
@@ -100,7 +100,7 @@ class CartesianGrid(Grid):
     units: Optional[str] = None
     system: Optional[str] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Derive missing spacing, endpoint, count, and default dimension names."""
 
         if len(self.x1) == 0:
@@ -122,10 +122,12 @@ class CartesianGrid(Grid):
             elif len(self.n) == 3:
                 self.dims = ["x", "y", "z"]
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, CartesianGrid):
+            return NotImplemented
         g1 = np.array([self.x0, self.x1, self.n])
         g2 = np.array([other.x0, other.x1, other.n])
-        return np.allclose(g1, g2)
+        return bool(np.allclose(g1, g2))
 
     def get_coords(self, slices: Optional[List[slice]] = None) -> np.ndarray:
         """Gets coordinates for all grid points or a subset defined by slices.
@@ -161,7 +163,7 @@ class CartesianGrid(Grid):
         else:
             raise ValueError("Grid must have 1, 2, or 3 dimensions")
 
-    def as_xarray(self):
+    def as_xarray(self) -> xr.DataArray:
         """Convert the grid to an xarray coordinate template.
 
         Returns:
@@ -206,7 +208,7 @@ class CartesianGrid(Grid):
         """
 
         coords = xarr.coords
-        dims = xarr.dims[::-1]
+        dims = cast(List[str], list(reversed(xarr.dims)))
 
         n = [coords[dim].size for dim in dims]
         x0 = [float(coords[dim].values.min()) for dim in dims]
@@ -236,7 +238,9 @@ class CartesianGrid(Grid):
         return tuple(self.n[::-1])
 
     # TODO: indexing below is confusing to align with fortran definition, should be changed
-    def generate_coords(self, slices: Optional[List[slice]] = None):
+    def generate_coords(
+        self, slices: Optional[List[slice]] = None
+    ) -> Generator[List[np.float64], None, None]:
         """Generates coordinates for all grid points or a subset defined by slices.
 
         Args:
@@ -279,7 +283,7 @@ class CartesianGrid(Grid):
         else:
             raise ValueError("Grid must have 1, 2, or 3 dimensions")
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize the grid to a solver payload.
 
         Args:
@@ -300,7 +304,7 @@ class CartesianGrid(Grid):
         }
 
     @classmethod
-    def from_fs(cls, data: Dict) -> "CartesianGrid":
+    def from_fs(cls, data: Mapping[Any, Any]) -> "CartesianGrid":
         """Create a Cartesian grid from a solver payload.
 
         Args:
@@ -309,8 +313,9 @@ class CartesianGrid(Grid):
         Returns:
             New ``CartesianGrid`` instance.
         """
+        dims: List[str]
         if "dims" in data:
-            dims = data["dims"]
+            dims = cast(List[str], data["dims"])
         else:
             if len(data["n"]) == 1:
                 dims = ["x"]
@@ -318,6 +323,8 @@ class CartesianGrid(Grid):
                 dims = ["x", "z"]
             elif len(data["n"]) == 3:
                 dims = ["x", "y", "z"]
+            else:
+                raise ValueError("Grid must have 1, 2, or 3 dimensions")
         return cls(
             n=data["n"],
             x0=data["x0"],

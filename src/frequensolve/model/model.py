@@ -219,7 +219,7 @@ class ModelSubdomain(ExtraFieldsMixin):
             properties=props,
             fields=fields,
             extra=data,
-            **({"grid": grid} if grid is not None else {}),
+            grid=grid,
         )
 
     def like(self, grid: xr.DataArray, **kwargs) -> None:

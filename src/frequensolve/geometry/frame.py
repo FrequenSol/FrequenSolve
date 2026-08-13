@@ -67,7 +67,7 @@ class CoordinateValue:
             extra=payload,
         )
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize the coordinate value for solver input.
 
         Args:
@@ -179,7 +179,7 @@ class Direction:
             extra=payload,
         )
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize the direction for solver input.
 
         Args:
@@ -250,7 +250,7 @@ class Axis:
             extra=payload,
         )
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize this axis for solver input.
 
         Args:
@@ -260,7 +260,7 @@ class Axis:
             JSON-compatible axis payload.
         """
 
-        payload = {
+        payload: Dict[str, Any] = {
             "name": self.name,
             "direction": self.direction,
         }
@@ -315,7 +315,7 @@ class CoordinateSystem:
     extra: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def cartesian(cls, name: str = "global", **kwargs) -> "CoordinateSystem":
+    def cartesian(cls, name: str = "global", **kwargs: Any) -> "CoordinateSystem":
         """Create a Cartesian coordinate system.
 
         Args:
@@ -329,7 +329,7 @@ class CoordinateSystem:
         return cls(name=name, type="cartesian", **kwargs)
 
     @classmethod
-    def cylindrical(cls, name: str, **kwargs) -> "CoordinateSystem":
+    def cylindrical(cls, name: str, **kwargs: Any) -> "CoordinateSystem":
         """Create a cylindrical coordinate system.
 
         Args:
@@ -343,7 +343,7 @@ class CoordinateSystem:
         return cls(name=name, type="cylindrical", **kwargs)
 
     @classmethod
-    def spherical(cls, name: str, **kwargs) -> "CoordinateSystem":
+    def spherical(cls, name: str, **kwargs: Any) -> "CoordinateSystem":
         """Create a spherical coordinate system.
 
         Args:
@@ -357,7 +357,7 @@ class CoordinateSystem:
         return cls(name=name, type="spherical", **kwargs)
 
     @classmethod
-    def geographic(cls, name: str = "geo", **kwargs) -> "CoordinateSystem":
+    def geographic(cls, name: str = "geo", **kwargs: Any) -> "CoordinateSystem":
         """Create a geographic coordinate system.
 
         Args:
@@ -379,7 +379,7 @@ class CoordinateSystem:
         normal: str = "up",
         offset: Optional[Any] = None,
         offset_units: Optional[Any] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> "CoordinateSystem":
         """Coordinate system tied to a named model surface.
 
@@ -448,7 +448,7 @@ class CoordinateSystem:
             extra=payload,
         )
 
-    def _payload(self, ctx=None) -> Dict[str, Any]:
+    def _payload(self, ctx: Any = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"type": self.type}
         if self.name is not None:
             payload["name"] = self.name
@@ -476,7 +476,7 @@ class CoordinateSystem:
             )
         return payload
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize the coordinate system for solver input.
 
         Args:
@@ -712,7 +712,7 @@ class SurfaceCoordinateSystem(CoordinateSystem):
         inherit_axes: bool = True,
         offset: Optional[Any] = None,
         offset_units: Optional[Any] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Create a coordinate system whose last axis follows a model surface.
 
@@ -778,7 +778,7 @@ class SurfaceCoordinateSystem(CoordinateSystem):
             extra=payload,
         )
 
-    def to_fs(self, ctx=None) -> Dict[str, Any]:
+    def to_fs(self, ctx: Any = None) -> Dict[str, Any]:
         """Serialize this surface coordinate system for solver input.
 
         Args:

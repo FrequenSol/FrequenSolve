@@ -17,6 +17,7 @@ BASELINE_FILE = "mypy-baseline.json"
 
 PHASE_ONE_STRICT_PATHS = (
     "scripts/check_mypy_baseline.py",
+    "src/frequensolve/geometry/",
     "src/frequensolve/units.py",
     "src/frequensolve/validation/",
 )
@@ -42,7 +43,6 @@ PHASES = (
         "name": "public-authoring-validation-units-serialization",
         "strict_now": list(PHASE_ONE_STRICT_PATHS),
         "remaining_prefixes": [
-            "src/frequensolve/geometry/",
             "src/frequensolve/mesh/",
             "src/frequensolve/model/",
             "src/frequensolve/project/",
