@@ -236,6 +236,8 @@ module = [
     "pyfftw",
     "pyfftw.*",
     "pylops",
+    "pyvista",
+    "pyvista.*",
     "requests",
     "scipy",
     "scipy.*",

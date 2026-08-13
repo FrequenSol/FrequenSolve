@@ -81,7 +81,12 @@ def parse_diagnostics(output: str, root: Path) -> Counter[Diagnostic]:
     for line in output.splitlines():
         if not line.strip():
             continue
-        payload = json.loads(line)
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if ": note: unused section" in line:
+                continue
+            raise ValueError(f"Unexpected non-JSON mypy output: {line}") from exc
         if payload.get("severity") != "error":
             continue
         diagnostics[

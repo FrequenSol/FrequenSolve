@@ -45,6 +45,24 @@ def test_mypy_json_diagnostics_group_by_module_and_error_class(tmp_path):
     )
 
 
+def test_mypy_parser_tolerates_known_unused_config_status_line(tmp_path):
+    output = "\n".join(
+        (
+            "pyproject.toml: note: unused section(s) in mypy config file: module = 'x'",
+            _mypy_line(tmp_path / "src/frequensolve/model.py", "arg-type"),
+        )
+    )
+
+    assert parse_diagnostics(output, tmp_path) == Counter(
+        {Diagnostic("src/frequensolve/model.py", "arg-type"): 1}
+    )
+
+
+def test_mypy_parser_rejects_unknown_plain_text(tmp_path):
+    with pytest.raises(ValueError, match="Unexpected non-JSON mypy output"):
+        parse_diagnostics("mypy crashed unexpectedly", tmp_path)
+
+
 def test_baseline_rows_roundtrip_deterministically():
     diagnostics = Counter(
         {
