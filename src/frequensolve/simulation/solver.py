@@ -90,12 +90,12 @@ class SuperPatch(ExtraFieldsMixin):
             ``SuperPatch`` instance.
         """
 
-        data = dict(copy.deepcopy(data))
+        payload = copy.deepcopy(dict(data))
         return cls(
-            grid=data.pop("grid"),
-            domain=data.pop("domain"),
-            warning_acknowledged=data.pop("warning_acknowledged", True),
-            **data,
+            grid=payload.pop("grid"),
+            domain=payload.pop("domain"),
+            warning_acknowledged=payload.pop("warning_acknowledged", True),
+            **payload,
         )
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
@@ -163,14 +163,14 @@ class SolverConfig(ExtraFieldsMixin):
             ``SolverConfig`` instance.
         """
 
-        data = dict(copy.deepcopy(data))
+        payload = copy.deepcopy(dict(data))
         obj = cls(
-            solve_on=data.pop("solve_on", "final"),
-            max_iter=data.pop("max_iter", 300),
-            tolerance=data.pop("tolerance", 1.0e-4),
-            precision=data.pop("precision", "single"),
+            solve_on=payload.pop("solve_on", "final"),
+            max_iter=payload.pop("max_iter", 300),
+            tolerance=payload.pop("tolerance", 1.0e-4),
+            precision=payload.pop("precision", "single"),
         )
-        obj._init_extra(data)
+        obj._init_extra(payload)
         return obj
 
     def __iadd__(self, other: SuperPatch) -> "SolverConfig":

@@ -45,8 +45,8 @@ class Discretization(ExtraFieldsMixin):
     def from_fs(cls, data: Mapping[str, Any]) -> "Discretization":
         """Deserialize discretization settings from solver JSON."""
 
-        data = copy.deepcopy(data)
-        return cls(**data)
+        payload = copy.deepcopy(dict(data))
+        return cls(**payload)
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize discretization settings for solver input."""
