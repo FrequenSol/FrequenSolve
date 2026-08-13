@@ -7,6 +7,8 @@ from scripts.check_mypy_baseline import (
     Diagnostic,
     _counter_from_rows,
     _diagnostic_rows,
+    _load_baseline,
+    _write_baseline,
     parse_diagnostics,
     run,
     strict_diagnostics,
@@ -77,11 +79,15 @@ def test_baseline_rows_roundtrip_deterministically():
     assert _counter_from_rows(rows) == diagnostics
 
 
-def test_strict_path_filter_covers_units_and_validation_only():
+def test_strict_path_filter_covers_promoted_phase_one_and_two_modules():
     diagnostics = Counter(
         {
             Diagnostic("src/frequensolve/units.py", "arg-type"): 1,
             Diagnostic("src/frequensolve/validation/outputs.py", "assignment"): 2,
+            Diagnostic(
+                "src/frequensolve/orchestrator/utils/progress.py", "union-attr"
+            ): 3,
+            Diagnostic("src/frequensolve/storage.py", "return-value"): 1,
             Diagnostic("src/frequensolve/model/model.py", "arg-type"): 4,
         }
     )
@@ -90,7 +96,31 @@ def test_strict_path_filter_covers_units_and_validation_only():
         {
             Diagnostic("src/frequensolve/units.py", "arg-type"): 1,
             Diagnostic("src/frequensolve/validation/outputs.py", "assignment"): 2,
+            Diagnostic(
+                "src/frequensolve/orchestrator/utils/progress.py", "union-attr"
+            ): 3,
+            Diagnostic("src/frequensolve/storage.py", "return-value"): 1,
         }
+    )
+
+
+def test_baseline_writer_removes_promoted_diagnostic_headroom(tmp_path):
+    baseline_path = tmp_path / "mypy-baseline.json"
+    diagnostics = Counter(
+        {
+            Diagnostic(
+                "src/frequensolve/orchestrator/utils/credentials.py",
+                "no-untyped-def",
+            ): 4,
+            Diagnostic("src/frequensolve/model/model.py", "arg-type"): 2,
+        }
+    )
+
+    _write_baseline(baseline_path, diagnostics)
+    _, written = _load_baseline(baseline_path)
+
+    assert written == Counter(
+        {Diagnostic("src/frequensolve/model/model.py", "arg-type"): 2}
     )
 
 
@@ -112,7 +142,7 @@ def test_baseline_allows_environment_with_fewer_diagnostics(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(
         "scripts.check_mypy_baseline._load_baseline",
-        lambda _path: ({}, expected),
+        lambda _path, **_kwargs: ({}, expected),
     )
     monkeypatch.setattr(
         "scripts.check_mypy_baseline.Path.exists",
@@ -135,7 +165,7 @@ def test_baseline_rejects_environment_that_exceeds_a_ceiling(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(
         "scripts.check_mypy_baseline._load_baseline",
-        lambda _path: ({}, expected),
+        lambda _path, **_kwargs: ({}, expected),
     )
     monkeypatch.setattr(
         "scripts.check_mypy_baseline.Path.exists",
@@ -171,7 +201,7 @@ def test_update_preserves_higher_ceiling_from_another_environment(
     )
     monkeypatch.setattr(
         "scripts.check_mypy_baseline._load_baseline",
-        lambda _path: ({}, expected),
+        lambda _path, **_kwargs: ({}, expected),
     )
     monkeypatch.setattr(
         "scripts.check_mypy_baseline.Path.exists",

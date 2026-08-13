@@ -213,7 +213,7 @@ class TraceAccessor:
         receiver_group = self.receiver_group
         source_coordinates = _source_coordinates(trace, preserve_metadata=True)
 
-        ureg = pint.UnitRegistry()
+        ureg: pint.UnitRegistry = pint.UnitRegistry()
         coordinate_units, output_unit = _segy_output_unit(units_out, ureg)
         receiver_coords = _coordinates_in_output_units(
             receiver_group.coordinates.get(),
@@ -328,7 +328,7 @@ def array_to_segy(
             error=exc,
         ) from exc
 
-    ureg = pint.UnitRegistry()
+    ureg: pint.UnitRegistry = pint.UnitRegistry()
     if units_out not in {"m", "ft"}:
         raise ValueError("units_out must be 'm' or 'ft'")
     iunit = ureg(units_in)

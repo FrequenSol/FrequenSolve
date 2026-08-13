@@ -1,8 +1,9 @@
 """Utility helpers for orchestration backends."""
 
 from importlib import import_module
+from typing import Final
 
-_EXPORT_MODULES = {
+_EXPORT_MODULES: Final[dict[str, str]] = {
     "CloudCredentials": "frequensolve.orchestrator.utils.credentials",
     "Credentials": "frequensolve.orchestrator.utils.credentials",
     "PoolInfo": "frequensolve.orchestrator.utils.pool",
@@ -16,10 +17,10 @@ _EXPORT_MODULES = {
     "wait_all": "frequensolve.orchestrator.utils.progress",
 }
 
-__all__ = list(_EXPORT_MODULES)
+__all__: list[str] = list(_EXPORT_MODULES)
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> object:
     if name in _EXPORT_MODULES:
         value = getattr(import_module(_EXPORT_MODULES[name]), name)
         globals()[name] = value
@@ -27,5 +28,5 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def __dir__():
+def __dir__() -> list[str]:
     return sorted({*globals(), *__all__})

@@ -546,41 +546,6 @@
       "file": "src/frequensolve/orchestrator/sites/local/site.py"
     },
     {
-      "code": "no-untyped-def",
-      "count": 2,
-      "file": "src/frequensolve/orchestrator/utils/__init__.py"
-    },
-    {
-      "code": "assignment",
-      "count": 2,
-      "file": "src/frequensolve/orchestrator/utils/credentials.py"
-    },
-    {
-      "code": "no-untyped-def",
-      "count": 9,
-      "file": "src/frequensolve/orchestrator/utils/credentials.py"
-    },
-    {
-      "code": "no-untyped-def",
-      "count": 1,
-      "file": "src/frequensolve/orchestrator/utils/pool.py"
-    },
-    {
-      "code": "attr-defined",
-      "count": 1,
-      "file": "src/frequensolve/orchestrator/utils/progress.py"
-    },
-    {
-      "code": "return-value",
-      "count": 1,
-      "file": "src/frequensolve/orchestrator/utils/progress.py"
-    },
-    {
-      "code": "union-attr",
-      "count": 4,
-      "file": "src/frequensolve/orchestrator/utils/progress.py"
-    },
-    {
       "code": "assignment",
       "count": 1,
       "file": "src/frequensolve/orchestrator/utils/ssh.py"
@@ -1405,7 +1370,15 @@
       "remaining_prefixes": [
         "src/frequensolve/orchestrator/sites/base.py",
         "src/frequensolve/orchestrator/sites/local/",
-        "src/frequensolve/orchestrator/utils/",
+        "src/frequensolve/orchestrator/utils/ssh.py"
+      ],
+      "strict_now": [
+        "src/frequensolve/orchestrator/utils/__init__.py",
+        "src/frequensolve/orchestrator/utils/credential_store.py",
+        "src/frequensolve/orchestrator/utils/credentials.py",
+        "src/frequensolve/orchestrator/utils/environment.py",
+        "src/frequensolve/orchestrator/utils/pool.py",
+        "src/frequensolve/orchestrator/utils/progress.py",
         "src/frequensolve/storage.py"
       ]
     },
@@ -1426,6 +1399,13 @@
   "strict_paths": [
     "scripts/check_mypy_baseline.py",
     "src/frequensolve/units.py",
-    "src/frequensolve/validation/"
+    "src/frequensolve/validation/",
+    "src/frequensolve/orchestrator/utils/__init__.py",
+    "src/frequensolve/orchestrator/utils/credential_store.py",
+    "src/frequensolve/orchestrator/utils/credentials.py",
+    "src/frequensolve/orchestrator/utils/environment.py",
+    "src/frequensolve/orchestrator/utils/pool.py",
+    "src/frequensolve/orchestrator/utils/progress.py",
+    "src/frequensolve/storage.py"
   ]
 }
