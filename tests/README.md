@@ -5,7 +5,10 @@ default lane is deterministic and avoids solver binaries, cloud services,
 schedulers, manual input, and visual baselines. Tests that need those resources
 use explicit pytest markers.
 
-1. **Unit Tests**: These tests can be run independently without requiring the full solver code. They focus on testing individual components and functions in isolation.
+1. **Unit Tests**: These tests can be run independently without requiring the
+   full solver code. The `unit` marker is an affirmative classification used by
+   contract-tool tests; unmarked deterministic tests remain part of the same
+   default lane.
 
 2. **Opt-in Marked Tests**: These tests require extra resources and are marked
    with `integration`, `cloud`, `hpc`, `interactive`, or `visual`. They test
@@ -32,6 +35,14 @@ normal Hypothesis profile so the PR-safe lane remains fast.
 Marker names are strict. An unknown marker fails collection so a misspelled
 `integration`, `cloud`, `hpc`, `interactive`, or `visual` marker cannot put a
 resource-dependent test into the default lane.
+
+Markers describe execution approval, not optional-package ownership. In
+particular, `cloud` means a test contacts a real cloud boundary and
+`interactive` means it needs input or an authenticated session. Credential-free
+AWS adapter behavior is selected by the `cloud` package contract without either
+approval marker. The currently unused `hpc` approval marker is reserved for the
+bounded real-cluster canary tracked by issue #83; hermetic SLURM and SSH behavior
+belongs in the required package contract without that marker.
 
 ## Writing Tests
 
@@ -105,12 +116,19 @@ The project includes several Makefile targets for running tests:
   - Enforces the 64.5% combined, 69.0% line, and 51.8% branch ratchets
   - Skips integration, cloud, HPC, interactive, and visual tests
 
-- `make test-optional-extras`: Runs PR-safe plotting, PyVista, SEG-Y, and
-  matplotlib baseline checks with the `parallel`, `visual`, and `seismic-io`
-  extras installed
-  - Includes visual tests that do not need a solver
-  - Excludes integration, cloud, HPC, and interactive tests
-  - Generates an HTML summary of matplotlib comparisons
+- `make validate-optional-extra-contracts`: Validates that
+  `tests/optional-extra-contracts.json` covers every advertised runtime extra,
+  preserves aliases, selects behavior tests, and matches the strict marker
+  policy. Run it in the full test environment with `dev`, `parallel`, and
+  `cloud` installed; required CI owns this validation.
+
+- `make test-optional-extra-contract EXTRA=visual`: Runs one manifest-owned
+  behavior and package-coverage contract in an environment where that extra is
+  installed.
+
+- `make test-optional-extras`: Convenience target for the local visual and
+  seismic-IO contracts. Required CI derives all base and runtime-extra jobs from
+  the manifest and installs each built distribution independently.
 
 - `make generate_reference_images`: Generates reference images for matplotlib tests
   - Creates baseline images in `tests/reference_images/`
@@ -133,10 +151,14 @@ pushes, and can also be started manually. It includes:
      upload job; only that job receives OIDC permission, and upload failures
      fail the aggregate gate
 
-2. **Optional Extras Job**:
-   - Installs the visual and seismic-IO extras on Python 3.12
-   - Executes `make test-optional-extras`, including the PR-safe visual baseline
-     and formerly skipped PyVista/SEG-Y behavior
+2. **Optional Package Contract Matrix**:
+   - Derives one Python 3.12 job per base/runtime-extra contract from
+     `tests/optional-extra-contracts.json`
+   - Resolves every direct requirement at its declared lower bound, installs
+     the built wheel or source distribution in a clean runner, and executes an
+     owning behavior path
+   - Uploads per-contract coverage JSON and enforces reviewed package-level
+     floors without contacting a solver, cloud service, or scheduler
 
 3. **Integration Test Job**:
    - Triggers the `FrequenSol/FrequenSolveDockerImage` CI workflow with the
