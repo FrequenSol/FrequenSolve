@@ -11,10 +11,12 @@ import base64
 import json
 import logging
 import os
+import random
 import tempfile
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from frequensolve._cloud_credentials import (
     CREDENTIAL_CACHE_BINDING_KEY,
@@ -47,6 +49,59 @@ _TOKEN_CACHE_FIELDS = (
     "refresh_token",
     "expires_at",
 )
+
+_IDENTITY_THROTTLE_CODES = frozenset(
+    {
+        "TooManyRequestsException",
+        "Throttling",
+        "ThrottlingException",
+    }
+)
+_IDENTITY_MAX_ATTEMPTS = 5
+_IDENTITY_RETRY_BASE_DELAY_SECONDS = 0.25
+_IDENTITY_RETRY_MAX_DELAY_SECONDS = 2.0
+_IDENTITY_BUSY_MESSAGE = (
+    "FrequenSol Cloud authentication is temporarily busy because several "
+    "sessions started at once. Wait a moment, then retry."
+)
+
+
+def _call_identity_with_retry(
+    operation_name: str,
+    operation: Callable[[], Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Run a Cognito Identity operation with bounded, jittered throttling retries."""
+
+    for attempt in range(_IDENTITY_MAX_ATTEMPTS):
+        try:
+            return operation()
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            if error_code not in _IDENTITY_THROTTLE_CODES:
+                raise
+
+            if attempt == _IDENTITY_MAX_ATTEMPTS - 1:
+                logger.warning(
+                    "Cognito Identity %s remained throttled after %d attempts",
+                    operation_name,
+                    _IDENTITY_MAX_ATTEMPTS,
+                )
+                raise RuntimeError(_IDENTITY_BUSY_MESSAGE) from None
+
+            delay_ceiling = min(
+                _IDENTITY_RETRY_BASE_DELAY_SECONDS * (2**attempt),
+                _IDENTITY_RETRY_MAX_DELAY_SECONDS,
+            )
+            delay = random.uniform(delay_ceiling / 2, delay_ceiling)
+            logger.debug(
+                "Cognito Identity %s was throttled; retrying (attempt %d/%d)",
+                operation_name,
+                attempt + 2,
+                _IDENTITY_MAX_ATTEMPTS,
+            )
+            time.sleep(delay)
+
+    raise AssertionError("Cognito Identity retry loop exited unexpectedly")
 
 
 def _cognito_issuer(*, region: str, user_pool_id: str) -> str:
@@ -287,8 +342,12 @@ class CognitoAuth:
 
         try:
             # Get Identity ID
-            identity_response = self.identity_client.get_id(
-                IdentityPoolId=self.identity_pool_id, Logins={provider_name: id_token}
+            identity_response = _call_identity_with_retry(
+                "GetId",
+                lambda: self.identity_client.get_id(
+                    IdentityPoolId=self.identity_pool_id,
+                    Logins={provider_name: id_token},
+                ),
             )
 
             identity_id = identity_response["IdentityId"]
@@ -296,8 +355,12 @@ class CognitoAuth:
 
             # Get AWS credentials for this identity
             logger.debug("Getting credentials for identity...")
-            credentials_response = self.identity_client.get_credentials_for_identity(
-                IdentityId=identity_id, Logins={provider_name: id_token}
+            credentials_response = _call_identity_with_retry(
+                "GetCredentialsForIdentity",
+                lambda: self.identity_client.get_credentials_for_identity(
+                    IdentityId=identity_id,
+                    Logins={provider_name: id_token},
+                ),
             )
 
             credentials = credentials_response["Credentials"]
