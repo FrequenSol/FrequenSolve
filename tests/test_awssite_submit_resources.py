@@ -44,8 +44,9 @@ class FakeJob:
     def __init__(self):
         self.project_path = Path("project-a")
         self.simulation = SimpleNamespace(
+            name="model",
             project_path=Path("project-a"),
-            _project=object(),
+            _project=SimpleNamespace(name="project-a", pretty_name="Project A"),
         )
         self._job_id = None
 
@@ -123,10 +124,14 @@ def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
 
     assert site.graphql_client.submit_calls[0]["vcpu"] is None
     assert site.graphql_client.submit_calls[0]["memory"] is None
+    assert site.graphql_client.submit_calls[0]["project_name"] == "project-a"
+    assert site.graphql_client.submit_calls[0]["project_display_name"] == "Project A"
+    assert site.graphql_client.submit_calls[0]["simulation_name"] == "model"
+    assert site.graphql_client.submit_calls[0]["simulation_job_name"] == "demo-job"
     assert site.graphql_client.compute_stack_checks == 0
 
 
-def test_graphql_submit_stages_inputs_for_loaded_job_without_project_owner():
+def test_graphql_submit_stages_inputs_without_inventing_project_metadata():
     site = make_graphql_site()
     site._ensure_storage_bucket = lambda: None
     sync_calls = []
@@ -144,6 +149,9 @@ def test_graphql_submit_stages_inputs_for_loaded_job_without_project_owner():
 
     site.submit(job)
 
+    assert site.graphql_client.submit_calls[0]["project_name"] is None
+    assert site.graphql_client.submit_calls[0]["project_display_name"] is None
+
     assert sync_calls == [
         (
             "staged-simulation.json",
@@ -152,6 +160,39 @@ def test_graphql_submit_stages_inputs_for_loaded_job_without_project_owner():
         ("local-input.h5", "project-a/inputs/model.h5"),
         ("local-job.json", "project-a/jobs/job.json"),
     ]
+
+
+def test_graphql_submit_recovers_saved_project_metadata_for_loaded_job(tmp_path):
+    project_path = tmp_path / "opaque-cache-directory"
+    project_path.mkdir()
+    (project_path / "customer-model.json").write_text(
+        '{"name":"customer-model","pretty_name":"Customer Model",'
+        '"version":"1.0","simulations":[]}'
+    )
+    site = make_graphql_site()
+    site._ensure_storage_bucket = lambda: None
+    site.sync_s3 = lambda local, remote: remote
+
+    job = FakeJob()
+    job.project_path = project_path
+    job.simulation.project_path = project_path
+    job.simulation._project = None
+    job.save_simulation_for_remote = lambda site_name, project: (
+        "staged-simulation.json",
+        f"{project}/simulations/model/model.json",
+    )
+    job.remote_input_files = lambda project: []
+    job.save_for_remote = lambda site_name, project: (
+        "local-job.json",
+        f"{project}/jobs/job.json",
+    )
+
+    site.submit(job)
+
+    submitted = site.graphql_client.submit_calls[0]
+    assert submitted["project_name"] == "customer-model"
+    assert submitted["project_display_name"] == "Customer Model"
+    assert submitted["project_name"] != project_path.name
 
 
 def test_poll_run_preserves_customer_safe_cloud_failure_message():
