@@ -888,6 +888,67 @@ class AWSSite(BaseSite):
             self.sync_s3(local_file, remote_file)
             self._emit(f"Synced simulation input to S3: {remote_file}")
 
+    @staticmethod
+    def _authored_project_metadata(
+        job: BaseJob,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Recover authored project identity without treating a path as a name.
+
+        Live jobs retain their owning ``Project``. Deserialized jobs intentionally
+        do not, so recover metadata only from an unambiguous saved project file.
+        Cloud can still derive its legacy storage key when no authored identity is
+        available.
+        """
+
+        project_owner = getattr(job.simulation, "_project", None)
+        project_name = getattr(project_owner, "name", None)
+        if isinstance(project_name, str) and project_name.strip():
+            project_display_name = getattr(project_owner, "pretty_name", None)
+            if (
+                not isinstance(project_display_name, str)
+                or not project_display_name.strip()
+            ):
+                project_display_name = None
+            return project_name.strip(), (
+                project_display_name.strip() if project_display_name else None
+            )
+
+        project_path = getattr(job, "project_path", None)
+        if project_path is None:
+            return None, None
+
+        try:
+            project_files = sorted(Path(project_path).expanduser().glob("*.json"))
+        except (OSError, TypeError, ValueError):
+            return None, None
+        if len(project_files) != 1:
+            return None, None
+
+        try:
+            project_payload = json.loads(project_files[0].read_text())
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None, None
+        if not isinstance(project_payload, dict):
+            return None, None
+        project_name = project_payload.get("name")
+        if (
+            not isinstance(project_name, str)
+            or not project_name.strip()
+            or "version" not in project_payload
+            or not isinstance(project_payload.get("simulations"), list)
+        ):
+            return None, None
+
+        project_display_name = project_payload.get("pretty_name")
+        if (
+            not isinstance(project_display_name, str)
+            or not project_display_name.strip()
+        ):
+            project_display_name = None
+        return project_name.strip(), (
+            project_display_name.strip() if project_display_name else None
+        )
+
     def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit a simulation job.
 
@@ -988,11 +1049,10 @@ class AWSSite(BaseSite):
             if self.graphql_client is not None:
                 # New path: Submit via GraphQL API
                 self._emit(f"Submitting {job.name} via AWS GraphQL API")
-                project_owner = getattr(job.simulation, "_project", None)
-                authored_project_name = getattr(project_owner, "name", None) or project
-                authored_project_display_name = getattr(
-                    project_owner, "pretty_name", None
-                )
+                (
+                    authored_project_name,
+                    authored_project_display_name,
+                ) = self._authored_project_metadata(job)
 
                 result = self.graphql_client.submit_job(
                     job_file_s3_key=str(s3_job_key),
