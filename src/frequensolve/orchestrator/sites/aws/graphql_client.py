@@ -499,6 +499,11 @@ class GraphQLClient:
         job_name: Optional[str] = None,
         send_simulation_status_email: Optional[bool] = None,
         fresh: bool = False,
+        *,
+        project_name: Optional[str] = None,
+        project_display_name: Optional[str] = None,
+        simulation_name: Optional[str] = None,
+        simulation_job_name: Optional[str] = None,
     ) -> Dict[str, str]:
         """Submit a simulation job.
 
@@ -509,6 +514,10 @@ class GraphQLClient:
             job_name: Custom name for the job (optional)
             send_simulation_status_email: If True/False, overrides cloud communication preferences for this run only
             fresh: Force a fresh solver run when the backend supports it
+            project_name: Authored project name for Cloud display metadata
+            project_display_name: Optional authored project display name
+            simulation_name: Authored simulation name for Cloud display metadata
+            simulation_job_name: Authored FrequenSolve job name for Cloud display metadata
 
         Returns:
             Dict containing:
@@ -519,15 +528,40 @@ class GraphQLClient:
         Raises:
             RuntimeError: If job submission fails
         """
-        force_var = "$forceRun: Boolean" if fresh else ""
-        force_arg = "forceRun: $forceRun" if fresh else ""
-        mutation = f"""
+        metadata = {
+            "projectName": project_name,
+            "projectDisplayName": project_display_name,
+            "simulationName": simulation_name,
+            "simulationJobName": simulation_job_name,
+        }
+        metadata = {key: value for key, value in metadata.items() if value is not None}
+
+        def build_mutation(include_metadata: bool) -> str:
+            force_var = "$forceRun: Boolean" if fresh else ""
+            force_arg = "forceRun: $forceRun" if fresh else ""
+            metadata_variables = ""
+            metadata_arguments = ""
+            if include_metadata:
+                metadata_variables = """
+                $projectName: String
+                $projectDisplayName: String
+                $simulationName: String
+                $simulationJobName: String
+                """
+                metadata_arguments = """
+                    projectName: $projectName
+                    projectDisplayName: $projectDisplayName
+                    simulationName: $simulationName
+                    simulationJobName: $simulationJobName
+                """
+            return f"""
             mutation SubmitJob(
                 $jobFileS3Key: String!
                 $vcpu: Int
                 $memory: Int
                 $jobName: String
                 $sendSimulationStatusEmail: Boolean
+                {metadata_variables}
                 {force_var}
             ) {{
                 submitJob(
@@ -536,6 +570,7 @@ class GraphQLClient:
                     memory: $memory
                     jobName: $jobName
                     sendSimulationStatusEmail: $sendSimulationStatusEmail
+                    {metadata_arguments}
                     {force_arg}
                 ) {{
                     simulationId
@@ -556,28 +591,49 @@ class GraphQLClient:
             variables["memory"] = memory
         if job_name is not None:
             variables["jobName"] = job_name
+        variables.update(metadata)
         if fresh:
             variables["forceRun"] = True
 
-        try:
-            result = self.execute(mutation, variables)
-        except RuntimeError as exc:
-            error_message = str(exc)
-            unsupported_force_run = (
-                fresh
-                and "forceRun" in error_message
-                and (
+        def execute_submission(include_metadata: bool) -> Dict[str, Any]:
+            request_variables = dict(variables)
+            if not include_metadata:
+                for key in metadata:
+                    request_variables.pop(key, None)
+            try:
+                return self.execute(
+                    build_mutation(include_metadata),
+                    request_variables,
+                )
+            except RuntimeError as exc:
+                error_message = str(exc)
+                unsupported_argument = (
                     "Unknown argument" in error_message
                     or "UnknownArgument" in error_message
                 )
-            )
-            if unsupported_force_run:
-                raise RuntimeError(
-                    "Fresh Cloud reruns are not supported by this environment. "
-                    "Submit without force=True, rerun=True, or skip=False, or "
-                    "update the Cloud backend before retrying."
-                ) from exc
-            raise
+                unsupported_metadata = (
+                    include_metadata
+                    and unsupported_argument
+                    and any(key in error_message for key in metadata)
+                )
+                if unsupported_metadata:
+                    logger.info(
+                        "Cloud run metadata is not supported by this environment; "
+                        "retrying the submission with the legacy mutation contract."
+                    )
+                    return execute_submission(False)
+                unsupported_force_run = (
+                    fresh and "forceRun" in error_message and unsupported_argument
+                )
+                if unsupported_force_run:
+                    raise RuntimeError(
+                        "Fresh Cloud reruns are not supported by this environment. "
+                        "Submit without force=True, rerun=True, or skip=False, or "
+                        "update the Cloud backend before retrying."
+                    ) from exc
+                raise
+
+        result = execute_submission(bool(metadata))
 
         if "submitJob" not in result or not result["submitJob"]:
             raise RuntimeError("Job submission failed: No response from API")

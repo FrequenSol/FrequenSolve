@@ -44,8 +44,9 @@ class FakeJob:
     def __init__(self):
         self.project_path = Path("project-a")
         self.simulation = SimpleNamespace(
+            name="model",
             project_path=Path("project-a"),
-            _project=object(),
+            _project=SimpleNamespace(name="project-a", pretty_name="Project A"),
         )
         self._job_id = None
 
@@ -123,6 +124,10 @@ def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
 
     assert site.graphql_client.submit_calls[0]["vcpu"] is None
     assert site.graphql_client.submit_calls[0]["memory"] is None
+    assert site.graphql_client.submit_calls[0]["project_name"] == "project-a"
+    assert site.graphql_client.submit_calls[0]["project_display_name"] == "Project A"
+    assert site.graphql_client.submit_calls[0]["simulation_name"] == "model"
+    assert site.graphql_client.submit_calls[0]["simulation_job_name"] == "demo-job"
     assert site.graphql_client.compute_stack_checks == 0
 
 
@@ -143,6 +148,9 @@ def test_graphql_submit_stages_inputs_for_loaded_job_without_project_owner():
     ]
 
     site.submit(job)
+
+    assert site.graphql_client.submit_calls[0]["project_name"] == "project-a"
+    assert site.graphql_client.submit_calls[0]["project_display_name"] is None
 
     assert sync_calls == [
         (

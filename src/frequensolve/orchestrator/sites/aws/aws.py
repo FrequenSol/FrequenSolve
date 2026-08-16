@@ -988,12 +988,21 @@ class AWSSite(BaseSite):
             if self.graphql_client is not None:
                 # New path: Submit via GraphQL API
                 self._emit(f"Submitting {job.name} via AWS GraphQL API")
+                project_owner = getattr(job.simulation, "_project", None)
+                authored_project_name = getattr(project_owner, "name", None) or project
+                authored_project_display_name = getattr(
+                    project_owner, "pretty_name", None
+                )
 
                 result = self.graphql_client.submit_job(
                     job_file_s3_key=str(s3_job_key),
                     vcpu=vcpu,
                     memory=memory,
                     job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
+                    project_name=authored_project_name,
+                    project_display_name=authored_project_display_name,
+                    simulation_name=job.simulation.name,
+                    simulation_job_name=job.name,
                     send_simulation_status_email=kwargs.get(
                         "send_simulation_status_email"
                     ),

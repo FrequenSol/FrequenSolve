@@ -241,6 +241,81 @@ def test_submit_job_can_send_status_email_override_and_fresh_run():
     }
 
 
+def test_submit_job_preserves_legacy_positional_argument_order():
+    client = CapturingGraphQLClient()
+
+    client.submit_job("project/jobs/job.json", 2, 4096, "run-name", True, False)
+
+    assert client.last_variables == {
+        "jobFileS3Key": "project/jobs/job.json",
+        "sendSimulationStatusEmail": True,
+        "vcpu": 2,
+        "memory": 4096,
+        "jobName": "run-name",
+    }
+
+
+def test_submit_job_sends_optional_cloud_run_metadata():
+    client = CapturingGraphQLClient()
+
+    client.submit_job(
+        "project/jobs/model/job/job.json",
+        project_name="project",
+        project_display_name="Project Alpha",
+        simulation_name="model",
+        simulation_job_name="job",
+    )
+
+    assert "projectName: $projectName" in client.last_query
+    assert "projectDisplayName: $projectDisplayName" in client.last_query
+    assert "simulationName: $simulationName" in client.last_query
+    assert "simulationJobName: $simulationJobName" in client.last_query
+    assert client.last_variables == {
+        "jobFileS3Key": "project/jobs/model/job/job.json",
+        "sendSimulationStatusEmail": None,
+        "projectName": "project",
+        "projectDisplayName": "Project Alpha",
+        "simulationName": "model",
+        "simulationJobName": "job",
+    }
+
+
+def test_submit_job_retries_legacy_cloud_without_optional_metadata(monkeypatch):
+    client = CapturingGraphQLClient()
+    calls = []
+
+    def execute(query, variables=None):
+        calls.append((query, variables))
+        if len(calls) == 1:
+            raise RuntimeError(
+                "GraphQL errors: Unknown argument 'projectName' on field "
+                "'Mutation.submitJob'."
+            )
+        return {
+            "submitJob": {
+                "simulationId": "simulation-legacy",
+                "batchJobId": "",
+                "status": "PENDING",
+            }
+        }
+
+    monkeypatch.setattr(client, "execute", execute)
+
+    result = client.submit_job(
+        "project/jobs/model/job/job.json",
+        project_name="project",
+        simulation_name="model",
+        simulation_job_name="job",
+    )
+
+    assert result["simulationId"] == "simulation-legacy"
+    assert len(calls) == 2
+    assert "projectName" in calls[0][0]
+    assert "projectName" not in calls[1][0]
+    assert "projectName" in calls[0][1]
+    assert "projectName" not in calls[1][1]
+
+
 def test_submit_job_explains_when_cloud_does_not_support_fresh_runs(monkeypatch):
     client = CapturingGraphQLClient()
 
