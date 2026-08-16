@@ -17,20 +17,6 @@ The local `v2_sam` branch may be useful for ongoing local development, but do
 not assume it is the correct PR base unless the user says so or the issue is
 already scoped to that branch.
 
-## Required Worklog Protocol
-
-For every non-trivial task, create or update a local worklog before substantive
-work begins.
-
-- At task start, tell the user the full absolute path of the worklog file.
-- Prefer `.codex/worklogs/<date>-<task-slug>.md`; this path is ignored by git.
-- Record the current branch, worktree path, timestamp, task summary, and active
-  assumptions.
-- Update the worklog after meaningful progress, branch changes, file edits,
-  verification, blockers, and final status.
-- Keep worklogs out of commits and PRs unless the user explicitly asks to
-  publish them.
-
 ## Issue And Project Workflow
 
 Use GitHub Project 4 as the shared cross-repository intake surface when a task
@@ -241,7 +227,7 @@ marked ready, or manually requested with `@codex review`.
    as timed out.
 5. Do not enter a second implementation cycle by default. If the connector
    leaves more feedback after first-round fixes, summarize the new feedback in
-   the PR or worklog and hand it off unless the user explicitly asks you to keep
+   the PR or issue and hand it off unless the user explicitly asks you to keep
    going. For obvious security, data-loss, billing, or tenant-isolation risks,
    flag the risk prominently in the handoff.
 6. Do not mark the PR handoff complete while first-round bot feedback remains
@@ -252,8 +238,8 @@ marked ready, or manually requested with `@codex review`.
 
 ## Safety Rules
 
-- Do not commit local worklogs, credentials, generated scratch output, or large
-  solver artifacts unless the user explicitly asks for them.
+- Do not commit credentials, generated scratch output, or large solver
+  artifacts unless the user explicitly asks for them.
 - Do not add production resource identifiers, customer data, secrets, or live
   cloud credentials to tests, examples, docs, or fixtures.
 - Prefer structured parsers and repo-native APIs over ad hoc string handling
