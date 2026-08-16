@@ -316,6 +316,40 @@ def test_submit_job_retries_legacy_cloud_without_optional_metadata(monkeypatch):
     assert "projectName" not in calls[1][1]
 
 
+def test_submit_job_retries_legacy_cloud_when_only_later_metadata_is_set(
+    monkeypatch,
+):
+    client = CapturingGraphQLClient()
+    calls = []
+
+    def execute(query, variables=None):
+        calls.append((query, variables))
+        if len(calls) == 1:
+            raise RuntimeError(
+                "GraphQL errors: Unknown argument 'projectName' on field "
+                "'Mutation.submitJob'."
+            )
+        return {
+            "submitJob": {
+                "simulationId": "simulation-legacy",
+                "batchJobId": "",
+                "status": "PENDING",
+            }
+        }
+
+    monkeypatch.setattr(client, "execute", execute)
+
+    result = client.submit_job(
+        "project/jobs/model/job/job.json",
+        simulation_name="model",
+    )
+
+    assert result["simulationId"] == "simulation-legacy"
+    assert len(calls) == 2
+    assert calls[0][1]["simulationName"] == "model"
+    assert "simulationName" not in calls[1][1]
+
+
 def test_submit_job_explains_when_cloud_does_not_support_fresh_runs(monkeypatch):
     client = CapturingGraphQLClient()
 

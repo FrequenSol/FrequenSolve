@@ -528,6 +528,12 @@ class GraphQLClient:
         Raises:
             RuntimeError: If job submission fails
         """
+        metadata_fields = (
+            "projectName",
+            "projectDisplayName",
+            "simulationName",
+            "simulationJobName",
+        )
         metadata = {
             "projectName": project_name,
             "projectDisplayName": project_display_name,
@@ -614,7 +620,7 @@ class GraphQLClient:
                 unsupported_metadata = (
                     include_metadata
                     and unsupported_argument
-                    and any(key in error_message for key in metadata)
+                    and any(key in error_message for key in metadata_fields)
                 )
                 if unsupported_metadata:
                     logger.info(
