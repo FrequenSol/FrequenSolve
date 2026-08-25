@@ -2169,6 +2169,83 @@ def test_slurm_batch_poll_does_not_heartbeat_timeout_postprocessing(monkeypatch)
     assert "scheduler_liveness" not in status.raw
 
 
+def test_slurm_batch_poll_uses_task_ledger_without_slurm_accounting(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    monkeypatch.setattr(site, "update_status", lambda job_id: "unknown")
+    monkeypatch.setattr(
+        site,
+        "_read_scheduler_status",
+        lambda run: {
+            "state": "complete",
+            "total": 1,
+            "successful": 1,
+            "failed": 0,
+            "running": 0,
+            "pending": 0,
+        },
+    )
+
+    run = RunHandle(site=site, job=DummyJob(), id="77", mode="batch")
+    status = site._poll_run(run)
+
+    assert status.state == "complete"
+    assert status.return_code == 0
+    assert status.raw["scheduler_terminal_fallback"] == {
+        "state": "complete",
+        "reason": "slurm-accounting-unavailable",
+    }
+    assert status.message == (
+        "tasks: 1 successful, 0 failed, 0 running, 0 pending, 1 total"
+    )
+
+
+@pytest.mark.parametrize(
+    "task_status",
+    [
+        {
+            "state": "running",
+            "total": 1,
+            "successful": 1,
+            "failed": 0,
+            "running": 0,
+            "pending": 0,
+        },
+        {
+            "state": "complete",
+            "total": 1,
+            "successful": 0,
+            "failed": 1,
+            "running": 0,
+            "pending": 0,
+        },
+        {
+            "state": "complete",
+            "total": 2,
+            "successful": 1,
+            "failed": 0,
+            "running": 0,
+            "pending": 1,
+        },
+    ],
+)
+def test_slurm_batch_poll_does_not_infer_unconfirmed_terminal_success(
+    monkeypatch, task_status
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    monkeypatch.setattr(site, "update_status", lambda job_id: "unknown")
+    monkeypatch.setattr(site, "_read_scheduler_status", lambda run: task_status)
+
+    run = RunHandle(site=site, job=DummyJob(), id="77", mode="batch")
+    status = site._poll_run(run)
+
+    assert status.state == "unknown"
+    assert status.return_code == -1
+    assert "scheduler_terminal_fallback" not in status.raw
+
+
 def test_slurm_batch_poll_includes_already_current_tasks(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
