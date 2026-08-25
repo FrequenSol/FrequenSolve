@@ -16,6 +16,7 @@ from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
 from frequensolve.orchestrator.sites.hpc.site import SlurmSite
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import normalize_slurm_state
 from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
+from frequensolve.orchestrator.utils import ssh as ssh_module
 from frequensolve.orchestrator.utils.ssh import SSHProxy
 
 pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
@@ -987,6 +988,46 @@ def test_cancel_observes_ssh_proxy_exit_status_with_empty_stderr(monkeypatch):
 
     with pytest.raises(RuntimeError, match="SLURM cancellation failed"):
         site.cancel_job("126")
+
+
+def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[0] == "ssh":
+            return SimpleNamespace(returncode=0, stdout="81a4 3\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ssh_module.subprocess, "run", run)
+    proxy = SSHProxy("/tmp/verified-control", "scientist", "login.example.edu")
+    sftp = proxy.open_sftp()
+    local = tmp_path / "input.bin"
+    local.write_bytes(b"abc")
+    fetched = tmp_path / "output.bin"
+
+    attributes = sftp.stat("/remote/input.bin")
+    sftp.put(str(local), "/remote/.input.partial")
+    sftp.chmod("/remote/.input.partial", 0o640)
+    sftp.posix_rename("/remote/.input.partial", "/remote/input.bin")
+    sftp.get("/remote/input.bin", str(fetched))
+    sftp.remove("/remote/input.bin")
+    sftp.close()
+
+    assert attributes.st_mode == 0o100644
+    assert attributes.st_size == 3
+    assert [call[0][0] for call in calls] == [
+        "ssh",
+        "sftp",
+        "sftp",
+        "sftp",
+        "sftp",
+        "sftp",
+    ]
+    for argv, kwargs in calls:
+        assert "ControlPath=/tmp/verified-control" in argv
+        assert kwargs["timeout"] == 120
+        assert "private-token" not in str(kwargs)
 
 
 def test_slurm_wait_timeout_cancels_before_returning_timeout_result():
