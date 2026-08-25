@@ -309,6 +309,13 @@ def test_profile_rejects_contradictions_and_unbounded_resources():
     unrestricted_account = EnterpriseHPCProfile.from_mapping(
         {**profile_values(), "account": None}
     )
+    unrestricted_account.validate_site(
+        host="login.example.invalid",
+        partition="synthetic",
+        account="",
+        qos="synthetic-qos",
+        mpi_launcher="srun",
+    )
     with pytest.raises(ValueError, match="enterprise_hpc.account"):
         unrestricted_account.validate_site(
             host="login.example.invalid",

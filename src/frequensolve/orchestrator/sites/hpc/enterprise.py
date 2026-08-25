@@ -423,6 +423,7 @@ class EnterpriseHPCProfile:
         _required_text(host, "host", _HOST)
         _required_text(partition, "partition", _TOKEN)
         _required_text(mpi_launcher, "mpi_launcher", _TOKEN)
+        account = account or None
         for value, name in ((account, "account"), (qos, "qos")):
             if value is not None:
                 _required_text(value, name, _TOKEN)
