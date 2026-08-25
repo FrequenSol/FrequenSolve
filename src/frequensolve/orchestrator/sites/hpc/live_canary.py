@@ -57,6 +57,17 @@ class LiveSlurmCanaryError(RuntimeError):
     """Raised when the live canary is unsafe, incomplete, or unsuccessful."""
 
 
+@dataclass(frozen=True)
+class _RecoveredSchedulerHandle:
+    """Minimal cancellation adapter for a job accepted before submit returned."""
+
+    site: Any
+    id: str
+
+    def cancel(self) -> None:
+        self.site.cancel_job(self.id)
+
+
 def _required_text(value: Any, label: str, pattern: re.Pattern[str]) -> str:
     if not isinstance(value, str) or not pattern.fullmatch(value):
         raise ValueError(f"live Slurm canary {label} has an invalid value")
@@ -290,6 +301,12 @@ def validate_live_slurm_local_inputs(
         )
     if site.get("ssh_port", 22) != _known_hosts_port(policy.known_hosts_name):
         raise LiveSlurmCanaryError("site SSH port is not bound to the canary policy")
+    if site.get("allow_ssh_agent") is not False:
+        raise LiveSlurmCanaryError("live canary SSH agent fallback must be disabled")
+    if site.get("allow_keyboard_interactive") is not False:
+        raise LiveSlurmCanaryError(
+            "live canary keyboard-interactive fallback must be disabled"
+        )
     if not isinstance(site.get("username"), str) or not str(site["username"]).strip():
         raise LiveSlurmCanaryError(
             "site config must provide a non-interactive username"
@@ -307,7 +324,7 @@ def validate_live_slurm_local_inputs(
             "configured SSH key must be a regular file without group/world access"
         )
     try:
-        from paramiko import HostKeys
+        from paramiko import HostKeys, PKey
 
         approved_known_hosts = policy.known_hosts_file.resolve(strict=True)
         configured_known_hosts = (
@@ -324,6 +341,15 @@ def validate_live_slurm_local_inputs(
             raise LiveSlurmCanaryError(
                 "site known-hosts file is not the approved owner-controlled file"
             )
+        try:
+            PKey.from_path(
+                key_path,
+                passphrase=os.environ.get("SSH_PASSPHRASE"),
+            )
+        except Exception as exc:
+            raise LiveSlurmCanaryError(
+                "configured SSH key cannot be loaded non-interactively"
+            ) from exc
         host_keys = HostKeys(str(policy.known_hosts_file))
     except LiveSlurmCanaryError:
         raise
@@ -357,6 +383,10 @@ def validate_live_slurm_site(
         "ssh_port": int(getattr(site.config, "ssh_port", 0)),
         "known_hosts_file": str(Path(site_known_hosts_file).expanduser().resolve()),
         "known_hosts_name": str(getattr(site.config, "known_hosts_name", "")),
+        "allow_ssh_agent": getattr(site.config, "allow_ssh_agent", None),
+        "allow_keyboard_interactive": getattr(
+            site.config, "allow_keyboard_interactive", None
+        ),
         "partition": str(getattr(site.config, "queue", "")),
         "work_dir": str(site.work_dir),
         "scratch_dir": str(site.scratch_dir or ""),
@@ -366,6 +396,8 @@ def validate_live_slurm_site(
         "ssh_port": _known_hosts_port(policy.known_hosts_name),
         "known_hosts_file": str(policy.known_hosts_file.resolve()),
         "known_hosts_name": policy.known_hosts_name,
+        "allow_ssh_agent": False,
+        "allow_keyboard_interactive": False,
         "partition": policy.allowed_partition,
         "work_dir": policy.allowed_work_dir,
         "scratch_dir": policy.allowed_scratch_dir,
@@ -594,9 +626,70 @@ def _cleanup_remote_paths(site: Any, paths: Sequence[str]) -> None:
         raise LiveSlurmCanaryError("canary-owned remote cleanup is incomplete")
 
 
+def _require_remote_paths_absent(site: Any, paths: Sequence[str]) -> None:
+    """Refuse to claim ownership when any target predates this canary run."""
+
+    probe = (
+        "import pathlib,sys;"
+        "print(sum(pathlib.Path(p).exists() or pathlib.Path(p).is_symlink() "
+        "for p in sys.argv[1:]))"
+    )
+    arguments = " ".join(shlex.quote(path) for path in paths)
+    existing = site.run_login(f"python3 -c {shlex.quote(probe)} {arguments}").strip()
+    if existing != "0":
+        raise LiveSlurmCanaryError(
+            "canary remote paths already exist; choose a fresh run token"
+        )
+
+
 def _scheduler_job_present(site: Any, job_id: Any) -> bool:
     validated_job_id = validate_slurm_job_id(job_id)
     return bool(site.run_login(f"squeue -h -j {validated_job_id} -o %i").strip())
+
+
+def _scheduler_job_ids_for_name(site: Any, name: str) -> tuple[str, ...]:
+    """Return validated scheduler IDs for one exact canary job name."""
+
+    validated_name = _required_text(name, "scheduler job name", _TOKEN)
+    output = site.run_login(f"squeue -h -n {shlex.quote(validated_name)} -o %i").strip()
+    if not output:
+        return ()
+    job_ids = tuple(validate_slurm_job_id(line.strip()) for line in output.splitlines())
+    if len(set(job_ids)) != len(job_ids):
+        raise LiveSlurmCanaryError("Slurm returned duplicate canary job identities")
+    return job_ids
+
+
+def _reconcile_canary_handles(
+    site: Any,
+    handles: Sequence[Any],
+    jobs: Sequence[Any],
+    *,
+    policy: LiveSlurmCanaryPolicy,
+) -> tuple[Any, ...]:
+    """Recover scheduler jobs when submission raised before returning a handle."""
+
+    by_id = {
+        validate_slurm_job_id(handle.id): handle
+        for handle in handles
+        if handle is not None
+    }
+    for job in jobs:
+        recorded_id = getattr(job, "_job_id", None)
+        if recorded_id is not None:
+            job_id = validate_slurm_job_id(recorded_id)
+            by_id.setdefault(job_id, _RecoveredSchedulerHandle(site, job_id))
+    try:
+        for job in jobs:
+            for job_id in _scheduler_job_ids_for_name(site, str(job.name)):
+                by_id.setdefault(job_id, _RecoveredSchedulerHandle(site, job_id))
+    except Exception as exc:
+        fallback = policy.emergency_cancel_command.format(job_id="<validated-job-id>")
+        raise LiveSlurmCanaryError(
+            "live Slurm canary could not reconcile scheduler submissions; inspect "
+            "the exact canary job names with squeue and run " + fallback
+        ) from exc
+    return tuple(by_id.values())
 
 
 def _cancel_active_scheduler_job(
@@ -690,8 +783,17 @@ def run_live_slurm_canary(
     started = time.monotonic()
     success_handle = None
     cancel_handle = None
-    remote_paths: list[str] = []
+    remote_paths = _owned_remote_paths(site, project, [success_job, cancel_job])
+    submission_started = False
+    remote_cleanup_complete = False
     try:
+        _require_remote_paths_absent(site, remote_paths)
+        for job in (success_job, cancel_job):
+            if _scheduler_job_ids_for_name(site, job.name):
+                raise LiveSlurmCanaryError(
+                    "canary scheduler job name is already active; choose a fresh run token"
+                )
+        submission_started = True
         success_handle = site.submit(
             success_job,
             force=True,
@@ -703,6 +805,7 @@ def run_live_slurm_canary(
             ranks_per_node=ranks,
             threads_per_rank=threads_per_rank,
             duration=policy.max_wall_time,
+            name=success_job.name,
         )
         success_states = [
             status.state
@@ -730,6 +833,7 @@ def run_live_slurm_canary(
             ranks_per_node=ranks,
             threads_per_rank=threads_per_rank,
             duration=policy.max_wall_time,
+            name=cancel_job.name,
         )
         _cancel_active_scheduler_job(
             site,
@@ -751,8 +855,8 @@ def run_live_slurm_canary(
             raise LiveSlurmCanaryError(
                 "cancelled canary process remains on the cluster"
             )
-        remote_paths = _owned_remote_paths(site, project, [success_job, cancel_job])
         _cleanup_remote_paths(site, remote_paths)
+        remote_cleanup_complete = True
 
         elapsed = time.monotonic() - started
         return {
@@ -793,16 +897,20 @@ def run_live_slurm_canary(
             "licensingBehaviorEvaluated": False,
         }
     finally:
-        _cancel_canary_handles(
-            site,
-            (cancel_handle, success_handle),
-            policy=policy,
-        )
-        if not remote_paths and success_handle is not None:
+        if submission_started:
+            reconciled_handles = _reconcile_canary_handles(
+                site,
+                (cancel_handle, success_handle),
+                (cancel_job, success_job),
+                policy=policy,
+            )
+            _cancel_canary_handles(
+                site,
+                reconciled_handles,
+                policy=policy,
+            )
+        if submission_started and not remote_cleanup_complete:
             try:
-                remote_paths = _owned_remote_paths(
-                    site, project, [success_job, cancel_job]
-                )
                 _cleanup_remote_paths(site, remote_paths)
             except Exception as exc:
                 raise LiveSlurmCanaryError(

@@ -15,6 +15,7 @@ from frequensolve.orchestrator.sites.hpc.live_canary import (
     _cancel_active_scheduler_job,
     _cancel_canary_handles,
     _owned_remote_paths,
+    _require_remote_paths_absent,
     build_synthetic_live_slurm_job,
     load_live_slurm_canary_policy,
     require_live_slurm_acknowledgement,
@@ -116,7 +117,8 @@ def test_canary_policy_loader_rejects_duplicate_keys(tmp_path):
 
 def test_local_inputs_require_explicit_key_and_approved_known_host(tmp_path):
     private_key = tmp_path / "id_ed25519"
-    private_key.write_text("synthetic-key-material")
+    private_key_object = RSAKey.generate(1024)
+    private_key_object.write_private_key_file(str(private_key))
     private_key.chmod(0o600)
     host_key = RSAKey.generate(1024)
     known_hosts = tmp_path / "known_hosts"
@@ -132,6 +134,8 @@ def test_local_inputs_require_explicit_key_and_approved_known_host(tmp_path):
         "ssh_port = 22\n"
         f"known_hosts_file = {str(known_hosts)!r}\n"
         'known_hosts_name = "login.example.invalid"\n'
+        "allow_ssh_agent = false\n"
+        "allow_keyboard_interactive = false\n"
         'username = "synthetic-user"\n'
         f"ssh_key = {str(private_key)!r}\n"
     )
@@ -161,6 +165,16 @@ def test_local_inputs_require_explicit_key_and_approved_known_host(tmp_path):
         )
     )
 
+    private_key.write_text("synthetic-invalid-private-key")
+    with pytest.raises(LiveSlurmCanaryError, match="cannot be loaded"):
+        validate_live_slurm_local_inputs(
+            site_config_path=config,
+            profile="approved",
+            policy=policy,
+        )
+    private_key_object.write_private_key_file(str(private_key))
+    private_key.chmod(0o600)
+
     private_key.chmod(0o644)
     with pytest.raises(LiveSlurmCanaryError, match="group/world"):
         validate_live_slurm_local_inputs(
@@ -179,6 +193,8 @@ def test_site_and_bundle_must_remain_inside_policy(tmp_path):
             ssh_port=22,
             known_hosts_file=policy.known_hosts_file,
             known_hosts_name=policy.known_hosts_name,
+            allow_ssh_agent=False,
+            allow_keyboard_interactive=False,
             queue="synthetic",
         ),
         work_dir=Path(policy.allowed_work_dir),
@@ -259,6 +275,16 @@ def test_scheduler_cleanup_surfaces_actionable_emergency_cancellation(tmp_path):
         _cancel_canary_handles(site, (handle,), policy=policy)
 
 
+def test_preexisting_remote_canary_paths_are_never_claimed():
+    site = SimpleNamespace(run_login=lambda command: "1")
+
+    with pytest.raises(LiveSlurmCanaryError, match="already exist"):
+        _require_remote_paths_absent(
+            site,
+            ("/approved/staging/fs_canary_existing",),
+        )
+
+
 def test_live_canary_polls_slurm_until_cancellation_is_complete(monkeypatch, tmp_path):
     policy = LiveSlurmCanaryPolicy.from_mapping(policy_values(tmp_path))
     success_job = SimpleNamespace(name="fs_canary_success")
@@ -293,6 +319,8 @@ def test_live_canary_polls_slurm_until_cancellation_is_complete(monkeypatch, tmp
     handles = iter([success_handle, cancel_handle])
 
     def run_login(command):
+        if "squeue -h -n " in command:
+            return ""
         if "squeue -h -j 10" in command:
             return ""
         if "squeue -h -j 20" in command:
@@ -324,6 +352,9 @@ def test_live_canary_polls_slurm_until_cancellation_is_complete(monkeypatch, tmp
     )
     monkeypatch.setattr(canary, "_process_count", lambda *args, **kwargs: 0)
     monkeypatch.setattr(
+        canary, "_require_remote_paths_absent", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
         canary,
         "_owned_remote_paths",
         lambda *args, **kwargs: ["/approved/staging/fs_canary_owned"],
@@ -342,3 +373,73 @@ def test_live_canary_polls_slurm_until_cancellation_is_complete(monkeypatch, tmp
     assert scheduler["cancel_requested"] is True
     assert scheduler["post_cancel_probes"] >= 2
     assert evidence["cancellation"]["schedulerJobsRemaining"] == 0
+
+
+def test_live_canary_recovers_job_id_when_submit_raises(monkeypatch, tmp_path):
+    policy = LiveSlurmCanaryPolicy.from_mapping(policy_values(tmp_path))
+    success_job = SimpleNamespace(name="fs_canary_recover_success", _job_id=None)
+    cancel_job = SimpleNamespace(name="fs_canary_recover_cancel", _job_id=None)
+    project = SimpleNamespace()
+    scheduler = {"active": False, "cancelled": [], "cleaned": False}
+
+    def submit(job, **kwargs):
+        job._job_id = "30"
+        scheduler["active"] = True
+        raise RuntimeError("synthetic post-submit transport loss")
+
+    def run_login(command):
+        if "squeue -h -n fs_canary_recover_success" in command:
+            return "30" if scheduler["active"] else ""
+        if "squeue -h -n fs_canary_recover_cancel" in command:
+            return ""
+        if "squeue -h -j 30" in command:
+            return "30" if scheduler["active"] else ""
+        raise AssertionError(f"unexpected command: {command}")
+
+    def cancel_scheduler_job(job_id):
+        scheduler["cancelled"].append(job_id)
+        scheduler["active"] = False
+        return True
+
+    site = SimpleNamespace(
+        run_config=SimpleNamespace(poll_interval=0),
+        enterprise_hpc_preflight=lambda: SimpleNamespace(to_evidence=lambda: {}),
+        submit=submit,
+        run_login=run_login,
+        cancel_job=cancel_scheduler_job,
+    )
+    monkeypatch.setattr(
+        canary, "validate_live_slurm_site", lambda *args, **kwargs: profile()
+    )
+    monkeypatch.setattr(
+        canary,
+        "build_synthetic_live_slurm_job",
+        lambda *args, **kwargs: (project, success_job, cancel_job),
+    )
+    monkeypatch.setattr(
+        canary,
+        "_owned_remote_paths",
+        lambda *args, **kwargs: ["/approved/staging/fs_canary_owned"],
+    )
+    monkeypatch.setattr(
+        canary, "_require_remote_paths_absent", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        canary,
+        "_cleanup_remote_paths",
+        lambda *args, **kwargs: scheduler.__setitem__("cleaned", True),
+    )
+
+    with pytest.raises(RuntimeError, match="post-submit transport loss"):
+        canary.run_live_slurm_canary(
+            site=site,
+            policy=policy,
+            project_path=tmp_path / "project",
+            run_token="run-654321",
+            ranks=4,
+            threads_per_rank=1,
+        )
+
+    assert scheduler["cancelled"] == ["30"]
+    assert scheduler["active"] is False
+    assert scheduler["cleaned"] is True
