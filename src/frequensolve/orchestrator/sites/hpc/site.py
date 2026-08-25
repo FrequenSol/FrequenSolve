@@ -364,6 +364,22 @@ def _safe_slurm_directive(value: Optional[str], name: str) -> Optional[str]:
     return value
 
 
+def _normalize_slurm_notify_on(value: Optional[str]) -> Optional[str]:
+    """Return one supported SLURM mail trigger or reject the value."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in {
+        "begin",
+        "end",
+        "fail",
+        "all",
+        "none",
+    }:
+        raise ValueError("notify_on must be one of: begin, end, fail, all, none")
+    return value
+
+
 @dataclass(init=False)
 class SlurmRunConfig:
     """Default resource request for SLURM job submissions.
@@ -467,7 +483,7 @@ class SlurmRunConfig:
         )
         self.account = _safe_slurm_directive(account, "account")
         self.qos = _safe_slurm_directive(qos, "qos")
-        self.notify_on = notify_on
+        self.notify_on = _normalize_slurm_notify_on(notify_on)
         self.notify_email = _safe_slurm_directive(notify_email, "notify_email")
         self.poll_interval = poll_interval
         if (
@@ -1180,6 +1196,11 @@ class SlurmSite(BaseSite):
             )
         return output
 
+    def _runtime_probe_command(self, command: str) -> str:
+        """Run a probe under the same module, Python, and environment setup as jobs."""
+
+        return " && ".join([*self._runtime_setup_lines(), command])
+
     def enterprise_hpc_preflight(
         self,
         *,
@@ -1255,7 +1276,6 @@ class SlurmSite(BaseSite):
             "squeue",
             "scancel",
             "scontrol",
-            "python3",
             *(("module",) if profile.module is not None else ()),
         )
         command_probe = " && ".join(
@@ -1263,14 +1283,14 @@ class SlurmSite(BaseSite):
             for command in required_commands
         )
         self._run_login_checked(command_probe, purpose="required Slurm commands")
-        launcher_probe = " && ".join(
-            [
-                *self._runtime_setup_lines(),
-                f"command -v {shlex.quote(profile.mpi_launcher)} >/dev/null",
-            ]
+        self._run_login_checked(
+            self._runtime_probe_command("command -v python3 >/dev/null"),
+            purpose="Python in the configured runtime environment",
         )
         self._run_login_checked(
-            launcher_probe,
+            self._runtime_probe_command(
+                f"command -v {shlex.quote(profile.mpi_launcher)} >/dev/null"
+            ),
             purpose="the configured MPI launcher",
         )
         scheduler_version = self._run_login_checked(
@@ -1314,7 +1334,9 @@ class SlurmSite(BaseSite):
                 "base64.b64encode(data).decode('ascii'))"
             )
             output = self._run_login_checked(
-                f"python3 -c {shlex.quote(reader)} {shlex.quote(path)}",
+                self._runtime_probe_command(
+                    f"python3 -c {shlex.quote(reader)} {shlex.quote(path)}"
+                ),
                 purpose=label,
             )
             digest, separator, encoded = output.partition("\n")
@@ -1393,8 +1415,10 @@ class SlurmSite(BaseSite):
             "sys.stdout.write(digest.hexdigest())"
         )
         executable_sha256 = self._run_login_checked(
-            f"python3 -c {shlex.quote(executable_digest_reader)} "
-            f"{shlex.quote(profile.solver_path)}",
+            self._runtime_probe_command(
+                f"python3 -c {shlex.quote(executable_digest_reader)} "
+                f"{shlex.quote(profile.solver_path)}"
+            ),
             purpose="the solver executable digest",
         ).strip()
         if executable_sha256 != result.solver_executable_sha256:
@@ -3261,6 +3285,7 @@ class SlurmSite(BaseSite):
         )
         qos = _safe_slurm_directive(kwargs.pop("qos", None), "qos")
         name = _safe_slurm_directive(name, "name") or "FrequenSolve"
+        notify_on = _normalize_slurm_notify_on(notify_on)
         notify_email = _safe_slurm_directive(notify_email, "notify_email")
         run_path = str(kwargs.pop("run_path", self.work_dir))
         rank_values = _normalize_rank_aliases(
