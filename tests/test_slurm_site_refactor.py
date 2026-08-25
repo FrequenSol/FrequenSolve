@@ -2717,11 +2717,15 @@ def test_slurm_site_config_normalizes_explicit_ssh_trust(tmp_path):
         ssh_port="50222",
         known_hosts_file=known_hosts,
         known_hosts_name="[127.0.0.1]:50222",
+        allow_ssh_agent=False,
+        allow_keyboard_interactive=False,
     )
 
     assert config.ssh_port == 50222
     assert config.known_hosts_file == known_hosts
     assert config.known_hosts_name == "[127.0.0.1]:50222"
+    assert config.allow_ssh_agent is False
+    assert config.allow_keyboard_interactive is False
 
 
 @pytest.mark.parametrize("ssh_port", [False, 0, 65536, "invalid"])
@@ -2737,6 +2741,12 @@ def test_slurm_site_config_rejects_invalid_known_hosts_name(known_hosts_name):
             hostname="login.example.edu",
             known_hosts_name=known_hosts_name,
         )
+
+
+@pytest.mark.parametrize("field", ["allow_ssh_agent", "allow_keyboard_interactive"])
+def test_slurm_site_config_rejects_non_boolean_authentication_policy(field):
+    with pytest.raises(ValueError, match=f"{field} must be true or false"):
+        SlurmSiteConfig(hostname="login.example.edu", **{field: "false"})
 
 
 def test_slurm_site_config_resolves_partition_shapes_and_rejects_unknown():

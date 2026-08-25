@@ -263,6 +263,56 @@ def test_explicit_ssh_endpoint_is_bound_to_configured_host_key(monkeypatch, tmp_
     ]
 
 
+def test_agent_and_interactive_fallbacks_can_be_disabled(monkeypatch):
+    site = _auth_site()
+    site.config = SimpleNamespace(
+        ssh_port=22,
+        known_hosts_file=None,
+        known_hosts_name=None,
+        allow_ssh_agent=False,
+        allow_keyboard_interactive=False,
+    )
+    configured_key = site.credentials.ssh_key
+    attempted_keys = []
+
+    class FakeTransport:
+        def __init__(self, sock):
+            self.authenticated = False
+
+        def start_client(self, timeout):
+            pass
+
+        def auth_publickey(self, username, key):
+            attempted_keys.append(key)
+            self.authenticated = key is configured_key
+
+        def auth_interactive(self, username, handler):
+            pytest.fail("keyboard-interactive authentication must be disabled")
+
+        def is_authenticated(self):
+            return self.authenticated
+
+        def set_keepalive(self, seconds):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        auth.socket, "create_connection", lambda *args, **kwargs: object()
+    )
+    monkeypatch.setattr(auth, "Transport", FakeTransport)
+    monkeypatch.setattr(auth, "_verify_server_host_key", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "paramiko.agent.Agent",
+        lambda: pytest.fail("SSH agent authentication must be disabled"),
+    )
+
+    SlurmAuthenticator(site)._interactive_authentication("login.example.edu")
+
+    assert attempted_keys == [configured_key]
+
+
 def test_failed_compute_connection_closes_channel_and_client(monkeypatch):
     channel = SimpleNamespace(closed=False)
     channel.close = lambda: setattr(channel, "closed", True)
