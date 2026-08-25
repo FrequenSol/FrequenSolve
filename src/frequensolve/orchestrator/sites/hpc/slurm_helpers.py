@@ -9,6 +9,7 @@ from typing import Any, List, Optional, Tuple, Union
 
 SLURM_QUEUE_STATES = {
     "PD": "pending",
+    "CF": "pending",
     "R": "running",
     "CG": "running",
     "CD": "complete",
