@@ -2709,6 +2709,36 @@ def test_slurm_site_config_validates_node_and_duration_requests():
         config.validate_request(3, 3, "00-00:30:00")
 
 
+def test_slurm_site_config_normalizes_explicit_ssh_trust(tmp_path):
+    known_hosts = tmp_path / "known_hosts"
+
+    config = SlurmSiteConfig(
+        hostname="127.0.0.1",
+        ssh_port="50222",
+        known_hosts_file=known_hosts,
+        known_hosts_name="[127.0.0.1]:50222",
+    )
+
+    assert config.ssh_port == 50222
+    assert config.known_hosts_file == known_hosts
+    assert config.known_hosts_name == "[127.0.0.1]:50222"
+
+
+@pytest.mark.parametrize("ssh_port", [False, 0, 65536, "invalid"])
+def test_slurm_site_config_rejects_invalid_ssh_port(ssh_port):
+    with pytest.raises(ValueError, match="SSH port"):
+        SlurmSiteConfig(hostname="login.example.edu", ssh_port=ssh_port)
+
+
+@pytest.mark.parametrize("known_hosts_name", ["", "login alias", 123])
+def test_slurm_site_config_rejects_invalid_known_hosts_name(known_hosts_name):
+    with pytest.raises(ValueError, match="known-hosts name"):
+        SlurmSiteConfig(
+            hostname="login.example.edu",
+            known_hosts_name=known_hosts_name,
+        )
+
+
 def test_slurm_site_config_resolves_partition_shapes_and_rejects_unknown():
     config = SlurmSiteConfig(
         hostname="login.example.edu",

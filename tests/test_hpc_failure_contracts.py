@@ -128,7 +128,11 @@ def test_authentication_exhaustion_closes_transport_and_hides_prompts(monkeypatc
         auth.socket, "create_connection", lambda *args, **kwargs: object()
     )
     monkeypatch.setattr(auth, "Transport", FakeTransport)
-    monkeypatch.setattr(auth, "_verify_server_host_key", lambda transport, host: None)
+    monkeypatch.setattr(
+        auth,
+        "_verify_server_host_key",
+        lambda transport, host, **kwargs: None,
+    )
     monkeypatch.setattr(
         "paramiko.agent.Agent",
         lambda: SimpleNamespace(get_keys=lambda: []),
@@ -167,6 +171,96 @@ def test_transport_setup_failure_closes_socket_and_is_sanitized(monkeypatch):
 
     assert sock.closed is True
     assert "private handshake detail" not in str(exc_info.value)
+
+
+def test_explicit_known_hosts_binding_skips_control_socket_reuse(monkeypatch, tmp_path):
+    site = _auth_site()
+    site.config = SimpleNamespace(
+        hostname="127.0.0.1",
+        ssh_port=50222,
+        known_hosts_file=tmp_path / "known_hosts",
+        known_hosts_name="[127.0.0.1]:50222",
+    )
+    site.default_host = None
+    authenticator = SlurmAuthenticator(site)
+    interactive = []
+
+    monkeypatch.setattr(auth.os.path, "exists", lambda path: True)
+    monkeypatch.setattr(
+        auth.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail(
+            "explicit host-key policy must bypass unrelated control sockets"
+        ),
+    )
+    monkeypatch.setattr(
+        authenticator,
+        "_interactive_authentication",
+        lambda host: interactive.append(host) or "interactive-client",
+    )
+
+    assert authenticator.authenticate() == "interactive-client"
+    assert interactive == ["127.0.0.1"]
+
+
+def test_explicit_ssh_endpoint_is_bound_to_configured_host_key(monkeypatch, tmp_path):
+    known_hosts_file = tmp_path / "known_hosts"
+    site = _auth_site()
+    site.config = SimpleNamespace(
+        ssh_port=50222,
+        known_hosts_file=known_hosts_file,
+        known_hosts_name="[127.0.0.1]:50222",
+    )
+    connections = []
+    verifications = []
+
+    class FakeTransport:
+        def __init__(self, sock):
+            self.authenticated = False
+
+        def start_client(self, timeout):
+            assert timeout == auth.SSH_CONNECT_TIMEOUT_SECONDS
+
+        def auth_publickey(self, username, key):
+            self.authenticated = True
+
+        def is_authenticated(self):
+            return self.authenticated
+
+        def set_keepalive(self, seconds):
+            assert seconds == 120
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        auth.socket,
+        "create_connection",
+        lambda address, timeout: connections.append((address, timeout)) or object(),
+    )
+    monkeypatch.setattr(auth, "Transport", FakeTransport)
+    monkeypatch.setattr(
+        auth,
+        "_verify_server_host_key",
+        lambda transport, host, **kwargs: verifications.append((host, kwargs)),
+    )
+    monkeypatch.setattr(
+        "paramiko.agent.Agent",
+        lambda: SimpleNamespace(get_keys=lambda: [object()]),
+    )
+
+    SlurmAuthenticator(site)._interactive_authentication("127.0.0.1")
+
+    assert connections == [(("127.0.0.1", 50222), auth.SSH_CONNECT_TIMEOUT_SECONDS)]
+    assert verifications == [
+        (
+            "127.0.0.1",
+            {
+                "known_hosts_file": known_hosts_file,
+                "known_hosts_name": "[127.0.0.1]:50222",
+            },
+        )
+    ]
 
 
 def test_failed_compute_connection_closes_channel_and_client(monkeypatch):

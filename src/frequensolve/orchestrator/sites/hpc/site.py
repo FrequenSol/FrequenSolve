@@ -178,6 +178,9 @@ class SlurmSiteConfig(BaseSiteConfig):
     """
 
     hostname: str
+    ssh_port: int = 22
+    known_hosts_file: Optional[Union[str, Path]] = None
+    known_hosts_name: Optional[str] = None
     queue: str = "normal"
     scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
@@ -196,6 +199,21 @@ class SlurmSiteConfig(BaseSiteConfig):
     )
 
     def __post_init__(self) -> None:
+        try:
+            ssh_port = int(self.ssh_port)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("SLURM SSH port must be between 1 and 65535") from exc
+        if isinstance(self.ssh_port, bool) or not 1 <= ssh_port <= 65535:
+            raise ValueError("SLURM SSH port must be between 1 and 65535")
+        self.ssh_port = ssh_port
+        if self.known_hosts_file is not None:
+            self.known_hosts_file = Path(self.known_hosts_file).expanduser()
+        if self.known_hosts_name is not None and (
+            not isinstance(self.known_hosts_name, str)
+            or not self.known_hosts_name.strip()
+            or any(character.isspace() for character in self.known_hosts_name)
+        ):
+            raise ValueError("SLURM known-hosts name must be one non-empty token")
         self.queue = _safe_slurm_directive(self.queue, "queue") or ""
         if self.account:
             self.account = _safe_slurm_directive(self.account, "account") or ""
