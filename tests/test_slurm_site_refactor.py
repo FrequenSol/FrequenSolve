@@ -621,6 +621,7 @@ def test_run_handle_watch_finalizes_terminal_status():
     job = DummyJob()
     states = iter(["running", "completed"])
     finalized = []
+    fetched = []
 
     def poll(run):
         return JobStatus(state=next(states), return_code=0, job_id="watch")
@@ -636,6 +637,10 @@ def test_run_handle_watch_finalizes_terminal_status():
             )
         )
 
+    def fetch(run):
+        fetched.append(run.id)
+        return {"result": "fetched"}
+
     run = RunHandle(
         site=site,
         job=job,
@@ -643,14 +648,18 @@ def test_run_handle_watch_finalizes_terminal_status():
         poll_interval=0.0,
         _status_fn=poll,
         _finalize_fn=finalize,
+        _fetch_fn=fetch,
+        _fetch_on_complete=True,
     )
 
     statuses = list(run.watch(timeout=1.0, poll_interval=0.0))
 
     assert [status.state for status in statuses] == ["running", "completed"]
     assert finalized == ["completed"]
+    assert fetched == ["watch"]
     assert statuses[-1].message == "packed"
     assert run.wait().status.message == "packed"
+    assert fetched == ["watch"]
 
 
 def test_run_handle_wait_prints_status_output_by_default(capsys):
