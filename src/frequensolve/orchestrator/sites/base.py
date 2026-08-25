@@ -859,7 +859,10 @@ class RunHandle:
         while True:
             status = self.status()
             if status.is_complete:
-                status = self._complete_from_status(status).status
+                result = self._complete_from_status(status)
+                if self._fetch_on_complete and (result.successful or not self.check):
+                    self.fetch()
+                status = result.status
             if status.state != last_state:
                 yield status
                 last_state = status.state
