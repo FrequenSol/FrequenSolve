@@ -192,7 +192,7 @@ class AdaptiveScheduler:
             file.write("\n")
         os.replace(temporary, self.status_file)
 
-    def _launch_command(self, task_id: int, offset: int, ranks: int):
+    def _launch_command(self, task_id: int, offset: int, ranks: int) -> list[str]:
         if self.mpi_launcher == "ibrun":
             prefix = [self.mpi, "-n", str(ranks), "-o", str(offset), "task_affinity"]
         elif self.mpi_launcher == "srun":
