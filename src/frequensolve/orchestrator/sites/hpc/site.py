@@ -1929,6 +1929,15 @@ class SlurmSite(BaseSite):
                 return_code = 1
                 raw["scheduler_liveness"] = scheduler_failure["raw"]
                 message = f"{scheduler_failure['message']}; {message}"
+            elif status == "unknown" and self._adaptive_scheduler_complete(
+                scheduler_status
+            ):
+                status = "complete"
+                return_code = 0
+                raw["scheduler_terminal_fallback"] = {
+                    "state": "complete",
+                    "reason": "slurm-accounting-unavailable",
+                }
         job_status = JobStatus(
             state=status,
             return_code=return_code,
@@ -2002,6 +2011,28 @@ class SlurmSite(BaseSite):
                 "stale": True,
             },
         }
+
+    @staticmethod
+    def _adaptive_scheduler_complete(payload: Mapping[str, Any]) -> bool:
+        """Confirm terminal success when SLURM accounting is unavailable."""
+
+        if str(payload.get("state") or "").strip().lower() != "complete":
+            return False
+        try:
+            total = int(payload.get("total") or 0)
+            successful = int(payload.get("successful") or payload.get("succeeded") or 0)
+            failed = int(payload.get("failed") or 0)
+            running = int(payload.get("running") or 0)
+            pending = int(payload.get("pending") or 0)
+        except (TypeError, ValueError):
+            return False
+        return (
+            total >= 0
+            and successful >= total
+            and failed == 0
+            and running == 0
+            and pending == 0
+        )
 
     def _scheduler_status_path(self, job: BaseJob) -> Path:
         """Return the remote scheduler progress file for a batch simulation job."""
