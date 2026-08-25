@@ -275,9 +275,19 @@ def test_connectivity_uses_the_same_graphql_capability_probe_as_submission():
     assert site.test_api_connectivity() is True
 
 
-def test_connectivity_fails_clearly_without_graphql_authentication():
+def test_connectivity_returns_false_without_graphql_authentication():
     site = make_graphql_site()
     site.graphql_client = None
 
-    with pytest.raises(RuntimeError, match="GraphQL client is unavailable"):
-        site.test_api_connectivity()
+    assert site.test_api_connectivity() is False
+
+
+def test_connectivity_returns_false_when_capability_probe_fails():
+    site = make_graphql_site()
+
+    def fail_capability_probe():
+        raise RuntimeError("request timed out")
+
+    site.graphql_client.get_compute_provisioning_mode = fail_capability_probe
+
+    assert site.test_api_connectivity() is False
