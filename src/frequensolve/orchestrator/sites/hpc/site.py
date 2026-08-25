@@ -192,6 +192,8 @@ class SlurmSiteConfig(BaseSiteConfig):
     ssh_port: int = 22
     known_hosts_file: Optional[Union[str, Path]] = None
     known_hosts_name: Optional[str] = None
+    allow_ssh_agent: bool = True
+    allow_keyboard_interactive: bool = True
     queue: str = "normal"
     scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
@@ -225,6 +227,10 @@ class SlurmSiteConfig(BaseSiteConfig):
             or any(character.isspace() for character in self.known_hosts_name)
         ):
             raise ValueError("SLURM known-hosts name must be one non-empty token")
+        if not isinstance(self.allow_ssh_agent, bool):
+            raise ValueError("SLURM allow_ssh_agent must be true or false")
+        if not isinstance(self.allow_keyboard_interactive, bool):
+            raise ValueError("SLURM allow_keyboard_interactive must be true or false")
         self.queue = _safe_slurm_directive(self.queue, "queue") or ""
         if self.account:
             self.account = _safe_slurm_directive(self.account, "account") or ""
