@@ -6,6 +6,7 @@ limits, credentials, and default paths without requiring site subclasses.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -21,10 +22,11 @@ from dataclasses import fields as dataclass_fields
 from dataclasses import replace
 from datetime import datetime, timezone
 from importlib.resources import as_file, files
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from select import select
 from typing import Any, Dict, List, Literal, Mapping, Optional, Type, Union
 
+from frequensolve import __version__ as frequensolve_version
 from frequensolve._optional import optional_dependency_error
 
 try:
@@ -43,6 +45,7 @@ from frequensolve.frequensolver import (
     IDENTITY_QUERY_TIMEOUT_SECONDS,
     FrequenSolverCompatibility,
     check_frequensolver_compatibility,
+    query_remote_frequensolver_identity,
     resolve_frequensolver_policy,
 )
 from frequensolve.orchestrator.sites.base import (
@@ -56,6 +59,12 @@ from frequensolve.orchestrator.sites.base import (
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
 from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
+from frequensolve.orchestrator.sites.hpc.enterprise import (
+    EnterpriseHPCPreflightError,
+    EnterpriseHPCPreflightResult,
+    EnterpriseHPCProfile,
+    validate_bundle_pair,
+)
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import as_list as _as_list
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     hms_to_seconds as _hms_to_seconds,
@@ -186,6 +195,9 @@ class SlurmSiteConfig(BaseSiteConfig):
     )
 
     def __post_init__(self) -> None:
+        self.queue = _safe_slurm_directive(self.queue, "queue") or ""
+        if self.account:
+            self.account = _safe_slurm_directive(self.account, "account") or ""
         normalized: Dict[str, SlurmPartitionConfig] = {}
         for name, value in self.partitions.items():
             if isinstance(value, SlurmPartitionConfig):
@@ -320,6 +332,19 @@ def _normalize_failure_tolerance(value: Any, *, default: Optional[int] = 4):
     return count
 
 
+_SLURM_DIRECTIVE_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+@/%,-]*\Z")
+
+
+def _safe_slurm_directive(value: Optional[str], name: str) -> Optional[str]:
+    """Reject values that could add or alter an ``#SBATCH`` directive."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _SLURM_DIRECTIVE_VALUE.fullmatch(value):
+        raise ValueError(f"{name} must be a single safe SLURM directive value")
+    return value
+
+
 @dataclass(init=False)
 class SlurmRunConfig:
     """Default resource request for SLURM job submissions.
@@ -353,6 +378,7 @@ class SlurmRunConfig:
     mpi_async_progress: bool = False
     tolerate_failures: Optional[int] = 4
     account: Optional[str] = None
+    qos: Optional[str] = None
     notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None
     notify_email: Optional[str] = None
     poll_interval: Optional[int] = None
@@ -370,6 +396,7 @@ class SlurmRunConfig:
         mpi_async_progress: bool = False,
         tolerate_failures: Optional[int] = 4,
         account: Optional[str] = None,
+        qos: Optional[str] = None,
         notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
         notify_email: Optional[str] = None,
         poll_interval: Optional[int] = None,
@@ -392,7 +419,7 @@ class SlurmRunConfig:
             names = ", ".join(unexpected)
             raise TypeError(f"Unexpected SlurmRunConfig option(s): {names}")
 
-        self.queue = queue
+        self.queue = _safe_slurm_directive(queue, "queue")
         self.nodes = nodes
         self.duration = duration
         self.ranks_per_node = values.get("ranks_per_node")
@@ -410,9 +437,10 @@ class SlurmRunConfig:
             tolerate_failures,
             default=4,
         )
-        self.account = account
+        self.account = _safe_slurm_directive(account, "account")
+        self.qos = _safe_slurm_directive(qos, "qos")
         self.notify_on = notify_on
-        self.notify_email = notify_email
+        self.notify_email = _safe_slurm_directive(notify_email, "notify_email")
         self.poll_interval = poll_interval
         if (
             scheduler_heartbeat_timeout is not None
@@ -464,7 +492,7 @@ class SlurmRunConfig:
         """
 
         overrides = _normalize_rank_aliases(overrides)
-        values = {
+        values: Dict[str, Any] = {
             "queue": self.queue,
             "nodes": self.nodes,
             "duration": self.duration,
@@ -473,6 +501,7 @@ class SlurmRunConfig:
             "mpi_async_progress": self.mpi_async_progress,
             "tolerate_failures": self.tolerate_failures,
             "account": self.account,
+            "qos": self.qos,
             "notify_on": self.notify_on,
             "notify_email": self.notify_email,
             "poll_interval": self.poll_interval,
@@ -568,6 +597,8 @@ class SlurmSite(BaseSite):
     frequensolver_policy: Optional[str]
     _frequensolver_compatibility_result: Optional[FrequenSolverCompatibility]
     _frequensolver_compatibility_policy: Optional[str]
+    enterprise_hpc: Optional[EnterpriseHPCProfile]
+    _enterprise_hpc_preflight_result: Optional[EnterpriseHPCPreflightResult]
 
     site_name: str = "SLURM"
     credentials_cls: Type["SlurmLoginCredentials"] = None
@@ -602,6 +633,7 @@ class SlurmSite(BaseSite):
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
         frequensolver_policy: Optional[str] = None,
+        enterprise_hpc: Optional[Union[EnterpriseHPCProfile, Mapping[str, Any]]] = None,
     ):
         if (
             default_partition is not None
@@ -662,6 +694,19 @@ class SlurmSite(BaseSite):
             ssh_key=ssh_key,
             credential_store=credential_store,
         )
+        if isinstance(enterprise_hpc, Mapping):
+            enterprise_hpc = EnterpriseHPCProfile.from_mapping(enterprise_hpc)
+        elif enterprise_hpc is not None and not isinstance(
+            enterprise_hpc, EnterpriseHPCProfile
+        ):
+            raise ValueError("enterprise_hpc must be a profile table")
+        self.enterprise_hpc = enterprise_hpc
+        if enterprise_hpc is not None:
+            if solver is not None and str(solver) != enterprise_hpc.solver_path:
+                raise ValueError(
+                    "Configured solver does not match enterprise_hpc.solver_path"
+                )
+            solver = enterprise_hpc.solver_path
         self.solver = solver
         self._configured_work_dir = work_dir
         self._rel_proj_path = Path(rel_path) if rel_path not in {None, ""} else None
@@ -672,12 +717,25 @@ class SlurmSite(BaseSite):
         if isinstance(modules, str):
             raise ValueError("modules must be an array of module names")
         self.modules = [str(module) for module in (modules or [])]
+        if enterprise_hpc is not None and enterprise_hpc.module is not None:
+            if enterprise_hpc.module not in self.modules:
+                self.modules.append(enterprise_hpc.module)
         self.environment = validate_environment(environment)
         self.frequensolver_policy = frequensolver_policy
         self._frequensolver_compatibility_result = None
         self._frequensolver_compatibility_policy = None
+        self._enterprise_hpc_preflight_result = None
         self.transfer_method = transfer_method
         self.run_config = run_config or SlurmRunConfig(queue=partition)
+        if enterprise_hpc is not None:
+            enterprise_hpc.validate_site(
+                host=str(getattr(self.config, "hostname", "")),
+                partition=str(partition),
+                account=self.run_config.account
+                or getattr(self.config, "account", None),
+                qos=self.run_config.qos,
+                mpi_launcher=str(getattr(self.config, "mpi_wrapper", "")),
+            )
         self._authenticator = SlurmAuthenticator(self)
         self._transfer = SlurmTransferManager(self)
 
@@ -885,12 +943,21 @@ class SlurmSite(BaseSite):
         )
         fresh_run = bool(fresh_run or skip_policy.force)
         validate = overrides.pop("validate", True)
-        self.check_frequensolver_compatibility(policy=frequensolver_policy)
-        self.prepare_job(job, validate=validate)
         if mode not in {"auto", "attached", "batch"}:
             raise ValueError("mode must be 'auto', 'attached', or 'batch'")
 
-        run_config, extra_kwargs = self.run_config.resolved(self.config, **overrides)
+        enterprise_hpc = getattr(self, "enterprise_hpc", None)
+        if enterprise_hpc is not None:
+            run_config, extra_kwargs = self.run_config.resolved(
+                self.config, **overrides
+            )
+            self.enterprise_hpc_preflight(run_config=run_config)
+        else:
+            self.check_frequensolver_compatibility(policy=frequensolver_policy)
+            run_config, extra_kwargs = self.run_config.resolved(
+                self.config, **overrides
+            )
+        self.prepare_job(job, validate=validate)
 
         if not fresh_run:
             handle = self._reattach_inflight_run(
@@ -942,7 +1009,11 @@ class SlurmSite(BaseSite):
             )
             job._job_id = allocation_id
             self._emit(f"Submitted {job.name} to active {self.site_name} allocation")
-            self._record_site_run(job, status="running")
+            self._record_site_run(
+                job,
+                scheduler_id=allocation_id,
+                status="running",
+            )
             handle = RunHandle(
                 site=self,
                 job=job,
@@ -1051,6 +1122,251 @@ class SlurmSite(BaseSite):
         self._frequensolver_compatibility_policy = selected
         return result
 
+    def _run_login_checked(self, command: str, *, purpose: str) -> str:
+        """Run a bounded login-node probe and reject a nonzero result."""
+
+        _, stdout, stderr = self.run_login_cmd(
+            command,
+            timeout=IDENTITY_QUERY_TIMEOUT_SECONDS,
+        )
+        output = _read_stream(stdout)
+        _read_stream(stderr)
+        status = _ssh_exit_status(stdout, stderr)
+        if status != 0:
+            raise EnterpriseHPCPreflightError(
+                f"Enterprise HPC preflight could not verify {purpose} "
+                f"(remote exit status {status})"
+            )
+        return output
+
+    def enterprise_hpc_preflight(
+        self,
+        *,
+        run_config: Optional[SlurmRunConfig] = None,
+        force: bool = False,
+    ) -> EnterpriseHPCPreflightResult:
+        """Verify bundle, scheduler, solver, paths, and bounds before submission."""
+
+        profile = self.enterprise_hpc
+        if profile is None:
+            raise ValueError("No enterprise_hpc profile is configured")
+        config = run_config or self.run_config.resolved(self.config)[0]
+        if config.slurm_args:
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC does not permit raw slurm_args; use the typed "
+                "resource profile"
+            )
+        if config.run_path is not None:
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC does not permit run_path overrides; use the "
+                "allowlisted site work directory"
+            )
+        partition = str(config.queue or self.config.queue)
+        partition_config = self.config_for_partition(partition)
+        if config.ranks_per_node is None:
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC run_config must set bounded ranks_per_node"
+            )
+        ranks_per_node = int(config.ranks_per_node)
+        duration = str(config.duration or partition_config.max_duration)
+        profile.validate_site(
+            host=str(getattr(self.config, "hostname", self.login_host)),
+            partition=partition,
+            account=config.account or getattr(self.config, "account", None),
+            qos=config.qos,
+            mpi_launcher=str(self.config.mpi_wrapper),
+        )
+        profile.validate_resources(
+            nodes=int(config.nodes),
+            ranks_per_node=ranks_per_node,
+            cores_per_node=int(partition_config.cores_per_node),
+            duration_seconds=_hms_to_seconds(duration),
+            max_wall_time_seconds=_hms_to_seconds(profile.max_wall_time),
+        )
+        if (
+            str(self.work_dir) != profile.work_dir
+            or (None if self.scratch_dir is None else str(self.scratch_dir))
+            != profile.scratch_dir
+        ):
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC site work/scratch paths do not match the profile"
+            )
+        if frequensolve_version != profile.frequensolve_version:
+            raise EnterpriseHPCPreflightError(
+                "Installed FrequenSolve version does not match the Enterprise HPC bundle"
+            )
+        # Remote state can change between submissions, so no cached result may
+        # authorize scheduler spend. Keep ``force`` as a source-compatible
+        # keyword while always refreshing the observations.
+        del force
+
+        required_commands = (
+            "sbatch",
+            "squeue",
+            "scancel",
+            "scontrol",
+            "python3",
+            profile.mpi_launcher,
+            *(("module",) if profile.module is not None else ()),
+        )
+        command_probe = " && ".join(
+            f"command -v {shlex.quote(command)} >/dev/null"
+            for command in required_commands
+        )
+        self._run_login_checked(command_probe, purpose="required Slurm commands")
+        scheduler_version = self._run_login_checked(
+            "scontrol --version",
+            purpose="the Slurm scheduler",
+        ).strip()
+        if not re.fullmatch(
+            r"slurm [0-9]+(?:\.[0-9]+){1,2}(?:[-+._][A-Za-z0-9]+)*",
+            scheduler_version,
+            flags=re.IGNORECASE,
+        ):
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC preflight found an unexpected scheduler"
+            )
+        self._run_login_checked(
+            f"test -x {shlex.quote(profile.solver_path)}",
+            purpose="the solver executable",
+        )
+        for path, label in (
+            (profile.work_dir, "the work directory"),
+            (profile.scratch_dir, "the scratch directory"),
+        ):
+            if path is not None:
+                self._run_login_checked(
+                    f"test -d {shlex.quote(path)} && test -w {shlex.quote(path)}",
+                    purpose=label,
+                )
+        if profile.python_environment is not None:
+            activation = PurePosixPath(profile.python_environment) / "bin" / "activate"
+            self._run_login_checked(
+                f"test -f {shlex.quote(str(activation))}",
+                purpose="the Python environment activation",
+            )
+
+        def remote_json(path: str, label: str) -> tuple[Mapping[str, Any], str]:
+            reader = (
+                "import base64,hashlib,sys;"
+                "data=open(sys.argv[1],'rb').read(1048577);"
+                "len(data)<=1048576 or sys.exit(70);"
+                "sys.stdout.write(hashlib.sha256(data).hexdigest()+'\\n'+"
+                "base64.b64encode(data).decode('ascii'))"
+            )
+            output = self._run_login_checked(
+                f"python3 -c {shlex.quote(reader)} {shlex.quote(path)}",
+                purpose=label,
+            )
+            digest, separator, encoded = output.partition("\n")
+            if not separator or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise EnterpriseHPCPreflightError(
+                    f"Enterprise HPC {label} snapshot is invalid"
+                )
+            try:
+                raw = base64.b64decode(encoded, validate=True)
+                text = raw.decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise EnterpriseHPCPreflightError(
+                    f"Enterprise HPC {label} is not valid UTF-8 JSON"
+                ) from exc
+            if len(raw) > 1024 * 1024:
+                raise EnterpriseHPCPreflightError(
+                    f"Enterprise HPC {label} exceeds the 1 MiB safety limit"
+                )
+
+            def closed_object(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError(f"duplicate key: {key}")
+                    result[key] = value
+                return result
+
+            try:
+                payload = json.loads(text, object_pairs_hook=closed_object)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise EnterpriseHPCPreflightError(
+                    f"Enterprise HPC {label} is not valid JSON"
+                ) from exc
+            if not isinstance(payload, Mapping):
+                raise EnterpriseHPCPreflightError(
+                    f"Enterprise HPC {label} must contain an object"
+                )
+            return payload, digest
+
+        bundle, bundle_sha256 = remote_json(profile.bundle_manifest, "bundle manifest")
+        compatibility, compatibility_sha256 = remote_json(
+            profile.compatibility_manifest,
+            "compatibility manifest",
+        )
+        bundle_schema, bundle_schema_sha256 = remote_json(
+            profile.bundle_schema_path,
+            "bundle schema",
+        )
+        compatibility_schema, compatibility_schema_sha256 = remote_json(
+            profile.compatibility_schema_path,
+            "compatibility schema",
+        )
+        if (
+            bundle_schema_sha256 != profile.bundle_schema_sha256
+            or compatibility_schema_sha256 != profile.compatibility_schema_sha256
+        ):
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC Deployment schema digest does not match the profile"
+            )
+        result = validate_bundle_pair(
+            profile,
+            bundle,
+            compatibility,
+            bundle_sha256=bundle_sha256,
+            compatibility_sha256=compatibility_sha256,
+            bundle_schema=bundle_schema,
+            compatibility_schema=compatibility_schema,
+            scheduler_version=scheduler_version,
+            cores_per_node=int(partition_config.cores_per_node),
+        )
+        executable_digest_reader = (
+            "import collections,hashlib,sys;"
+            "digest=hashlib.sha256();stream=open(sys.argv[1],'rb');"
+            "collections.deque((digest.update(chunk) for chunk in "
+            "iter(lambda:stream.read(1048576),b'')),maxlen=0);"
+            "sys.stdout.write(digest.hexdigest())"
+        )
+        executable_sha256 = self._run_login_checked(
+            f"python3 -c {shlex.quote(executable_digest_reader)} "
+            f"{shlex.quote(profile.solver_path)}",
+            purpose="the solver executable digest",
+        ).strip()
+        if executable_sha256 != result.solver_executable_sha256:
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC solver executable digest does not match the bundle"
+            )
+        identity_query = query_remote_frequensolver_identity(
+            profile.solver_path,
+            lambda command: self._run_login_checked(
+                command,
+                purpose="the solver public identity",
+            ),
+            setup_commands=self._runtime_setup_lines(),
+        )
+        identity = identity_query.identity
+        if identity is None:
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC solver public identity is unavailable"
+            )
+        if (
+            identity.version.removeprefix("v")
+            != profile.solver_version.removeprefix("v")
+            or identity.git_commit != profile.solver_source_commit
+            or identity.build_id != profile.solver_build_id
+        ):
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC solver public identity does not match the bundle"
+            )
+        self._enterprise_hpc_preflight_result = result
+        return result
+
     def handle(
         self, job, job_id: Optional[str] = None, mode: str = "attached"
     ) -> RunHandle:
@@ -1085,6 +1401,20 @@ class SlurmSite(BaseSite):
             duration,
         )
         duration = duration or getattr(self.config, "max_duration", "00-02:00:00")
+        provision_config = None
+        if self.enterprise_hpc is not None:
+            provision_config = SlurmRunConfig(
+                queue=kwargs.get("queue", self.run_config.queue or self.config.queue),
+                nodes=nhost,
+                ranks_per_node=nproc,
+                duration=duration,
+                account=kwargs.get(
+                    "account",
+                    self.run_config.account or getattr(self.config, "account", None),
+                ),
+                qos=kwargs.get("qos", self.run_config.qos),
+            )
+            self.enterprise_hpc_preflight(run_config=provision_config)
         self._emit(
             f"Submitting {self.site_name} allocation: nodes={nhost}, "
             f"tasks={nproc}, duration={duration}"
@@ -1104,6 +1434,9 @@ class SlurmSite(BaseSite):
             remote_path = self.remote_tmp_dir / os.path.basename(script_path)
             try:
                 self.put(script_path, remote_path)
+
+                if provision_config is not None:
+                    self.enterprise_hpc_preflight(run_config=provision_config)
 
                 self.pool.id = self._submit_sbatch(
                     f"sbatch {shlex.quote(str(remote_path))}"
@@ -1829,7 +2162,7 @@ class SlurmSite(BaseSite):
     ):
         if not isinstance(job, BaseJob):
             return None
-        metadata = {}
+        metadata: Dict[str, Any] = {}
         config_path = getattr(self, "_site_config_path", None)
         profile = getattr(self, "_site_profile", None)
         if config_path is not None and profile is not None:
@@ -1837,6 +2170,9 @@ class SlurmSite(BaseSite):
                 "site_config_path": str(config_path),
                 "site_profile": str(profile),
             }
+        enterprise_result = getattr(self, "_enterprise_hpc_preflight_result", None)
+        if enterprise_result is not None:
+            metadata["enterprise_hpc"] = enterprise_result.to_evidence()
         record = job.record_site_run(
             site=self.site_name,
             work_dir=self.work_dir,
@@ -2214,6 +2550,7 @@ class SlurmSite(BaseSite):
             ),
             **({"queue": config.queue} if config.queue is not None else {}),
             **({"account": config.account} if config.account is not None else {}),
+            **({"qos": config.qos} if config.qos is not None else {}),
             **({"notify_on": config.notify_on} if config.notify_on is not None else {}),
             **(
                 {"notify_email": config.notify_email}
@@ -2227,14 +2564,16 @@ class SlurmSite(BaseSite):
         remote_script, remote_job = self._transfer_SLURM_job(script, job)
 
         logs_path = job._remote_path(self.work_dir) / "logs"
-        cmd = f"mkdir -p {logs_path}/batch && "
-        cmd += f"rm -f {logs_path}/scheduler_status.json && "
+        cmd = f"mkdir -p {shlex.quote(str(logs_path / 'batch'))} && "
+        cmd += f"rm -f {shlex.quote(str(logs_path / 'scheduler_status.json'))} && "
         cmd += "sbatch "
         if config.slurm_args:
             for arg in config.slurm_args:
-                cmd += f"{arg} "
-        cmd += f"{remote_script} {remote_job}"
+                cmd += f"{shlex.quote(str(arg))} "
+        cmd += f"{shlex.quote(str(remote_script))} {shlex.quote(str(remote_job))}"
 
+        if self.enterprise_hpc is not None:
+            self.enterprise_hpc_preflight(run_config=config)
         job_id = self._submit_sbatch(cmd)
 
         logger.info(
@@ -2431,6 +2770,12 @@ class SlurmSite(BaseSite):
         lines = [f"module load {shlex.quote(module)}" for module in self.modules]
         if self.modules:
             lines.append("module list")
+        enterprise_hpc = getattr(self, "enterprise_hpc", None)
+        if enterprise_hpc is not None and enterprise_hpc.python_environment is not None:
+            activation = (
+                PurePosixPath(enterprise_hpc.python_environment) / "bin" / "activate"
+            )
+            lines.append(f". {shlex.quote(str(activation))}")
         runtime_environment = {
             **_HPC_RUNTIME_DEFAULTS,
             **self.environment,
@@ -2727,6 +3072,8 @@ class SlurmSite(BaseSite):
             pack_job = kwargs.pop("pack_job", True)
         mpi_async_progress = kwargs.pop("mpi_async_progress", False)
         kwargs.pop("executable", None)
+        if kwargs.get("run_path") is not None:
+            kwargs.setdefault("run_path_shell", shlex.quote(str(kwargs["run_path"])))
         n_threads = self.pool.ncore // self.pool.nproc
         mpi_async_progress_setup: List[str] = []
         if mpi_async_progress:
@@ -2747,8 +3094,11 @@ class SlurmSite(BaseSite):
             n_procs=self.pool.nproc,
             n_threads=n_threads,
             mpi=self.mpi_cmd,
+            mpi_shell=shlex.quote(str(self.mpi_cmd)),
             dir_out=dir_out,
+            dir_out_shell=shlex.quote(dir_out),
             executable=self.executable,
+            executable_shell=shlex.quote(str(self.executable)),
             imaging_job=isinstance(job, ImagingJob),
             pack_job=bool(pack_job),
             runtime_setup=self._runtime_setup_lines(),
@@ -2787,9 +3137,20 @@ class SlurmSite(BaseSite):
         """
 
         # Unpack keyword arguments
-        queue = str(kwargs.pop("queue", self.config.queue))
+        queue = _safe_slurm_directive(
+            str(kwargs.pop("queue", self.config.queue)), "queue"
+        )
+        if queue is None:
+            raise ValueError("queue must be configured")
         config = self.config_for_partition(queue)
-        account = str(kwargs.pop("account", self.config.account))
+        account_value = kwargs.pop("account", self.config.account)
+        account = _safe_slurm_directive(
+            None if account_value in {None, ""} else str(account_value),
+            "account",
+        )
+        qos = _safe_slurm_directive(kwargs.pop("qos", None), "qos")
+        name = _safe_slurm_directive(name, "name") or "FrequenSolve"
+        notify_email = _safe_slurm_directive(notify_email, "notify_email")
         run_path = str(kwargs.pop("run_path", self.work_dir))
         rank_values = _normalize_rank_aliases(
             {
@@ -2878,17 +3239,26 @@ class SlurmSite(BaseSite):
             duration=duration,
             queue=queue,
             account=account,
+            qos=qos,
             imaging_job=imaging_job,
             pack_job=pack_job,
             mpi=self.mpi_cmd,
+            mpi_shell=shlex.quote(str(self.mpi_cmd)),
             executable=self.executable,
+            executable_shell=shlex.quote(str(self.executable)),
             runtime_setup=self._runtime_setup_lines(),
             mpi_async_progress_setup=mpi_async_progress_setup,
             scheduler_config_shell=shlex.quote(json.dumps(scheduler_config, indent=2)),
             sizing_json_shell=shlex.quote(str(sizing_json)),
             scheduler_runner=shlex.quote(str(self._adaptive_scheduler_remote_path())),
+            dir_out_shell=shlex.quote(str(stdout)),
             **({"sizing_json": sizing_json} if sizing_json is not None else {}),
             **({"run_path": run_path} if run_path is not None else {}),
+            **(
+                {"run_path_shell": shlex.quote(str(run_path))}
+                if run_path is not None
+                else {}
+            ),
             **({"notify_on": notify_on.upper()} if notify_on is not None else {}),
             **({"notify_email": notify_email} if notify_email is not None else {}),
             **kwargs,
@@ -2901,6 +3271,7 @@ class SlurmSite(BaseSite):
         duration: str = "00-02:00:00",
         queue: Optional[str] = None,
         account: Optional[str] = None,
+        qos: Optional[str] = None,
         notify_email: Optional[str] = None,
         **kwargs,
     ) -> str:
@@ -2922,8 +3293,14 @@ class SlurmSite(BaseSite):
                 }
             )
             ranks_per_node = int(values["ranks_per_node"])
-        name = kwargs.get("name", "FS_cluster")
-        account = account or self.run_config.account or self.config.account
+        name = _safe_slurm_directive(kwargs.get("name", "FS_cluster"), "name")
+        queue = _safe_slurm_directive(queue or self.config.queue, "queue")
+        account = _safe_slurm_directive(
+            account or self.run_config.account or self.config.account or None,
+            "account",
+        )
+        qos = _safe_slurm_directive(qos or self.run_config.qos, "qos")
+        notify_email = _safe_slurm_directive(notify_email, "notify_email")
 
         return self._render_template(
             "provision/provision_SLURM.sh",
@@ -2935,8 +3312,10 @@ class SlurmSite(BaseSite):
             ranks_per_node=ranks_per_node,
             queue=queue,
             account=account,
+            qos=qos,
             duration=duration,
             work_dir=self.work_dir,
+            work_dir_shell=shlex.quote(str(self.work_dir)),
             mpi=self.config.mpi_wrapper,
             **({"notify_email": notify_email} if notify_email is not None else {}),
         )

@@ -8,6 +8,9 @@
 {% if account %}
 #SBATCH -A {{ account }}
 {% endif %}
+{% if qos %}
+#SBATCH --qos={{ qos }}
+{% endif %}
 {% if duration %}
 #SBATCH -t {{ duration }}
 {% endif %}
@@ -15,7 +18,7 @@
 #SBATCH --mail-user={{ notify_email }}
 {% endif %}
 
-cd {{ work_dir }}
+cd {{ work_dir_shell }}
 
 # {{ mpi }} flux start --boot
 

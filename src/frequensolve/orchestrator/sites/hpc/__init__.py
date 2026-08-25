@@ -1,6 +1,11 @@
 """SLURM/HPC site backends."""
 
 from frequensolve.orchestrator.sites.hpc.config import Stampede3Config
+from frequensolve.orchestrator.sites.hpc.enterprise import (
+    EnterpriseHPCPreflightError,
+    EnterpriseHPCPreflightResult,
+    EnterpriseHPCProfile,
+)
 from frequensolve.orchestrator.sites.hpc.site import (
     SlurmLoginCredentials,
     SlurmPartitionConfig,
@@ -20,6 +25,9 @@ from frequensolve.orchestrator.sites.hpc.stampede3 import (
 )
 
 __all__ = [
+    "EnterpriseHPCPreflightError",
+    "EnterpriseHPCPreflightResult",
+    "EnterpriseHPCProfile",
     "SlurmLoginCredentials",
     "SlurmPartitionConfig",
     "SlurmRunConfig",
