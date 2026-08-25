@@ -1350,11 +1350,15 @@ class AWSSite(BaseSite):
             True if API is accessible, False otherwise.
         """
         if self.graphql_client is None:
-            raise RuntimeError("Authenticated GraphQL client is unavailable")
-        return self.graphql_client.get_compute_provisioning_mode() in {
-            "shared",
-            "per-user",
-        }
+            return False
+        try:
+            return self.graphql_client.get_compute_provisioning_mode() in {
+                "shared",
+                "per-user",
+            }
+        except Exception as exc:
+            logger.warning("GraphQL connectivity probe failed: %s", exc)
+            return False
 
     def cancel_job(self, job_id: str) -> None:
         """Cancel a running simulation.
