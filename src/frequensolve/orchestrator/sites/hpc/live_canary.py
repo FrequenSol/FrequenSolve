@@ -88,6 +88,14 @@ def _wall_time_seconds(value: str) -> int:
     return hours * 3600 + minutes * 60 + seconds
 
 
+def _known_hosts_port(name: str) -> int:
+    """Return the SSH port encoded by an OpenSSH known-hosts lookup name."""
+
+    if name.startswith("["):
+        return int(name.rsplit("]:", 1)[1])
+    return 22
+
+
 @dataclass(frozen=True)
 class LiveSlurmCanaryPolicy:
     """Closed local execution policy required before any scheduler mutation."""
@@ -123,6 +131,10 @@ class LiveSlurmCanaryPolicy:
             )
         _required_text(self.allowed_host, "allowedHost", _HOST)
         _required_text(self.known_hosts_name, "knownHostsName", _KNOWN_HOST_NAME)
+        if not 1 <= _known_hosts_port(self.known_hosts_name) <= 65535:
+            raise ValueError("live Slurm canary knownHostsName has an invalid port")
+        if not self.known_hosts_file.is_absolute():
+            raise ValueError("live Slurm canary knownHostsFile must be absolute")
         _required_text(self.allowed_partition, "allowedPartition", _TOKEN)
         _remote_path(self.allowed_work_dir, "allowedWorkDir")
         _remote_path(self.allowed_scratch_dir, "allowedScratchDir")
@@ -272,6 +284,12 @@ def validate_live_slurm_local_inputs(
         raise LiveSlurmCanaryError("selected site profile is not generic Slurm")
     if site.get("hostname") != policy.allowed_host:
         raise LiveSlurmCanaryError("site host is not allowlisted by the canary policy")
+    if site.get("known_hosts_name") != policy.known_hosts_name:
+        raise LiveSlurmCanaryError(
+            "site known-hosts lookup is not bound to the canary policy"
+        )
+    if site.get("ssh_port", 22) != _known_hosts_port(policy.known_hosts_name):
+        raise LiveSlurmCanaryError("site SSH port is not bound to the canary policy")
     if not isinstance(site.get("username"), str) or not str(site["username"]).strip():
         raise LiveSlurmCanaryError(
             "site config must provide a non-interactive username"
@@ -291,7 +309,24 @@ def validate_live_slurm_local_inputs(
     try:
         from paramiko import HostKeys
 
+        approved_known_hosts = policy.known_hosts_file.resolve(strict=True)
+        configured_known_hosts = (
+            Path(str(site.get("known_hosts_file", "")))
+            .expanduser()
+            .resolve(strict=True)
+        )
+        known_hosts_stat = approved_known_hosts.stat()
+        if (
+            configured_known_hosts != approved_known_hosts
+            or not stat.S_ISREG(known_hosts_stat.st_mode)
+            or known_hosts_stat.st_mode & 0o022
+        ):
+            raise LiveSlurmCanaryError(
+                "site known-hosts file is not the approved owner-controlled file"
+            )
         host_keys = HostKeys(str(policy.known_hosts_file))
+    except LiveSlurmCanaryError:
+        raise
     except (OSError, ValueError) as exc:
         raise LiveSlurmCanaryError("approved known-hosts file is unavailable") from exc
     if not host_keys.lookup(policy.known_hosts_name):
@@ -312,14 +347,25 @@ def validate_live_slurm_site(
     profile = getattr(site, "enterprise_hpc", None)
     if not isinstance(profile, EnterpriseHPCProfile):
         raise LiveSlurmCanaryError("site has no Enterprise HPC compatibility profile")
+    site_known_hosts_file = getattr(site.config, "known_hosts_file", None)
+    if not isinstance(site_known_hosts_file, (str, os.PathLike)):
+        raise LiveSlurmCanaryError(
+            "site known-hosts file is not bound to the canary policy"
+        )
     observed = {
         "host": str(getattr(site.config, "hostname", "")),
+        "ssh_port": int(getattr(site.config, "ssh_port", 0)),
+        "known_hosts_file": str(Path(site_known_hosts_file).expanduser().resolve()),
+        "known_hosts_name": str(getattr(site.config, "known_hosts_name", "")),
         "partition": str(getattr(site.config, "queue", "")),
         "work_dir": str(site.work_dir),
         "scratch_dir": str(site.scratch_dir or ""),
     }
     expected = {
         "host": policy.allowed_host,
+        "ssh_port": _known_hosts_port(policy.known_hosts_name),
+        "known_hosts_file": str(policy.known_hosts_file.resolve()),
+        "known_hosts_name": policy.known_hosts_name,
         "partition": policy.allowed_partition,
         "work_dir": policy.allowed_work_dir,
         "scratch_dir": policy.allowed_scratch_dir,
@@ -574,6 +620,52 @@ def _cancel_active_scheduler_job(
         time.sleep(poll_interval)
 
 
+def _cancel_canary_handles(
+    site: Any,
+    handles: Sequence[Any],
+    *,
+    policy: LiveSlurmCanaryPolicy,
+) -> None:
+    """Cancel every possibly active handle or report exact emergency commands."""
+
+    failures: list[tuple[str, Exception]] = []
+    for handle in handles:
+        if handle is None:
+            continue
+        try:
+            job_id = validate_slurm_job_id(handle.id)
+            _cancel_active_scheduler_job(
+                site,
+                handle,
+                timeout=policy.cancel_timeout_seconds,
+                poll_interval=site.run_config.poll_interval,
+            )
+            if _scheduler_job_present(site, job_id):
+                raise LiveSlurmCanaryError(
+                    "canary scheduler job remains active after cancellation"
+                )
+        except Exception as exc:
+            failures.append((str(getattr(handle, "id", "unknown")), exc))
+    if failures:
+        instructions = []
+        for job_id, _ in failures:
+            try:
+                validated_job_id = validate_slurm_job_id(job_id)
+            except ValueError:
+                command = policy.emergency_cancel_command.format(
+                    job_id="<validated-job-id>"
+                )
+            else:
+                command = policy.emergency_cancel_command.format(
+                    job_id=validated_job_id
+                )
+            instructions.append(f"job {job_id}: {command}")
+        raise LiveSlurmCanaryError(
+            "live Slurm canary emergency cancellation failed; scheduler spend may "
+            "remain active; run " + "; ".join(instructions)
+        ) from failures[0][1]
+
+
 def run_live_slurm_canary(
     *,
     site: Any,
@@ -639,7 +731,12 @@ def run_live_slurm_canary(
             threads_per_rank=threads_per_rank,
             duration=policy.max_wall_time,
         )
-        cancel_handle.cancel()
+        _cancel_active_scheduler_job(
+            site,
+            cancel_handle,
+            timeout=policy.cancel_timeout_seconds,
+            poll_interval=site.run_config.poll_interval,
+        )
         cancel_result = cancel_handle.wait(
             timeout=policy.cancel_timeout_seconds,
             poll_interval=site.run_config.poll_interval,
@@ -647,10 +744,7 @@ def run_live_slurm_canary(
         )
         if cancel_result.status.state != "cancelled":
             raise LiveSlurmCanaryError("cancellation case did not reach cancelled")
-        scheduler_remaining = site.run_login(
-            f"squeue -h -j {shlex.quote(str(cancel_handle.id))} -o %i"
-        ).strip()
-        if scheduler_remaining:
+        if _scheduler_job_present(site, cancel_handle.id):
             raise LiveSlurmCanaryError("cancelled job remains in the Slurm queue")
         process_count = _process_count(site, cancel_job.name)
         if process_count:
@@ -699,31 +793,22 @@ def run_live_slurm_canary(
             "licensingBehaviorEvaluated": False,
         }
     finally:
-        all_terminal = True
-        for handle in (cancel_handle, success_handle):
-            if handle is None:
-                continue
-            try:
-                _cancel_active_scheduler_job(
-                    site,
-                    handle,
-                    timeout=policy.cancel_timeout_seconds,
-                    poll_interval=site.run_config.poll_interval,
-                )
-            except Exception:
-                all_terminal = False
-            else:
-                all_terminal = all_terminal and not _scheduler_job_present(
-                    site, handle.id
-                )
-        if all_terminal and not remote_paths and success_handle is not None:
+        _cancel_canary_handles(
+            site,
+            (cancel_handle, success_handle),
+            policy=policy,
+        )
+        if not remote_paths and success_handle is not None:
             try:
                 remote_paths = _owned_remote_paths(
                     site, project, [success_job, cancel_job]
                 )
                 _cleanup_remote_paths(site, remote_paths)
-            except Exception:
-                pass
+            except Exception as exc:
+                raise LiveSlurmCanaryError(
+                    "live Slurm canary owned-path cleanup failed after scheduler "
+                    "cancellation"
+                ) from exc
 
 
 def _argument_parser() -> argparse.ArgumentParser:
