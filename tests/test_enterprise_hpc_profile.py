@@ -1,6 +1,8 @@
 import base64
 import hashlib
 import json
+import shlex
+import subprocess
 
 import pytest
 
@@ -656,7 +658,9 @@ def _manifest_snapshot(payload, digest):
     return digest + "\n" + base64.b64encode(raw).decode()
 
 
-def test_preflight_observes_scheduler_manifests_and_public_solver_identity(monkeypatch):
+def test_preflight_observes_scheduler_manifests_and_public_solver_identity(
+    monkeypatch, tmp_path
+):
     site = _enterprise_site(monkeypatch)
     profile = site.enterprise_hpc
     bundle, compatibility = contract_pair()
@@ -675,6 +679,8 @@ def test_preflight_observes_scheduler_manifests_and_public_solver_identity(monke
             output = _manifest_snapshot(bundle_schema, "7" * 64)
         elif "base64" in command and profile.compatibility_schema_path in command:
             output = _manifest_snapshot(compatibility_schema, "8" * 64)
+        elif "frequensolve_bundle_inventory" in command:
+            output = SHA_A
         elif profile.solver_path in command and "hashlib" in command:
             output = SOLVER_SHA
         elif "--identity-json" in command:
@@ -713,7 +719,7 @@ def test_preflight_observes_scheduler_manifests_and_public_solver_identity(monke
         for command in launcher_probes
     )
     python_probes = [command for command in calls if "python3" in command]
-    assert len(python_probes) == 12
+    assert len(python_probes) == 14
     assert all(
         command.startswith("module load frequensolve/1.0.0-synthetic && ")
         and ". /opt/frequensolve/python-env/bin/activate && " in command
@@ -722,6 +728,67 @@ def test_preflight_observes_scheduler_manifests_and_public_solver_identity(monke
     )
     assert all(not command.startswith(("cat ", "sha256sum ")) for command in calls)
     assert all(not command.lstrip().startswith("sbatch ") for command in calls)
+
+    installed = tmp_path / "bundle" / "docs" / "synthetic.txt"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(b"synthetic installed payload\n")
+    installed.chmod(0o640)
+    installed_sha256 = hashlib.sha256(installed.read_bytes()).hexdigest()
+    inventory = [
+        {
+            "path": "docs/synthetic.txt",
+            "mode": "0640",
+            "size": installed.stat().st_size,
+            "sha256": installed_sha256,
+        }
+    ]
+    encoded_inventory = base64.b64encode(
+        json.dumps(inventory, separators=(",", ":")).encode()
+    ).decode()
+    inventory_command = next(
+        command for command in calls if "frequensolve_bundle_inventory" in command
+    )
+    argv = shlex.split(inventory_command.rsplit(" && ", 1)[1])
+    argv[-2:] = [str(tmp_path / "bundle"), encoded_inventory]
+
+    completed = subprocess.run(argv, check=True, capture_output=True, text=True)
+    expected_inventory = (
+        f"{installed_sha256}  0640  {installed.stat().st_size}  " "docs/synthetic.txt\n"
+    ).encode()
+
+    assert completed.stdout == hashlib.sha256(expected_inventory).hexdigest()
+
+
+def test_preflight_rejects_modified_installed_bundle_content(monkeypatch):
+    site = _enterprise_site(monkeypatch)
+    profile = site.enterprise_hpc
+    bundle, compatibility = contract_pair()
+    bundle_schema, compatibility_schema = contract_schemas()
+
+    def run_login_cmd(command, timeout=None):
+        if command == "scontrol --version":
+            output = "slurm 24.05.5"
+        elif "base64" in command and profile.bundle_manifest in command:
+            output = _manifest_snapshot(bundle, "e" * 64)
+        elif "base64" in command and profile.compatibility_manifest in command:
+            output = _manifest_snapshot(compatibility, SHA_B)
+        elif "base64" in command and profile.bundle_schema_path in command:
+            output = _manifest_snapshot(bundle_schema, "7" * 64)
+        elif "base64" in command and profile.compatibility_schema_path in command:
+            output = _manifest_snapshot(compatibility_schema, "8" * 64)
+        elif "frequensolve_bundle_inventory" in command:
+            output = "0" * 64
+        else:
+            output = ""
+        return None, _Stream(output), _Stream("")
+
+    monkeypatch.setattr(site, "run_login_cmd", run_login_cmd)
+
+    with pytest.raises(
+        EnterpriseHPCPreflightError,
+        match="installed bundle content does not match",
+    ):
+        site.enterprise_hpc_preflight()
 
 
 def test_preflight_rejects_multiline_scheduler_evidence(monkeypatch):
@@ -892,6 +959,8 @@ def test_preflight_fails_before_submission_when_solver_identity_differs(monkeypa
             output = _manifest_snapshot(bundle_schema, "7" * 64)
         elif "base64" in command and profile.compatibility_schema_path in command:
             output = _manifest_snapshot(compatibility_schema, "8" * 64)
+        elif "frequensolve_bundle_inventory" in command:
+            output = SHA_A
         elif profile.solver_path in command and "hashlib" in command:
             output = SOLVER_SHA
         elif "--identity-json" in command:
