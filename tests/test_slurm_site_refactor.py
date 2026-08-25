@@ -853,6 +853,7 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
         nodes=3,
         queue="normal",
         ranks_per_node=7,
+        threads_per_rank=2,
         duration="00-00:45:00",
         mpi_async_progress=False,
         scheduler_heartbeat_timeout=17,
@@ -861,6 +862,7 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
     assert seen["config"].nodes == 3
     assert seen["config"].queue == "normal"
     assert seen["config"].ranks_per_node == 7
+    assert seen["config"].threads_per_rank == 2
     assert seen["config"].duration == "00-00:45:00"
     assert seen["config"].mpi_async_progress is False
     assert seen["config"].scheduler_heartbeat_timeout == 17.0
@@ -871,26 +873,35 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
 def test_slurm_submit_exposes_direct_resource_parameters():
     parameters = inspect.signature(SlurmSite.submit).parameters
 
-    assert {"queue", "nodes", "ranks_per_node", "duration"} <= set(parameters)
+    assert {
+        "queue",
+        "nodes",
+        "ranks_per_node",
+        "threads_per_rank",
+        "duration",
+    } <= set(parameters)
 
 
 def test_slurm_run_config_normalizes_rank_aliases():
     config = SlurmRunConfig(
         procs_per_node=4,
         procs_per_task=2,
+        threads_per_rank=3,
     )
 
     assert config.ranks_per_node == 4
     assert config.ranks_per_task == 2
+    assert config.threads_per_rank == 3
     assert config.procs_per_node == 4
     assert config.procs_per_task == 2
     assert config.mpi_async_progress is False
     assert SlurmRunConfig(tolerate_failures=None).tolerate_failures is None
 
-    merged = config.merged(ranks_per_node=8, procs_per_task=3)
+    merged = config.merged(ranks_per_node=8, procs_per_task=3, threads_per_rank=1)
 
     assert merged.ranks_per_node == 8
     assert merged.ranks_per_task == 3
+    assert merged.threads_per_rank == 1
     assert merged.mpi_async_progress is False
     with pytest.raises(ValueError, match="Pass either"):
         config.merged(ranks_per_node=8, procs_per_node=4)
@@ -900,6 +911,8 @@ def test_slurm_run_config_normalizes_rank_aliases():
 
     with pytest.raises(NotImplementedError, match="race during MPI initialization"):
         SlurmRunConfig(mpi_async_progress=True)
+    with pytest.raises(ValueError, match="threads_per_rank"):
+        SlurmRunConfig(threads_per_rank=0)
 
 
 def test_slurm_run_config_validates_scheduler_heartbeat_timeout():
@@ -1350,6 +1363,40 @@ def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):
     assert '"total_ranks": 8' in script
     assert '"task_indices": [' in script
     assert "    4" in script
+
+
+def test_adaptive_slurm_script_can_leave_node_cores_idle(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        ranks_per_node=1,
+        threads_per_rank=1,
+        stdout="/scratch/user/jobs/simple/freq/logs",
+        duration="00-00:10:00",
+    )
+
+    assert "#SBATCH -n 1" in script
+    assert "#SBATCH --cpus-per-task=1" in script
+    assert "n_threads=1" in script
+    assert '"omp_threads": 1' in script
+
+
+def test_adaptive_slurm_script_rejects_core_oversubscription(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    with pytest.raises(ValueError, match="exceeds cores_per_node"):
+        site._sweep_SLURM_script(
+            n_tasks=1,
+            n_nodes=1,
+            ranks_per_node=4,
+            threads_per_rank=100,
+            stdout="/scratch/user/jobs/simple/freq/logs",
+            duration="00-00:10:00",
+        )
 
 
 def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
