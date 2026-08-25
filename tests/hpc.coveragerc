@@ -1,0 +1,7 @@
+[run]
+branch = true
+source =
+    src/frequensolve/orchestrator/sites/hpc
+
+[report]
+precision = 1
