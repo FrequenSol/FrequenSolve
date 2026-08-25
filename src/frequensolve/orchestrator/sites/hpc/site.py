@@ -330,6 +330,8 @@ class SlurmRunConfig:
         duration: Requested wall time.
         ranks_per_node: MPI ranks per node.
         ranks_per_task: MPI ranks used by each FrequenSolve task.
+        threads_per_rank: OpenMP threads used by each MPI rank. When omitted,
+            all cores are divided evenly between the requested ranks.
         mpi_async_progress: Reserved compatibility option. Enabling it is
             temporarily unsupported and raises :class:`NotImplementedError`.
         tolerate_failures: Number of failed tasks tolerated before the adaptive
@@ -350,6 +352,7 @@ class SlurmRunConfig:
     duration: Optional[str] = None
     ranks_per_node: Optional[int] = None
     ranks_per_task: Optional[int] = None
+    threads_per_rank: Optional[int] = None
     mpi_async_progress: bool = False
     tolerate_failures: Optional[int] = 4
     account: Optional[str] = None
@@ -367,6 +370,7 @@ class SlurmRunConfig:
         duration: Optional[str] = None,
         ranks_per_node: Optional[int] = None,
         ranks_per_task: Optional[int] = None,
+        threads_per_rank: Optional[int] = None,
         mpi_async_progress: bool = False,
         tolerate_failures: Optional[int] = 4,
         account: Optional[str] = None,
@@ -397,6 +401,11 @@ class SlurmRunConfig:
         self.duration = duration
         self.ranks_per_node = values.get("ranks_per_node")
         self.ranks_per_task = values.get("ranks_per_task")
+        if threads_per_rank is not None and int(threads_per_rank) <= 0:
+            raise ValueError("threads_per_rank must be greater than zero")
+        self.threads_per_rank = (
+            None if threads_per_rank is None else int(threads_per_rank)
+        )
         if not isinstance(mpi_async_progress, bool):
             raise ValueError("mpi_async_progress must be true or false")
         if mpi_async_progress:
@@ -470,6 +479,7 @@ class SlurmRunConfig:
             "duration": self.duration,
             "ranks_per_node": self.ranks_per_node,
             "ranks_per_task": self.ranks_per_task,
+            "threads_per_rank": self.threads_per_rank,
             "mpi_async_progress": self.mpi_async_progress,
             "tolerate_failures": self.tolerate_failures,
             "account": self.account,
@@ -815,6 +825,7 @@ class SlurmSite(BaseSite):
         queue: Optional[str] = None,
         nodes: Optional[int] = None,
         ranks_per_node: Optional[int] = None,
+        threads_per_rank: Optional[int] = None,
         duration: Optional[str] = None,
         mpi_async_progress: Optional[bool] = None,
         force: bool = False,
@@ -830,6 +841,8 @@ class SlurmSite(BaseSite):
             queue: Queue or partition for this submission.
             nodes: Number of nodes for this submission.
             ranks_per_node: MPI ranks per node for this submission.
+            threads_per_rank: OpenMP threads used by each MPI rank. Values may
+                leave physical cores idle but may not oversubscribe the node.
             duration: Wall time for this submission.
             mpi_async_progress: Reserved compatibility option. Passing ``True``
                 raises :class:`NotImplementedError` while asynchronous MPI
@@ -854,6 +867,7 @@ class SlurmSite(BaseSite):
                     "queue": queue,
                     "nodes": nodes,
                     "ranks_per_node": ranks_per_node,
+                    "threads_per_rank": threads_per_rank,
                     "duration": duration,
                     "mpi_async_progress": mpi_async_progress,
                 }.items()
@@ -2242,6 +2256,11 @@ class SlurmSite(BaseSite):
                 else {}
             ),
             **(
+                {"threads_per_rank": config.threads_per_rank}
+                if config.threads_per_rank is not None
+                else {}
+            ),
+            **(
                 {"tolerate_failures": config.tolerate_failures}
                 if config.tolerate_failures is not None
                 else {}
@@ -2798,6 +2817,7 @@ class SlurmSite(BaseSite):
         name: str = "FrequenSolve",
         duration: str = "00-02:00:00",
         ranks_per_node: Optional[int] = None,
+        threads_per_rank: Optional[int] = None,
         notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
         notify_email: Optional[str] = None,
         imaging_job: bool = False,
@@ -2812,6 +2832,7 @@ class SlurmSite(BaseSite):
             duration:       Duration of the job (DD-HH:MM:SS)
             n_nodes:        Number of nodes to run on
             ranks_per_node: Number of MPI ranks per node
+            threads_per_rank: OpenMP threads used by each MPI rank
             ranks_per_task: Number of MPI ranks per task
             queue:          Queue/partition to run on (optional, defaults to site queue)
             account:        Account/allocation to run on
@@ -2861,7 +2882,18 @@ class SlurmSite(BaseSite):
         skip_sizing = bool(kwargs.pop("skip_sizing", n_tasks == 1))
         proc_memory = (config.memory_per_node / ranks_per_node) / 1024.0
         duration = config.validate_request(n_nodes, n_nodes * ranks_per_node, duration)
-        n_threads = config.cores_per_node // ranks_per_node
+        derived_threads = config.cores_per_node // ranks_per_node
+        n_threads = int(
+            derived_threads if threads_per_rank is None else threads_per_rank
+        )
+        if n_threads <= 0:
+            raise ValueError("threads_per_rank must be greater than zero")
+        if ranks_per_node * n_threads > config.cores_per_node:
+            raise ValueError(
+                "ranks_per_node * threads_per_rank exceeds cores_per_node; "
+                f"got {ranks_per_node} ranks, {n_threads} threads, and "
+                f"{config.cores_per_node} cores"
+            )
         mpi_async_progress_setup: List[str] = []
         if mpi_async_progress:
             n_threads, mpi_async_progress_setup = self._mpi_async_progress_layout(
