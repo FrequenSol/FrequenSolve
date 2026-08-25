@@ -505,8 +505,10 @@ def _process_count(site: Any, needle: str) -> int:
 def _owned_remote_paths(site: Any, project: Any, jobs: Sequence[Any]) -> list[str]:
     root = PurePosixPath(str(site.work_dir))
     paths = [str(site._remote_job_dir(job)) for job in jobs]
+    remote_simulation = root / "jobs" / project.simulations[0].name
     paths.extend(
         [
+            str(remote_simulation),
             str(root / "simulations" / project.simulations[0].name),
             str(root / f"{project.name}.json"),
         ]

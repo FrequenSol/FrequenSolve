@@ -170,8 +170,9 @@ def test_synthetic_fixture_uses_unique_owned_paths(tmp_path):
 
     paths = _owned_remote_paths(fake_site, project, [success, cancellation])
 
-    assert len(paths) == 4
+    assert len(paths) == 5
     assert all(Path(path).name.startswith("fs_canary_") for path in paths)
+    assert "/approved/staging/jobs/fs_canary_run_123456_simulation" in paths
     assert success.simulation is cancellation.simulation
     assert success.f_list == [20.0]
     with pytest.raises(LiveSlurmCanaryError, match="must not already exist"):
