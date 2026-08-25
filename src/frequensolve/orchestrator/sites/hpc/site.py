@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from importlib.resources import as_file, files
 from pathlib import Path, PurePosixPath
 from select import select
-from typing import Any, Dict, List, Literal, Mapping, Optional, Type, Union
+from typing import Any, Dict, List, Literal, Mapping, Optional, Type, Union, cast
 
 from frequensolve import __version__ as frequensolve_version
 from frequensolve._optional import optional_dependency_error
@@ -364,7 +364,9 @@ def _safe_slurm_directive(value: Optional[str], name: str) -> Optional[str]:
     return value
 
 
-def _normalize_slurm_notify_on(value: Optional[str]) -> Optional[str]:
+def _normalize_slurm_notify_on(
+    value: Optional[str],
+) -> Optional[Literal["begin", "end", "fail", "all", "none"]]:
     """Return one supported SLURM mail trigger or reject the value."""
 
     if value is None:
@@ -377,7 +379,7 @@ def _normalize_slurm_notify_on(value: Optional[str]) -> Optional[str]:
         "none",
     }:
         raise ValueError("notify_on must be one of: begin, end, fail, all, none")
-    return value
+    return cast(Literal["begin", "end", "fail", "all", "none"], value)
 
 
 @dataclass(init=False)
