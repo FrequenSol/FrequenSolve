@@ -349,9 +349,15 @@ def test_sftp_directory_put_uses_configured_tmp_dirs(tmp_path):
 
     assert transfers[0][0].parent == local_tmp
     assert transfers[0][1].startswith("/remote/tmp/frequensolve/")
-    assert commands[0] == "mkdir -p /work"
+    assert commands[0] == "mkdir -p -- /work"
     assert "mkdir -p /remote/tmp/frequensolve" in commands
-    assert any("tar xzf /remote/tmp/frequensolve/" in command for command in commands)
+    publish_command = next(command for command in commands if "tar xzf" in command)
+    assert 'tar xzf "$archive" -C "$staging"' in publish_command
+    assert 'mv -- "$destination" "$backup"' in publish_command
+    assert 'mv -- "$staging/$entry" "$destination"' in publish_command
+    assert 'mv -- "$backup" "$destination" || true' in publish_command
+    assert 'rm -rf -- "$backup"' in publish_command
+    assert "trap cleanup EXIT HUP INT TERM" in publish_command
     assert not (tmp_path / "project.tar.gz").exists()
 
 
@@ -374,7 +380,7 @@ def test_sftp_directory_get_uses_configured_tmp_dirs(tmp_path):
             nonlocal archive_size
             downloads.append((remote, Path(local)))
             with tarfile.open(local, "w:gz") as tar:
-                tar.add(payload, arcname="project")
+                tar.add(payload / "output.json", arcname="output.json")
             archive_size = Path(local).stat().st_size
 
         def close(self):

@@ -94,9 +94,10 @@ class BytesIO:
         initial_bytes: Initial byte payload.
     """
 
-    def __init__(self, initial_bytes: bytes):
+    def __init__(self, initial_bytes: bytes, *, channel: Any = None):
         self._bytes = initial_bytes
         self._pos = 0
+        self.channel = channel
 
     def read(self) -> bytes:
         """Return all remaining bytes and advance to end-of-stream."""
@@ -123,6 +124,18 @@ class BytesIO:
         """Decode the underlying bytes payload as text."""
 
         return self._bytes.decode()
+
+
+class _ExitStatusChannel:
+    """Expose a subprocess return code through Paramiko's channel contract."""
+
+    def __init__(self, returncode: int) -> None:
+        self._returncode = returncode
+
+    def recv_exit_status(self) -> int:
+        """Return the completed SSH subprocess status."""
+
+        return self._returncode
 
 
 class SSHProxy:
@@ -236,8 +249,13 @@ class SSHProxy:
             result = self._exec_on_login(command, timeout=timeout)
 
         stdout_bytes, stderr_bytes = self._filter_output(result)
+        channel = _ExitStatusChannel(result.returncode)
 
-        return (BytesIO(b""), BytesIO(stdout_bytes), BytesIO(stderr_bytes))
+        return (
+            BytesIO(b"", channel=channel),
+            BytesIO(stdout_bytes, channel=channel),
+            BytesIO(stderr_bytes, channel=channel),
+        )
 
     def exec_command_term(self, command: str) -> SSHCommandResult:
         """Execute a login-node command with a pseudo-terminal.
@@ -251,8 +269,13 @@ class SSHProxy:
 
         result = self._exec_on_login(command, term=True)
         stdout_bytes, stderr_bytes = self._filter_output(result)
+        channel = _ExitStatusChannel(result.returncode)
 
-        return (BytesIO(b""), BytesIO(stdout_bytes), BytesIO(stderr_bytes))
+        return (
+            BytesIO(b"", channel=channel),
+            BytesIO(stdout_bytes, channel=channel),
+            BytesIO(stderr_bytes, channel=channel),
+        )
 
     def _exec_on_login(
         self,

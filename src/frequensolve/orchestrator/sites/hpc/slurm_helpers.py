@@ -77,6 +77,22 @@ def read_stream(stream) -> str:
     return output.strip()
 
 
+def ssh_exit_status(*streams: Any) -> Optional[int]:
+    """Return an SSH command's exit status when a stream exposes its channel.
+
+    Paramiko attaches the same channel to stdout and stderr. Lightweight test
+    doubles and alternative adapters may not expose it, so callers retain their
+    existing stderr-based fallback when this returns ``None``.
+    """
+
+    for stream in streams:
+        channel = getattr(stream, "channel", None)
+        receive = getattr(channel, "recv_exit_status", None)
+        if callable(receive):
+            return int(receive())
+    return None
+
+
 def normalize_slurm_state(state: str) -> str:
     """Map a SLURM queue/accounting state to the public PoolInfo status."""
 

@@ -156,14 +156,14 @@ class SlurmAuthenticator:
         """
 
         site = self.site
-        job_id = validate_slurm_job_id(job_id)
-        status = site.run_login(f"squeue -j {job_id} -h -o %t").strip()
+        validated_job_id = validate_slurm_job_id(job_id)
+        status = site.run_login(f"squeue -j {validated_job_id} -h -o %t").strip()
         if status != "R":
-            raise RuntimeError(f"Job {job_id} is not running")
+            raise RuntimeError(f"Job {validated_job_id} is not running")
 
-        hostname = site.run_login(f"squeue -j {job_id} -h -o %B").strip()
+        hostname = site.run_login(f"squeue -j {validated_job_id} -h -o %B").strip()
         if not hostname:
-            raise RuntimeError(f"Could not get hostname for job {job_id}")
+            raise RuntimeError(f"Could not get hostname for job {validated_job_id}")
         if not _COMPUTE_HOST.fullmatch(hostname):
             raise RuntimeError("SLURM returned an invalid compute-node hostname")
 

@@ -73,6 +73,9 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     seconds_to_hms as _seconds_to_hms,
 )
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
+    ssh_exit_status as _ssh_exit_status,
+)
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     temporary_text_file as _temporary_text_file,
 )
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
@@ -918,6 +921,17 @@ class SlurmSite(BaseSite):
                     "No active compute allocation is attached; use mode='batch' "
                     "or allow mode='auto' to submit a batch job."
                 )
+            pool_id = self.pool.id
+            if not pool_id:
+                raise RuntimeError(
+                    "Active SLURM allocation is missing a valid scheduler job id"
+                )
+            try:
+                allocation_id = _validate_slurm_job_id(pool_id)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "Active SLURM allocation is missing a valid scheduler job id"
+                ) from exc
             pack = bool(extra_kwargs.pop("pack", True))
             future = self._submit_attached(
                 job,
@@ -926,18 +940,20 @@ class SlurmSite(BaseSite):
                 fresh=fresh_run,
                 **({"pack": pack} if not pack else {}),
             )
+            job._job_id = allocation_id
             self._emit(f"Submitted {job.name} to active {self.site_name} allocation")
             self._record_site_run(job, status="running")
             handle = RunHandle(
                 site=self,
                 job=job,
-                id=getattr(job, "_job_id", None),
+                id=allocation_id,
                 mode="attached",
                 poll_interval=run_config.poll_interval,
                 check=check,
                 _status_fn=self._poll_attached_run,
                 _wait_fn=self._wait_attached_run,
                 _wait_async_fn=self._wait_attached_run_async,
+                _timeout_fn=self._timeout_slurm_run,
                 _generic_wait=False,
                 _cancel_fn=lambda run: self.cancel_job(str(run.id)),
                 _fetch_fn=(lambda run: self.fetch_outputs(run.job)) if fetch else None,
@@ -1040,7 +1056,16 @@ class SlurmSite(BaseSite):
     ) -> RunHandle:
         """Create a run handle and attach SLURM-specific wait behavior."""
 
-        return super().handle(job, job_id=job_id, mode=mode)
+        handle = super().handle(job, job_id=job_id, mode=mode)
+        handle._timeout_fn = self._timeout_slurm_run
+        return handle
+
+    def _timeout_slurm_run(self, run: RunHandle, status: JobStatus) -> RunResult:
+        """Cancel a still-running SLURM job before publishing a timeout result."""
+
+        self.cancel_job(str(run.id))
+        self._finalize_run_record(run, status)
+        return run._make_result(status)
 
     def provision(
         self, nodes: int, tasks: int, duration: Optional[str] = None, **kwargs
@@ -1577,12 +1602,14 @@ class SlurmSite(BaseSite):
             logger.debug("No SLURM job id supplied; skipping cancellation")
             return False
         job_id = _validate_slurm_job_id(job_id)
-        cancelled_ids = getattr(self, "_cancelled_job_ids", set())
+        cancelled_ids: set[str] = getattr(self, "_cancelled_job_ids", set())
         if job_id in cancelled_ids:
             logger.debug("SLURM job %s was already cancelled by this site", job_id)
             return False
-        _, _, stderr = self.run_login_cmd(f"scancel {job_id}")
-        if _read_stream(stderr):
+        _, stdout, stderr = self.run_login_cmd(f"scancel {job_id}")
+        error_output = _read_stream(stderr)
+        exit_status = _ssh_exit_status(stdout, stderr)
+        if error_output or exit_status not in {None, 0}:
             raise RuntimeError("SLURM cancellation failed")
         cancelled_ids.add(job_id)
         self._cancelled_job_ids = cancelled_ids
@@ -2031,6 +2058,7 @@ class SlurmSite(BaseSite):
             _wait_fn=self._wait_allocation,
             _wait_async_fn=self._wait_allocation_async,
             _finalize_fn=self._finalize_allocation,
+            _timeout_fn=self._timeout_slurm_run,
             _cancel_fn=lambda run: self.cancel_job(str(run.id)),
         )
 
@@ -2265,7 +2293,17 @@ class SlurmSite(BaseSite):
                     "asyncio loop is already running; use 'await run' instead."
                 )
         if timeout is not None:
-            loop.run_until_complete(asyncio.wait_for(future, timeout=timeout))
+            try:
+                loop.run_until_complete(asyncio.wait_for(future, timeout=timeout))
+            except asyncio.TimeoutError:
+                if not future.cancelled():
+                    raise
+                status = JobStatus(
+                    state="timeout",
+                    job_id=str(run.id),
+                    message=f"Timed out waiting for run after {timeout} seconds",
+                )
+                return self._timeout_slurm_run(run, status)
         else:
             loop.run_until_complete(future)
         status = self._poll_attached_run(run)
@@ -2284,7 +2322,17 @@ class SlurmSite(BaseSite):
             return RunResult(job=run.job, status=status, site=self)
 
         if timeout is not None:
-            await asyncio.wait_for(future, timeout=timeout)
+            try:
+                await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError:
+                if not future.cancelled():
+                    raise
+                status = JobStatus(
+                    state="timeout",
+                    job_id=str(run.id),
+                    message=f"Timed out waiting for run after {timeout} seconds",
+                )
+                return self._timeout_slurm_run(run, status)
         else:
             await future
         status = self._poll_attached_run(run)
@@ -2624,10 +2672,10 @@ class SlurmSite(BaseSite):
             logger.debug("Transferring input file to remote path: %s", remote_file)
             self.put(Path(local_file), Path(remote_file))
 
-    def _is_running(self, job_id: int):
+    def _is_running(self, job_id: int) -> bool:
         """Check if a job is running."""
-        job_id = _validate_slurm_job_id(job_id)
-        status = self.run_login(f"squeue -j {job_id} -h -o %t")
+        validated_job_id = _validate_slurm_job_id(job_id)
+        status = self.run_login(f"squeue -j {validated_job_id} -h -o %t")
         return status == "R"
 
     @staticmethod

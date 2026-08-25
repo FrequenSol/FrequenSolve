@@ -39,6 +39,7 @@ test-hpc-hermetic:
 	--strict-markers \
 	-m hpc_hermetic \
 	--cov=src/frequensolve/orchestrator/sites/hpc \
+	--cov-config=tests/hpc.coveragerc \
 	--cov-branch \
 	--cov-report=term \
 	--cov-fail-under=67.5 \

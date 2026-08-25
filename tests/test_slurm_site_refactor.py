@@ -2316,6 +2316,7 @@ def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
 
     class DummyFuture:
         def done(self):
@@ -2331,10 +2332,64 @@ def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
     assert run.status().state == "running"
 
 
+def test_fresh_attached_submit_timeout_cancels_active_allocation(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
+    site = DummySlurmSite("project/run")
+    site.pool.id = "24680"
+    cancelled = []
+    finalized = []
+    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
+    site._finalize_run_record = lambda run, status: finalized.append(status.state)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        future = loop.create_future()
+        monkeypatch.setattr(
+            site,
+            "_submit_attached",
+            lambda job, ranks_per_task=2, **kwargs: future,
+        )
+        job = DummyJob()
+
+        run = site.submit(job, mode="attached")
+        result = run.wait(timeout=0)
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+    assert run.id == "24680"
+    assert job._job_id == "24680"
+    assert result.status.state == "timeout"
+    assert cancelled == ["24680"]
+    assert finalized == ["timeout"]
+
+
+def test_fresh_attached_submit_without_allocation_id_fails_before_launch(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
+    site = DummySlurmSite("project/run")
+    launched = []
+    monkeypatch.setattr(
+        site,
+        "_submit_attached",
+        lambda job, ranks_per_task=2, **kwargs: launched.append(job),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="^Active SLURM allocation is missing a valid scheduler job id$",
+    ):
+        site.submit(DummyJob(), mode="attached")
+
+    assert launched == []
+
+
 def test_slurm_submit_attached_can_disable_pack(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
     seen = {}
 
     class DummyFuture:
@@ -2367,6 +2422,7 @@ def test_slurm_submit_rejects_mpi_async_progress(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
 
     def fail_submit(*args, **kwargs):
         raise AssertionError("unsupported configuration reached submission")
@@ -2452,6 +2508,7 @@ def test_slurm_attached_run_is_awaitable(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
 
     async def submit_and_wait():
         future = asyncio.get_running_loop().create_future()

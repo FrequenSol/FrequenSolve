@@ -1,3 +1,6 @@
+import asyncio
+import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -7,18 +10,24 @@ from types import SimpleNamespace
 
 import pytest
 
+from frequensolve.orchestrator.sites.base import JobStatus, RunHandle
 from frequensolve.orchestrator.sites.hpc import auth
 from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
 from frequensolve.orchestrator.sites.hpc.site import SlurmSite
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import normalize_slurm_state
 from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
+from frequensolve.orchestrator.utils.ssh import SSHProxy
 
 pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
 
 
 class Stream:
-    def __init__(self, text=""):
+    def __init__(self, text="", *, exit_status=None):
         self.text = text
+        if exit_status is not None:
+            self.channel = SimpleNamespace(
+                recv_exit_status=lambda: exit_status,
+            )
 
     def read(self):
         return self.text.encode()
@@ -465,8 +474,12 @@ def test_sftp_download_preserves_existing_destination_mode(tmp_path):
     assert stat.S_IMODE(destination.stat().st_mode) == 0o640
 
 
-def test_sftp_download_new_destination_uses_remote_mode(tmp_path):
+def test_sftp_download_new_destination_uses_local_creation_mode(tmp_path):
     destination = tmp_path / "result.bin"
+    expected = tmp_path / "expected.bin"
+    expected.touch()
+    expected_mode = stat.S_IMODE(expected.stat().st_mode)
+    expected.unlink()
 
     class FakeSFTP:
         def stat(self, target):
@@ -480,7 +493,7 @@ def test_sftp_download_new_destination_uses_remote_mode(tmp_path):
 
     SlurmTransferManager(_sftp_site(FakeSFTP())).get("/work/result.bin", destination)
 
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o750
+    assert stat.S_IMODE(destination.stat().st_mode) == expected_mode
 
 
 def test_directory_download_failure_preserves_existing_tree_and_cleans_remote(
@@ -500,11 +513,7 @@ def test_directory_download_failure_preserves_existing_tree_and_cleans_remote(
 
         def get(self, source, target):
             nonlocal archive_size
-            payload = tmp_path / "unexpected"
-            payload.mkdir(exist_ok=True)
-            (payload / "new.txt").write_text("new")
-            with tarfile.open(target, "w:gz") as tar:
-                tar.add(payload, arcname="unexpected")
+            Path(target).write_bytes(b"not a tar archive")
             archive_size = Path(target).stat().st_size
 
         def close(self):
@@ -526,10 +535,105 @@ def test_directory_download_failure_preserves_existing_tree_and_cleans_remote(
         )
     )
 
-    with pytest.raises(RuntimeError, match="did not contain its root"):
+    with pytest.raises(RuntimeError, match=r"HPC download failed \(ReadError\)"):
         SlurmTransferManager(site).get("/work/project", destination)
 
     assert (destination / "existing.txt").read_text() == "existing"
+    assert any(command.startswith("rm -f /remote/tmp/") for command in commands)
+    assert list(local_tmp.glob("*.tar.gz")) == []
+
+
+def test_directory_download_nonzero_exit_never_publishes_valid_archive(tmp_path):
+    destination = tmp_path / "project"
+    destination.mkdir()
+    (destination / "existing.txt").write_text("existing")
+    downloads = []
+    commands = []
+    archive_size = None
+
+    class FakeSFTP:
+        def stat(self, target):
+            if target == "/work/project":
+                return SimpleNamespace(st_mode=0o040755)
+            return SimpleNamespace(st_mode=0o100644, st_size=archive_size)
+
+        def get(self, source, target):
+            nonlocal archive_size
+            downloads.append((source, target))
+            payload = tmp_path / "new.txt"
+            payload.write_text("new")
+            with tarfile.open(target, "w:gz") as tar:
+                tar.add(payload, arcname="new.txt")
+            archive_size = Path(target).stat().st_size
+
+        def close(self):
+            pass
+
+    site = _sftp_site(FakeSFTP())
+    site.remote_tmp_dir = Path("/remote/tmp")
+    site.run_login = lambda command: commands.append(command) or ""
+    site.run_login_cmd = lambda command: (
+        commands.append(command)
+        or (
+            None,
+            Stream(exit_status=1),
+            Stream(),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="Remote directory archive failed"):
+        SlurmTransferManager(site).get("/work/project", destination)
+
+    assert downloads == []
+    assert (destination / "existing.txt").read_text() == "existing"
+    assert any(command.startswith("rm -f /remote/tmp/") for command in commands)
+
+
+def test_directory_download_resolves_only_symlinked_remote_root(tmp_path):
+    destination = tmp_path / "project-link"
+    commands = []
+    archive_size = None
+
+    class FakeSFTP:
+        def stat(self, target):
+            if target == "/work/project-link":
+                return SimpleNamespace(st_mode=0o040755)
+            return SimpleNamespace(st_mode=0o100644, st_size=archive_size)
+
+        def get(self, source, target):
+            nonlocal archive_size
+            payload = tmp_path / "new.txt"
+            payload.write_text("new")
+            with tarfile.open(target, "w:gz") as tar:
+                tar.add(payload, arcname="new.txt")
+            archive_size = Path(target).stat().st_size
+
+        def close(self):
+            pass
+
+    local_tmp = tmp_path / "transfer-tmp"
+    config = tmp_path / "site.toml"
+    config.write_text(f'[host]\ntmp_dir = "{local_tmp.as_posix()}"\n')
+    site = _sftp_site(FakeSFTP())
+    site._site_config_path = config
+    site.remote_tmp_dir = Path("/remote/tmp")
+    site.run_login = lambda command: commands.append(command) or ""
+    site.run_login_cmd = lambda command: (
+        commands.append(command)
+        or (
+            None,
+            Stream(),
+            Stream(),
+        )
+    )
+
+    SlurmTransferManager(site).get("/work/project-link", destination)
+
+    assert (destination / "new.txt").read_text() == "new"
+    archive_command = next(command for command in commands if "tar czf" in command)
+    assert "readlink -f -- /work/project-link" in archive_command
+    assert '-C "$resolved_dir" .' in archive_command
+    assert "--dereference" not in archive_command
     assert any(command.startswith("rm -f /remote/tmp/") for command in commands)
     assert list(local_tmp.glob("*.tar.gz")) == []
 
@@ -590,9 +694,79 @@ def test_directory_upload_failure_cleans_remote_archive_and_hides_stderr(tmp_pat
     assert any(command.startswith("rm -f /remote/tmp/") for command in commands)
 
 
+def test_directory_upload_tar_failure_preserves_existing_remote_tree(tmp_path):
+    source = tmp_path / "local" / "project"
+    source.mkdir(parents=True)
+    (source / "new.txt").write_text("new")
+
+    remote_parent = tmp_path / "remote"
+    destination = remote_parent / "project"
+    destination.mkdir(parents=True)
+    (destination / "existing.txt").write_text("existing")
+    remote_tmp = tmp_path / "remote-tmp"
+    corrupt_archive = True
+
+    class LocalSFTP:
+        def put(self, source_path, target):
+            shutil.copyfile(source_path, target)
+
+        def stat(self, target):
+            return os.stat(target)
+
+        def chmod(self, target, mode):
+            os.chmod(target, mode)
+
+        def posix_rename(self, source_path, target):
+            os.replace(source_path, target)
+            if corrupt_archive and Path(target).parent == remote_tmp:
+                Path(target).write_bytes(b"corrupt archive")
+
+        def remove(self, target):
+            Path(target).unlink(missing_ok=True)
+
+        def close(self):
+            pass
+
+    def run(command):
+        result = subprocess.run(command, shell=True, capture_output=True, check=False)
+        if result.returncode:
+            raise RuntimeError("remote command failed")
+        return result.stdout.decode().strip()
+
+    def run_cmd(command):
+        result = subprocess.run(command, shell=True, capture_output=True, check=False)
+        return (
+            None,
+            Stream(result.stdout.decode(), exit_status=result.returncode),
+            Stream(result.stderr.decode()),
+        )
+
+    site = _sftp_site(LocalSFTP())
+    site.remote_tmp_dir = remote_tmp
+    site.run_login = run
+    site.run_login_cmd = run_cmd
+
+    manager = SlurmTransferManager(site)
+    with pytest.raises(RuntimeError, match="Remote directory extraction failed"):
+        manager.put(source, destination)
+
+    assert (destination / "existing.txt").read_text() == "existing"
+    assert not (destination / "new.txt").exists()
+    assert list(remote_parent.glob(".project.frequensolve-*")) == []
+    assert list(remote_tmp.glob("frequensolve-*")) == []
+
+    corrupt_archive = False
+    manager.put(source, destination)
+
+    assert (destination / "new.txt").read_text() == "new"
+    assert not (destination / "existing.txt").exists()
+    assert list(remote_parent.glob(".project.frequensolve-*")) == []
+    assert list(remote_tmp.glob("frequensolve-*")) == []
+
+
 @pytest.mark.parametrize(
     "remote_path",
-    ["relative/path", "/work/../private", "/work/bad\nname", r"C:\work\file"],
+    ["/work/../private", "/work/bad\nname", r"C:\work\file"],
 )
 def test_transfer_rejects_unsafe_remote_paths_without_remote_calls(
     tmp_path, remote_path
@@ -607,6 +781,62 @@ def test_transfer_rejects_unsafe_remote_paths_without_remote_calls(
         SlurmTransferManager(site).put(local, remote_path)
 
     assert commands == []
+
+
+def test_transfer_accepts_traversal_free_relative_remote_path(tmp_path):
+    local = tmp_path / "output.h5"
+    local.write_bytes(b"payload")
+    commands = []
+    published = []
+
+    class FakeSFTP:
+        def stat(self, target):
+            if target == "results/output.h5":
+                raise FileNotFoundError(target)
+            return SimpleNamespace(st_size=local.stat().st_size)
+
+        def put(self, source, target):
+            pass
+
+        def chmod(self, target, mode):
+            pass
+
+        def posix_rename(self, source, target):
+            published.append((source, target))
+
+        def remove(self, target):
+            pass
+
+        def close(self):
+            pass
+
+    site = _sftp_site(FakeSFTP())
+    site.run_login = lambda command: commands.append(command) or ""
+
+    SlurmTransferManager(site).put(local, "results/output.h5")
+
+    assert commands == ["mkdir -p -- results"]
+    assert len(published) == 1
+    assert published[0][1] == "results/output.h5"
+
+
+def test_download_accepts_traversal_free_relative_remote_path(tmp_path):
+    destination = tmp_path / "output.h5"
+
+    class FakeSFTP:
+        def stat(self, target):
+            assert target == "results/output.h5"
+            return SimpleNamespace(st_mode=0o100664, st_size=7)
+
+        def get(self, source, target):
+            Path(target).write_bytes(b"payload")
+
+        def close(self):
+            pass
+
+    SlurmTransferManager(_sftp_site(FakeSFTP())).get("results/output.h5", destination)
+
+    assert destination.read_bytes() == b"payload"
 
 
 def test_rsync_failure_hides_provider_output(monkeypatch):
@@ -720,3 +950,149 @@ def test_cancel_is_idempotent_and_sanitizes_scheduler_failure():
     with pytest.raises(RuntimeError, match="SLURM cancellation failed") as exc_info:
         failing.cancel_job("124")
     assert "private scheduler detail" not in str(exc_info.value)
+
+
+def test_cancel_nonzero_exit_with_empty_stderr_can_be_retried():
+    site = object.__new__(SlurmSite)
+    calls = []
+    exit_statuses = iter([1, 0])
+
+    def run_login_cmd(command):
+        calls.append(command)
+        exit_status = next(exit_statuses)
+        return None, Stream(exit_status=exit_status), Stream()
+
+    site.run_login_cmd = run_login_cmd
+
+    with pytest.raises(RuntimeError, match="SLURM cancellation failed"):
+        site.cancel_job("125")
+
+    assert site.cancel_job("125") is True
+    assert calls == ["scancel 125", "scancel 125"]
+
+
+def test_cancel_observes_ssh_proxy_exit_status_with_empty_stderr(monkeypatch):
+    proxy = SSHProxy("/tmp/fake-control", "scientist", "login.example.edu")
+    monkeypatch.setattr(
+        proxy,
+        "_exec_on_login",
+        lambda command, term=False, timeout=None: SimpleNamespace(
+            stdout=b"",
+            stderr=b"",
+            returncode=1,
+        ),
+    )
+    site = object.__new__(SlurmSite)
+    site.run_login_cmd = proxy.exec_command
+
+    with pytest.raises(RuntimeError, match="SLURM cancellation failed"):
+        site.cancel_job("126")
+
+
+def test_slurm_wait_timeout_cancels_before_returning_timeout_result():
+    site = object.__new__(SlurmSite)
+    site.config = SimpleNamespace(poll_interval=0.0)
+    site._poll_run = lambda run: JobStatus(state="running", job_id=run.id)
+    cancelled = []
+    finalized = []
+    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
+    site._finalize_run_record = lambda run, status: finalized.append(status.state)
+    run = site.handle(SimpleNamespace(), job_id="127", mode="batch")
+
+    result = run.wait(timeout=0, poll_interval=0, check=False)
+
+    assert result.status.state == "timeout"
+    assert cancelled == ["127"]
+    assert finalized == ["timeout"]
+
+
+def test_slurm_wait_timeout_surfaces_sanitized_cancellation_failure():
+    site = object.__new__(SlurmSite)
+    site.config = SimpleNamespace(poll_interval=0.0)
+    site._poll_run = lambda run: JobStatus(state="running", job_id=run.id)
+    site.cancel_job = lambda job_id: (_ for _ in ()).throw(
+        RuntimeError("SLURM cancellation failed")
+    )
+    run = site.handle(SimpleNamespace(), job_id="128", mode="batch")
+
+    with pytest.raises(RuntimeError, match="^SLURM cancellation failed$"):
+        run.wait(timeout=0, poll_interval=0, check=False)
+
+
+def test_attached_slurm_async_timeout_requests_cancellation():
+    site = object.__new__(SlurmSite)
+    cancelled = []
+    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
+    site._finalize_run_record = lambda run, status: None
+
+    async def wait_for_timeout():
+        future = asyncio.get_running_loop().create_future()
+        run = RunHandle(site=site, job=SimpleNamespace(), id="129", mode="attached")
+        run.backend["future"] = future
+        return await site._wait_attached_run_async(run, timeout=0)
+
+    result = asyncio.run(wait_for_timeout())
+
+    assert result.status.state == "timeout"
+    assert cancelled == ["129"]
+
+
+def test_attached_slurm_sync_deadline_requests_cancellation():
+    site = object.__new__(SlurmSite)
+    site._is_notebook = False
+    cancelled = []
+    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
+    site._finalize_run_record = lambda run, status: None
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        run = RunHandle(site=site, job=SimpleNamespace(), id="130", mode="attached")
+        run.backend["future"] = loop.create_future()
+        result = site._wait_attached_run(run, timeout=0)
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+    assert result.status.state == "timeout"
+    assert cancelled == ["130"]
+
+
+def test_attached_slurm_sync_task_timeout_propagates_without_cancellation():
+    site = object.__new__(SlurmSite)
+    site._is_notebook = False
+    cancelled = []
+    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        future = loop.create_future()
+        future.set_exception(TimeoutError("task-level timeout"))
+        run = RunHandle(site=site, job=SimpleNamespace(), id="131", mode="attached")
+        run.backend["future"] = future
+        with pytest.raises(TimeoutError, match="task-level timeout"):
+            site._wait_attached_run(run, timeout=1)
+        assert site._poll_attached_run(run).state == "failed"
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+    assert cancelled == []
+
+
+def test_attached_slurm_async_task_timeout_propagates_without_cancellation():
+    site = object.__new__(SlurmSite)
+    cancelled = []
+    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
+
+    async def wait_for_task_failure():
+        future = asyncio.get_running_loop().create_future()
+        future.set_exception(TimeoutError("task-level timeout"))
+        run = RunHandle(site=site, job=SimpleNamespace(), id="132", mode="attached")
+        run.backend["future"] = future
+        with pytest.raises(TimeoutError, match="task-level timeout"):
+            await site._wait_attached_run_async(run, timeout=1)
+        assert site._poll_attached_run(run).state == "failed"
+
+    asyncio.run(wait_for_task_failure())
+
+    assert cancelled == []
