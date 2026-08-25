@@ -539,6 +539,7 @@ class EnterpriseHPCProfile:
         cores_per_node: int,
         duration_seconds: int,
         max_wall_time_seconds: int,
+        threads_per_rank: Optional[int] = None,
     ) -> None:
         """Enforce the compatibility row's bounded scheduler request."""
 
@@ -558,8 +559,14 @@ class EnterpriseHPCProfile:
             raise ValueError("Enterprise HPC request exceeds max_ranks")
         if ranks_per_node < 1 or ranks_per_node > cores_per_node:
             raise ValueError("Enterprise HPC ranks_per_node exceeds node cores")
-        threads_per_rank = cores_per_node // ranks_per_node
-        if threads_per_rank > self.max_threads_per_rank:
+        requested_threads = (
+            cores_per_node // ranks_per_node
+            if threads_per_rank is None
+            else _positive_int(threads_per_rank, "threads_per_rank")
+        )
+        if ranks_per_node * requested_threads > cores_per_node:
+            raise ValueError("Enterprise HPC request exceeds node cores")
+        if requested_threads > self.max_threads_per_rank:
             raise ValueError("Enterprise HPC request exceeds max_threads_per_rank")
         if duration_seconds > max_wall_time_seconds:
             raise ValueError("Enterprise HPC request exceeds max_wall_time")

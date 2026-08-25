@@ -1205,6 +1205,7 @@ class SlurmSite(BaseSite):
             cores_per_node=int(partition_config.cores_per_node),
             duration_seconds=_hms_to_seconds(duration),
             max_wall_time_seconds=_hms_to_seconds(profile.max_wall_time),
+            threads_per_rank=config.threads_per_rank,
         )
         if (
             str(self.work_dir) != profile.work_dir

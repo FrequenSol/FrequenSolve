@@ -300,6 +300,14 @@ def test_profile_rejects_contradictions_and_unbounded_resources():
         duration_seconds=1800,
         max_wall_time_seconds=1800,
     )
+    profile.validate_resources(
+        nodes=1,
+        ranks_per_node=1,
+        cores_per_node=64,
+        threads_per_rank=1,
+        duration_seconds=1800,
+        max_wall_time_seconds=1800,
+    )
 
     with pytest.raises(ValueError, match="not allowlisted"):
         profile.validate_site(
@@ -349,6 +357,15 @@ def test_profile_rejects_contradictions_and_unbounded_resources():
             ranks_per_node=8,
             cores_per_node=64,
             duration_seconds=1801,
+            max_wall_time_seconds=1800,
+        )
+    with pytest.raises(ValueError, match="node cores"):
+        profile.validate_resources(
+            nodes=1,
+            ranks_per_node=8,
+            cores_per_node=64,
+            threads_per_rank=9,
+            duration_seconds=1800,
             max_wall_time_seconds=1800,
         )
 
