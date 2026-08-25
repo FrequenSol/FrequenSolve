@@ -11,6 +11,7 @@ from frequensolve.orchestrator.sites.hpc.live_canary import (
     SYNTHETIC_FIXTURE_ID,
     LiveSlurmCanaryError,
     LiveSlurmCanaryPolicy,
+    _cancel_active_scheduler_job,
     _owned_remote_paths,
     build_synthetic_live_slurm_job,
     load_live_slurm_canary_policy,
@@ -177,3 +178,26 @@ def test_synthetic_fixture_uses_unique_owned_paths(tmp_path):
     assert success.f_list == [20.0]
     with pytest.raises(LiveSlurmCanaryError, match="must not already exist"):
         build_synthetic_live_slurm_job(project_path, "run-654321")
+
+
+def test_scheduler_cleanup_cancels_job_when_public_handle_is_terminal():
+    commands = []
+    responses = iter(["50", "", ""])
+    site = SimpleNamespace(
+        run_login=lambda command: commands.append(command) or next(responses)
+    )
+    cancellations = []
+    handle = SimpleNamespace(id="50", cancel=lambda: cancellations.append("50"))
+
+    _cancel_active_scheduler_job(
+        site,
+        handle,
+        timeout=10,
+        poll_interval=0,
+    )
+
+    assert cancellations == ["50"]
+    assert commands == [
+        "squeue -h -j 50 -o %i",
+        "squeue -h -j 50 -o %i",
+    ]

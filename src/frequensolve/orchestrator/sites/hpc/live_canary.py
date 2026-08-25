@@ -36,6 +36,7 @@ from frequensolve import (
 )
 from frequensolve.orchestrator.sites import Site, load_site_config
 from frequensolve.orchestrator.sites.hpc.enterprise import EnterpriseHPCProfile
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import validate_slurm_job_id
 
 CANARY_POLICY_SCHEMA = "frequensolve-live-slurm-canary-policy/v1"
 CANARY_EVIDENCE_SCHEMA = "frequensolve-live-slurm-canary-evidence/v1"
@@ -547,6 +548,32 @@ def _cleanup_remote_paths(site: Any, paths: Sequence[str]) -> None:
         raise LiveSlurmCanaryError("canary-owned remote cleanup is incomplete")
 
 
+def _scheduler_job_present(site: Any, job_id: Any) -> bool:
+    validated_job_id = validate_slurm_job_id(job_id)
+    return bool(site.run_login(f"squeue -h -j {validated_job_id} -o %i").strip())
+
+
+def _cancel_active_scheduler_job(
+    site: Any,
+    handle: Any,
+    *,
+    timeout: float,
+    poll_interval: float,
+) -> None:
+    """Cancel an active scheduler job even if the public handle is terminal."""
+
+    if not _scheduler_job_present(site, handle.id):
+        return
+    handle.cancel()
+    deadline = time.monotonic() + timeout
+    while _scheduler_job_present(site, handle.id):
+        if time.monotonic() >= deadline:
+            raise LiveSlurmCanaryError(
+                "canary scheduler job remained active after cancellation"
+            )
+        time.sleep(poll_interval)
+
+
 def run_live_slurm_canary(
     *,
     site: Any,
@@ -677,17 +704,18 @@ def run_live_slurm_canary(
             if handle is None:
                 continue
             try:
-                if not handle.status().is_complete:
-                    handle.cancel()
-                    handle.wait(
-                        timeout=policy.cancel_timeout_seconds,
-                        poll_interval=site.run_config.poll_interval,
-                        check=False,
-                    )
+                _cancel_active_scheduler_job(
+                    site,
+                    handle,
+                    timeout=policy.cancel_timeout_seconds,
+                    poll_interval=site.run_config.poll_interval,
+                )
             except Exception:
                 all_terminal = False
             else:
-                all_terminal = all_terminal and handle.status().is_complete
+                all_terminal = all_terminal and not _scheduler_job_present(
+                    site, handle.id
+                )
         if all_terminal and not remote_paths and success_handle is not None:
             try:
                 remote_paths = _owned_remote_paths(
