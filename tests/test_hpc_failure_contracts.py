@@ -886,6 +886,7 @@ def test_rsync_remote_spec_rejects_unsafe_endpoint_values(username, hostname):
     ("raw", "expected"),
     [
         ("PD", "pending"),
+        ("CF", "pending"),
         ("CONFIGURING", "pending"),
         ("R", "running"),
         ("COMPLETING", "running"),
