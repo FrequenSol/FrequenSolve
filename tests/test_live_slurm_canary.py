@@ -20,6 +20,8 @@ from frequensolve.orchestrator.sites.hpc.live_canary import (
     validate_live_slurm_site,
 )
 
+pytestmark = pytest.mark.hpc_hermetic
+
 
 def policy_values(tmp_path: Path) -> dict:
     return {
