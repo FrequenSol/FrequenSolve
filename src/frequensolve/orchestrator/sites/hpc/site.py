@@ -1047,7 +1047,7 @@ class SlurmSite(BaseSite):
                 _wait_async_fn=self._wait_attached_run_async,
                 _timeout_fn=self._timeout_slurm_run,
                 _generic_wait=False,
-                _cancel_fn=lambda run: self.cancel_job(str(run.id)),
+                _cancel_fn=self._cancel_run,
                 _fetch_fn=(lambda run: self.fetch_outputs(run.job)) if fetch else None,
                 _fetch_on_complete=fetch,
             )
@@ -1415,7 +1415,24 @@ class SlurmSite(BaseSite):
 
         handle = super().handle(job, job_id=job_id, mode=mode)
         handle._timeout_fn = self._timeout_slurm_run
+        handle._cancel_fn = self._cancel_run
         return handle
+
+    def _cancel_run(self, run: RunHandle) -> None:
+        """Publish terminal cancellation after SLURM accepts ``scancel``."""
+
+        if not self.cancel_job(str(run.id)):
+            return
+        status = JobStatus(
+            state="cancelled",
+            return_code=1,
+            job_id=str(run.id),
+            message="SLURM cancellation request accepted",
+            raw={"scheduler": "slurm", "cancellation_requested": True},
+        )
+        run._last_status = status
+        run._result = run._make_result(status)
+        self._finalize_run_record(run, status)
 
     def _timeout_slurm_run(self, run: RunHandle, status: JobStatus) -> RunResult:
         """Cancel a still-running SLURM job before publishing a timeout result."""
@@ -2468,7 +2485,7 @@ class SlurmSite(BaseSite):
             _wait_async_fn=self._wait_allocation_async,
             _finalize_fn=self._finalize_allocation,
             _timeout_fn=self._timeout_slurm_run,
-            _cancel_fn=lambda run: self.cancel_job(str(run.id)),
+            _cancel_fn=self._cancel_run,
         )
 
     def _poll_allocation(self, run: RunHandle) -> JobStatus:

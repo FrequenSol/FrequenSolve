@@ -684,6 +684,29 @@ def test_run_handle_cancel_delegates_to_site():
     assert site.cancelled == "123"
 
 
+def test_slurm_run_handle_cancel_is_terminal_without_accounting(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    cancelled = []
+    monkeypatch.setattr(
+        site,
+        "cancel_job",
+        lambda job_id: cancelled.append(job_id) or True,
+    )
+    run = site.handle(DummyJob(), job_id="41", mode="batch")
+
+    run.cancel()
+    result = run.wait(check=False)
+
+    assert cancelled == ["41"]
+    assert result.status.state == "cancelled"
+    assert result.status.return_code == 1
+    assert result.status.raw == {
+        "scheduler": "slurm",
+        "cancellation_requested": True,
+    }
+
+
 def test_site_run_separates_submit_and_wait_options():
     site = DummyBaseSite()
 
