@@ -736,6 +736,9 @@ def test_installed_sdk_artifact_uses_pip_direct_url_and_record(monkeypatch, tmp_
     package.parent.mkdir()
     metadata.mkdir()
     package.write_text("synthetic installed package\n")
+    cache = package.parent / "__pycache__" / "module.cpython-312.pyc"
+    cache.parent.mkdir()
+    cache.write_bytes(b"synthetic generated cache")
     direct_url = json.dumps(
         {
             "archive_info": {
@@ -755,6 +758,7 @@ def test_installed_sdk_artifact_uses_pip_direct_url_and_record(monkeypatch, tmp_
     record = "\n".join(
         [
             f"frequensolve/module.py,sha256={record_hash(package)},{package.stat().st_size}",
+            "frequensolve/__pycache__/module.cpython-312.pyc,,",
             "frequensolve-1.0.dist-info/direct_url.json,"
             f"sha256={record_hash(direct_url_path)},{direct_url_path.stat().st_size}",
             "frequensolve-1.0.dist-info/RECORD,,",
@@ -775,6 +779,35 @@ def test_installed_sdk_artifact_uses_pip_direct_url_and_record(monkeypatch, tmp_
     assert installed_frequensolve_artifact_sha256() == "d" * 64
 
     package.write_text("synthetic modified package\n")
+    assert installed_frequensolve_artifact_sha256() is None
+
+
+def test_installed_sdk_artifact_rejects_unverified_non_cache_record(
+    monkeypatch, tmp_path
+):
+    metadata = tmp_path / "frequensolve-1.0.dist-info"
+    metadata.mkdir()
+    direct_url = json.dumps(
+        {
+            "archive_info": {"hashes": {"sha256": "d" * 64}},
+            "url": "file:///synthetic/frequensolve.whl",
+        }
+    )
+
+    class _Distribution:
+        def read_text(self, name):
+            return {
+                "direct_url.json": direct_url,
+                "RECORD": "frequensolve/generated.py,,\nfrequensolve-1.0.dist-info/RECORD,,",
+            }[name]
+
+        def locate_file(self, relative):
+            return tmp_path / relative
+
+    monkeypatch.setattr(
+        enterprise_contract, "distribution", lambda name: _Distribution()
+    )
+
     assert installed_frequensolve_artifact_sha256() is None
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import importlib.util
 import json
 import re
 from dataclasses import dataclass
@@ -102,13 +103,20 @@ def installed_frequensolve_artifact_sha256() -> Optional[str]:
     if not rows or any(len(row) != 3 for row in rows):
         return None
     record_rows = 0
+    verified_paths: set[str] = set()
+    generated_cache_sources: set[str] = set()
     for relative, encoded_hash, encoded_size in rows:
         if not relative:
             return None
         if not encoded_hash and not encoded_size:
-            if not relative.endswith(".dist-info/RECORD"):
+            if relative.endswith(".dist-info/RECORD"):
+                record_rows += 1
+                continue
+            try:
+                source = importlib.util.source_from_cache(relative)
+            except ValueError:
                 return None
-            record_rows += 1
+            generated_cache_sources.add(source)
             continue
         if not encoded_hash.startswith("sha256=") or not encoded_size.isdigit():
             return None
@@ -126,7 +134,10 @@ def installed_frequensolve_artifact_sha256() -> Optional[str]:
             or encoded_hash.removeprefix("sha256=") != expected
         ):
             return None
+        verified_paths.add(relative)
     if record_rows != 1:
+        return None
+    if not generated_cache_sources.issubset(verified_paths):
         return None
     return candidates[0]
 
