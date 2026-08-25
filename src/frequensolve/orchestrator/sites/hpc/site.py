@@ -24,7 +24,18 @@ from datetime import datetime, timezone
 from importlib.resources import as_file, files
 from pathlib import Path, PurePosixPath
 from select import select
-from typing import Any, Dict, List, Literal, Mapping, Optional, Type, Union, cast
+from typing import (
+    Any,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Type,
+    Union,
+    cast,
+)
 
 from frequensolve import __version__ as frequensolve_version
 from frequensolve._optional import optional_dependency_error
@@ -181,6 +192,8 @@ class SlurmSiteConfig(BaseSiteConfig):
     ssh_port: int = 22
     known_hosts_file: Optional[Union[str, Path]] = None
     known_hosts_name: Optional[str] = None
+    allow_ssh_agent: bool = True
+    allow_keyboard_interactive: bool = True
     queue: str = "normal"
     scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
@@ -214,6 +227,10 @@ class SlurmSiteConfig(BaseSiteConfig):
             or any(character.isspace() for character in self.known_hosts_name)
         ):
             raise ValueError("SLURM known-hosts name must be one non-empty token")
+        if not isinstance(self.allow_ssh_agent, bool):
+            raise ValueError("SLURM allow_ssh_agent must be true or false")
+        if not isinstance(self.allow_keyboard_interactive, bool):
+            raise ValueError("SLURM allow_keyboard_interactive must be true or false")
         self.queue = _safe_slurm_directive(self.queue, "queue") or ""
         if self.account:
             self.account = _safe_slurm_directive(self.account, "account") or ""
@@ -1409,6 +1426,78 @@ class SlurmSite(BaseSite):
             scheduler_version=scheduler_version,
             cores_per_node=int(partition_config.cores_per_node),
         )
+        installed_files = bundle.get("installedFiles")
+        if isinstance(installed_files, (str, bytes)) or not isinstance(
+            installed_files, Sequence
+        ):
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC installed-file inventory is invalid"
+            )
+        inventory_records = []
+        for item in installed_files:
+            if not isinstance(item, Mapping):
+                raise EnterpriseHPCPreflightError(
+                    "Enterprise HPC installed-file inventory is invalid"
+                )
+            relative = str(item.get("path", ""))
+            relative_path = PurePosixPath(relative)
+            if (
+                not relative
+                or relative_path.is_absolute()
+                or relative_path.as_posix() != relative
+                or any(part in {"", ".", ".."} for part in relative_path.parts)
+            ):
+                raise EnterpriseHPCPreflightError(
+                    "Enterprise HPC installed-file inventory is invalid"
+                )
+            inventory_records.append(
+                {
+                    "path": relative,
+                    "mode": item.get("mode"),
+                    "size": item.get("size"),
+                    "sha256": item.get("sha256"),
+                }
+            )
+        encoded_inventory = base64.b64encode(
+            json.dumps(inventory_records, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+        bundle_inventory_reader = (
+            "import base64, hashlib, json, os, stat, sys\n"
+            "frequensolve_bundle_inventory = True\n"
+            "root = sys.argv[1]\n"
+            "records = json.loads(base64.b64decode(sys.argv[2], validate=True))\n"
+            "inventory = []\n"
+            "for record in records:\n"
+            "    path = os.path.join(root, *record['path'].split('/'))\n"
+            "    metadata = os.lstat(path)\n"
+            "    if not stat.S_ISREG(metadata.st_mode):\n"
+            "        sys.exit(71)\n"
+            "    mode = metadata.st_mode & 0o777\n"
+            "    if metadata.st_size != record['size'] or mode != int(record['mode'], 8):\n"
+            "        sys.exit(72)\n"
+            "    digest = hashlib.sha256()\n"
+            "    with open(path, 'rb') as stream:\n"
+            "        for chunk in iter(lambda: stream.read(1048576), b''):\n"
+            "            digest.update(chunk)\n"
+            "    observed = digest.hexdigest()\n"
+            "    if observed != record['sha256']:\n"
+            "        sys.exit(73)\n"
+            '    inventory.append(f"{observed}  {mode:04o}  {metadata.st_size}  "'
+            " + record['path'] + '\\n')\n"
+            "sys.stdout.write(hashlib.sha256(''.join(inventory).encode()).hexdigest())\n"
+        )
+        installed_content_sha256 = self._run_login_checked(
+            self._runtime_probe_command(
+                f"python3 -c {shlex.quote(bundle_inventory_reader)} "
+                f"{shlex.quote(profile.bundle_root)} "
+                f"{shlex.quote(encoded_inventory)}"
+            ),
+            purpose="the complete installed bundle content",
+        ).strip()
+        if installed_content_sha256 != result.bundle_content_sha256:
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC installed bundle content does not match the bundle"
+            )
         executable_digest_reader = (
             "import collections,hashlib,sys;"
             "digest=hashlib.sha256();stream=open(sys.argv[1],'rb');"
