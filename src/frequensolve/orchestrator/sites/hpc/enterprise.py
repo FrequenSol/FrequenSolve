@@ -120,7 +120,7 @@ def installed_frequensolve_artifact_sha256() -> Optional[str]:
             continue
         if not encoded_hash.startswith("sha256=") or not encoded_size.isdigit():
             return None
-        path = Path(installed.locate_file(relative))
+        path = Path(str(installed.locate_file(relative)))
         try:
             observed = path.lstat()
             if path.is_symlink() or not path.is_file():
