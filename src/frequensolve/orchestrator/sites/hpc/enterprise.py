@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import csv
+import hashlib
+import json
 import re
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from importlib.metadata import PackageNotFoundError, distribution
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional, Sequence
 
 from frequensolve._optional import optional_dependency_error
@@ -60,6 +65,70 @@ _WALL_TIME = re.compile(r"(?:(?:0|[1-9][0-9]*)-)?[0-9]{2}:[0-5][0-9]:[0-5][0-9]\
 
 class EnterpriseHPCPreflightError(RuntimeError):
     """Raised when an Enterprise HPC site is unsafe or incompatible."""
+
+
+def installed_frequensolve_artifact_sha256() -> Optional[str]:
+    """Return the wheel SHA-256 after verifying pip provenance and RECORD."""
+
+    try:
+        installed = distribution("frequensolve")
+        direct_url = installed.read_text("direct_url.json")
+        record = installed.read_text("RECORD")
+    except (PackageNotFoundError, OSError):
+        return None
+    if direct_url is None or record is None:
+        return None
+    try:
+        document = json.loads(direct_url)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(document, Mapping):
+        return None
+    archive = document.get("archive_info")
+    if not isinstance(archive, Mapping):
+        return None
+    candidates: list[str] = []
+    legacy = archive.get("hash")
+    if isinstance(legacy, str) and legacy.startswith("sha256="):
+        candidates.append(legacy.removeprefix("sha256="))
+    hashes = archive.get("hashes")
+    if isinstance(hashes, Mapping) and isinstance(hashes.get("sha256"), str):
+        candidates.append(hashes["sha256"])
+    if not candidates or any(not _SHA256.fullmatch(value) for value in candidates):
+        return None
+    if len(set(candidates)) != 1:
+        return None
+    rows = list(csv.reader(record.splitlines()))
+    if not rows or any(len(row) != 3 for row in rows):
+        return None
+    record_rows = 0
+    for relative, encoded_hash, encoded_size in rows:
+        if not relative:
+            return None
+        if not encoded_hash and not encoded_size:
+            if not relative.endswith(".dist-info/RECORD"):
+                return None
+            record_rows += 1
+            continue
+        if not encoded_hash.startswith("sha256=") or not encoded_size.isdigit():
+            return None
+        path = Path(installed.locate_file(relative))
+        try:
+            observed = path.lstat()
+            if path.is_symlink() or not path.is_file():
+                return None
+            digest = hashlib.sha256(path.read_bytes()).digest()
+        except OSError:
+            return None
+        expected = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+        if (
+            int(encoded_size) != observed.st_size
+            or encoded_hash.removeprefix("sha256=") != expected
+        ):
+            return None
+    if record_rows != 1:
+        return None
+    return candidates[0]
 
 
 def _required_text(value: Any, name: str, pattern: re.Pattern[str]) -> str:
@@ -483,6 +552,22 @@ class EnterpriseHPCProfile:
             raise ValueError("Enterprise HPC request exceeds max_threads_per_rank")
         if duration_seconds > max_wall_time_seconds:
             raise ValueError("Enterprise HPC request exceeds max_wall_time")
+
+    def validate_allocation(self, *, nodes: int, ranks: int, cores: int) -> None:
+        """Reject an attached allocation outside certified resource bounds."""
+
+        for value, label in ((nodes, "nodes"), (ranks, "ranks"), (cores, "cores")):
+            _positive_int(value, f"allocation_{label}")
+        if nodes > self.max_nodes:
+            raise ValueError("Enterprise HPC allocation exceeds max_nodes")
+        if ranks > self.max_ranks:
+            raise ValueError("Enterprise HPC allocation exceeds max_ranks")
+        if cores < ranks or cores % ranks:
+            raise ValueError(
+                "Enterprise HPC allocation cores must divide evenly across ranks"
+            )
+        if cores // ranks > self.max_threads_per_rank:
+            raise ValueError("Enterprise HPC allocation exceeds max_threads_per_rank")
 
 
 @dataclass(frozen=True)

@@ -63,6 +63,7 @@ from frequensolve.orchestrator.sites.hpc.enterprise import (
     EnterpriseHPCPreflightError,
     EnterpriseHPCPreflightResult,
     EnterpriseHPCProfile,
+    installed_frequensolve_artifact_sha256,
     validate_bundle_pair,
 )
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import as_list as _as_list
@@ -999,6 +1000,12 @@ class SlurmSite(BaseSite):
                 raise RuntimeError(
                     "Active SLURM allocation is missing a valid scheduler job id"
                 ) from exc
+            if enterprise_hpc is not None:
+                enterprise_hpc.validate_allocation(
+                    nodes=int(self.pool.nhost),
+                    ranks=int(self.pool.nproc),
+                    cores=int(self.pool.ncore),
+                )
             pack = bool(extra_kwargs.pop("pack", True))
             future = self._submit_attached(
                 job,
@@ -1195,6 +1202,14 @@ class SlurmSite(BaseSite):
             raise EnterpriseHPCPreflightError(
                 "Installed FrequenSolve version does not match the Enterprise HPC bundle"
             )
+        if (
+            installed_frequensolve_artifact_sha256()
+            != profile.frequensolve_artifact_sha256
+        ):
+            raise EnterpriseHPCPreflightError(
+                "Installed FrequenSolve artifact provenance does not match the "
+                "Enterprise HPC bundle"
+            )
         # Remote state can change between submissions, so no cached result may
         # authorize scheduler spend. Keep ``force`` as a source-compatible
         # keyword while always refreshing the observations.
@@ -1206,7 +1221,6 @@ class SlurmSite(BaseSite):
             "scancel",
             "scontrol",
             "python3",
-            profile.mpi_launcher,
             *(("module",) if profile.module is not None else ()),
         )
         command_probe = " && ".join(
@@ -1214,6 +1228,16 @@ class SlurmSite(BaseSite):
             for command in required_commands
         )
         self._run_login_checked(command_probe, purpose="required Slurm commands")
+        launcher_probe = " && ".join(
+            [
+                *self._runtime_setup_lines(),
+                f"command -v {shlex.quote(profile.mpi_launcher)} >/dev/null",
+            ]
+        )
+        self._run_login_checked(
+            launcher_probe,
+            purpose="the configured MPI launcher",
+        )
         scheduler_version = self._run_login_checked(
             "scontrol --version",
             purpose="the Slurm scheduler",

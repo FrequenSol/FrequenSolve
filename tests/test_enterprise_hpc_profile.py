@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 
 import pytest
@@ -12,10 +13,12 @@ from frequensolve.orchestrator.sites.hpc import (
     SlurmSite,
     SlurmSiteConfig,
 )
+from frequensolve.orchestrator.sites.hpc import enterprise as enterprise_contract
 from frequensolve.orchestrator.sites.hpc import site as hpc
 from frequensolve.orchestrator.sites.hpc.enterprise import (
     EnterpriseHPCPreflightError,
     EnterpriseHPCProfile,
+    installed_frequensolve_artifact_sha256,
     validate_bundle_pair,
 )
 from frequensolve.project.project import Project
@@ -617,6 +620,11 @@ def _enterprise_site(monkeypatch):
         qos="synthetic-qos",
     )
     monkeypatch.setattr(hpc, "SSHClientClass", _WrappedLogin)
+    monkeypatch.setattr(
+        hpc,
+        "installed_frequensolve_artifact_sha256",
+        lambda: "d" * 64,
+    )
     return _Site(
         config=config,
         run_config=run_config,
@@ -681,6 +689,12 @@ def test_preflight_observes_scheduler_manifests_and_public_solver_identity(monke
     assert result.scheduler_version == "slurm 24.05.5"
     assert result.solver_source_commit == COMMIT
     assert sum("--identity-json" in command for command in calls) == 2
+    launcher_probes = [command for command in calls if "command -v srun" in command]
+    assert len(launcher_probes) == 2
+    assert all(
+        "module load frequensolve/1.0.0-synthetic" in command
+        for command in launcher_probes
+    )
     assert all(not command.startswith(("cat ", "sha256sum ")) for command in calls)
     assert all(not command.lstrip().startswith("sbatch ") for command in calls)
 
@@ -700,6 +714,106 @@ def test_preflight_rejects_multiline_scheduler_evidence(monkeypatch):
 
     with pytest.raises(EnterpriseHPCPreflightError, match="unexpected scheduler"):
         site.enterprise_hpc_preflight()
+
+
+def test_preflight_rejects_unproven_local_sdk_artifact_before_remote_use(monkeypatch):
+    site = _enterprise_site(monkeypatch)
+    calls = []
+    monkeypatch.setattr(hpc, "installed_frequensolve_artifact_sha256", lambda: None)
+    monkeypatch.setattr(
+        site, "run_login_cmd", lambda *args, **kwargs: calls.append(args)
+    )
+
+    with pytest.raises(EnterpriseHPCPreflightError, match="artifact provenance"):
+        site.enterprise_hpc_preflight()
+
+    assert calls == []
+
+
+def test_installed_sdk_artifact_uses_pip_direct_url_and_record(monkeypatch, tmp_path):
+    package = tmp_path / "frequensolve" / "module.py"
+    metadata = tmp_path / "frequensolve-1.0.dist-info"
+    package.parent.mkdir()
+    metadata.mkdir()
+    package.write_text("synthetic installed package\n")
+    direct_url = json.dumps(
+        {
+            "archive_info": {
+                "hash": "sha256=" + "d" * 64,
+                "hashes": {"sha256": "d" * 64},
+            },
+            "url": "file:///synthetic/frequensolve.whl",
+        }
+    )
+    direct_url_path = metadata / "direct_url.json"
+    direct_url_path.write_text(direct_url)
+
+    def record_hash(path):
+        digest = base64.urlsafe_b64encode(hashlib.sha256(path.read_bytes()).digest())
+        return digest.decode("ascii").rstrip("=")
+
+    record = "\n".join(
+        [
+            f"frequensolve/module.py,sha256={record_hash(package)},{package.stat().st_size}",
+            "frequensolve-1.0.dist-info/direct_url.json,"
+            f"sha256={record_hash(direct_url_path)},{direct_url_path.stat().st_size}",
+            "frequensolve-1.0.dist-info/RECORD,,",
+        ]
+    )
+
+    class _Distribution:
+        def read_text(self, name):
+            return {"direct_url.json": direct_url, "RECORD": record}[name]
+
+        def locate_file(self, relative):
+            return tmp_path / relative
+
+    monkeypatch.setattr(
+        enterprise_contract, "distribution", lambda name: _Distribution()
+    )
+
+    assert installed_frequensolve_artifact_sha256() == "d" * 64
+
+    package.write_text("synthetic modified package\n")
+    assert installed_frequensolve_artifact_sha256() is None
+
+
+@pytest.mark.parametrize(
+    ("nodes", "ranks", "cores", "message"),
+    [
+        (3, 8, 16, "max_nodes"),
+        (1, 17, 32, "max_ranks"),
+        (1, 4, 10, "divide evenly"),
+        (1, 2, 18, "max_threads_per_rank"),
+    ],
+)
+def test_enterprise_profile_rejects_unbounded_attached_allocation(
+    nodes, ranks, cores, message
+):
+    profile = EnterpriseHPCProfile.from_mapping(profile_values())
+
+    with pytest.raises(ValueError, match=message):
+        profile.validate_allocation(nodes=nodes, ranks=ranks, cores=cores)
+
+
+def test_attached_submit_validates_actual_pool_before_transfer(monkeypatch):
+    site = _enterprise_site(monkeypatch)
+    site.pool.id = "24680"
+    site.pool.nhost = 3
+    site.pool.nproc = 8
+    site.pool.ncore = 16
+    transferred = []
+    monkeypatch.setattr(_Site, "provisioned", property(lambda self: True))
+    monkeypatch.setattr(site, "enterprise_hpc_preflight", lambda **kwargs: None)
+    monkeypatch.setattr(site, "prepare_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        site, "_submit_attached", lambda *args, **kwargs: transferred.append(args)
+    )
+
+    with pytest.raises(ValueError, match="max_nodes"):
+        site.submit(object(), mode="attached", force=True)
+
+    assert transferred == []
 
 
 def test_preflight_fails_before_submission_when_solver_identity_differs(monkeypatch):
