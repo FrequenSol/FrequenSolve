@@ -2255,11 +2255,7 @@ class SlurmSite(BaseSite):
                 if config.ranks_per_node is not None
                 else {}
             ),
-            **(
-                {"threads_per_rank": config.threads_per_rank}
-                if config.threads_per_rank is not None
-                else {}
-            ),
+            threads_per_rank=config.threads_per_rank,
             **(
                 {"tolerate_failures": config.tolerate_failures}
                 if config.tolerate_failures is not None
