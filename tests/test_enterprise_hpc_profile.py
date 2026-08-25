@@ -712,6 +712,14 @@ def test_preflight_observes_scheduler_manifests_and_public_solver_identity(monke
         "module load frequensolve/1.0.0-synthetic" in command
         for command in launcher_probes
     )
+    python_probes = [command for command in calls if "python3" in command]
+    assert len(python_probes) == 12
+    assert all(
+        command.startswith("module load frequensolve/1.0.0-synthetic && ")
+        and ". /opt/frequensolve/python-env/bin/activate && " in command
+        and command.index("/bin/activate") < command.index("python3")
+        for command in python_probes
+    )
     assert all(not command.startswith(("cat ", "sha256sum ")) for command in calls)
     assert all(not command.lstrip().startswith("sbatch ") for command in calls)
 
@@ -991,6 +999,27 @@ def test_enterprise_provision_rechecks_after_transfer_immediately_before_sbatch(
 def test_slurm_directive_values_reject_newline_injection(field):
     with pytest.raises(ValueError, match="safe SLURM directive"):
         SlurmRunConfig(**{field: "safe\n#SBATCH --nodes=999"})
+
+
+@pytest.mark.parametrize(
+    "notify_on",
+    ["end\n#SBATCH --array=1-1000", "requeue", "END", 123],
+)
+def test_slurm_notification_trigger_rejects_unbounded_directives(notify_on):
+    with pytest.raises(ValueError, match="notify_on must be one of"):
+        SlurmRunConfig(notify_on=notify_on)
+
+
+def test_slurm_notification_trigger_is_validated_at_script_boundary(monkeypatch):
+    site = _enterprise_site(monkeypatch)
+
+    with pytest.raises(ValueError, match="notify_on must be one of"):
+        site._sweep_SLURM_script(
+            n_tasks=1,
+            n_nodes=1,
+            stdout="/synthetic/work/logs",
+            notify_on="end\n#SBATCH --array=1-1000",
+        )
 
 
 def test_safe_existing_slurm_partition_list_and_email_characters_remain_supported():
