@@ -42,26 +42,38 @@ logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
 _COMPUTE_HOST = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:]+\])\Z")
 
 
-def _verify_server_host_key(transport: Transport, host: str) -> None:
-    """Verify *host* against the user's or system's known-hosts files."""
+def _verify_server_host_key(
+    transport: Transport,
+    host: str,
+    *,
+    known_hosts_file: Optional[Path] = None,
+    known_hosts_name: Optional[str] = None,
+) -> None:
+    """Verify *host* against an explicit or standard known-hosts source."""
 
     known_hosts = HostKeys()
-    for path in (
-        Path("~/.ssh/known_hosts").expanduser(),
-        Path("/etc/ssh/ssh_known_hosts"),
-    ):
+    paths = (
+        (known_hosts_file,)
+        if known_hosts_file is not None
+        else (
+            Path("~/.ssh/known_hosts").expanduser(),
+            Path("/etc/ssh/ssh_known_hosts"),
+        )
+    )
+    for path in paths:
         try:
             known_hosts.load(str(path))
         except OSError:
             continue
 
     server_key = transport.get_remote_server_key()
-    host_keys = known_hosts.lookup(host)
+    lookup_name = known_hosts_name or host
+    host_keys = known_hosts.lookup(lookup_name)
     expected_key = host_keys.get(server_key.get_name()) if host_keys else None
     if expected_key != server_key:
         raise SSHException(
-            f"SSH host key for {host!r} is unknown or does not match known_hosts. "
-            f"Connect once with your system SSH client to verify and save the host key."
+            f"SSH host key for {lookup_name!r} is unknown or does not match "
+            "the configured known-hosts source."
         )
 
 
@@ -100,8 +112,13 @@ class SlurmAuthenticator:
 
         logger.info("Starting authentication with host: %s", host)
 
+        config = getattr(site, "config", None)
+        ssh_port = getattr(config, "ssh_port", 22)
+        known_hosts_file = getattr(config, "known_hosts_file", None)
+        known_hosts_name = getattr(config, "known_hosts_name", None)
         control_dir = os.path.expanduser("~/.ssh/control")
-        if os.path.exists(control_dir):
+        explicit_trust = known_hosts_file is not None or known_hosts_name is not None
+        if ssh_port == 22 and not explicit_trust and os.path.exists(control_dir):
             for control_path in glob.glob(f"{control_dir}/*"):
                 try:
                     result = subprocess.run(
@@ -231,10 +248,14 @@ class SlurmAuthenticator:
 
         site = self.site
         login_client = SSHClient()
+        config = getattr(site, "config", None)
+        ssh_port = getattr(config, "ssh_port", 22)
+        known_hosts_file = getattr(config, "known_hosts_file", None)
+        known_hosts_name = getattr(config, "known_hosts_name", None)
 
         try:
             sock = socket.create_connection(
-                (host, 22), timeout=SSH_CONNECT_TIMEOUT_SECONDS
+                (host, ssh_port), timeout=SSH_CONNECT_TIMEOUT_SECONDS
             )
         except (socket.timeout, TimeoutError):
             raise TimeoutError(
@@ -254,7 +275,12 @@ class SlurmAuthenticator:
             ) from None
         try:
             transport.start_client(timeout=SSH_CONNECT_TIMEOUT_SECONDS)
-            _verify_server_host_key(transport, host)
+            _verify_server_host_key(
+                transport,
+                host,
+                known_hosts_file=known_hosts_file,
+                known_hosts_name=known_hosts_name,
+            )
         except Exception:
             transport.close()
             raise
