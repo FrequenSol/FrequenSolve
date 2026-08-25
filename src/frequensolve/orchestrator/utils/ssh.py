@@ -351,8 +351,7 @@ class SSHProxy:
                 target,
             )
             raise TimeoutError(
-                f"SSH command to {target} timed out after "
-                f"{effective_timeout} seconds"
+                f"SSH command to {target} timed out after {effective_timeout} seconds"
             ) from None
         except OSError as exc:
             logger.error("SSH command could not start (%s)", type(exc).__name__)
@@ -382,6 +381,127 @@ class SSHProxy:
         """Return ``None`` because subprocess SSH proxies expose no transport."""
 
         return None  # No transport for proxy
+
+    def open_sftp(self) -> "_OpenSSHControlSFTP":
+        """Open an SFTP adapter that reuses this verified control socket."""
+
+        return _OpenSSHControlSFTP(
+            control_path=self.control_path,
+            username=self.username,
+            host=self.host,
+            command_timeout=self.command_timeout,
+        )
+
+
+class _OpenSSHControlSFTP:
+    """Small Paramiko-compatible SFTP surface backed by OpenSSH batch mode."""
+
+    def __init__(
+        self,
+        *,
+        control_path: str,
+        username: str,
+        host: str,
+        command_timeout: float,
+    ) -> None:
+        self.control_path = control_path
+        self.username = username
+        self.host = host
+        self.command_timeout = command_timeout
+
+    @staticmethod
+    def _quote_path(value: str) -> str:
+        raw = str(value)
+        if not raw or any(character in raw for character in ("\x00", "\n", "\r")):
+            raise ValueError("SFTP path contains an invalid character")
+        return shlex.quote(raw)
+
+    def _run_batch(self, command: str) -> None:
+        result = subprocess.run(
+            [
+                "sftp",
+                "-q",
+                "-b",
+                "-",
+                *control_socket_ssh_options(self.control_path),
+                f"{self.username}@{self.host}",
+            ],
+            input=f"{command}\n",
+            capture_output=True,
+            text=True,
+            timeout=self.command_timeout,
+        )
+        if result.returncode != 0:
+            raise OSError("SFTP operation failed")
+
+    def _run_ssh(self, command: str) -> str:
+        result = subprocess.run(
+            [
+                "ssh",
+                *control_socket_ssh_options(self.control_path),
+                f"{self.username}@{self.host}",
+                command,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=self.command_timeout,
+        )
+        if result.returncode != 0:
+            raise OSError("SFTP metadata operation failed")
+        return result.stdout
+
+    def stat(self, path: str) -> Any:
+        """Return the remote mode and size needed by the transfer manager."""
+
+        output = self._run_ssh("stat -Lc '%f %s' -- " + self._quote_path(path)).strip()
+        try:
+            encoded_mode, encoded_size = output.split()
+            mode = int(encoded_mode, 16)
+            size = int(encoded_size)
+        except (TypeError, ValueError):
+            raise OSError("SFTP metadata response was invalid") from None
+        return type("SFTPAttributes", (), {"st_mode": mode, "st_size": size})()
+
+    def put(self, local_path: str, remote_path: str) -> None:
+        """Upload one file through OpenSSH SFTP."""
+
+        self._run_batch(
+            f"put {self._quote_path(local_path)} {self._quote_path(remote_path)}"
+        )
+
+    def get(self, remote_path: str, local_path: str) -> None:
+        """Download one file through OpenSSH SFTP."""
+
+        self._run_batch(
+            f"get {self._quote_path(remote_path)} {self._quote_path(local_path)}"
+        )
+
+    def chmod(self, path: str, mode: int) -> None:
+        """Set one remote file mode through OpenSSH SFTP."""
+
+        self._run_batch(f"chmod {mode:04o} {self._quote_path(path)}")
+
+    def posix_rename(self, old_path: str, new_path: str) -> None:
+        """Atomically rename one remote file when the server supports it."""
+
+        self._run_batch(
+            f"rename {self._quote_path(old_path)} {self._quote_path(new_path)}"
+        )
+
+    def rename(self, old_path: str, new_path: str) -> None:
+        """Rename one remote file."""
+
+        self.posix_rename(old_path, new_path)
+
+    def remove(self, path: str) -> None:
+        """Remove one remote file."""
+
+        self._run_batch(f"rm {self._quote_path(path)}")
+
+    def close(self) -> None:
+        """Close the stateless adapter."""
+
+        return None
 
 
 class SSHClientClass:
