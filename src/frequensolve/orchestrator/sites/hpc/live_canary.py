@@ -1,24 +1,21 @@
-"""Bounded, manually invoked live Slurm acceptance canary.
+"""Manually exercise FrequenSolve's public SSH/SFTP/Slurm behavior.
 
-This module deliberately has no scheduled or CI entry point.  Operators must
-provide a local policy file and an explicit acknowledgement for every run.
+The Deployment acceptance harness supplies the generated Enterprise profile,
+execution policy, cleanup, and evidence retention. This module is intentionally
+limited to one synthetic success case and one bounded cancellation case.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import re
-import shlex
-import stat
 import sys
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
-from typing import Any, Mapping, Optional, Sequence
+from pathlib import Path
+from typing import Any, Optional, Sequence
 
 import numpy as np
 
@@ -34,231 +31,35 @@ from frequensolve import (
     __version__,
     ureg,
 )
-from frequensolve.orchestrator.sites import Site, load_site_config
+from frequensolve.orchestrator.sites import Site
 from frequensolve.orchestrator.sites.hpc.enterprise import EnterpriseHPCProfile
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import validate_slurm_job_id
 
-CANARY_POLICY_SCHEMA = "frequensolve-live-slurm-canary-policy/v1"
-CANARY_EVIDENCE_SCHEMA = "frequensolve-live-slurm-canary-evidence/v1"
 CANARY_ACKNOWLEDGEMENT = "I_ACKNOWLEDGE_BOUNDED_LIVE_SLURM_SPEND"
+CANARY_RESULT_SCHEMA = "frequensolve-live-slurm-canary-result/v1"
 SYNTHETIC_FIXTURE_ID = "synthetic-acoustic-2d-v1"
 
-_POLICY_ID = re.compile(r"[a-z0-9][a-z0-9._-]{2,127}\Z")
-_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
-_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:-]*\Z")
-_KNOWN_HOST_NAME = re.compile(
-    r"(?:[A-Za-z0-9][A-Za-z0-9.:-]*|\[[A-Fa-f0-9:.]+\]:[0-9]+)\Z"
-)
-_WALL_TIME = re.compile(r"[0-9]{2}:[0-5][0-9]:[0-5][0-9]\Z")
 _RUN_TOKEN = re.compile(r"[a-z0-9][a-z0-9-]{5,31}\Z")
+_JOB_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 class LiveSlurmCanaryError(RuntimeError):
-    """Raised when the live canary is unsafe, incomplete, or unsuccessful."""
+    """Raised when the opt-in live canary cannot finish safely."""
 
 
-@dataclass(frozen=True)
-class _RecoveredSchedulerHandle:
-    """Minimal cancellation adapter for a job accepted before submit returned."""
+class _RecoveredHandle:
+    """Cancel a scheduler job recovered after an interrupted submission."""
 
-    site: Any
-    id: str
+    def __init__(self, site: Any, job_id: str):
+        self.site = site
+        self.id = job_id
 
     def cancel(self) -> None:
         self.site.cancel_job(self.id)
 
 
-def _required_text(value: Any, label: str, pattern: re.Pattern[str]) -> str:
-    if not isinstance(value, str) or not pattern.fullmatch(value):
-        raise ValueError(f"live Slurm canary {label} has an invalid value")
-    return value
-
-
-def _positive_int(value: Any, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(f"live Slurm canary {label} must be a positive integer")
-    return value
-
-
-def _remote_path(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not value.startswith("/"):
-        raise ValueError(f"live Slurm canary {label} must be an absolute path")
-    path = PurePosixPath(value)
-    if any(part in {"", ".", ".."} for part in path.parts[1:]):
-        raise ValueError(
-            f"live Slurm canary {label} must be an absolute traversal-free path"
-        )
-    if any(ord(character) < 32 or ord(character) == 127 for character in value):
-        raise ValueError(f"live Slurm canary {label} contains a control character")
-    return str(path)
-
-
-def _wall_time_seconds(value: str) -> int:
-    _required_text(value, "maxWallTime", _WALL_TIME)
-    hours, minutes, seconds = (int(part) for part in value.split(":"))
-    return hours * 3600 + minutes * 60 + seconds
-
-
-def _known_hosts_port(name: str) -> int:
-    """Return the SSH port encoded by an OpenSSH known-hosts lookup name."""
-
-    if name.startswith("["):
-        return int(name.rsplit("]:", 1)[1])
-    return 22
-
-
-@dataclass(frozen=True)
-class LiveSlurmCanaryPolicy:
-    """Closed local execution policy required before any scheduler mutation."""
-
-    policy_id: str
-    fixture_id: str
-    allowed_host: str
-    known_hosts_file: Path
-    known_hosts_name: str
-    allowed_partition: str
-    allowed_work_dir: str
-    allowed_scratch_dir: str
-    max_nodes: int
-    max_ranks: int
-    max_threads_per_rank: int
-    max_wall_time: str
-    completion_timeout_seconds: int
-    cancel_timeout_seconds: int
-    cleanup_owner: str
-    log_retention: str
-    emergency_cancel_command: str
-    schema: str = CANARY_POLICY_SCHEMA
-
-    def __post_init__(self) -> None:
-        if self.schema != CANARY_POLICY_SCHEMA:
-            raise ValueError(
-                f"live Slurm canary schema must be {CANARY_POLICY_SCHEMA!r}"
-            )
-        _required_text(self.policy_id, "policyId", _POLICY_ID)
-        if self.fixture_id != SYNTHETIC_FIXTURE_ID:
-            raise ValueError(
-                f"live Slurm canary fixtureId must be {SYNTHETIC_FIXTURE_ID!r}"
-            )
-        _required_text(self.allowed_host, "allowedHost", _HOST)
-        _required_text(self.known_hosts_name, "knownHostsName", _KNOWN_HOST_NAME)
-        if not 1 <= _known_hosts_port(self.known_hosts_name) <= 65535:
-            raise ValueError("live Slurm canary knownHostsName has an invalid port")
-        if not self.known_hosts_file.is_absolute():
-            raise ValueError("live Slurm canary knownHostsFile must be absolute")
-        _required_text(self.allowed_partition, "allowedPartition", _TOKEN)
-        _remote_path(self.allowed_work_dir, "allowedWorkDir")
-        _remote_path(self.allowed_scratch_dir, "allowedScratchDir")
-        for label, value in (
-            ("maxNodes", self.max_nodes),
-            ("maxRanks", self.max_ranks),
-            ("maxThreadsPerRank", self.max_threads_per_rank),
-            ("completionTimeoutSeconds", self.completion_timeout_seconds),
-            ("cancelTimeoutSeconds", self.cancel_timeout_seconds),
-        ):
-            _positive_int(value, label)
-        if _wall_time_seconds(self.max_wall_time) > self.completion_timeout_seconds:
-            raise ValueError(
-                "live Slurm canary completion timeout must cover maxWallTime"
-            )
-        if not self.cleanup_owner.strip() or len(self.cleanup_owner) > 128:
-            raise ValueError("live Slurm canary cleanupOwner is required")
-        if not self.log_retention.strip() or len(self.log_retention) > 128:
-            raise ValueError("live Slurm canary logRetention is required")
-        if self.emergency_cancel_command != "scancel {job_id}":
-            raise ValueError(
-                "live Slurm canary emergencyCancelCommand must be " "'scancel {job_id}'"
-            )
-
-    @classmethod
-    def from_mapping(cls, values: Mapping[str, Any]) -> "LiveSlurmCanaryPolicy":
-        """Parse a closed policy mapping and reject unknown controls."""
-
-        fields = {
-            "schema",
-            "policyId",
-            "fixtureId",
-            "allowedHost",
-            "knownHostsFile",
-            "knownHostsName",
-            "allowedPartition",
-            "allowedWorkDir",
-            "allowedScratchDir",
-            "maxNodes",
-            "maxRanks",
-            "maxThreadsPerRank",
-            "maxWallTime",
-            "completionTimeoutSeconds",
-            "cancelTimeoutSeconds",
-            "cleanupOwner",
-            "logRetention",
-            "emergencyCancelCommand",
-        }
-        unknown = sorted(set(values) - fields)
-        if unknown:
-            raise ValueError(
-                "unsupported live Slurm canary policy key(s): " + ", ".join(unknown)
-            )
-        missing = sorted(fields - set(values))
-        if missing:
-            raise ValueError(
-                "missing live Slurm canary policy key(s): " + ", ".join(missing)
-            )
-        return cls(
-            schema=str(values["schema"]),
-            policy_id=str(values["policyId"]),
-            fixture_id=str(values["fixtureId"]),
-            allowed_host=str(values["allowedHost"]),
-            known_hosts_file=Path(str(values["knownHostsFile"])).expanduser(),
-            known_hosts_name=str(values["knownHostsName"]),
-            allowed_partition=str(values["allowedPartition"]),
-            allowed_work_dir=str(values["allowedWorkDir"]),
-            allowed_scratch_dir=str(values["allowedScratchDir"]),
-            max_nodes=_positive_int(values["maxNodes"], "maxNodes"),
-            max_ranks=_positive_int(values["maxRanks"], "maxRanks"),
-            max_threads_per_rank=_positive_int(
-                values["maxThreadsPerRank"], "maxThreadsPerRank"
-            ),
-            max_wall_time=str(values["maxWallTime"]),
-            completion_timeout_seconds=_positive_int(
-                values["completionTimeoutSeconds"], "completionTimeoutSeconds"
-            ),
-            cancel_timeout_seconds=_positive_int(
-                values["cancelTimeoutSeconds"], "cancelTimeoutSeconds"
-            ),
-            cleanup_owner=str(values["cleanupOwner"]),
-            log_retention=str(values["logRetention"]),
-            emergency_cancel_command=str(values["emergencyCancelCommand"]),
-        )
-
-
-def load_live_slurm_canary_policy(path: Path) -> LiveSlurmCanaryPolicy:
-    """Load a duplicate-key-safe local canary policy."""
-
-    def closed_object(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate live Slurm canary policy key: {key}")
-            result[key] = value
-        return result
-
-    try:
-        payload = json.loads(path.read_text(), object_pairs_hook=closed_object)
-    except OSError as exc:
-        raise LiveSlurmCanaryError("live Slurm canary policy is unavailable") from exc
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise LiveSlurmCanaryError("live Slurm canary policy is invalid JSON") from exc
-    if not isinstance(payload, Mapping):
-        raise LiveSlurmCanaryError("live Slurm canary policy must contain an object")
-    try:
-        return LiveSlurmCanaryPolicy.from_mapping(payload)
-    except ValueError as exc:
-        raise LiveSlurmCanaryError(str(exc)) from exc
-
-
 def require_live_slurm_acknowledgement(value: Optional[str]) -> None:
-    """Fail closed unless the operator explicitly accepts bounded live spend."""
+    """Require an explicit acknowledgement for every live invocation."""
 
     if value != CANARY_ACKNOWLEDGEMENT:
         raise LiveSlurmCanaryError(
@@ -267,182 +68,65 @@ def require_live_slurm_acknowledgement(value: Optional[str]) -> None:
         )
 
 
-def _selected_site_table(
-    config: Mapping[str, Any], profile: Optional[str]
-) -> Mapping[str, Any]:
-    sites = config.get("sites")
-    selected = profile or config.get("default")
-    if not isinstance(sites, Mapping) or not isinstance(selected, str):
-        raise LiveSlurmCanaryError("site config has no selected profile")
-    table = sites.get(selected)
-    if not isinstance(table, Mapping):
-        raise LiveSlurmCanaryError("selected site profile is unavailable")
-    return table
+def _seconds(value: str) -> int:
+    """Parse the Slurm wall-time formats used by generated profiles."""
 
-
-def validate_live_slurm_local_inputs(
-    *,
-    site_config_path: Path,
-    profile: Optional[str],
-    policy: LiveSlurmCanaryPolicy,
-) -> None:
-    """Validate non-interactive credentials and trusted-host material."""
-
-    config = load_site_config(site_config_path)
-    site = _selected_site_table(config, profile)
-    site_type = str(site.get("type", "")).replace("_", "").replace("-", "").lower()
-    if site_type not in {"slurm", "slurmsite"}:
-        raise LiveSlurmCanaryError("selected site profile is not generic Slurm")
-    if site.get("hostname") != policy.allowed_host:
-        raise LiveSlurmCanaryError("site host is not allowlisted by the canary policy")
-    if site.get("known_hosts_name") != policy.known_hosts_name:
-        raise LiveSlurmCanaryError(
-            "site known-hosts lookup is not bound to the canary policy"
-        )
-    if site.get("ssh_port", 22) != _known_hosts_port(policy.known_hosts_name):
-        raise LiveSlurmCanaryError("site SSH port is not bound to the canary policy")
-    if site.get("allow_ssh_agent") is not False:
-        raise LiveSlurmCanaryError("live canary SSH agent fallback must be disabled")
-    if site.get("allow_keyboard_interactive") is not False:
-        raise LiveSlurmCanaryError(
-            "live canary keyboard-interactive fallback must be disabled"
-        )
-    if not isinstance(site.get("username"), str) or not str(site["username"]).strip():
-        raise LiveSlurmCanaryError(
-            "site config must provide a non-interactive username"
-        )
-    key_value = site.get("ssh_key")
-    if not isinstance(key_value, str) or not key_value.strip():
-        raise LiveSlurmCanaryError("site config must provide an explicit SSH key path")
-    key_path = Path(key_value).expanduser()
     try:
-        key_stat = key_path.stat()
-    except OSError as exc:
-        raise LiveSlurmCanaryError("configured SSH key is unavailable") from exc
-    if not stat.S_ISREG(key_stat.st_mode) or key_stat.st_mode & 0o077:
-        raise LiveSlurmCanaryError(
-            "configured SSH key must be a regular file without group/world access"
-        )
-    try:
-        from paramiko import HostKeys, PKey
-
-        approved_known_hosts = policy.known_hosts_file.resolve(strict=True)
-        configured_known_hosts = (
-            Path(str(site.get("known_hosts_file", "")))
-            .expanduser()
-            .resolve(strict=True)
-        )
-        known_hosts_stat = approved_known_hosts.stat()
-        if (
-            configured_known_hosts != approved_known_hosts
-            or not stat.S_ISREG(known_hosts_stat.st_mode)
-            or known_hosts_stat.st_mode & 0o022
-        ):
-            raise LiveSlurmCanaryError(
-                "site known-hosts file is not the approved owner-controlled file"
-            )
-        try:
-            PKey.from_path(
-                key_path,
-                passphrase=os.environ.get("SSH_PASSPHRASE"),
-            )
-        except Exception as exc:
-            raise LiveSlurmCanaryError(
-                "configured SSH key cannot be loaded non-interactively"
-            ) from exc
-        host_keys = HostKeys(str(policy.known_hosts_file))
-    except LiveSlurmCanaryError:
-        raise
-    except (OSError, ValueError) as exc:
-        raise LiveSlurmCanaryError("approved known-hosts file is unavailable") from exc
-    if not host_keys.lookup(policy.known_hosts_name):
-        raise LiveSlurmCanaryError(
-            "approved known-hosts file has no key for knownHostsName"
-        )
+        if "-" in value:
+            days, value = value.split("-", 1)
+        else:
+            days = "0"
+        hours, minutes, seconds = (int(part) for part in value.split(":"))
+    except (TypeError, ValueError) as exc:
+        raise LiveSlurmCanaryError("generated profile has invalid wall time") from exc
+    if int(days) < 0 or hours < 0 or not 0 <= minutes < 60 or not 0 <= seconds < 60:
+        raise LiveSlurmCanaryError("generated profile has invalid wall time")
+    return int(days) * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
-def validate_live_slurm_site(
-    site: Any,
-    policy: LiveSlurmCanaryPolicy,
-    *,
-    ranks: int,
-    threads_per_rank: int,
-) -> EnterpriseHPCProfile:
-    """Bind the instantiated site and immutable bundle to the approved policy."""
+def validate_live_slurm_site(site: Any, *, ranks_per_node: int) -> EnterpriseHPCProfile:
+    """Bind the canary to the installed, Deployment-generated profile."""
 
     profile = getattr(site, "enterprise_hpc", None)
     if not isinstance(profile, EnterpriseHPCProfile):
-        raise LiveSlurmCanaryError("site has no Enterprise HPC compatibility profile")
-    site_known_hosts_file = getattr(site.config, "known_hosts_file", None)
-    if not isinstance(site_known_hosts_file, (str, os.PathLike)):
         raise LiveSlurmCanaryError(
-            "site known-hosts file is not bound to the canary policy"
+            "live Slurm canary requires a Deployment-generated Enterprise profile"
         )
-    observed = {
-        "host": str(getattr(site.config, "hostname", "")),
-        "ssh_port": int(getattr(site.config, "ssh_port", 0)),
-        "known_hosts_file": str(Path(site_known_hosts_file).expanduser().resolve()),
-        "known_hosts_name": str(getattr(site.config, "known_hosts_name", "")),
-        "allow_ssh_agent": getattr(site.config, "allow_ssh_agent", None),
-        "allow_keyboard_interactive": getattr(
-            site.config, "allow_keyboard_interactive", None
-        ),
-        "partition": str(getattr(site.config, "queue", "")),
-        "work_dir": str(site.work_dir),
-        "scratch_dir": str(site.scratch_dir or ""),
-    }
-    expected = {
-        "host": policy.allowed_host,
-        "ssh_port": _known_hosts_port(policy.known_hosts_name),
-        "known_hosts_file": str(policy.known_hosts_file.resolve()),
-        "known_hosts_name": policy.known_hosts_name,
-        "allow_ssh_agent": False,
-        "allow_keyboard_interactive": False,
-        "partition": policy.allowed_partition,
-        "work_dir": policy.allowed_work_dir,
-        "scratch_dir": policy.allowed_scratch_dir,
-    }
-    mismatches = [name for name in expected if observed[name] != expected[name]]
-    if mismatches:
-        raise LiveSlurmCanaryError(
-            "site is outside the live canary policy: " + ", ".join(mismatches)
-        )
-    for label, actual, maximum in (
-        ("nodes", int(site.run_config.nodes), policy.max_nodes),
-        ("ranks", ranks, policy.max_ranks),
-        ("threads per rank", threads_per_rank, policy.max_threads_per_rank),
-        ("profile nodes", profile.max_nodes, policy.max_nodes),
-        ("profile ranks", profile.max_ranks, policy.max_ranks),
-        (
-            "profile threads per rank",
-            profile.max_threads_per_rank,
-            policy.max_threads_per_rank,
-        ),
+    config = site.config
+    if not getattr(config, "known_hosts_file", None) or not getattr(
+        config, "known_hosts_name", None
     ):
-        if actual < 1 or actual > maximum:
-            raise LiveSlurmCanaryError(f"live Slurm canary exceeds approved {label}")
+        raise LiveSlurmCanaryError("generated profile must configure strict host trust")
+    if str(getattr(config, "hostname", "")) != profile.host:
+        raise LiveSlurmCanaryError("site host does not match the Enterprise profile")
+    partition = str(site.run_config.queue or getattr(config, "queue", ""))
+    if partition not in profile.allowed_partitions:
+        raise LiveSlurmCanaryError("site partition is not allowlisted by the profile")
+    if str(site.work_dir) != profile.work_dir:
+        raise LiveSlurmCanaryError("site work path does not match the profile")
+    scratch = None if site.scratch_dir is None else str(site.scratch_dir)
+    if scratch != profile.scratch_dir:
+        raise LiveSlurmCanaryError("site scratch path does not match the profile")
+    nodes = int(site.run_config.nodes)
+    if nodes < 1 or nodes > profile.max_nodes:
+        raise LiveSlurmCanaryError("site node request exceeds the profile")
+    if ranks_per_node < 1 or nodes * ranks_per_node > profile.max_ranks:
+        raise LiveSlurmCanaryError("site rank request exceeds the profile")
     duration = str(site.run_config.duration or "")
-    if not _WALL_TIME.fullmatch(duration):
-        raise LiveSlurmCanaryError(
-            "site run config must set a bounded HH:MM:SS duration"
-        )
-    if _wall_time_seconds(duration) > _wall_time_seconds(policy.max_wall_time):
-        raise LiveSlurmCanaryError("live Slurm canary exceeds approved wall time")
-    if profile.max_wall_time != policy.max_wall_time:
-        raise LiveSlurmCanaryError("Enterprise HPC profile wall time is outside policy")
-    if profile.allowed_partitions != (policy.allowed_partition,):
-        raise LiveSlurmCanaryError(
-            "Enterprise HPC profile partitions are outside policy"
-        )
+    if not duration or _seconds(duration) > _seconds(profile.max_wall_time):
+        raise LiveSlurmCanaryError("site wall time exceeds the profile")
+    if site.run_config.slurm_args or site.run_config.run_path is not None:
+        raise LiveSlurmCanaryError("live canary does not permit raw Slurm overrides")
     return profile
 
 
 def build_synthetic_live_slurm_job(
     project_path: Path, run_token: str
 ) -> tuple[Any, Any, Any]:
-    """Build the small, visibly synthetic public-API canary fixture."""
+    """Build a small, visibly synthetic public-API fixture."""
 
-    _required_text(run_token, "run token", _RUN_TOKEN)
+    if not isinstance(run_token, str) or not _RUN_TOKEN.fullmatch(run_token):
+        raise LiveSlurmCanaryError("live Slurm canary run token is invalid")
     if project_path.exists():
         raise LiveSlurmCanaryError("canary project path must not already exist")
     prefix = f"fs_canary_{run_token.replace('-', '_')}"
@@ -500,39 +184,34 @@ def build_synthetic_live_slurm_job(
         upscale=0,
         order=1,
     )
-    success = FrequencyDomainJob(
-        name=f"{prefix}_success",
-        simulation=simulation,
-        f_list=[20.0],
-        outputs=[output],
+    jobs = tuple(
+        FrequencyDomainJob(
+            name=f"{prefix}_{suffix}",
+            simulation=simulation,
+            f_list=[20.0],
+            outputs=[output],
+        )
+        for suffix in ("success", "cancel")
     )
-    cancellation = FrequencyDomainJob(
-        name=f"{prefix}_cancel",
-        simulation=simulation,
-        f_list=[20.0],
-        outputs=[output],
-    )
-    return project, success, cancellation
+    return project, jobs[0], jobs[1]
 
 
-def _manifest_evidence(job: Any, ranks: int, threads_per_rank: int) -> dict[str, Any]:
+def _solver_evidence(job: Any, expected_ranks: int) -> dict[str, Any]:
     manifest_path = Path(job._result_path) / "_fs_run" / "run_manifest.json"
     try:
-        manifest = json.loads(manifest_path.read_text())
-        task = manifest["tasks"][0]
+        task = json.loads(manifest_path.read_text())["tasks"][0]
         convergence = task["solver"]["convergence"]
-    except (OSError, json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+        ranks = int(task["n_ranks"])
+        threads = int(task["threads_per_rank"])
+    except (OSError, ValueError, json.JSONDecodeError, KeyError, IndexError) as exc:
         raise LiveSlurmCanaryError("fetched solver run manifest is incomplete") from exc
-    if task.get("n_ranks") != ranks or task.get("threads_per_rank") != threads_per_rank:
-        raise LiveSlurmCanaryError("solver run manifest has an unexpected MPI layout")
-    if not convergence.get("converged"):
-        raise LiveSlurmCanaryError("synthetic solver case did not converge")
+    if ranks != expected_ranks or threads < 1 or not convergence.get("converged"):
+        raise LiveSlurmCanaryError("solver MPI/convergence invariant failed")
     return {
-        "mpiRanks": task["n_ranks"],
-        "threadsPerRank": task["threads_per_rank"],
+        "mpiRanks": ranks,
+        "threadsPerRank": threads,
         "iterations": convergence.get("iterations"),
         "residual": convergence.get("residual"),
-        "solverStatus": convergence.get("status"),
     }
 
 
@@ -544,283 +223,127 @@ def _trace_evidence(result: Any) -> dict[str, Any]:
     values = np.asarray(traces.fd("surface", "p", source=int(sources[0])))
     if not values.size or not np.isfinite(values).all() or not np.any(values != 0):
         raise LiveSlurmCanaryError("synthetic trace invariant failed")
-    return {
-        "group": "surface",
-        "component": "p",
-        "sourceCount": 1,
-        "shape": list(values.shape),
-        "finite": True,
-        "nonzero": True,
-    }
-
-
-def _process_count(site: Any, needle: str) -> int:
-    encoded = base64.b64encode(needle.encode()).decode()
-    probe = (
-        "import base64,glob,os,sys\n"
-        "needle=base64.b64decode(sys.argv[1])\n"
-        "own={os.getpid(),os.getppid()}\n"
-        "matches=[]\n"
-        "for path in glob.glob('/proc/[0-9]*/cmdline'):\n"
-        "    if int(path.split('/')[2]) in own:\n"
-        "        continue\n"
-        "    try:\n"
-        "        data=open(path,'rb').read()\n"
-        "    except OSError:\n"
-        "        continue\n"
-        "    if needle in data:\n"
-        "        matches.append(path)\n"
-        "print(len(matches))"
-    )
-    output = site.run_login(
-        f"python3 -c {shlex.quote(probe)} {shlex.quote(encoded)}"
-    ).strip()
-    try:
-        return int(output)
-    except ValueError as exc:
-        raise LiveSlurmCanaryError("remote process cleanup probe failed") from exc
-
-
-def _owned_remote_paths(site: Any, project: Any, jobs: Sequence[Any]) -> list[str]:
-    root = PurePosixPath(str(site.work_dir))
-    paths = [str(site._remote_job_dir(job)) for job in jobs]
-    remote_simulation = root / "jobs" / project.simulations[0].name
-    paths.extend(
-        [
-            str(remote_simulation),
-            str(root / "simulations" / project.simulations[0].name),
-            str(root / f"{project.name}.json"),
-        ]
-    )
-    for value in paths:
-        path = PurePosixPath(value)
-        try:
-            path.relative_to(root)
-        except ValueError as exc:
-            raise LiveSlurmCanaryError(
-                "cleanup target is outside the work directory"
-            ) from exc
-        if not path.name.startswith("fs_canary_"):
-            raise LiveSlurmCanaryError("cleanup target is not canary-owned")
-    return paths
-
-
-def _cleanup_remote_paths(site: Any, paths: Sequence[str]) -> None:
-    cleaner = (
-        "import pathlib,shutil,sys;"
-        "[(p.unlink() if p.is_symlink() or p.is_file() else shutil.rmtree(p)) "
-        "for p in map(pathlib.Path,sys.argv[1:]) if p.exists() or p.is_symlink()]"
-    )
-    arguments = " ".join(shlex.quote(path) for path in paths)
-    site.run_login(f"python3 -c {shlex.quote(cleaner)} {arguments}")
-    remaining = site.run_login(
-        "python3 -c "
-        + shlex.quote(
-            "import pathlib,sys;print(sum(pathlib.Path(p).exists() or "
-            "pathlib.Path(p).is_symlink() for p in sys.argv[1:]))"
-        )
-        + " "
-        + arguments
-    ).strip()
-    if remaining != "0":
-        raise LiveSlurmCanaryError("canary-owned remote cleanup is incomplete")
-
-
-def _require_remote_paths_absent(site: Any, paths: Sequence[str]) -> None:
-    """Refuse to claim ownership when any target predates this canary run."""
-
-    probe = (
-        "import pathlib,sys;"
-        "print(sum(pathlib.Path(p).exists() or pathlib.Path(p).is_symlink() "
-        "for p in sys.argv[1:]))"
-    )
-    arguments = " ".join(shlex.quote(path) for path in paths)
-    existing = site.run_login(f"python3 -c {shlex.quote(probe)} {arguments}").strip()
-    if existing != "0":
-        raise LiveSlurmCanaryError(
-            "canary remote paths already exist; choose a fresh run token"
-        )
+    return {"shape": list(values.shape), "finite": True, "nonzero": True}
 
 
 def _scheduler_job_present(site: Any, job_id: Any) -> bool:
-    validated_job_id = validate_slurm_job_id(job_id)
-    return bool(site.run_login(f"squeue -h -j {validated_job_id} -o %i").strip())
+    job_id = validate_slurm_job_id(job_id)
+    return bool(site.run_login(f"squeue -h -j {job_id} -o %i").strip())
 
 
 def _scheduler_job_ids_for_name(site: Any, name: str) -> tuple[str, ...]:
-    """Return validated scheduler IDs for one exact canary job name."""
-
-    validated_name = _required_text(name, "scheduler job name", _TOKEN)
-    output = site.run_login(f"squeue -h -n {shlex.quote(validated_name)} -o %i").strip()
+    if not isinstance(name, str) or not _JOB_NAME.fullmatch(name):
+        raise LiveSlurmCanaryError("canary scheduler job name is invalid")
+    output = site.run_login(f"squeue -h -n {name} -o %i").strip()
     if not output:
         return ()
-    job_ids = tuple(validate_slurm_job_id(line.strip()) for line in output.splitlines())
-    if len(set(job_ids)) != len(job_ids):
-        raise LiveSlurmCanaryError("Slurm returned duplicate canary job identities")
-    return job_ids
+    return tuple(validate_slurm_job_id(line.strip()) for line in output.splitlines())
 
 
-def _reconcile_canary_handles(
-    site: Any,
-    handles: Sequence[Any],
-    jobs: Sequence[Any],
-    *,
-    policy: LiveSlurmCanaryPolicy,
+def _recover_handles(
+    site: Any, handles: Sequence[Any], jobs: Sequence[Any]
 ) -> tuple[Any, ...]:
-    """Recover scheduler jobs when submission raised before returning a handle."""
-
     by_id = {
         validate_slurm_job_id(handle.id): handle
         for handle in handles
         if handle is not None
     }
     for job in jobs:
-        recorded_id = getattr(job, "_job_id", None)
-        if recorded_id is not None:
-            job_id = validate_slurm_job_id(recorded_id)
-            by_id.setdefault(job_id, _RecoveredSchedulerHandle(site, job_id))
-    try:
-        for job in jobs:
-            for job_id in _scheduler_job_ids_for_name(site, str(job.name)):
-                by_id.setdefault(job_id, _RecoveredSchedulerHandle(site, job_id))
-    except Exception as exc:
-        fallback = policy.emergency_cancel_command.format(job_id="<validated-job-id>")
-        raise LiveSlurmCanaryError(
-            "live Slurm canary could not reconcile scheduler submissions; inspect "
-            "the exact canary job names with squeue and run " + fallback
-        ) from exc
+        if getattr(job, "_job_id", None) is not None:
+            job_id = validate_slurm_job_id(job._job_id)
+            by_id.setdefault(job_id, _RecoveredHandle(site, job_id))
+        for job_id in _scheduler_job_ids_for_name(site, str(job.name)):
+            by_id.setdefault(job_id, _RecoveredHandle(site, job_id))
     return tuple(by_id.values())
 
 
-def _cancel_active_scheduler_job(
-    site: Any,
-    handle: Any,
-    *,
-    timeout: float,
-    poll_interval: float,
+def _cancel_active_job(
+    site: Any, handle: Any, *, timeout: float, poll_interval: float
 ) -> None:
-    """Cancel an active scheduler job even if the public handle is terminal."""
-
     if not _scheduler_job_present(site, handle.id):
         return
     handle.cancel()
     deadline = time.monotonic() + timeout
     while _scheduler_job_present(site, handle.id):
         if time.monotonic() >= deadline:
+            job_id = validate_slurm_job_id(handle.id)
             raise LiveSlurmCanaryError(
-                "canary scheduler job remained active after cancellation"
+                f"scheduler job {job_id} remains active; run scancel {job_id}"
             )
         time.sleep(poll_interval)
 
 
-def _cancel_canary_handles(
-    site: Any,
-    handles: Sequence[Any],
-    *,
-    policy: LiveSlurmCanaryPolicy,
-) -> None:
-    """Cancel every possibly active handle or report exact emergency commands."""
-
-    failures: list[tuple[str, Exception]] = []
+def _cancel_all(site: Any, handles: Sequence[Any], *, timeout: float) -> None:
+    failures = []
     for handle in handles:
-        if handle is None:
-            continue
         try:
-            job_id = validate_slurm_job_id(handle.id)
-            _cancel_active_scheduler_job(
+            _cancel_active_job(
                 site,
                 handle,
-                timeout=policy.cancel_timeout_seconds,
-                poll_interval=site.run_config.poll_interval,
+                timeout=timeout,
+                poll_interval=float(site.run_config.poll_interval or 1),
             )
-            if _scheduler_job_present(site, job_id):
-                raise LiveSlurmCanaryError(
-                    "canary scheduler job remains active after cancellation"
-                )
         except Exception as exc:
             failures.append((str(getattr(handle, "id", "unknown")), exc))
     if failures:
-        instructions = []
-        for job_id, _ in failures:
-            try:
-                validated_job_id = validate_slurm_job_id(job_id)
-            except ValueError:
-                command = policy.emergency_cancel_command.format(
-                    job_id="<validated-job-id>"
-                )
-            else:
-                command = policy.emergency_cancel_command.format(
-                    job_id=validated_job_id
-                )
-            instructions.append(f"job {job_id}: {command}")
+        job_id, error = failures[0]
         raise LiveSlurmCanaryError(
-            "live Slurm canary emergency cancellation failed; scheduler spend may "
-            "remain active; run " + "; ".join(instructions)
-        ) from failures[0][1]
+            f"canary cleanup could not cancel job {job_id}; run scancel {job_id}"
+        ) from error
 
 
 def run_live_slurm_canary(
     *,
     site: Any,
-    policy: LiveSlurmCanaryPolicy,
     project_path: Path,
     run_token: str,
-    ranks: int,
-    threads_per_rank: int,
+    ranks_per_node: int,
+    timeout: float,
+    cancel_timeout: float,
 ) -> dict[str, Any]:
-    """Run success, fetch/load, cancellation, and owned-path cleanup checks."""
+    """Exercise submit, observation, fetch/load, and cancellation."""
 
-    profile = validate_live_slurm_site(
-        site,
-        policy,
-        ranks=ranks,
-        threads_per_rank=threads_per_rank,
-    )
+    if timeout <= 0 or cancel_timeout <= 0:
+        raise LiveSlurmCanaryError("canary timeouts must be positive")
+    profile = validate_live_slurm_site(site, ranks_per_node=ranks_per_node)
+    if timeout < _seconds(str(site.run_config.duration)):
+        raise LiveSlurmCanaryError(
+            "completion timeout must cover the requested wall time"
+        )
     preflight = site.enterprise_hpc_preflight()
-    project, success_job, cancel_job = build_synthetic_live_slurm_job(
-        project_path, run_token
-    )
-    started = time.monotonic()
+    _, success_job, cancel_job = build_synthetic_live_slurm_job(project_path, run_token)
     success_handle = None
     cancel_handle = None
-    remote_paths = _owned_remote_paths(site, project, [success_job, cancel_job])
-    submission_started = False
-    remote_cleanup_complete = False
     try:
-        _require_remote_paths_absent(site, remote_paths)
         for job in (success_job, cancel_job):
             if _scheduler_job_ids_for_name(site, job.name):
                 raise LiveSlurmCanaryError(
-                    "canary scheduler job name is already active; choose a fresh run token"
+                    "canary scheduler name is already active; choose a fresh run token"
                 )
-        submission_started = True
         success_handle = site.submit(
             success_job,
             force=True,
             fetch=True,
             check=True,
             mode="batch",
-            queue=policy.allowed_partition,
-            nodes=1,
-            ranks_per_node=ranks,
-            threads_per_rank=threads_per_rank,
-            duration=policy.max_wall_time,
+            queue=site.run_config.queue,
+            nodes=site.run_config.nodes,
+            ranks_per_node=ranks_per_node,
+            duration=site.run_config.duration,
             name=success_job.name,
         )
-        success_states = [
+        states = [
             status.state
             for status in success_handle.watch(
-                timeout=policy.completion_timeout_seconds,
+                timeout=timeout,
                 poll_interval=site.run_config.poll_interval,
             )
         ]
         success_result = success_handle.wait(check=True)
         if success_result.status.state != "complete":
             raise LiveSlurmCanaryError("success case did not reach complete")
-        trace_evidence = _trace_evidence(success_result)
-        solver_evidence = _manifest_evidence(
-            success_job, ranks=ranks, threads_per_rank=threads_per_rank
-        )
+        traces = _trace_evidence(success_result)
+        solver = _solver_evidence(success_job, ranks_per_node)
 
         cancel_handle = site.submit(
             cancel_job,
@@ -828,147 +351,93 @@ def run_live_slurm_canary(
             fetch=False,
             check=False,
             mode="batch",
-            queue=policy.allowed_partition,
-            nodes=1,
-            ranks_per_node=ranks,
-            threads_per_rank=threads_per_rank,
-            duration=policy.max_wall_time,
+            queue=site.run_config.queue,
+            nodes=site.run_config.nodes,
+            ranks_per_node=ranks_per_node,
+            duration=site.run_config.duration,
             name=cancel_job.name,
         )
-        _cancel_active_scheduler_job(
+        _cancel_active_job(
             site,
             cancel_handle,
-            timeout=policy.cancel_timeout_seconds,
-            poll_interval=site.run_config.poll_interval,
+            timeout=cancel_timeout,
+            poll_interval=float(site.run_config.poll_interval or 1),
         )
         cancel_result = cancel_handle.wait(
-            timeout=policy.cancel_timeout_seconds,
+            timeout=cancel_timeout,
             poll_interval=site.run_config.poll_interval,
             check=False,
         )
         if cancel_result.status.state != "cancelled":
             raise LiveSlurmCanaryError("cancellation case did not reach cancelled")
-        if _scheduler_job_present(site, cancel_handle.id):
-            raise LiveSlurmCanaryError("cancelled job remains in the Slurm queue")
-        process_count = _process_count(site, cancel_job.name)
-        if process_count:
-            raise LiveSlurmCanaryError(
-                "cancelled canary process remains on the cluster"
-            )
-        _cleanup_remote_paths(site, remote_paths)
-        remote_cleanup_complete = True
-
-        elapsed = time.monotonic() - started
         return {
-            "schema": CANARY_EVIDENCE_SCHEMA,
+            "schema": CANARY_RESULT_SCHEMA,
             "generatedAt": datetime.now(timezone.utc).isoformat(),
-            "policyId": policy.policy_id,
-            "fixtureId": policy.fixture_id,
+            "fixtureId": SYNTHETIC_FIXTURE_ID,
             "frequensolveVersion": __version__,
             "identities": preflight.to_evidence(),
             "request": {
-                "partition": policy.allowed_partition,
-                "nodes": 1,
-                "ranks": ranks,
-                "threadsPerRank": threads_per_rank,
-                "maxWallTime": policy.max_wall_time,
+                "partition": site.run_config.queue,
+                "nodes": site.run_config.nodes,
+                "ranksPerNode": ranks_per_node,
+                "maxWallTime": site.run_config.duration,
             },
             "success": {
                 "schedulerJobId": str(success_handle.id),
-                "states": success_states,
+                "states": states,
                 "terminalState": success_result.status.state,
                 "outputs": len(success_result.output_files(existing=True)),
-                "traces": trace_evidence,
-                **solver_evidence,
+                "traces": traces,
+                **solver,
             },
             "cancellation": {
                 "schedulerJobId": str(cancel_handle.id),
                 "terminalState": cancel_result.status.state,
-                "schedulerJobsRemaining": 0,
-                "remoteProcessesRemaining": process_count,
             },
-            "cleanup": {
-                "ownedPathsRemoved": len(remote_paths),
-                "unownedPathsRemoved": 0,
-                "ownerRecorded": bool(policy.cleanup_owner),
-            },
-            "retentionPolicyRecorded": bool(policy.log_retention),
-            "elapsedSeconds": round(elapsed, 3),
-            "licensingBehaviorEvaluated": False,
+            "profileId": profile.profile_id,
         }
     finally:
-        if submission_started:
-            reconciled_handles = _reconcile_canary_handles(
-                site,
-                (cancel_handle, success_handle),
-                (cancel_job, success_job),
-                policy=policy,
-            )
-            _cancel_canary_handles(
-                site,
-                reconciled_handles,
-                policy=policy,
-            )
-        if submission_started and not remote_cleanup_complete:
-            try:
-                _cleanup_remote_paths(site, remote_paths)
-            except Exception as exc:
-                raise LiveSlurmCanaryError(
-                    "live Slurm canary owned-path cleanup failed after scheduler "
-                    "cancellation"
-                ) from exc
+        handles = _recover_handles(
+            site,
+            (cancel_handle, success_handle),
+            (cancel_job, success_job),
+        )
+        _cancel_all(site, handles, timeout=cancel_timeout)
 
 
 def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--policy", required=True, type=Path)
     parser.add_argument("--site-config", required=True, type=Path)
     parser.add_argument("--site-profile")
     parser.add_argument("--project-path", required=True, type=Path)
-    parser.add_argument("--evidence", required=True, type=Path)
     parser.add_argument("--run-token", required=True)
-    parser.add_argument("--ranks", required=True, type=int)
-    parser.add_argument("--threads-per-rank", default=1, type=int)
-    parser.add_argument(
-        "--acknowledge",
-        help="Exact per-run acknowledgement; it is intentionally not persisted",
-    )
+    parser.add_argument("--ranks-per-node", required=True, type=int)
+    parser.add_argument("--timeout", required=True, type=float)
+    parser.add_argument("--cancel-timeout", default=120.0, type=float)
+    parser.add_argument("--acknowledge")
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Run the manual canary and write sanitized evidence atomically."""
+    """Run the canary and print one sanitized result for Deployment to retain."""
 
     args = _argument_parser().parse_args(argv)
     require_live_slurm_acknowledgement(
         args.acknowledge or os.environ.get("FREQUENSOLVE_LIVE_SLURM_ACKNOWLEDGEMENT")
     )
-    policy = load_live_slurm_canary_policy(args.policy)
-    validate_live_slurm_local_inputs(
-        site_config_path=args.site_config,
-        profile=args.site_profile,
-        policy=policy,
-    )
-    evidence_path = args.evidence.expanduser().resolve()
-    if evidence_path.exists():
-        raise LiveSlurmCanaryError("evidence path already exists")
-    evidence_path.parent.mkdir(parents=True, exist_ok=True)
     site = Site(config_path=args.site_config, profile=args.site_profile)
     try:
-        evidence = run_live_slurm_canary(
+        result = run_live_slurm_canary(
             site=site,
-            policy=policy,
             project_path=args.project_path.expanduser().resolve(),
             run_token=args.run_token,
-            ranks=args.ranks,
-            threads_per_rank=args.threads_per_rank,
+            ranks_per_node=args.ranks_per_node,
+            timeout=args.timeout,
+            cancel_timeout=args.cancel_timeout,
         )
     finally:
         site.close()
-    temporary = evidence_path.with_suffix(evidence_path.suffix + ".tmp")
-    temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-    temporary.replace(evidence_path)
-    print(json.dumps(evidence, indent=2, sort_keys=True))
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 
