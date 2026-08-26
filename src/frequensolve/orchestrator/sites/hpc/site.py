@@ -358,6 +358,17 @@ def _normalize_failure_tolerance(value: Any, *, default: Optional[int] = 4):
     return count
 
 
+def _safe_slurm_directive(value: Optional[Any], name: str) -> Optional[str]:
+    """Reject only characters that can create a second ``#SBATCH`` line."""
+
+    if value is None:
+        return None
+    text = str(value)
+    if any(character in text for character in ("\r", "\n", "\0")):
+        raise ValueError(f"{name} must not contain control characters")
+    return text
+
+
 @dataclass(init=False)
 class SlurmRunConfig:
     """Default resource request for SLURM job submissions.
@@ -2790,15 +2801,18 @@ class SlurmSite(BaseSite):
         if self._compute_client.is_proxy():
             interactive = self.compute_client.invoke_shell()
             cmd = (
-                f"cd {self.work_dir} && "
-                f"{remote_script} {remote_job} {ntasks_per_item}\n"
+                f"cd {shlex.quote(str(self.work_dir))} && "
+                f"{shlex.quote(str(remote_script))} "
+                f"{shlex.quote(str(remote_job))} {ntasks_per_item}\n"
             )
             interactive.stdin.write(cmd.encode())
             interactive.stdin.flush()
             monitor = self._monitor_command_output(future, job, interactive)
         else:
             cmd = (
-                f"cd {self.work_dir} && {remote_script} {remote_job} {ntasks_per_item}"
+                f"cd {shlex.quote(str(self.work_dir))} && "
+                f"{shlex.quote(str(remote_script))} "
+                f"{shlex.quote(str(remote_job))} {ntasks_per_item}"
             )
             interactive = self.login_client.invoke_shell()
             interactive.send(f"ssh {self.compute_host}\n")
@@ -3079,7 +3093,7 @@ class SlurmSite(BaseSite):
             logger.debug("Temporary sweep script created at %s", script_path)
             self.put(script_path, remote_script)
 
-        self.run_login(f"chmod 700 {remote_script}")
+        self.run_login(f"chmod 700 {shlex.quote(str(remote_script))}")
 
         return remote_script, remote_job
 
@@ -3151,7 +3165,7 @@ class SlurmSite(BaseSite):
             pack_job = kwargs.pop("pack_job", True)
         mpi_async_progress = kwargs.pop("mpi_async_progress", False)
         kwargs.pop("executable", None)
-        if kwargs.get("run_path") is not None:
+        if "run_path" in kwargs:
             kwargs.setdefault("run_path_shell", shlex.quote(str(kwargs["run_path"])))
         n_threads = self.pool.ncore // self.pool.nproc
         mpi_async_progress_setup: List[str] = []
@@ -3172,11 +3186,8 @@ class SlurmSite(BaseSite):
             n_tasks=n_tasks,
             n_procs=self.pool.nproc,
             n_threads=n_threads,
-            mpi=self.mpi_cmd,
             mpi_shell=shlex.quote(str(self.mpi_cmd)),
-            dir_out=dir_out,
             dir_out_shell=shlex.quote(dir_out),
-            executable=self.executable,
             executable_shell=shlex.quote(str(self.executable)),
             imaging_job=isinstance(job, ImagingJob),
             pack_job=bool(pack_job),
@@ -3216,10 +3227,17 @@ class SlurmSite(BaseSite):
         """
 
         # Unpack keyword arguments
-        queue = str(kwargs.pop("queue", self.config.queue))
+        queue = _safe_slurm_directive(kwargs.pop("queue", self.config.queue), "queue")
         config = self.config_for_partition(queue)
-        account = str(kwargs.pop("account", self.config.account))
+        account = _safe_slurm_directive(
+            kwargs.pop("account", self.config.account), "account"
+        )
         run_path = str(kwargs.pop("run_path", self.work_dir))
+        name = _safe_slurm_directive(name, "name") or "FrequenSolve"
+        duration = _safe_slurm_directive(duration, "duration") or duration
+        stdout = _safe_slurm_directive(stdout, "stdout") or stdout
+        notify_on = _safe_slurm_directive(notify_on, "notify_on")
+        notify_email = _safe_slurm_directive(notify_email, "notify_email")
         rank_values = _normalize_rank_aliases(
             {
                 "ranks_per_node": ranks_per_node,
@@ -3309,15 +3327,23 @@ class SlurmSite(BaseSite):
             account=account,
             imaging_job=imaging_job,
             pack_job=pack_job,
-            mpi=self.mpi_cmd,
-            executable=self.executable,
+            mpi_shell=shlex.quote(str(self.mpi_cmd)),
+            executable_shell=shlex.quote(str(self.executable)),
             runtime_setup=self._runtime_setup_lines(),
             mpi_async_progress_setup=mpi_async_progress_setup,
             scheduler_config_shell=shlex.quote(json.dumps(scheduler_config, indent=2)),
             sizing_json_shell=shlex.quote(str(sizing_json)),
             scheduler_runner=shlex.quote(str(self._adaptive_scheduler_remote_path())),
+            dir_out_shell=shlex.quote(str(stdout)),
             **({"sizing_json": sizing_json} if sizing_json is not None else {}),
-            **({"run_path": run_path} if run_path is not None else {}),
+            **(
+                {
+                    "run_path": run_path,
+                    "run_path_shell": shlex.quote(str(run_path)),
+                }
+                if run_path is not None
+                else {}
+            ),
             **({"notify_on": notify_on.upper()} if notify_on is not None else {}),
             **({"notify_email": notify_email} if notify_email is not None else {}),
             **kwargs,
@@ -3351,8 +3377,14 @@ class SlurmSite(BaseSite):
                 }
             )
             ranks_per_node = int(values["ranks_per_node"])
-        name = kwargs.get("name", "FS_cluster")
-        account = account or self.run_config.account or self.config.account
+        name = _safe_slurm_directive(kwargs.get("name", "FS_cluster"), "name")
+        queue = _safe_slurm_directive(queue or self.config.queue, "queue")
+        account = _safe_slurm_directive(
+            account or self.run_config.account or self.config.account,
+            "account",
+        )
+        duration = _safe_slurm_directive(duration, "duration") or duration
+        notify_email = _safe_slurm_directive(notify_email, "notify_email")
 
         return self._render_template(
             "provision/provision_SLURM.sh",
@@ -3365,7 +3397,7 @@ class SlurmSite(BaseSite):
             queue=queue,
             account=account,
             duration=duration,
-            work_dir=self.work_dir,
+            work_dir_shell=shlex.quote(str(self.work_dir)),
             mpi=self.config.mpi_wrapper,
             **({"notify_email": notify_email} if notify_email is not None else {}),
         )
