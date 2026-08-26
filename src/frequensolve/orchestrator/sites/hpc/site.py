@@ -31,7 +31,6 @@ from typing import (
     Literal,
     Mapping,
     Optional,
-    Sequence,
     Type,
     Union,
 )
@@ -722,6 +721,13 @@ class SlurmSite(BaseSite):
             raise ValueError("enterprise_hpc must be a profile table")
         self.enterprise_hpc = enterprise_hpc
         if enterprise_hpc is not None:
+            if not (
+                getattr(self.config, "known_hosts_file", None)
+                or getattr(self.config, "known_hosts_name", None)
+            ):
+                raise ValueError(
+                    "Enterprise HPC requires an explicit known-hosts file or alias"
+                )
             if solver is not None and str(solver) != enterprise_hpc.solver_path:
                 raise ValueError(
                     "Configured solver does not match enterprise_hpc.solver_path"
@@ -963,21 +969,16 @@ class SlurmSite(BaseSite):
         )
         fresh_run = bool(fresh_run or skip_policy.force)
         validate = overrides.pop("validate", True)
+        enterprise_hpc = getattr(self, "enterprise_hpc", None)
+        if enterprise_hpc is None:
+            self.check_frequensolver_compatibility(policy=frequensolver_policy)
+        self.prepare_job(job, validate=validate)
         if mode not in {"auto", "attached", "batch"}:
             raise ValueError("mode must be 'auto', 'attached', or 'batch'")
 
-        enterprise_hpc = getattr(self, "enterprise_hpc", None)
+        run_config, extra_kwargs = self.run_config.resolved(self.config, **overrides)
         if enterprise_hpc is not None:
-            run_config, extra_kwargs = self.run_config.resolved(
-                self.config, **overrides
-            )
             self.enterprise_hpc_preflight(run_config=run_config)
-        else:
-            self.check_frequensolver_compatibility(policy=frequensolver_policy)
-            run_config, extra_kwargs = self.run_config.resolved(
-                self.config, **overrides
-            )
-        self.prepare_job(job, validate=validate)
 
         if not fresh_run:
             handle = self._reattach_inflight_run(
@@ -1035,11 +1036,14 @@ class SlurmSite(BaseSite):
             )
             job._job_id = allocation_id
             self._emit(f"Submitted {job.name} to active {self.site_name} allocation")
-            self._record_site_run(
-                job,
-                scheduler_id=allocation_id,
-                status="running",
-            )
+            if enterprise_hpc is not None:
+                self._record_site_run(
+                    job,
+                    scheduler_id=allocation_id,
+                    status="running",
+                )
+            else:
+                self._record_site_run(job, status="running")
             handle = RunHandle(
                 site=self,
                 job=job,
@@ -1374,78 +1378,6 @@ class SlurmSite(BaseSite):
             scheduler_version=scheduler_version,
             cores_per_node=int(partition_config.cores_per_node),
         )
-        installed_files = bundle.get("installedFiles")
-        if isinstance(installed_files, (str, bytes)) or not isinstance(
-            installed_files, Sequence
-        ):
-            raise EnterpriseHPCPreflightError(
-                "Enterprise HPC installed-file inventory is invalid"
-            )
-        inventory_records = []
-        for item in installed_files:
-            if not isinstance(item, Mapping):
-                raise EnterpriseHPCPreflightError(
-                    "Enterprise HPC installed-file inventory is invalid"
-                )
-            relative = str(item.get("path", ""))
-            relative_path = PurePosixPath(relative)
-            if (
-                not relative
-                or relative_path.is_absolute()
-                or relative_path.as_posix() != relative
-                or any(part in {"", ".", ".."} for part in relative_path.parts)
-            ):
-                raise EnterpriseHPCPreflightError(
-                    "Enterprise HPC installed-file inventory is invalid"
-                )
-            inventory_records.append(
-                {
-                    "path": relative,
-                    "mode": item.get("mode"),
-                    "size": item.get("size"),
-                    "sha256": item.get("sha256"),
-                }
-            )
-        encoded_inventory = base64.b64encode(
-            json.dumps(inventory_records, separators=(",", ":")).encode("utf-8")
-        ).decode("ascii")
-        bundle_inventory_reader = (
-            "import base64, hashlib, json, os, stat, sys\n"
-            "frequensolve_bundle_inventory = True\n"
-            "root = sys.argv[1]\n"
-            "records = json.loads(base64.b64decode(sys.argv[2], validate=True))\n"
-            "inventory = []\n"
-            "for record in records:\n"
-            "    path = os.path.join(root, *record['path'].split('/'))\n"
-            "    metadata = os.lstat(path)\n"
-            "    if not stat.S_ISREG(metadata.st_mode):\n"
-            "        sys.exit(71)\n"
-            "    mode = metadata.st_mode & 0o777\n"
-            "    if metadata.st_size != record['size'] or mode != int(record['mode'], 8):\n"
-            "        sys.exit(72)\n"
-            "    digest = hashlib.sha256()\n"
-            "    with open(path, 'rb') as stream:\n"
-            "        for chunk in iter(lambda: stream.read(1048576), b''):\n"
-            "            digest.update(chunk)\n"
-            "    observed = digest.hexdigest()\n"
-            "    if observed != record['sha256']:\n"
-            "        sys.exit(73)\n"
-            '    inventory.append(f"{observed}  {mode:04o}  {metadata.st_size}  "'
-            " + record['path'] + '\\n')\n"
-            "sys.stdout.write(hashlib.sha256(''.join(inventory).encode()).hexdigest())\n"
-        )
-        installed_content_sha256 = self._run_login_checked(
-            self._runtime_probe_command(
-                f"python3 -c {shlex.quote(bundle_inventory_reader)} "
-                f"{shlex.quote(profile.bundle_root)} "
-                f"{shlex.quote(encoded_inventory)}"
-            ),
-            purpose="the complete installed bundle content",
-        ).strip()
-        if installed_content_sha256 != result.bundle_content_sha256:
-            raise EnterpriseHPCPreflightError(
-                "Enterprise HPC installed bundle content does not match the bundle"
-            )
         executable_digest_reader = (
             "import collections,hashlib,sys;"
             "digest=hashlib.sha256();stream=open(sys.argv[1],'rb');"

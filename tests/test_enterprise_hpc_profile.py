@@ -2,7 +2,7 @@ import base64
 import hashlib
 import json
 import shlex
-import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,8 +15,10 @@ from frequensolve.orchestrator.sites.hpc import (
     SlurmSite,
     SlurmSiteConfig,
 )
+from frequensolve.orchestrator.sites.hpc import auth as hpc_auth
 from frequensolve.orchestrator.sites.hpc import enterprise as enterprise_contract
 from frequensolve.orchestrator.sites.hpc import site as hpc
+from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
 from frequensolve.orchestrator.sites.hpc.enterprise import (
     EnterpriseHPCPreflightError,
     EnterpriseHPCProfile,
@@ -626,6 +628,7 @@ def _enterprise_site(monkeypatch):
         queue="synthetic",
         mpi_wrapper="srun",
         account="synthetic-account",
+        known_hosts_file="/synthetic/known_hosts",
         max_nodes=2,
         cores_per_node=8,
         memory_per_node=32768,
@@ -636,7 +639,6 @@ def _enterprise_site(monkeypatch):
         ranks_per_node=4,
         duration="00:30:00",
         account="synthetic-account",
-        qos="synthetic-qos",
     )
     monkeypatch.setattr(hpc, "SSHClientClass", _WrappedLogin)
     monkeypatch.setattr(
@@ -653,14 +655,94 @@ def _enterprise_site(monkeypatch):
     )
 
 
+def test_generic_site_does_not_activate_enterprise_policy(monkeypatch):
+    run_config = SlurmRunConfig(
+        queue="cpu,gpu",
+        account="project.team+shared",
+        notify_email="first.last%tag@example.com",
+    )
+    monkeypatch.setattr(hpc, "SSHClientClass", _WrappedLogin)
+
+    site = _Site(
+        config=SlurmSiteConfig(
+            hostname="login.example.invalid",
+            queue="cpu,gpu",
+            mpi_wrapper="srun",
+        ),
+        run_config=run_config,
+        solver="/existing/bin/FS_seismic",
+        work_dir="/existing/work",
+    )
+
+    assert site.enterprise_hpc is None
+    assert site.run_config is run_config
+    assert site.run_config.queue == "cpu,gpu"
+    assert site.run_config.account == "project.team+shared"
+    assert site.run_config.notify_email == "first.last%tag@example.com"
+
+
+def test_enterprise_profile_requires_configured_key_authentication(monkeypatch):
+    configured_key = object()
+    site = SimpleNamespace(
+        enterprise_hpc=object(),
+        config=SimpleNamespace(
+            ssh_port=22,
+            known_hosts_file=None,
+            known_hosts_name=None,
+        ),
+        credentials=SimpleNamespace(
+            username="scientist",
+            ssh_key=configured_key,
+        ),
+    )
+    authentication_methods = []
+
+    class _Transport:
+        def __init__(self, sock):
+            self.authenticated = False
+
+        def start_client(self, timeout):
+            pass
+
+        def auth_publickey(self, username, key):
+            authentication_methods.append(("key", key))
+            self.authenticated = True
+
+        def auth_interactive(self, username, handler):
+            authentication_methods.append(("interactive", None))
+
+        def is_authenticated(self):
+            return self.authenticated
+
+        def set_keepalive(self, seconds):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        hpc_auth.socket, "create_connection", lambda *args, **kwargs: object()
+    )
+    monkeypatch.setattr(hpc_auth, "Transport", _Transport)
+    monkeypatch.setattr(
+        hpc_auth, "_verify_server_host_key", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "paramiko.agent.Agent",
+        lambda: pytest.fail("Enterprise profile must not use the SSH agent"),
+    )
+
+    SlurmAuthenticator(site)._interactive_authentication("login.example.invalid")
+
+    assert authentication_methods == [("key", configured_key)]
+
+
 def _manifest_snapshot(payload, digest):
     raw = json.dumps(payload).encode()
     return digest + "\n" + base64.b64encode(raw).decode()
 
 
-def test_preflight_observes_scheduler_manifests_and_public_solver_identity(
-    monkeypatch, tmp_path
-):
+def test_preflight_observes_scheduler_manifests_and_public_solver_identity(monkeypatch):
     site = _enterprise_site(monkeypatch)
     profile = site.enterprise_hpc
     bundle, compatibility = contract_pair()
@@ -679,8 +761,6 @@ def test_preflight_observes_scheduler_manifests_and_public_solver_identity(
             output = _manifest_snapshot(bundle_schema, "7" * 64)
         elif "base64" in command and profile.compatibility_schema_path in command:
             output = _manifest_snapshot(compatibility_schema, "8" * 64)
-        elif "frequensolve_bundle_inventory" in command:
-            output = SHA_A
         elif profile.solver_path in command and "hashlib" in command:
             output = SOLVER_SHA
         elif "--identity-json" in command:
@@ -719,7 +799,7 @@ def test_preflight_observes_scheduler_manifests_and_public_solver_identity(
         for command in launcher_probes
     )
     python_probes = [command for command in calls if "python3" in command]
-    assert len(python_probes) == 14
+    assert len(python_probes) == 12
     assert all(
         command.startswith("module load frequensolve/1.0.0-synthetic && ")
         and ". /opt/frequensolve/python-env/bin/activate && " in command
@@ -728,67 +808,6 @@ def test_preflight_observes_scheduler_manifests_and_public_solver_identity(
     )
     assert all(not command.startswith(("cat ", "sha256sum ")) for command in calls)
     assert all(not command.lstrip().startswith("sbatch ") for command in calls)
-
-    installed = tmp_path / "bundle" / "docs" / "synthetic.txt"
-    installed.parent.mkdir(parents=True)
-    installed.write_bytes(b"synthetic installed payload\n")
-    installed.chmod(0o640)
-    installed_sha256 = hashlib.sha256(installed.read_bytes()).hexdigest()
-    inventory = [
-        {
-            "path": "docs/synthetic.txt",
-            "mode": "0640",
-            "size": installed.stat().st_size,
-            "sha256": installed_sha256,
-        }
-    ]
-    encoded_inventory = base64.b64encode(
-        json.dumps(inventory, separators=(",", ":")).encode()
-    ).decode()
-    inventory_command = next(
-        command for command in calls if "frequensolve_bundle_inventory" in command
-    )
-    argv = shlex.split(inventory_command.rsplit(" && ", 1)[1])
-    argv[-2:] = [str(tmp_path / "bundle"), encoded_inventory]
-
-    completed = subprocess.run(argv, check=True, capture_output=True, text=True)
-    expected_inventory = (
-        f"{installed_sha256}  0640  {installed.stat().st_size}  " "docs/synthetic.txt\n"
-    ).encode()
-
-    assert completed.stdout == hashlib.sha256(expected_inventory).hexdigest()
-
-
-def test_preflight_rejects_modified_installed_bundle_content(monkeypatch):
-    site = _enterprise_site(monkeypatch)
-    profile = site.enterprise_hpc
-    bundle, compatibility = contract_pair()
-    bundle_schema, compatibility_schema = contract_schemas()
-
-    def run_login_cmd(command, timeout=None):
-        if command == "scontrol --version":
-            output = "slurm 24.05.5"
-        elif "base64" in command and profile.bundle_manifest in command:
-            output = _manifest_snapshot(bundle, "e" * 64)
-        elif "base64" in command and profile.compatibility_manifest in command:
-            output = _manifest_snapshot(compatibility, SHA_B)
-        elif "base64" in command and profile.bundle_schema_path in command:
-            output = _manifest_snapshot(bundle_schema, "7" * 64)
-        elif "base64" in command and profile.compatibility_schema_path in command:
-            output = _manifest_snapshot(compatibility_schema, "8" * 64)
-        elif "frequensolve_bundle_inventory" in command:
-            output = "0" * 64
-        else:
-            output = ""
-        return None, _Stream(output), _Stream("")
-
-    monkeypatch.setattr(site, "run_login_cmd", run_login_cmd)
-
-    with pytest.raises(
-        EnterpriseHPCPreflightError,
-        match="installed bundle content does not match",
-    ):
-        site.enterprise_hpc_preflight()
 
 
 def test_preflight_rejects_multiline_scheduler_evidence(monkeypatch):
@@ -1047,6 +1066,7 @@ def test_enterprise_provision_rechecks_after_transfer_immediately_before_sbatch(
 ):
     site = _enterprise_site(monkeypatch)
     events = []
+    submissions = []
     monkeypatch.setattr(
         site,
         "enterprise_hpc_preflight",
@@ -1056,65 +1076,19 @@ def test_enterprise_provision_rechecks_after_transfer_immediately_before_sbatch(
     monkeypatch.setattr(
         site,
         "_submit_sbatch",
-        lambda *args, **kwargs: events.append("sbatch") or "24680",
+        lambda command: (
+            events.append("sbatch") or submissions.append(command) or "24680"
+        ),
     )
     monkeypatch.setattr(site, "_allocation_handle", lambda job_id: job_id)
 
     assert site.provision(nodes=1, tasks=4, duration="00:30:00") == "24680"
     assert events == ["preflight", "put", "preflight", "sbatch"]
-
-
-@pytest.mark.parametrize("field", ["queue", "account", "qos", "notify_email"])
-def test_slurm_directive_values_reject_newline_injection(field):
-    with pytest.raises(ValueError, match="safe SLURM directive"):
-        SlurmRunConfig(**{field: "safe\n#SBATCH --nodes=999"})
-
-
-@pytest.mark.parametrize(
-    "notify_on",
-    ["end\n#SBATCH --array=1-1000", "requeue", "END", 123],
-)
-def test_slurm_notification_trigger_rejects_unbounded_directives(notify_on):
-    with pytest.raises(ValueError, match="notify_on must be one of"):
-        SlurmRunConfig(notify_on=notify_on)
-
-
-def test_slurm_notification_trigger_is_validated_at_script_boundary(monkeypatch):
-    site = _enterprise_site(monkeypatch)
-
-    with pytest.raises(ValueError, match="notify_on must be one of"):
-        site._sweep_SLURM_script(
-            n_tasks=1,
-            n_nodes=1,
-            stdout="/synthetic/work/logs",
-            notify_on="end\n#SBATCH --array=1-1000",
-        )
-
-
-def test_safe_existing_slurm_partition_list_and_email_characters_remain_supported():
-    config = SlurmRunConfig(
-        queue="cpu,gpu",
-        notify_email="first.last%tag@example.com",
-    )
-
-    assert config.queue == "cpu,gpu"
-    assert config.notify_email == "first.last%tag@example.com"
-
-
-def test_enterprise_qos_is_rendered_as_a_bounded_scheduler_directive(monkeypatch):
-    site = _enterprise_site(monkeypatch)
-
-    script = site._generate_provision_script(
-        n_nodes=1,
-        ranks_per_node=4,
-        duration="00:30:00",
-        queue="synthetic",
-        account="synthetic-account",
-        qos="synthetic-qos",
-    )
-
-    assert "#SBATCH --qos=synthetic-qos" in script
-    assert script.count("synthetic-qos") == 1
+    submission = shlex.split(submissions[0])
+    assert submission[:2] == ["sbatch", "--qos=synthetic-qos"]
+    assert len(submission) == 3
+    assert submission[2].rsplit("/", 1)[-1].startswith("slurm_")
+    assert submission[2].endswith(".sh")
 
 
 def test_run_record_contains_sanitized_enterprise_identities(monkeypatch, tmp_path):

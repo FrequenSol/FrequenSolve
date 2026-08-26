@@ -227,6 +227,12 @@ class SlurmAuthenticator:
             ) from None
         job_client = SSHClient()
         enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
+        auth_options = {"allow_agent": True}
+        if enterprise_key_only:
+            auth_options = {
+                "pkey": site.credentials.ssh_key,
+                "allow_agent": False,
+            }
 
         try:
             job_client.load_system_host_keys()
@@ -234,12 +240,11 @@ class SlurmAuthenticator:
                 job_host,
                 username=site.credentials.username,
                 sock=channel,
-                pkey=site.credentials.ssh_key if enterprise_key_only else None,
-                allow_agent=not enterprise_key_only,
                 look_for_keys=False,
                 timeout=SSH_CONNECT_TIMEOUT_SECONDS,
                 banner_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
                 auth_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
+                **auth_options,
             )
             logger.info("Connected to job host: %s", job_host)
             return job_client

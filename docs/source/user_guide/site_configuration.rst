@@ -304,7 +304,7 @@ extra.
    username = "username"
    credential = "example-primary"
    ssh_key = "~/.ssh/id_ed25519"
-   solver = "/opt/frequensolve/bin/FS_seismic"
+   solver = "/work/shared/frequensol/FS_seismic"
    work_dir = "/shared/username/frequensolve"
    scratch_dir = "/scratch/username/frequensolve"
    tmp_dir = "/scratch/username/frequensolve/tmp"
@@ -332,64 +332,16 @@ extra.
    duration = "00:30:00"
    ranks_per_node = 4
    ranks_per_task = 1
-   qos = "normal"
    scheduler_heartbeat_timeout = 60
 
-An Enterprise HPC installation adds a closed ``enterprise_hpc`` table to the
-same generic profile. Obtain every value from the installed bundle and its
-compatibility manifest; do not use branch names or ``latest`` aliases. The
-synthetic values below are illustrative only.
-
-.. code-block:: toml
-
-   [sites.cluster.enterprise_hpc]
-   schema = "frequensolve-enterprise-hpc-profile/v1"
-   profile_id = "synthetic-private-slurm"
-   host = "login.example.edu"
-   bundle_manifest = "/opt/frequensolve/manifests/bundle.json"
-   compatibility_manifest = "/opt/frequensolve/manifests/compatibility.json"
-   bundle_schema_path = "/opt/frequensolve/schemas/bundle-manifest.schema.json"
-   compatibility_schema_path = "/opt/frequensolve/schemas/compatibility-row.schema.json"
-   bundle_root = "/opt/frequensolve"
-   solver_path = "/opt/frequensolve/bin/FS_seismic"
-   work_dir = "/shared/username/frequensolve"
-   scratch_dir = "/scratch/username/frequensolve"
-   bundle_version = "1.0.0-synthetic"
-   bundle_content_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-   bundle_manifest_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-   bundle_schema_sha256 = "7777777777777777777777777777777777777777777777777777777777777777"
-   support_tier = "experimental"
-   compatibility_row_id = "synthetic-private-slurm-row"
-   compatibility_document_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-   compatibility_schema_sha256 = "8888888888888888888888888888888888888888888888888888888888888888"
-   solver_version = "1.2.3"
-   solver_source_commit = "1111111111111111111111111111111111111111"
-   solver_build_id = "synthetic-build"
-   solver_build_identity_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-   frequensolve_version = "2.3.4"
-   frequensolve_artifact_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-   allowed_partitions = ["debug"]
-   max_nodes = 2
-   max_ranks = 16
-   max_threads_per_rank = 8
-   max_wall_time = "00:30:00"
-   module = "frequensolve/1.0.0-synthetic"
-   python_environment = "/opt/frequensolve/python-env"
-   account = "allocation"
-   qos = "normal"
-   mpi_launcher = "srun"
-
-Before every transfer or scheduler submission, FrequenSolve verifies the strict
-SSH host, required Slurm commands, allowlisted work and scratch paths,
-executable bytes and activation paths, scheduler identity, complete manifest
-pair, installed Python version, public solver identity, partition, launcher,
-and resource ceilings. A mismatch fails without submitting work. Enterprise
-profiles reject raw ``slurm_args`` and per-run ``run_path`` overrides; use the
-typed, bounded fields instead. Bundle, work, and scratch paths must be absolute,
-traversal-free, and use portable shell-safe path characters (no spaces or shell
-metacharacters). Successful submissions store only sanitized immutable
-identities in the job run record. Azure topology and credentials do not belong
-in this table.
+An Enterprise HPC installation adds a closed, generated ``enterprise_hpc``
+table to the same profile. Do not hand-author it: the Deployment installer
+binds it to the installed bundle, compatibility row, solver and Python artifact
+digests, allowlisted scheduler resources, paths, launcher, and explicit SSH
+host trust. When the table is present, FrequenSolve verifies those values before
+transfer or scheduler spend and rejects untyped ``slurm_args`` and ``run_path``
+overrides. When it is absent, generic Slurm configuration and behavior are
+unchanged. Azure topology and credentials never enter this table.
 
 Stampede3 profiles use the built-in preset and create generic ``SlurmSite``
 instances. The preferred setup command prompts for the username and writes the
@@ -479,9 +431,6 @@ The generated profile is equivalent to this minimal configuration:
        ``None`` through ``SlurmRunConfig`` to disable the check.
    * - ``account``
      - HPC allocation/account name.
-   * - ``qos``
-     - Optional scheduler QOS name, rendered as an explicit ``--qos``
-       directive rather than a raw scheduler argument.
    * - ``max_duration``
      - Maximum allowed run duration for generic SLURM config validation.
    * - ``min_nodes`` / ``max_nodes``
