@@ -33,6 +33,7 @@ from typing import (
     Optional,
     Type,
     Union,
+    cast,
 )
 
 from frequensolve import __version__ as frequensolve_version
@@ -3160,7 +3161,7 @@ class SlurmSite(BaseSite):
 
         # Unpack keyword arguments
         queue = _safe_slurm_directive(kwargs.pop("queue", self.config.queue), "queue")
-        config = self.config_for_partition(queue)
+        config = self.config_for_partition(cast(str, queue))
         account = _safe_slurm_directive(
             kwargs.pop("account", self.config.account), "account"
         )
@@ -3168,7 +3169,10 @@ class SlurmSite(BaseSite):
         name = _safe_slurm_directive(name, "name") or "FrequenSolve"
         duration = _safe_slurm_directive(duration, "duration") or duration
         stdout = _safe_slurm_directive(stdout, "stdout") or stdout
-        notify_on = _safe_slurm_directive(notify_on, "notify_on")
+        notify_on = cast(
+            Optional[Literal["begin", "end", "fail", "all", "none"]],
+            _safe_slurm_directive(notify_on, "notify_on"),
+        )
         notify_email = _safe_slurm_directive(notify_email, "notify_email")
         rank_values = _normalize_rank_aliases(
             {
