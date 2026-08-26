@@ -11,7 +11,6 @@
 {% endif %}
 #SBATCH -N {{ n_nodes }}
 #SBATCH -n {{ n_procs }}
-#SBATCH --cpus-per-task={{ n_threads }}
 #SBATCH -p {{ queue }}
 {% if account %}
 #SBATCH -A {{ account }}

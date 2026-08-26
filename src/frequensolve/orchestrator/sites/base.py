@@ -622,7 +622,6 @@ class RunHandle:
         check: Whether ``wait()`` and ``wait_async()`` raise when this run
             reaches an unsuccessful terminal status and the caller does not
             pass an explicit ``check`` value.
-        _fetch_on_complete: Whether waits fetch outputs after terminal success.
         backend: Site-specific run metadata.
     """
 
@@ -645,7 +644,6 @@ class RunHandle:
     _generic_wait: bool = True
     _cancel_fn: Optional[Callable[["RunHandle"], None]] = None
     _fetch_fn: Optional[Callable[["RunHandle"], Any]] = None
-    _fetch_on_complete: bool = False
     _result: Optional[RunResult] = None
     _last_status: JobStatus = field(default_factory=JobStatus)
 
@@ -749,10 +747,6 @@ class RunHandle:
             return self._result
         if not self._generic_wait and self._wait_fn is not None:
             self._result = self._wait_fn(self, timeout, poll_interval)
-            if self._fetch_on_complete and (
-                self._result.successful or not effective_check
-            ):
-                self.fetch()
             if effective_check:
                 self._result.raise_for_status()
             return self._result
@@ -762,7 +756,6 @@ class RunHandle:
             self,
             timeout=timeout,
             poll_interval=poll_interval,
-            fetch=self._fetch_on_complete,
             check=effective_check,
         )
         return self._result
@@ -794,10 +787,6 @@ class RunHandle:
             return self._result
         if not self._generic_wait and self._wait_async_fn is not None:
             self._result = await self._wait_async_fn(self, timeout, poll_interval)
-            if self._fetch_on_complete and (
-                self._result.successful or not effective_check
-            ):
-                self.fetch()
             if effective_check:
                 self._result.raise_for_status()
             return self._result
@@ -829,10 +818,7 @@ class RunHandle:
         while True:
             status = self.status()
             if status.is_complete:
-                result = self._complete_from_status(status)
-                if self._fetch_on_complete and (result.successful or not self.check):
-                    self.fetch()
-                status = result.status
+                status = self._complete_from_status(status).status
             if status.state != last_state:
                 yield status
                 last_state = status.state

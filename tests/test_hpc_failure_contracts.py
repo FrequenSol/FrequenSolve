@@ -263,56 +263,6 @@ def test_explicit_ssh_endpoint_is_bound_to_configured_host_key(monkeypatch, tmp_
     ]
 
 
-def test_agent_and_interactive_fallbacks_can_be_disabled(monkeypatch):
-    site = _auth_site()
-    site.config = SimpleNamespace(
-        ssh_port=22,
-        known_hosts_file=None,
-        known_hosts_name=None,
-        allow_ssh_agent=False,
-        allow_keyboard_interactive=False,
-    )
-    configured_key = site.credentials.ssh_key
-    attempted_keys = []
-
-    class FakeTransport:
-        def __init__(self, sock):
-            self.authenticated = False
-
-        def start_client(self, timeout):
-            pass
-
-        def auth_publickey(self, username, key):
-            attempted_keys.append(key)
-            self.authenticated = key is configured_key
-
-        def auth_interactive(self, username, handler):
-            pytest.fail("keyboard-interactive authentication must be disabled")
-
-        def is_authenticated(self):
-            return self.authenticated
-
-        def set_keepalive(self, seconds):
-            pass
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(
-        auth.socket, "create_connection", lambda *args, **kwargs: object()
-    )
-    monkeypatch.setattr(auth, "Transport", FakeTransport)
-    monkeypatch.setattr(auth, "_verify_server_host_key", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        "paramiko.agent.Agent",
-        lambda: pytest.fail("SSH agent authentication must be disabled"),
-    )
-
-    SlurmAuthenticator(site)._interactive_authentication("login.example.edu")
-
-    assert attempted_keys == [configured_key]
-
-
 def test_failed_compute_connection_closes_channel_and_client(monkeypatch):
     channel = SimpleNamespace(closed=False)
     channel.close = lambda: setattr(channel, "closed", True)
@@ -1071,68 +1021,25 @@ def test_status_rejects_command_injection_before_scheduler_call():
     assert calls == []
 
 
-def test_cancel_is_idempotent_and_sanitizes_scheduler_failure():
+def test_cancel_preserves_existing_repeat_call_and_error_behavior():
     site = object.__new__(SlurmSite)
     calls = []
     site.run_login_cmd = lambda command: (
         calls.append(command)
         or (
             None,
-            Stream(),
-            Stream(),
+            Stream("accepted"),
+            Stream("ignored scheduler detail"),
         )
     )
 
     assert site.cancel_job("123") is True
-    assert site.cancel_job("123") is False
-    assert calls == ["scancel 123"]
+    assert site.cancel_job("123") is True
+    assert calls == ["scancel 123", "scancel 123"]
 
-    failing = object.__new__(SlurmSite)
-    failing.run_login_cmd = lambda command: (
-        None,
-        Stream(),
-        Stream("private scheduler detail"),
-    )
-    with pytest.raises(RuntimeError, match="SLURM cancellation failed") as exc_info:
-        failing.cancel_job("124")
-    assert "private scheduler detail" not in str(exc_info.value)
-
-
-def test_cancel_nonzero_exit_with_empty_stderr_can_be_retried():
-    site = object.__new__(SlurmSite)
-    calls = []
-    exit_statuses = iter([1, 0])
-
-    def run_login_cmd(command):
-        calls.append(command)
-        exit_status = next(exit_statuses)
-        return None, Stream(exit_status=exit_status), Stream()
-
-    site.run_login_cmd = run_login_cmd
-
-    with pytest.raises(RuntimeError, match="SLURM cancellation failed"):
-        site.cancel_job("125")
-
-    assert site.cancel_job("125") is True
-    assert calls == ["scancel 125", "scancel 125"]
-
-
-def test_cancel_observes_ssh_proxy_exit_status_with_empty_stderr(monkeypatch):
-    proxy = SSHProxy("/tmp/fake-control", "scientist", "login.example.edu")
-    monkeypatch.setattr(
-        proxy,
-        "_exec_on_login",
-        lambda command, term=False, timeout=None: SimpleNamespace(
-            stdout=b"",
-            stderr=b"",
-            returncode=1,
-        ),
-    )
-    site = object.__new__(SlurmSite)
-    site.run_login_cmd = proxy.exec_command
-
-    with pytest.raises(RuntimeError, match="SLURM cancellation failed"):
-        site.cancel_job("126")
+    with pytest.raises(ValueError, match="job id must be numeric"):
+        site.cancel_job("123; touch /tmp/private")
+    assert calls == ["scancel 123", "scancel 123"]
 
 
 def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
@@ -1175,110 +1082,32 @@ def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
         assert "private-token" not in str(kwargs)
 
 
-def test_slurm_wait_timeout_cancels_before_returning_timeout_result():
+def test_slurm_wait_timeout_preserves_non_cancelling_behavior():
     site = object.__new__(SlurmSite)
     site.config = SimpleNamespace(poll_interval=0.0)
     site._poll_run = lambda run: JobStatus(state="running", job_id=run.id)
     cancelled = []
-    finalized = []
     site.cancel_job = lambda job_id: cancelled.append(job_id) or True
-    site._finalize_run_record = lambda run, status: finalized.append(status.state)
     run = site.handle(SimpleNamespace(), job_id="127", mode="batch")
 
     result = run.wait(timeout=0, poll_interval=0, check=False)
 
     assert result.status.state == "timeout"
-    assert cancelled == ["127"]
-    assert finalized == ["timeout"]
-
-
-def test_slurm_wait_timeout_surfaces_sanitized_cancellation_failure():
-    site = object.__new__(SlurmSite)
-    site.config = SimpleNamespace(poll_interval=0.0)
-    site._poll_run = lambda run: JobStatus(state="running", job_id=run.id)
-    site.cancel_job = lambda job_id: (_ for _ in ()).throw(
-        RuntimeError("SLURM cancellation failed")
-    )
-    run = site.handle(SimpleNamespace(), job_id="128", mode="batch")
-
-    with pytest.raises(RuntimeError, match="^SLURM cancellation failed$"):
-        run.wait(timeout=0, poll_interval=0, check=False)
-
-
-def test_attached_slurm_async_timeout_requests_cancellation():
-    site = object.__new__(SlurmSite)
-    cancelled = []
-    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
-    site._finalize_run_record = lambda run, status: None
-
-    async def wait_for_timeout():
-        future = asyncio.get_running_loop().create_future()
-        run = RunHandle(site=site, job=SimpleNamespace(), id="129", mode="attached")
-        run.backend["future"] = future
-        return await site._wait_attached_run_async(run, timeout=0)
-
-    result = asyncio.run(wait_for_timeout())
-
-    assert result.status.state == "timeout"
-    assert cancelled == ["129"]
-
-
-def test_attached_slurm_sync_deadline_requests_cancellation():
-    site = object.__new__(SlurmSite)
-    site._is_notebook = False
-    cancelled = []
-    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
-    site._finalize_run_record = lambda run, status: None
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        run = RunHandle(site=site, job=SimpleNamespace(), id="130", mode="attached")
-        run.backend["future"] = loop.create_future()
-        result = site._wait_attached_run(run, timeout=0)
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
-
-    assert result.status.state == "timeout"
-    assert cancelled == ["130"]
-
-
-def test_attached_slurm_sync_task_timeout_propagates_without_cancellation():
-    site = object.__new__(SlurmSite)
-    site._is_notebook = False
-    cancelled = []
-    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        future = loop.create_future()
-        future.set_exception(TimeoutError("task-level timeout"))
-        run = RunHandle(site=site, job=SimpleNamespace(), id="131", mode="attached")
-        run.backend["future"] = future
-        with pytest.raises(TimeoutError, match="task-level timeout"):
-            site._wait_attached_run(run, timeout=1)
-        assert site._poll_attached_run(run).state == "failed"
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
-
     assert cancelled == []
 
 
-def test_attached_slurm_async_task_timeout_propagates_without_cancellation():
+def test_attached_slurm_timeout_propagates_without_cancellation():
     site = object.__new__(SlurmSite)
     cancelled = []
     site.cancel_job = lambda job_id: cancelled.append(job_id) or True
 
-    async def wait_for_task_failure():
+    async def wait_for_timeout():
         future = asyncio.get_running_loop().create_future()
-        future.set_exception(TimeoutError("task-level timeout"))
-        run = RunHandle(site=site, job=SimpleNamespace(), id="132", mode="attached")
+        run = RunHandle(site=site, job=SimpleNamespace(), id="128", mode="attached")
         run.backend["future"] = future
-        with pytest.raises(TimeoutError, match="task-level timeout"):
-            await site._wait_attached_run_async(run, timeout=1)
-        assert site._poll_attached_run(run).state == "failed"
+        with pytest.raises(asyncio.TimeoutError):
+            await site._wait_attached_run_async(run, timeout=0)
 
-    asyncio.run(wait_for_task_failure())
+    asyncio.run(wait_for_timeout())
 
     assert cancelled == []

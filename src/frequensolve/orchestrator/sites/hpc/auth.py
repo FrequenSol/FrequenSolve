@@ -116,17 +116,9 @@ class SlurmAuthenticator:
         ssh_port = getattr(config, "ssh_port", 22)
         known_hosts_file = getattr(config, "known_hosts_file", None)
         known_hosts_name = getattr(config, "known_hosts_name", None)
-        allow_ssh_agent = getattr(config, "allow_ssh_agent", True)
-        allow_keyboard_interactive = getattr(config, "allow_keyboard_interactive", True)
         control_dir = os.path.expanduser("~/.ssh/control")
         explicit_trust = known_hosts_file is not None or known_hosts_name is not None
-        explicit_auth_policy = not allow_ssh_agent or not allow_keyboard_interactive
-        if (
-            ssh_port == 22
-            and not explicit_trust
-            and not explicit_auth_policy
-            and os.path.exists(control_dir)
-        ):
+        if ssh_port == 22 and not explicit_trust and os.path.exists(control_dir):
             for control_path in glob.glob(f"{control_dir}/*"):
                 try:
                     result = subprocess.run(
@@ -260,8 +252,6 @@ class SlurmAuthenticator:
         ssh_port = getattr(config, "ssh_port", 22)
         known_hosts_file = getattr(config, "known_hosts_file", None)
         known_hosts_name = getattr(config, "known_hosts_name", None)
-        allow_ssh_agent = getattr(config, "allow_ssh_agent", True)
-        allow_keyboard_interactive = getattr(config, "allow_keyboard_interactive", True)
 
         try:
             sock = socket.create_connection(
@@ -296,28 +286,26 @@ class SlurmAuthenticator:
             raise
 
         authenticated = False
-        if allow_ssh_agent:
-            try:
-                from paramiko.agent import Agent
+        try:
+            from paramiko.agent import Agent
 
-                logger.debug("Attempting agent-based authentication.")
-                agent = Agent()
-                for key in agent.get_keys():
-                    try:
-                        transport.auth_publickey(site.credentials.username, key)
-                        if transport.is_authenticated():
-                            authenticated = True
-                            break
-                    except Exception as exc:
-                        logger.debug(
-                            "Agent key authentication failed (%s)",
-                            type(exc).__name__,
-                        )
-                        continue
-            except Exception as exc:
-                logger.debug(
-                    "Agent-based authentication exception (%s)", type(exc).__name__
-                )
+            logger.debug("Attempting agent-based authentication.")
+            agent = Agent()
+            for key in agent.get_keys():
+                try:
+                    transport.auth_publickey(site.credentials.username, key)
+                    if transport.is_authenticated():
+                        authenticated = True
+                        break
+                except Exception as exc:
+                    logger.debug(
+                        "Agent key authentication failed (%s)", type(exc).__name__
+                    )
+                    continue
+        except Exception as exc:
+            logger.debug(
+                "Agent-based authentication exception (%s)", type(exc).__name__
+            )
 
         if not authenticated:
             logger.debug("Attempting configured private-key authentication.")
@@ -331,7 +319,7 @@ class SlurmAuthenticator:
                     type(exc).__name__,
                 )
 
-        if not authenticated and allow_keyboard_interactive:
+        if not authenticated:
             logger.debug("Attempting keyboard-interactive authentication.")
 
             def handler(title, instructions, prompt_list):
