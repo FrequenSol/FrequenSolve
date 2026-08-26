@@ -149,29 +149,6 @@ def test_wait_all_check_true_does_not_fetch_failed_outputs():
     assert fetch_calls == []
 
 
-def test_run_handle_wait_honors_submit_time_fetch_request():
-    fetch_calls = []
-    run = RunHandle(
-        site=DummySite(),
-        job=DummyJob(),
-        id="run-1",
-        poll_interval=0.0,
-        check=True,
-        _status_fn=lambda run: JobStatus(
-            state="complete",
-            return_code=0,
-            job_id="run-1",
-        ),
-        _fetch_fn=lambda run: fetch_calls.append(run.id),
-        _fetch_on_complete=True,
-    )
-
-    result = run.wait()
-
-    assert result.successful
-    assert fetch_calls == ["run-1"]
-
-
 def test_failed_run_result_traces_raise_before_fetching_outputs():
     site = DummySite()
     result = RunResult(
