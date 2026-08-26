@@ -8,9 +8,6 @@
 {% if account %}
 #SBATCH -A {{ account }}
 {% endif %}
-{% if qos %}
-#SBATCH --qos={{ qos }}
-{% endif %}
 {% if duration %}
 #SBATCH -t {{ duration }}
 {% endif %}
