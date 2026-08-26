@@ -732,6 +732,41 @@ def test_slurm_provision_uses_profile_account(monkeypatch):
     assert "#SBATCH -A allocation-from-profile" in script
 
 
+def test_existing_slurm_directive_formats_remain_supported(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        stdout="/scratch/user/jobs/simple/freq/logs",
+        queue="cpu,gpu",
+        account="project.team+shared",
+        notify_on="all",
+        notify_email="first.last%tag@example.com",
+    )
+
+    assert "#SBATCH -p cpu,gpu" in script
+    assert "#SBATCH -A project.team+shared" in script
+    assert "#SBATCH --mail-type=ALL" in script
+    assert "#SBATCH --mail-user=first.last%tag@example.com" in script
+
+
+@pytest.mark.parametrize("field", ["queue", "account", "notify_email"])
+def test_slurm_directive_newline_is_rejected_at_script_boundary(monkeypatch, field):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    values = {field: "safe\n#SBATCH --array=1-999"}
+
+    with pytest.raises(ValueError, match="control characters"):
+        site._sweep_SLURM_script(
+            n_tasks=1,
+            n_nodes=1,
+            stdout="/scratch/user/jobs/simple/freq/logs",
+            **values,
+        )
+
+
 def test_slurm_site_verbose_initialization(monkeypatch, capsys):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
 
