@@ -116,15 +116,13 @@ class SlurmAuthenticator:
         ssh_port = getattr(config, "ssh_port", 22)
         known_hosts_file = getattr(config, "known_hosts_file", None)
         known_hosts_name = getattr(config, "known_hosts_name", None)
-        allow_ssh_agent = getattr(config, "allow_ssh_agent", True)
-        allow_keyboard_interactive = getattr(config, "allow_keyboard_interactive", True)
         control_dir = os.path.expanduser("~/.ssh/control")
         explicit_trust = known_hosts_file is not None or known_hosts_name is not None
-        explicit_auth_policy = not allow_ssh_agent or not allow_keyboard_interactive
+        enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
         if (
-            ssh_port == 22
+            not enterprise_key_only
+            and ssh_port == 22
             and not explicit_trust
-            and not explicit_auth_policy
             and os.path.exists(control_dir)
         ):
             for control_path in glob.glob(f"{control_dir}/*"):
@@ -228,6 +226,7 @@ class SlurmAuthenticator:
                 f"SSH compute-node tunnel failed ({type(exc).__name__})"
             ) from None
         job_client = SSHClient()
+        enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
 
         try:
             job_client.load_system_host_keys()
@@ -235,7 +234,8 @@ class SlurmAuthenticator:
                 job_host,
                 username=site.credentials.username,
                 sock=channel,
-                allow_agent=True,
+                pkey=site.credentials.ssh_key if enterprise_key_only else None,
+                allow_agent=not enterprise_key_only,
                 look_for_keys=False,
                 timeout=SSH_CONNECT_TIMEOUT_SECONDS,
                 banner_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
@@ -260,8 +260,7 @@ class SlurmAuthenticator:
         ssh_port = getattr(config, "ssh_port", 22)
         known_hosts_file = getattr(config, "known_hosts_file", None)
         known_hosts_name = getattr(config, "known_hosts_name", None)
-        allow_ssh_agent = getattr(config, "allow_ssh_agent", True)
-        allow_keyboard_interactive = getattr(config, "allow_keyboard_interactive", True)
+        enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
 
         try:
             sock = socket.create_connection(
@@ -296,7 +295,7 @@ class SlurmAuthenticator:
             raise
 
         authenticated = False
-        if allow_ssh_agent:
+        if not enterprise_key_only:
             try:
                 from paramiko.agent import Agent
 
@@ -310,8 +309,7 @@ class SlurmAuthenticator:
                             break
                     except Exception as exc:
                         logger.debug(
-                            "Agent key authentication failed (%s)",
-                            type(exc).__name__,
+                            "Agent key authentication failed (%s)", type(exc).__name__
                         )
                         continue
             except Exception as exc:
@@ -331,7 +329,7 @@ class SlurmAuthenticator:
                     type(exc).__name__,
                 )
 
-        if not authenticated and allow_keyboard_interactive:
+        if not authenticated and not enterprise_key_only:
             logger.debug("Attempting keyboard-interactive authentication.")
 
             def handler(title, instructions, prompt_list):

@@ -15,9 +15,6 @@
 {% if account %}
 #SBATCH -A {{ account }}
 {% endif %}
-{% if qos %}
-#SBATCH --qos={{ qos }}
-{% endif %}
 {% if duration %}
 #SBATCH -t {{ duration }}
 {% endif %}
@@ -41,10 +38,10 @@ procs_per_task=$2
 {% endif %}
 
 {% if run_path %}
-cd {{run_path_shell}}
+cd {{run_path}}
 {% endif %}
 
-dir_out={{dir_out_shell}}
+dir_out={{dir_out}}
 mkdir -p "$dir_out/batch"
 find "$dir_out" -mindepth 1 -maxdepth 1 ! -name batch -exec rm -rf -- {} +
 
@@ -52,8 +49,8 @@ find "$dir_out" -mindepth 1 -maxdepth 1 ! -name batch -exec rm -rf -- {} +
 {{ line }}
 {% endfor %}
 
-mpi_exec={{mpi_shell}}
-executable={{executable_shell}}
+mpi_exec={{mpi}}
+executable={{executable}}
 n_threads={{n_threads}}
 export OMP_NUM_THREADS=$n_threads
 {% for line in mpi_async_progress_setup %}

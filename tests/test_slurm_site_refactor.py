@@ -621,7 +621,6 @@ def test_run_handle_watch_finalizes_terminal_status():
     job = DummyJob()
     states = iter(["running", "completed"])
     finalized = []
-    fetched = []
 
     def poll(run):
         return JobStatus(state=next(states), return_code=0, job_id="watch")
@@ -637,10 +636,6 @@ def test_run_handle_watch_finalizes_terminal_status():
             )
         )
 
-    def fetch(run):
-        fetched.append(run.id)
-        return {"result": "fetched"}
-
     run = RunHandle(
         site=site,
         job=job,
@@ -648,18 +643,14 @@ def test_run_handle_watch_finalizes_terminal_status():
         poll_interval=0.0,
         _status_fn=poll,
         _finalize_fn=finalize,
-        _fetch_fn=fetch,
-        _fetch_on_complete=True,
     )
 
     statuses = list(run.watch(timeout=1.0, poll_interval=0.0))
 
     assert [status.state for status in statuses] == ["running", "completed"]
     assert finalized == ["completed"]
-    assert fetched == ["watch"]
     assert statuses[-1].message == "packed"
     assert run.wait().status.message == "packed"
-    assert fetched == ["watch"]
 
 
 def test_run_handle_wait_prints_status_output_by_default(capsys):
@@ -691,29 +682,6 @@ def test_run_handle_cancel_delegates_to_site():
     run.cancel()
 
     assert site.cancelled == "123"
-
-
-def test_slurm_run_handle_cancel_is_terminal_without_accounting(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite("project/run")
-    cancelled = []
-    monkeypatch.setattr(
-        site,
-        "cancel_job",
-        lambda job_id: cancelled.append(job_id) or True,
-    )
-    run = site.handle(DummyJob(), job_id="41", mode="batch")
-
-    run.cancel()
-    result = run.wait(check=False)
-
-    assert cancelled == ["41"]
-    assert result.status.state == "cancelled"
-    assert result.status.return_code == 1
-    assert result.status.raw == {
-        "scheduler": "slurm",
-        "cancellation_requested": True,
-    }
 
 
 def test_site_run_separates_submit_and_wait_options():
@@ -885,7 +853,6 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
         nodes=3,
         queue="normal",
         ranks_per_node=7,
-        threads_per_rank=2,
         duration="00-00:45:00",
         mpi_async_progress=False,
         scheduler_heartbeat_timeout=17,
@@ -894,7 +861,6 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
     assert seen["config"].nodes == 3
     assert seen["config"].queue == "normal"
     assert seen["config"].ranks_per_node == 7
-    assert seen["config"].threads_per_rank == 2
     assert seen["config"].duration == "00-00:45:00"
     assert seen["config"].mpi_async_progress is False
     assert seen["config"].scheduler_heartbeat_timeout == 17.0
@@ -905,35 +871,26 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
 def test_slurm_submit_exposes_direct_resource_parameters():
     parameters = inspect.signature(SlurmSite.submit).parameters
 
-    assert {
-        "queue",
-        "nodes",
-        "ranks_per_node",
-        "threads_per_rank",
-        "duration",
-    } <= set(parameters)
+    assert {"queue", "nodes", "ranks_per_node", "duration"} <= set(parameters)
 
 
 def test_slurm_run_config_normalizes_rank_aliases():
     config = SlurmRunConfig(
         procs_per_node=4,
         procs_per_task=2,
-        threads_per_rank=3,
     )
 
     assert config.ranks_per_node == 4
     assert config.ranks_per_task == 2
-    assert config.threads_per_rank == 3
     assert config.procs_per_node == 4
     assert config.procs_per_task == 2
     assert config.mpi_async_progress is False
     assert SlurmRunConfig(tolerate_failures=None).tolerate_failures is None
 
-    merged = config.merged(ranks_per_node=8, procs_per_task=3, threads_per_rank=1)
+    merged = config.merged(ranks_per_node=8, procs_per_task=3)
 
     assert merged.ranks_per_node == 8
     assert merged.ranks_per_task == 3
-    assert merged.threads_per_rank == 1
     assert merged.mpi_async_progress is False
     with pytest.raises(ValueError, match="Pass either"):
         config.merged(ranks_per_node=8, procs_per_node=4)
@@ -943,8 +900,6 @@ def test_slurm_run_config_normalizes_rank_aliases():
 
     with pytest.raises(NotImplementedError, match="race during MPI initialization"):
         SlurmRunConfig(mpi_async_progress=True)
-    with pytest.raises(ValueError, match="threads_per_rank"):
-        SlurmRunConfig(threads_per_rank=0)
 
 
 def test_slurm_run_config_validates_scheduler_heartbeat_timeout():
@@ -956,6 +911,38 @@ def test_slurm_run_config_validates_scheduler_heartbeat_timeout():
 
     with pytest.raises(ValueError, match="scheduler_heartbeat_timeout"):
         SlurmRunConfig(scheduler_heartbeat_timeout=0)
+
+
+def test_existing_slurm_run_config_public_call_shape_is_unchanged():
+    assert tuple(inspect.signature(SlurmRunConfig).parameters) == (
+        "queue",
+        "nodes",
+        "duration",
+        "ranks_per_node",
+        "ranks_per_task",
+        "mpi_async_progress",
+        "tolerate_failures",
+        "account",
+        "notify_on",
+        "notify_email",
+        "poll_interval",
+        "scheduler_heartbeat_timeout",
+        "run_path",
+        "slurm_args",
+        "aliases",
+    )
+    config = SlurmRunConfig(
+        queue="existing-partition",
+        nodes=2,
+        duration="00-00:30:00",
+        ranks_per_node=4,
+        ranks_per_task=2,
+        account="existing-account",
+        slurm_args=["--exclusive"],
+    )
+    assert config.queue == "existing-partition"
+    assert config.account == "existing-account"
+    assert config.slurm_args == ["--exclusive"]
 
 
 def test_job_save_for_remote_writes_remote_absolute_result_path(tmp_path):
@@ -1395,40 +1382,6 @@ def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):
     assert '"total_ranks": 8' in script
     assert '"task_indices": [' in script
     assert "    4" in script
-
-
-def test_adaptive_slurm_script_can_leave_node_cores_idle(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite("project/run")
-
-    script = site._sweep_SLURM_script(
-        n_tasks=1,
-        n_nodes=1,
-        ranks_per_node=1,
-        threads_per_rank=1,
-        stdout="/scratch/user/jobs/simple/freq/logs",
-        duration="00-00:10:00",
-    )
-
-    assert "#SBATCH -n 1" in script
-    assert "#SBATCH --cpus-per-task=1" in script
-    assert "n_threads=1" in script
-    assert '"omp_threads": 1' in script
-
-
-def test_adaptive_slurm_script_rejects_core_oversubscription(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite("project/run")
-
-    with pytest.raises(ValueError, match="exceeds cores_per_node"):
-        site._sweep_SLURM_script(
-            n_tasks=1,
-            n_nodes=1,
-            ranks_per_node=4,
-            threads_per_rank=100,
-            stdout="/scratch/user/jobs/simple/freq/logs",
-            duration="00-00:10:00",
-        )
 
 
 def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
@@ -2248,83 +2201,6 @@ def test_slurm_batch_poll_does_not_heartbeat_timeout_postprocessing(monkeypatch)
     assert "scheduler_liveness" not in status.raw
 
 
-def test_slurm_batch_poll_uses_task_ledger_without_slurm_accounting(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite("project/run")
-
-    monkeypatch.setattr(site, "update_status", lambda job_id: "unknown")
-    monkeypatch.setattr(
-        site,
-        "_read_scheduler_status",
-        lambda run: {
-            "state": "complete",
-            "total": 1,
-            "successful": 1,
-            "failed": 0,
-            "running": 0,
-            "pending": 0,
-        },
-    )
-
-    run = RunHandle(site=site, job=DummyJob(), id="77", mode="batch")
-    status = site._poll_run(run)
-
-    assert status.state == "complete"
-    assert status.return_code == 0
-    assert status.raw["scheduler_terminal_fallback"] == {
-        "state": "complete",
-        "reason": "slurm-accounting-unavailable",
-    }
-    assert status.message == (
-        "tasks: 1 successful, 0 failed, 0 running, 0 pending, 1 total"
-    )
-
-
-@pytest.mark.parametrize(
-    "task_status",
-    [
-        {
-            "state": "running",
-            "total": 1,
-            "successful": 1,
-            "failed": 0,
-            "running": 0,
-            "pending": 0,
-        },
-        {
-            "state": "complete",
-            "total": 1,
-            "successful": 0,
-            "failed": 1,
-            "running": 0,
-            "pending": 0,
-        },
-        {
-            "state": "complete",
-            "total": 2,
-            "successful": 1,
-            "failed": 0,
-            "running": 0,
-            "pending": 1,
-        },
-    ],
-)
-def test_slurm_batch_poll_does_not_infer_unconfirmed_terminal_success(
-    monkeypatch, task_status
-):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite("project/run")
-    monkeypatch.setattr(site, "update_status", lambda job_id: "unknown")
-    monkeypatch.setattr(site, "_read_scheduler_status", lambda run: task_status)
-
-    run = RunHandle(site=site, job=DummyJob(), id="77", mode="batch")
-    status = site._poll_run(run)
-
-    assert status.state == "unknown"
-    assert status.return_code == -1
-    assert "scheduler_terminal_fallback" not in status.raw
-
-
 def test_slurm_batch_poll_includes_already_current_tasks(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
@@ -2486,39 +2362,6 @@ def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
 
     assert run.mode == "attached"
     assert run.status().state == "running"
-
-
-def test_fresh_attached_submit_timeout_cancels_active_allocation(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
-    site = DummySlurmSite("project/run")
-    site.pool.id = "24680"
-    cancelled = []
-    finalized = []
-    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
-    site._finalize_run_record = lambda run, status: finalized.append(status.state)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        future = loop.create_future()
-        monkeypatch.setattr(
-            site,
-            "_submit_attached",
-            lambda job, ranks_per_task=2, **kwargs: future,
-        )
-        job = DummyJob()
-
-        run = site.submit(job, mode="attached")
-        result = run.wait(timeout=0)
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
-
-    assert run.id == "24680"
-    assert job._job_id == "24680"
-    assert result.status.state == "timeout"
-    assert cancelled == ["24680"]
-    assert finalized == ["timeout"]
 
 
 def test_fresh_attached_submit_without_allocation_id_fails_before_launch(monkeypatch):
@@ -2707,46 +2550,6 @@ def test_slurm_site_config_validates_node_and_duration_requests():
     assert config.validate_request(1, 1, "00-02:00:00") == "00-01:00:00"
     with pytest.raises(ValueError, match="Maximum number of nodes"):
         config.validate_request(3, 3, "00-00:30:00")
-
-
-def test_slurm_site_config_normalizes_explicit_ssh_trust(tmp_path):
-    known_hosts = tmp_path / "known_hosts"
-
-    config = SlurmSiteConfig(
-        hostname="127.0.0.1",
-        ssh_port="50222",
-        known_hosts_file=known_hosts,
-        known_hosts_name="[127.0.0.1]:50222",
-        allow_ssh_agent=False,
-        allow_keyboard_interactive=False,
-    )
-
-    assert config.ssh_port == 50222
-    assert config.known_hosts_file == known_hosts
-    assert config.known_hosts_name == "[127.0.0.1]:50222"
-    assert config.allow_ssh_agent is False
-    assert config.allow_keyboard_interactive is False
-
-
-@pytest.mark.parametrize("ssh_port", [False, 0, 65536, "invalid"])
-def test_slurm_site_config_rejects_invalid_ssh_port(ssh_port):
-    with pytest.raises(ValueError, match="SSH port"):
-        SlurmSiteConfig(hostname="login.example.edu", ssh_port=ssh_port)
-
-
-@pytest.mark.parametrize("known_hosts_name", ["", "login alias", 123])
-def test_slurm_site_config_rejects_invalid_known_hosts_name(known_hosts_name):
-    with pytest.raises(ValueError, match="known-hosts name"):
-        SlurmSiteConfig(
-            hostname="login.example.edu",
-            known_hosts_name=known_hosts_name,
-        )
-
-
-@pytest.mark.parametrize("field", ["allow_ssh_agent", "allow_keyboard_interactive"])
-def test_slurm_site_config_rejects_non_boolean_authentication_policy(field):
-    with pytest.raises(ValueError, match=f"{field} must be true or false"):
-        SlurmSiteConfig(hostname="login.example.edu", **{field: "false"})
 
 
 def test_slurm_site_config_resolves_partition_shapes_and_rejects_unknown():

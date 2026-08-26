@@ -34,7 +34,6 @@ from typing import (
     Sequence,
     Type,
     Union,
-    cast,
 )
 
 from frequensolve import __version__ as frequensolve_version
@@ -192,8 +191,6 @@ class SlurmSiteConfig(BaseSiteConfig):
     ssh_port: int = 22
     known_hosts_file: Optional[Union[str, Path]] = None
     known_hosts_name: Optional[str] = None
-    allow_ssh_agent: bool = True
-    allow_keyboard_interactive: bool = True
     queue: str = "normal"
     scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
@@ -227,13 +224,6 @@ class SlurmSiteConfig(BaseSiteConfig):
             or any(character.isspace() for character in self.known_hosts_name)
         ):
             raise ValueError("SLURM known-hosts name must be one non-empty token")
-        if not isinstance(self.allow_ssh_agent, bool):
-            raise ValueError("SLURM allow_ssh_agent must be true or false")
-        if not isinstance(self.allow_keyboard_interactive, bool):
-            raise ValueError("SLURM allow_keyboard_interactive must be true or false")
-        self.queue = _safe_slurm_directive(self.queue, "queue") or ""
-        if self.account:
-            self.account = _safe_slurm_directive(self.account, "account") or ""
         normalized: Dict[str, SlurmPartitionConfig] = {}
         for name, value in self.partitions.items():
             if isinstance(value, SlurmPartitionConfig):
@@ -368,37 +358,6 @@ def _normalize_failure_tolerance(value: Any, *, default: Optional[int] = 4):
     return count
 
 
-_SLURM_DIRECTIVE_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+@/%,-]*\Z")
-
-
-def _safe_slurm_directive(value: Optional[str], name: str) -> Optional[str]:
-    """Reject values that could add or alter an ``#SBATCH`` directive."""
-
-    if value is None:
-        return None
-    if not isinstance(value, str) or not _SLURM_DIRECTIVE_VALUE.fullmatch(value):
-        raise ValueError(f"{name} must be a single safe SLURM directive value")
-    return value
-
-
-def _normalize_slurm_notify_on(
-    value: Optional[str],
-) -> Optional[Literal["begin", "end", "fail", "all", "none"]]:
-    """Return one supported SLURM mail trigger or reject the value."""
-
-    if value is None:
-        return None
-    if not isinstance(value, str) or value not in {
-        "begin",
-        "end",
-        "fail",
-        "all",
-        "none",
-    }:
-        raise ValueError("notify_on must be one of: begin, end, fail, all, none")
-    return cast(Literal["begin", "end", "fail", "all", "none"], value)
-
-
 @dataclass(init=False)
 class SlurmRunConfig:
     """Default resource request for SLURM job submissions.
@@ -409,8 +368,6 @@ class SlurmRunConfig:
         duration: Requested wall time.
         ranks_per_node: MPI ranks per node.
         ranks_per_task: MPI ranks used by each FrequenSolve task.
-        threads_per_rank: OpenMP threads used by each MPI rank. When omitted,
-            all cores are divided evenly between the requested ranks.
         mpi_async_progress: Reserved compatibility option. Enabling it is
             temporarily unsupported and raises :class:`NotImplementedError`.
         tolerate_failures: Number of failed tasks tolerated before the adaptive
@@ -431,11 +388,9 @@ class SlurmRunConfig:
     duration: Optional[str] = None
     ranks_per_node: Optional[int] = None
     ranks_per_task: Optional[int] = None
-    threads_per_rank: Optional[int] = None
     mpi_async_progress: bool = False
     tolerate_failures: Optional[int] = 4
     account: Optional[str] = None
-    qos: Optional[str] = None
     notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None
     notify_email: Optional[str] = None
     poll_interval: Optional[int] = None
@@ -450,11 +405,9 @@ class SlurmRunConfig:
         duration: Optional[str] = None,
         ranks_per_node: Optional[int] = None,
         ranks_per_task: Optional[int] = None,
-        threads_per_rank: Optional[int] = None,
         mpi_async_progress: bool = False,
         tolerate_failures: Optional[int] = 4,
         account: Optional[str] = None,
-        qos: Optional[str] = None,
         notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
         notify_email: Optional[str] = None,
         poll_interval: Optional[int] = None,
@@ -477,16 +430,11 @@ class SlurmRunConfig:
             names = ", ".join(unexpected)
             raise TypeError(f"Unexpected SlurmRunConfig option(s): {names}")
 
-        self.queue = _safe_slurm_directive(queue, "queue")
+        self.queue = queue
         self.nodes = nodes
         self.duration = duration
         self.ranks_per_node = values.get("ranks_per_node")
         self.ranks_per_task = values.get("ranks_per_task")
-        if threads_per_rank is not None and int(threads_per_rank) <= 0:
-            raise ValueError("threads_per_rank must be greater than zero")
-        self.threads_per_rank = (
-            None if threads_per_rank is None else int(threads_per_rank)
-        )
         if not isinstance(mpi_async_progress, bool):
             raise ValueError("mpi_async_progress must be true or false")
         if mpi_async_progress:
@@ -500,10 +448,9 @@ class SlurmRunConfig:
             tolerate_failures,
             default=4,
         )
-        self.account = _safe_slurm_directive(account, "account")
-        self.qos = _safe_slurm_directive(qos, "qos")
-        self.notify_on = _normalize_slurm_notify_on(notify_on)
-        self.notify_email = _safe_slurm_directive(notify_email, "notify_email")
+        self.account = account
+        self.notify_on = notify_on
+        self.notify_email = notify_email
         self.poll_interval = poll_interval
         if (
             scheduler_heartbeat_timeout is not None
@@ -555,17 +502,15 @@ class SlurmRunConfig:
         """
 
         overrides = _normalize_rank_aliases(overrides)
-        values: Dict[str, Any] = {
+        values = {
             "queue": self.queue,
             "nodes": self.nodes,
             "duration": self.duration,
             "ranks_per_node": self.ranks_per_node,
             "ranks_per_task": self.ranks_per_task,
-            "threads_per_rank": self.threads_per_rank,
             "mpi_async_progress": self.mpi_async_progress,
             "tolerate_failures": self.tolerate_failures,
             "account": self.account,
-            "qos": self.qos,
             "notify_on": self.notify_on,
             "notify_email": self.notify_email,
             "poll_interval": self.poll_interval,
@@ -797,7 +742,7 @@ class SlurmSite(BaseSite):
                 partition=str(partition),
                 account=self.run_config.account
                 or getattr(self.config, "account", None),
-                qos=self.run_config.qos,
+                qos=enterprise_hpc.qos,
                 mpi_launcher=str(getattr(self.config, "mpi_wrapper", "")),
             )
         self._authenticator = SlurmAuthenticator(self)
@@ -937,7 +882,6 @@ class SlurmSite(BaseSite):
         queue: Optional[str] = None,
         nodes: Optional[int] = None,
         ranks_per_node: Optional[int] = None,
-        threads_per_rank: Optional[int] = None,
         duration: Optional[str] = None,
         mpi_async_progress: Optional[bool] = None,
         force: bool = False,
@@ -953,8 +897,6 @@ class SlurmSite(BaseSite):
             queue: Queue or partition for this submission.
             nodes: Number of nodes for this submission.
             ranks_per_node: MPI ranks per node for this submission.
-            threads_per_rank: OpenMP threads used by each MPI rank. Values may
-                leave physical cores idle but may not oversubscribe the node.
             duration: Wall time for this submission.
             mpi_async_progress: Reserved compatibility option. Passing ``True``
                 raises :class:`NotImplementedError` while asynchronous MPI
@@ -979,7 +921,6 @@ class SlurmSite(BaseSite):
                     "queue": queue,
                     "nodes": nodes,
                     "ranks_per_node": ranks_per_node,
-                    "threads_per_rank": threads_per_rank,
                     "duration": duration,
                     "mpi_async_progress": mpi_async_progress,
                 }.items()
@@ -1098,11 +1039,9 @@ class SlurmSite(BaseSite):
                 _status_fn=self._poll_attached_run,
                 _wait_fn=self._wait_attached_run,
                 _wait_async_fn=self._wait_attached_run_async,
-                _timeout_fn=self._timeout_slurm_run,
                 _generic_wait=False,
-                _cancel_fn=self._cancel_run,
+                _cancel_fn=lambda run: self.cancel_job(str(run.id)),
                 _fetch_fn=(lambda run: self.fetch_outputs(run.job)) if fetch else None,
-                _fetch_on_complete=fetch,
             )
             handle.backend["future"] = future
             handle.backend["mpi_async_progress"] = run_config.mpi_async_progress
@@ -1163,7 +1102,6 @@ class SlurmSite(BaseSite):
         handle.backend["mpi_async_progress"] = run_config.mpi_async_progress
         handle.check = check
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
-        handle._fetch_on_complete = fetch
         if task_plan is not None:
             handle.backend["task_plan"] = task_plan
         return handle
@@ -1254,7 +1192,7 @@ class SlurmSite(BaseSite):
             host=str(getattr(self.config, "hostname", self.login_host)),
             partition=partition,
             account=config.account or getattr(self.config, "account", None),
-            qos=config.qos,
+            qos=profile.qos,
             mpi_launcher=str(self.config.mpi_wrapper),
         )
         profile.validate_resources(
@@ -1263,7 +1201,6 @@ class SlurmSite(BaseSite):
             cores_per_node=int(partition_config.cores_per_node),
             duration_seconds=_hms_to_seconds(duration),
             max_wall_time_seconds=_hms_to_seconds(profile.max_wall_time),
-            threads_per_rank=config.threads_per_rank,
         )
         if (
             str(self.work_dir) != profile.work_dir
@@ -1546,33 +1483,7 @@ class SlurmSite(BaseSite):
     ) -> RunHandle:
         """Create a run handle and attach SLURM-specific wait behavior."""
 
-        handle = super().handle(job, job_id=job_id, mode=mode)
-        handle._timeout_fn = self._timeout_slurm_run
-        handle._cancel_fn = self._cancel_run
-        return handle
-
-    def _cancel_run(self, run: RunHandle) -> None:
-        """Publish terminal cancellation after SLURM accepts ``scancel``."""
-
-        if not self.cancel_job(str(run.id)):
-            return
-        status = JobStatus(
-            state="cancelled",
-            return_code=1,
-            job_id=str(run.id),
-            message="SLURM cancellation request accepted",
-            raw={"scheduler": "slurm", "cancellation_requested": True},
-        )
-        run._last_status = status
-        run._result = run._make_result(status)
-        self._finalize_run_record(run, status)
-
-    def _timeout_slurm_run(self, run: RunHandle, status: JobStatus) -> RunResult:
-        """Cancel a still-running SLURM job before publishing a timeout result."""
-
-        self.cancel_job(str(run.id))
-        self._finalize_run_record(run, status)
-        return run._make_result(status)
+        return super().handle(job, job_id=job_id, mode=mode)
 
     def provision(
         self, nodes: int, tasks: int, duration: Optional[str] = None, **kwargs
@@ -1603,7 +1514,6 @@ class SlurmSite(BaseSite):
                     "account",
                     self.run_config.account or getattr(self.config, "account", None),
                 ),
-                qos=kwargs.get("qos", self.run_config.qos),
             )
             self.enterprise_hpc_preflight(run_config=provision_config)
         self._emit(
@@ -1629,8 +1539,16 @@ class SlurmSite(BaseSite):
                 if provision_config is not None:
                     self.enterprise_hpc_preflight(run_config=provision_config)
 
+                sbatch_options = ""
+                if (
+                    self.enterprise_hpc is not None
+                    and self.enterprise_hpc.qos is not None
+                ):
+                    sbatch_options = (
+                        shlex.quote(f"--qos={self.enterprise_hpc.qos}") + " "
+                    )
                 self.pool.id = self._submit_sbatch(
-                    f"sbatch {shlex.quote(str(remote_path))}"
+                    f"sbatch {sbatch_options}{shlex.quote(str(remote_path))}"
                 )
                 logger.debug("Job submitted successfully with job ID: %s", self.pool.id)
                 self.pool._status.status = "pending"
@@ -2126,18 +2044,8 @@ class SlurmSite(BaseSite):
             logger.debug("No SLURM job id supplied; skipping cancellation")
             return False
         job_id = _validate_slurm_job_id(job_id)
-        cancelled_ids: set[str] = getattr(self, "_cancelled_job_ids", set())
-        if job_id in cancelled_ids:
-            logger.debug("SLURM job %s was already cancelled by this site", job_id)
-            return False
-        _, stdout, stderr = self.run_login_cmd(f"scancel {job_id}")
-        error_output = _read_stream(stderr)
-        exit_status = _ssh_exit_status(stdout, stderr)
-        if error_output or exit_status not in {None, 0}:
-            raise RuntimeError("SLURM cancellation failed")
-        cancelled_ids.add(job_id)
-        self._cancelled_job_ids = cancelled_ids
-        logger.info("SLURM job %s cancellation requested", job_id)
+        _, stdout, _ = self.run_login_cmd(f"scancel {job_id}")
+        logger.info("Job %s cancelled: %s", job_id, stdout.read().decode().strip())
         return True
 
     def deprovision(self, **kwargs):
@@ -2195,7 +2103,6 @@ class SlurmSite(BaseSite):
         handle.backend["scheduler_heartbeat_timeout"] = scheduler_heartbeat_timeout
         handle.check = check
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
-        handle._fetch_on_complete = fetch
         handle.backend["reattached"] = True
         return handle
 
@@ -2457,15 +2364,6 @@ class SlurmSite(BaseSite):
                 return_code = 1
                 raw["scheduler_liveness"] = scheduler_failure["raw"]
                 message = f"{scheduler_failure['message']}; {message}"
-            elif status == "unknown" and self._adaptive_scheduler_complete(
-                scheduler_status
-            ):
-                status = "complete"
-                return_code = 0
-                raw["scheduler_terminal_fallback"] = {
-                    "state": "complete",
-                    "reason": "slurm-accounting-unavailable",
-                }
         job_status = JobStatus(
             state=status,
             return_code=return_code,
@@ -2540,28 +2438,6 @@ class SlurmSite(BaseSite):
             },
         }
 
-    @staticmethod
-    def _adaptive_scheduler_complete(payload: Mapping[str, Any]) -> bool:
-        """Confirm terminal success when SLURM accounting is unavailable."""
-
-        if str(payload.get("state") or "").strip().lower() != "complete":
-            return False
-        try:
-            total = int(payload.get("total") or 0)
-            successful = int(payload.get("successful") or payload.get("succeeded") or 0)
-            failed = int(payload.get("failed") or 0)
-            running = int(payload.get("running") or 0)
-            pending = int(payload.get("pending") or 0)
-        except (TypeError, ValueError):
-            return False
-        return (
-            total >= 0
-            and successful >= total
-            and failed == 0
-            and running == 0
-            and pending == 0
-        )
-
     def _scheduler_status_path(self, job: BaseJob) -> Path:
         """Return the remote scheduler progress file for a batch simulation job."""
 
@@ -2617,8 +2493,7 @@ class SlurmSite(BaseSite):
             _wait_fn=self._wait_allocation,
             _wait_async_fn=self._wait_allocation_async,
             _finalize_fn=self._finalize_allocation,
-            _timeout_fn=self._timeout_slurm_run,
-            _cancel_fn=self._cancel_run,
+            _cancel_fn=lambda run: self.cancel_job(str(run.id)),
         )
 
     def _poll_allocation(self, run: RunHandle) -> JobStatus:
@@ -2766,7 +2641,6 @@ class SlurmSite(BaseSite):
                 if config.ranks_per_node is not None
                 else {}
             ),
-            threads_per_rank=config.threads_per_rank,
             **(
                 {"tolerate_failures": config.tolerate_failures}
                 if config.tolerate_failures is not None
@@ -2774,7 +2648,6 @@ class SlurmSite(BaseSite):
             ),
             **({"queue": config.queue} if config.queue is not None else {}),
             **({"account": config.account} if config.account is not None else {}),
-            **({"qos": config.qos} if config.qos is not None else {}),
             **({"notify_on": config.notify_on} if config.notify_on is not None else {}),
             **(
                 {"notify_email": config.notify_email}
@@ -2791,6 +2664,8 @@ class SlurmSite(BaseSite):
         cmd = f"mkdir -p {shlex.quote(str(logs_path / 'batch'))} && "
         cmd += f"rm -f {shlex.quote(str(logs_path / 'scheduler_status.json'))} && "
         cmd += "sbatch "
+        if self.enterprise_hpc is not None and self.enterprise_hpc.qos is not None:
+            cmd += f"{shlex.quote(f'--qos={self.enterprise_hpc.qos}')} "
         if config.slurm_args:
             for arg in config.slurm_args:
                 cmd += f"{shlex.quote(str(arg))} "
@@ -2856,17 +2731,7 @@ class SlurmSite(BaseSite):
                     "asyncio loop is already running; use 'await run' instead."
                 )
         if timeout is not None:
-            try:
-                loop.run_until_complete(asyncio.wait_for(future, timeout=timeout))
-            except asyncio.TimeoutError:
-                if not future.cancelled():
-                    raise
-                status = JobStatus(
-                    state="timeout",
-                    job_id=str(run.id),
-                    message=f"Timed out waiting for run after {timeout} seconds",
-                )
-                return self._timeout_slurm_run(run, status)
+            loop.run_until_complete(asyncio.wait_for(future, timeout=timeout))
         else:
             loop.run_until_complete(future)
         status = self._poll_attached_run(run)
@@ -2885,17 +2750,7 @@ class SlurmSite(BaseSite):
             return RunResult(job=run.job, status=status, site=self)
 
         if timeout is not None:
-            try:
-                await asyncio.wait_for(future, timeout=timeout)
-            except asyncio.TimeoutError:
-                if not future.cancelled():
-                    raise
-                status = JobStatus(
-                    state="timeout",
-                    job_id=str(run.id),
-                    message=f"Timed out waiting for run after {timeout} seconds",
-                )
-                return self._timeout_slurm_run(run, status)
+            await asyncio.wait_for(future, timeout=timeout)
         else:
             await future
         status = self._poll_attached_run(run)
@@ -3338,7 +3193,6 @@ class SlurmSite(BaseSite):
         name: str = "FrequenSolve",
         duration: str = "00-02:00:00",
         ranks_per_node: Optional[int] = None,
-        threads_per_rank: Optional[int] = None,
         notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
         notify_email: Optional[str] = None,
         imaging_job: bool = False,
@@ -3353,7 +3207,6 @@ class SlurmSite(BaseSite):
             duration:       Duration of the job (DD-HH:MM:SS)
             n_nodes:        Number of nodes to run on
             ranks_per_node: Number of MPI ranks per node
-            threads_per_rank: OpenMP threads used by each MPI rank
             ranks_per_task: Number of MPI ranks per task
             queue:          Queue/partition to run on (optional, defaults to site queue)
             account:        Account/allocation to run on
@@ -3363,21 +3216,9 @@ class SlurmSite(BaseSite):
         """
 
         # Unpack keyword arguments
-        queue = _safe_slurm_directive(
-            str(kwargs.pop("queue", self.config.queue)), "queue"
-        )
-        if queue is None:
-            raise ValueError("queue must be configured")
+        queue = str(kwargs.pop("queue", self.config.queue))
         config = self.config_for_partition(queue)
-        account_value = kwargs.pop("account", self.config.account)
-        account = _safe_slurm_directive(
-            None if account_value in {None, ""} else str(account_value),
-            "account",
-        )
-        qos = _safe_slurm_directive(kwargs.pop("qos", None), "qos")
-        name = _safe_slurm_directive(name, "name") or "FrequenSolve"
-        notify_on = _normalize_slurm_notify_on(notify_on)
-        notify_email = _safe_slurm_directive(notify_email, "notify_email")
+        account = str(kwargs.pop("account", self.config.account))
         run_path = str(kwargs.pop("run_path", self.work_dir))
         rank_values = _normalize_rank_aliases(
             {
@@ -3415,18 +3256,7 @@ class SlurmSite(BaseSite):
         skip_sizing = bool(kwargs.pop("skip_sizing", n_tasks == 1))
         proc_memory = (config.memory_per_node / ranks_per_node) / 1024.0
         duration = config.validate_request(n_nodes, n_nodes * ranks_per_node, duration)
-        derived_threads = config.cores_per_node // ranks_per_node
-        n_threads = int(
-            derived_threads if threads_per_rank is None else threads_per_rank
-        )
-        if n_threads <= 0:
-            raise ValueError("threads_per_rank must be greater than zero")
-        if ranks_per_node * n_threads > config.cores_per_node:
-            raise ValueError(
-                "ranks_per_node * threads_per_rank exceeds cores_per_node; "
-                f"got {ranks_per_node} ranks, {n_threads} threads, and "
-                f"{config.cores_per_node} cores"
-            )
+        n_threads = config.cores_per_node // ranks_per_node
         mpi_async_progress_setup: List[str] = []
         if mpi_async_progress:
             n_threads, mpi_async_progress_setup = self._mpi_async_progress_layout(
@@ -3477,26 +3307,17 @@ class SlurmSite(BaseSite):
             duration=duration,
             queue=queue,
             account=account,
-            qos=qos,
             imaging_job=imaging_job,
             pack_job=pack_job,
             mpi=self.mpi_cmd,
-            mpi_shell=shlex.quote(str(self.mpi_cmd)),
             executable=self.executable,
-            executable_shell=shlex.quote(str(self.executable)),
             runtime_setup=self._runtime_setup_lines(),
             mpi_async_progress_setup=mpi_async_progress_setup,
             scheduler_config_shell=shlex.quote(json.dumps(scheduler_config, indent=2)),
             sizing_json_shell=shlex.quote(str(sizing_json)),
             scheduler_runner=shlex.quote(str(self._adaptive_scheduler_remote_path())),
-            dir_out_shell=shlex.quote(str(stdout)),
             **({"sizing_json": sizing_json} if sizing_json is not None else {}),
             **({"run_path": run_path} if run_path is not None else {}),
-            **(
-                {"run_path_shell": shlex.quote(str(run_path))}
-                if run_path is not None
-                else {}
-            ),
             **({"notify_on": notify_on.upper()} if notify_on is not None else {}),
             **({"notify_email": notify_email} if notify_email is not None else {}),
             **kwargs,
@@ -3509,7 +3330,6 @@ class SlurmSite(BaseSite):
         duration: str = "00-02:00:00",
         queue: Optional[str] = None,
         account: Optional[str] = None,
-        qos: Optional[str] = None,
         notify_email: Optional[str] = None,
         **kwargs,
     ) -> str:
@@ -3531,14 +3351,8 @@ class SlurmSite(BaseSite):
                 }
             )
             ranks_per_node = int(values["ranks_per_node"])
-        name = _safe_slurm_directive(kwargs.get("name", "FS_cluster"), "name")
-        queue = _safe_slurm_directive(queue or self.config.queue, "queue")
-        account = _safe_slurm_directive(
-            account or self.run_config.account or self.config.account or None,
-            "account",
-        )
-        qos = _safe_slurm_directive(qos or self.run_config.qos, "qos")
-        notify_email = _safe_slurm_directive(notify_email, "notify_email")
+        name = kwargs.get("name", "FS_cluster")
+        account = account or self.run_config.account or self.config.account
 
         return self._render_template(
             "provision/provision_SLURM.sh",
@@ -3550,10 +3364,8 @@ class SlurmSite(BaseSite):
             ranks_per_node=ranks_per_node,
             queue=queue,
             account=account,
-            qos=qos,
             duration=duration,
             work_dir=self.work_dir,
-            work_dir_shell=shlex.quote(str(self.work_dir)),
             mpi=self.config.mpi_wrapper,
             **({"notify_email": notify_email} if notify_email is not None else {}),
         )
