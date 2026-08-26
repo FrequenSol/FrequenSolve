@@ -1010,6 +1010,32 @@ def test_status_falls_back_to_accounting_and_uses_first_known_state():
     ]
 
 
+@pytest.mark.parametrize(
+    ("retained_state", "expected"),
+    [("COMPLETED", "complete"), ("CANCELLED", "cancelled")],
+)
+def test_status_falls_back_to_retained_job_when_accounting_is_disabled(
+    retained_state, expected
+):
+    site = object.__new__(SlurmSite)
+    responses = iter(
+        [
+            "",
+            "Slurm accounting storage is disabled",
+            f"JobId=123 JobState={retained_state} ExitCode=0:0\n",
+        ]
+    )
+    commands = []
+    site.run_login = lambda command: commands.append(command) or next(responses)
+
+    assert site.update_status("123") == expected
+    assert commands == [
+        "squeue -j 123 -h -o %t",
+        "sacct -j 123 -n -o State%20",
+        "scontrol show job -o 123",
+    ]
+
+
 def test_status_rejects_command_injection_before_scheduler_call():
     site = object.__new__(SlurmSite)
     calls = []

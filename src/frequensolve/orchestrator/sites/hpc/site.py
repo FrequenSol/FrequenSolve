@@ -1640,6 +1640,21 @@ class SlurmSite(BaseSite):
                 status = _normalize_slurm_state(line)
                 if status != "unknown":
                     break
+            if status == "unknown":
+                try:
+                    control_status = self.run_login(
+                        f"scontrol show job -o {job_id}"
+                    ).strip()
+                except Exception as exc:
+                    logger.debug(
+                        "Could not read retained SLURM job %s from scontrol: %s",
+                        job_id,
+                        exc,
+                    )
+                    control_status = ""
+                match = re.search(r"(?:^|\s)JobState=(\S+)", control_status)
+                if match:
+                    status = _normalize_slurm_state(match.group(1))
         else:
             status = _normalize_slurm_state(queue_status)
 
