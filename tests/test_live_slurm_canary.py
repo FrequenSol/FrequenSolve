@@ -157,6 +157,8 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
     enterprise_site.enterprise_hpc_preflight = lambda: SimpleNamespace(
         to_evidence=lambda: {"profileId": "synthetic-profile"}
     )
+    fetched_logs = []
+    enterprise_site.fetch_logs = lambda job: fetched_logs.append(job) or tmp_path
     monkeypatch.setattr(
         canary,
         "build_synthetic_live_slurm_job",
@@ -183,8 +185,28 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
     assert result["cancellation"]["terminalState"] == "cancelled"
     assert calls[0]["fetch"] is True
     assert calls[1]["fetch"] is False
+    assert fetched_logs == [success_job]
     assert all("threads_per_rank" not in call for call in calls)
     assert all(call["mode"] == "batch" for call in calls)
+
+
+def test_solver_evidence_uses_public_fetched_logs(tmp_path):
+    (tmp_path / "init.log").write_text(
+        " -- Parallelism --\n Ranks  :    4\n Threads:    1\n"
+    )
+    (tmp_path / "task_1.log").write_text(
+        "  Iter     ||r||_2         step\n"
+        "       1   2.5339E-01   2.5043E+01\n"
+        "      18   8.7280E-05   2.0403E-03\n"
+        " -- Timing --\n"
+    )
+
+    assert canary._solver_evidence(tmp_path / "task_1.log", 4) == {
+        "mpiRanks": 4,
+        "threadsPerRank": 1,
+        "iterations": 18,
+        "residual": 8.728e-05,
+    }
 
 
 def test_live_canary_recovers_and_cancels_after_interrupted_submit(

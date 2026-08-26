@@ -196,22 +196,28 @@ def build_synthetic_live_slurm_job(
     return project, jobs[0], jobs[1]
 
 
-def _solver_evidence(job: Any, expected_ranks: int) -> dict[str, Any]:
-    manifest_path = Path(job._result_path) / "_fs_run" / "run_manifest.json"
+def _solver_evidence(log_path: Path, expected_ranks: int) -> dict[str, Any]:
+    log_dir = log_path if log_path.is_dir() else log_path.parent
     try:
-        task = json.loads(manifest_path.read_text())["tasks"][0]
-        convergence = task["solver"]["convergence"]
-        ranks = int(task["n_ranks"])
-        threads = int(task["threads_per_rank"])
-    except (OSError, ValueError, json.JSONDecodeError, KeyError, IndexError) as exc:
-        raise LiveSlurmCanaryError("fetched solver run manifest is incomplete") from exc
-    if ranks != expected_ranks or threads < 1 or not convergence.get("converged"):
+        init_log = (log_dir / "init.log").read_text()
+        task_log = sorted(log_dir.glob("task_*.log"))[0].read_text()
+        ranks = int(re.search(r"(?m)^\s*Ranks\s*:\s*(\d+)\s*$", init_log).group(1))
+        threads = int(re.search(r"(?m)^\s*Threads\s*:\s*(\d+)\s*$", init_log).group(1))
+        iterations = re.findall(r"(?m)^\s*(\d+)\s+([0-9.]+E[+-]\d+)\s+", task_log)
+    except (AttributeError, IndexError, OSError, ValueError) as exc:
+        raise LiveSlurmCanaryError("fetched solver logs are incomplete") from exc
+    if (
+        ranks != expected_ranks
+        or threads < 1
+        or not iterations
+        or "-- Timing --" not in task_log
+    ):
         raise LiveSlurmCanaryError("solver MPI/convergence invariant failed")
     return {
         "mpiRanks": ranks,
         "threadsPerRank": threads,
-        "iterations": convergence.get("iterations"),
-        "residual": convergence.get("residual"),
+        "iterations": int(iterations[-1][0]),
+        "residual": float(iterations[-1][1]),
     }
 
 
@@ -343,7 +349,7 @@ def run_live_slurm_canary(
         if success_result.status.state != "complete":
             raise LiveSlurmCanaryError("success case did not reach complete")
         traces = _trace_evidence(success_result)
-        solver = _solver_evidence(success_job, ranks_per_node)
+        solver = _solver_evidence(site.fetch_logs(success_job), ranks_per_node)
 
         cancel_handle = site.submit(
             cancel_job,
