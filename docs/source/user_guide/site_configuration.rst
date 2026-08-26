@@ -337,6 +337,15 @@ extra.
    # Optional controller-enforced deadline for a full-rank MPI check before sizing.
    # mpi_health_check_timeout = "00:02:00"
 
+An Enterprise HPC installation adds a closed, generated ``enterprise_hpc``
+table to the same profile. Do not hand-author it: the Deployment installer
+binds it to the installed bundle, compatibility row, solver and Python artifact
+digests, allowlisted scheduler resources, paths, launcher, and explicit SSH
+host trust. When the table is present, FrequenSolve verifies those values before
+transfer or scheduler spend and rejects untyped ``slurm_args`` and ``run_path``
+overrides. When it is absent, generic Slurm configuration and behavior are
+unchanged. Azure topology and credentials never enter this table.
+
 Stampede3 profiles use the built-in preset and create generic ``SlurmSite``
 instances. The preferred setup command prompts for the username and writes the
 profile:

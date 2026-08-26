@@ -33,6 +33,18 @@ Marker names are strict. An unknown marker fails collection so a misspelled
 `integration`, `cloud`, `hpc`, `interactive`, or `visual` marker cannot put a
 resource-dependent test into the default lane.
 
+Markers describe execution approval, not optional-package ownership. In
+particular, `cloud` means a test contacts a real cloud boundary and
+`interactive` means it needs input or an authenticated session. Credential-free
+AWS adapter behavior is selected by the `cloud` package contract without either
+approval marker. The `hpc` approval marker is reserved for live scheduler
+checks. The thin real-cluster canary tracked by issue #83 is invoked manually
+with `python -m frequensolve.orchestrator.sites.hpc.live_canary`; it is never
+scheduled and is not part of required PR CI. It exercises public submission,
+observation, fetch/load, and cancellation using the Deployment-generated
+Enterprise profile. Deployment owns policy, cleanup, retention, performance,
+provenance aggregation, and certification evidence.
+
 ## Writing Tests
 
 ### Test Framework

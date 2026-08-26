@@ -118,7 +118,13 @@ class SlurmAuthenticator:
         known_hosts_name = getattr(config, "known_hosts_name", None)
         control_dir = os.path.expanduser("~/.ssh/control")
         explicit_trust = known_hosts_file is not None or known_hosts_name is not None
-        if ssh_port == 22 and not explicit_trust and os.path.exists(control_dir):
+        enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
+        if (
+            not enterprise_key_only
+            and ssh_port == 22
+            and not explicit_trust
+            and os.path.exists(control_dir)
+        ):
             for control_path in glob.glob(f"{control_dir}/*"):
                 try:
                     result = subprocess.run(
@@ -220,6 +226,13 @@ class SlurmAuthenticator:
                 f"SSH compute-node tunnel failed ({type(exc).__name__})"
             ) from None
         job_client = SSHClient()
+        enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
+        auth_options = {"allow_agent": True}
+        if enterprise_key_only:
+            auth_options = {
+                "pkey": site.credentials.ssh_key,
+                "allow_agent": False,
+            }
 
         try:
             job_client.load_system_host_keys()
@@ -227,11 +240,11 @@ class SlurmAuthenticator:
                 job_host,
                 username=site.credentials.username,
                 sock=channel,
-                allow_agent=True,
                 look_for_keys=False,
                 timeout=SSH_CONNECT_TIMEOUT_SECONDS,
                 banner_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
                 auth_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
+                **auth_options,
             )
             logger.info("Connected to job host: %s", job_host)
             return job_client
@@ -252,6 +265,7 @@ class SlurmAuthenticator:
         ssh_port = getattr(config, "ssh_port", 22)
         known_hosts_file = getattr(config, "known_hosts_file", None)
         known_hosts_name = getattr(config, "known_hosts_name", None)
+        enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
 
         try:
             sock = socket.create_connection(
@@ -286,26 +300,27 @@ class SlurmAuthenticator:
             raise
 
         authenticated = False
-        try:
-            from paramiko.agent import Agent
+        if not enterprise_key_only:
+            try:
+                from paramiko.agent import Agent
 
-            logger.debug("Attempting agent-based authentication.")
-            agent = Agent()
-            for key in agent.get_keys():
-                try:
-                    transport.auth_publickey(site.credentials.username, key)
-                    if transport.is_authenticated():
-                        authenticated = True
-                        break
-                except Exception as exc:
-                    logger.debug(
-                        "Agent key authentication failed (%s)", type(exc).__name__
-                    )
-                    continue
-        except Exception as exc:
-            logger.debug(
-                "Agent-based authentication exception (%s)", type(exc).__name__
-            )
+                logger.debug("Attempting agent-based authentication.")
+                agent = Agent()
+                for key in agent.get_keys():
+                    try:
+                        transport.auth_publickey(site.credentials.username, key)
+                        if transport.is_authenticated():
+                            authenticated = True
+                            break
+                    except Exception as exc:
+                        logger.debug(
+                            "Agent key authentication failed (%s)", type(exc).__name__
+                        )
+                        continue
+            except Exception as exc:
+                logger.debug(
+                    "Agent-based authentication exception (%s)", type(exc).__name__
+                )
 
         if not authenticated:
             logger.debug("Attempting configured private-key authentication.")
@@ -319,7 +334,7 @@ class SlurmAuthenticator:
                     type(exc).__name__,
                 )
 
-        if not authenticated:
+        if not authenticated and not enterprise_key_only:
             logger.debug("Attempting keyboard-interactive authentication.")
 
             def handler(title, instructions, prompt_list):
