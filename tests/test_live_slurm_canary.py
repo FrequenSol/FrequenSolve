@@ -13,7 +13,7 @@ from frequensolve.orchestrator.sites.hpc.live_canary import (
     validate_live_slurm_site,
 )
 
-pytestmark = pytest.mark.hpc_hermetic
+pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
 
 
 def profile() -> EnterpriseHPCProfile:
