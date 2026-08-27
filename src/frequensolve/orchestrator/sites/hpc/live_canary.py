@@ -201,10 +201,14 @@ def _solver_evidence(log_path: Path, expected_ranks: int) -> dict[str, Any]:
     try:
         init_log = (log_dir / "init.log").read_text()
         task_log = sorted(log_dir.glob("task_*.log"))[0].read_text()
-        ranks = int(re.search(r"(?m)^\s*Ranks\s*:\s*(\d+)\s*$", init_log).group(1))
-        threads = int(re.search(r"(?m)^\s*Threads\s*:\s*(\d+)\s*$", init_log).group(1))
+        ranks_match = re.search(r"(?m)^\s*Ranks\s*:\s*(\d+)\s*$", init_log)
+        threads_match = re.search(r"(?m)^\s*Threads\s*:\s*(\d+)\s*$", init_log)
+        if ranks_match is None or threads_match is None:
+            raise LiveSlurmCanaryError("fetched solver logs are incomplete")
+        ranks = int(ranks_match.group(1))
+        threads = int(threads_match.group(1))
         iterations = re.findall(r"(?m)^\s*(\d+)\s+([0-9.]+E[+-]\d+)\s+", task_log)
-    except (AttributeError, IndexError, OSError, ValueError) as exc:
+    except (IndexError, OSError, ValueError) as exc:
         raise LiveSlurmCanaryError("fetched solver logs are incomplete") from exc
     if (
         ranks != expected_ranks
