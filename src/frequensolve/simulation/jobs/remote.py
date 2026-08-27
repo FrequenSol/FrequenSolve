@@ -18,6 +18,7 @@ from frequensolve.util.store import compact_hdf5_file
 if TYPE_CHECKING:
     from frequensolve.simulation.jobs.base import JobLayout
 
+_PROJECT_FILE_REFERENCE_KEYS = ("file", "data_path", "observed")
 
 class JobRemoteMixin:
     """Save and stage job inputs for local and remote execution.
@@ -429,9 +430,10 @@ class JobRemoteMixin:
     @staticmethod
     def _iter_file_references(value: Any) -> Iterable[str]:
         if isinstance(value, Mapping):
-            file_ref = value.get("file")
-            if isinstance(file_ref, (str, Path)):
-                yield JobRemoteMixin._strip_file_locator(file_ref)
+            for key in _PROJECT_FILE_REFERENCE_KEYS:
+                file_ref = value.get(key)
+                if isinstance(file_ref, (str, Path)):
+                    yield JobRemoteMixin._strip_file_locator(file_ref)
             derivatives = value.get("observed_derivatives")
             if isinstance(derivatives, Mapping):
                 df = derivatives.get("df")
