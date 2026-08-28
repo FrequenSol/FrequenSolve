@@ -1129,7 +1129,7 @@ class AWSSite(BaseSite):
         self._emit(f"Fetched AWS run metadata from {s3_results_path}")
         return job.collect_task_run_manifests()
 
-    def fetch_image(self, job: ImagingJob):
+    def fetch_image(self, job: ImagingJob) -> Any:
         """Download and open the aggregate image for one imaging job."""
 
         if not isinstance(job, ImagingJob):

@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Protocol, Union, cast
 
 from frequensolve.simulation.jobs.run_state import SkipPolicy
 
@@ -40,6 +40,13 @@ STATUS_COLORS = {
 }
 STATUS_PREFIX_COLOR = "\033[38;5;244m"
 STATUS_RESET = "\033[0m"
+
+
+class _ImageFetchingSite(Protocol):
+    """Optional imaging capability implemented by concrete sites."""
+
+    def fetch_image(self, job: Any) -> Any: ...
+
 
 __all__ = [
     "BaseSite",
@@ -539,7 +546,8 @@ class RunResult:
 
         self.raise_for_status()
         if self.site is not None:
-            return self.site.fetch_image(self.job)
+            site = cast(_ImageFetchingSite, self.site)
+            return site.fetch_image(self.job)
         return self.job.load_images()
 
     def output_files(
