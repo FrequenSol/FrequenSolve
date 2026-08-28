@@ -754,11 +754,12 @@ def test_slurm_submit_auto_uses_batch_when_not_attached(monkeypatch):
 
     monkeypatch.setattr(site, "_submit_slurm_batch", fake_submit)
 
-    run = site.submit(DummyJob())
+    run = site.submit(DummyJob(), fetch=True)
 
     assert isinstance(run, RunHandle)
     assert run.id == "77"
     assert run.mode == "batch"
+    assert run._fetch_on_wait is True
     assert seen["config"].nodes == 2
     assert seen["config"].queue == "debug"
 
@@ -1422,11 +1423,12 @@ def test_slurm_submit_reattaches_matching_inflight_run(monkeypatch, tmp_path):
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("reran job")),
     )
 
-    run = site.submit(job)
+    run = site.submit(job, fetch=True)
 
     assert run.id == "77"
     assert run.mode == "batch"
     assert run.check is False
+    assert run._fetch_on_wait is True
     assert run.backend["reattached"] is True
     assert run.status().state == "running"
     assert job.latest_run(site="Dummy").status == "running"

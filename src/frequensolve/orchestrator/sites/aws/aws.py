@@ -1344,6 +1344,8 @@ class AWSSite(BaseSite):
             wavefields = self.fetch_wavefields(job)
         if getattr(job.outputs, "paraview", None):
             self.fetch_paraview(job)
+        if isinstance(job, ImagingJob):
+            self.fetch_image(job)
         if wavefields is None:
             return traces
         return {"traces": traces, "wavefields": wavefields}

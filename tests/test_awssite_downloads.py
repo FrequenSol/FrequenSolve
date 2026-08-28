@@ -301,6 +301,19 @@ def test_fetch_outputs_downloads_complete_configured_artifact_set():
     assert calls == ["metadata", "traces", "wavefields", "paraview"]
 
 
+def test_fetch_outputs_downloads_aggregate_image_for_imaging_job():
+    site = AWSSite.__new__(AWSSite)
+    calls = []
+    site.fetch_run_metadata = lambda job: calls.append("metadata")
+    site.fetch_traces = lambda job: calls.append("traces") or "trace-data"
+    site.fetch_image = lambda job: calls.append("image")
+    job = object.__new__(ImagingJob)
+    job.outputs = SimpleNamespace(wavefields=[], paraview=[])
+
+    assert site.fetch_outputs(job) == "trace-data"
+    assert calls == ["metadata", "traces", "image"]
+
+
 def test_aws_run_handle_honors_submit_time_fetch_after_success():
     site = AWSSite.__new__(AWSSite)
     fetch_calls = []
