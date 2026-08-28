@@ -1905,6 +1905,7 @@ class JobRunStateMixin:
         duration_keys = (
             "duration_seconds",
             "elapsed_seconds",
+            "elapsed_s",
             "runtime_seconds",
             "wall_time_seconds",
             "time_seconds",
