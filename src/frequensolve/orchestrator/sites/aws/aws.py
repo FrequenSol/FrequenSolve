@@ -31,7 +31,7 @@ from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.jobs import BaseJob, SkipPolicy
+from frequensolve.simulation.jobs import BaseJob, ImagingJob, SkipPolicy
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
@@ -1285,6 +1285,45 @@ class AWSSite(BaseSite):
         self.get(s3_results_path, local_run_path)
         self._emit(f"Fetched AWS run metadata from {s3_results_path}")
         return job.collect_task_run_manifests()
+
+    def fetch_image(self, job: ImagingJob):
+        """Download and open the aggregate image for one imaging job."""
+
+        if not isinstance(job, ImagingJob):
+            raise TypeError("fetch_image expects an ImagingJob")
+
+        project_path = Path(job.project_path).resolve()
+        local_image_file = Path(job.image_file()).resolve()
+        try:
+            relative_image_file = local_image_file.relative_to(project_path)
+        except ValueError as exc:
+            raise ValueError(
+                f"Imaging output path {local_image_file} is outside project "
+                f"root {project_path}"
+            ) from exc
+
+        bucket = self.config.s3_bucket
+        key = f"{project_path.name}/{relative_image_file.as_posix()}"
+        local_image_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            self.s3_client.download_file(bucket, key, str(local_image_file))
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            if error_code in ("ExpiredToken", "InvalidToken") and hasattr(
+                self, "cognito_auth"
+            ):
+                self._refresh_s3_credentials()
+                self.s3_client.download_file(bucket, key, str(local_image_file))
+            elif error_code in ("404", "NoSuchKey", "NotFound"):
+                raise FileNotFoundError(
+                    f"AWS imaging output s3://{bucket}/{key} is missing"
+                ) from exc
+            else:
+                raise RuntimeError(f"S3 image download failed: {exc}") from exc
+
+        self._emit(f"Fetched AWS image from s3://{bucket}/{key}")
+        return job.load_images()
 
     def fetch_outputs(self, job: BaseJob):
         """Fetch common AWS result artifacts for a completed job.

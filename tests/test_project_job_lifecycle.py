@@ -3,6 +3,7 @@ import math
 import os
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -19,6 +20,7 @@ from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import (
     BaseJob,
     FrequencyDomainJob,
+    ImagingJob,
     JobLayout,
     TimeDomainJob,
 )
@@ -111,6 +113,19 @@ def test_generic_load_infers_trace_store(tmp_path):
     assert isinstance(traces, TraceDataset)
     assert traces.manifest.groups == ["surface"]
     assert traces.manifest.frequencies == {1: 10.0}
+
+
+def test_successful_run_result_opens_images_through_its_site():
+    expected = object()
+    job = object.__new__(ImagingJob)
+    site = SimpleNamespace(fetch_image=lambda requested: expected)
+    result = RunResult(
+        job=job,
+        status=JobStatus(state="completed", return_code=0),
+        site=site,
+    )
+
+    assert result.images() is expected
 
 
 def test_project_save_serializes_solver_hp_sympy_policy(tmp_path):
