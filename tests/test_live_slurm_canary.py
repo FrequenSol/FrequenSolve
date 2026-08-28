@@ -4,60 +4,21 @@ from types import SimpleNamespace
 import pytest
 
 from frequensolve.orchestrator.sites.hpc import live_canary as canary
-from frequensolve.orchestrator.sites.hpc.enterprise import EnterpriseHPCProfile
 from frequensolve.orchestrator.sites.hpc.live_canary import (
     CANARY_ACKNOWLEDGEMENT,
     LiveSlurmCanaryError,
     build_synthetic_live_slurm_job,
     require_live_slurm_acknowledgement,
-    validate_live_slurm_site,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
 
 
-def profile() -> EnterpriseHPCProfile:
-    digest = "a" * 64
-    return EnterpriseHPCProfile(
-        profile_id="synthetic-profile",
-        host="login.example.invalid",
-        bundle_manifest="/bundle/manifests/bundle.json",
-        compatibility_manifest="/bundle/manifests/compatibility.json",
-        bundle_schema_path="/bundle/manifests/bundle-schema.json",
-        compatibility_schema_path="/bundle/manifests/compatibility-schema.json",
-        bundle_root="/bundle",
-        solver_path="/bundle/bin/fs2d",
-        work_dir="/approved/staging",
-        scratch_dir="/approved/scratch",
-        bundle_version="0.1.0-test",
-        bundle_content_sha256=digest,
-        bundle_manifest_sha256=digest,
-        bundle_schema_sha256=digest,
-        compatibility_row_id="synthetic-row",
-        compatibility_document_sha256=digest,
-        compatibility_schema_sha256=digest,
-        solver_version="v0.0.0-test",
-        solver_source_commit="b" * 40,
-        solver_build_id="synthetic build",
-        solver_build_identity_sha256=digest,
-        frequensolve_version="0.0.0-test",
-        frequensolve_artifact_sha256=digest,
-        allowed_partitions=("synthetic",),
-        max_nodes=1,
-        max_ranks=4,
-        max_threads_per_rank=8,
-        max_wall_time="00:20:00",
-        support_tier="experimental",
-        mpi_launcher="mpirun",
-    )
-
-
-def site(profile_value=None):
+def site():
     return SimpleNamespace(
-        enterprise_hpc=profile_value,
         config=SimpleNamespace(
             hostname="login.example.invalid",
-            known_hosts_file=Path("/synthetic/known_hosts"),
+            known_hosts_file="/synthetic/known_hosts",
             known_hosts_name="login.example.invalid",
             queue="synthetic",
         ),
@@ -74,19 +35,10 @@ def site(profile_value=None):
     )
 
 
-def test_canary_requires_manual_acknowledgement_and_generated_profile():
+def test_canary_requires_manual_acknowledgement():
     require_live_slurm_acknowledgement(CANARY_ACKNOWLEDGEMENT)
     with pytest.raises(LiveSlurmCanaryError, match="disabled"):
         require_live_slurm_acknowledgement(None)
-    with pytest.raises(LiveSlurmCanaryError, match="Deployment-generated"):
-        validate_live_slurm_site(site(), ranks_per_node=4)
-
-    enterprise_site = site(profile())
-    result = validate_live_slurm_site(enterprise_site, ranks_per_node=4)
-    assert result is enterprise_site.enterprise_hpc
-    enterprise_site.run_config.queue = "unapproved"
-    with pytest.raises(LiveSlurmCanaryError, match="partition"):
-        validate_live_slurm_site(enterprise_site, ranks_per_node=4)
 
 
 def test_synthetic_fixture_is_small_and_uniquely_named(tmp_path):
@@ -105,7 +57,7 @@ def test_synthetic_fixture_is_small_and_uniquely_named(tmp_path):
 
 
 def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path):
-    enterprise_site = site(profile())
+    enterprise_site = site()
     calls = []
     scheduler = {"cancelled": False, "probes": 0}
     success_job = SimpleNamespace(name="fs_canary_success", _job_id=None)
@@ -154,9 +106,7 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
 
     enterprise_site.submit = submit
     enterprise_site.run_login = run_login
-    enterprise_site.enterprise_hpc_preflight = lambda: SimpleNamespace(
-        to_evidence=lambda: {"profileId": "synthetic-profile"}
-    )
+    enterprise_site.enterprise_hpc_preflight = lambda: None
     fetched_logs = []
     enterprise_site.fetch_logs = lambda job: fetched_logs.append(job) or tmp_path
     monkeypatch.setattr(
@@ -212,7 +162,7 @@ def test_solver_evidence_uses_public_fetched_logs(tmp_path):
 def test_live_canary_recovers_and_cancels_after_interrupted_submit(
     monkeypatch, tmp_path
 ):
-    enterprise_site = site(profile())
+    enterprise_site = site()
     job = SimpleNamespace(name="fs_canary_recover", _job_id=None)
     other = SimpleNamespace(name="fs_canary_other", _job_id=None)
     scheduler = {"active": False, "cancelled": []}
@@ -238,9 +188,7 @@ def test_live_canary_recovers_and_cancels_after_interrupted_submit(
     enterprise_site.submit = submit
     enterprise_site.run_login = run_login
     enterprise_site.cancel_job = cancel_job
-    enterprise_site.enterprise_hpc_preflight = lambda: SimpleNamespace(
-        to_evidence=lambda: {}
-    )
+    enterprise_site.enterprise_hpc_preflight = lambda: None
     monkeypatch.setattr(
         canary,
         "build_synthetic_live_slurm_job",

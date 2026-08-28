@@ -13,7 +13,6 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -28,15 +27,12 @@ from frequensolve import (
     Project,
     ReceiverNode,
     VtkOutput,
-    __version__,
     ureg,
 )
 from frequensolve.orchestrator.sites import Site
-from frequensolve.orchestrator.sites.hpc.enterprise import EnterpriseHPCProfile
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import validate_slurm_job_id
 
 CANARY_ACKNOWLEDGEMENT = "I_ACKNOWLEDGE_BOUNDED_LIVE_SLURM_SPEND"
-CANARY_RESULT_SCHEMA = "frequensolve-live-slurm-canary-result/v1"
 SYNTHETIC_FIXTURE_ID = "synthetic-acoustic-2d-v1"
 
 _RUN_TOKEN = re.compile(r"[a-z0-9][a-z0-9-]{5,31}\Z")
@@ -66,58 +62,6 @@ def require_live_slurm_acknowledgement(value: Optional[str]) -> None:
             "live Slurm canary is disabled; pass the exact acknowledgement "
             f"{CANARY_ACKNOWLEDGEMENT!r}"
         )
-
-
-def _seconds(value: str) -> int:
-    """Parse the Slurm wall-time formats used by generated profiles."""
-
-    try:
-        if "-" in value:
-            days, value = value.split("-", 1)
-        else:
-            days = "0"
-        hours, minutes, seconds = (int(part) for part in value.split(":"))
-    except (TypeError, ValueError) as exc:
-        raise LiveSlurmCanaryError("generated profile has invalid wall time") from exc
-    if int(days) < 0 or hours < 0 or not 0 <= minutes < 60 or not 0 <= seconds < 60:
-        raise LiveSlurmCanaryError("generated profile has invalid wall time")
-    return int(days) * 86400 + hours * 3600 + minutes * 60 + seconds
-
-
-def validate_live_slurm_site(site: Any, *, ranks_per_node: int) -> EnterpriseHPCProfile:
-    """Bind the canary to the installed, Deployment-generated profile."""
-
-    profile = getattr(site, "enterprise_hpc", None)
-    if not isinstance(profile, EnterpriseHPCProfile):
-        raise LiveSlurmCanaryError(
-            "live Slurm canary requires a Deployment-generated Enterprise profile"
-        )
-    config = site.config
-    if not getattr(config, "known_hosts_file", None) or not getattr(
-        config, "known_hosts_name", None
-    ):
-        raise LiveSlurmCanaryError("generated profile must configure strict host trust")
-    if str(getattr(config, "hostname", "")) != profile.host:
-        raise LiveSlurmCanaryError("site host does not match the Enterprise profile")
-    partition = str(site.run_config.queue or getattr(config, "queue", ""))
-    if partition not in profile.allowed_partitions:
-        raise LiveSlurmCanaryError("site partition is not allowlisted by the profile")
-    if str(site.work_dir) != profile.work_dir:
-        raise LiveSlurmCanaryError("site work path does not match the profile")
-    scratch = None if site.scratch_dir is None else str(site.scratch_dir)
-    if scratch != profile.scratch_dir:
-        raise LiveSlurmCanaryError("site scratch path does not match the profile")
-    nodes = int(site.run_config.nodes)
-    if nodes < 1 or nodes > profile.max_nodes:
-        raise LiveSlurmCanaryError("site node request exceeds the profile")
-    if ranks_per_node < 1 or nodes * ranks_per_node > profile.max_ranks:
-        raise LiveSlurmCanaryError("site rank request exceeds the profile")
-    duration = str(site.run_config.duration or "")
-    if not duration or _seconds(duration) > _seconds(profile.max_wall_time):
-        raise LiveSlurmCanaryError("site wall time exceeds the profile")
-    if site.run_config.slurm_args or site.run_config.run_path is not None:
-        raise LiveSlurmCanaryError("live canary does not permit raw Slurm overrides")
-    return profile
 
 
 def build_synthetic_live_slurm_job(
@@ -315,12 +259,7 @@ def run_live_slurm_canary(
 
     if timeout <= 0 or cancel_timeout <= 0:
         raise LiveSlurmCanaryError("canary timeouts must be positive")
-    profile = validate_live_slurm_site(site, ranks_per_node=ranks_per_node)
-    if timeout < _seconds(str(site.run_config.duration)):
-        raise LiveSlurmCanaryError(
-            "completion timeout must cover the requested wall time"
-        )
-    preflight = site.enterprise_hpc_preflight()
+    site.enterprise_hpc_preflight()
     _, success_job, cancel_job = build_synthetic_live_slurm_job(project_path, run_token)
     success_handle = None
     cancel_handle = None
@@ -381,17 +320,7 @@ def run_live_slurm_canary(
         if cancel_result.status.state != "cancelled":
             raise LiveSlurmCanaryError("cancellation case did not reach cancelled")
         return {
-            "schema": CANARY_RESULT_SCHEMA,
-            "generatedAt": datetime.now(timezone.utc).isoformat(),
             "fixtureId": SYNTHETIC_FIXTURE_ID,
-            "frequensolveVersion": __version__,
-            "identities": preflight.to_evidence(),
-            "request": {
-                "partition": site.run_config.queue,
-                "nodes": site.run_config.nodes,
-                "ranksPerNode": ranks_per_node,
-                "maxWallTime": site.run_config.duration,
-            },
             "success": {
                 "schedulerJobId": str(success_handle.id),
                 "states": states,
@@ -404,7 +333,6 @@ def run_live_slurm_canary(
                 "schedulerJobId": str(cancel_handle.id),
                 "terminalState": cancel_result.status.state,
             },
-            "profileId": profile.profile_id,
         }
     finally:
         handles = _recover_handles(
