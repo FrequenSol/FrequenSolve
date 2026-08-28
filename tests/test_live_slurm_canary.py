@@ -19,12 +19,12 @@ def site():
         config=SimpleNamespace(
             hostname="login.example.invalid",
             known_hosts_file="/synthetic/known_hosts",
-            known_hosts_name="login.example.invalid",
             queue="synthetic",
         ),
         run_config=SimpleNamespace(
             queue="synthetic",
             nodes=1,
+            ranks_per_node=4,
             duration="00:20:00",
             poll_interval=0,
             slurm_args=[],
@@ -106,7 +106,6 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
 
     enterprise_site.submit = submit
     enterprise_site.run_login = run_login
-    enterprise_site.enterprise_hpc_preflight = lambda: None
     fetched_logs = []
     enterprise_site.fetch_logs = lambda job: fetched_logs.append(job) or tmp_path
     monkeypatch.setattr(
@@ -125,7 +124,6 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
         site=enterprise_site,
         project_path=tmp_path / "project",
         run_token="run-123456",
-        ranks_per_node=4,
         timeout=1200,
         cancel_timeout=30,
     )
@@ -138,6 +136,21 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
     assert fetched_logs == [success_job]
     assert all("threads_per_rank" not in call for call in calls)
     assert all(call["mode"] == "batch" for call in calls)
+    assert all(call["ranks_per_node"] == 4 for call in calls)
+
+
+def test_live_canary_uses_generated_site_rank_default(monkeypatch, tmp_path):
+    enterprise_site = site()
+    enterprise_site.run_config.ranks_per_node = None
+
+    with pytest.raises(LiveSlurmCanaryError, match="run_config.ranks_per_node"):
+        canary.run_live_slurm_canary(
+            site=enterprise_site,
+            project_path=tmp_path / "project",
+            run_token="run-123456",
+            timeout=1200,
+            cancel_timeout=30,
+        )
 
 
 def test_solver_evidence_uses_public_fetched_logs(tmp_path):
@@ -188,7 +201,6 @@ def test_live_canary_recovers_and_cancels_after_interrupted_submit(
     enterprise_site.submit = submit
     enterprise_site.run_login = run_login
     enterprise_site.cancel_job = cancel_job
-    enterprise_site.enterprise_hpc_preflight = lambda: None
     monkeypatch.setattr(
         canary,
         "build_synthetic_live_slurm_job",
@@ -200,7 +212,6 @@ def test_live_canary_recovers_and_cancels_after_interrupted_submit(
             site=enterprise_site,
             project_path=tmp_path / "project",
             run_token="run-654321",
-            ranks_per_node=4,
             timeout=1200,
             cancel_timeout=30,
         )

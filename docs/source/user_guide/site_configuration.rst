@@ -336,12 +336,13 @@ extra.
 
 An Enterprise HPC installation adds a closed, generated ``enterprise_hpc``
 table to the same profile. Do not hand-author it: the Deployment installer
-binds it to the installed bundle, compatibility row, solver and Python artifact
-digests, allowlisted scheduler resources, paths, launcher, and explicit SSH
-host trust. When the table is present, FrequenSolve verifies those values before
-transfer or scheduler spend and rejects untyped ``slurm_args`` and ``run_path``
-overrides. When it is absent, generic Slurm configuration and behavior are
-unchanged. Azure topology and credentials never enter this table.
+records only a profile identifier, the installed bundle root, the bundle
+manifest digest, and its schema identifier. The digest-anchored bundle manifest
+binds the compatibility row, schemas, solver, and Python artifact. Host trust,
+paths, modules, partitions, launcher, and resource defaults remain ordinary
+Slurm profile settings. FrequenSolve verifies the combined profile before
+transfer or scheduler spend. When ``enterprise_hpc`` is absent, generic Slurm
+configuration and behavior are unchanged.
 
 Stampede3 profiles use the built-in preset and create generic ``SlurmSite``
 instances. The preferred setup command prompts for the username and writes the

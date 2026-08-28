@@ -46,8 +46,8 @@ def _verify_server_host_key(
     transport: Transport,
     host: str,
     *,
+    port: int = 22,
     known_hosts_file: Optional[Path] = None,
-    known_hosts_name: Optional[str] = None,
 ) -> None:
     """Verify *host* against an explicit or standard known-hosts source."""
 
@@ -67,7 +67,8 @@ def _verify_server_host_key(
             continue
 
     server_key = transport.get_remote_server_key()
-    lookup_name = known_hosts_name or host
+    lookup_host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    lookup_name = lookup_host if port == 22 else f"[{lookup_host}]:{port}"
     host_keys = known_hosts.lookup(lookup_name)
     expected_key = host_keys.get(server_key.get_name()) if host_keys else None
     if expected_key != server_key:
@@ -115,9 +116,8 @@ class SlurmAuthenticator:
         config = getattr(site, "config", None)
         ssh_port = getattr(config, "ssh_port", 22)
         known_hosts_file = getattr(config, "known_hosts_file", None)
-        known_hosts_name = getattr(config, "known_hosts_name", None)
         control_dir = os.path.expanduser("~/.ssh/control")
-        explicit_trust = known_hosts_file is not None or known_hosts_name is not None
+        explicit_trust = known_hosts_file is not None
         enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
         if (
             not enterprise_key_only
@@ -264,7 +264,6 @@ class SlurmAuthenticator:
         config = getattr(site, "config", None)
         ssh_port = getattr(config, "ssh_port", 22)
         known_hosts_file = getattr(config, "known_hosts_file", None)
-        known_hosts_name = getattr(config, "known_hosts_name", None)
         enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
 
         try:
@@ -292,8 +291,8 @@ class SlurmAuthenticator:
             _verify_server_host_key(
                 transport,
                 host,
+                port=ssh_port,
                 known_hosts_file=known_hosts_file,
-                known_hosts_name=known_hosts_name,
             )
         except Exception:
             transport.close()

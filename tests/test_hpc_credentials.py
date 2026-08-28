@@ -200,7 +200,7 @@ def test_host_key_verification_accepts_matching_known_host(monkeypatch):
     auth._verify_server_host_key(FakeTransport(), "login.example.edu")
 
 
-def test_host_key_verification_uses_explicit_file_and_lookup_name(
+def test_host_key_verification_derives_nonstandard_port_lookup_name(
     monkeypatch, tmp_path
 ):
     server_key = type("Key", (), {"get_name": lambda self: "ssh-ed25519"})()
@@ -225,8 +225,8 @@ def test_host_key_verification_uses_explicit_file_and_lookup_name(
     auth._verify_server_host_key(
         FakeTransport(),
         "127.0.0.1",
+        port=50222,
         known_hosts_file=known_hosts,
-        known_hosts_name="[127.0.0.1]:50222",
     )
 
     assert loaded == [str(known_hosts)]

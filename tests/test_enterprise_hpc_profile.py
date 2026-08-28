@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import shlex
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,60 +21,55 @@ from frequensolve.orchestrator.sites.hpc import enterprise as enterprise_contrac
 from frequensolve.orchestrator.sites.hpc import site as hpc
 from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
 from frequensolve.orchestrator.sites.hpc.enterprise import (
+    BUNDLE_MANIFEST_RELATIVE,
+    BUNDLE_SCHEMA_RELATIVE,
+    COMPATIBILITY_MANIFEST_RELATIVE,
+    COMPATIBILITY_SCHEMA_RELATIVE,
     EnterpriseHPCPreflightError,
-    EnterpriseHPCProfile,
     installed_frequensolve_artifact_sha256,
-    validate_bundle_pair,
 )
 from frequensolve.project.project import Project
 from frequensolve.simulation.jobs import FrequencyDomainJob
 
 pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
 
-SHA_A = "a" * 64
-SHA_B = "b" * 64
-SHA_C = "c" * 64
+BUNDLE_CONTENT_SHA = "a" * 64
+BUNDLE_MANIFEST_SHA = "e" * 64
+COMPATIBILITY_SHA = "b" * 64
+BUNDLE_SCHEMA_SHA = "7" * 64
+COMPATIBILITY_SCHEMA_SHA = "8" * 64
 SOLVER_SHA = "9" * 64
+SDK_SHA = "d" * 64
 COMMIT = "1" * 40
+SOLVER_IDENTITY = {
+    "schema": "frequensolver-identity-1",
+    "product": "FrequenSolver",
+    "version": "1.2.3",
+    "build_id": "synthetic-build",
+    "git_commit": COMMIT,
+}
+SOLVER_IDENTITY_SHA = hashlib.sha256(
+    (json.dumps(SOLVER_IDENTITY, sort_keys=True, separators=(",", ":")) + "\n").encode()
+).hexdigest()
 
 
 def profile_values():
     return {
         "schema": "frequensolve-enterprise-hpc-profile/v1",
         "profile_id": "synthetic-private-slurm",
-        "host": "login.example.invalid",
-        "bundle_manifest": "/opt/frequensolve/manifests/bundle.json",
-        "compatibility_manifest": "/opt/frequensolve/manifests/compatibility.json",
-        "bundle_schema_path": "/opt/frequensolve/schemas/bundle-manifest.schema.json",
-        "compatibility_schema_path": "/opt/frequensolve/schemas/compatibility-row.schema.json",
         "bundle_root": "/opt/frequensolve",
-        "solver_path": "/opt/frequensolve/bin/FS_seismic",
-        "work_dir": "/synthetic/work",
-        "scratch_dir": None,
-        "bundle_version": "1.0.0-synthetic",
-        "bundle_content_sha256": SHA_A,
-        "bundle_manifest_sha256": "e" * 64,
-        "bundle_schema_sha256": "7" * 64,
-        "compatibility_row_id": "synthetic-private-slurm-row",
-        "compatibility_document_sha256": SHA_B,
-        "compatibility_schema_sha256": "8" * 64,
-        "solver_version": "1.2.3",
-        "solver_source_commit": COMMIT,
-        "solver_build_id": "synthetic-build",
-        "solver_build_identity_sha256": SHA_C,
-        "frequensolve_version": frequensolve_version,
-        "frequensolve_artifact_sha256": "d" * 64,
-        "allowed_partitions": ["synthetic"],
-        "max_nodes": 2,
-        "max_ranks": 16,
-        "max_threads_per_rank": 8,
-        "max_wall_time": "00:30:00",
-        "support_tier": "experimental",
-        "module": "frequensolve/1.0.0-synthetic",
-        "python_environment": "/opt/frequensolve/python-env",
-        "account": "synthetic-account",
-        "qos": "synthetic-qos",
-        "mpi_launcher": "srun",
+        "bundle_manifest_sha256": BUNDLE_MANIFEST_SHA,
+    }
+
+
+def _installed_file(path, sha256, *, mode="0644"):
+    return {
+        "path": path,
+        "kind": "file",
+        "mode": mode,
+        "ownership": {"user": "install-owner", "group": "install-group"},
+        "size": 123,
+        "sha256": sha256,
     }
 
 
@@ -85,7 +81,7 @@ def contract_pair():
         "releaseState": "candidate",
         "createdAt": "2026-08-24T12:00:00Z",
         "stateChangedAt": "2026-08-24T12:00:00Z",
-        "contentSha256": SHA_A,
+        "contentSha256": BUNDLE_CONTENT_SHA,
         "deployment": {
             "repository": "FrequenSol/FrequenSolveHPCDeployment",
             "version": "1.0.0-synthetic",
@@ -99,7 +95,7 @@ def contract_pair():
                 "name": "synthetic-native.tar",
                 "version": "1.2.3",
                 "sourceCommit": COMMIT,
-                "producerIdentitySha256": SHA_C,
+                "producerIdentitySha256": SOLVER_IDENTITY_SHA,
                 "locator": "https://example.invalid/sauce.tar?versionId=synthetic-1",
                 "sha256": "5" * 64,
             },
@@ -110,18 +106,17 @@ def contract_pair():
                 "sourceCommit": "2" * 40,
                 "producerIdentitySha256": "6" * 64,
                 "locator": "https://example.invalid/sdk.whl?versionId=synthetic-1",
-                "sha256": "d" * 64,
+                "sha256": SDK_SHA,
             },
         },
         "installedFiles": [
-            {
-                "path": "bin/FS_seismic",
-                "kind": "file",
-                "mode": "0755",
-                "ownership": {"user": "install-owner", "group": "install-group"},
-                "size": 123,
-                "sha256": SOLVER_SHA,
-            }
+            _installed_file("bin/FS_seismic", SOLVER_SHA, mode="0755"),
+            _installed_file(COMPATIBILITY_MANIFEST_RELATIVE, COMPATIBILITY_SHA),
+            _installed_file(BUNDLE_SCHEMA_RELATIVE, BUNDLE_SCHEMA_SHA),
+            _installed_file(
+                COMPATIBILITY_SCHEMA_RELATIVE,
+                COMPATIBILITY_SCHEMA_SHA,
+            ),
         ],
         "executables": [
             {
@@ -141,7 +136,7 @@ def contract_pair():
         "compatibility": {
             "schemaVersion": "frequensolve-enterprise-hpc-compatibility/v1",
             "rowId": "synthetic-private-slurm-row",
-            "documentSha256": SHA_B,
+            "documentSha256": COMPATIBILITY_SHA,
         },
         "evidence": [],
         "knownLimitations": ["Synthetic fixture only"],
@@ -192,12 +187,12 @@ def contract_pair():
         "solver": {
             "version": "1.2.3",
             "sourceCommit": COMMIT,
-            "buildIdentitySha256": SHA_C,
+            "buildIdentitySha256": SOLVER_IDENTITY_SHA,
             "variants": ["double-mpi"],
         },
         "frequensolve": {
             "version": frequensolve_version,
-            "artifactSha256": "d" * 64,
+            "artifactSha256": SDK_SHA,
         },
         "limits": {
             "maxNodes": 2,
@@ -230,336 +225,206 @@ def _required_synthetic_shape(value):
 
 
 def contract_schemas(bundle=None, compatibility=None):
-    draft = "https://json-schema.org/draft/2020-12/schema"
     if bundle is None or compatibility is None:
         bundle, compatibility = contract_pair()
+    draft = "https://json-schema.org/draft/2020-12/schema"
     return (
         {
             **_required_synthetic_shape(bundle),
             "$schema": draft,
-            "$id": (
-                "https://schemas.frequensol.com/frequensolve-enterprise-hpc/v1/"
-                "bundle-manifest.schema.json"
-            ),
-            "title": "Synthetic test projection of the Deployment bundle schema",
+            "$id": enterprise_contract.BUNDLE_SCHEMA_ID,
         },
         {
             **_required_synthetic_shape(compatibility),
             "$schema": draft,
-            "$id": (
-                "https://schemas.frequensol.com/frequensolve-enterprise-hpc/v1/"
-                "compatibility-row.schema.json"
-            ),
-            "title": "Synthetic test projection of the Deployment compatibility schema",
+            "$id": enterprise_contract.COMPATIBILITY_SCHEMA_ID,
         },
     )
 
 
-def schema_arguments():
-    bundle_schema, compatibility_schema = contract_schemas()
-    return {
-        "bundle_schema": bundle_schema,
-        "compatibility_schema": compatibility_schema,
+def bundle_snapshot(bundle=None, compatibility=None):
+    if bundle is None or compatibility is None:
+        bundle, compatibility = contract_pair()
+    bundle_schema, compatibility_schema = contract_schemas(bundle, compatibility)
+    return enterprise_contract._BundleSnapshot(
+        bundle=bundle,
+        bundle_sha256=BUNDLE_MANIFEST_SHA,
+        compatibility=compatibility,
+        compatibility_sha256=COMPATIBILITY_SHA,
+        bundle_schema=bundle_schema,
+        bundle_schema_sha256=BUNDLE_SCHEMA_SHA,
+        compatibility_schema=compatibility_schema,
+        compatibility_schema_sha256=COMPATIBILITY_SCHEMA_SHA,
+    )
+
+
+def runtime_observation(**overrides):
+    values = {
+        "host": "login.example.invalid",
+        "scheduler_version": "slurm 24.05.5",
+        "cores_per_node": 8,
+        "mpi_launcher": "srun",
+        "solver_path": "/opt/frequensolve/bin/FS_seismic",
+        "solver_identity": SOLVER_IDENTITY,
+        "frequensolve_version": frequensolve_version,
+        "frequensolve_artifact_sha256": SDK_SHA,
     }
+    values.update(overrides)
+    return enterprise_contract._RuntimeObservation(**values)
 
 
-def test_profile_is_closed_and_rejects_unsafe_paths_and_shell_values():
+def validate_contract(*, bundle=None, compatibility=None, runtime=None, profile=None):
+    return enterprise_contract._validate_bundle_snapshot(
+        profile
+        or enterprise_contract._EnterpriseHPCProfile.from_mapping(profile_values()),
+        bundle_snapshot(bundle, compatibility),
+        runtime or runtime_observation(),
+    )
+
+
+def test_generated_profile_is_small_closed_and_shell_safe():
     values = profile_values()
-    profile = EnterpriseHPCProfile.from_mapping(values)
+    profile = enterprise_contract._EnterpriseHPCProfile.from_mapping(values)
 
-    assert profile.allowed_partitions == ("synthetic",)
-    assert profile.solver_path == "/opt/frequensolve/bin/FS_seismic"
+    assert set(values) == {
+        "schema",
+        "profile_id",
+        "bundle_root",
+        "bundle_manifest_sha256",
+    }
+    assert profile.installed_path(BUNDLE_MANIFEST_RELATIVE) == (
+        "/opt/frequensolve/manifests/bundle-manifest.json"
+    )
 
     for name, value in (
-        ("solver_path", "/opt/frequensolve/../customer/solver"),
-        ("solver_path", "/opt/frequensolve/bin/FS_seismic;touch-pwned"),
-        ("bundle_manifest", "/opt/frequensolve/manifests/bundle.json;touch-pwned"),
-        ("work_dir", "/synthetic/work;touch-pwned"),
-        ("host", "login.example.invalid;touch /tmp/pwned"),
-        ("module", "frequensolve/good\nmodule load hostile"),
-        ("qos", "good;scancel 1"),
+        ("bundle_root", "/opt/frequensolve/../customer"),
+        ("bundle_root", "/opt/frequensolve;touch-pwned"),
     ):
-        invalid = {**values, name: value}
         with pytest.raises(ValueError, match="enterprise_hpc"):
-            EnterpriseHPCProfile.from_mapping(invalid)
+            enterprise_contract._EnterpriseHPCProfile.from_mapping(
+                {**values, name: value}
+            )
 
     with pytest.raises(ValueError, match="Unsupported enterprise_hpc"):
-        EnterpriseHPCProfile.from_mapping({**values, "azure_subscription": "fake"})
-
-
-def test_profile_rejects_contradictions_and_unbounded_resources():
-    profile = EnterpriseHPCProfile.from_mapping(profile_values())
-
-    profile.validate_site(
-        host="login.example.invalid",
-        partition="synthetic",
-        account="synthetic-account",
-        qos="synthetic-qos",
-        mpi_launcher="srun",
-    )
-    profile.validate_resources(
-        nodes=2,
-        ranks_per_node=8,
-        cores_per_node=64,
-        duration_seconds=1800,
-        max_wall_time_seconds=1800,
-    )
-    profile.validate_resources(
-        nodes=1,
-        ranks_per_node=1,
-        cores_per_node=64,
-        threads_per_rank=1,
-        duration_seconds=1800,
-        max_wall_time_seconds=1800,
-    )
-
-    with pytest.raises(ValueError, match="not allowlisted"):
-        profile.validate_site(
-            host="login.example.invalid",
-            partition="unapproved",
-            account="synthetic-account",
-            qos="synthetic-qos",
-            mpi_launcher="srun",
-        )
-    unrestricted_account = EnterpriseHPCProfile.from_mapping(
-        {**profile_values(), "account": None}
-    )
-    unrestricted_account.validate_site(
-        host="login.example.invalid",
-        partition="synthetic",
-        account="",
-        qos="synthetic-qos",
-        mpi_launcher="srun",
-    )
-    with pytest.raises(ValueError, match="enterprise_hpc.account"):
-        unrestricted_account.validate_site(
-            host="login.example.invalid",
-            partition="synthetic",
-            account="safe;scancel 1",
-            qos="synthetic-qos",
-            mpi_launcher="srun",
-        )
-    with pytest.raises(ValueError, match="max_ranks"):
-        profile.validate_resources(
-            nodes=2,
-            ranks_per_node=16,
-            cores_per_node=64,
-            duration_seconds=1800,
-            max_wall_time_seconds=1800,
-        )
-    with pytest.raises(ValueError, match="max_nodes"):
-        profile.validate_resources(
-            nodes=3,
-            ranks_per_node=1,
-            cores_per_node=64,
-            duration_seconds=1800,
-            max_wall_time_seconds=1800,
-        )
-    with pytest.raises(ValueError, match="max_wall_time"):
-        profile.validate_resources(
-            nodes=1,
-            ranks_per_node=8,
-            cores_per_node=64,
-            duration_seconds=1801,
-            max_wall_time_seconds=1800,
-        )
-    with pytest.raises(ValueError, match="node cores"):
-        profile.validate_resources(
-            nodes=1,
-            ranks_per_node=8,
-            cores_per_node=64,
-            threads_per_rank=9,
-            duration_seconds=1800,
-            max_wall_time_seconds=1800,
+        enterprise_contract._EnterpriseHPCProfile.from_mapping(
+            {**values, "azure_subscription": "fake"}
         )
 
 
-def test_bundle_pair_records_only_exact_sanitized_identities():
-    profile = EnterpriseHPCProfile.from_mapping(profile_values())
-    bundle, compatibility = contract_pair()
+def test_profile_contains_no_provider_credential_or_duplicated_runtime_contract():
+    serialized = json.dumps(profile_values(), sort_keys=True)
+    for prohibited in (
+        "azure",
+        "password",
+        "license",
+        "solver_path",
+        "host",
+        "partition",
+        "module",
+        "max_nodes",
+    ):
+        assert prohibited not in serialized.lower()
 
-    result = validate_bundle_pair(
-        profile,
-        bundle,
-        compatibility,
-        bundle_sha256="e" * 64,
-        compatibility_sha256=SHA_B,
-        **schema_arguments(),
-        scheduler_version="slurm 24.05.5",
-        cores_per_node=8,
-    )
 
-    evidence = result.to_evidence()
-    assert evidence["bundle_content_sha256"] == SHA_A
+def test_anchored_bundle_produces_only_sanitized_exact_evidence():
+    validated = validate_contract()
+    evidence = validated.result.to_evidence()
+
+    assert evidence["bundle_content_sha256"] == BUNDLE_CONTENT_SHA
+    assert evidence["bundle_manifest_sha256"] == BUNDLE_MANIFEST_SHA
+    assert evidence["solver_build_identity_sha256"] == SOLVER_IDENTITY_SHA
     assert evidence["solver_source_commit"] == COMMIT
-    assert evidence["frequensolve_artifact_sha256"] == "d" * 64
-    assert "bundle_manifest" not in evidence
+    assert evidence["frequensolve_artifact_sha256"] == SDK_SHA
+    assert "bundle_root" not in evidence
     assert "account" not in evidence
+    assert validated.limits.max_nodes == 2
 
 
 @pytest.mark.parametrize(
-    "mutation",
+    ("runtime_override", "message"),
     [
-        ("bundle", ("contentSha256",), "e" * 64),
-        ("bundle", ("upstreamArtifacts", "sauce", "sourceCommit"), "2" * 40),
+        ({"scheduler_version": "slurm 24.05.4"}, "compatibility scheduler"),
+        ({"mpi_launcher": "mpirun"}, "compatibility launcher"),
+        ({"cores_per_node": 64}, "compatibility cores per node"),
+        ({"frequensolve_artifact_sha256": "0" * 64}, "FrequenSolve artifact"),
         (
-            "compatibility",
-            ("solver", "buildIdentitySha256"),
-            "f" * 64,
+            {"solver_path": "/opt/other/bin/FS_seismic"},
+            "outside the immutable bundle root",
         ),
-        ("compatibility", ("frequensolve", "artifactSha256"), "0" * 64),
     ],
 )
-def test_bundle_pair_fails_closed_on_any_identity_mismatch(mutation):
-    profile = EnterpriseHPCProfile.from_mapping(profile_values())
-    bundle, compatibility = contract_pair()
-    document_name, path, value = mutation
-    document = bundle if document_name == "bundle" else compatibility
-    target = document
-    for key in path[:-1]:
-        target = target[key]
-    target[path[-1]] = value
+def test_runtime_must_match_the_anchored_compatibility_row(runtime_override, message):
+    with pytest.raises(EnterpriseHPCPreflightError, match=message):
+        validate_contract(runtime=runtime_observation(**runtime_override))
 
-    with pytest.raises(EnterpriseHPCPreflightError, match="compatibility mismatch"):
-        validate_bundle_pair(
+
+def test_public_solver_identity_must_match_the_anchored_producer_identity():
+    identity = {**SOLVER_IDENTITY, "build_id": "wrong-build"}
+
+    with pytest.raises(EnterpriseHPCPreflightError, match="solver build identity"):
+        validate_contract(runtime=runtime_observation(solver_identity=identity))
+
+
+def test_bundle_manifest_digest_is_the_single_profile_trust_anchor():
+    profile = enterprise_contract._EnterpriseHPCProfile.from_mapping(profile_values())
+    snapshot = bundle_snapshot()
+    snapshot = enterprise_contract._BundleSnapshot(
+        **{**snapshot.__dict__, "bundle_sha256": "0" * 64}
+    )
+
+    with pytest.raises(EnterpriseHPCPreflightError, match="does not match the profile"):
+        enterprise_contract._validate_bundle_snapshot(
             profile,
-            bundle,
-            compatibility,
-            bundle_sha256="e" * 64,
-            compatibility_sha256=SHA_B,
-            **schema_arguments(),
-            scheduler_version="slurm 24.05.5",
-            cores_per_node=8,
+            snapshot,
+            runtime_observation(),
         )
 
 
-def test_bundle_pair_rejects_schema_valid_withdrawn_bundle():
-    profile = EnterpriseHPCProfile.from_mapping(profile_values())
+def test_bundle_manifest_binds_all_other_installed_contracts():
+    bundle, compatibility = contract_pair()
+    bundle["installedFiles"][1]["sha256"] = "0" * 64
+
+    with pytest.raises(EnterpriseHPCPreflightError, match="contract digest mismatch"):
+        validate_contract(bundle=bundle, compatibility=compatibility)
+
+
+def test_schema_valid_withdrawn_bundle_is_rejected():
     bundle, compatibility = contract_pair()
     bundle["releaseState"] = "withdrawn"
     bundle["withdrawal"] = {"reason": "Synthetic withdrawal test"}
-    bundle_schema, compatibility_schema = contract_schemas(bundle, compatibility)
 
     with pytest.raises(EnterpriseHPCPreflightError, match="withdrawn"):
-        validate_bundle_pair(
-            profile,
-            bundle,
-            compatibility,
-            bundle_sha256="e" * 64,
-            compatibility_sha256=SHA_B,
-            bundle_schema=bundle_schema,
-            compatibility_schema=compatibility_schema,
-            scheduler_version="slurm 24.05.5",
-            cores_per_node=8,
-        )
+        validate_contract(bundle=bundle, compatibility=compatibility)
 
 
-@pytest.mark.parametrize(
-    "document_name,path",
-    [
-        ("compatibility", ("platform",)),
-        ("compatibility", ("toolchain", "launcher")),
-        ("compatibility", ("storage",)),
-        ("compatibility", ("limits", "maxNodes")),
-        ("compatibility", ("evidence",)),
-        ("bundle", ("installedFiles",)),
-        ("bundle", ("executables",)),
-    ],
-)
-def test_bundle_pair_rejects_incomplete_deployment_v1_contracts(document_name, path):
-    profile = EnterpriseHPCProfile.from_mapping(profile_values())
-    bundle, compatibility = contract_pair()
-    document = bundle if document_name == "bundle" else compatibility
-    target = document
-    for key in path[:-1]:
-        target = target[key]
-    del target[path[-1]]
-
-    with pytest.raises(EnterpriseHPCPreflightError, match="Enterprise HPC"):
-        validate_bundle_pair(
-            profile,
-            bundle,
-            compatibility,
-            bundle_sha256="e" * 64,
-            compatibility_sha256=SHA_B,
-            **schema_arguments(),
-            scheduler_version="slurm 24.05.5",
-            cores_per_node=8,
-        )
-
-
-def test_bundle_pair_rejects_malformed_nested_metadata_without_raw_attribute_error():
-    profile = EnterpriseHPCProfile.from_mapping(profile_values())
-    bundle, compatibility = contract_pair()
-    compatibility["toolchain"] = {"launcher": None}
-
-    with pytest.raises(EnterpriseHPCPreflightError, match="Enterprise HPC"):
-        validate_bundle_pair(
-            profile,
-            bundle,
-            compatibility,
-            bundle_sha256="e" * 64,
-            compatibility_sha256=SHA_B,
-            **schema_arguments(),
-            scheduler_version="slurm 24.05.5",
-            cores_per_node=8,
-        )
-
-
-@pytest.mark.parametrize(
-    "mutation,error",
-    [
-        (("toolchain", "slurm", "24.05.4"), "compatibility scheduler"),
-        (("toolchain", "launcher", "mpirun"), "compatibility launcher"),
-        (("limits", "maxNodes", 99), "compatibility max nodes"),
-        (("platform", "cpu", "coresPerNode", 64), "compatibility cores per node"),
-    ],
-)
-def test_bundle_pair_binds_certified_scheduler_launcher_and_limits(mutation, error):
-    profile = EnterpriseHPCProfile.from_mapping(profile_values())
-    bundle, compatibility = contract_pair()
-    *path, value = mutation
-    target = compatibility
-    for key in path[:-1]:
-        target = target[key]
-    target[path[-1]] = value
-
-    with pytest.raises(EnterpriseHPCPreflightError, match=error):
-        validate_bundle_pair(
-            profile,
-            bundle,
-            compatibility,
-            bundle_sha256="e" * 64,
-            compatibility_sha256=SHA_B,
-            **schema_arguments(),
-            scheduler_version="slurm 24.05.5",
-            cores_per_node=8,
-        )
-
-
-def test_bundle_pair_binds_selected_solver_path_and_variant():
-    profile = EnterpriseHPCProfile.from_mapping(profile_values())
+def test_selected_solver_path_and_variant_are_bundle_declared():
     bundle, compatibility = contract_pair()
     bundle["executables"][0]["path"] = "bin/other-solver"
 
     with pytest.raises(EnterpriseHPCPreflightError, match="not uniquely declared"):
-        validate_bundle_pair(
-            profile,
-            bundle,
-            compatibility,
-            bundle_sha256="e" * 64,
-            compatibility_sha256=SHA_B,
-            **schema_arguments(),
-            scheduler_version="slurm 24.05.5",
-            cores_per_node=8,
+        validate_contract(bundle=bundle, compatibility=compatibility)
+
+
+@pytest.mark.parametrize(
+    ("nodes", "ranks_per_node", "cores", "message"),
+    [
+        (3, 4, 8, "max_nodes"),
+        (2, 9, 16, "max_ranks"),
+        (1, 9, 8, "node cores"),
+        (1, 1, 16, "max_threads_per_rank"),
+    ],
+)
+def test_compatibility_limits_bound_scheduler_requests(
+    nodes, ranks_per_node, cores, message
+):
+    limits = validate_contract().limits
+
+    with pytest.raises(EnterpriseHPCPreflightError, match=message):
+        limits.validate_resources(
+            nodes=nodes,
+            ranks_per_node=ranks_per_node,
+            cores_per_node=cores,
         )
-
-
-def test_profile_fixture_contains_no_provider_or_credential_contract():
-    serialized = json.dumps(profile_values(), sort_keys=True)
-    assert "azure" not in serialized.lower()
-    assert "password" not in serialized.lower()
-    assert "license" not in serialized.lower()
 
 
 class _ExitChannel:
@@ -621,10 +486,8 @@ class _Site(SlurmSite):
 
 
 def _enterprise_site(monkeypatch):
-    values = profile_values()
-    profile = EnterpriseHPCProfile.from_mapping(values)
     config = SlurmSiteConfig(
-        hostname=profile.host,
+        hostname="login.example.invalid",
         queue="synthetic",
         mpi_wrapper="srun",
         account="synthetic-account",
@@ -644,18 +507,21 @@ def _enterprise_site(monkeypatch):
     monkeypatch.setattr(
         hpc,
         "installed_frequensolve_artifact_sha256",
-        lambda: "d" * 64,
+        lambda: SDK_SHA,
     )
     return _Site(
         config=config,
         run_config=run_config,
-        enterprise_hpc=profile,
-        solver=profile.solver_path,
+        enterprise_hpc=profile_values(),
+        solver="/opt/frequensolve/bin/FS_seismic",
         work_dir="/synthetic/work",
+        modules=["frequensolve/1.0.0-synthetic"],
     )
 
 
-def test_generic_site_does_not_activate_enterprise_policy(monkeypatch):
+def test_generic_site_preserves_existing_configuration_and_submission_defaults(
+    monkeypatch,
+):
     run_config = SlurmRunConfig(
         queue="cpu,gpu",
         account="project.team+shared",
@@ -679,6 +545,33 @@ def test_generic_site_does_not_activate_enterprise_policy(monkeypatch):
     assert site.run_config.queue == "cpu,gpu"
     assert site.run_config.account == "project.team+shared"
     assert site.run_config.notify_email == "first.last%tag@example.com"
+    assert site.modules == []
+
+
+def test_enterprise_profile_does_not_override_generic_site_values(monkeypatch):
+    site = _enterprise_site(monkeypatch)
+
+    assert site.executable == "/opt/frequensolve/bin/FS_seismic"
+    assert site.work_dir == Path("/synthetic/work")
+    assert site.modules == ["frequensolve/1.0.0-synthetic"]
+    assert site.config.queue == "synthetic"
+    assert site.config.account == "synthetic-account"
+
+
+def test_enterprise_profile_requires_explicit_host_trust(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", _WrappedLogin)
+
+    with pytest.raises(ValueError, match="explicit known-hosts"):
+        _Site(
+            config=SlurmSiteConfig(
+                hostname="login.example.invalid",
+                queue="synthetic",
+                mpi_wrapper="srun",
+            ),
+            enterprise_hpc=profile_values(),
+            solver="/opt/frequensolve/bin/FS_seismic",
+            work_dir="/synthetic/work",
+        )
 
 
 def test_enterprise_profile_requires_configured_key_authentication(monkeypatch):
@@ -688,12 +581,8 @@ def test_enterprise_profile_requires_configured_key_authentication(monkeypatch):
         config=SimpleNamespace(
             ssh_port=22,
             known_hosts_file=None,
-            known_hosts_name=None,
         ),
-        credentials=SimpleNamespace(
-            username="scientist",
-            ssh_key=configured_key,
-        ),
+        credentials=SimpleNamespace(username="scientist", ssh_key=configured_key),
     )
     authentication_methods = []
 
@@ -721,11 +610,15 @@ def test_enterprise_profile_requires_configured_key_authentication(monkeypatch):
             pass
 
     monkeypatch.setattr(
-        hpc_auth.socket, "create_connection", lambda *args, **kwargs: object()
+        hpc_auth.socket,
+        "create_connection",
+        lambda *args, **kwargs: object(),
     )
     monkeypatch.setattr(hpc_auth, "Transport", _Transport)
     monkeypatch.setattr(
-        hpc_auth, "_verify_server_host_key", lambda *args, **kwargs: None
+        hpc_auth,
+        "_verify_server_host_key",
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         "paramiko.agent.Agent",
@@ -742,101 +635,86 @@ def _manifest_snapshot(payload, digest):
     return digest + "\n" + base64.b64encode(raw).decode()
 
 
-def test_preflight_observes_scheduler_manifests_and_public_solver_identity(monkeypatch):
-    site = _enterprise_site(monkeypatch)
+def _successful_remote_runner(site, *, identity=None, calls=None):
     profile = site.enterprise_hpc
     bundle, compatibility = contract_pair()
     bundle_schema, compatibility_schema = contract_schemas()
-    calls = []
+    snapshots = {
+        profile.installed_path(BUNDLE_MANIFEST_RELATIVE): _manifest_snapshot(
+            bundle, BUNDLE_MANIFEST_SHA
+        ),
+        profile.installed_path(COMPATIBILITY_MANIFEST_RELATIVE): _manifest_snapshot(
+            compatibility, COMPATIBILITY_SHA
+        ),
+        profile.installed_path(BUNDLE_SCHEMA_RELATIVE): _manifest_snapshot(
+            bundle_schema, BUNDLE_SCHEMA_SHA
+        ),
+        profile.installed_path(COMPATIBILITY_SCHEMA_RELATIVE): _manifest_snapshot(
+            compatibility_schema, COMPATIBILITY_SCHEMA_SHA
+        ),
+    }
+    solver_identity = identity or SOLVER_IDENTITY
 
     def run_login_cmd(command, timeout=None):
-        calls.append(command)
+        if calls is not None:
+            calls.append(command)
         if command == "scontrol --version":
             output = "slurm 24.05.5"
-        elif "base64" in command and profile.bundle_manifest in command:
-            output = _manifest_snapshot(bundle, "e" * 64)
-        elif "base64" in command and profile.compatibility_manifest in command:
-            output = _manifest_snapshot(compatibility, SHA_B)
-        elif "base64" in command and profile.bundle_schema_path in command:
-            output = _manifest_snapshot(bundle_schema, "7" * 64)
-        elif "base64" in command and profile.compatibility_schema_path in command:
-            output = _manifest_snapshot(compatibility_schema, "8" * 64)
-        elif profile.solver_path in command and "hashlib" in command:
-            output = SOLVER_SHA
+        elif "base64" in command:
+            output = next(
+                snapshot for path, snapshot in snapshots.items() if path in command
+            )
         elif "--identity-json" in command:
             output = "\n".join(
                 [
                     "frequensolve-frequensolver-identity-begin",
-                    json.dumps(
-                        {
-                            "schema": "frequensolver-identity-1",
-                            "product": "FrequenSolver",
-                            "version": "1.2.3",
-                            "build_id": "synthetic-build",
-                            "git_commit": COMMIT,
-                        }
-                    ),
+                    json.dumps(solver_identity),
                     "frequensolve-frequensolver-identity-ok",
                 ]
             )
+        elif "/opt/frequensolve/bin/FS_seismic" in command and "hashlib" in command:
+            output = SOLVER_SHA
         else:
             output = ""
         return None, _Stream(output), _Stream("")
 
-    monkeypatch.setattr(site, "run_login_cmd", run_login_cmd)
+    return run_login_cmd
 
-    result = site.enterprise_hpc_preflight()
-    refreshed = site.enterprise_hpc_preflight()
 
-    assert result == refreshed
+def test_preflight_observes_bundle_scheduler_and_public_solver_identity(monkeypatch):
+    site = _enterprise_site(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        site, "run_login_cmd", _successful_remote_runner(site, calls=calls)
+    )
+
+    result = site._enterprise_hpc_preflight()
+
     assert result.scheduler_version == "slurm 24.05.5"
     assert result.solver_source_commit == COMMIT
-    assert sum("--identity-json" in command for command in calls) == 2
-    launcher_probes = [command for command in calls if "command -v srun" in command]
-    assert len(launcher_probes) == 2
-    assert all(
-        "module load frequensolve/1.0.0-synthetic" in command
-        for command in launcher_probes
-    )
-    python_probes = [command for command in calls if "python3" in command]
-    assert len(python_probes) == 12
+    assert sum("--identity-json" in command for command in calls) == 1
+    assert all(not command.lstrip().startswith("sbatch ") for command in calls)
+    runtime_commands = [command for command in calls if "python3" in command]
+    assert runtime_commands
     assert all(
         command.startswith("module load frequensolve/1.0.0-synthetic && ")
-        and ". /opt/frequensolve/python-env/bin/activate && " in command
-        and command.index("/bin/activate") < command.index("python3")
-        for command in python_probes
+        for command in runtime_commands
     )
-    assert all(not command.startswith(("cat ", "sha256sum ")) for command in calls)
-    assert all(not command.lstrip().startswith("sbatch ") for command in calls)
+    assert all("/bin/activate" not in command for command in runtime_commands)
 
 
-def test_preflight_rejects_multiline_scheduler_evidence(monkeypatch):
-    site = _enterprise_site(monkeypatch)
-
-    def run_login_cmd(command, timeout=None):
-        output = (
-            "slurm 24.05.5\nsynthetic-host-secret"
-            if command == "scontrol --version"
-            else ""
-        )
-        return None, _Stream(output), _Stream("")
-
-    monkeypatch.setattr(site, "run_login_cmd", run_login_cmd)
-
-    with pytest.raises(EnterpriseHPCPreflightError, match="unexpected scheduler"):
-        site.enterprise_hpc_preflight()
-
-
-def test_preflight_rejects_unproven_local_sdk_artifact_before_remote_use(monkeypatch):
+def test_preflight_rejects_unproven_sdk_before_remote_use(monkeypatch):
     site = _enterprise_site(monkeypatch)
     calls = []
     monkeypatch.setattr(hpc, "installed_frequensolve_artifact_sha256", lambda: None)
     monkeypatch.setattr(
-        site, "run_login_cmd", lambda *args, **kwargs: calls.append(args)
+        site,
+        "run_login_cmd",
+        lambda *args, **kwargs: calls.append(args),
     )
 
     with pytest.raises(EnterpriseHPCPreflightError, match="artifact provenance"):
-        site.enterprise_hpc_preflight()
+        site._enterprise_hpc_preflight()
 
     assert calls == []
 
@@ -853,8 +731,8 @@ def test_installed_sdk_artifact_uses_pip_direct_url_and_record(monkeypatch, tmp_
     direct_url = json.dumps(
         {
             "archive_info": {
-                "hash": "sha256=" + "d" * 64,
-                "hashes": {"sha256": "d" * 64},
+                "hash": "sha256=" + SDK_SHA,
+                "hashes": {"sha256": SDK_SHA},
             },
             "url": "file:///synthetic/frequensolve.whl",
         }
@@ -884,63 +762,17 @@ def test_installed_sdk_artifact_uses_pip_direct_url_and_record(monkeypatch, tmp_
             return tmp_path / relative
 
     monkeypatch.setattr(
-        enterprise_contract, "distribution", lambda name: _Distribution()
+        enterprise_contract,
+        "distribution",
+        lambda name: _Distribution(),
     )
 
-    assert installed_frequensolve_artifact_sha256() == "d" * 64
-
+    assert installed_frequensolve_artifact_sha256() == SDK_SHA
     package.write_text("synthetic modified package\n")
     assert installed_frequensolve_artifact_sha256() is None
 
 
-def test_installed_sdk_artifact_rejects_unverified_non_cache_record(
-    monkeypatch, tmp_path
-):
-    metadata = tmp_path / "frequensolve-1.0.dist-info"
-    metadata.mkdir()
-    direct_url = json.dumps(
-        {
-            "archive_info": {"hashes": {"sha256": "d" * 64}},
-            "url": "file:///synthetic/frequensolve.whl",
-        }
-    )
-
-    class _Distribution:
-        def read_text(self, name):
-            return {
-                "direct_url.json": direct_url,
-                "RECORD": "frequensolve/generated.py,,\nfrequensolve-1.0.dist-info/RECORD,,",
-            }[name]
-
-        def locate_file(self, relative):
-            return tmp_path / relative
-
-    monkeypatch.setattr(
-        enterprise_contract, "distribution", lambda name: _Distribution()
-    )
-
-    assert installed_frequensolve_artifact_sha256() is None
-
-
-@pytest.mark.parametrize(
-    ("nodes", "ranks", "cores", "message"),
-    [
-        (3, 8, 16, "max_nodes"),
-        (1, 17, 32, "max_ranks"),
-        (1, 4, 10, "divide evenly"),
-        (1, 2, 18, "max_threads_per_rank"),
-    ],
-)
-def test_enterprise_profile_rejects_unbounded_attached_allocation(
-    nodes, ranks, cores, message
-):
-    profile = EnterpriseHPCProfile.from_mapping(profile_values())
-
-    with pytest.raises(ValueError, match=message):
-        profile.validate_allocation(nodes=nodes, ranks=ranks, cores=cores)
-
-
-def test_attached_submit_validates_actual_pool_before_transfer(monkeypatch):
+def test_attached_submit_validates_observed_pool_before_transfer(monkeypatch):
     site = _enterprise_site(monkeypatch)
     site.pool.id = "24680"
     site.pool.nhost = 3
@@ -948,93 +780,47 @@ def test_attached_submit_validates_actual_pool_before_transfer(monkeypatch):
     site.pool.ncore = 16
     transferred = []
     monkeypatch.setattr(_Site, "provisioned", property(lambda self: True))
-    monkeypatch.setattr(site, "enterprise_hpc_preflight", lambda **kwargs: None)
+
+    def preflight(**kwargs):
+        validated = validate_contract()
+        site._enterprise_hpc_limits = validated.limits
+        return validated.result
+
+    monkeypatch.setattr(site, "_enterprise_hpc_preflight", preflight)
     monkeypatch.setattr(site, "prepare_job", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        site, "_submit_attached", lambda *args, **kwargs: transferred.append(args)
+        site,
+        "_submit_attached",
+        lambda *args, **kwargs: transferred.append(args),
     )
 
-    with pytest.raises(ValueError, match="max_nodes"):
+    with pytest.raises(EnterpriseHPCPreflightError, match="max_nodes"):
         site.submit(object(), mode="attached", force=True)
 
     assert transferred == []
 
 
-def test_preflight_fails_before_submission_when_solver_identity_differs(monkeypatch):
-    site = _enterprise_site(monkeypatch)
-    profile = site.enterprise_hpc
-    bundle, compatibility = contract_pair()
-    bundle_schema, compatibility_schema = contract_schemas()
-    submitted = []
-
-    def run_login_cmd(command, timeout=None):
-        if command == "scontrol --version":
-            output = "slurm 24.05.5"
-        elif "base64" in command and profile.bundle_manifest in command:
-            output = _manifest_snapshot(bundle, "e" * 64)
-        elif "base64" in command and profile.compatibility_manifest in command:
-            output = _manifest_snapshot(compatibility, SHA_B)
-        elif "base64" in command and profile.bundle_schema_path in command:
-            output = _manifest_snapshot(bundle_schema, "7" * 64)
-        elif "base64" in command and profile.compatibility_schema_path in command:
-            output = _manifest_snapshot(compatibility_schema, "8" * 64)
-        elif "frequensolve_bundle_inventory" in command:
-            output = SHA_A
-        elif profile.solver_path in command and "hashlib" in command:
-            output = SOLVER_SHA
-        elif "--identity-json" in command:
-            output = "\n".join(
-                [
-                    "frequensolve-frequensolver-identity-begin",
-                    json.dumps(
-                        {
-                            "schema": "frequensolver-identity-1",
-                            "product": "FrequenSolver",
-                            "version": "9.9.9",
-                            "build_id": "wrong-build",
-                            "git_commit": "9" * 40,
-                        }
-                    ),
-                    "frequensolve-frequensolver-identity-ok",
-                ]
-            )
-        else:
-            output = ""
-        return None, _Stream(output), _Stream("")
-
-    monkeypatch.setattr(site, "run_login_cmd", run_login_cmd)
-    monkeypatch.setattr(
-        site, "_submit_sbatch", lambda command: submitted.append(command)
-    )
-
-    with pytest.raises(
-        EnterpriseHPCPreflightError,
-        match="public identity does not match",
-    ):
-        site.enterprise_hpc_preflight()
-
-    assert submitted == []
-
-
 @pytest.mark.parametrize(
-    "override,error",
+    ("override", "error"),
     [
         ({"slurm_args": ["--nodes=999"]}, "raw slurm_args"),
         ({"run_path": "/synthetic/work; touch /tmp/pwned"}, "run_path overrides"),
     ],
 )
-def test_enterprise_preflight_rejects_untyped_submission_overrides_before_remote_use(
+def test_enterprise_preflight_rejects_untyped_overrides_before_remote_use(
     monkeypatch, override, error
 ):
     site = _enterprise_site(monkeypatch)
     config = site.run_config.merged(**override)
     calls = []
     monkeypatch.setattr(
-        site, "run_login_cmd", lambda *args, **kwargs: calls.append(args)
+        site,
+        "run_login_cmd",
+        lambda *args, **kwargs: calls.append(args),
     )
 
     with pytest.raises(EnterpriseHPCPreflightError, match=error):
-        site.enterprise_hpc_preflight(run_config=config)
+        site._enterprise_hpc_preflight(run_config=config)
 
     assert calls == []
 
@@ -1049,10 +835,12 @@ def test_enterprise_provision_preflights_before_transfer_or_scheduler_spend(
         side_effects.append("preflight")
         raise EnterpriseHPCPreflightError("synthetic stop")
 
-    monkeypatch.setattr(site, "enterprise_hpc_preflight", reject_preflight)
+    monkeypatch.setattr(site, "_enterprise_hpc_preflight", reject_preflight)
     monkeypatch.setattr(site, "put", lambda *args, **kwargs: side_effects.append("put"))
     monkeypatch.setattr(
-        site, "_submit_sbatch", lambda *args, **kwargs: side_effects.append("sbatch")
+        site,
+        "_submit_sbatch",
+        lambda *args, **kwargs: side_effects.append("sbatch"),
     )
 
     with pytest.raises(EnterpriseHPCPreflightError, match="synthetic stop"):
@@ -1061,15 +849,13 @@ def test_enterprise_provision_preflights_before_transfer_or_scheduler_spend(
     assert side_effects == ["preflight"]
 
 
-def test_enterprise_provision_rechecks_after_transfer_immediately_before_sbatch(
-    monkeypatch,
-):
+def test_enterprise_provision_preserves_the_existing_sbatch_shape(monkeypatch):
     site = _enterprise_site(monkeypatch)
     events = []
     submissions = []
     monkeypatch.setattr(
         site,
-        "enterprise_hpc_preflight",
+        "_enterprise_hpc_preflight",
         lambda *args, **kwargs: events.append("preflight"),
     )
     monkeypatch.setattr(site, "put", lambda *args, **kwargs: events.append("put"))
@@ -1085,26 +871,13 @@ def test_enterprise_provision_rechecks_after_transfer_immediately_before_sbatch(
     assert site.provision(nodes=1, tasks=4, duration="00:30:00") == "24680"
     assert events == ["preflight", "put", "preflight", "sbatch"]
     submission = shlex.split(submissions[0])
-    assert submission[:2] == ["sbatch", "--qos=synthetic-qos"]
-    assert len(submission) == 3
-    assert submission[2].rsplit("/", 1)[-1].startswith("slurm_")
-    assert submission[2].endswith(".sh")
+    assert submission[0] == "sbatch"
+    assert len(submission) == 2
 
 
 def test_run_record_contains_sanitized_enterprise_identities(monkeypatch, tmp_path):
     site = _enterprise_site(monkeypatch)
-    profile = site.enterprise_hpc
-    bundle, compatibility = contract_pair()
-    site._enterprise_hpc_preflight_result = validate_bundle_pair(
-        profile,
-        bundle,
-        compatibility,
-        bundle_sha256="e" * 64,
-        compatibility_sha256=SHA_B,
-        **schema_arguments(),
-        scheduler_version="slurm 24.05.5",
-        cores_per_node=8,
-    )
+    site._enterprise_hpc_preflight_result = validate_contract().result
     project = Project(name="synthetic-project", path=tmp_path / "project")
     simulation = project.new_simulation(
         name="synthetic-simulation",
@@ -1126,9 +899,8 @@ def test_run_record_contains_sanitized_enterprise_identities(monkeypatch, tmp_pa
 
     evidence = record.metadata["enterprise_hpc"]
     assert record.scheduler_id == "24680"
-    assert evidence["bundle_manifest_sha256"] == "e" * 64
-    assert evidence["compatibility_document_sha256"] == SHA_B
-    assert evidence["scheduler_version"] == "slurm 24.05.5"
+    assert evidence["bundle_manifest_sha256"] == BUNDLE_MANIFEST_SHA
+    assert evidence["compatibility_document_sha256"] == COMPATIBILITY_SHA
     serialized = json.dumps(evidence, sort_keys=True)
     assert "/opt/" not in serialized
     assert "account" not in serialized

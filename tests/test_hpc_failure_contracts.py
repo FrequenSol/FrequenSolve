@@ -179,7 +179,6 @@ def test_explicit_known_hosts_binding_skips_control_socket_reuse(monkeypatch, tm
         hostname="127.0.0.1",
         ssh_port=50222,
         known_hosts_file=tmp_path / "known_hosts",
-        known_hosts_name="[127.0.0.1]:50222",
     )
     site.default_host = None
     authenticator = SlurmAuthenticator(site)
@@ -209,7 +208,6 @@ def test_explicit_ssh_endpoint_is_bound_to_configured_host_key(monkeypatch, tmp_
     site.config = SimpleNamespace(
         ssh_port=50222,
         known_hosts_file=known_hosts_file,
-        known_hosts_name="[127.0.0.1]:50222",
     )
     connections = []
     verifications = []
@@ -256,8 +254,8 @@ def test_explicit_ssh_endpoint_is_bound_to_configured_host_key(monkeypatch, tmp_
         (
             "127.0.0.1",
             {
+                "port": 50222,
                 "known_hosts_file": known_hosts_file,
-                "known_hosts_name": "[127.0.0.1]:50222",
             },
         )
     ]
