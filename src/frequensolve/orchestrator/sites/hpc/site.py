@@ -1083,6 +1083,7 @@ class SlurmSite(BaseSite):
                 _generic_wait=False,
                 _cancel_fn=lambda run: self.cancel_job(str(run.id)),
                 _fetch_fn=(lambda run: self.fetch_outputs(run.job)) if fetch else None,
+                _fetch_on_wait=fetch,
             )
             handle.backend["future"] = future
             handle.backend["mpi_async_progress"] = run_config.mpi_async_progress
@@ -1165,6 +1166,7 @@ class SlurmSite(BaseSite):
         handle.backend["mpi_async_progress"] = run_config.mpi_async_progress
         handle.check = check
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
+        handle._fetch_on_wait = fetch
         if task_plan is not None:
             handle.backend["task_plan"] = task_plan
         return handle
@@ -2154,6 +2156,7 @@ class SlurmSite(BaseSite):
         handle.backend["scheduler_heartbeat_timeout"] = scheduler_heartbeat_timeout
         handle.check = check
         handle._fetch_fn = (lambda run: self.fetch_outputs(run.job)) if fetch else None
+        handle._fetch_on_wait = fetch
         handle.backend["reattached"] = True
         return handle
 
