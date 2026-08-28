@@ -534,6 +534,14 @@ class RunResult:
             self.site.fetch_outputs(self.job)
         return self.job.results
 
+    def images(self) -> Any:
+        """Open imaging outputs for this run."""
+
+        self.raise_for_status()
+        if self.site is not None:
+            return self.site.fetch_image(self.job)
+        return self.job.load_images()
+
     def output_files(
         self,
         *,

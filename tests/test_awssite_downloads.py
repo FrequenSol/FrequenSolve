@@ -8,6 +8,7 @@ from botocore.exceptions import ClientError
 
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
 from frequensolve.orchestrator.sites.base import JobStatus
+from frequensolve.simulation.jobs import ImagingJob
 
 
 class FakePaginator:
@@ -110,6 +111,53 @@ def test_fetch_vtk_reraises_download_failures(tmp_path):
 
     with pytest.raises(RuntimeError, match="download failed"):
         site.fetch_vtk(job)
+
+
+def test_fetch_image_downloads_only_the_aggregate_image(tmp_path):
+    project_path = tmp_path / "imaging-project"
+    image_path = project_path / "jobs" / "model" / "rtm" / "results" / "imaging"
+    image_key = "imaging-project/jobs/model/rtm/results/imaging/image.h5"
+    s3_client = FakeS3Client(
+        {
+            image_key: "image payload",
+            f"{image_key.removesuffix('image.h5')}image_1.h5": "shard payload",
+        }
+    )
+    site = make_site(s3_client)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    site._emit = lambda message: None
+
+    job = object.__new__(ImagingJob)
+    job.name = "rtm"
+    job.simulation = SimpleNamespace(project_path=project_path, name="model")
+    job.save_path = image_path
+    expected = object()
+    job.load_images = lambda: expected
+
+    assert site.fetch_image(job) is expected
+    assert (image_path / "image.h5").read_text() == "image payload"
+    assert s3_client.downloads == [
+        {
+            "Bucket": "bucket",
+            "Key": image_key,
+            "Filename": str(image_path / "image.h5"),
+        }
+    ]
+    assert s3_client.paginate_calls == []
+
+
+def test_fetch_image_rejects_paths_outside_the_project(tmp_path):
+    project_path = tmp_path / "imaging-project"
+    site = make_site(FakeS3Client({}))
+    site.config = SimpleNamespace(s3_bucket="bucket")
+
+    job = object.__new__(ImagingJob)
+    job.name = "rtm"
+    job.simulation = SimpleNamespace(project_path=project_path, name="model")
+    job.save_path = tmp_path / "other" / "imaging"
+
+    with pytest.raises(ValueError, match="outside project root"):
+        site.fetch_image(job)
 
 
 def test_fetch_vtk_downloads_only_configured_output_paths(tmp_path):
