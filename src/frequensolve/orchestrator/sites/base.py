@@ -61,6 +61,12 @@ class _TraceFetchingSite(Protocol):
     def fetch_traces(self, job: Any, upscale: int = 1) -> Any: ...
 
 
+class _ImageFetchingSite(Protocol):
+    """Optional imaging capability implemented by concrete sites."""
+
+    def fetch_image(self, job: Any) -> Any: ...
+
+
 __all__ = [
     "BaseSite",
     "JobStatus",
@@ -546,7 +552,8 @@ class RunResult:
 
         self.raise_for_status()
         if self.site is not None:
-            return self.site.fetch_image(self.job)
+            site = cast(_ImageFetchingSite, self.site)
+            return site.fetch_image(self.job)
         return self.job.load_images()
 
     def output_files(

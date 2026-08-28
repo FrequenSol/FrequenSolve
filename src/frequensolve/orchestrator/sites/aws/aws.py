@@ -7,7 +7,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.orchestrator.sites.aws.cache_paths import (
@@ -1286,7 +1286,7 @@ class AWSSite(BaseSite):
         self._emit(f"Fetched AWS run metadata from {s3_results_path}")
         return job.collect_task_run_manifests()
 
-    def fetch_image(self, job: ImagingJob):
+    def fetch_image(self, job: ImagingJob) -> Any:
         """Download and open the aggregate image for one imaging job."""
 
         if not isinstance(job, ImagingJob):
