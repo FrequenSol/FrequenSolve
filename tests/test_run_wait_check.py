@@ -111,6 +111,20 @@ def test_precompleted_fetch_intent_retries_after_fetch_failure():
     assert fetch_calls == [None, None]
 
 
+def test_wait_all_fetches_precompleted_submit_outputs_once():
+    fetch_calls = []
+    run = RunHandle.skipped(DummySite(), DummyJob())
+    run._fetch_fn = lambda run: fetch_calls.append(run.id)
+    run._fetch_on_wait = True
+
+    [result] = wait_all([run], poll_interval=0.0)
+
+    assert result.successful
+    assert fetch_calls == [None]
+    assert wait_all([run], poll_interval=0.0) == [result]
+    assert fetch_calls == [None]
+
+
 def test_run_handle_wait_raises_by_default_for_failed_run():
     run = failed_run()
 

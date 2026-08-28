@@ -122,7 +122,12 @@ class RunMonitor:
                     statuses[index] = run._result.status
                     continue
                 if run._result is not None:
-                    statuses[index] = run._result.status
+                    result = run._result
+                    if result.successful and fetch:
+                        run.fetch()
+                    else:
+                        run._fetch_pending_outputs()
+                    statuses[index] = result.status
                     completed.add(index)
                     continue
 
