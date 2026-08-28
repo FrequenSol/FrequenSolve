@@ -251,7 +251,6 @@ def run_live_slurm_canary(
     site: Any,
     project_path: Path,
     run_token: str,
-    ranks_per_node: int,
     timeout: float,
     cancel_timeout: float,
 ) -> dict[str, Any]:
@@ -259,7 +258,15 @@ def run_live_slurm_canary(
 
     if timeout <= 0 or cancel_timeout <= 0:
         raise LiveSlurmCanaryError("canary timeouts must be positive")
-    site.enterprise_hpc_preflight()
+    ranks_per_node = site.run_config.ranks_per_node
+    if (
+        isinstance(ranks_per_node, bool)
+        or not isinstance(ranks_per_node, int)
+        or ranks_per_node < 1
+    ):
+        raise LiveSlurmCanaryError(
+            "site run_config.ranks_per_node must be a positive integer"
+        )
     _, success_job, cancel_job = build_synthetic_live_slurm_job(project_path, run_token)
     success_handle = None
     cancel_handle = None
@@ -349,7 +356,6 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--site-profile")
     parser.add_argument("--project-path", required=True, type=Path)
     parser.add_argument("--run-token", required=True)
-    parser.add_argument("--ranks-per-node", required=True, type=int)
     parser.add_argument("--timeout", required=True, type=float)
     parser.add_argument("--cancel-timeout", default=120.0, type=float)
     parser.add_argument("--acknowledge")
@@ -369,7 +375,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             site=site,
             project_path=args.project_path.expanduser().resolve(),
             run_token=args.run_token,
-            ranks_per_node=args.ranks_per_node,
             timeout=args.timeout,
             cancel_timeout=args.cancel_timeout,
         )
