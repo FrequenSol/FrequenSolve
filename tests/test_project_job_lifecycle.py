@@ -1325,6 +1325,27 @@ def test_job_plot_task_timings(tmp_path):
     assert len(ax.patches) == 2
 
 
+def test_job_task_timings_accepts_native_elapsed_s(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0, 10.0])
+    job.save()
+    run_dir = job._result_path / "_fs_run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "timings.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-timings-1",
+                "tasks": [
+                    {"task": 1, "elapsed_s": 0.5},
+                    {"task": 2, "elapsed_s": 1.25},
+                ],
+            }
+        )
+    )
+
+    assert [row["duration_seconds"] for row in job.task_timings()] == [0.5, 1.25]
+
+
 def test_job_plot_task_timings_uses_sparse_ticks(tmp_path):
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg", force=True)
