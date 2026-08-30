@@ -80,7 +80,7 @@ def successful_run(site=None):
 def test_run_handle_wait_honors_submit_time_fetch_after_success():
     fetch_calls = []
     run = successful_run()
-    run._fetch_fn = lambda run: fetch_calls.append(run.id)
+    run._pending_fetch_fn = lambda run: fetch_calls.append(run.id)
 
     result = run.wait()
 
@@ -99,8 +99,7 @@ def test_precompleted_fetch_intent_retries_after_fetch_failure():
         if len(fetch_calls) == 1:
             raise RuntimeError("temporary download failure")
 
-    run._fetch_fn = fetch
-    run._fetch_on_wait = True
+    run._pending_fetch_fn = fetch
 
     with pytest.raises(RuntimeError, match="temporary download failure"):
         run.wait()
@@ -114,8 +113,7 @@ def test_precompleted_fetch_intent_retries_after_fetch_failure():
 def test_wait_all_fetches_precompleted_submit_outputs_once():
     fetch_calls = []
     run = RunHandle.skipped(DummySite(), DummyJob())
-    run._fetch_fn = lambda run: fetch_calls.append(run.id)
-    run._fetch_on_wait = True
+    run._pending_fetch_fn = lambda run: fetch_calls.append(run.id)
 
     [result] = wait_all([run], poll_interval=0.0)
 
@@ -199,7 +197,7 @@ def test_wait_all_check_false_returns_failed_result():
 def test_wait_all_check_true_does_not_fetch_failed_outputs():
     fetch_calls = []
     run = failed_run()
-    run._fetch_fn = lambda run: fetch_calls.append(run.id)
+    run._pending_fetch_fn = lambda run: fetch_calls.append(run.id)
 
     with pytest.raises(
         RunFailedError,
@@ -226,7 +224,7 @@ def test_submit_time_fetch_skips_unsuccessful_terminal_runs(state):
             return_code=1,
             job_id="run-1",
         ),
-        _fetch_fn=lambda run: fetch_calls.append(run.id),
+        _pending_fetch_fn=lambda run: fetch_calls.append(run.id),
     )
 
     with pytest.raises(RunFailedError):
@@ -247,7 +245,7 @@ def test_submit_time_fetch_skips_timed_out_run():
             return_code=-1,
             job_id="run-1",
         ),
-        _fetch_fn=lambda run: fetch_calls.append(run.id),
+        _pending_fetch_fn=lambda run: fetch_calls.append(run.id),
     )
 
     with pytest.raises(RunFailedError):
@@ -259,11 +257,55 @@ def test_submit_time_fetch_skips_timed_out_run():
 def test_explicit_non_strict_wait_all_preserves_failed_output_fetch():
     fetch_calls = []
     run = failed_run()
-    run._fetch_fn = lambda run: fetch_calls.append(run.id)
+    run._pending_fetch_fn = lambda run: fetch_calls.append(run.id)
 
     [result] = wait_all([run], fetch=True, check=False, poll_interval=0.0)
 
     assert not result.successful
+    assert fetch_calls == ["run-1"]
+
+
+def test_explicit_non_strict_wait_all_fetches_precompleted_failure():
+    fetch_calls = []
+    run = failed_run()
+    run._result = run._make_result(run.status())
+    run._pending_fetch_fn = lambda run: fetch_calls.append(run.id)
+
+    [result] = wait_all([run], fetch=True, check=False, poll_interval=0.0)
+
+    assert not result.successful
+    assert fetch_calls == ["run-1"]
+    assert run._pending_fetch_fn is None
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_site_specific_wait_consumes_submit_time_fetch(asynchronous):
+    fetch_calls = []
+    site = DummySite()
+    job = DummyJob()
+    result = RunResult(
+        job=job,
+        site=site,
+        status=JobStatus(state="completed", return_code=0, job_id="run-1"),
+    )
+
+    async def wait_async(run, timeout, poll_interval):
+        return result
+
+    run = RunHandle(
+        site=site,
+        job=job,
+        id="run-1",
+        poll_interval=0.0,
+        _generic_wait=False,
+        _wait_fn=lambda run, timeout, poll_interval: result,
+        _wait_async_fn=wait_async,
+        _pending_fetch_fn=lambda run: fetch_calls.append(run.id),
+    )
+
+    waited = asyncio.run(run.wait_async()) if asynchronous else run.wait()
+
+    assert waited is result
     assert fetch_calls == ["run-1"]
 
 

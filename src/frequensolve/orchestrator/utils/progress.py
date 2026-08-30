@@ -123,7 +123,7 @@ class RunMonitor:
                     continue
                 if run._result is not None:
                     result = run._result
-                    if result.successful and fetch:
+                    if fetch and (result.successful or not check):
                         run.fetch()
                     else:
                         run._fetch_pending_outputs()
@@ -194,7 +194,7 @@ class RunMonitor:
         check: bool,
     ) -> RunResult:
         result = run._complete_from_status(status)
-        configured_fetch = run._fetch_on_wait or run._fetch_fn is not None
+        configured_fetch = run._pending_fetch_fn is not None
         if result.successful and (fetch or configured_fetch):
             run.fetch()
         elif fetch and not check:
