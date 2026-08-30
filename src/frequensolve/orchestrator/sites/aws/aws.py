@@ -1306,20 +1306,25 @@ class AWSSite(BaseSite):
         key = f"{project_path.name}/{relative_image_file.as_posix()}"
         local_image_file.parent.mkdir(parents=True, exist_ok=True)
 
-        try:
-            self.s3_client.download_file(bucket, key, str(local_image_file))
-        except ClientError as exc:
-            error_code = exc.response.get("Error", {}).get("Code", "")
-            if error_code in ("ExpiredToken", "InvalidToken") and hasattr(
-                self, "cognito_auth"
-            ):
-                self._refresh_s3_credentials()
+        refreshed_credentials = False
+        while True:
+            try:
                 self.s3_client.download_file(bucket, key, str(local_image_file))
-            elif error_code in ("404", "NoSuchKey", "NotFound"):
-                raise FileNotFoundError(
-                    f"AWS imaging output s3://{bucket}/{key} is missing"
-                ) from exc
-            else:
+                break
+            except ClientError as exc:
+                error_code = exc.response.get("Error", {}).get("Code", "")
+                if (
+                    error_code in ("ExpiredToken", "InvalidToken")
+                    and not refreshed_credentials
+                    and hasattr(self, "cognito_auth")
+                ):
+                    refreshed_credentials = True
+                    self._refresh_s3_credentials()
+                    continue
+                if error_code in ("404", "NoSuchKey", "NotFound"):
+                    raise FileNotFoundError(
+                        f"AWS imaging output s3://{bucket}/{key} is missing"
+                    ) from exc
                 raise RuntimeError(f"S3 image download failed: {exc}") from exc
 
         self._emit(f"Fetched AWS image from s3://{bucket}/{key}")

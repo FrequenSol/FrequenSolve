@@ -160,6 +160,38 @@ def test_fetch_image_rejects_paths_outside_the_project(tmp_path):
         site.fetch_image(job)
 
 
+def test_fetch_image_normalizes_missing_output_after_credential_refresh(tmp_path):
+    project_path = tmp_path / "imaging-project"
+
+    class ExpiredThenMissingS3Client:
+        def __init__(self):
+            self.attempts = 0
+
+        def download_file(self, bucket, key, filename):
+            self.attempts += 1
+            code = "ExpiredToken" if self.attempts == 1 else "NoSuchKey"
+            raise ClientError(
+                {"Error": {"Code": code, "Message": code}},
+                "GetObject",
+            )
+
+    s3_client = ExpiredThenMissingS3Client()
+    site = make_site(s3_client)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    site.cognito_auth = object()
+    site._refresh_s3_credentials = lambda: None
+
+    job = object.__new__(ImagingJob)
+    job.name = "rtm"
+    job.simulation = SimpleNamespace(project_path=project_path, name="model")
+    job.save_path = project_path / "jobs" / "model" / "rtm" / "results" / "imaging"
+
+    with pytest.raises(FileNotFoundError, match="AWS imaging output .* is missing"):
+        site.fetch_image(job)
+
+    assert s3_client.attempts == 2
+
+
 def test_fetch_vtk_downloads_only_configured_output_paths(tmp_path):
     key = "project-a/jobs/simulation-a/job-a/results/paraview/pv_00000.vtu"
     s3_client = FakeS3Client({key: "mesh"})
