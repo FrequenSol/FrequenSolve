@@ -991,8 +991,7 @@ class AWSSite(BaseSite):
             self._emit(f"Skipping {job.name}; run is current")
             handle = RunHandle.skipped(self, job)
             if fetch:
-                handle._fetch_fn = lambda run: self.fetch_outputs(run.job)
-                handle._fetch_on_wait = True
+                handle._pending_fetch_fn = lambda run: self.fetch_outputs(run.job)
             return handle
 
         self.prepare_job(job, sync_project=True, validate=False)
@@ -1106,8 +1105,9 @@ class AWSSite(BaseSite):
             check=check,
             _status_fn=self._poll_run,
             _cancel_fn=lambda run: self.cancel_job(str(run.id)),
-            _fetch_fn=(lambda run: self.fetch_outputs(run.job)) if fetch else None,
-            _fetch_on_wait=fetch,
+            _pending_fetch_fn=(
+                (lambda run: self.fetch_outputs(run.job)) if fetch else None
+            ),
         )
 
     def _poll_run(self, run: RunHandle) -> JobStatus:

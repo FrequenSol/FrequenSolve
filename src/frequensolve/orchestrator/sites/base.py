@@ -686,8 +686,7 @@ class RunHandle:
     _timeout_fn: Optional[Callable[["RunHandle", JobStatus], RunResult]] = None
     _generic_wait: bool = True
     _cancel_fn: Optional[Callable[["RunHandle"], None]] = None
-    _fetch_fn: Optional[Callable[["RunHandle"], Any]] = None
-    _fetch_on_wait: bool = False
+    _pending_fetch_fn: Optional[Callable[["RunHandle"], Any]] = None
     _result: Optional[RunResult] = None
     _last_status: JobStatus = field(default_factory=JobStatus)
 
@@ -796,6 +795,7 @@ class RunHandle:
             self._result = self._wait_fn(self, timeout, poll_interval)
             if effective_check:
                 self._result.raise_for_status()
+            self._fetch_pending_outputs()
             return self._result
         from frequensolve.orchestrator.utils.progress import wait
 
@@ -831,13 +831,13 @@ class RunHandle:
         if self._result is not None:
             if effective_check:
                 self._result.raise_for_status()
-            if self._fetch_on_wait and self._result.successful:
-                await asyncio.to_thread(self._fetch_pending_outputs)
+            await asyncio.to_thread(self._fetch_pending_outputs)
             return self._result
         if not self._generic_wait and self._wait_async_fn is not None:
             self._result = await self._wait_async_fn(self, timeout, poll_interval)
             if effective_check:
                 self._result.raise_for_status()
+            await asyncio.to_thread(self._fetch_pending_outputs)
             return self._result
         return await asyncio.to_thread(
             self.wait,
@@ -903,19 +903,24 @@ class RunHandle:
             available.
         """
 
-        if self._fetch_fn is not None:
-            result = self._fetch_fn(self)
+        pending_fetch = self._pending_fetch_fn
+        if pending_fetch is not None:
+            result = pending_fetch(self)
+            self._pending_fetch_fn = None
         elif hasattr(self.site, "fetch_outputs"):
             result = self.site.fetch_outputs(self.job)
         else:
             result = None
-        self._fetch_on_wait = False
         return result
 
     def _fetch_pending_outputs(self) -> None:
-        """Fetch one successful pre-completed run when submit requested it."""
+        """Consume one successful submit-time output fetch when pending."""
 
-        if self._fetch_on_wait and self._result is not None and self._result.successful:
+        if (
+            self._pending_fetch_fn is not None
+            and self._result is not None
+            and self._result.successful
+        ):
             self.fetch()
 
     def traces(self, upscale: int = 1) -> Any:
