@@ -298,14 +298,17 @@ def _identity_from_output(output: str) -> FrequenSolverIdentity:
             details.append(f"unexpected keys: {', '.join(extra)}")
         raise ValueError("identity JSON has " + "; ".join(details))
     schema = payload.get("schema")
-    if schema != IDENTITY_SCHEMA:
-        raise ValueError(f"identity schema must be {IDENTITY_SCHEMA!r}, got {schema!r}")
     product = payload.get("product")
-    if product != IDENTITY_PRODUCT:
+    if not (
+        (schema == IDENTITY_SCHEMA and product == IDENTITY_PRODUCT)
+        or (schema == "fs-solver-identity-1" and product == "FS_solver")
+    ):
         raise ValueError(
-            f"identity product must be {IDENTITY_PRODUCT!r}, got {product!r}"
+            f"unsupported identity schema/product pair: {schema!r}/{product!r}"
         )
     return FrequenSolverIdentity(
+        schema=str(schema),
+        product=str(product),
         version=_required_string(
             payload.get("version"), "identity.version", allow_unknown=True
         ),
