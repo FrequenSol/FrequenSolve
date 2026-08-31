@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, 
 
 from frequensolve.model.property import rsf_binary_path
 from frequensolve.simulation.simulation import CustomJSONEncoder
+from frequensolve.util.store import compact_hdf5_file
 
 if TYPE_CHECKING:
     from frequensolve.simulation.jobs.base import JobLayout
@@ -27,7 +28,7 @@ class JobRemoteMixin:
     """
 
     def save(self):
-        """Save the simulation and project-relative job JSON to disk.
+        """Save the project-relative job JSON and its simulation.
 
         Returns:
             Path to the saved local job JSON.
@@ -40,9 +41,13 @@ class JobRemoteMixin:
         self.simulation.save()
         file = self._local_path / f"{self.name}.json"
         self._file = file
-        data = self.to_fs(project_relative=True)
+        ctx = self.export_context()
+        data = self.to_fs(ctx, project_relative=True)
         data["result_path"] = str(self._result_path.relative_to(self.project_path))
         self._write_json_file(file, data)
+        ctx.store.prune_unreferenced(data)
+        if ctx.store.path.exists():
+            compact_hdf5_file(ctx.store.path)
         return file
 
     def save_for_remote(self, site: str, remote_project: Union[Path, str]):

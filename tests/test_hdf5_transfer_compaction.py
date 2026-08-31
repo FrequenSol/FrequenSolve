@@ -11,7 +11,6 @@ from frequensolve.util import store as store_module
 from frequensolve.util.store import (
     SimulationStore,
     compact_hdf5_file,
-    hash_dataarray_payload,
 )
 
 
@@ -127,7 +126,11 @@ def test_put_dataarray_replaces_incomplete_matching_hash(tmp_path):
         coords={"x": [0.0, 0.5, 1.0], "z": [0.0, 1.0]},
     )
     attrs = {"fs_kind": "property"}
-    digest = hash_dataarray_payload(data, attrs=attrs, dtype=None)
+    digest = (
+        SimulationStore(tmp_path / "probe.h5")
+        .put_dataarray("values", data, attrs=attrs, dtype=None)
+        .hash
+    )
     with h5py.File(path, "w") as h5:
         dset = h5.create_dataset("values", data=data.values)
         dset.attrs["fs_hash"] = f"blake3:{digest}"
@@ -197,6 +200,11 @@ def test_put_dataarray_references_large_dimension_coordinate_dataset(tmp_path):
     )
 
     ref = store.put_dataarray("values", data, dtype=None)
+    assert ref.to_fs() == {
+        "file": str(path),
+        "dataset": "values",
+        "hash": f"blake3:{ref.hash}",
+    }
 
     with h5py.File(path, "a") as h5:
         dset = h5["values"]
@@ -225,6 +233,34 @@ def test_put_dataarray_references_large_dimension_coordinate_dataset(tmp_path):
         coordinate_reference = h5["values"].attrs["x"]
         assert coordinate_reference in h5
         np.testing.assert_array_equal(h5[coordinate_reference][:], x)
+
+
+def test_put_dataarray_rewrites_changed_interpolation_layout(tmp_path):
+    path = tmp_path / "simulation.h5"
+    store = SimulationStore(path)
+    data = xr.DataArray(
+        np.arange(6, dtype=np.float64).reshape(3, 2),
+        dims=("x", "component"),
+        coords={"x": [0.0, 0.5, 1.0], "component": ["p", "q"]},
+    )
+
+    first = store.put_dataarray(
+        "values",
+        data,
+        interpolation_dims=("x",),
+        dtype=None,
+    )
+    second = store.put_dataarray(
+        "values",
+        data,
+        interpolation_dims=("x", "component"),
+        dtype=None,
+    )
+
+    assert first.hash != second.hash
+    with h5py.File(path, "r") as h5:
+        assert list(h5["values"].attrs["dims"]) == ["x", "component"]
+        assert list(h5["values"].attrs["component"]) == ["p", "q"]
 
 
 def test_put_array_chunks_replaces_incomplete_matching_hash(tmp_path):

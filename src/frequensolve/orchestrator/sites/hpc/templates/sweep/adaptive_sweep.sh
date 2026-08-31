@@ -127,11 +127,11 @@ python3 {{ scheduler_runner }} \
     --output "$dir_out" \
     --status "$scheduler_status"
 {% else %}
-echo "Skipping frequency sweep; running imaging postprocess only."
+echo "Skipping frequency sweep; running solver postprocess only."
 {% endif %}
 
 {% if imaging_job %}
-echo "Running imaging step..."
+echo "Running solver postprocess step..."
 $mpi_exec -n "$n_procs" "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1
 {% if smooth_only %}
 cat > "$scheduler_status" <<EOF

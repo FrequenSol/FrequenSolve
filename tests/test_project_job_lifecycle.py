@@ -22,7 +22,12 @@ from frequensolve.simulation.jobs import (
     JobLayout,
     TimeDomainJob,
 )
-from frequensolve.simulation.jobs.artifacts import RunMetadata
+from frequensolve.simulation.jobs.artifacts import (
+    OutputManifest,
+    RunMetadata,
+    TaskArtifactCatalog,
+    TraceManifest,
+)
 from frequensolve.simulation.solver import SolverConfig
 
 
@@ -412,6 +417,61 @@ def test_run_metadata_filters_output_files(tmp_path):
     assert result.output_files(kind="vtk", suffix=".vtu", base="pressure_1") == [
         result_path / "ParaView/pressure_1.vtu"
     ]
+
+
+def test_output_manifest_and_task_catalog_preserve_producer_records(tmp_path):
+    result_path = tmp_path / "results"
+    manifest_path = result_path / "_fs_run/tasks/task_000001/outputs.json"
+    manifest_path.parent.mkdir(parents=True)
+    record = {
+        "path": "traces/shards/task_000001_generation_3.h5",
+        "kind": "traces",
+        "schema": "fs_trace_payload_shard_v1",
+        "producer": "acquisition",
+        "task": 1,
+        "state": "present",
+    }
+    manifest_path.write_text(json.dumps({"schema": "fs-outputs-1", "files": [record]}))
+
+    manifest = OutputManifest.read(manifest_path, result_path=result_path)
+    catalog = TaskArtifactCatalog.read(result_path, tasks=[1])
+
+    assert manifest.valid
+    assert manifest.records == [record]
+    assert manifest.artifacts[0].path == result_path / record["path"]
+    assert catalog.artifacts_for_task(1) == tuple(manifest.artifacts)
+
+
+def test_trace_manifest_prefers_producer_reported_task_artifact(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+    reported = job.trace_outputs.path / "shards/task_000001_generation_3.h5"
+    reported.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(reported, "w") as h5:
+        h5.create_dataset("frequency", data=10.0)
+    task_outputs = job.task_run_manifest_path(1).parent / "outputs.json"
+    task_outputs.parent.mkdir(parents=True, exist_ok=True)
+    task_outputs.write_text(
+        json.dumps(
+            {
+                "schema": "fs-outputs-1",
+                "files": [
+                    {
+                        "path": str(reported.relative_to(job._result_path)),
+                        "kind": "traces",
+                        "schema": "fs_trace_payload_shard_v1",
+                        "task": 1,
+                    }
+                ],
+            }
+        )
+    )
+
+    manifest = TraceManifest.from_job(job)
+
+    assert manifest.files == [reported]
+    assert manifest.artifacts[0].path == reported
 
 
 def test_run_metadata_discovers_unregistered_vtu_files(tmp_path):
@@ -814,7 +874,7 @@ def test_job_failed_tasks_reports_reasons(tmp_path):
     assert failures[0]["reason"] == "mesh generation failed"
     assert failures[1]["frequency"] == 2.0
     assert failures[1]["reason"] == (
-        "Solver residual 0.002 exceeded failure threshold 0.001 after " "24 iterations."
+        "Solver residual 0.002 exceeded failure threshold 0.001 after 24 iterations."
     )
     assert failures[1]["solver"]["convergence"]["residual"] == 0.002
 
@@ -1004,6 +1064,21 @@ def test_job_collects_task_run_manifests_into_job_manifest(tmp_path):
                 }
             )
         )
+        (task_manifest.parent / "outputs.json").write_text(
+            json.dumps(
+                {
+                    "schema": "fs-outputs-1",
+                    "files": [
+                        {
+                            "path": f"traces/shards/task_{task:06d}.h5",
+                            "kind": "traces",
+                            "schema": "fs_trace_payload_shard_v1",
+                            "task": task,
+                        }
+                    ],
+                }
+            )
+        )
 
     path = job.collect_task_run_manifests()
 
@@ -1022,6 +1097,14 @@ def test_job_collects_task_run_manifests_into_job_manifest(tmp_path):
     assert mirrored["tasks"][0]["returncode"] == 0
     assert mirrored["tasks"][1]["n_ranks"] == 2
     assert mirrored["tasks"][1]["threads_per_rank"] == 8
+    assert payload["tasks"][0]["artifacts"] == [
+        {
+            "path": "traces/shards/task_000001.h5",
+            "kind": "traces",
+            "schema": "fs_trace_payload_shard_v1",
+            "task": 1,
+        }
+    ]
     assert mirrored["solver"]["convergence"]["status"] == "failed"
     assert mirrored["solver"]["convergence"]["residual"] == 0.002
 
@@ -1374,6 +1457,27 @@ def test_job_task_plan_reruns_all_frequencies(tmp_path):
     assert not any(file.exists() for file in job.expected_trace_files())
 
 
+def test_forced_rerun_removes_shards_outside_a_shrunk_frequency_list(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    original = FrequencyDomainJob(
+        name="freq",
+        simulation=sim,
+        f_list=[1.0, 2.0, 3.0],
+    )
+    original.save()
+    old_files = original.expected_trace_files()
+    for file in old_files:
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(file.name)
+
+    shrunk = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    shrunk.save()
+    plan = shrunk.task_run_plan(force=True)
+
+    assert plan["pending_indices"] == [0]
+    assert not any(file.exists() for file in old_files)
+
+
 def test_job_task_plan_skips_current_packed_trace_product(tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0])
@@ -1621,6 +1725,29 @@ def test_frequency_named_trace_shard_counts_as_current_when_pack_is_stale(tmp_pa
         "not_run": 0,
     }
     assert job.task_run_plan()["pending_indices"] == []
+
+
+def test_trace_manifest_indexes_modern_frequency_shards_without_discovery(
+    tmp_path, monkeypatch
+):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0, 3.0])
+    job.save()
+    shard_dir = job.trace_outputs.path / "shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    shards = [shard_dir / f"f_{frequency:.5f}_hz.h5" for frequency in job.f_list]
+    for shard in shards:
+        shard.touch()
+
+    manifest = job.trace_manifest
+    monkeypatch.setattr(
+        job,
+        "_matching_frequency_trace_file",
+        lambda *args, **kwargs: pytest.fail("modern shards must not be rediscovered"),
+    )
+
+    assert manifest.files == shards
+    assert job.trace_outputs_exist()
 
 
 def test_task_manifest_recovers_current_frequency_shard_when_state_is_stale(tmp_path):

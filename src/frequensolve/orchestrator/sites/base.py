@@ -390,7 +390,7 @@ class SubmitPlan:
             if self.n_accepted_failed_tasks:
                 categories.append(f"{self.n_accepted_failed_tasks} accepted failed")
             category_text = ", ".join(categories) if categories else "0 current"
-            message += f"; {self.n_tasks_to_skip} would skip " f"({category_text})"
+            message += f"; {self.n_tasks_to_skip} would skip ({category_text})"
         if self.pending_tasks:
             message += f"\nPending tasks: {self._task_ranges(self.pending_tasks)}"
         if self.skipped_tasks:
@@ -952,7 +952,6 @@ class BaseSite:
             sync_project: Whether to synchronize the owning project after the
                 job is saved.
             validate: Whether to run job validation before submission.
-
         Returns:
             The same job object, for fluent site implementations.
         """
