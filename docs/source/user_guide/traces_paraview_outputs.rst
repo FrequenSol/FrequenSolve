@@ -177,6 +177,20 @@ filesystem path. Receiver-group names in the observed data must match the
 :term:`simulation` acquisition, because the imaging misfit pairs observed and simulated
 receiver groups by name.
 
+Arbitrary nonnegative residual weights can be attached to a misfit receiver
+group. The array shape determines whether weights vary by receiver,
+component/receiver, or source/component/receiver; sparse trace-catalog weights
+use an explicit ``layout="sparse_trace"``. Saved jobs put production arrays in
+a job-owned HDF5 file and retain only its reference in job JSON and provenance:
+
+.. code-block:: python
+
+   group = job.misfit.receiver_groups[0]
+   group.add_trace_weights(
+       quality_weights,  # shape: (source, component, receiver)
+       name="data_quality",
+   )
+
 Successful imaging runs can be opened directly from local files with
 ``job.load_images()``. This does not contact an execution site:
 
