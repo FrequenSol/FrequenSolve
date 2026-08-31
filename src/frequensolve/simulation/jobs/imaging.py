@@ -568,7 +568,6 @@ class MisfitGroup:
     name: str = ""
     observed: Optional[Union[str, Path]] = None
     simulated: Union[str, Path] = ""
-    incremental_simulated: Optional[Union[str, Path]] = None
     preprocess: List[Union[PreprocessHook, Dict[str, Any]]] = field(
         default_factory=list
     )
@@ -576,11 +575,6 @@ class MisfitGroup:
     def __post_init__(self):
         self.observed = None if self.observed is None else Path(self.observed)
         self.simulated = Path(self.simulated)
-        self.incremental_simulated = (
-            None
-            if self.incremental_simulated is None
-            else Path(self.incremental_simulated)
-        )
 
     def to_fs(
         self,
@@ -604,11 +598,6 @@ class MisfitGroup:
             "name": self.name,
             "observed": self.observed,
             "simulated": self.simulated,
-            **(
-                {"incremental_simulated": self.incremental_simulated}
-                if self.incremental_simulated is not None
-                else {}
-            ),
             **(
                 {
                     "preprocess": _preprocess_to_fs(
@@ -706,7 +695,6 @@ class MisfitGroup:
             name=data["name"],
             observed=data["observed"],
             simulated=data["simulated"],
-            incremental_simulated=data.get("incremental_simulated"),
             preprocess=_preprocess_from_fs(data.get("preprocess", [])),
         )
 
@@ -1190,23 +1178,12 @@ class ImagingJob(BaseJob):
                 base_path=base_path,
                 project_path=resolved_project_path,
             )
-            group.incremental_simulated = cls._resolve_saved_path(
-                group.incremental_simulated,
+        if "direction" in image_data:
+            image_data["direction"] = cls._resolve_saved_path(
+                image_data["direction"],
                 base_path=base_path,
                 project_path=resolved_project_path,
             )
-        for key in ("direction", "background_field_path"):
-            if key in image_data:
-                image_data[key] = cls._resolve_saved_path(
-                    image_data[key],
-                    base_path=base_path,
-                    project_path=resolved_project_path,
-                )
-        if (
-            image_data.get("background_forward_policy") == "reuse"
-            and misfit.receiver_groups
-        ):
-            image_data["background_data_path"] = misfit.receiver_groups[0].simulated
 
         job = cls(
             name=data.pop("name", None),
@@ -1266,10 +1243,6 @@ class ImagingJob(BaseJob):
             group["simulated"] = self._export_path(
                 group["simulated"], project_relative=True
             )
-            if "incremental_simulated" in group:
-                group["incremental_simulated"] = self._export_path(
-                    group["incremental_simulated"], project_relative=True
-                )
         return payload
 
     @staticmethod
@@ -1316,79 +1289,22 @@ class LSRTMGradientJob(ImagingJob):
             raise ValueError(
                 "LSRTMGradientJob requires direction or zero_direction=True"
             )
-        background_forward_policy = str(
-            kwargs.pop("background_forward_policy", "recompute")
-        ).lower()
-        background_field_path = kwargs.pop("background_field_path", None)
-        background_data_path = kwargs.pop("background_data_path", None)
-        if background_forward_policy not in {"recompute", "store", "reuse"}:
-            raise ValueError(
-                "background_forward_policy must be 'recompute', 'store', or 'reuse'"
-            )
         if direction is not None:
             direction = Path(direction).resolve()
             if not direction.is_file():
                 raise FileNotFoundError(f"LSRTM direction file not found: {direction}")
-        if background_forward_policy == "reuse":
-            if background_field_path is None or background_data_path is None:
-                raise ValueError(
-                    "background reuse requires background_field_path and "
-                    "background_data_path"
-                )
-            background_field_path = Path(background_field_path).resolve()
-            background_data_path = Path(background_data_path).resolve()
-            if not background_field_path.is_dir():
-                raise FileNotFoundError(
-                    f"LSRTM background field path not found: {background_field_path}"
-                )
-            if not background_data_path.exists():
-                raise FileNotFoundError(
-                    f"LSRTM background trace path not found: {background_data_path}"
-                )
-        elif background_field_path is not None or background_data_path is not None:
-            raise ValueError(
-                "background cache paths are accepted only with "
-                "background_forward_policy='reuse'"
-            )
         if kwargs.pop("born_traces_only", False):
             raise ValueError("LSRTMGradientJob cannot be trace-only")
         kwargs["born_traces_only"] = False
         kwargs["gauss_newton"] = True
-        kwargs["background_forward_policy"] = background_forward_policy
-        if background_forward_policy == "store":
-            kwargs["field_retention"] = "forward"
-        self.background_forward_policy = background_forward_policy
         super().__init__(*args, **kwargs)
         if any(group.observed is None for group in self.misfit.receiver_groups):
             raise ValueError("LSRTMGradientJob requires observed data")
         self.direction = direction
-        self.background_field_path = background_field_path
-        self.background_data_path = background_data_path
-        if self.simulation._file is None:
-            raise ValueError(
-                "Simulation must be saved before building an LSRTM cache key"
-            )
-        self.background_cache_key = self._hash_payload(
-            {
-                "schema": "frequensolve-lsrtm-background-cache-1",
-                "simulation": self._hash_json_file(self.simulation._file),
-                "frequencies": [
-                    self._canonical_frequency_value(value) for value in self.f_list
-                ],
-                "weights": self.weights,
-            }
-        )
-        if background_forward_policy == "reuse":
-            for group in self.misfit.receiver_groups:
-                group.simulated = self.background_data_path
-                # Leave the incremental path implicit so Sauce binds it to this
-                # task's output shard.  Serializing that not-yet-created path as
-                # an input makes metadata initialization try to open it.
-                group.incremental_simulated = None
         self.workflow = "lsrtm_gradient"
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
-        """Serialize the explicit iterate and background-field policy."""
+        """Serialize the explicit iterate consumed by the fused workflow."""
 
         payload = super().to_fs(ctx, project_relative=project_relative)
         image = payload["Image"]
@@ -1397,12 +1313,6 @@ class LSRTMGradientJob(ImagingJob):
         else:
             image["direction"] = self._export_path(
                 self.direction, project_relative=project_relative
-            )
-        image["background_forward_policy"] = self.background_forward_policy
-        image["background_cache_key"] = self.background_cache_key
-        if self.background_field_path is not None:
-            image["background_field_path"] = self._export_path(
-                self.background_field_path, project_relative=project_relative
             )
         return payload
 
@@ -1427,12 +1337,6 @@ class LSRTMGradientJob(ImagingJob):
             )
             for component in baseline.components
         ]
-        if self.background_forward_policy == "reuse":
-            return replace(
-                baseline,
-                groups=incremental_groups,
-                components=incremental_components,
-            )
         return replace(
             baseline,
             groups=[*baseline.groups, *incremental_groups],

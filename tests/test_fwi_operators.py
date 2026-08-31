@@ -283,8 +283,8 @@ def test_lsrtm_gradient_job_serializes_one_call_residual_workflow(tmp_path):
     assert payload["Image"]["gauss_newton"] is True
     assert payload["Image"]["born_traces_only"] is False
     assert payload["Image"]["zero_direction"] is True
-    assert payload["Image"]["background_forward_policy"] == "recompute"
-    assert payload["Image"]["background_cache_key"].startswith("blake3:")
+    assert "background_forward_policy" not in payload["Image"]
+    assert "background_cache_key" not in payload["Image"]
     assert payload["Image"]["misfit"]["receiver_groups"][0]["observed"] is not None
     assert job.n_tasks == 2
     assert job.trace_outputs.groups == ["surface", "surface_inc"]
@@ -294,52 +294,6 @@ def test_lsrtm_gradient_job_serializes_one_call_residual_workflow(tmp_path):
 
     assert isinstance(loaded, LSRTMGradientJob)
     assert loaded.workflow == "lsrtm_gradient"
-
-
-def test_lsrtm_gradient_job_supports_opt_in_background_store_and_reuse(tmp_path):
-    sim = _elastic_simulation(tmp_path)
-    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
-    observed = tmp_path / "observed"
-    observed.mkdir()
-    cache_fields = tmp_path / "background" / "images"
-    cache_traces = tmp_path / "background" / "traces"
-    cache_fields.mkdir(parents=True)
-    cache_traces.mkdir(parents=True)
-
-    store = LSRTMGradientJob(
-        name="store_background",
-        simulation=sim,
-        data_path=observed,
-        f_list=[5.0, 7.0],
-        grid=grid,
-        images={"dVp": "FWI:Vp"},
-        save_path=cache_fields,
-        background_forward_policy="store",
-    )
-    reuse = LSRTMGradientJob(
-        name="reuse_background",
-        simulation=sim,
-        data_path=observed,
-        f_list=[5.0, 7.0],
-        grid=grid,
-        images={"dVp": "FWI:Vp"},
-        save_path=tmp_path / "reuse_images",
-        background_forward_policy="reuse",
-        background_field_path=cache_fields,
-        background_data_path=cache_traces,
-    )
-
-    store_payload = store.to_fs()
-    reuse_payload = reuse.to_fs()
-    reuse_group = reuse_payload["Image"]["misfit"]["receiver_groups"][0]
-
-    assert store_payload["Image"]["field_retention"] == "forward"
-    assert store.background_cache_key == reuse.background_cache_key
-    assert reuse_payload["Image"]["background_field_path"] == cache_fields
-    assert reuse_group["simulated"] == cache_traces
-    assert "incremental_simulated" not in reuse_group
-    assert reuse.trace_outputs.groups == ["surface_inc"]
-    assert isinstance(BaseJob.load(reuse.save()), LSRTMGradientJob)
 
 
 def test_lsrtm_gradient_job_requires_observed_data(tmp_path):
