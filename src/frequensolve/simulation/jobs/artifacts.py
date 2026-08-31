@@ -1223,7 +1223,7 @@ class JobArtifactMixin:
 
         for group in sim.acquisition.receiver_groups:
             groups.append(group.name)
-            for component in group.device.components:
+            for component in group.device.output_components():
                 components.append(f"{group.name}:{component.name}")
 
         for source_id in sim.acquisition.source_field_ids():

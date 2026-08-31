@@ -2005,6 +2005,10 @@ class Property:
         if isinstance(value, Mapping):
             payload = dict(value)
             _normalize_system_alias(payload)
+            if "parameterized" in payload:
+                from frequensolve.model.parameterization import ParameterizedProperty
+
+                return ParameterizedProperty.from_fs(payload)
             if "expr" in payload:
                 payload.pop("depends_on", None)
                 return cls.expr(

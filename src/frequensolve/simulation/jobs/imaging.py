@@ -2,24 +2,365 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
+from typing import (
+    Any,
+    ClassVar,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import numpy as np
+import xarray as xr
 
 from frequensolve.geometry.grids import CartesianGrid
+from frequensolve.model.representation import (
+    CartesianGridRepresentation,
+    VariationalSmoothing,
+)
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.jobs.base import BaseJob
 from frequensolve.simulation.outputs import JobOutputs, Output
 from frequensolve.simulation.simulation import SeismicSimulation
+from frequensolve.units import value_and_units_to_fs
 from frequensolve.util.class_registry import register_class
 
 __all__ = [
     "ImagingJob",
     "Misfit",
     "MisfitGroup",
+    "PreprocessHook",
     "ImageDatabase",
     "extract_frequencies_for_job",
 ]
+
+
+def _positive_physical_scalar(value: Any, name: str) -> Any:
+    """Validate and serialize one positive scalar with optional units."""
+
+    payload = value_and_units_to_fs(value)
+    magnitude = payload.get("value") if isinstance(payload, Mapping) else payload
+    values = np.asarray(magnitude)
+    if values.ndim != 0 or np.iscomplexobj(values):
+        raise ValueError(f"{name} must be a positive real scalar")
+    try:
+        scalar = float(values)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be numeric") from exc
+    if not np.isfinite(scalar) or scalar <= 0.0:
+        raise ValueError(f"{name} must be finite and positive")
+    return payload
+
+
+def _finite_fraction(value: Any, name: str, *, allow_zero: bool = False) -> float:
+    """Return one finite dimensionless filter fraction."""
+
+    try:
+        scalar = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be numeric") from exc
+    lower_ok = scalar >= 0.0 if allow_zero else scalar > 0.0
+    if not np.isfinite(scalar) or not lower_ok:
+        qualifier = "nonnegative" if allow_zero else "positive"
+        raise ValueError(f"{name} must be finite and {qualifier}")
+    return scalar
+
+
+@dataclass(kw_only=True)
+class PreprocessHook:
+    """One solver preprocessing hook.
+
+    Use :meth:`trace_weight` to author arbitrary nonnegative residual weights
+    with a shape that remains explicit in the solver payload.
+    """
+
+    kind: str
+    stage: str
+    params: Dict[str, Any] = field(default_factory=dict)
+    name: Optional[str] = None
+    schema: str = "fs-preprocess-hook-1"
+    _weight_values: Optional[np.ndarray] = field(default=None, repr=False)
+
+    _MAX_INLINE_TRACE_WEIGHTS: ClassVar[int] = 256
+
+    @classmethod
+    def trace_weight(
+        cls,
+        weights: Any,
+        *,
+        layout: Optional[
+            Literal[
+                "receiver",
+                "component_receiver",
+                "source_component_receiver",
+                "sparse_trace",
+            ]
+        ] = None,
+        name: Optional[str] = None,
+    ) -> "PreprocessHook":
+        """Create a residual-stage per-trace objective-weight hook.
+
+        Multidimensional arrays infer layouts ``receiver`` (1-D),
+        ``component_receiver`` (2-D), or ``source_component_receiver`` (3-D).
+        Receiver is always the fastest-varying flattened dimension. Sparse
+        trace-catalog weights require ``layout="sparse_trace"`` explicitly.
+        """
+
+        values = np.asarray(weights)
+        if values.ndim < 1 or values.ndim > 3 or values.size == 0:
+            raise ValueError("trace weights must be a nonempty 1-D, 2-D, or 3-D array")
+        if np.iscomplexobj(values) and np.any(np.imag(values) != 0):
+            raise ValueError("residual trace weights must be real")
+        try:
+            real_values = np.asarray(np.real(values), dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("residual trace weights must be numeric") from exc
+        if not np.all(np.isfinite(real_values)) or np.any(real_values < 0):
+            raise ValueError("residual trace weights must be finite and nonnegative")
+
+        inferred = {
+            1: "receiver",
+            2: "component_receiver",
+            3: "source_component_receiver",
+        }[real_values.ndim]
+        selected = inferred if layout is None else layout
+        allowed = {
+            "receiver",
+            "component_receiver",
+            "source_component_receiver",
+            "sparse_trace",
+        }
+        if selected not in allowed:
+            raise ValueError(f"unsupported trace-weight layout {selected!r}")
+        expected_ndim = {
+            "receiver": 1,
+            "component_receiver": 2,
+            "source_component_receiver": 3,
+            "sparse_trace": 1,
+        }[selected]
+        if real_values.ndim != expected_ndim:
+            raise ValueError(
+                f"trace-weight layout {selected!r} requires a {expected_ndim}-D array"
+            )
+        return cls(
+            kind="trace_weight",
+            stage="residual",
+            name=name,
+            params={"layout": selected},
+            _weight_values=np.array(real_values, dtype=np.float64, copy=True),
+        )
+
+    @classmethod
+    def receiver_ar1_whiten(
+        cls,
+        correlation: float,
+        *,
+        name: Optional[str] = None,
+    ) -> "PreprocessHook":
+        """Create exact stationary AR(1) whitening along a dense receiver axis."""
+
+        try:
+            rho = float(correlation)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("receiver AR(1) correlation must be numeric") from exc
+        if not np.isfinite(rho) or abs(rho) >= 1.0:
+            raise ValueError(
+                "receiver AR(1) correlation must be finite with absolute value below one"
+            )
+        return cls(
+            kind="receiver_ar1_whiten",
+            stage="trace_pair",
+            name=name,
+            params={"correlation": rho},
+        )
+
+    @classmethod
+    def scholte_notch(
+        cls,
+        phase_velocity: Optional[Any] = None,
+        *,
+        wavenumber: Optional[Any] = None,
+        relative_half_width: float = 0.04,
+        relative_taper_width: float = 0.04,
+        spacing_tolerance: float = 1.0e-3,
+        name: Optional[str] = None,
+    ) -> "PreprocessHook":
+        """Create a smooth receiver-wavenumber notch around a Scholte ridge.
+
+        Supply exactly one ridge description: ``phase_velocity`` predicts the
+        frequency-local angular wavenumber as ``2*pi*f/velocity``;
+        ``wavenumber`` supplies that angular wavenumber directly. The real,
+        symmetric mask is applied along a regularly sampled dense cable.
+        """
+
+        if (phase_velocity is None) == (wavenumber is None):
+            raise ValueError(
+                "scholte_notch requires exactly one of phase_velocity or wavenumber"
+            )
+        params = {
+            "relative_half_width": _finite_fraction(
+                relative_half_width,
+                "relative_half_width",
+                allow_zero=True,
+            ),
+            "relative_taper_width": _finite_fraction(
+                relative_taper_width,
+                "relative_taper_width",
+            ),
+            "spacing_tolerance": _finite_fraction(
+                spacing_tolerance,
+                "spacing_tolerance",
+            ),
+        }
+        if params["spacing_tolerance"] >= 1.0:
+            raise ValueError("spacing_tolerance must be less than one")
+        if phase_velocity is not None:
+            params["phase_velocity"] = _positive_physical_scalar(
+                phase_velocity,
+                "phase_velocity",
+            )
+        else:
+            params["wavenumber"] = _positive_physical_scalar(
+                wavenumber,
+                "wavenumber",
+            )
+        return cls(
+            kind="scholte_notch",
+            stage="trace_pair",
+            name=name,
+            params=params,
+        )
+
+    @classmethod
+    def slow_velocity_mute(
+        cls,
+        stop_velocity: Any,
+        pass_velocity: Any,
+        *,
+        mode: Literal["reject_slow", "keep_slow"] = "reject_slow",
+        spacing_tolerance: float = 1.0e-3,
+        name: Optional[str] = None,
+    ) -> "PreprocessHook":
+        """Create a smooth apparent-velocity fan mute along a dense cable.
+
+        ``reject_slow`` is zero below ``stop_velocity`` and one above
+        ``pass_velocity`` with a raised-cosine transition. ``keep_slow`` uses
+        the complementary mask for paired P/S experiments.
+        """
+
+        if mode not in {"reject_slow", "keep_slow"}:
+            raise ValueError(f"unsupported slow-velocity mute mode {mode!r}")
+        stop = _positive_physical_scalar(stop_velocity, "stop_velocity")
+        passed = _positive_physical_scalar(pass_velocity, "pass_velocity")
+        stop_value = stop.get("value") if isinstance(stop, Mapping) else stop
+        pass_value = passed.get("value") if isinstance(passed, Mapping) else passed
+        stop_units = stop.get("units") if isinstance(stop, Mapping) else None
+        pass_units = passed.get("units") if isinstance(passed, Mapping) else None
+        if stop_units == pass_units and float(pass_value) <= float(stop_value):
+            raise ValueError("pass_velocity must exceed stop_velocity")
+        tolerance = _finite_fraction(spacing_tolerance, "spacing_tolerance")
+        if tolerance >= 1.0:
+            raise ValueError("spacing_tolerance must be less than one")
+        return cls(
+            kind="slow_velocity_mute",
+            stage="trace_pair",
+            name=name,
+            params={
+                "stop_velocity": stop,
+                "pass_velocity": passed,
+                "mode": mode,
+                "spacing_tolerance": tolerance,
+            },
+        )
+
+    def to_fs(self, ctx=None, *, dataset: Optional[str] = None) -> Dict[str, Any]:
+        """Serialize this hook, materializing authored trace weights when possible."""
+
+        params = dict(self.params)
+        if self.kind == "trace_weight" and self._weight_values is not None:
+            store = getattr(ctx, "store", None) if ctx is not None else None
+            if store is None:
+                if self._weight_values.size > self._MAX_INLINE_TRACE_WEIGHTS:
+                    raise ValueError(
+                        "large trace weights require an export context with an HDF5 store"
+                    )
+                params["weights"] = self._weight_values.reshape(-1, order="C").tolist()
+            else:
+                if dataset is None:
+                    raise ValueError(
+                        "trace-weight HDF5 serialization requires a dataset path"
+                    )
+                dims = {
+                    1: ("receiver",),
+                    2: ("component", "receiver"),
+                    3: ("source", "component", "receiver"),
+                }[self._weight_values.ndim]
+                if params.get("layout") == "sparse_trace":
+                    dims = ("trace",)
+                ref = store.put_dataarray(
+                    dataset,
+                    xr.DataArray(self._weight_values, dims=dims),
+                    attrs={"fs_kind": "residual_trace_weights"},
+                    coordinate_dims=(),
+                    dtype=np.float64,
+                )
+                params["weights"] = {
+                    "_type": "HDF5Dense",
+                    **ref.to_fs(format="HDF5"),
+                }
+
+        return {
+            "schema": self.schema,
+            **({"name": self.name} if self.name is not None else {}),
+            "kind": self.kind,
+            "stage": self.stage,
+            "params": params,
+        }
+
+    @classmethod
+    def from_fs(cls, data: Dict[str, Any]) -> "PreprocessHook":
+        """Deserialize a preprocessing hook."""
+
+        return cls(
+            schema=data.get("schema", "fs-preprocess-hook-1"),
+            name=data.get("name"),
+            kind=data["kind"],
+            stage=data["stage"],
+            params=dict(data.get("params", {})),
+        )
+
+
+def _preprocess_to_fs(
+    hooks: Sequence[Union[PreprocessHook, Dict[str, Any]]],
+    ctx=None,
+    *,
+    scope: str,
+) -> List[Dict[str, Any]]:
+    """Serialize typed and raw preprocessing hooks without changing order."""
+
+    return [
+        (
+            hook.to_fs(
+                ctx,
+                dataset=f"inputs/imaging/trace_weights/{scope}/{index}",
+            )
+            if isinstance(hook, PreprocessHook)
+            else dict(hook)
+        )
+        for index, hook in enumerate(hooks)
+    ]
+
+
+def _preprocess_from_fs(hooks: Sequence[Dict[str, Any]]) -> List[PreprocessHook]:
+    """Deserialize preprocessing hook payloads."""
+
+    return [PreprocessHook.from_fs(hook) for hook in hooks]
 
 
 @dataclass(kw_only=True)
@@ -225,12 +566,21 @@ class MisfitGroup:
     name: str = ""
     observed: Optional[Union[str, Path]] = None
     simulated: Union[str, Path] = ""
+    preprocess: List[Union[PreprocessHook, Dict[str, Any]]] = field(
+        default_factory=list
+    )
 
     def __post_init__(self):
         self.observed = None if self.observed is None else Path(self.observed)
         self.simulated = Path(self.simulated)
 
-    def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
+    def to_fs(
+        self,
+        ctx=None,
+        *,
+        project_relative: bool = False,
+        preprocess_scope: Optional[str] = None,
+    ) -> Dict:
         """Serialize the receiver-group misfit path mapping.
 
         Args:
@@ -246,7 +596,87 @@ class MisfitGroup:
             "name": self.name,
             "observed": self.observed,
             "simulated": self.simulated,
+            **(
+                {
+                    "preprocess": _preprocess_to_fs(
+                        self.preprocess,
+                        ctx,
+                        scope=preprocess_scope or f"receiver_groups/{self.name}",
+                    )
+                }
+                if self.preprocess
+                else {}
+            ),
         }
+
+    def add_trace_weights(
+        self,
+        weights: Any,
+        *,
+        layout: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> PreprocessHook:
+        """Append arbitrary residual weights for this receiver group."""
+
+        hook = PreprocessHook.trace_weight(weights, layout=layout, name=name)
+        self.preprocess.append(hook)
+        return hook
+
+    def add_receiver_ar1_whitening(
+        self,
+        correlation: float,
+        *,
+        name: Optional[str] = None,
+    ) -> PreprocessHook:
+        """Append stationary neighbor-covariance whitening for this group."""
+
+        hook = PreprocessHook.receiver_ar1_whiten(correlation, name=name)
+        self.preprocess.append(hook)
+        return hook
+
+    def add_scholte_notch(
+        self,
+        phase_velocity: Optional[Any] = None,
+        *,
+        wavenumber: Optional[Any] = None,
+        relative_half_width: float = 0.04,
+        relative_taper_width: float = 0.04,
+        spacing_tolerance: float = 1.0e-3,
+        name: Optional[str] = None,
+    ) -> PreprocessHook:
+        """Append a smooth Scholte-ridge notch for this receiver group."""
+
+        hook = PreprocessHook.scholte_notch(
+            phase_velocity,
+            wavenumber=wavenumber,
+            relative_half_width=relative_half_width,
+            relative_taper_width=relative_taper_width,
+            spacing_tolerance=spacing_tolerance,
+            name=name,
+        )
+        self.preprocess.append(hook)
+        return hook
+
+    def add_slow_velocity_mute(
+        self,
+        stop_velocity: Any,
+        pass_velocity: Any,
+        *,
+        mode: Literal["reject_slow", "keep_slow"] = "reject_slow",
+        spacing_tolerance: float = 1.0e-3,
+        name: Optional[str] = None,
+    ) -> PreprocessHook:
+        """Append a smooth apparent-velocity fan mute for this receiver group."""
+
+        hook = PreprocessHook.slow_velocity_mute(
+            stop_velocity,
+            pass_velocity,
+            mode=mode,
+            spacing_tolerance=spacing_tolerance,
+            name=name,
+        )
+        self.preprocess.append(hook)
+        return hook
 
     @classmethod
     def from_fs(cls, data: Dict) -> "MisfitGroup":
@@ -263,6 +693,7 @@ class MisfitGroup:
             name=data["name"],
             observed=data["observed"],
             simulated=data["simulated"],
+            preprocess=_preprocess_from_fs(data.get("preprocess", [])),
         )
 
 
@@ -278,6 +709,9 @@ class Misfit:
 
     norm: Literal["L2"] = "L2"
     receiver_groups: List[MisfitGroup] = field(default_factory=list)
+    preprocess: List[Union[PreprocessHook, Dict[str, Any]]] = field(
+        default_factory=list
+    )
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
         """Serialize the imaging misfit configuration.
@@ -293,7 +727,24 @@ class Misfit:
 
         return {
             "norm": self.norm,
-            "receiver_groups": [group.to_fs(ctx) for group in self.receiver_groups],
+            **(
+                {
+                    "preprocess": _preprocess_to_fs(
+                        self.preprocess,
+                        ctx,
+                        scope="misfit",
+                    )
+                }
+                if self.preprocess
+                else {}
+            ),
+            "receiver_groups": [
+                group.to_fs(
+                    ctx,
+                    preprocess_scope=f"receiver_groups/{index}",
+                )
+                for index, group in enumerate(self.receiver_groups)
+            ],
         }
 
     @classmethod
@@ -309,6 +760,7 @@ class Misfit:
 
         return cls(
             norm=data["norm"],
+            preprocess=_preprocess_from_fs(data.get("preprocess", [])),
             receiver_groups=[
                 MisfitGroup.from_fs(group) for group in data["receiver_groups"]
             ],
@@ -353,6 +805,7 @@ class ImagingJob(BaseJob):
     data_path: Optional[Union[str, Path]]
     save_path: Union[str, Path]
     grid: CartesianGrid = field(default_factory=CartesianGrid)
+    representation: CartesianGridRepresentation = field(init=False)
     keep_forward: bool = False
     keep_adjoint: bool = False
     keep_unstacked: bool = False
@@ -368,6 +821,7 @@ class ImagingJob(BaseJob):
         f_list: Optional[List[float]] = None,
         resolution: Optional[List[int]] = None,
         grid: Optional[CartesianGrid] = None,
+        representation: Optional[CartesianGridRepresentation] = None,
         images: Optional[dict] = None,
         weights: Optional[List[float]] = None,
         wavelet: Optional[Wavelet] = None,
@@ -375,7 +829,7 @@ class ImagingJob(BaseJob):
         keep_forward: bool = False,
         keep_adjoint: bool = False,
         keep_unstacked: bool = False,
-        regularization: Optional[dict] = None,
+        regularization: Optional[Union[VariationalSmoothing, Mapping[str, Any]]] = None,
         save_path: Optional[Union[str, Path]] = None,
         reassemble_adjoint: bool = False,
         outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
@@ -432,8 +886,18 @@ class ImagingJob(BaseJob):
         else:
             self.weights = None
 
-        if regularization is not None:
+        if isinstance(regularization, VariationalSmoothing):
+            if regularization.derivative_order != 1:
+                raise ValueError(
+                    "Cartesian image smoothing uses mixed first-order FEM fields"
+                )
+            if regularization.input_role != "primal":
+                raise ValueError(
+                    "Cartesian image samples require smoothing input_role='primal'"
+                )
             self.regularization = regularization
+        elif regularization is not None:
+            self.regularization = dict(regularization)
         else:
             self.regularization = {
                 "type": "TV",
@@ -457,7 +921,15 @@ class ImagingJob(BaseJob):
                 )
             )
 
-        if grid is not None:
+        if grid is not None and representation is not None:
+            raise ValueError("provide either grid or representation, not both")
+        if representation is not None:
+            if not isinstance(representation, CartesianGridRepresentation):
+                raise TypeError(
+                    "Sauce imaging currently requires a CartesianGridRepresentation"
+                )
+            self.grid = representation.grid
+        elif grid is not None:
             self.grid = grid
         # TODO: this will only work for a layered model right now
         elif simulation.model.dimension == 2:
@@ -485,6 +957,7 @@ class ImagingJob(BaseJob):
             self.grid = CartesianGrid(x0=x0, x1=x1, n=resolution)
         else:
             raise ValueError(f"Unknown model dimension: {simulation.model.dimension}")
+        self.representation = CartesianGridRepresentation(self.grid)
         self.reassemble_adjoint = reassemble_adjoint
 
     def image_file(self, part: Optional[int] = None) -> Path:
@@ -493,6 +966,16 @@ class ImagingJob(BaseJob):
         if part is None:
             return self.save_path / "image.h5"
         return self.save_path / f"image_{part}.h5"
+
+    def requires_postprocess(self) -> bool:
+        """Return true because images are stacked and smoothed after tasks."""
+
+        return True
+
+    def postprocess_file(self, part: Optional[int] = None) -> Path:
+        """Return the aggregate or task-local image path."""
+
+        return self.image_file(part)
 
     def load_images(self) -> ImageDatabase:
         """Open imaging results that are already present locally.
@@ -520,6 +1003,11 @@ class ImagingJob(BaseJob):
 
         return self.image_file().is_file()
 
+    def postprocess_output_exists(self) -> bool:
+        """Return whether the final stacked image exists locally."""
+
+        return self.image_output_exists()
+
     def image_part_outputs_exist(self) -> bool:
         """Return whether every per-frequency image shard exists locally."""
 
@@ -527,10 +1015,15 @@ class ImagingJob(BaseJob):
             self.image_file(part).is_file() for part in range(1, self.n_tasks + 1)
         )
 
+    def postprocess_part_outputs_exist(self) -> bool:
+        """Return whether every per-frequency image shard exists locally."""
+
+        return self.image_part_outputs_exist()
+
     def needs_image_smoothing(self) -> bool:
         """Return whether local shards are present but ``image.h5`` is missing."""
 
-        return self.image_part_outputs_exist() and not self.image_output_exists()
+        return self.needs_postprocess()
 
     def is_run_current(self) -> bool:
         """Return whether the imaging run and aggregate image are current."""
@@ -574,20 +1067,42 @@ class ImagingJob(BaseJob):
                 self.save_path, project_relative=project_relative
             ),
             "misfit": self._misfit_to_fs(ctx, project_relative=project_relative),
-            "grid": self.grid.to_fs(ctx),
+            "grid": self.representation.to_fs(ctx),
             "keep_forward": self.keep_forward,
             "keep_adjoint": self.keep_adjoint,
             "keep_unstacked": self.keep_unstacked,
             "images": images,
             "weights": self.weights,
             "reassemble_adjoint": self.reassemble_adjoint,
-            "Smoothing": self.regularization,
+            "Smoothing": self._smoothing_to_fs(),
             **self.kwargs,
         }
         return {
-            **super().to_fs(project_relative=project_relative),
+            **super().to_fs(ctx, project_relative=project_relative),
             "Image": imaging,
         }
+
+    def _smoothing_to_fs(self) -> Dict[str, Any]:
+        """Serialize smoothing for the Cartesian-image FEM implementation."""
+
+        if not isinstance(self.regularization, VariationalSmoothing):
+            payload = dict(self.regularization)
+            if (
+                "illumination_normalization" not in payload
+                and "normalize_illumination" not in payload
+            ):
+                payload["illumination_normalization"] = "none"
+            return payload
+        config = self.regularization
+        payload = config.to_fs()
+        payload.pop("input_role")
+        if config.reference_wavelength is not None:
+            payload.pop("reference_wavelength")
+            if config.kind == "tgv":
+                payload["alpha1"], payload["alpha2"] = config.resolved_tgv_weights()
+            elif config.kind in {"tikhonov", "tv"}:
+                payload["alpha"] = config.resolved_alpha()
+        return payload
 
     @classmethod
     def from_fs(

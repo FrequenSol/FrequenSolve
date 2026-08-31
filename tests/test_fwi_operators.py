@@ -8,10 +8,15 @@ import xarray as xr
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
+from frequensolve.model.representation import VariationalSmoothing
 from frequensolve.seismic.acquisition import Acquisition
-from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
+from frequensolve.seismic.receivers import (
+    EncodedReceiver,
+    ReceiverComponent,
+    ReceiverNode,
+)
 from frequensolve.seismic.sources import SourceGeometry
-from frequensolve.simulation.jobs import BaseJob
+from frequensolve.simulation.jobs import BaseJob, FrequencyDomainJob
 from frequensolve.simulation.jobs.fwi import DataSpace, ModelSpace
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
 from frequensolve.simulation.outputs import VtkOutput
@@ -100,6 +105,32 @@ def test_data_space_packs_trace_groups_in_frequency_source_component_receiver_or
         "receiver",
     )
     assert roundtrip["surface"].coords["component"].values.tolist() == ["vz"]
+
+
+def test_data_space_uses_encoded_receiver_outputs_and_reduced_geometry(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    sim.acquisition.receiver_groups[0].device = EncodedReceiver(
+        components=[ReceiverComponent(name="vz", field="velocity")],
+        weights=np.ones((2, 1, 2), dtype=np.complex64),
+        encoding_names=["focus_a", "focus_b"],
+    )
+
+    space = DataSpace.from_simulation(sim, frequencies=[5.0])
+
+    assert space.segments[0].components == ("focus_a", "focus_b")
+    assert space.segments[0].receivers == (1,)
+    assert space.size == 2
+
+    job = FrequencyDomainJob(name="encoded", simulation=sim, f_list=[5.0])
+    assert job.trace_outputs.components == [
+        "surface:focus_a",
+        "surface:focus_b",
+    ]
+
+    sim.acquisition.receiver_groups[0].device.reduction = "none"
+    unreduced = DataSpace.from_simulation(sim, frequencies=[5.0])
+    assert unreduced.segments[0].receivers == (1, 2)
+    assert unreduced.size == 4
 
 
 def test_data_space_requires_known_external_source_count(tmp_path):
@@ -235,6 +266,112 @@ def test_legacy_imaging_images_syntax_still_serializes(tmp_path):
     ]
 
 
+def test_imaging_job_serializes_representation_independent_tgv_smoothing(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+
+    job = ImagingJob(
+        name="rtm",
+        simulation=sim,
+        f_list=[5.0],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        regularization=VariationalSmoothing(
+            kind="tgv",
+            wavelength_fraction=0.5,
+            tgv_ratio=2.0,
+            epsilon=0.01,
+            iterations=7,
+            input_role="primal",
+        ),
+    )
+
+    assert job.to_fs()["Image"]["Smoothing"] == {
+        "type": "tgv",
+        "lambda": 0.5,
+        "derivative_order": 1,
+        "epsilon": 0.01,
+        "iterations": 7,
+        "tgv_ratio": 2.0,
+        "illumination_normalization": "none",
+    }
+
+
+def test_imaging_job_native_smoothing_mapping_defaults_to_no_illumination(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+
+    job = ImagingJob(
+        name="rtm",
+        simulation=sim,
+        f_list=[5.0],
+        grid=grid,
+        regularization={"type": "tikhonov", "lambda": 0.5},
+    )
+    legacy = ImagingJob(
+        name="legacy_rtm",
+        simulation=sim,
+        f_list=[5.0],
+        grid=grid,
+        regularization={
+            "type": "tikhonov",
+            "lambda": 0.5,
+            "normalize_illumination": True,
+        },
+    )
+
+    assert job.to_fs()["Image"]["Smoothing"]["illumination_normalization"] == "none"
+    assert "illumination_normalization" not in legacy.to_fs()["Image"]["Smoothing"]
+
+
+def test_imaging_job_rejects_dual_or_second_derivative_smoothing(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+
+    with pytest.raises(ValueError, match="input_role='primal'"):
+        ImagingJob(
+            name="dual",
+            simulation=sim,
+            f_list=[5.0],
+            grid=grid,
+            regularization=VariationalSmoothing(),
+        )
+    with pytest.raises(ValueError, match="first-order"):
+        ImagingJob(
+            name="second",
+            simulation=sim,
+            f_list=[5.0],
+            grid=grid,
+            regularization=VariationalSmoothing(
+                derivative_order=2,
+                input_role="primal",
+            ),
+        )
+
+
+def test_imaging_job_resolves_reference_wavelength_before_export(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+
+    job = ImagingJob(
+        name="reference",
+        simulation=sim,
+        f_list=[5.0],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        regularization=VariationalSmoothing(
+            kind="tgv",
+            wavelength_fraction=0.5,
+            reference_wavelength=2.0,
+            tgv_ratio=2.0,
+            input_role="primal",
+        ),
+    )
+
+    smoothing = job.to_fs()["Image"]["Smoothing"]
+    alpha1 = 1.0 / (2.0 * np.pi)
+    assert smoothing["alpha1"] == alpha1
+    assert smoothing["alpha2"] == 2.0 * alpha1**2
+    assert "reference_wavelength" not in smoothing
+    assert "input_role" not in smoothing
+
+
 def test_imaging_job_save_and_load_round_trips_project_relative_simulation(tmp_path):
     sim = _elastic_simulation(tmp_path)
     observed = tmp_path / "observed" / "traces"
@@ -269,7 +406,46 @@ def test_imaging_job_save_and_load_round_trips_project_relative_simulation(tmp_p
         "lambda": 1.0,
         "epsilon": 1.0,
         "iterations": 5,
+        "illumination_normalization": "none",
     }
+
+
+def test_imaging_job_saves_trace_weights_in_job_owned_hdf5(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    job = sim.imaging_job(
+        name="weighted_rtm",
+        frequencies=[5.0],
+        parameters=["vp"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+    )
+    weights = np.asarray([[[0.25, 2.0]]])
+    job.misfit.receiver_groups[0].add_trace_weights(weights)
+
+    job_file = job.save()
+    saved = json.loads(job_file.read_text())
+    reference = saved["Image"]["misfit"]["receiver_groups"][0]["preprocess"][0][
+        "params"
+    ]["weights"]
+
+    assert reference["_type"] == "HDF5Dense"
+    assert reference["file"] == "jobs/smooth/weighted_rtm/inputs.h5"
+    with h5py.File(tmp_path / reference["file"], "r") as h5:
+        stored = h5[reference["dataset"]]
+        np.testing.assert_allclose(stored[:], weights)
+        assert "source" not in stored.attrs
+        assert "receiver" not in stored.attrs
+    loaded = BaseJob.load(job_file)
+    assert (
+        loaded.to_fs()["Image"]["misfit"]["receiver_groups"][0]["preprocess"][0][
+            "params"
+        ]["weights"]
+        == reference
+    )
+    fingerprint = job.fingerprint()
+    job.misfit.receiver_groups[0].preprocess.clear()
+    job.misfit.receiver_groups[0].add_trace_weights(np.asarray([[[0.5, 2.0]]]))
+    assert fingerprint.startswith("blake3:")
+    assert job.fingerprint() != fingerprint
 
 
 def test_imaging_job_without_observed_saves_and_loads_null_data_path(tmp_path):

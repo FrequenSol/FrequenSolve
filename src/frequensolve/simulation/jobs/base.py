@@ -24,6 +24,8 @@ from frequensolve.simulation.outputs import (
     TraceOutput,
 )
 from frequensolve.simulation.simulation import BaseSimulation
+from frequensolve.util.mixins import ExportContext
+from frequensolve.util.store import SimulationStore
 
 __all__ = [
     "JobLayout",
@@ -537,6 +539,48 @@ class BaseJob(
 
         return len(self.f_list)
 
+    def requires_postprocess(self) -> bool:
+        """Return whether frequency tasks require one solver postprocess step."""
+
+        return False
+
+    def postprocess_output_exists(self) -> bool:
+        """Return whether the final postprocessed product exists locally."""
+
+        return True
+
+    def postprocess_part_outputs_exist(self) -> bool:
+        """Return whether all task-local postprocess inputs exist locally."""
+
+        return True
+
+    def needs_postprocess(self) -> bool:
+        """Return whether complete task shards still need postprocessing."""
+
+        if not self.requires_postprocess() or not self.postprocess_part_outputs_exist():
+            return False
+        if not self.postprocess_output_exists():
+            return True
+        output = self.postprocess_file()
+        try:
+            output_time = output.stat().st_mtime_ns
+            return any(
+                self.postprocess_file(part).stat().st_mtime_ns > output_time
+                for part in range(1, self.n_tasks + 1)
+            )
+        except OSError:
+            return True
+
+    def postprocess_file(self, part: Optional[int] = None) -> Path:
+        """Return a postprocess output/input path for jobs that support it."""
+
+        raise NotImplementedError(f"{type(self).__name__} has no postprocess product")
+
+    def postprocess_fetch_files(self) -> List[Path]:
+        """Return finalized postprocess artifacts that remote sites should fetch."""
+
+        return [self.postprocess_file()]
+
     def _project_path(self) -> Path:
         project_path = getattr(self.simulation, "project_path", None)
         if project_path is None:
@@ -547,6 +591,20 @@ class BaseJob(
     def _local_path(self):
         project_path = Path(self.project_path)
         return project_path / "jobs" / self.simulation.name / self.name
+
+    def export_context(self) -> ExportContext:
+        """Return the job-owned context used for bulk input arrays."""
+
+        project_path = Path(self.project_path)
+        store = SimulationStore(
+            self._local_path / "inputs.h5",
+            project_path=project_path,
+        )
+        return ExportContext(
+            project_path,
+            self._local_path.relative_to(project_path),
+            store=store,
+        )
 
     @property
     def _stdout_path(self):
