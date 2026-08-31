@@ -620,10 +620,12 @@ class DataSpace:
 
         segments = []
         for group in simulation.acquisition.receiver_groups:
-            components = tuple(component.name for component in group.device.components)
+            components = tuple(
+                component.name for component in group.device.output_components()
+            )
             if not components:
                 raise ValueError(f"Receiver group '{group.name}' has no components")
-            receivers = tuple(range(1, int(group.size) + 1))
+            receivers = tuple(range(1, group.output_size + 1))
             segments.append(
                 _DataSegment(
                     group=group.name,

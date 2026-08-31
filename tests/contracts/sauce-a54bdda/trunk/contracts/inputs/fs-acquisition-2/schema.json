@@ -150,6 +150,19 @@
           "type": "string",
           "minLength": 1
         },
+        "names_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional UTF-8 source-name dataset in the same HDF5 file."
+        },
+        "hash": {
+          "type": "string",
+          "description": "Optional content hash used for provenance and rerun invalidation."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        },
         "system": {
           "type": "string"
         },
@@ -267,6 +280,11 @@
           "items": {
             "$ref": "#/$defs/namedEncodingField"
           }
+        },
+        "conjugate_coefficients": {
+          "type": "boolean",
+          "default": false,
+          "description": "Conjugate all source coefficients in the runtime without rewriting authored storage."
         }
       },
       "additionalProperties": false
@@ -289,13 +307,16 @@
           }
         },
         "reference_coordinates": {
-          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue",
+          "deprecated": true,
+          "description": "Deprecated legacy field reference. Physical source geometry and the simulation coordinate system are authoritative."
         }
       },
       "additionalProperties": false
     },
     "jsonDenseSourceEncoding": {
       "type": "object",
+      "description": "Compact inline dense encoding for small examples and compatibility. Saved production inputs should use HDF5Dense.",
       "required": [
         "_type",
         "fields"
@@ -313,12 +334,18 @@
           "items": {
             "$ref": "#/$defs/denseEncodingField"
           }
+        },
+        "conjugate_coefficients": {
+          "type": "boolean",
+          "default": false,
+          "description": "Conjugate all source coefficients in the runtime without rewriting authored storage."
         }
       },
       "additionalProperties": false
     },
     "hdf5DenseSourceEncoding": {
       "type": "object",
+      "description": "Bulk dense complex encoding stored with h5py shape (field, source, complex=2), or frequency-dependent shape (frequency, field, source, complex=2). Small field labels use a separate dataset; production source-axis values are not copied into metadata.",
       "required": [
         "_type",
         "file",
@@ -338,13 +365,23 @@
           "type": "string",
           "minLength": 1
         },
+        "hash": {
+          "type": "string",
+          "description": "Optional content hash used for provenance and rerun invalidation."
+        },
+        "conjugate_coefficients": {
+          "type": "boolean",
+          "default": false,
+          "description": "Conjugate all source coefficients in the runtime without rewriting the HDF5 dataset."
+        },
         "field_names_dataset": {
           "type": "string",
           "minLength": 1
         },
-        "reference_coordinates_dataset": {
+        "frequencies_dataset": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Required for a rank-4 coefficient tensor; contains the physical frequency in Hz for each tensor slice."
         }
       },
       "additionalProperties": false
@@ -361,12 +398,593 @@
           "$ref": "#/$defs/hdf5DenseSourceEncoding"
         }
       ]
+    },
+    "sampledPressureData": {
+      "type": "object",
+      "required": [
+        "file",
+        "dataset"
+      ],
+      "properties": {
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "format": {
+          "const": "HDF5"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "system": {
+          "type": "string",
+          "default": "global"
+        }
+      },
+      "additionalProperties": true,
+      "description": "Component-packed HDF5 xarray field. Its dataset metadata defines only the spatial interpolation dimensions; frequency or time samples occupy the trailing component axis."
+    },
+    "surfacePressureFrequencyField": {
+      "type": "object",
+      "required": [
+        "source",
+        "reference_coordinate",
+        "rhs_normalization",
+        "domain",
+        "frequencies",
+        "data"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_coordinate": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+        },
+        "rhs_normalization": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Positive source scale in the pressure units declared by data. Authoring libraries derive it from the maximum field magnitude."
+        },
+        "domain": {
+          "const": "frequency"
+        },
+        "frequencies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number",
+            "minimum": 0.0
+          },
+          "description": "Strictly increasing physical frequencies in Hz. The HDF5 component axis stores [real, imag] for each frequency in this order."
+        },
+        "data": {
+          "$ref": "#/$defs/sampledPressureData"
+        }
+      },
+      "additionalProperties": false
+    },
+    "surfacePressureTimeField": {
+      "type": "object",
+      "required": [
+        "source",
+        "reference_coordinate",
+        "rhs_normalization",
+        "domain",
+        "time_origin",
+        "time_step",
+        "data"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_coordinate": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+        },
+        "rhs_normalization": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Positive source scale in the pressure units declared by data. Authoring libraries derive it from the maximum absolute time sample."
+        },
+        "domain": {
+          "const": "time"
+        },
+        "time_origin": {
+          "type": "number",
+          "description": "Physical time of the first sample in seconds."
+        },
+        "time_step": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Uniform physical sample interval in seconds."
+        },
+        "window": {
+          "enum": [
+            "none",
+            "hann"
+          ],
+          "default": "none"
+        },
+        "detrend": {
+          "enum": [
+            "none",
+            "mean"
+          ],
+          "default": "none"
+        },
+        "data": {
+          "$ref": "#/$defs/sampledPressureData"
+        }
+      },
+      "additionalProperties": false
+    },
+    "surfacePressureLoading": {
+      "type": "object",
+      "required": [
+        "_type",
+        "boundary_condition",
+        "fields"
+      ],
+      "properties": {
+        "_type": {
+          "const": "SurfacePressure"
+        },
+        "boundary_condition": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable name of a boundary-condition assignment containing gravity_surface."
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/surfacePressureFrequencyField"
+              },
+              {
+                "$ref": "#/$defs/surfacePressureTimeField"
+              }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "positiveLength": {
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number",
+              "exclusiveMinimum": 0.0
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "A positive scalar length, optionally with units."
+    },
+    "gaussianBeamSource": {
+      "type": "object",
+      "required": [
+        "origin",
+        "width"
+      ],
+      "properties": {
+        "origin": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue",
+          "description": "Gaussian-beam waist center in the simulation coordinate system."
+        },
+        "theta": {
+          "type": "number",
+          "default": 0.0,
+          "description": "Global beam propagation angle in degrees. In two dimensions, zero propagates along the positive first simulation-coordinate axis; the angle is independent of boundary orientation."
+        },
+        "phi": {
+          "type": "number",
+          "default": 90.0,
+          "description": "Three-dimensional beam azimuth in degrees."
+        },
+        "polarization": {
+          "type": "number",
+          "default": 45.0,
+          "description": "Electric-field polarization angle in degrees for Maxwell excitation."
+        },
+        "width": {
+          "$ref": "#/$defs/positiveLength",
+          "description": "Positive Gaussian waist radius."
+        },
+        "amplitude": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Incident-field amplitude."
+        },
+        "n0": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "default": 1.0,
+          "description": "Reference slowness used by the analytic beam."
+        }
+      },
+      "additionalProperties": false
+    },
+    "gaussianImpedanceBeam": {
+      "type": "object",
+      "required": [
+        "rhs",
+        "source"
+      ],
+      "properties": {
+        "rhs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "One-based RHS field within the active acquisition batch. Multiple beams assigned to the same RHS are summed."
+        },
+        "source": {
+          "$ref": "#/$defs/gaussianBeamSource"
+        }
+      },
+      "additionalProperties": false
+    },
+    "gaussianBeamImpedanceSources": {
+      "type": "object",
+      "required": [
+        "_type",
+        "beams"
+      ],
+      "properties": {
+        "_type": {
+          "const": "GaussianBeam"
+        },
+        "beams": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/gaussianImpedanceBeam"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Analytic incident fields applied as nonhomogeneous impedance data. All referenced RHS fields must fit in one acquisition batch."
+    },
+    "pointImpedanceField": {
+      "type": "object",
+      "required": [
+        "rhs",
+        "source"
+      ],
+      "properties": {
+        "rhs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "One-based RHS field receiving the outgoing point Green field."
+        },
+        "source": {
+          "$ref": "#/$defs/pointEquivalentSource"
+        }
+      },
+      "additionalProperties": false
+    },
+    "pointSourceImpedanceSources": {
+      "type": "object",
+      "required": [
+        "_type",
+        "points"
+      ],
+      "properties": {
+        "_type": {
+          "const": "PointSource"
+        },
+        "points": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/pointImpedanceField"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Outgoing point Green fields applied as nonhomogeneous data on impedance boundaries."
+    },
+    "gaussianEquivalentSourceSurface": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "boundary"
+          ],
+          "properties": {
+            "kind": {
+              "const": "pml_interface"
+            },
+            "boundary": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Name of the original geometric boundary from which the PML was extruded. The source sheet is assembled on the physical side of this interface."
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "point",
+            "normal"
+          ],
+          "properties": {
+            "kind": {
+              "const": "internal_plane"
+            },
+            "point": {
+              "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue",
+              "description": "A point on a plane that must coincide with root-element sides."
+            },
+            "normal": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector",
+              "description": "Plane normal pointing toward the positive emission half-space."
+            },
+            "emission_side": {
+              "enum": [
+                "positive",
+                "negative"
+              ],
+              "default": "positive",
+              "description": "Half-space in which the prescribed incident field is retained and whose element sides support the load."
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "positiveLengthVector": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0.0
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 3,
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              }
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "pointEquivalentSourceSurface": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "half_width"
+          ],
+          "properties": {
+            "kind": {
+              "const": "adaptive_box"
+            },
+            "half_width": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/positiveLength"
+                },
+                {
+                  "$ref": "#/$defs/positiveLengthVector"
+                }
+              ],
+              "description": "Scalar or per-axis half-width of an axis-aligned closed Huygens box. Its faces must coincide with adaptive leaf-element sides; the exterior leaves carry the load."
+            },
+            "enrichment_order": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Optional polynomial order applied to every adaptive leaf element whose closed bounding box intersects the Huygens box."
+            },
+            "loading": {
+              "enum": [
+                "huygens",
+                "monopole",
+                "dipole"
+              ],
+              "default": "huygens",
+              "description": "Surface loading: paired pressure and normal-velocity Cauchy data for interior cancellation, or one analytic monopole or dipole sheet."
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "inner_radius",
+            "outer_radius"
+          ],
+          "properties": {
+            "kind": {
+              "const": "volume_shell"
+            },
+            "inner_radius": {
+              "$ref": "#/$defs/positiveLength",
+              "description": "Radius inside which the analytic point field is removed."
+            },
+            "outer_radius": {
+              "$ref": "#/$defs/positiveLength",
+              "description": "Radius outside which the analytic point field is fully retained. It must exceed inner_radius."
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "gaussianEquivalentIncidentField": {
+      "type": "object",
+      "required": [
+        "kind",
+        "beams"
+      ],
+      "properties": {
+        "kind": {
+          "const": "gaussian_beam"
+        },
+        "beams": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/gaussianImpedanceBeam"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "pointEquivalentSource": {
+      "type": "object",
+      "required": [
+        "origin"
+      ],
+      "properties": {
+        "origin": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue",
+          "description": "Center of the outgoing acoustic Green field."
+        },
+        "amplitude": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Green-field amplitude."
+        },
+        "phase": {
+          "type": "number",
+          "default": 0.0,
+          "description": "Complex source phase in degrees. Positive values multiply the incident Green field by exp(+i phase)."
+        },
+        "n0": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "default": 1.0,
+          "description": "Reference slowness of the homogeneous medium surrounding the source."
+        }
+      },
+      "additionalProperties": false
+    },
+    "pointEquivalentIncidentField": {
+      "type": "object",
+      "required": [
+        "kind",
+        "source"
+      ],
+      "properties": {
+        "kind": {
+          "const": "point_source"
+        },
+        "rhs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "One-based RHS field receiving the point Green field."
+        },
+        "source": {
+          "$ref": "#/$defs/pointEquivalentSource"
+        }
+      },
+      "additionalProperties": false
+    },
+    "equivalentSources": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "surface",
+            "incident_field"
+          ],
+          "properties": {
+            "surface": {
+              "$ref": "#/$defs/gaussianEquivalentSourceSurface"
+            },
+            "incident_field": {
+              "$ref": "#/$defs/gaussianEquivalentIncidentField"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "surface",
+            "incident_field"
+          ],
+          "properties": {
+            "surface": {
+              "$ref": "#/$defs/pointEquivalentSourceSurface"
+            },
+            "incident_field": {
+              "$ref": "#/$defs/pointEquivalentIncidentField"
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "description": "Experimental analytic incident-field injection through either an additive DPG source sheet or a smooth volume shell. The trial and trace operators remain unchanged and therefore transparent to solved waves.",
+      "x-fs-visibility": "experimental"
     }
   },
   "type": "object",
-  "required": [
-    "source_geometry"
+  "anyOf": [
+    {
+      "required": [
+        "source_geometry"
+      ]
+    },
+    {
+      "required": [
+        "boundary_loadings"
+      ]
+    }
   ],
+  "dependentRequired": {
+    "source_encoding": [
+      "source_geometry"
+    ]
+  },
   "properties": {
     "schema": {
       "const": "fs-acquisition-2"
@@ -384,6 +1002,28 @@
     },
     "source_encoding": {
       "$ref": "#/$defs/sourceEncoding"
+    },
+    "boundary_loadings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/surfacePressureLoading"
+      },
+      "description": "Distributed nonhomogeneous boundary fields. SurfacePressure fields become logical RHS sources and may use independent spatial grids."
+    },
+    "impedance_sources": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/gaussianBeamImpedanceSources"
+        },
+        {
+          "$ref": "#/$defs/pointSourceImpedanceSources"
+        }
+      ]
+    },
+    "equivalent_sources": {
+      "$ref": "#/$defs/equivalentSources",
+      "x-fs-visibility": "experimental"
     },
     "receiver_groups": {
       "type": "array",
