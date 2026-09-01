@@ -13,6 +13,7 @@ from frequensolve import (
     Direction,
     DistributedSource,
     EncodedReceiver,
+    EncodedSource,
     PointSource,
     ReceiverArray,
     ReceiverComponent,
@@ -56,10 +57,10 @@ def _five_point_four_field_acquisition() -> Acquisition:
     )
     encoding = SourceEncoding.named(
         [
-            DistributedSource.named("shot_left", {"shot_left": 1.0}),
-            DistributedSource.named("shot_center", {"shot_center": 1.0}),
-            DistributedSource.named("shot_right", {"shot_right": 1.0}),
-            DistributedSource.named("difference", {"pair_pos": 1.0, "pair_neg": -1.0}),
+            EncodedSource.named("shot_left", {"shot_left": 1.0}),
+            EncodedSource.named("shot_center", {"shot_center": 1.0}),
+            EncodedSource.named("shot_right", {"shot_right": 1.0}),
+            EncodedSource.named("difference", {"pair_pos": 1.0, "pair_neg": -1.0}),
         ]
     )
     return Acquisition(source_geometry=geometry, source_encoding=encoding)
@@ -258,7 +259,7 @@ def test_json_dense_encoding_roundtrips_against_pinned_sauce_schema():
             names=["left", "right"],
         ),
         source_encoding=SourceEncoding.dense(
-            [[1.0, 1.0], [0.0, -1.0]],
+            [[1.0, 0.0], [1.0, -1.0]],
             names=["left_only", "difference"],
         ),
     )
@@ -278,7 +279,7 @@ def test_dense_encoding_materializes_in_hdf5_without_source_axis_metadata(tmp_pa
             names=["left", "right"],
         ),
         source_encoding=SourceEncoding.dense(
-            [[1.0 + 2.0j, 0.0], [-3.0j, 0.5]],
+            [[1.0 + 2.0j, -3.0j], [0.0, 0.5]],
             names=["focus", "reference"],
         ),
     )
@@ -298,12 +299,20 @@ def test_dense_encoding_materializes_in_hdf5_without_source_axis_metadata(tmp_pa
         assert stored.shape == (2, 2, 2)
         assert "field" not in stored.attrs
         assert "source" not in stored.attrs
+        assert list(h5[encoding["field_names_dataset"]].asstr()[:]) == [
+            "focus",
+            "reference",
+        ]
+        np.testing.assert_allclose(
+            stored[..., 0] + 1j * stored[..., 1],
+            [[1.0 + 2.0j, -3.0j], [0.0, 0.5]],
+        )
 
 
 def test_frequency_dense_encoding_materializes_one_hdf5_tensor(tmp_path):
-    coefficients = np.zeros((3, 4, 2), dtype=np.complex64)
-    coefficients[:, :, 0] = 1.0
-    coefficients[:, :, 1] = np.asarray(
+    weights = np.zeros((3, 2, 4), dtype=np.complex64)
+    weights[:, 0, :] = 1.0
+    weights[:, 1, :] = np.asarray(
         [
             [1.0, -1.0, 1.0, -1.0],
             [1.0j, -1.0j, 1.0j, -1.0j],
@@ -317,7 +326,7 @@ def test_frequency_dense_encoding_materializes_one_hdf5_tensor(tmp_path):
         )
     )
     encoding = acquisition.encode_sources(
-        coefficients,
+        weights,
         frequencies=[2.0, 3.0, 4.0],
         names=["sum", "changing_code"],
     )
@@ -325,7 +334,7 @@ def test_frequency_dense_encoding_materializes_one_hdf5_tensor(tmp_path):
     payload = acquisition.to_fs(ExportContext(tmp_path, store=store))
 
     source_encoding = payload["source_encoding"]
-    assert encoding.coefficients is coefficients
+    assert encoding.weights is weights
     assert source_encoding["_type"] == "HDF5Dense"
     assert source_encoding["frequencies_dataset"].endswith("/frequencies")
     _sauce_acquisition_validator().validate(payload)
@@ -337,19 +346,11 @@ def test_frequency_dense_encoding_materializes_one_hdf5_tensor(tmp_path):
         assert "frequency" not in stored.attrs
         np.testing.assert_allclose(
             stored[..., 0] + 1.0j * stored[..., 1],
-            coefficients.transpose(0, 2, 1),
+            weights,
         )
 
     with pytest.raises(ValueError, match="requires a simulation/project store"):
         encoding.to_fs()
-        assert list(h5[encoding["field_names_dataset"]].asstr()[:]) == [
-            "focus",
-            "reference",
-        ]
-        np.testing.assert_allclose(
-            stored[..., 0] + 1j * stored[..., 1],
-            [[1.0 + 2.0j, -3.0j], [0.0, 0.5]],
-        )
     assert store.prune_unreferenced(payload) == []
     _sauce_acquisition_validator().validate(payload)
 
@@ -467,18 +468,18 @@ def test_complex_source_responses_are_conveniently_time_reversed():
         )
     )
 
-    responses = np.asarray(
-        [[1.0 + 2.0j], [-3.0j], [0.5 - 0.25j]],
+    weights = np.asarray(
+        [[1.0 + 2.0j, -3.0j, 0.5 - 0.25j]],
         dtype=np.complex64,
     )
     encoding = acquisition.encode_sources(
-        responses,
+        weights,
         names=["focus"],
         conjugate=True,
     )
     payload = acquisition.to_fs()
 
-    assert encoding.coefficients is responses
+    assert encoding.weights is weights
     assert payload["source_encoding"]["conjugate_coefficients"] is True
     assert payload["source_encoding"]["fields"][0]["coefficients"] == [
         [1.0, 2.0],
@@ -491,17 +492,86 @@ def test_complex_source_responses_are_conveniently_time_reversed():
 
 
 def test_dense_source_encoding_keeps_one_shared_production_matrix():
-    coefficients = np.ones((250_000, 4), dtype=np.complex64)
+    weights = np.ones((4, 250_000), dtype=np.complex64)
 
-    encoding = SourceEncoding.dense(coefficients)
+    encoding = SourceEncoding.dense(weights)
     reversed_encoding = encoding.time_reversed()
 
-    assert encoding.coefficients is coefficients
-    assert reversed_encoding.coefficients is coefficients
+    assert encoding.weights is weights
+    assert reversed_encoding.weights is weights
     assert reversed_encoding.conjugate_coefficients is True
     assert encoding.conjugate_coefficients is False
     for index, field in enumerate(encoding.fields):
-        assert np.shares_memory(field.coefficients, coefficients[:, index])
+        assert np.shares_memory(field.coefficients, weights[index, :])
+
+
+def test_encoded_source_uses_encoding_major_weights_and_keeps_legacy_aliases():
+    weights = np.asarray(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, -1.0]],
+        dtype=np.complex64,
+    )
+    encoding = SourceEncoding.dense(weights, names=["left", "difference"])
+
+    assert encoding.weights is weights
+    np.testing.assert_allclose(encoding.fields[0].coefficients, [1.0, 0.0, 0.0])
+    np.testing.assert_allclose(encoding.fields[1].coefficients, [0.0, 1.0, -1.0])
+
+    legacy_coefficients = np.asarray(
+        [[1.0, 0.0], [0.0, 1.0], [0.0, -1.0]],
+        dtype=np.complex64,
+    )
+    with pytest.warns(DeprecationWarning, match="coefficients"):
+        legacy_encoding = SourceEncoding(
+            encoding_type="JsonDense",
+            fields=[EncodedSource(name="left"), EncodedSource(name="difference")],
+            coefficients=legacy_coefficients,
+        )
+    np.testing.assert_allclose(legacy_encoding.weights, weights)
+    with pytest.warns(DeprecationWarning, match="coefficients"):
+        legacy_factory_encoding = SourceEncoding.dense(
+            coefficients=legacy_coefficients,
+            names=["left", "difference"],
+        )
+    np.testing.assert_allclose(legacy_factory_encoding.weights, weights)
+    with pytest.warns(DeprecationWarning, match="coefficients"):
+        legacy_frequency_encoding = SourceEncoding.frequency_dense(
+            coefficients=legacy_coefficients[np.newaxis, :, :],
+            frequencies=[2.0],
+            names=["left", "difference"],
+        )
+    np.testing.assert_allclose(
+        legacy_frequency_encoding.weights,
+        weights[np.newaxis, :, :],
+    )
+
+    acquisition = Acquisition()
+    acquisition.add_sources(
+        kind="scalar",
+        coords=[[0.0, 0.0], [1.0, 0.0]],
+        names=["left", "right"],
+    )
+    encoded = acquisition.add_encoded_source("sum", {"left": 1.0, "right": 1.0})
+    assert isinstance(encoded, EncodedSource)
+    assert acquisition.source_field(1) is encoded
+
+    legacy_acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar",
+            coords=[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]],
+        )
+    )
+    with pytest.warns(DeprecationWarning, match="coefficients"):
+        legacy_acquisition_encoding = legacy_acquisition.encode_sources(
+            coefficients=legacy_coefficients
+        )
+    np.testing.assert_allclose(legacy_acquisition_encoding.weights, weights)
+
+    with pytest.warns(DeprecationWarning, match="DistributedSource"):
+        legacy_field = DistributedSource.named("left", {"left": 1.0})
+    assert isinstance(legacy_field, EncodedSource)
+    with pytest.warns(DeprecationWarning, match="add_distributed_source"):
+        legacy_added = acquisition.add_distributed_source("right", {"right": 1.0})
+    assert isinstance(legacy_added, EncodedSource)
 
 
 def test_acquisition_accessors_reject_zero_and_list_device_fields():
@@ -629,13 +699,7 @@ def test_encoded_receiver_bulk_tensor_is_lazy_shared_and_multicomponent(tmp_path
         encoding_names=["target_a", "target_b"],
         weights=weights,
     )
-    reversed_device = device.time_reversed()
-
     assert device.weights is weights
-    assert reversed_device.weights is weights
-    assert reversed_device.conjugate_weights is True
-    assert reversed_device.time_reversed().weights is weights
-    assert reversed_device.time_reversed().conjugate_weights is False
     assert [component.name for component in device.output_components()] == [
         "target_a:vx",
         "target_a:vz",
@@ -652,14 +716,13 @@ def test_encoded_receiver_bulk_tensor_is_lazy_shared_and_multicomponent(tmp_path
     )
     acquisition.add_receiver_group(
         name="surface",
-        device=reversed_device,
+        device=device,
         coords=[[0.0, 0.0], [0.5, 0.0], [1.0, 0.0]],
     )
     store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
     payload = acquisition.to_fs(ExportContext(tmp_path, store=store))
     serialized = payload["receiver_groups"][0]["device"]
 
-    assert serialized["conjugate_weights"] is True
     with h5py.File(tmp_path / "simulation.h5", "r") as h5:
         stored = h5[serialized["weights"]["dataset"]][:]
         assert stored.shape == (4, 3, 2)
@@ -805,7 +868,7 @@ def test_encoded_reference_coordinates_preserve_explicit_and_implicit_metadata()
     explicit = Acquisition(
         source_geometry=geometry,
         source_encoding=SourceEncoding.dense(
-            [[1.0], [0.0]],
+            [[1.0, 0.0]],
             names=["explicit"],
             reference_coordinates=CoordinateValue(
                 [750.0, 40.0],
@@ -817,7 +880,7 @@ def test_encoded_reference_coordinates_preserve_explicit_and_implicit_metadata()
     implicit = Acquisition(
         source_geometry=geometry,
         source_encoding=SourceEncoding.named(
-            [DistributedSource.named("midpoint", {"left": 1.0, "right": -1.0})]
+            [EncodedSource.named("midpoint", {"left": 1.0, "right": -1.0})]
         ),
     )
 
@@ -860,10 +923,10 @@ def test_implicit_encoded_reference_normalizes_compatible_source_units(encoding_
     )
     encoding = (
         SourceEncoding.named(
-            [DistributedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
+            [EncodedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
         )
         if encoding_type == "Named"
-        else SourceEncoding.dense([[1.0], [1.0]], names=["midpoint"])
+        else SourceEncoding.dense([[1.0, 1.0]], names=["midpoint"])
     )
     acquisition = Acquisition(
         source_geometry=geometry,
@@ -913,14 +976,14 @@ def test_implicit_encoded_reference_ignores_inactive_source_metadata(encoding_ty
     encoding = (
         SourceEncoding.named(
             [
-                DistributedSource.named(
+                EncodedSource.named(
                     "midpoint",
                     {"left": 1.0, "right": 1.0, "inactive": 0.0},
                 )
             ]
         )
         if encoding_type == "Named"
-        else SourceEncoding.dense([[1.0], [1.0], [0.0]], names=["midpoint"])
+        else SourceEncoding.dense([[1.0, 1.0, 0.0]], names=["midpoint"])
     )
     acquisition = Acquisition(
         source_geometry=geometry,
@@ -974,10 +1037,10 @@ def test_implicit_encoded_reference_rejects_incompatible_active_source_metadata(
     )
     encoding = (
         SourceEncoding.named(
-            [DistributedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
+            [EncodedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
         )
         if encoding_type == "Named"
-        else SourceEncoding.dense([[1.0], [1.0]], names=["midpoint"])
+        else SourceEncoding.dense([[1.0, 1.0]], names=["midpoint"])
     )
     acquisition = Acquisition(
         source_geometry=geometry,
@@ -1277,7 +1340,7 @@ def test_named_encoding_requires_explicit_inline_source_names():
         kind="scalar", sources=[PointSource(coordinates=[0.5, 0.05])]
     )
     encoding = SourceEncoding.named(
-        [DistributedSource.named("field", {"source_000001": 1.0})]
+        [EncodedSource.named("field", {"source_000001": 1.0})]
     )
 
     with pytest.raises(ValueError, match="requires explicit names"):
@@ -1307,7 +1370,7 @@ def test_export_rejects_missing_geometry_and_inconsistent_encoding():
         names=["known"],
     )
     unknown_encoding = SourceEncoding.named(
-        [DistributedSource.named("bad", {"unknown": 1.0})]
+        [EncodedSource.named("bad", {"unknown": 1.0})]
     )
     with pytest.raises(ValueError, match="unknown sources"):
         Acquisition(

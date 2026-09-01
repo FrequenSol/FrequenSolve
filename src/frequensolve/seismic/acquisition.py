@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
@@ -15,7 +16,7 @@ from frequensolve.seismic.receivers import (
     ReceiverGroup,
 )
 from frequensolve.seismic.sources import (
-    DistributedSource,
+    EncodedSource,
     PointSource,
     SourceEncoding,
     SourceGeometry,
@@ -418,8 +419,9 @@ class Acquisition(ExtraFieldsMixin):
 
     def encode_sources(
         self,
-        coefficients: Any,
+        weights: Optional[Any] = None,
         *,
+        coefficients: Optional[Any] = None,
         names: Optional[Sequence[str]] = None,
         reference_coordinates: Optional[Any] = None,
         name: Optional[str] = None,
@@ -428,21 +430,24 @@ class Acquisition(ExtraFieldsMixin):
     ) -> SourceEncoding:
         """Set a dense complex source encoding on the current geometry.
 
-        Static ``coefficients`` use source-major shape ``(n_source, n_field)``.
+        Static ``weights`` use encoding-major shape ``(n_encoded, n_source)``.
         Passing ``frequencies`` selects a frequency-dependent tensor with shape
-        ``(n_frequency, n_source, n_field)``. Set ``conjugate=True`` when the
+        ``(n_frequency, n_encoded, n_source)``. Set ``conjugate=True`` when the
         values are forward responses that should be time-reversed.
         """
 
+        if weights is not None and coefficients is not None:
+            raise TypeError("Use either weights or coefficients, not both")
         if frequencies is None:
             encoding = SourceEncoding.dense(
-                coefficients,
+                weights,
+                coefficients=coefficients,
                 names=names,
                 reference_coordinates=reference_coordinates,
                 name=name,
                 conjugate=conjugate,
             )
-            source_axis = 0
+            source_axis = 1
         else:
             if reference_coordinates is not None:
                 raise ValueError(
@@ -450,17 +455,18 @@ class Acquisition(ExtraFieldsMixin):
                     "coordinates from physical geometry"
                 )
             encoding = SourceEncoding.frequency_dense(
-                coefficients,
+                weights,
                 frequencies,
+                coefficients=coefficients,
                 names=names,
                 name=name,
                 conjugate=conjugate,
             )
-            source_axis = 1
+            source_axis = 2
         point_count = self.known_source_point_count()
         if (
             point_count is not None
-            and encoding.coefficients.shape[source_axis] != point_count
+            and encoding.weights.shape[source_axis] != point_count
         ):
             raise ValueError(
                 "source encoding coefficient count must match the "
@@ -537,7 +543,7 @@ class Acquisition(ExtraFieldsMixin):
         weights: np.ndarray,
         direction: Optional[np.ndarray] = None,
         domain: Optional[int] = None,
-    ) -> DistributedSource:
+    ) -> EncodedSource:
         """Add a legacy weighted source through the compatibility shim."""
 
         from frequensolve.seismic import _legacy_sources
@@ -551,30 +557,42 @@ class Acquisition(ExtraFieldsMixin):
             domain=domain,
         )
 
-    def add_distributed_source(
+    def add_encoded_source(
         self,
         name: str,
         terms: Mapping[Any, Any],
-    ) -> DistributedSource:
-        """Append one sparse named RHS/source field."""
+    ) -> EncodedSource:
+        """Append one sparse named encoded-source field."""
 
         encoded = _encoded_terms(terms)
         known = set(self.source_point_names())
         unknown = sorted(set(encoded).difference(known))
         if unknown:
             raise ValueError(f"Unknown physical source names: {unknown}")
-        field_obj = DistributedSource.named(name, encoded)
+        field_obj = EncodedSource.named(name, encoded)
         if self.source_encoding is None:
             self.source_encoding = SourceEncoding.named([field_obj])
         elif self.source_encoding.encoding_type != "Named":
-            raise ValueError(
-                "add_distributed_source can only extend Named source encoding"
-            )
+            raise ValueError("add_encoded_source can only extend Named source encoding")
         else:
             if name in set(self.source_encoding.field_names()):
-                raise ValueError(f"Distributed source {name!r} already exists")
+                raise ValueError(f"Encoded source {name!r} already exists")
             self.source_encoding.fields.append(field_obj)
         return field_obj
+
+    def add_distributed_source(
+        self,
+        name: str,
+        terms: Mapping[Any, Any],
+    ) -> EncodedSource:
+        """Deprecated alias for :meth:`add_encoded_source`."""
+
+        warnings.warn(
+            "add_distributed_source() is deprecated; use add_encoded_source().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.add_encoded_source(name, terms)
 
     def _append_inline_sources(self, geometry: SourceGeometry) -> List[str]:
         if self.source_geometry is None:
@@ -863,15 +881,15 @@ class Acquisition(ExtraFieldsMixin):
 
         return self.source_field_ids()
 
-    def source_field(self, isrc: int) -> Union[PointSource, DistributedSource]:
+    def source_field(self, isrc: int) -> Union[PointSource, EncodedSource]:
         """Return locally available source-field metadata by one-based index.
 
         Args:
             isrc: One-based source index.
 
         Returns:
-            An inline point source for identity encoding, or a distributed
-            source for explicit inline encoding.
+            An inline point source for identity encoding, or an encoded source
+            for explicit inline encoding.
         """
         count = self.known_source_field_count()
         if isrc < 1 or (count is not None and isrc > count):

@@ -312,6 +312,7 @@ extra.
    account = "allocation"
    transfer_method = "rsync"
    modules = []
+   launcher_args = []
 
    # Add one table per partition using limits and node resources from your
    # cluster documentation or administrator. Memory values are in MiB.
@@ -333,6 +334,8 @@ extra.
    ranks_per_node = 4
    ranks_per_task = 1
    scheduler_heartbeat_timeout = 60
+   # Optional controller-enforced deadline for a full-rank MPI check before sizing.
+   # mpi_health_check_timeout = "00:02:00"
 
 Stampede3 profiles use the built-in preset and create generic ``SlurmSite``
 instances. The preferred setup command prompts for the username and writes the
@@ -414,12 +417,19 @@ The generated profile is equivalent to this minimal configuration:
        loaded; other shell expressions remain escaped.
    * - ``mpi_wrapper``
      - MPI launcher such as ``srun`` or ``ibrun``.
+   * - ``launcher_args``
+     - Arguments passed to every MPI launcher invocation, such as SLURM's
+       ``--kill-on-bad-exit=1`` and ``--wait=30``.
    * - ``poll_interval``
      - Seconds between scheduler status polls.
    * - ``scheduler_heartbeat_timeout``
      - Maximum seconds without a new adaptive-scheduler heartbeat before a
        running SLURM job is reported failed. Defaults to 60. Set it to
        ``None`` through ``SlurmRunConfig`` to disable the check.
+   * - ``mpi_health_check_timeout``
+     - Optional SLURM step time limit for a full-rank solver MPI health check
+       before sizing. The solver must support ``--mpi-health-check``. Disabled
+       by default for compatibility with older solver installations.
    * - ``account``
      - HPC allocation/account name.
    * - ``max_duration``

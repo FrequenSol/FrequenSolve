@@ -124,6 +124,7 @@ class AdaptiveScheduler:
         self.status_file = Path(status)
         self.executable = str(config["executable"])
         self.mpi = str(config.get("mpi", "ibrun"))
+        self.mpi_args = [str(value) for value in config.get("mpi_args", [])]
         self.fresh_flag = ["--fresh"] if config.get("fresh") else []
         self.total_ranks = int(config["total_ranks"])
         self.omp_threads = int(config["omp_threads"])
@@ -193,6 +194,7 @@ class AdaptiveScheduler:
         output = open(self.output / f"task_{task_id}.log", "ab", buffering=0)
         command = [
             self.mpi,
+            *self.mpi_args,
             "-n",
             str(ranks),
             "-o",

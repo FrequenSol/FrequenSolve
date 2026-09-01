@@ -1469,7 +1469,7 @@ def test_source_and_receiver_coordinate_arrays_are_float64():
         coords=np.asarray([[0.125, 0.0], [0.875, 0.0]], dtype=np.float32),
         names=["left", "right"],
     )
-    acq.add_distributed_source("compound", {"left": 1.0, "right": 1.0})
+    acq.add_encoded_source("compound", {"left": 1.0, "right": 1.0})
     acq.add_receiver_group(
         name="surface",
         device=geophone,
@@ -1740,7 +1740,7 @@ def test_named_source_encoding_replaces_compound_source_weights():
         names=["left", "right"],
         direction=[0.0, 1.0],
     )
-    acq.add_distributed_source("dipole_like", {"left": 1.0, "right": -1.0})
+    acq.add_encoded_source("dipole_like", {"left": 1.0, "right": -1.0})
 
     payload = acq.to_fs()
 
@@ -5813,6 +5813,61 @@ def test_trace_dataset_td_applies_wavelet_before_interpolating_oscillatory_respo
         rtol=2.0e-5,
         atol=2.0e-5,
     )
+
+
+def test_trace_dataset_td_eagerly_reads_small_dense_gather(monkeypatch, tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    frequencies = np.arange(200.0)
+    data = np.zeros((frequencies.size, 2, 2, 641, 2), dtype=np.float32)
+    data[:, 0, 0, :, 0] = 1.0
+
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=frequencies)
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        dset = h5.create_dataset("surface", data=data)
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.arange(1, 642, dtype=np.int32)
+        dset.attrs["component"] = np.array(["p", "v_z"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7, 8], dtype=np.int32)
+
+    def no_lazy_read(*args, **kwargs):
+        raise AssertionError("small trace gathers must not construct a Dask graph")
+
+    monkeypatch.setattr(TraceStore, "read_FD", no_lazy_read)
+    traces = TraceDataset.open(packed)
+    td = traces.td("surface", "p", source=7, wavelet=RickerWavelet(f=40.0))
+
+    assert td.sizes["receiver"] == 641
+    assert not callable(getattr(td.data, "__dask_graph__", None))
+
+
+def test_trace_dataset_td_eagerly_reads_small_indexed_gather(monkeypatch, tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    _write_indexed_packed_trace_product(
+        packed,
+        "surface",
+        frequencies=[0.0, 1.0, 2.0, 3.0],
+        values=[1.0, 1.0, 1.0, 1.0],
+    )
+
+    def no_lazy_read(*args, **kwargs):
+        raise AssertionError("small trace gathers must not construct a Dask graph")
+
+    monkeypatch.setattr(TraceStore, "read_FD", no_lazy_read)
+    traces = TraceDataset.open(packed)
+    td = traces.td("surface", "p", source=7, wavelet=RickerWavelet(f=1.0))
+
+    assert td.sizes["receiver"] == 1
+    assert not callable(getattr(td.data, "__dask_graph__", None))
 
 
 def test_trace_store_reads_indexed_solver_packed_trace_file(tmp_path):

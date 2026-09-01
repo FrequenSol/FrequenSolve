@@ -55,6 +55,46 @@ def test_adaptive_scheduler_reads_structured_config_without_environment(
     assert instance.task_indices == [1]
 
 
+def test_adaptive_scheduler_passes_configured_mpi_arguments(monkeypatch, tmp_path):
+    scheduler = _load_scheduler_module()
+    launched = {}
+
+    class Process:
+        pass
+
+    def fake_popen(command, **kwargs):
+        launched["command"] = command
+        return Process()
+
+    monkeypatch.setattr(scheduler.subprocess, "Popen", fake_popen)
+    instance = scheduler.AdaptiveScheduler(
+        {
+            "executable": "/remote/bin/solver",
+            "mpi": "srun",
+            "mpi_args": ["--kill-on-bad-exit=1", "--wait=30"],
+            "total_ranks": 2,
+            "omp_threads": 1,
+            "mem_per_rank_gib": 1,
+            "job_task_count": 1,
+            "task_indices": [1],
+        },
+        job_file="job.json",
+        output=str(tmp_path),
+        status=str(tmp_path / "status.json"),
+    )
+
+    instance._launch(task_id=1, offset=0, ranks=2, memory=1.0)
+
+    assert launched["command"][:5] == [
+        "srun",
+        "--kill-on-bad-exit=1",
+        "--wait=30",
+        "-n",
+        "2",
+    ]
+    instance.running[-1][-1].close()
+
+
 def test_sizing_checkpoint_validation_uses_scheduler_memory_field(tmp_path):
     scheduler = _load_scheduler_module()
     sizing = tmp_path / "sizing.json"

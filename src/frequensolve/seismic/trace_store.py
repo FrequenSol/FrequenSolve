@@ -36,6 +36,8 @@ _LEGACY_TRACE_SHARD_GLOBS = (
     "receivers_*.h5",
     "trace_frequency_*.h5",
 )
+_TD_EAGER_MAX_BYTES = 64 * 1024**2
+_TD_LAZY_CHUNK_BYTES = 16 * 1024**2
 
 
 class TraceSummary(str):
@@ -478,8 +480,7 @@ class TraceStore:
                     else []
                 )
                 raise KeyError(
-                    f"Property {name!r} not found for {group!r}; "
-                    f"available: {available}"
+                    f"Property {name!r} not found for {group!r}; available: {available}"
                 )
             dset = h5[path]
             values = np.asarray(dset[()]).reshape(-1)
@@ -571,7 +572,7 @@ class TraceStore:
             if len(freq) > 1:
                 df = freq[1] - freq[0]
                 out += f"  {_gray('Frequencies')}\t: {freq[0]:.2f} - {freq[-1]:.2f} Hz (Δf={df:.2f})\n"
-                out += f"  {_gray('Window')}\t: {0:.2f} - {1.0/df:.2f} s\n"
+                out += f"  {_gray('Window')}\t: {0:.2f} - {1.0 / df:.2f} s\n"
             else:
                 out += f"  {_gray('Frequency')}\t: {freq[0]:.2f} Hz\n"
             out += "\n"
@@ -1004,6 +1005,11 @@ class TraceStore:
         if not expected:
             return None
         available_values = np.asarray(available, dtype=float).ravel()
+        expected_values = np.asarray(expected, dtype=float)
+        if expected_values.size == available_values.size and np.allclose(
+            expected_values, available_values, rtol=0.0, atol=1.0e-9
+        ):
+            return None
         indices: list[int] = []
         used: set[int] = set()
         for frequency in expected:
@@ -1591,7 +1597,58 @@ class TraceStore:
         if data_ndim == len(dims) + 1:
             dims.append("complex")
         dims = ["source" if dim == "shot" else dim for dim in dims]
+        coords = self._trace_coordinates(
+            h5,
+            dset,
+            group,
+            dims,
+            data_shape,
+            indexed_frequencies=indexed_frequencies,
+        )
+
+        if indexed_paths:
+            arrays = []
+            for path in indexed_paths:
+                item = h5[path]
+                if item.shape != dset.shape:
+                    raise ValueError(
+                        "Indexed packed trace datasets for group "
+                        f"{group!r} do not have a common shape"
+                    )
+                arrays.append(da.from_array(item, chunks=item.shape))
+            data = da.stack(arrays, axis=0)
+        else:
+            chunks = (dset.shape[0], 1, 1, *dset.shape[3:])
+            data = da.from_array(dset, chunks=chunks)
+        fd = DataArray(data, dims=dims, coords=coords)
+        if "frequency" in fd.dims:
+            if indexed_laplace:
+                laplace = np.asarray(indexed_laplace, dtype=float)
+            elif "laplace" in h5:
+                laplace = np.asarray(h5["laplace"][()]).ravel().astype(float)
+            else:
+                laplace = self._metadata_laplace_values(fd.coords["frequency"].values)
+            if laplace.size == 1 and fd.sizes["frequency"] > 1:
+                laplace = np.full(fd.sizes["frequency"], float(laplace[0]))
+            if laplace.size == fd.sizes["frequency"]:
+                fd = fd.assign_coords(laplace=("frequency", laplace))
+            fd = self._filter_expected_frequency_data(fd)
+        return fd
+
+    @staticmethod
+    def _trace_coordinates(
+        h5,
+        dset,
+        group: str,
+        dims: list[str],
+        data_shape: tuple[int, ...],
+        *,
+        indexed_frequencies: Iterable[float] = (),
+    ) -> Dict[str, np.ndarray]:
+        """Build physical trace coordinates without constructing data tasks."""
+
         coords = {}
+        indexed_frequencies = list(indexed_frequencies)
         for axis, dim in enumerate(dims):
             if dim == "complex":
                 coords[dim] = (
@@ -1638,35 +1695,154 @@ class TraceStore:
                 coords[dim] = np.arange(1, data_shape[axis] + 1)
         if "complex" in dims and "complex" not in coords:
             coords["complex"] = ["real", "imag"]
+        return coords
 
-        if indexed_paths:
-            arrays = []
-            for path in indexed_paths:
-                item = h5[path]
-                if item.shape != dset.shape:
+    @staticmethod
+    def _coordinate_index(values, value, dim: str) -> int:
+        """Return the exact coordinate position requested by a trace selection."""
+
+        values = np.asarray(values)
+        matches = np.flatnonzero(values == value)
+        if matches.size == 0:
+            raise KeyError(f"{dim!r} coordinate {value!r} was not found")
+        return int(matches[0])
+
+    def _read_fd_eager(
+        self,
+        group: str,
+        component: str,
+        source: int,
+        *,
+        max_bytes: int,
+    ) -> Optional[DataArray]:
+        """Read a small selected frequency-domain gather directly with h5py."""
+
+        if max_bytes <= 0:
+            return None
+
+        with h5py.File(self._trace_file_for_group(group), "r") as h5:
+            indexed_paths: list[str] = []
+            indexed_frequencies: list[float] = []
+            indexed_laplace: list[float] = []
+            if self._is_indexed_packed_h5(h5) and group not in h5:
+                indexed_rows = self._filter_expected_indexed_rows(
+                    self._indexed_trace_rows(h5, group)
+                )
+                if not indexed_rows:
                     raise ValueError(
-                        "Indexed packed trace datasets for group "
-                        f"{group!r} do not have a common shape"
+                        "Packed trace file does not contain any requested "
+                        f"frequencies for group {group!r}"
                     )
-                arrays.append(da.from_array(item, chunks=item.shape))
-            data = da.stack(arrays, axis=0)
-        else:
-            chunks = (dset.shape[0], 1, 1, *dset.shape[3:])
-            data = da.from_array(dset, chunks=chunks)
-        fd = DataArray(data, dims=dims, coords=coords)
-        if "frequency" in fd.dims:
+                indexed_paths = [row["packed_path"] for row in indexed_rows]
+                indexed_frequencies = [
+                    row["frequency"]
+                    for row in indexed_rows
+                    if row["frequency"] is not None
+                ]
+                indexed_laplace = [row.get("laplace", 0.0) for row in indexed_rows]
+                dset = h5[indexed_paths[0]]
+            else:
+                dset = h5[group]
+
+            dims = _trace_data_dims(dset)
+            data_shape = (
+                (len(indexed_paths), *dset.shape) if indexed_paths else dset.shape
+            )
+            if len(data_shape) == len(dims) + 1:
+                dims.append("complex")
+            dims = ["source" if dim == "shot" else dim for dim in dims]
+            if tuple(dims) != (
+                "frequency",
+                "source",
+                "component",
+                "receiver",
+                "complex",
+            ):
+                return None
+
+            coords = self._trace_coordinates(
+                h5,
+                dset,
+                group,
+                dims,
+                data_shape,
+                indexed_frequencies=indexed_frequencies,
+            )
+            if len(coords["complex"]) != 2:
+                return None
+
+            source_index = self._coordinate_index(coords["source"], source, "source")
+            component_index = self._coordinate_index(
+                coords["component"], component, "component"
+            )
+            n_frequency = len(coords["frequency"])
+            n_receiver = len(coords["receiver"])
+            nbytes = (
+                n_frequency * n_receiver * len(coords["complex"]) * dset.dtype.itemsize
+            )
+            if nbytes > max_bytes:
+                return None
+
+            if indexed_paths:
+                raw = np.stack(
+                    [
+                        np.asarray(h5[path][source_index, component_index, :, :])
+                        for path in indexed_paths
+                    ],
+                    axis=0,
+                )
+            else:
+                raw = np.asarray(dset[:, source_index, component_index, :, :])
+
+            values = raw[..., 0] + 1j * raw[..., 1]
+            values = np.where(np.isnan(values), 0.0, values)
+            frequency = np.asarray(coords["frequency"], dtype=float)
+            receiver = np.asarray(coords["receiver"])
             if indexed_laplace:
                 laplace = np.asarray(indexed_laplace, dtype=float)
             elif "laplace" in h5:
                 laplace = np.asarray(h5["laplace"][()]).ravel().astype(float)
             else:
-                laplace = self._metadata_laplace_values(fd.coords["frequency"].values)
-            if laplace.size == 1 and fd.sizes["frequency"] > 1:
-                laplace = np.full(fd.sizes["frequency"], float(laplace[0]))
-            if laplace.size == fd.sizes["frequency"]:
+                laplace = self._metadata_laplace_values(frequency)
+            if laplace.size == 1 and frequency.size > 1:
+                laplace = np.full(frequency.size, float(laplace[0]))
+
+            indices = self._expected_frequency_laplace_indices(frequency, laplace)
+            if indices is not None:
+                frequency = frequency[indices]
+                values = values[indices]
+                if laplace.size == len(coords["frequency"]):
+                    laplace = laplace[indices]
+
+            fd = DataArray(
+                values,
+                dims=("frequency", "receiver"),
+                coords={"frequency": frequency, "receiver": receiver},
+            )
+            if laplace.size == frequency.size:
                 fd = fd.assign_coords(laplace=("frequency", laplace))
-            fd = self._filter_expected_frequency_data(fd)
-        return fd
+            fd.attrs.update(
+                self._trace_array_attrs(
+                    group,
+                    component=component,
+                    source=source,
+                    domain="frequency",
+                )
+            )
+            return fd
+
+    @staticmethod
+    def _coalesce_td_chunks(fd: DataArray) -> DataArray:
+        """Bound the Dask graph used by a large lazy TD reconstruction."""
+
+        if not callable(getattr(fd.data, "rechunk", None)):
+            return fd
+        chunks: Dict[str, int] = {"frequency": -1}
+        if "receiver" in fd.dims:
+            itemsize = np.dtype(fd.dtype).itemsize
+            per_receiver = max(1, fd.sizes["frequency"] * itemsize)
+            chunks["receiver"] = max(1, _TD_LAZY_CHUNK_BYTES // per_receiver)
+        return fd.chunk(chunks)
 
     def read_FD(
         self,
@@ -1866,6 +2042,11 @@ class TraceStore:
             Time-domain ``xarray.DataArray``.
         """
 
+        eager_max_bytes = kwargs.pop("eager_max_bytes", _TD_EAGER_MAX_BYTES)
+        if eager_max_bytes is None:
+            eager_max_bytes = 0
+        if int(eager_max_bytes) < 0:
+            raise ValueError("eager_max_bytes must be non-negative or None")
         compensation_mode = self._normalize_laplace_compensation(laplace_compensation)
         sampling = UniformSweepSampling(
             f_min=0.0,
@@ -1873,7 +2054,23 @@ class TraceStore:
             df=self.metadata["df"],
             upscale=upscale,
         )
-        fd = self.read_FD(group, component, source, wavelet, **kwargs)
+        fd = self._read_fd_eager(
+            group,
+            component,
+            source,
+            max_bytes=int(eager_max_bytes),
+        )
+        if fd is not None:
+            source_sampling = UniformSweepSampling(
+                f_min=0.0,
+                f_max=self.metadata["f_max"],
+                df=self.metadata["df"],
+            )
+            wavelet.times = source_sampling.T_list
+            fd = self._apply_wavelet_to_fd(fd, wavelet, **kwargs)
+        else:
+            fd = self.read_FD(group, component, source, wavelet, **kwargs)
+            fd = self._coalesce_td_chunks(fd)
         laplace = self._uniform_laplace(fd)
         wavelet.times = sampling.T_list
 

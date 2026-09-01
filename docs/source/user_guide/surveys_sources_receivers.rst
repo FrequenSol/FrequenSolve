@@ -13,7 +13,7 @@ Related tutorials:
 - :download:`DAS <../../../examples/tutorials/05_surveys/02_das.ipynb>`
   for fiber-style strain receivers.
 - :download:`Sources <../../../examples/tutorials/05_surveys/03_sources.ipynb>`
-  for physical point catalogs and sparse distributed source fields.
+  for physical point catalogs and sparse encoded-source fields.
 - :download:`Sparse surveys <../../../examples/tutorials/05_surveys/04_sparse_surveys.ipynb>`
   for offset windows and explicit source-receiver layouts.
 
@@ -164,9 +164,12 @@ and ``dipole``. ``SourceGeometry`` describes physical source points. When
        source_encoding=encoding,
    )
 
-For dense complex arrays, coefficients have source-major shape
-``(n_source, n_field)``. Saved simulations move them into HDF5 automatically;
-the inline JSON form is retained only for small direct-serialization examples.
+For dense complex arrays, weights have encoding-major shape
+``(n_encoded, n_source)``: each row describes one encoded source over the
+physical source points. This matches encoded-receiver weights and the
+field-major solver storage. Saved simulations move them into HDF5
+automatically; the inline JSON form is retained only for small
+direct-serialization examples.
 Forward responses can be time-reversed while installing the encoding:
 
 .. code-block:: python
@@ -177,10 +180,10 @@ Forward responses can be time-reversed while installing the encoding:
        conjugate=True,
    )
 
-Frequency-dependent coefficients have shape
-``(n_frequency, n_source, n_field)``. Passing the matching physical frequency
-axis stores one chunked HDF5 tensor and lets each Sauce task read only its
-slice:
+Frequency-dependent weights have shape
+``(n_frequency, n_encoded, n_source)``. Passing the matching physical
+frequency axis stores one chunked HDF5 tensor and lets each Sauce task read
+only its slice:
 
 .. code-block:: python
 
@@ -200,7 +203,7 @@ description.
 
 Use ``acq.source_point_count()`` for physical geometry size and
 ``acq.source_field_count()`` for the number of solver RHS fields. New code
-should use ``add_sources()``, ``add_distributed_source()``, and
+should use ``add_sources()``, ``add_encoded_source()``, and
 ``source_encoding``. A small compatibility shim still accepts the deprecated
 ``source_groups``, ``add_source_group()``, and ``add_compound_source()`` APIs;
 they are never serialized. Legacy untagged and ``fs-acquisition-1`` payloads

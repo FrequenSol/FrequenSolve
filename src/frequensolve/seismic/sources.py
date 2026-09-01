@@ -39,6 +39,7 @@ __all__ = [
     "PointSource",
     "SourceGeometry",
     "SourceEncoding",
+    "EncodedSource",
     "DistributedSource",
 ]
 
@@ -1312,8 +1313,8 @@ class SourceGeometry(ExtraFieldsMixin):
 
 
 @dataclass
-class DistributedSource:
-    """One simulated source field distributed over physical point sources."""
+class EncodedSource:
+    """One encoded solver source field over physical source points."""
 
     name: Optional[str] = None
     terms: Dict[str, Any] = field(default_factory=dict)
@@ -1321,7 +1322,7 @@ class DistributedSource:
     reference_coordinates: Optional[Any] = None
 
     @classmethod
-    def named(cls, name: str, terms: Mapping[str, Any]) -> "DistributedSource":
+    def named(cls, name: str, terms: Mapping[str, Any]) -> "EncodedSource":
         return cls(name=name, terms=dict(terms))
 
     @classmethod
@@ -1331,10 +1332,10 @@ class DistributedSource:
         *,
         name: Optional[str] = None,
         reference_coordinates: Optional[Any] = None,
-    ) -> "DistributedSource":
+    ) -> "EncodedSource":
         if reference_coordinates is not None:
             warnings.warn(
-                "DistributedSource reference_coordinates is deprecated; use the "
+                "EncodedSource reference_coordinates is deprecated; use the "
                 "simulation coordinate system and physical source geometry",
                 DeprecationWarning,
                 stacklevel=2,
@@ -1344,13 +1345,13 @@ class DistributedSource:
             coefficients=_source_coefficient_array(
                 coefficients,
                 ndim=1,
-                label="DistributedSource coefficients",
+                label="EncodedSource coefficients",
             ),
             reference_coordinates=reference_coordinates,
         )
 
     @classmethod
-    def from_named_fs(cls, data: Mapping[str, Any]) -> "DistributedSource":
+    def from_named_fs(cls, data: Mapping[str, Any]) -> "EncodedSource":
         payload = copy.deepcopy(dict(data))
         terms = {
             str(term["source"]): term["coefficient"]
@@ -1359,14 +1360,14 @@ class DistributedSource:
         return cls(name=payload.pop("name", None), terms=terms)
 
     @classmethod
-    def from_dense_fs(cls, data: Mapping[str, Any]) -> "DistributedSource":
+    def from_dense_fs(cls, data: Mapping[str, Any]) -> "EncodedSource":
         payload = copy.deepcopy(dict(data))
         return cls(
             name=payload.pop("name", None),
             coefficients=_source_coefficient_array(
                 payload.pop("coefficients"),
                 ndim=1,
-                label="DistributedSource coefficients",
+                label="EncodedSource coefficients",
             ),
             reference_coordinates=(
                 CoordinateValue.from_fs(payload.pop("reference_coordinates"))
@@ -1377,7 +1378,7 @@ class DistributedSource:
 
     def to_named_fs(self) -> Dict[str, Any]:
         if not self.terms:
-            raise ValueError("DistributedSource requires at least one term")
+            raise ValueError("EncodedSource requires at least one term")
         payload: Dict[str, Any] = {
             **({"name": self.name} if self.name is not None else {}),
             "terms": [
@@ -1387,15 +1388,15 @@ class DistributedSource:
             ],
         }
         if not payload["terms"]:
-            raise ValueError("DistributedSource needs a nonzero coefficient")
+            raise ValueError("EncodedSource needs a nonzero coefficient")
         return payload
 
     def to_dense_fs(self) -> Dict[str, Any]:
         if self.coefficients is None:
-            raise ValueError("Dense DistributedSource requires coefficients")
+            raise ValueError("Dense EncodedSource requires coefficients")
         coefficients = [_complex_to_fs(value) for value in self.coefficients]
         if not any(_coefficient_abs(value) != 0.0 for value in self.coefficients):
-            raise ValueError("Dense DistributedSource needs a nonzero coefficient")
+            raise ValueError("Dense EncodedSource needs a nonzero coefficient")
         payload: Dict[str, Any] = {
             **({"name": self.name} if self.name is not None else {}),
             "coefficients": coefficients,
@@ -1406,7 +1407,7 @@ class DistributedSource:
             )
         return payload
 
-    def conjugated(self) -> "DistributedSource":
+    def conjugated(self) -> "EncodedSource":
         """Return a copy with all source-encoding coefficients conjugated."""
 
         source = copy.deepcopy(self)
@@ -1421,20 +1422,32 @@ class DistributedSource:
     time_reversed = conjugated
 
 
+class DistributedSource(EncodedSource):
+    """Deprecated name for :class:`EncodedSource`."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        warnings.warn(
+            "DistributedSource is deprecated; use EncodedSource.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)
+
+
 @dataclass
 class _NamedSourceEncoding:
-    fields: List[DistributedSource]
+    fields: List[EncodedSource]
 
 
 @dataclass
 class _DenseSourceEncoding:
-    fields: List[DistributedSource]
+    fields: List[EncodedSource]
     coefficients: np.ndarray
 
 
 @dataclass
 class _FrequencyDenseSourceEncoding:
-    fields: List[DistributedSource]
+    fields: List[EncodedSource]
     coefficients: np.ndarray
     frequencies: np.ndarray
 
@@ -1470,7 +1483,8 @@ class SourceEncoding(ExtraFieldsMixin):
         *,
         encoding_type: str,
         name: Optional[str] = None,
-        fields: Optional[Iterable[DistributedSource]] = None,
+        fields: Optional[Iterable[EncodedSource]] = None,
+        weights: Optional[Any] = None,
         coefficients: Optional[Any] = None,
         frequencies: Optional[Any] = None,
         file: Optional[Union[str, Path]] = None,
@@ -1485,13 +1499,25 @@ class SourceEncoding(ExtraFieldsMixin):
         self.name = name
         normalized_type = str(encoding_type).strip().lower()
         field_objects = list(fields or [])
+        if weights is not None and coefficients is not None:
+            raise TypeError("Use either weights or coefficients, not both")
+        if coefficients is not None:
+            warnings.warn(
+                "SourceEncoding(coefficients=...) is deprecated; use "
+                "weights= with encoding-major axes instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            matrix_values = np.swapaxes(np.asarray(coefficients), -1, -2)
+        else:
+            matrix_values = weights
         matrix = (
             None
-            if coefficients is None
+            if matrix_values is None
             else _source_coefficient_array(
-                coefficients,
+                matrix_values,
                 ndim=3 if normalized_type == "frequencydense" else 2,
-                label="SourceEncoding coefficients",
+                label="SourceEncoding weights",
             )
         )
         frequency_axis = None
@@ -1542,7 +1568,7 @@ class SourceEncoding(ExtraFieldsMixin):
                     _source_coefficient_array(
                         field_obj.coefficients,
                         ndim=1,
-                        label="DistributedSource coefficients",
+                        label="EncodedSource coefficients",
                     )
                     for field_obj in field_objects
                 ]
@@ -1551,7 +1577,7 @@ class SourceEncoding(ExtraFieldsMixin):
                     raise ValueError(
                         "JsonDense fields must have the same source coefficient count"
                     )
-                matrix = np.column_stack(columns).astype(np.complex64, copy=False)
+                matrix = np.stack(columns).astype(np.complex64, copy=False)
             if not field_objects:
                 raise ValueError("JsonDense source encoding requires fields")
             if file is not None or dataset:
@@ -1567,17 +1593,17 @@ class SourceEncoding(ExtraFieldsMixin):
                 raise ValueError(
                     "JsonDense source encoding cannot include HDF5 metadata"
                 )
-            if matrix.shape[1] != len(field_objects):
+            if matrix.shape[0] != len(field_objects):
                 raise ValueError(
-                    "JsonDense coefficient columns must match the encoded field count"
+                    "JsonDense weight rows must match the encoded field count"
                 )
             self._storage = _DenseSourceEncoding(field_objects, matrix)
             for index, field_obj in enumerate(field_objects):
-                field_obj.coefficients = matrix[:, index]
+                field_obj.coefficients = matrix[index, :]
         elif normalized_type == "frequencydense":
             if matrix is None or frequency_axis is None or not field_objects:
                 raise ValueError(
-                    "FrequencyDense source encoding requires coefficients, "
+                    "FrequencyDense source encoding requires weights, "
                     "frequencies, and fields"
                 )
             if file is not None or dataset:
@@ -1591,13 +1617,9 @@ class SourceEncoding(ExtraFieldsMixin):
             if normalized_count is not None:
                 raise ValueError("FrequencyDense source encoding infers its count")
             if matrix.shape[0] != frequency_axis.size:
-                raise ValueError(
-                    "FrequencyDense coefficient slices must match frequencies"
-                )
-            if matrix.shape[2] != len(field_objects):
-                raise ValueError(
-                    "FrequencyDense coefficient fields must match encoded names"
-                )
+                raise ValueError("FrequencyDense weight slices must match frequencies")
+            if matrix.shape[1] != len(field_objects):
+                raise ValueError("FrequencyDense weight rows must match encoded names")
             self._storage = _FrequencyDenseSourceEncoding(
                 field_objects,
                 matrix,
@@ -1645,11 +1667,24 @@ class SourceEncoding(ExtraFieldsMixin):
         return "HDF5Dense"
 
     @property
-    def fields(self) -> List[DistributedSource]:
+    def fields(self) -> List[EncodedSource]:
         return getattr(self._storage, "fields", [])
 
     @property
     def coefficients(self) -> Optional[np.ndarray]:
+        """Compatibility alias for :attr:`weights`."""
+
+        return self.weights
+
+    @property
+    def weights(self) -> Optional[np.ndarray]:
+        """Encoding-major complex weights.
+
+        Static weights have shape ``(encoded_source, physical_source)``;
+        frequency-dependent weights have shape
+        ``(frequency, encoded_source, physical_source)``.
+        """
+
         if isinstance(
             self._storage,
             (_DenseSourceEncoding, _FrequencyDenseSourceEncoding),
@@ -1725,7 +1760,7 @@ class SourceEncoding(ExtraFieldsMixin):
             if any(field.terms for field in self.fields):
                 raise ValueError("JsonDense source fields cannot include named terms")
             self.validate_dense_shape()
-            if not np.all(np.any(self.coefficients != 0.0, axis=0)):
+            if not np.all(np.any(self.weights != 0.0, axis=1)):
                 raise ValueError(
                     "Every JsonDense source field requires a nonzero coefficient"
                 )
@@ -1741,19 +1776,17 @@ class SourceEncoding(ExtraFieldsMixin):
                     "coordinates live in bulk storage"
                 )
             self.validate_dense_shape()
-            if not np.all(np.any(self.coefficients != 0.0, axis=1)):
+            if not np.all(np.any(self.weights != 0.0, axis=2)):
                 raise ValueError(
                     "Every FrequencyDense field requires a nonzero coefficient "
                     "at every frequency"
                 )
 
     def validate_dense_shape(self, source_count: Optional[int] = None) -> None:
-        """Validate dense columns and absorb compatible legacy field assignment."""
+        """Validate dense rows and absorb compatible field assignment."""
 
         if isinstance(self._storage, _FrequencyDenseSourceEncoding):
-            if source_count is not None and self.coefficients.shape[1] != int(
-                source_count
-            ):
+            if source_count is not None and self.weights.shape[2] != int(source_count):
                 raise ValueError(
                     "FrequencyDense source dimension must match physical "
                     "source-point count"
@@ -1766,16 +1799,16 @@ class SourceEncoding(ExtraFieldsMixin):
             values = _source_coefficient_array(
                 field_obj.coefficients,
                 ndim=1,
-                label="DistributedSource coefficients",
+                label="EncodedSource coefficients",
             )
-            if len(values) != len(matrix):
+            if len(values) != matrix.shape[1]:
                 raise ValueError(
                     "JsonDense coefficient count must match physical source-point count"
                 )
             if not np.shares_memory(values, matrix):
-                matrix[:, index] = values
-                field_obj.coefficients = matrix[:, index]
-        if source_count is not None and len(matrix) != int(source_count):
+                matrix[index, :] = values
+                field_obj.coefficients = matrix[index, :]
+        if source_count is not None and matrix.shape[1] != int(source_count):
             raise ValueError(
                 "JsonDense coefficient count must match physical source-point count"
             )
@@ -1785,7 +1818,7 @@ class SourceEncoding(ExtraFieldsMixin):
         cls,
         fields: Union[
             Mapping[str, Mapping[str, Any]],
-            Iterable[Union[DistributedSource, Mapping[str, Any]]],
+            Iterable[Union[EncodedSource, Mapping[str, Any]]],
         ],
         *,
         name: Optional[str] = None,
@@ -1795,15 +1828,15 @@ class SourceEncoding(ExtraFieldsMixin):
 
         if isinstance(fields, Mapping):
             field_objects = [
-                DistributedSource.named(field_name, terms)
+                EncodedSource.named(field_name, terms)
                 for field_name, terms in fields.items()
             ]
         else:
             field_objects = [
                 (
                     field
-                    if isinstance(field, DistributedSource)
-                    else DistributedSource.from_named_fs(field)
+                    if isinstance(field, EncodedSource)
+                    else EncodedSource.from_named_fs(field)
                 )
                 for field in fields
             ]
@@ -1817,38 +1850,57 @@ class SourceEncoding(ExtraFieldsMixin):
     @classmethod
     def dense(
         cls,
-        coefficients: Any,
+        weights: Optional[Any] = None,
         *,
+        coefficients: Optional[Any] = None,
         names: Optional[Iterable[str]] = None,
         reference_coordinates: Optional[Any] = None,
         name: Optional[str] = None,
         conjugate: bool = False,
         **kwargs: Any,
     ) -> "SourceEncoding":
-        """Create dense encoding from an ``n_source x n_field`` matrix.
+        """Create dense encoding from an ``n_encoded x n_source`` matrix.
 
         Saved simulations materialize the coefficients in HDF5. Calling
         :meth:`to_fs` without a store retains a compact JSON representation for
         interactive examples and compatibility.
 
         Args:
-            coefficients: Real or complex source-major coefficient matrix.
-            names: Optional encoded-field names.
+            weights: Real or complex encoding-major weight matrix.
+            names: Optional encoded-source labels.
             reference_coordinates: Optional reference coordinate per field.
             name: Optional encoding name.
             conjugate: Conjugate the authored coefficients, which implements
                 frequency-domain time reversal for forward responses.
         """
 
-        matrix = np.asarray(coefficients)
+        if weights is not None and coefficients is not None:
+            raise TypeError("Use either weights or coefficients, not both")
+        if coefficients is not None:
+            warnings.warn(
+                "SourceEncoding.dense(coefficients=...) is deprecated; use "
+                "weights= with encoding-major axes instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            matrix = np.asarray(coefficients)
+            matrix = (
+                matrix.reshape(1, -1)
+                if matrix.ndim == 1
+                else np.swapaxes(matrix, -1, -2)
+            )
+        elif weights is not None:
+            matrix = np.asarray(weights)
+        else:
+            raise TypeError("SourceEncoding.dense() requires weights")
         if matrix.ndim == 1:
-            matrix = matrix.reshape(-1, 1)
+            matrix = matrix.reshape(1, -1)
         matrix = _source_coefficient_array(
             matrix,
             ndim=2,
-            label="dense coefficients",
+            label="dense weights",
         )
-        n_fields = int(matrix.shape[1])
+        n_fields = int(matrix.shape[0])
         field_names = (
             _source_names(names, n_fields)
             if names is not None
@@ -1863,7 +1915,7 @@ class SourceEncoding(ExtraFieldsMixin):
             )
         refs = _reference_rows(reference_coordinates, n_fields)
         fields = [
-            DistributedSource(
+            EncodedSource(
                 name=field_names[index],
                 reference_coordinates=refs[index],
             )
@@ -1873,7 +1925,7 @@ class SourceEncoding(ExtraFieldsMixin):
             encoding_type="JsonDense",
             name=name,
             fields=fields,
-            coefficients=matrix,
+            weights=matrix,
             conjugate_coefficients=conjugate,
             **kwargs,
         )
@@ -1881,9 +1933,10 @@ class SourceEncoding(ExtraFieldsMixin):
     @classmethod
     def frequency_dense(
         cls,
-        coefficients: Any,
-        frequencies: Any,
+        weights: Optional[Any] = None,
+        frequencies: Optional[Any] = None,
         *,
+        coefficients: Optional[Any] = None,
         names: Optional[Iterable[str]] = None,
         name: Optional[str] = None,
         conjugate: bool = False,
@@ -1892,8 +1945,8 @@ class SourceEncoding(ExtraFieldsMixin):
         """Create frequency-dependent dense source encoding.
 
         Args:
-            coefficients: Complex tensor with shape
-                ``(n_frequency, n_source, n_field)``.
+            weights: Complex tensor with shape
+                ``(n_frequency, n_encoded, n_source)``.
             frequencies: Physical frequency in Hz for every tensor slice.
             names: Optional encoded-field names.
             name: Optional encoding name.
@@ -1903,23 +1956,37 @@ class SourceEncoding(ExtraFieldsMixin):
         in HDF5. Inline JSON serialization is intentionally unsupported.
         """
 
+        if weights is not None and coefficients is not None:
+            raise TypeError("Use either weights or coefficients, not both")
+        if coefficients is not None:
+            warnings.warn(
+                "SourceEncoding.frequency_dense(coefficients=...) is "
+                "deprecated; use weights= with encoding-major axes instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            weights = np.swapaxes(np.asarray(coefficients), -1, -2)
+        if weights is None:
+            raise TypeError("SourceEncoding.frequency_dense() requires weights")
+        if frequencies is None:
+            raise TypeError("SourceEncoding.frequency_dense() requires frequencies")
         tensor = _source_coefficient_array(
-            coefficients,
+            weights,
             ndim=3,
-            label="frequency-dependent dense coefficients",
+            label="frequency-dependent dense weights",
         )
-        n_fields = int(tensor.shape[2])
+        n_fields = int(tensor.shape[1])
         field_names = (
             _source_names(names, n_fields)
             if names is not None
             else [f"field_{index:06d}" for index in range(1, n_fields + 1)]
         )
-        fields = [DistributedSource(name=field_name) for field_name in field_names]
+        fields = [EncodedSource(name=field_name) for field_name in field_names]
         return cls(
             encoding_type="FrequencyDense",
             name=name,
             fields=fields,
-            coefficients=tensor,
+            weights=tensor,
             frequencies=frequencies,
             conjugate_coefficients=conjugate,
             **kwargs,
@@ -1940,8 +2007,8 @@ class SourceEncoding(ExtraFieldsMixin):
     ) -> "SourceEncoding":
         """Create HDF5 dense source encoding.
 
-        Static coefficients use h5py shape ``(field, source, complex=2)``.
-        Frequency-dependent coefficients use shape
+        Static weights use h5py shape ``(field, source, complex=2)``.
+        Frequency-dependent weights use shape
         ``(frequency, field, source, complex=2)`` and require
         ``frequencies_dataset``.
         """
@@ -1974,12 +2041,12 @@ class SourceEncoding(ExtraFieldsMixin):
             raise ValueError("SourceEncoding payload requires _type or encoding_type")
         if encoding_type == "Named":
             fields = [
-                DistributedSource.from_named_fs(field)
+                EncodedSource.from_named_fs(field)
                 for field in payload.pop("fields", [])
             ]
         elif encoding_type == "JsonDense":
             fields = [
-                DistributedSource.from_dense_fs(field)
+                EncodedSource.from_dense_fs(field)
                 for field in payload.pop("fields", [])
             ]
         else:
@@ -2015,8 +2082,8 @@ class SourceEncoding(ExtraFieldsMixin):
                     "FrequencyDense source encoding requires a simulation/project "
                     "store so coefficients can be materialized in HDF5"
                 )
-            tensor = self.coefficients
-            n_frequency, n_source, n_field = tensor.shape
+            tensor = self.weights
+            n_frequency, n_field, n_source = tensor.shape
 
             def coefficient_chunks():
                 target_bytes = 32 * 1024 * 1024
@@ -2027,7 +2094,7 @@ class SourceEncoding(ExtraFieldsMixin):
                 slices_per_chunk = max(1, target_bytes // slice_bytes)
                 for start in range(0, n_frequency, slices_per_chunk):
                     stop = min(n_frequency, start + slices_per_chunk)
-                    values = tensor[start:stop].transpose(0, 2, 1)
+                    values = tensor[start:stop]
                     split = np.empty((*values.shape, 2), dtype=np.float32)
                     split[..., 0] = values.real
                     split[..., 1] = values.imag
@@ -2081,8 +2148,8 @@ class SourceEncoding(ExtraFieldsMixin):
             return payload
 
         if self.encoding_type == "JsonDense" and store is not None:
-            matrix = self.coefficients
-            n_source, n_field = matrix.shape
+            matrix = self.weights
+            n_field, n_source = matrix.shape
 
             def coefficient_chunks():
                 target_bytes = 32 * 1024 * 1024
@@ -2090,7 +2157,7 @@ class SourceEncoding(ExtraFieldsMixin):
                 rows_per_chunk = max(1, target_bytes // row_bytes)
                 for start in range(0, n_field, rows_per_chunk):
                     stop = min(n_field, start + rows_per_chunk)
-                    values = matrix[:, start:stop].T
+                    values = matrix[start:stop, :]
                     split = np.empty((*values.shape, 2), dtype=np.float32)
                     split[..., 0] = values.real
                     split[..., 1] = values.imag
@@ -2133,7 +2200,7 @@ class SourceEncoding(ExtraFieldsMixin):
         if self.encoding_type == "Named":
             payload["fields"] = [field.to_named_fs() for field in self.fields]
         elif self.encoding_type == "JsonDense":
-            if self.coefficients.size > 256:
+            if self.weights.size > 256:
                 raise ValueError(
                     "JsonDense source encoding is limited to 256 coefficients; "
                     "save through a simulation/project context to materialize HDF5"
@@ -2228,7 +2295,7 @@ class SourceEncoding(ExtraFieldsMixin):
             elif isinstance(self._storage, _FrequencyDenseSourceEncoding):
                 weights = np.sqrt(
                     np.mean(
-                        np.abs(self.coefficients[:, :, field_index]) ** 2,
+                        np.abs(self.weights[:, field_index, :]) ** 2,
                         axis=0,
                     )
                 )
@@ -2300,7 +2367,7 @@ class SourceEncoding(ExtraFieldsMixin):
         )
 
     def conjugated(self) -> "SourceEncoding":
-        """Return a lazy conjugated view without copying coefficient arrays."""
+        """Return a lazy conjugated view without copying weight arrays."""
 
         encoding = copy.copy(self)
         encoding._storage = copy.copy(self._storage)

@@ -458,11 +458,6 @@
             "weights": {
               "$ref": "#/$defs/receiverWeightTable"
             },
-            "conjugate_weights": {
-              "type": "boolean",
-              "default": false,
-              "description": "Conjugate the complete EncodedReceiver HDF5 weight table in the runtime without rewriting it."
-            },
             "gauge_length": {
               "description": "Preferred DAS gauge length key. Accepted as a quantity object or legacy solver-scaled scalar.",
               "oneOf": [

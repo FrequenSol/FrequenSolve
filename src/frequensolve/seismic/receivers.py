@@ -593,8 +593,9 @@ class EncodedReceiver(ReceiverDevice):
             omitted from JSON; large explicit name lists are stored in HDF5.
         encoding_count: Required for external tables when names are omitted.
         reduction: Reduction across the fixed receiver geometry.
-        weight_table: Optional external HDF5 table.
-        conjugate_weights: Lazily conjugate the complete table in Sauce.
+        weight_table: Optional external HDF5 table.  Weights always define
+            the forward receiver operator; adjoint modeling applies its
+            Hermitian transpose automatically.
     """
 
     weights: Optional[Any] = field(default=None, repr=False)
@@ -602,7 +603,6 @@ class EncodedReceiver(ReceiverDevice):
     encoding_count: Optional[int] = None
     reduction: Literal["none", "sum", "mean"] = "sum"
     weight_table: Optional[ReceiverWeightTable] = None
-    conjugate_weights: bool = False
     _weight_blocks: List[Tuple[np.ndarray, bool]] = field(
         default_factory=list,
         init=False,
@@ -620,10 +620,6 @@ class EncodedReceiver(ReceiverDevice):
             raise ValueError(
                 "EncodedReceiver accepts authored weights or an external table, not both"
             )
-        if not isinstance(self.conjugate_weights, (bool, np.bool_)):
-            raise TypeError("EncodedReceiver conjugate_weights must be boolean")
-        self.conjugate_weights = bool(self.conjugate_weights)
-
         names = self.encoding_names
         if names is not None:
             if isinstance(names, (str, bytes)):
@@ -855,10 +851,6 @@ class EncodedReceiver(ReceiverDevice):
             raise ValueError(
                 "EncodedReceiver pointwise and component scalar weights cannot be mixed"
             )
-        if self.conjugate_weights and not has_pointwise:
-            raise ValueError(
-                "EncodedReceiver conjugate_weights requires a pointwise weight table"
-            )
         if not self.encoding_count:
             raise ValueError("EncodedReceiver requires at least one encoding")
         if self.weight_table is not None:
@@ -867,20 +859,6 @@ class EncodedReceiver(ReceiverDevice):
                 point_count,
                 ctx,
             )
-
-    def conjugated(self) -> "EncodedReceiver":
-        """Return a lazy conjugated view without copying the weight tensor."""
-
-        encoded = copy.copy(self)
-        encoded.components = copy.deepcopy(self.components)
-        encoded.encoding_names = (
-            None if self.encoding_names is None else list(self.encoding_names)
-        )
-        encoded._weight_blocks = list(self._weight_blocks)
-        encoded.conjugate_weights = not self.conjugate_weights
-        return encoded
-
-    time_reversed = conjugated
 
     def _materialize_weight_table(
         self,
@@ -976,7 +954,6 @@ class EncodedReceiver(ReceiverDevice):
             **({"encoding_names": list(inline_names)} if inline_names else {}),
             "reduction": self.reduction,
             "weights": weight_payload,
-            **({"conjugate_weights": True} if self.conjugate_weights else {}),
         }
 
     @classmethod
@@ -991,7 +968,6 @@ class EncodedReceiver(ReceiverDevice):
             encoding_names=data.get("encoding_names"),
             encoding_count=data.get("encoding_count"),
             reduction=data.get("reduction", "sum"),
-            conjugate_weights=data.get("conjugate_weights", False),
             weight_table=weight_table,
         )
 

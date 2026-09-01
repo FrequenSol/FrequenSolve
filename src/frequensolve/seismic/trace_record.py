@@ -16,7 +16,7 @@ from xarray import DataArray, register_dataarray_accessor
 from frequensolve._optional import optional_dependency_error
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverGroup, coordinate_array_metadata
-from frequensolve.seismic.sources import DistributedSource, PointSource, SourceGroup
+from frequensolve.seismic.sources import EncodedSource, PointSource, SourceGroup
 from frequensolve.units import unit_expression
 
 TraceRecord = DataArray
@@ -51,7 +51,7 @@ def _source_index(trace: DataArray) -> int:
     return int(trace.attrs.get("source_id", trace.attrs.get("source_group", 1)))
 
 
-def _source_field(trace: DataArray) -> PointSource | DistributedSource:
+def _source_field(trace: DataArray) -> PointSource | EncodedSource:
     return _acquisition(trace).source_field(_source_index(trace))
 
 
@@ -162,7 +162,7 @@ class TraceAccessor:
         return _source_group(self._trace)
 
     @property
-    def source_field(self) -> PointSource | DistributedSource:
+    def source_field(self) -> PointSource | EncodedSource:
         """Return current source-field metadata reconstructed from the trace."""
 
         return _source_field(self._trace)

@@ -16,7 +16,7 @@ from frequensolve.seismic._legacy_source_types import (
 )
 from frequensolve.seismic.receivers import coordinate_array_metadata
 from frequensolve.seismic.sources import (
-    DistributedSource,
+    EncodedSource,
     PointSource,
     SourceEncoding,
     SourceGeometry,
@@ -95,12 +95,12 @@ def add_compound_source(
     weights: Any,
     direction: Optional[Any],
     domain: Optional[int],
-) -> DistributedSource:
+) -> EncodedSource:
     """Implement the deprecated compound-source authoring call."""
 
     _warn(
         "add_compound_source()",
-        "add_sources() plus add_distributed_source()",
+        "add_sources() plus add_encoded_source()",
     )
 
     coords = np.asarray(coords, dtype=np.float64)
@@ -140,12 +140,12 @@ def add_compound_source(
             source.direction = source_direction.tolist()
     acquisition._append_inline_sources(geometry)
 
-    field = DistributedSource.named(
+    field = EncodedSource.named(
         field_name,
         dict(zip(point_names, weights.tolist())),
     )
     if acquisition.source_encoding is None:
-        fields = [DistributedSource.named(name, {name: 1.0}) for name in existing_names]
+        fields = [EncodedSource.named(name, {name: 1.0}) for name in existing_names]
         fields.append(field)
         acquisition.source_encoding = SourceEncoding.named(fields)
     else:
@@ -159,7 +159,7 @@ def _append_identity_fields(acquisition: Any, names: List[str]) -> None:
         return
     if encoding.encoding_type != "Named":
         raise ValueError("Cannot append identity fields to non-Named encoding")
-    encoding.fields.extend(DistributedSource.named(name, {name: 1.0}) for name in names)
+    encoding.fields.extend(EncodedSource.named(name, {name: 1.0}) for name in names)
 
 
 def migrate_source_groups(
@@ -177,7 +177,7 @@ def migrate_source_groups(
     source_kind: Optional[str] = None
     source_domain: Optional[int] = None
     physical_sources: List[PointSource] = []
-    fields: List[DistributedSource] = []
+    fields: List[EncodedSource] = []
     needs_encoding = False
     used_names: set[str] = set()
 
@@ -228,7 +228,7 @@ def migrate_source_groups(
                     extra=point_extra,
                 )
             )
-            fields.append(DistributedSource.named(field_name, {field_name: 1.0}))
+            fields.append(EncodedSource.named(field_name, {field_name: 1.0}))
             continue
 
         if not isinstance(source, CompoundSource):
@@ -270,7 +270,7 @@ def migrate_source_groups(
                 )
             )
             terms[point_name] = 1.0
-        fields.append(DistributedSource.named(field_name, terms))
+        fields.append(EncodedSource.named(field_name, terms))
 
     geometry = SourceGeometry.inline(
         kind=source_kind,

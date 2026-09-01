@@ -149,6 +149,7 @@ def test_top_level_authoring_exports_are_available():
         "PointSource",
         "SourceGeometry",
         "SourceEncoding",
+        "EncodedSource",
         "DistributedSource",
         "PreprocessHook",
         "EncodedReceiver",
