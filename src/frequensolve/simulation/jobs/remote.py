@@ -50,6 +50,9 @@ class JobRemoteMixin:
                 output validation fails.
         """
 
+        from frequensolve.simulation.jobs.base import JobLayout
+
+        JobLayout._layout_name(self.name, field="name")
         self.simulation.save()
         file = self._local_path / f"{self.name}.json"
         self._file = file

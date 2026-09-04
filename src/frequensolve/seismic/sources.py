@@ -227,12 +227,15 @@ def _coordinate_rows(
         extra = copy.deepcopy(coords.extra)
         coords = coords.value
 
-    if is_quantity(coords):
-        target_units = units or coords.units
-        values = np.asarray(coords.to(target_units).magnitude, dtype=float)
-        units = target_units
-    else:
-        values = np.asarray(coords, dtype=float)
+    try:
+        if is_quantity(coords):
+            target_units = units or coords.units
+            values = np.asarray(coords.to(target_units).magnitude, dtype=float)
+            units = target_units
+        else:
+            values = np.asarray(coords, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("source coordinates must have shape (n, dim)") from exc
 
     if values.ndim == 1:
         values = values.reshape(1, -1)

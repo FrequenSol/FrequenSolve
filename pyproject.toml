@@ -170,6 +170,7 @@ markers = [
     "hpc_hermetic: deterministic HPC adapter behavior with no SSH, scheduler, or credentials",
     "integration: requires solver binaries or external services",
     "interactive: requires manual input or an already authenticated user session",
+    "property_contract: bounded generated testing for Python SDK contracts",
     "unit: deterministic unit test with no solver, network, credentials, or scheduler",
     "visual: image comparison or plotting test",
 ]
