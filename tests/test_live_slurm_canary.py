@@ -58,6 +58,7 @@ def test_synthetic_fixture_is_small_and_uniquely_named(tmp_path):
 
 def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path):
     enterprise_site = site()
+    enterprise_site.run_config.nodes = 2
     calls = []
     scheduler = {"cancelled": False, "probes": 0}
     success_job = SimpleNamespace(name="fs_canary_success", _job_id=None)
@@ -114,11 +115,13 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
         lambda *args, **kwargs: (SimpleNamespace(), success_job, cancel_job),
     )
     monkeypatch.setattr(canary, "_trace_evidence", lambda result: {"finite": True})
-    monkeypatch.setattr(
-        canary,
-        "_solver_evidence",
-        lambda *args, **kwargs: {"mpiRanks": 4, "threadsPerRank": 2},
-    )
+    solver_evidence_calls = []
+
+    def solver_evidence(*args):
+        solver_evidence_calls.append(args)
+        return {"mpiRanks": 8, "threadsPerRank": 2}
+
+    monkeypatch.setattr(canary, "_solver_evidence", solver_evidence)
 
     result = canary.run_live_slurm_canary(
         site=enterprise_site,
@@ -134,6 +137,7 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
     assert calls[0]["fetch"] is True
     assert calls[1]["fetch"] is False
     assert fetched_logs == [success_job]
+    assert solver_evidence_calls == [(tmp_path, 8)]
     assert all("threads_per_rank" not in call for call in calls)
     assert all(call["mode"] == "batch" for call in calls)
     assert all(call["ranks_per_node"] == 4 for call in calls)

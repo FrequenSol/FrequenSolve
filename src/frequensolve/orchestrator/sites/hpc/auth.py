@@ -236,6 +236,11 @@ class SlurmAuthenticator:
 
         try:
             job_client.load_system_host_keys()
+            known_hosts_file = getattr(
+                getattr(site, "config", None), "known_hosts_file", None
+            )
+            if known_hosts_file is not None:
+                job_client.load_host_keys(str(known_hosts_file))
             job_client.connect(
                 job_host,
                 username=site.credentials.username,

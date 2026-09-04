@@ -299,7 +299,8 @@ def run_live_slurm_canary(
         if success_result.status.state != "complete":
             raise LiveSlurmCanaryError("success case did not reach complete")
         traces = _trace_evidence(success_result)
-        solver = _solver_evidence(site.fetch_logs(success_job), ranks_per_node)
+        expected_ranks = site.run_config.nodes * ranks_per_node
+        solver = _solver_evidence(site.fetch_logs(success_job), expected_ranks)
 
         cancel_handle = site.submit(
             cancel_job,

@@ -271,6 +271,7 @@ def test_failed_compute_connection_closes_channel_and_client(monkeypatch):
             get_transport=lambda: tunnel,
         ),
         credentials=SimpleNamespace(username="scientist"),
+        config=SimpleNamespace(known_hosts_file=Path("/synthetic/known_hosts")),
     )
     authenticator = SlurmAuthenticator(site)
     monkeypatch.setattr(authenticator, "get_job_host", lambda job_id: "compute-1")
@@ -281,6 +282,9 @@ def test_failed_compute_connection_closes_channel_and_client(monkeypatch):
 
         def load_system_host_keys(self):
             pass
+
+        def load_host_keys(self, path):
+            assert path == "/synthetic/known_hosts"
 
         def connect(self, *args, **kwargs):
             assert kwargs["timeout"] == auth.SSH_CONNECT_TIMEOUT_SECONDS
