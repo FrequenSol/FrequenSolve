@@ -22,7 +22,7 @@ from frequensolve._optional import optional_dependency_error
 
 try:
     import boto3
-    from boto3.exceptions import S3UploadFailedError
+    from boto3.exceptions import S3UploadFailedError  # type: ignore[import-untyped]
     from botocore.exceptions import ClientError
 except ModuleNotFoundError as exc:
     raise optional_dependency_error(
