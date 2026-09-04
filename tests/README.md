@@ -221,7 +221,8 @@ To establish or replace `tests/performance/sdk-baseline.json`:
    coefficients of variation, and reject evidence collected after runner or
    dependency drift.
 3. Set reviewed median wall-time and peak-Python-heap ceilings for every
-   scenario. Keep the recorded comparison runner identity (all `runner` fields
+   scenario. Record the ordered scenario names and the exact warm-up/sample
+   configuration alongside the thresholds. Keep the recorded comparison runner identity (all `runner` fields
    except the ephemeral `runnerName`) and exact third-party `dependencies`
    mapping. The measured FrequenSolve build remains bound by `repository.commit`
    instead of forcing a rebaseline after every dynamic package-version change.

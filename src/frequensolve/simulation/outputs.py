@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Type, Union
@@ -68,7 +69,11 @@ _OUTPUT_DIMENSIONS = {
 
 
 def _relative_output_path(path: Union[str, Path], field: str = "path") -> str:
-    raw = str(path)
+    if not isinstance(path, (str, os.PathLike)):
+        raise TypeError(f"{field} must be a string or path-like value")
+    raw = os.fspath(path)
+    if not isinstance(raw, str):
+        raise TypeError(f"{field} must be a string or path-like value")
     value = Path(raw)
     if (
         not raw

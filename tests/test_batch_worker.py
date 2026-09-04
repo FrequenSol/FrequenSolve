@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("boto3")
+from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import ClientError
 
 from frequensolve.orchestrator.sites.aws import batch_worker
@@ -312,6 +313,31 @@ def test_partial_result_upload_rolls_back_exact_uploaded_keys_without_leaking(
     diagnostic = f"{exc.value}\n{caplog.text}"
     assert "account-prefix" not in diagnostic
     assert "private-bucket" not in diagnostic
+    assert exc.value.__cause__ is None
+
+
+def test_managed_upload_failure_rolls_back_and_is_sanitized(tmp_path):
+    s3 = FakeS3Client()
+    worker = _worker(tmp_path, s3_client=s3)
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "a.txt").write_text("a")
+    (results / "b.txt").write_text("b")
+    original_upload = s3.upload_file
+
+    def managed_upload(filename, bucket, key):
+        if key.endswith("/b.txt"):
+            raise S3UploadFailedError(f"private provider detail for {key}")
+        original_upload(filename, bucket, key)
+
+    s3.upload_file = managed_upload
+
+    with pytest.raises(RuntimeError, match="result upload failed") as exc:
+        worker.upload_results_to_s3(results, "private/account-prefix")
+
+    assert s3.objects == {}
+    assert s3.deleted == [("private-bucket", s3.uploads[0][2])]
+    assert "account-prefix" not in str(exc.value)
     assert exc.value.__cause__ is None
 
 

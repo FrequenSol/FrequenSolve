@@ -6,7 +6,7 @@ import pytest
 import xarray as xr
 from hypothesis import given
 from hypothesis import strategies as st
-from pint.errors import UndefinedUnitError
+from pint.errors import DimensionalityError, UndefinedUnitError
 
 from frequensolve.geometry.frame import CoordinateValue
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
@@ -16,7 +16,12 @@ from frequensolve.project.project import Project
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.sources import SourceEncoding, SourceGeometry
 from frequensolve.simulation.jobs import FrequencyDomainJob, JobLayout
-from frequensolve.simulation.outputs import JobOutputs, TraceOutput
+from frequensolve.simulation.outputs import (
+    JobOutputs,
+    TraceOutput,
+    VtkOutput,
+    WavefieldOutput,
+)
 from frequensolve.units import Q_, UnitConfig, quantity_to_fs
 from tests.property_strategies import (
     ACQUISITION_CASES,
@@ -184,6 +189,11 @@ def test_ragged_source_coordinate_regression_reports_stable_shape_error():
         SourceGeometry.points(kind="scalar", coords=[[0.0], [0.0, 1.0]])
 
 
+def test_quantity_coordinate_conversion_preserves_dimensionality_error():
+    with pytest.raises(DimensionalityError):
+        SourceGeometry.points(kind="scalar", coords=Q_([[1.0, 2.0]], "s"), units="m")
+
+
 @given(case=SIMULATION_CASES)
 def test_simulation_schema_and_dimension_normalization_are_stable(case):
     with tempfile.TemporaryDirectory() as temporary:
@@ -257,6 +267,13 @@ def test_trace_output_safe_relative_path_roundtrips(selection):
 def test_trace_output_rejects_paths_outside_result_directory(path):
     with pytest.raises(ValueError, match="safe relative path"):
         TraceOutput(path=path)
+
+
+@pytest.mark.parametrize("output_type", [TraceOutput, VtkOutput, WavefieldOutput])
+@pytest.mark.parametrize("path", [None, b"output", object()])
+def test_outputs_reject_non_path_values_before_string_coercion(output_type, path):
+    with pytest.raises(TypeError, match="string or path-like"):
+        output_type(path=path)
 
 
 @given(path=SAFE_RELATIVE_PATHS)

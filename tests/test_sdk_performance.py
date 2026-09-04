@@ -35,6 +35,7 @@ def _evidence() -> dict:
             "runnerImageVersion": "20260801.1",
         },
         "dependencies": {"frequensolve": "1.2.3", "numpy": "2.4.0"},
+        "configuration": {"warmups": 2, "samples": 7},
         "scenarios": [
             {
                 "name": "representative-scenario",
@@ -57,6 +58,8 @@ def _baseline(evidence: dict) -> dict:
         "schema": BASELINE_SCHEMA,
         "runner": comparison_runner_identity(evidence["runner"]),
         "dependencies": comparison_dependency_versions(evidence["dependencies"]),
+        "configuration": deepcopy(evidence["configuration"]),
+        "scenarioOrder": ["representative-scenario"],
         "thresholds": {
             "representative-scenario": {
                 "maxMedianWallTimeSeconds": 0.5,
@@ -175,4 +178,28 @@ def test_baseline_comparison_rejects_missing_scenarios():
     }
 
     with pytest.raises(ValueError, match="scenario set differs"):
+        compare_to_baseline(evidence, baseline)
+
+
+def test_baseline_comparison_rejects_measurement_configuration_drift():
+    evidence = _evidence()
+    baseline = _baseline(evidence)
+    evidence["configuration"]["samples"] = 3
+
+    with pytest.raises(ValueError, match="measurement configuration drifted"):
+        compare_to_baseline(evidence, baseline)
+
+
+def test_baseline_comparison_rejects_scenario_reordering():
+    evidence = _evidence()
+    second = deepcopy(evidence["scenarios"][0])
+    second["name"] = "second-scenario"
+    evidence["scenarios"].append(second)
+    baseline = _baseline(evidence)
+    baseline["scenarioOrder"] = ["second-scenario", "representative-scenario"]
+    baseline["thresholds"]["second-scenario"] = deepcopy(
+        baseline["thresholds"]["representative-scenario"]
+    )
+
+    with pytest.raises(ValueError, match="scenario order differs"):
         compare_to_baseline(evidence, baseline)

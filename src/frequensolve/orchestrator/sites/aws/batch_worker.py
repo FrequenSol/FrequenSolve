@@ -22,6 +22,7 @@ from frequensolve._optional import optional_dependency_error
 
 try:
     import boto3
+    from boto3.exceptions import S3UploadFailedError
     from botocore.exceptions import ClientError
 except ModuleNotFoundError as exc:
     raise optional_dependency_error(
@@ -420,7 +421,7 @@ class BatchWorker:
             logger.info("Batch-worker result upload completed")
             return s3_key
 
-        except (ClientError, OSError, RuntimeError) as exc:
+        except (ClientError, S3UploadFailedError, OSError, RuntimeError) as exc:
             client = self.s3_client
             for uploaded_key in locals().get("uploaded_keys", []):
                 try:

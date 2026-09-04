@@ -585,14 +585,21 @@ def compare_to_baseline(
     )
     if baseline.get("dependencies") != actual_dependencies:
         raise ValueError("dependency versions drifted from the reviewed baseline")
+    configuration = evidence.get("configuration")
+    if baseline.get("configuration") != configuration:
+        raise ValueError("measurement configuration drifted from the reviewed baseline")
     thresholds = baseline.get("thresholds")
     if not isinstance(thresholds, Mapping) or not thresholds:
         raise ValueError("performance baseline contains no thresholds")
-    scenarios = {
-        str(item["name"]): item
+    measured_scenarios = [
+        item
         for item in evidence.get("scenarios", [])
         if isinstance(item, Mapping) and "name" in item
-    }
+    ]
+    scenario_order = [str(item["name"]) for item in measured_scenarios]
+    if baseline.get("scenarioOrder") != scenario_order:
+        raise ValueError("baseline scenario order differs from measured evidence")
+    scenarios = {str(item["name"]): item for item in measured_scenarios}
     if set(scenarios) != set(thresholds):
         raise ValueError("baseline scenario set differs from measured evidence")
 

@@ -204,6 +204,11 @@
       "minimum_cases": 1,
       "role": "solver binary or external service approval"
     },
+    "property_contract": {
+      "minimum_cases": 1,
+      "required_companion": "unit",
+      "role": "bounded generated SDK contract tests with no external services"
+    },
     "unit": {
       "minimum_cases": 1,
       "role": "explicit deterministic contract-tool unit tests"
