@@ -617,6 +617,7 @@ def _write_heavy_test_artifacts(
     duplicate_scenario=None,
     renamed_scenario=None,
     scenario_outcome=None,
+    repeated_filler=False,
 ):
     manifest = load_scenario_manifest()
     cases = []
@@ -644,7 +645,11 @@ def _write_heavy_test_artifacts(
     cases.extend(
         {
             "classname": "tests.test_release_baseline",
-            "name": f"test_baseline_{index:04d}",
+            "name": (
+                "test_repeated_baseline"
+                if repeated_filler
+                else f"test_baseline_{index:04d}"
+            ),
             "outcome": None,
         }
         for index in range(filler_count)
@@ -802,6 +807,14 @@ def test_heavy_test_evidence_rejects_inconsistent_junit_summary(tmp_path):
     evidence["pytest"]["junit"]["counts"]["tests"] += 1
 
     with pytest.raises(ValueError, match="counts.tests must match JUnit XML"):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+def test_heavy_test_evidence_rejects_duplicate_unrelated_test_identities(tmp_path):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence, repeated_filler=True)
+
+    with pytest.raises(ValueError, match="testcase identity.*must be unique"):
         validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
 
 

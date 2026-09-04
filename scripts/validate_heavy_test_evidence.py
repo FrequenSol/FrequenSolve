@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import xml.etree.ElementTree as ET
+from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -208,6 +209,14 @@ def _junit_counts_and_scenarios(
             }[status]
             derived[key] += 1
         cases.append((classname, name, status))
+
+    identities = Counter(case[:2] for case in cases)
+    for (classname, name), count in sorted(identities.items()):
+        if count > 1:
+            errors.append(
+                f"pytest.junit testcase identity {classname}::{name} "
+                f"must be unique; found {count}"
+            )
 
     for name, measured in derived.items():
         if summary.get(name) != measured:
