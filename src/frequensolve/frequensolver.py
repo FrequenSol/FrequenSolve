@@ -305,7 +305,11 @@ def _identity_from_output(output: str) -> FrequenSolverIdentity:
         raise ValueError("identity JSON has " + "; ".join(details))
     schema = payload.get("schema")
     product = payload.get("product")
-    if (schema, product) not in _SUPPORTED_IDENTITY_PAIRS:
+    if (
+        not isinstance(schema, str)
+        or not isinstance(product, str)
+        or (schema, product) not in _SUPPORTED_IDENTITY_PAIRS
+    ):
         raise ValueError(
             "identity schema/product pair is unsupported: "
             f"schema={schema!r}, product={product!r}"
