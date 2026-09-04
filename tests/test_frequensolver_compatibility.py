@@ -248,13 +248,22 @@ def test_loader_rejects_release_url_for_another_frequensolver_release(tmp_path):
         load_frequensolver_compatibility(path)
 
 
-def test_local_identity_query_calls_executable_directly(monkeypatch):
+@pytest.mark.parametrize(
+    "schema,product",
+    [
+        ("frequensolver-identity-1", "FrequenSolver"),
+        ("fs-solver-identity-1", "FS_solver"),
+    ],
+)
+def test_local_identity_query_calls_executable_directly(monkeypatch, schema, product):
     seen = {}
 
     def fake_run(command, **kwargs):
         seen["command"] = command
         seen["kwargs"] = kwargs
-        return subprocess.CompletedProcess(command, 0, _identity_json(), "")
+        return subprocess.CompletedProcess(
+            command, 0, _identity_json(schema=schema, product=product), ""
+        )
 
     monkeypatch.setattr(frequensolver.subprocess, "run", fake_run)
 
@@ -263,7 +272,13 @@ def test_local_identity_query_calls_executable_directly(monkeypatch):
         environment={"PATH": "/opt/bin"},
     )
 
-    assert result.identity == _identity()
+    assert result.identity == FrequenSolverIdentity(
+        version="v0.1.0",
+        build_id="release-v0.1.0",
+        git_commit=COMMIT,
+        schema=schema,
+        product=product,
+    )
     assert seen["command"] == ["/opt/Frequen Solver/fs3d", "--identity-json"]
     assert seen["kwargs"]["env"] == {"PATH": "/opt/bin"}
 
@@ -426,6 +441,28 @@ def test_identity_query_rejects_noncanonical_object(monkeypatch, mutation):
 
     assert result.identity is None
     assert "keys" in result.error
+
+
+@pytest.mark.parametrize(
+    "schema,product",
+    [
+        ("fs-solver-identity-1", "FrequenSolver"),
+        ("frequensolver-identity-1", "FS_solver"),
+        ("fs-solver-identity-2", "FS_solver"),
+        ({}, "FS_solver"),
+    ],
+)
+def test_identity_query_rejects_mixed_or_unknown_identity(monkeypatch, schema, product):
+    monkeypatch.setattr(
+        frequensolver.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, _identity_json(schema=schema, product=product), ""
+        ),
+    )
+    result = query_local_frequensolver_identity("/solver")
+    assert result.identity is None
+    assert "schema/product pair" in result.error
 
 
 def test_identity_query_rejects_multiline_build_id(monkeypatch):

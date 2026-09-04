@@ -5,7 +5,6 @@ import pytest
 
 pytest.importorskip("boto3")
 
-from frequensolve.orchestrator.sites.aws import aws as aws_module
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
 
 
@@ -77,16 +76,6 @@ def make_graphql_site():
     return site
 
 
-def make_rest_site():
-    site = make_graphql_site()
-    site.graphql_client = None
-    site.config = SimpleNamespace(
-        api_token=None,
-        api_base_url="https://api.example.invalid",
-    )
-    return site
-
-
 def test_aws_cli_environment_replaces_credentials_and_removes_profiles(
     monkeypatch,
 ):
@@ -129,6 +118,26 @@ def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
     assert site.graphql_client.submit_calls[0]["simulation_name"] == "model"
     assert site.graphql_client.submit_calls[0]["simulation_job_name"] == "demo-job"
     assert site.graphql_client.compute_stack_checks == 0
+
+
+def test_graphql_submit_current_job_fetches_once_when_waited():
+    site = make_graphql_site()
+    site._emit_status = lambda *args, **kwargs: None
+    fetch_calls = []
+    site.fetch_outputs = lambda job: fetch_calls.append(job)
+    job = FakeJob()
+    job.is_run_current = lambda: True
+    job.write_run_state = lambda **kwargs: None
+
+    run = site.submit(job, fetch=True)
+
+    assert fetch_calls == []
+    result = run.wait()
+    assert result.successful
+    assert fetch_calls == [job]
+    assert run.wait() is result
+    assert fetch_calls == [job]
+    assert site.graphql_client.submit_calls == []
 
 
 def test_graphql_submit_stages_inputs_without_inventing_project_metadata():
@@ -271,78 +280,34 @@ def test_graphql_submit_skip_false_requests_fresh_run(skip):
     assert site.graphql_client.submit_calls[0]["fresh"] is True
 
 
-def test_rest_submit_preserves_backend_resource_defaults_when_omitted(monkeypatch):
-    site = make_rest_site()
+def test_submit_requires_the_current_authenticated_graphql_contract():
+    site = make_graphql_site()
+    site.graphql_client = None
     job = FakeJob()
-    requests = []
 
-    def fake_post(url, json, headers, timeout):
-        requests.append(
-            {
-                "url": url,
-                "json": json,
-                "headers": headers,
-                "timeout": timeout,
-            }
-        )
-        return SimpleNamespace(
-            status_code=200,
-            text="",
-            json=lambda: {"status": "success", "simulation_id": "simulation-1"},
-        )
-
-    monkeypatch.setattr(aws_module.requests, "post", fake_post)
-
-    site.submit(job)
-
-    assert "vcpu" not in requests[0]["json"]
-    assert "memory" not in requests[0]["json"]
+    with pytest.raises(RuntimeError, match="requires Cognito authentication"):
+        site.submit(job)
 
 
-def test_rest_submit_sends_only_explicit_resource_overrides(monkeypatch):
-    site = make_rest_site()
-    job = FakeJob()
-    requests = []
+def test_connectivity_uses_the_same_graphql_capability_probe_as_submission():
+    site = make_graphql_site()
 
-    def fake_post(url, json, headers, timeout):
-        requests.append(
-            {
-                "url": url,
-                "json": json,
-                "headers": headers,
-                "timeout": timeout,
-            }
-        )
-        return SimpleNamespace(
-            status_code=200,
-            text="",
-            json=lambda: {"status": "success", "simulation_id": "simulation-1"},
-        )
-
-    monkeypatch.setattr(aws_module.requests, "post", fake_post)
-
-    site.submit(job, vcpu=8)
-
-    assert requests[0]["json"]["vcpu"] == 8
-    assert "memory" not in requests[0]["json"]
+    assert site.test_api_connectivity() is True
 
 
-@pytest.mark.parametrize("skip", [False, "false"])
-def test_rest_submit_skip_false_requests_fresh_run(monkeypatch, skip):
-    site = make_rest_site()
-    job = FakeJob()
-    requests = []
+def test_connectivity_returns_false_without_graphql_authentication():
+    site = make_graphql_site()
+    site.graphql_client = None
 
-    def fake_post(url, json, headers, timeout):
-        requests.append(json)
-        return SimpleNamespace(
-            status_code=200,
-            text="",
-            json=lambda: {"status": "success", "simulation_id": "simulation-1"},
-        )
+    assert site.test_api_connectivity() is False
 
-    monkeypatch.setattr(aws_module.requests, "post", fake_post)
 
-    site.submit(job, skip=skip)
+def test_connectivity_returns_false_when_capability_probe_fails():
+    site = make_graphql_site()
 
-    assert len(requests) == 1
+    def fail_capability_probe():
+        raise RuntimeError("request timed out")
+
+    site.graphql_client.get_compute_provisioning_mode = fail_capability_probe
+
+    assert site.test_api_connectivity() is False

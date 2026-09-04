@@ -61,6 +61,12 @@ class _TraceFetchingSite(Protocol):
     def fetch_traces(self, job: Any, upscale: int = 1) -> Any: ...
 
 
+class _ImageFetchingSite(Protocol):
+    """Optional imaging capability implemented by concrete sites."""
+
+    def fetch_image(self, job: Any) -> Any: ...
+
+
 __all__ = [
     "BaseSite",
     "JobStatus",
@@ -541,6 +547,15 @@ class RunResult:
             return self.site.fetch_wavefields(self.job, upscale=upscale)
         return self.job.wavefields.open(upscale=upscale)
 
+    def images(self) -> Any:
+        """Open imaging outputs for this run."""
+
+        self.raise_for_status()
+        if self.site is not None:
+            site = cast(_ImageFetchingSite, self.site)
+            return site.fetch_image(self.job)
+        return self.job.load_images()
+
     def output_files(
         self,
         *,
@@ -671,7 +686,7 @@ class RunHandle:
     _timeout_fn: Optional[Callable[["RunHandle", JobStatus], RunResult]] = None
     _generic_wait: bool = True
     _cancel_fn: Optional[Callable[["RunHandle"], None]] = None
-    _fetch_fn: Optional[Callable[["RunHandle"], Any]] = None
+    _pending_fetch_fn: Optional[Callable[["RunHandle"], Any]] = None
     _result: Optional[RunResult] = None
     _last_status: JobStatus = field(default_factory=JobStatus)
 
@@ -774,11 +789,13 @@ class RunHandle:
         if self._result is not None:
             if effective_check:
                 self._result.raise_for_status()
+            self._fetch_pending_outputs()
             return self._result
         if not self._generic_wait and self._wait_fn is not None:
             self._result = self._wait_fn(self, timeout, poll_interval)
             if effective_check:
                 self._result.raise_for_status()
+            self._fetch_pending_outputs()
             return self._result
         from frequensolve.orchestrator.utils.progress import wait
 
@@ -814,11 +831,13 @@ class RunHandle:
         if self._result is not None:
             if effective_check:
                 self._result.raise_for_status()
+            await asyncio.to_thread(self._fetch_pending_outputs)
             return self._result
         if not self._generic_wait and self._wait_async_fn is not None:
             self._result = await self._wait_async_fn(self, timeout, poll_interval)
             if effective_check:
                 self._result.raise_for_status()
+            await asyncio.to_thread(self._fetch_pending_outputs)
             return self._result
         return await asyncio.to_thread(
             self.wait,
@@ -884,11 +903,25 @@ class RunHandle:
             available.
         """
 
-        if self._fetch_fn is not None:
-            return self._fetch_fn(self)
-        if hasattr(self.site, "fetch_outputs"):
-            return self.site.fetch_outputs(self.job)
-        return None
+        pending_fetch = self._pending_fetch_fn
+        if pending_fetch is not None:
+            result = pending_fetch(self)
+            self._pending_fetch_fn = None
+        elif hasattr(self.site, "fetch_outputs"):
+            result = self.site.fetch_outputs(self.job)
+        else:
+            result = None
+        return result
+
+    def _fetch_pending_outputs(self) -> None:
+        """Consume one successful submit-time output fetch when pending."""
+
+        if (
+            self._pending_fetch_fn is not None
+            and self._result is not None
+            and self._result.successful
+        ):
+            self.fetch()
 
     def traces(self, upscale: int = 1) -> Any:
         """Fetch outputs if needed and open receiver traces.
