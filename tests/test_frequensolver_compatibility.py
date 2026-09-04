@@ -268,6 +268,55 @@ def test_local_identity_query_calls_executable_directly(monkeypatch):
     assert seen["kwargs"]["env"] == {"PATH": "/opt/bin"}
 
 
+def test_identity_query_accepts_current_sauce_identity_additively(monkeypatch):
+    payload = json.loads(_identity_json())
+    payload.update(schema="fs-solver-identity-1", product="FS_solver")
+    monkeypatch.setattr(
+        frequensolver.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, json.dumps(payload), ""
+        ),
+    )
+
+    result = query_local_frequensolver_identity("/solver")
+
+    assert result.identity == FrequenSolverIdentity(
+        version="v0.1.0",
+        build_id="release-v0.1.0",
+        git_commit=COMMIT,
+        schema="fs-solver-identity-1",
+        product="FS_solver",
+    )
+
+
+@pytest.mark.parametrize(
+    ("schema", "product"),
+    [
+        ("fs-solver-identity-1", "FrequenSolver"),
+        ("frequensolver-identity-1", "FS_solver"),
+        ("unknown-identity-1", "unknown"),
+    ],
+)
+def test_identity_query_rejects_unknown_or_mixed_identity_pairs(
+    monkeypatch, schema, product
+):
+    payload = json.loads(_identity_json())
+    payload.update(schema=schema, product=product)
+    monkeypatch.setattr(
+        frequensolver.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, json.dumps(payload), ""
+        ),
+    )
+
+    result = query_local_frequensolver_identity("/solver")
+
+    assert result.identity is None
+    assert "schema/product pair is unsupported" in result.error
+
+
 def test_remote_identity_query_quotes_command_and_runs_setup_directly():
     commands = []
 

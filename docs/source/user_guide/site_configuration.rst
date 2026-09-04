@@ -334,6 +334,16 @@ extra.
    ranks_per_task = 1
    scheduler_heartbeat_timeout = 60
 
+An Enterprise HPC installation adds a closed, generated ``enterprise_hpc``
+table to the same profile. Do not hand-author it: the Deployment installer
+records only a profile identifier, the installed bundle root, the bundle
+manifest digest, and its schema identifier. The digest-anchored bundle manifest
+binds the compatibility row, schemas, solver, and Python artifact. Host trust,
+paths, modules, partitions, launcher, and resource defaults remain ordinary
+Slurm profile settings. FrequenSolve verifies the combined profile before
+transfer or scheduler spend. When ``enterprise_hpc`` is absent, generic Slurm
+configuration and behavior are unchanged.
+
 Stampede3 profiles use the built-in preset and create generic ``SlurmSite``
 instances. The preferred setup command prompts for the username and writes the
 profile:

@@ -20,7 +20,9 @@ if TYPE_CHECKING:
 _PROJECT_FILE_REFERENCE_KEYS = frozenset(
     {
         "file",
+        "data_path",
         "layout_file",
+        "observed",
         "receiver_file",
         "relation_file",
         "source_file",

@@ -3900,6 +3900,35 @@ def test_remote_input_files_include_simulation_hdf5_store(tmp_path):
     ) in files
 
 
+def test_remote_input_files_include_project_observed_trace_directory(tmp_path):
+    observed = tmp_path / "jobs" / "observed" / "results" / "traces"
+    observed.mkdir(parents=True)
+    (observed / "manifest.json").write_text('{"schema":"synthetic-traces-v1"}\n')
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="image", simulation=sim, f_list=[10.0])
+    job_file = job.save()
+    payload = json.loads(job_file.read_text())
+    payload["Image"] = {
+        "data_path": str(observed),
+        "misfit": {"receiver_groups": [{"observed": str(observed)}]},
+    }
+    job_file.write_text(json.dumps(payload))
+
+    files = job.remote_input_files(Path("/remote/project"))
+
+    assert (
+        observed,
+        Path("/remote/project/jobs/observed/results/traces"),
+    ) in files
+
+
 def test_remote_input_files_skip_remote_property_refs(tmp_path):
     model = ModelBase(name="model", dimension=2)
     model += ModelSubdomain(

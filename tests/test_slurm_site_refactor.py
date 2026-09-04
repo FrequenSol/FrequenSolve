@@ -40,6 +40,8 @@ from frequensolve.simulation.jobs import FrequencyDomainJob, SkipPolicy
 from frequensolve.simulation.jobs.imaging import ImagingJob
 from frequensolve.simulation.outputs import WavefieldOutput
 
+pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
+
 
 class DummyStream:
     def __init__(self, text=""):
@@ -730,6 +732,41 @@ def test_slurm_provision_uses_profile_account(monkeypatch):
     assert "#SBATCH -A allocation-from-profile" in script
 
 
+def test_existing_slurm_directive_formats_remain_supported(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        stdout="/scratch/user/jobs/simple/freq/logs",
+        queue="cpu,gpu",
+        account="project.team+shared",
+        notify_on="all",
+        notify_email="first.last%tag@example.com",
+    )
+
+    assert "#SBATCH -p cpu,gpu" in script
+    assert "#SBATCH -A project.team+shared" in script
+    assert "#SBATCH --mail-type=ALL" in script
+    assert "#SBATCH --mail-user=first.last%tag@example.com" in script
+
+
+@pytest.mark.parametrize("field", ["queue", "account", "notify_email"])
+def test_slurm_directive_newline_is_rejected_at_script_boundary(monkeypatch, field):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    values = {field: "safe\n#SBATCH --array=1-999"}
+
+    with pytest.raises(ValueError, match="control characters"):
+        site._sweep_SLURM_script(
+            n_tasks=1,
+            n_nodes=1,
+            stdout="/scratch/user/jobs/simple/freq/logs",
+            **values,
+        )
+
+
 def test_slurm_site_verbose_initialization(monkeypatch, capsys):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
 
@@ -909,6 +946,38 @@ def test_slurm_run_config_validates_scheduler_heartbeat_timeout():
 
     with pytest.raises(ValueError, match="scheduler_heartbeat_timeout"):
         SlurmRunConfig(scheduler_heartbeat_timeout=0)
+
+
+def test_existing_slurm_run_config_public_call_shape_is_unchanged():
+    assert tuple(inspect.signature(SlurmRunConfig).parameters) == (
+        "queue",
+        "nodes",
+        "duration",
+        "ranks_per_node",
+        "ranks_per_task",
+        "mpi_async_progress",
+        "tolerate_failures",
+        "account",
+        "notify_on",
+        "notify_email",
+        "poll_interval",
+        "scheduler_heartbeat_timeout",
+        "run_path",
+        "slurm_args",
+        "aliases",
+    )
+    config = SlurmRunConfig(
+        queue="existing-partition",
+        nodes=2,
+        duration="00-00:30:00",
+        ranks_per_node=4,
+        ranks_per_task=2,
+        account="existing-account",
+        slurm_args=["--exclusive"],
+    )
+    assert config.queue == "existing-partition"
+    assert config.account == "existing-account"
+    assert config.slurm_args == ["--exclusive"]
 
 
 def test_job_save_for_remote_writes_remote_absolute_result_path(tmp_path):
@@ -2314,6 +2383,7 @@ def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
 
     class DummyFuture:
         def done(self):
@@ -2329,10 +2399,31 @@ def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
     assert run.status().state == "running"
 
 
+def test_fresh_attached_submit_without_allocation_id_fails_before_launch(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
+    site = DummySlurmSite("project/run")
+    launched = []
+    monkeypatch.setattr(
+        site,
+        "_submit_attached",
+        lambda job, ranks_per_task=2, **kwargs: launched.append(job),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="^Active SLURM allocation is missing a valid scheduler job id$",
+    ):
+        site.submit(DummyJob(), mode="attached")
+
+    assert launched == []
+
+
 def test_slurm_submit_attached_can_disable_pack(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
     seen = {}
 
     class DummyFuture:
@@ -2365,6 +2456,7 @@ def test_slurm_submit_rejects_mpi_async_progress(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
 
     def fail_submit(*args, **kwargs):
         raise AssertionError("unsupported configuration reached submission")
@@ -2450,6 +2542,7 @@ def test_slurm_attached_run_is_awaitable(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
 
     async def submit_and_wait():
         future = asyncio.get_running_loop().create_future()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -28,6 +29,7 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import validate_slurm_job_id
 from frequensolve.orchestrator.utils.ssh import (
     SSH_CONNECT_TIMEOUT_SECONDS,
     SSHProxy,
@@ -37,27 +39,42 @@ from frequensolve.util.setup_logger import init_logger
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
 
+_COMPUTE_HOST = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:]+\])\Z")
 
-def _verify_server_host_key(transport: Transport, host: str) -> None:
-    """Verify *host* against the user's or system's known-hosts files."""
+
+def _verify_server_host_key(
+    transport: Transport,
+    host: str,
+    *,
+    port: int = 22,
+    known_hosts_file: Optional[Path] = None,
+) -> None:
+    """Verify *host* against an explicit or standard known-hosts source."""
 
     known_hosts = HostKeys()
-    for path in (
-        Path("~/.ssh/known_hosts").expanduser(),
-        Path("/etc/ssh/ssh_known_hosts"),
-    ):
+    paths = (
+        (known_hosts_file,)
+        if known_hosts_file is not None
+        else (
+            Path("~/.ssh/known_hosts").expanduser(),
+            Path("/etc/ssh/ssh_known_hosts"),
+        )
+    )
+    for path in paths:
         try:
             known_hosts.load(str(path))
         except OSError:
             continue
 
     server_key = transport.get_remote_server_key()
-    host_keys = known_hosts.lookup(host)
+    lookup_host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    lookup_name = lookup_host if port == 22 else f"[{lookup_host}]:{port}"
+    host_keys = known_hosts.lookup(lookup_name)
     expected_key = host_keys.get(server_key.get_name()) if host_keys else None
     if expected_key != server_key:
         raise SSHException(
-            f"SSH host key for {host!r} is unknown or does not match known_hosts. "
-            f"Connect once with your system SSH client to verify and save the host key."
+            f"SSH host key for {lookup_name!r} is unknown or does not match "
+            "the configured known-hosts source."
         )
 
 
@@ -96,8 +113,18 @@ class SlurmAuthenticator:
 
         logger.info("Starting authentication with host: %s", host)
 
+        config = getattr(site, "config", None)
+        ssh_port = getattr(config, "ssh_port", 22)
+        known_hosts_file = getattr(config, "known_hosts_file", None)
         control_dir = os.path.expanduser("~/.ssh/control")
-        if os.path.exists(control_dir):
+        explicit_trust = known_hosts_file is not None
+        enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
+        if (
+            not enterprise_key_only
+            and ssh_port == 22
+            and not explicit_trust
+            and os.path.exists(control_dir)
+        ):
             for control_path in glob.glob(f"{control_dir}/*"):
                 try:
                     result = subprocess.run(
@@ -130,7 +157,9 @@ class SlurmAuthenticator:
                     continue
                 except Exception as exc:
                     logger.debug(
-                        "Failed to use control socket %s: %s", control_path, exc
+                        "Failed to use control socket %s (%s)",
+                        control_path,
+                        type(exc).__name__,
                     )
                     continue
         return self._interactive_authentication(host)
@@ -150,13 +179,16 @@ class SlurmAuthenticator:
         """
 
         site = self.site
-        status = site.run_login(f"squeue -j {job_id} -h -o %t").strip()
+        validated_job_id = validate_slurm_job_id(job_id)
+        status = site.run_login(f"squeue -j {validated_job_id} -h -o %t").strip()
         if status != "R":
-            raise RuntimeError(f"Job {job_id} is not running")
+            raise RuntimeError(f"Job {validated_job_id} is not running")
 
-        hostname = site.run_login(f"squeue -j {job_id} -h -o %B").strip()
+        hostname = site.run_login(f"squeue -j {validated_job_id} -h -o %B").strip()
         if not hostname:
-            raise RuntimeError(f"Could not get hostname for job {job_id}")
+            raise RuntimeError(f"Could not get hostname for job {validated_job_id}")
+        if not _COMPUTE_HOST.fullmatch(hostname):
+            raise RuntimeError("SLURM returned an invalid compute-node hostname")
 
         return hostname
 
@@ -187,57 +219,107 @@ class SlurmAuthenticator:
         if not transport:
             raise RuntimeError("No transport available for SSH tunneling")
 
-        channel = transport.open_channel("direct-tcpip", (job_host, 22), ("", 0))
+        try:
+            channel = transport.open_channel("direct-tcpip", (job_host, 22), ("", 0))
+        except Exception as exc:
+            raise RuntimeError(
+                f"SSH compute-node tunnel failed ({type(exc).__name__})"
+            ) from None
         job_client = SSHClient()
-        job_client.load_system_host_keys()
+        enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
+        auth_options = {"allow_agent": True}
+        if enterprise_key_only:
+            auth_options = {
+                "pkey": site.credentials.ssh_key,
+                "allow_agent": False,
+            }
 
         try:
+            job_client.load_system_host_keys()
             job_client.connect(
                 job_host,
                 username=site.credentials.username,
                 sock=channel,
-                allow_agent=True,
                 look_for_keys=False,
+                timeout=SSH_CONNECT_TIMEOUT_SECONDS,
+                banner_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
+                auth_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
+                **auth_options,
             )
             logger.info("Connected to job host: %s", job_host)
             return job_client
-        except Exception:
-            logger.exception("Failed to connect to job host: %s", job_host)
+        except Exception as exc:
+            logger.error("Failed to connect to job host (%s)", type(exc).__name__)
+            job_client.close()
             channel.close()
-            raise
+            raise RuntimeError(
+                f"SSH compute-node connection failed ({type(exc).__name__})"
+            ) from None
 
     def _interactive_authentication(self, host: str):
         """Normal authentication flow when a control socket is not available."""
 
         site = self.site
         login_client = SSHClient()
+        config = getattr(site, "config", None)
+        ssh_port = getattr(config, "ssh_port", 22)
+        known_hosts_file = getattr(config, "known_hosts_file", None)
+        enterprise_key_only = getattr(site, "enterprise_hpc", None) is not None
 
-        sock = socket.create_connection((host, 22), timeout=SSH_CONNECT_TIMEOUT_SECONDS)
-        transport = Transport(sock)
         try:
-            transport.start_client()
-            _verify_server_host_key(transport, host)
+            sock = socket.create_connection(
+                (host, ssh_port), timeout=SSH_CONNECT_TIMEOUT_SECONDS
+            )
+        except (socket.timeout, TimeoutError):
+            raise TimeoutError(
+                "SSH login connection timed out after "
+                f"{SSH_CONNECT_TIMEOUT_SECONDS} seconds"
+            ) from None
+        except OSError as exc:
+            raise RuntimeError(
+                f"SSH login connection failed ({type(exc).__name__})"
+            ) from None
+        try:
+            transport = Transport(sock)
+        except Exception as exc:
+            sock.close()
+            raise RuntimeError(
+                f"SSH transport setup failed ({type(exc).__name__})"
+            ) from None
+        try:
+            transport.start_client(timeout=SSH_CONNECT_TIMEOUT_SECONDS)
+            _verify_server_host_key(
+                transport,
+                host,
+                port=ssh_port,
+                known_hosts_file=known_hosts_file,
+            )
         except Exception:
             transport.close()
             raise
 
         authenticated = False
-        try:
-            from paramiko.agent import Agent
+        if not enterprise_key_only:
+            try:
+                from paramiko.agent import Agent
 
-            logger.debug("Attempting agent-based authentication.")
-            agent = Agent()
-            for key in agent.get_keys():
-                try:
-                    transport.auth_publickey(site.credentials.username, key)
-                    if transport.is_authenticated():
-                        authenticated = True
-                        break
-                except Exception as exc:
-                    logger.debug("Agent key authentication failed: %s", exc)
-                    continue
-        except Exception as exc:
-            logger.debug("Agent-based authentication exception: %s", exc)
+                logger.debug("Attempting agent-based authentication.")
+                agent = Agent()
+                for key in agent.get_keys():
+                    try:
+                        transport.auth_publickey(site.credentials.username, key)
+                        if transport.is_authenticated():
+                            authenticated = True
+                            break
+                    except Exception as exc:
+                        logger.debug(
+                            "Agent key authentication failed (%s)", type(exc).__name__
+                        )
+                        continue
+            except Exception as exc:
+                logger.debug(
+                    "Agent-based authentication exception (%s)", type(exc).__name__
+                )
 
         if not authenticated:
             logger.debug("Attempting configured private-key authentication.")
@@ -246,9 +328,12 @@ class SlurmAuthenticator:
                 transport.auth_publickey(site.credentials.username, key)
                 authenticated = transport.is_authenticated()
             except (FileNotFoundError, OSError, SSHException) as exc:
-                logger.debug("Private-key authentication unavailable: %s", exc)
+                logger.debug(
+                    "Private-key authentication unavailable (%s)",
+                    type(exc).__name__,
+                )
 
-        if not authenticated:
+        if not authenticated and not enterprise_key_only:
             logger.debug("Attempting keyboard-interactive authentication.")
 
             def handler(title, instructions, prompt_list):
@@ -274,12 +359,14 @@ class SlurmAuthenticator:
                 else:
                     logger.debug("Keyboard-interactive authentication failed.")
             except Exception as exc:
-                logger.debug("Keyboard-interactive authentication exception: %s", exc)
+                logger.debug(
+                    "Keyboard-interactive authentication exception (%s)",
+                    type(exc).__name__,
+                )
 
         if not transport.is_authenticated():
-            logger.error(
-                "Authentication failed for user: %s", site.credentials.username
-            )
+            logger.error("Authentication failed for the configured SSH user")
+            transport.close()
             raise AuthenticationException("Authentication failed.")
 
         transport.set_keepalive(120)
