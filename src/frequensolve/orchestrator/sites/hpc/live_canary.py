@@ -180,22 +180,39 @@ def _trace_evidence(result: Any) -> dict[str, Any]:
     return {"shape": list(values.shape), "finite": True, "nonzero": True}
 
 
-def _scheduler_job_present(site: Any, job_id: Any) -> bool:
+def _remaining_cleanup_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise LiveSlurmCanaryError("canary cleanup deadline expired")
+    return remaining
+
+
+def _scheduler_job_present(site: Any, job_id: Any, *, deadline: float) -> bool:
     job_id = validate_slurm_job_id(job_id)
-    return bool(site.run_login(f"squeue -h -j {job_id} -o %i").strip())
+    return bool(
+        site.run_login(
+            f"squeue -h -j {job_id} -o %i",
+            timeout=_remaining_cleanup_time(deadline),
+        ).strip()
+    )
 
 
-def _scheduler_job_ids_for_name(site: Any, name: str) -> tuple[str, ...]:
+def _scheduler_job_ids_for_name(
+    site: Any, name: str, *, deadline: float
+) -> tuple[str, ...]:
     if not isinstance(name, str) or not _JOB_NAME.fullmatch(name):
         raise LiveSlurmCanaryError("canary scheduler job name is invalid")
-    output = site.run_login(f"squeue -h -n {name} -o %i").strip()
+    output = site.run_login(
+        f"squeue -h -n {name} -o %i",
+        timeout=_remaining_cleanup_time(deadline),
+    ).strip()
     if not output:
         return ()
     return tuple(validate_slurm_job_id(line.strip()) for line in output.splitlines())
 
 
 def _recover_handles(
-    site: Any, handles: Sequence[Any], jobs: Sequence[Any]
+    site: Any, handles: Sequence[Any], jobs: Sequence[Any], *, deadline: float
 ) -> tuple[Any, ...]:
     by_id = {
         validate_slurm_job_id(handle.id): handle
@@ -206,35 +223,33 @@ def _recover_handles(
         if getattr(job, "_job_id", None) is not None:
             job_id = validate_slurm_job_id(job._job_id)
             by_id.setdefault(job_id, _RecoveredHandle(site, job_id))
-        for job_id in _scheduler_job_ids_for_name(site, str(job.name)):
+        for job_id in _scheduler_job_ids_for_name(
+            site, str(job.name), deadline=deadline
+        ):
             by_id.setdefault(job_id, _RecoveredHandle(site, job_id))
     return tuple(by_id.values())
 
 
 def _cancel_active_job(
-    site: Any, handle: Any, *, timeout: float, poll_interval: float
+    site: Any, handle: Any, *, deadline: float, poll_interval: float
 ) -> None:
-    if not _scheduler_job_present(site, handle.id):
+    job_id = validate_slurm_job_id(handle.id)
+    if not _scheduler_job_present(site, job_id, deadline=deadline):
         return
-    handle.cancel()
-    deadline = time.monotonic() + timeout
-    while _scheduler_job_present(site, handle.id):
-        if time.monotonic() >= deadline:
-            job_id = validate_slurm_job_id(handle.id)
-            raise LiveSlurmCanaryError(
-                f"scheduler job {job_id} remains active; run scancel {job_id}"
-            )
-        time.sleep(poll_interval)
+    site.run_login(f"scancel {job_id}", timeout=_remaining_cleanup_time(deadline))
+    while _scheduler_job_present(site, job_id, deadline=deadline):
+        remaining = _remaining_cleanup_time(deadline)
+        time.sleep(min(poll_interval, remaining))
 
 
-def _cancel_all(site: Any, handles: Sequence[Any], *, timeout: float) -> None:
+def _cancel_all(site: Any, handles: Sequence[Any], *, deadline: float) -> None:
     failures = []
     for handle in handles:
         try:
             _cancel_active_job(
                 site,
                 handle,
-                timeout=timeout,
+                deadline=deadline,
                 poll_interval=float(site.run_config.poll_interval or 1),
             )
         except Exception as exc:
@@ -272,7 +287,9 @@ def run_live_slurm_canary(
     cancel_handle = None
     try:
         for job in (success_job, cancel_job):
-            if _scheduler_job_ids_for_name(site, job.name):
+            if _scheduler_job_ids_for_name(
+                site, job.name, deadline=time.monotonic() + cancel_timeout
+            ):
                 raise LiveSlurmCanaryError(
                     "canary scheduler name is already active; choose a fresh run token"
                 )
@@ -317,7 +334,7 @@ def run_live_slurm_canary(
         _cancel_active_job(
             site,
             cancel_handle,
-            timeout=cancel_timeout,
+            deadline=time.monotonic() + cancel_timeout,
             poll_interval=float(site.run_config.poll_interval or 1),
         )
         cancel_result = cancel_handle.wait(
@@ -343,12 +360,14 @@ def run_live_slurm_canary(
             },
         }
     finally:
+        cleanup_deadline = time.monotonic() + cancel_timeout
         handles = _recover_handles(
             site,
             (cancel_handle, success_handle),
             (cancel_job, success_job),
+            deadline=cleanup_deadline,
         )
-        _cancel_all(site, handles, timeout=cancel_timeout)
+        _cancel_all(site, handles, deadline=cleanup_deadline)
 
 
 def _argument_parser() -> argparse.ArgumentParser:

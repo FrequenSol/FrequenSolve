@@ -60,6 +60,7 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
     enterprise_site = site()
     enterprise_site.run_config.nodes = 2
     calls = []
+    scheduler_timeouts = []
     scheduler = {"cancelled": False, "probes": 0}
     success_job = SimpleNamespace(name="fs_canary_success", _job_id=None)
     cancel_job = SimpleNamespace(name="fs_canary_cancel", _job_id=None)
@@ -79,13 +80,9 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
         cancel=lambda: None,
     )
 
-    def cancel():
-        scheduler["cancelled"] = True
-
     cancel_handle = SimpleNamespace(
         id="20",
         wait=lambda **kwargs: cancel_result,
-        cancel=cancel,
     )
     handles = iter((success_handle, cancel_handle))
 
@@ -95,7 +92,8 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
         job._job_id = handle.id
         return handle
 
-    def run_login(command):
+    def run_login(command, *, timeout=None):
+        scheduler_timeouts.append(timeout)
         if "squeue -h -n " in command or "squeue -h -j 10" in command:
             return ""
         if "squeue -h -j 20" in command:
@@ -103,6 +101,9 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
                 return "20"
             scheduler["probes"] += 1
             return "" if scheduler["probes"] > 1 else "20"
+        if command == "scancel 20":
+            scheduler["cancelled"] = True
+            return ""
         raise AssertionError(command)
 
     enterprise_site.submit = submit
@@ -141,6 +142,10 @@ def test_live_canary_uses_existing_public_submission_calls(monkeypatch, tmp_path
     assert all("threads_per_rank" not in call for call in calls)
     assert all(call["mode"] == "batch" for call in calls)
     assert all(call["ranks_per_node"] == 4 for call in calls)
+    assert scheduler_timeouts
+    assert all(
+        timeout is not None and 0 < timeout <= 30 for timeout in scheduler_timeouts
+    )
 
 
 def test_live_canary_uses_generated_site_rank_default(monkeypatch, tmp_path):
@@ -189,22 +194,22 @@ def test_live_canary_recovers_and_cancels_after_interrupted_submit(
         scheduler["active"] = True
         raise RuntimeError("synthetic post-submit transport loss")
 
-    def run_login(command):
+    def run_login(command, *, timeout=None):
+        assert timeout is not None and 0 < timeout <= 30
         if "squeue -h -n fs_canary_recover" in command:
             return "30" if scheduler["active"] else ""
         if "squeue -h -n fs_canary_other" in command:
             return ""
         if "squeue -h -j 30" in command:
             return "30" if scheduler["active"] else ""
+        if command == "scancel 30":
+            scheduler["cancelled"].append("30")
+            scheduler["active"] = False
+            return ""
         raise AssertionError(command)
-
-    def cancel_job(job_id):
-        scheduler["cancelled"].append(job_id)
-        scheduler["active"] = False
 
     enterprise_site.submit = submit
     enterprise_site.run_login = run_login
-    enterprise_site.cancel_job = cancel_job
     monkeypatch.setattr(
         canary,
         "build_synthetic_live_slurm_job",
