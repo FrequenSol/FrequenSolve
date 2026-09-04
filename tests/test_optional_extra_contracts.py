@@ -1,5 +1,7 @@
+import builtins
 import copy
 import json
+import runpy
 from pathlib import Path
 
 import pytest
@@ -144,3 +146,16 @@ def test_import_verification_does_not_require_package_metadata(tmp_path):
         )
         == 0
     )
+
+
+def test_installed_package_contracts_do_not_require_hypothesis(monkeypatch):
+    original_import = builtins.__import__
+
+    def import_without_hypothesis(name, *args, **kwargs):
+        if name == "hypothesis":
+            raise ModuleNotFoundError("No module named 'hypothesis'", name=name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_hypothesis)
+
+    runpy.run_path(Path(__file__).with_name("conftest.py"))
