@@ -26,11 +26,12 @@ class FakePaginator:
 
 
 class FakeS3Client:
-    def __init__(self, objects):
+    def __init__(self, objects, *, failures=None):
         self.objects = objects
         self.downloads = []
         self.head_calls = []
         self.paginate_calls = []
+        self.failures = list(failures or [])
 
     def get_paginator(self, name):
         assert name == "list_objects_v2"
@@ -38,6 +39,8 @@ class FakeS3Client:
 
     def head_object(self, Bucket, Key):
         self.head_calls.append({"Bucket": Bucket, "Key": Key})
+        if self.failures:
+            raise self.failures.pop(0)
         if Key not in self.objects:
             raise ClientError(
                 {"Error": {"Code": "404", "Message": "Not found"}},
@@ -90,6 +93,75 @@ def test_get_falls_back_to_prefix_download_when_exact_object_is_missing(tmp_path
     assert s3_client.paginate_calls == [
         {"Bucket": "bucket", "Prefix": "path/to/results/"}
     ]
+
+
+def test_get_reports_missing_object_or_prefix_without_private_key(tmp_path):
+    s3_client = FakeS3Client({})
+    site = make_site(s3_client)
+    private_path = "s3://bucket/accounts/private-user/missing-result"
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        site.get(private_path, tmp_path / "downloads")
+
+    assert "No S3 objects matched" in str(exc_info.value)
+    assert "private-user" not in str(exc_info.value)
+
+
+def test_get_refreshes_expired_credentials_once_then_downloads(tmp_path):
+    expired = ClientError(
+        {"Error": {"Code": "ExpiredToken", "Message": "private token"}},
+        "HeadObject",
+    )
+    s3_client = FakeS3Client({"path/result.json": "{}"}, failures=[expired])
+    site = make_site(s3_client)
+    refreshes = []
+    site.cognito_auth = object()
+    site._refresh_s3_credentials = lambda: refreshes.append(True)
+
+    site.get("s3://bucket/path/result.json", tmp_path / "downloads")
+
+    assert refreshes == [True]
+    assert (tmp_path / "downloads" / "result.json").read_text() == "{}"
+
+
+def test_get_stops_after_one_refresh_and_sanitizes_provider_failure(tmp_path):
+    failures = [
+        ClientError(
+            {"Error": {"Code": "ExpiredToken", "Message": "first secret"}},
+            "HeadObject",
+        ),
+        ClientError(
+            {"Error": {"Code": "ExpiredToken", "Message": "second secret"}},
+            "HeadObject",
+        ),
+    ]
+    site = make_site(FakeS3Client({}, failures=failures))
+    site.cognito_auth = object()
+    refreshes = []
+    site._refresh_s3_credentials = lambda: refreshes.append(True)
+
+    with pytest.raises(RuntimeError, match="AWS error code ExpiredToken") as exc_info:
+        site.get(
+            "s3://bucket/accounts/private-user/result.json",
+            tmp_path / "downloads",
+        )
+
+    assert refreshes == [True]
+    diagnostic = str(exc_info.value)
+    for secret in ("first secret", "second secret", "private-user"):
+        assert secret not in diagnostic
+
+
+def test_get_rejects_object_key_that_escapes_destination(tmp_path):
+    outside = tmp_path / "outside.txt"
+    s3_client = FakeS3Client({"path/results/../../outside.txt": "private content"})
+    site = make_site(s3_client)
+
+    with pytest.raises(RuntimeError, match="S3 transfer failed"):
+        site.get("s3://bucket/path/results/", tmp_path / "downloads")
+
+    assert not outside.exists()
+    assert s3_client.downloads == []
 
 
 def test_fetch_vtk_reraises_download_failures(tmp_path):

@@ -8,6 +8,7 @@ the FrequenSol AppSync API using Cognito authentication.
 import json
 import logging
 import time
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 from frequensolve._optional import optional_dependency_error
@@ -25,6 +26,34 @@ except ModuleNotFoundError as exc:
 from .cognito import CognitoAuth
 
 logger = logging.getLogger(__name__)
+
+
+def _string_values(value: object) -> set[str]:
+    """Collect request strings that must be redacted from provider errors."""
+
+    if isinstance(value, str):
+        return {value} if value else set()
+    if isinstance(value, Mapping):
+        result: set[str] = set()
+        for item in value.values():
+            result.update(_string_values(item))
+        return result
+    if isinstance(value, (list, tuple)):
+        result = set()
+        for item in value:
+            result.update(_string_values(item))
+        return result
+    return set()
+
+
+def _redact_provider_message(message: object, secrets: set[str]) -> str:
+    """Return a bounded provider diagnostic without request-supplied values."""
+
+    safe = str(message).replace("\r", " ").replace("\n", " ")
+    for secret in sorted(secrets, key=len, reverse=True):
+        if len(secret) >= 3:
+            safe = safe.replace(secret, "<redacted>")
+    return safe[:500]
 
 
 class GraphQLClient:
@@ -137,25 +166,57 @@ class GraphQLClient:
         if variables:
             payload["variables"] = variables
 
+        headers = self._get_headers()
         try:
             response = requests.post(
-                self.api_url, headers=self._get_headers(), json=payload, timeout=30
+                self.api_url, headers=headers, json=payload, timeout=30
             )
             response.raise_for_status()
+        except requests.exceptions.Timeout:
+            raise RuntimeError("Cloud API request timed out after 30 seconds") from None
+        except requests.exceptions.RequestException as exc:
+            raise RuntimeError(
+                f"Cloud API request failed ({type(exc).__name__})"
+            ) from None
 
+        try:
             result = response.json()
+        except (TypeError, ValueError):
+            raise RuntimeError("Cloud API returned malformed JSON") from None
+        if not isinstance(result, Mapping):
+            raise RuntimeError("Cloud API returned a non-object response")
 
-            # Check for GraphQL errors
-            if "errors" in result:
-                error_messages = [
-                    err.get("message", str(err)) for err in result["errors"]
-                ]
-                raise RuntimeError(f"GraphQL errors: {'; '.join(error_messages)}")
+        # Check for GraphQL errors without echoing tokens or request identifiers.
+        errors = result.get("errors")
+        if errors:
+            if not isinstance(errors, list):
+                raise RuntimeError("GraphQL errors: malformed error envelope")
+            secrets = _string_values(variables)
+            secrets.add(str(headers.get("Authorization", "")))
+            account_getter = getattr(self.auth, "get_account_id", None)
+            if callable(account_getter):
+                try:
+                    account_id = account_getter()
+                except Exception:
+                    account_id = None
+                if isinstance(account_id, str) and account_id:
+                    secrets.add(account_id)
+            error_messages = [
+                _redact_provider_message(
+                    err.get("message", str(err)) if isinstance(err, Mapping) else err,
+                    secrets,
+                )
+                for err in errors[:10]
+            ]
+            raise RuntimeError(f"GraphQL errors: {'; '.join(error_messages)}")
 
-            return result.get("data", {})
+        data = result.get("data")
+        if not isinstance(data, Mapping):
+            raise RuntimeError(
+                "Cloud API response did not contain an object data field"
+            )
 
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"API request failed: {e}") from e
+        return dict(data)
 
     def _build_storage_stack_filter(self, account_id: Optional[str] = None) -> dict:
         """Build filter for storage stack queries.
