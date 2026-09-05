@@ -492,6 +492,7 @@ def _enterprise_site(monkeypatch):
         mpi_wrapper="srun",
         account="synthetic-account",
         known_hosts_file="/synthetic/known_hosts",
+        enterprise_hpc=profile_values(),
         max_nodes=2,
         cores_per_node=8,
         memory_per_node=32768,
@@ -512,7 +513,6 @@ def _enterprise_site(monkeypatch):
     return _Site(
         config=config,
         run_config=run_config,
-        enterprise_hpc=profile_values(),
         solver="/opt/frequensolve/bin/FS_seismic",
         work_dir="/synthetic/work",
         modules=["frequensolve/1.0.0-synthetic"],
@@ -567,8 +567,8 @@ def test_enterprise_profile_requires_explicit_host_trust(monkeypatch):
                 hostname="login.example.invalid",
                 queue="synthetic",
                 mpi_wrapper="srun",
+                enterprise_hpc=profile_values(),
             ),
-            enterprise_hpc=profile_values(),
             solver="/opt/frequensolve/bin/FS_seismic",
             work_dir="/synthetic/work",
         )

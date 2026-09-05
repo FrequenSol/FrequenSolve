@@ -197,6 +197,7 @@ class SlurmSiteConfig(BaseSiteConfig):
     hostname: str
     ssh_port: int = 22
     known_hosts_file: Optional[Union[str, Path]] = None
+    enterprise_hpc: Optional[Mapping[str, Any]] = None
     queue: str = "normal"
     scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
@@ -654,7 +655,6 @@ class SlurmSite(BaseSite):
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
         frequensolver_policy: Optional[str] = None,
-        enterprise_hpc: Optional[Mapping[str, Any]] = None,
     ):
         if (
             default_partition is not None
@@ -715,6 +715,7 @@ class SlurmSite(BaseSite):
             ssh_key=ssh_key,
             credential_store=credential_store,
         )
+        enterprise_hpc = getattr(self.config, "enterprise_hpc", None)
         if enterprise_hpc is not None and not isinstance(enterprise_hpc, Mapping):
             raise ValueError("enterprise_hpc must be a profile table")
         self.enterprise_hpc = (

@@ -353,3 +353,16 @@ def test_connectivity_returns_false_when_capability_probe_fails():
     site.graphql_client.get_compute_provisioning_mode = fail_capability_probe
 
     assert site.test_api_connectivity() is False
+
+
+def test_legacy_status_entry_point_uses_graphql_details():
+    site = make_graphql_site()
+    site.graphql_client.get_simulation_status_details = lambda simulation_id: {
+        "id": simulation_id,
+        "status": "RUNNING",
+    }
+
+    with pytest.deprecated_call(match="get_job_status_from_api"):
+        status = site.get_job_status_from_api("simulation-1")
+
+    assert status == {"id": "simulation-1", "status": "RUNNING"}

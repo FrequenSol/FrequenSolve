@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import uuid
+import warnings
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Union
@@ -1425,6 +1426,34 @@ class AWSSite(BaseSite):
         except Exception as exc:
             logger.warning("GraphQL connectivity probe failed: %s", exc)
             return False
+
+    def get_job_status_from_api(self, job_id: str) -> Dict[str, Any]:
+        """Return cloud job status through the authenticated GraphQL client.
+
+        This compatibility method preserves the former public entry point while
+        the cloud transport moves from REST to GraphQL.
+        """
+
+        warnings.warn(
+            "AWSSite.get_job_status_from_api() is deprecated; use RunHandle status APIs",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.graphql_client is None:
+            return {}
+        try:
+            details_getter = getattr(
+                self.graphql_client, "get_simulation_status_details", None
+            )
+            if callable(details_getter):
+                return dict(details_getter(job_id))
+            return {"status": self.graphql_client.get_simulation_status(job_id)}
+        except Exception as exc:
+            logger.warning(
+                "GraphQL status lookup failed (%s)",
+                type(exc).__name__,
+            )
+            return {}
 
     def cancel_job(self, job_id: str) -> None:
         """Cancel a running simulation.
