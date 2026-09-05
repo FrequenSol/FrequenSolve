@@ -582,13 +582,15 @@ class RunResult:
         """
 
         metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
-        if metadata is None:
-            return []
-        files = metadata.output_files(
-            kind=kind,
-            suffix=suffix,
-            base=base,
-            existing=existing,
+        files = (
+            metadata.output_files(
+                kind=kind,
+                suffix=suffix,
+                base=base,
+                existing=existing,
+            )
+            if metadata is not None
+            else []
         )
         if files or self.site is None or not fetch_missing:
             return files
@@ -600,7 +602,13 @@ class RunResult:
         fetch_output_files(self.job, kind=kind, suffix=suffix)
         metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
         if metadata is None:
-            return []
+            result_path = getattr(self.job, "_result_path", None)
+            if result_path is None:
+                return []
+            from frequensolve.simulation.jobs.artifacts import RunMetadata
+
+            metadata = RunMetadata(result_path=Path(result_path))
+            self.run_metadata = metadata
         return metadata.output_files(
             kind=kind,
             suffix=suffix,

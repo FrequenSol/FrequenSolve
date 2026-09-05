@@ -3,6 +3,7 @@ import inspect
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
     RunHandle,
+    RunResult,
     SubmitPlan,
 )
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
@@ -2105,6 +2107,37 @@ def test_slurm_fetch_output_files_downloads_supported_vtk_outputs(
 
     assert site.fetch_output_files(job, kind=kind, suffix=suffix) == job._result_path
     assert fetches == [job] * expected_fetches
+
+
+def test_slurm_run_result_fetches_vtk_without_initial_run_metadata(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    job = SimpleNamespace(
+        _result_path=tmp_path / "results",
+        outputs=SimpleNamespace(paraview=[object()]),
+    )
+    expected = job._result_path / "paraview/qc/qc_00000.vtu"
+    fetches = []
+
+    def fetch_paraview(fetched_job):
+        fetches.append(fetched_job)
+        expected.parent.mkdir(parents=True)
+        expected.write_text("<VTKFile></VTKFile>")
+
+    monkeypatch.setattr(site, "fetch_paraview", fetch_paraview)
+    result = RunResult(
+        job=job,
+        status=JobStatus(state="completed", return_code=0),
+        site=site,
+        run_metadata=None,
+    )
+
+    assert result.output_files(suffix=".vtu", existing=True) == [expected]
+    assert fetches == [job]
 
 
 def test_slurm_batch_poll_reads_scheduler_status(monkeypatch, capsys):
