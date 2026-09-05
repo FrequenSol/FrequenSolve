@@ -2077,6 +2077,36 @@ def test_slurm_fetch_vtk_downloads_configured_output_path(monkeypatch, tmp_path)
     ) in calls
 
 
+@pytest.mark.parametrize(
+    ("kind", "suffix", "expected_fetches"),
+    [
+        (None, ".vtu", 1),
+        (" XDMF ", ".XMF", 1),
+        ("hdf5", ".h5", 0),
+    ],
+)
+def test_slurm_fetch_output_files_downloads_supported_vtk_outputs(
+    monkeypatch,
+    tmp_path,
+    kind,
+    suffix,
+    expected_fetches,
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.vtk("qc", path="paraview/qc", fields="pressure")
+    fetches = []
+    monkeypatch.setattr(site, "fetch_paraview", fetches.append)
+
+    assert site.fetch_output_files(job, kind=kind, suffix=suffix) == job._result_path
+    assert fetches == [job] * expected_fetches
+
+
 def test_slurm_batch_poll_reads_scheduler_status(monkeypatch, capsys):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")

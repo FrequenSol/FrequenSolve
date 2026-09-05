@@ -1787,6 +1787,34 @@ class SlurmSite(BaseSite):
 
         return self.fetch_vtk(job)
 
+    def fetch_output_files(
+        self,
+        job: BaseJob,
+        *,
+        kind: Optional[str] = None,
+        suffix: Optional[Union[str, tuple[str, ...]]] = None,
+    ) -> Path:
+        """Fetch supported filesystem-backed SLURM outputs used by discovery."""
+
+        paraview_kinds = {"vtk", "vtu", "vtr", "vtp", "vts", "xmf", "xdmf"}
+        normalized_kind = str(kind).strip().lower() if kind is not None else None
+        suffixes = (suffix,) if isinstance(suffix, str) else (suffix or ())
+        paraview_suffixes = (".vtk", ".vtu", ".vtr", ".vtp", ".vts", ".xmf")
+        suffix_can_match_paraview = not suffixes or any(
+            not str(requested_suffix)
+            or str(requested_suffix).lower().endswith(paraview_suffixes)
+            for requested_suffix in suffixes
+        )
+        can_fetch_paraview = (
+            normalized_kind in {None, *paraview_kinds} and suffix_can_match_paraview
+        )
+
+        if can_fetch_paraview and getattr(
+            getattr(job, "outputs", None), "paraview", None
+        ):
+            self.fetch_paraview(job)
+        return job._result_path
+
     def fetch_image(
         self,
         job: Union[ImagingJob, List[ImagingJob]],
