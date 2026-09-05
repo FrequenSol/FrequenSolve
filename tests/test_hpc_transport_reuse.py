@@ -15,6 +15,8 @@ from frequensolve.orchestrator.utils.ssh import (
     SSHProxy,
 )
 
+pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
+
 
 def _result(*, stdout=b"", stderr=b"", returncode=0):
     return SimpleNamespace(
@@ -140,18 +142,21 @@ def test_ssh_proxy_honors_per_command_timeout(monkeypatch):
 
 
 def test_ssh_proxy_reports_expired_control_socket(monkeypatch):
+    private_detail = "Control socket connect: private token"
     monkeypatch.setattr(
         subprocess,
         "run",
         lambda argv, **kwargs: _result(
-            stderr=b"Control socket connect: Connection refused\n",
+            stderr=f"{private_detail}\n".encode(),
             returncode=255,
         ),
     )
     proxy = SSHProxy("/tmp/control.sock", "user", "login.example.edu")
 
-    with pytest.raises(RuntimeError, match="Control socket connect"):
+    with pytest.raises(RuntimeError, match="status 255") as exc_info:
         proxy._exec_on_login("squeue")
+
+    assert private_detail not in str(exc_info.value)
 
 
 def test_rsync_reuses_authenticated_control_socket(monkeypatch):
@@ -256,10 +261,25 @@ def test_rsync_configuration_uses_authenticated_sftp_without_control_socket(
     tmp_path,
 ):
     transferred = []
+    published = []
 
     class FakeSFTP:
         def put(self, source, target):
             transferred.append((source, target))
+
+        def stat(self, target):
+            if target == "/work/input.json":
+                raise FileNotFoundError(target)
+            return SimpleNamespace(st_size=Path(transferred[-1][0]).stat().st_size)
+
+        def chmod(self, target, mode):
+            pass
+
+        def posix_rename(self, source, target):
+            published.append((source, target))
+
+        def remove(self, target):
+            pass
 
         def close(self):
             pass
@@ -277,7 +297,9 @@ def test_rsync_configuration_uses_authenticated_sftp_without_control_socket(
 
     SlurmTransferManager(site).put(local_file, Path("/work/input.json"))
 
-    assert transferred == [(str(local_file), "/work/input.json")]
+    assert transferred[0][0] == str(local_file)
+    assert transferred[0][1].startswith("/work/.input.json.frequensolve-")
+    assert published == [(transferred[0][1], "/work/input.json")]
 
 
 def test_sftp_directory_put_uses_configured_tmp_dirs(tmp_path):
@@ -292,6 +314,20 @@ def test_sftp_directory_put_uses_configured_tmp_dirs(tmp_path):
         def put(self, source, target):
             transfers.append((Path(source), target))
 
+        def stat(self, target):
+            if not target.split("/")[-1].startswith("."):
+                raise FileNotFoundError(target)
+            return SimpleNamespace(st_size=transfers[-1][0].stat().st_size)
+
+        def chmod(self, target, mode):
+            pass
+
+        def posix_rename(self, source, target):
+            pass
+
+        def remove(self, target):
+            pass
+
         def close(self):
             pass
 
@@ -304,17 +340,24 @@ def test_sftp_directory_put_uses_configured_tmp_dirs(tmp_path):
         remote_tmp_dir=Path("/remote/tmp/frequensolve"),
         _site_config_path=_host_config(tmp_path, local_tmp),
         run_login=lambda command: commands.append(command) or "",
-        run_login_cmd=lambda command: commands.append(command)
-        or (None, _stream(), _stream()),
+        run_login_cmd=lambda command: (
+            commands.append(command) or (None, _stream(), _stream())
+        ),
     )
 
     SlurmTransferManager(site).put(local_dir, Path("/work/project"))
 
     assert transfers[0][0].parent == local_tmp
     assert transfers[0][1].startswith("/remote/tmp/frequensolve/")
-    assert commands[0] == "mkdir -p /work"
+    assert commands[0] == "mkdir -p -- /work"
     assert "mkdir -p /remote/tmp/frequensolve" in commands
-    assert any("tar xzf /remote/tmp/frequensolve/" in command for command in commands)
+    publish_command = next(command for command in commands if "tar xzf" in command)
+    assert 'tar xzf "$archive" -C "$staging"' in publish_command
+    assert 'mv -- "$destination" "$backup"' in publish_command
+    assert 'mv -- "$staging/$entry" "$destination"' in publish_command
+    assert 'mv -- "$backup" "$destination" || true' in publish_command
+    assert 'rm -rf -- "$backup"' in publish_command
+    assert "trap cleanup EXIT HUP INT TERM" in publish_command
     assert not (tmp_path / "project.tar.gz").exists()
 
 
@@ -325,15 +368,20 @@ def test_sftp_directory_get_uses_configured_tmp_dirs(tmp_path):
     (payload / "output.json").write_text("{}")
     downloads = []
     commands = []
+    archive_size = None
 
     class FakeSFTP:
         def stat(self, path):
-            return SimpleNamespace(st_mode=0o040755)
+            if path == "/work/project":
+                return SimpleNamespace(st_mode=0o040755)
+            return SimpleNamespace(st_mode=0o100644, st_size=archive_size)
 
         def get(self, remote, local):
+            nonlocal archive_size
             downloads.append((remote, Path(local)))
             with tarfile.open(local, "w:gz") as tar:
-                tar.add(payload, arcname="project")
+                tar.add(payload / "output.json", arcname="output.json")
+            archive_size = Path(local).stat().st_size
 
         def close(self):
             pass
@@ -347,8 +395,9 @@ def test_sftp_directory_get_uses_configured_tmp_dirs(tmp_path):
         remote_tmp_dir=Path("/remote/tmp/frequensolve"),
         _site_config_path=_host_config(tmp_path, local_tmp),
         run_login=lambda command: commands.append(command) or "",
-        run_login_cmd=lambda command: commands.append(command)
-        or (None, _stream(), _stream()),
+        run_login_cmd=lambda command: (
+            commands.append(command) or (None, _stream(), _stream())
+        ),
     )
 
     SlurmTransferManager(site).get(Path("/work/project"), tmp_path / "project")

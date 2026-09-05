@@ -124,6 +124,7 @@ class AdaptiveScheduler:
         self.status_file = Path(status)
         self.executable = str(config["executable"])
         self.mpi = str(config.get("mpi", "ibrun"))
+        self.mpi_launcher = Path(self.mpi).name
         self.fresh_flag = ["--fresh"] if config.get("fresh") else []
         self.total_ranks = int(config["total_ranks"])
         self.omp_threads = int(config["omp_threads"])
@@ -157,6 +158,8 @@ class AdaptiveScheduler:
         return _load_task_memory_file(self.sizing_json)
 
     def _choose_base_ranks(self, task_memory: float) -> int:
+        if self.mpi_launcher in {"mpiexec", "mpirun"}:
+            return self.total_ranks
         ranks = int(math.ceil(task_memory * self.mem_cushion / self.mem_per_rank))
         ranks = max(ranks, self.min_ranks)
         ranks = min(ranks, self.max_ranks_per_task, self.total_ranks)
@@ -189,15 +192,28 @@ class AdaptiveScheduler:
             file.write("\n")
         os.replace(temporary, self.status_file)
 
-    def _launch(self, task_id: int, offset: int, ranks: int, memory: float):
-        output = open(self.output / f"task_{task_id}.log", "ab", buffering=0)
-        command = [
-            self.mpi,
-            "-n",
-            str(ranks),
-            "-o",
-            str(offset),
-            "task_affinity",
+    def _launch_command(self, task_id: int, offset: int, ranks: int) -> list[str]:
+        if self.mpi_launcher == "ibrun":
+            prefix = [self.mpi, "-n", str(ranks), "-o", str(offset), "task_affinity"]
+        elif self.mpi_launcher == "srun":
+            prefix = [
+                self.mpi,
+                "--exclusive",
+                "--ntasks",
+                str(ranks),
+                "--cpus-per-task",
+                str(self.omp_threads),
+            ]
+        elif self.mpi_launcher in {"mpiexec", "mpirun"}:
+            if offset != 0 or ranks != self.total_ranks:
+                raise SystemExit(
+                    f"{self.mpi_launcher} task launch requires the full allocation"
+                )
+            prefix = [self.mpi, "-n", str(ranks)]
+        else:
+            raise SystemExit(f"unsupported MPI launcher: {self.mpi_launcher}")
+        return [
+            *prefix,
             self.executable,
             "-nthreads",
             str(self.omp_threads),
@@ -207,6 +223,10 @@ class AdaptiveScheduler:
             "--task",
             str(task_id),
         ]
+
+    def _launch(self, task_id: int, offset: int, ranks: int, memory: float):
+        output = open(self.output / f"task_{task_id}.log", "ab", buffering=0)
+        command = self._launch_command(task_id, offset, ranks)
         try:
             process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
         except Exception:

@@ -19,6 +19,7 @@ class FakeSite:
 @dataclass
 class FakeSlurmSiteConfig:
     hostname: str
+    enterprise_hpc: dict | None = None
     queue: str = "normal"
     scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
@@ -390,6 +391,12 @@ verbose = true
 [sites.cluster.environment]
 OMP_NUM_THREADS = "2"
 LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
+
+[sites.cluster.enterprise_hpc]
+schema = "frequensolve-enterprise-hpc-profile/v1"
+profile_id = "synthetic-private-slurm"
+bundle_root = "/opt/frequensolve"
+bundle_manifest_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 """.strip()
     )
     monkeypatch.setattr(sites, "SlurmSite", FakeSite)
@@ -411,6 +418,12 @@ LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
     }
     assert site.kwargs["config"] == FakeSlurmSiteConfig(
         hostname="login.example.edu",
+        enterprise_hpc={
+            "schema": "frequensolve-enterprise-hpc-profile/v1",
+            "profile_id": "synthetic-private-slurm",
+            "bundle_root": "/opt/frequensolve",
+            "bundle_manifest_sha256": "e" * 64,
+        },
         queue="debug",
         account="acct123",
         tmp_dir="/scratch/user/frequensolve-tmp",

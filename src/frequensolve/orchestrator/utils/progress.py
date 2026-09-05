@@ -131,7 +131,12 @@ class RunMonitor:
                     statuses[index] = _require_result(run).status
                     continue
                 if run._result is not None:
-                    statuses[index] = run._result.status
+                    result = run._result
+                    if fetch and (result.successful or not check):
+                        run.fetch()
+                    else:
+                        run._fetch_pending_outputs()
+                    statuses[index] = result.status
                     completed.add(index)
                     continue
 
@@ -198,7 +203,10 @@ class RunMonitor:
         check: bool,
     ) -> RunResult:
         result = run._complete_from_status(status)
-        if fetch and (result.successful or not check):
+        configured_fetch = run._pending_fetch_fn is not None
+        if result.successful and (fetch or configured_fetch):
+            run.fetch()
+        elif fetch and not check:
             run.fetch()
         return result
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Type, Union
@@ -68,9 +69,22 @@ _OUTPUT_DIMENSIONS = {
 
 
 def _relative_output_path(path: Union[str, Path], field: str = "path") -> str:
-    value = Path(path)
-    if value.is_absolute():
-        raise ValueError(f"{field} must be relative to the job result directory")
+    if not isinstance(path, (str, os.PathLike)):
+        raise TypeError(f"{field} must be a string or path-like value")
+    raw = os.fspath(path)
+    if not isinstance(raw, str):
+        raise TypeError(f"{field} must be a string or path-like value")
+    value = Path(raw)
+    if (
+        not raw
+        or value.is_absolute()
+        or value == Path()
+        or ".." in value.parts
+        or any(character in raw for character in ("\\", "\x00", "\n", "\r"))
+    ):
+        raise ValueError(
+            f"{field} must be a safe relative path below the job result directory"
+        )
     return str(value)
 
 
