@@ -4610,6 +4610,104 @@ def _write_indexed_packed_trace_product(
             dset.attrs["shot"] = np.array([7], dtype=np.int32)
 
 
+def _write_indexed_sparse_trace_product(path):
+    _write_indexed_packed_trace_product(
+        path,
+        "middle_offsets",
+        frequencies=[10.0, 20.0],
+        values=[0.0, 0.0],
+    )
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(path, "r+") as h5:
+        catalog = h5["survey/receiver_groups/_catalog"]
+        catalog["layout_kind"][...] = np.array(["sparse_trace_v1"], dtype=string_dtype)
+
+        traces = h5["survey/receiver_groups/middle_offsets/traces"]
+        for name in list(traces):
+            del traces[name]
+        traces.create_dataset("trace_id", data=np.array([11, 12, 13, 14]))
+        traces.create_dataset("source_id", data=np.array([1, 2, 1, 1]))
+        traces.create_dataset("receiver_id", data=np.array([101, 102, 103, 104]))
+        traces.create_dataset("component", data=np.array([1, 1, 2, 1]))
+        traces.create_dataset("weight", data=np.array([0.25, 0.5, 0.75, 1.0]))
+
+        components = h5.require_group("survey/components")
+        components.create_dataset("component", data=np.array([1, 2]))
+        components.create_dataset(
+            "component_name", data=np.array(["p", "v_z"], dtype=string_dtype)
+        )
+        receivers = h5.require_group("survey/receivers")
+        receivers.create_dataset("receiver_id", data=np.array([101, 102, 103, 104]))
+        coordinates = receivers.create_dataset(
+            "coordinates",
+            data=np.array([[0.1, 0.2, 0.3, 0.4], [0.05, 0.05, 0.05, 0.05]]),
+        )
+        coordinates.attrs["dims"] = np.array(["receiver", "coord"], dtype=string_dtype)
+        coordinates.attrs["coord"] = np.array(["x", "z"], dtype=string_dtype)
+        coordinates.attrs["units"] = np.array(["km"], dtype=string_dtype)
+
+        payloads = [
+            np.array([[1, 10], [2, 20], [3, 30], [4, 40]], dtype=np.float32),
+            np.array([[5, 50], [6, 60], [7, 70], [8, 80]], dtype=np.float32),
+        ]
+        for number, payload in enumerate(payloads, start=1):
+            path = f"trace_data/middle_offsets/{number:06d}"
+            del h5[path]
+            dset = h5.create_dataset(path, data=payload)
+            dset.attrs["dims"] = np.array(["trace"], dtype=string_dtype)
+            dset.attrs["layout_kind"] = np.array(
+                ["sparse_trace_v1"], dtype=string_dtype
+            )
+
+
+def test_trace_dataset_reads_indexed_sparse_gathers_with_catalog_metadata(tmp_path):
+    packed = tmp_path / "traces.h5"
+    _write_indexed_sparse_trace_product(packed)
+    traces = TraceDataset.open(packed)
+
+    raw = traces.fd("middle_offsets", "p", source=1)
+
+    assert raw.dims == ("frequency", "receiver")
+    assert raw.coords["frequency"].values.tolist() == [10.0, 20.0]
+    assert raw.coords["receiver"].values.tolist() == [101, 104]
+    assert raw.coords["trace_id"].values.tolist() == [11, 14]
+    assert raw.coords["source_id"].values.tolist() == [1, 1]
+    assert raw.coords["component"].values.tolist() == ["p", "p"]
+    assert raw.coords["weight"].values.tolist() == pytest.approx([0.25, 1.0])
+    assert raw.coords["receiver_x"].values.tolist() == pytest.approx([0.1, 0.4])
+    assert raw.coords["receiver_z"].values.tolist() == pytest.approx([0.05, 0.05])
+    np.testing.assert_array_equal(
+        raw.values,
+        np.array([[1 + 10j, 4 + 40j], [5 + 50j, 8 + 80j]]),
+    )
+    source_two = traces.fd("middle_offsets", "p", source=2)
+    assert source_two.coords["receiver"].values.tolist() == [102]
+    np.testing.assert_array_equal(source_two.values[:, 0], [2 + 20j, 6 + 60j])
+    second_component = traces.fd("middle_offsets", "v_z", source=1)
+    assert second_component.coords["receiver"].values.tolist() == [103]
+    np.testing.assert_array_equal(second_component.values[:, 0], [3 + 30j, 7 + 70j])
+
+    wavelet = RickerWavelet(f=10.0, center=0.0)
+    shaped = traces.fd("middle_offsets", "p", source=1, wavelet=wavelet)
+    expected_scale = np.interp(
+        raw.coords["frequency"], wavelet.frequencies, wavelet.spectrum
+    )
+    np.testing.assert_allclose(shaped.values, raw.values * expected_scale[:, None])
+    for name in ("receiver", "trace_id", "weight", "receiver_x", "receiver_z"):
+        np.testing.assert_array_equal(shaped.coords[name], raw.coords[name])
+
+    td = traces.td(
+        "middle_offsets",
+        "p",
+        source=1,
+        wavelet=RickerWavelet(f=10.0, center=0.0),
+        upscale=2,
+    )
+    assert td.dims == ("time", "receiver")
+    for name in ("receiver", "trace_id", "weight", "receiver_x", "receiver_z"):
+        np.testing.assert_array_equal(td.coords[name], raw.coords[name])
+
+
 def test_trace_dataset_filters_indexed_packed_rows_by_frequency_and_laplace(tmp_path):
     trace_dir = tmp_path / "results" / "traces"
     trace_dir.mkdir(parents=True)
