@@ -634,7 +634,10 @@ class RunResult:
             ):
                 return self.logs_path
         if self.site is not None:
-            return self.site.fetch_logs(self.job, **kwargs)
+            fetched = self.site.fetch_logs(self.job, **kwargs)
+            if not kwargs and isinstance(fetched, (str, Path)):
+                self.logs_path = Path(fetched)
+            return fetched
         if hasattr(self.job, "_stdout_path"):
             return self.job._stdout_path
         return None
@@ -739,12 +742,17 @@ class RunHandle:
         return self.wait_async().__await__()
 
     def _make_result(self, status: JobStatus) -> RunResult:
+        fetch_logs = getattr(self.site, "fetch_logs", None)
         return RunResult(
             job=self.job,
             status=status,
             site=self.site,
             trace_manifest=getattr(self.job, "trace_manifest", None),
-            logs_path=getattr(self.job, "_stdout_path", None),
+            logs_path=(
+                None
+                if callable(fetch_logs)
+                else getattr(self.job, "_stdout_path", None)
+            ),
             run_metadata=getattr(self.job, "run_metadata", None),
         )
 

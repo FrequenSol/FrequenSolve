@@ -4610,10 +4610,10 @@ def _write_indexed_packed_trace_product(
             dset.attrs["shot"] = np.array([7], dtype=np.int32)
 
 
-def _write_indexed_sparse_trace_product(path):
+def _write_indexed_sparse_trace_product(path, group="middle_offsets"):
     _write_indexed_packed_trace_product(
         path,
-        "middle_offsets",
+        group,
         frequencies=[10.0, 20.0],
         values=[0.0, 0.0],
     )
@@ -4622,7 +4622,7 @@ def _write_indexed_sparse_trace_product(path):
         catalog = h5["survey/receiver_groups/_catalog"]
         catalog["layout_kind"][...] = np.array(["sparse_trace_v1"], dtype=string_dtype)
 
-        traces = h5["survey/receiver_groups/middle_offsets/traces"]
+        traces = h5[f"survey/receiver_groups/{group}/traces"]
         for name in list(traces):
             del traces[name]
         traces.create_dataset("trace_id", data=np.array([11, 12, 13, 14]))
@@ -4651,7 +4651,7 @@ def _write_indexed_sparse_trace_product(path):
             np.array([[5, 50], [6, 60], [7, 70], [8, 80]], dtype=np.float32),
         ]
         for number, payload in enumerate(payloads, start=1):
-            path = f"trace_data/middle_offsets/{number:06d}"
+            path = f"trace_data/{group}/{number:06d}"
             del h5[path]
             dset = h5.create_dataset(path, data=payload)
             dset.attrs["dims"] = np.array(["trace"], dtype=string_dtype)
@@ -4706,6 +4706,27 @@ def test_trace_dataset_reads_indexed_sparse_gathers_with_catalog_metadata(tmp_pa
     assert td.dims == ("time", "receiver")
     for name in ("receiver", "trace_id", "weight", "receiver_x", "receiver_z"):
         np.testing.assert_array_equal(td.coords[name], raw.coords[name])
+
+
+def test_sparse_gather_reads_catalog_from_its_own_packed_group_file(tmp_path):
+    first = tmp_path / "first.h5"
+    second = tmp_path / "second.h5"
+    _write_indexed_sparse_trace_product(first, "first")
+    _write_indexed_sparse_trace_product(second, "second")
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=[first, second],
+            frequencies={1: 10.0, 2: 20.0},
+            groups=["first", "second"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=tmp_path / "results" / "traces",
+            project_path=tmp_path,
+        )
+    )
+
+    assert traces.fd("first", "p", source=1).sizes["receiver"] == 2
+    assert traces.fd("second", "p", source=1).sizes["receiver"] == 2
 
 
 def test_trace_dataset_filters_indexed_packed_rows_by_frequency_and_laplace(tmp_path):

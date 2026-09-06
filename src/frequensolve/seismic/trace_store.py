@@ -457,20 +457,20 @@ class TraceStore:
             ind = np.where(dims == "receiver")[0][0]
             return np.arange(1, dset.shape[ind] + 1)
 
+    @staticmethod
+    def _read_h5_group(group: h5py.Group) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for key, item in group.items():
+            if isinstance(item, h5py.Dataset):
+                out[key] = _decode_h5_strings(item[()]).tolist()
+            elif isinstance(item, h5py.Group):
+                out[key] = TraceStore._read_h5_group(item)
+        return out
+
     def survey_tables(self) -> Dict[str, Any]:
         """Return embedded survey metadata tables from the trace store."""
 
         self._ensure_consolidated()
-
-        def read_group(group):
-            out = {}
-            for key, item in group.items():
-                if isinstance(item, h5py.Dataset):
-                    value = item[()]
-                    out[key] = _decode_h5_strings(value).tolist()
-                elif isinstance(item, h5py.Group):
-                    out[key] = read_group(item)
-            return out
 
         if self._packed_group_files:
             tables: Dict[str, Any] = {}
@@ -478,12 +478,12 @@ class TraceStore:
                 with h5py.File(path, "r") as f:
                     if "survey" not in f:
                         continue
-                    tables.update(read_group(f["survey"]))
+                    tables.update(self._read_h5_group(f["survey"]))
             return tables
         with h5py.File(self._consolidated, "r") as f:
             if "survey" not in f:
                 return {}
-            return read_group(f["survey"])
+            return self._read_h5_group(f["survey"])
 
     def format_summary(self, colorize: bool = False) -> TraceSummary:
         """Return a human-readable summary of groups, sources, and frequencies."""
@@ -1503,7 +1503,8 @@ class TraceStore:
         if "trace" not in dset.dims:
             return dset.sel(component=component, source=source)
 
-        survey = self.survey_tables()
+        with h5py.File(self._trace_file_for_group(group), "r") as h5:
+            survey = self._read_h5_group(h5["survey"]) if "survey" in h5 else {}
         receiver_group = survey.get("receiver_groups", {}).get(group, {})
         trace_table = receiver_group.get("traces", {})
         trace_count = dset.sizes["trace"]

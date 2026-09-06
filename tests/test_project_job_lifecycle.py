@@ -13,7 +13,7 @@ import sympy as sp
 import frequensolve as fs
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
-from frequensolve.orchestrator.sites.base import JobStatus, RunResult
+from frequensolve.orchestrator.sites.base import JobStatus, RunHandle, RunResult
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project.project import Project
 from frequensolve.seismic.traces import TraceDataset
@@ -542,6 +542,32 @@ def test_run_result_logs_reuses_fetched_local_logs(tmp_path):
     )
 
     assert result.logs() == logs_path
+
+
+def test_remote_run_result_refreshes_preexisting_logs_once(tmp_path):
+    stale_logs = tmp_path / "logs"
+    stale_logs.mkdir()
+    (stale_logs / "old.log").write_text("old run\n")
+    calls = []
+
+    class FetchingSite:
+        def fetch_logs(self, job, **kwargs):
+            calls.append((job, kwargs))
+            (stale_logs / "old.log").unlink()
+            (stale_logs / "current.log").write_text("current run\n")
+            return stale_logs
+
+    job = SimpleNamespace(_stdout_path=stale_logs, run_metadata=None)
+    site = FetchingSite()
+    result = RunHandle(site=site, job=job, mode="batch")._make_result(
+        JobStatus(state="completed", return_code=0)
+    )
+
+    assert result.logs_path is None
+    assert result.logs() == stale_logs
+    assert result.logs() == stale_logs
+    assert calls == [(job, {})]
+    assert [path.name for path in stale_logs.iterdir()] == ["current.log"]
 
 
 @pytest.mark.parametrize(
