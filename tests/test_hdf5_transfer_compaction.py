@@ -325,7 +325,7 @@ def test_project_transfer_compacts_only_the_staging_copy(monkeypatch, tmp_path):
             local = Path(local)
             if not local.is_dir():
                 return
-            staged = local / "simulations" / "model" / "model.h5"
+            staged = local / "model" / "model.h5"
             captured["size"] = staged.stat().st_size
             with h5py.File(staged, "r") as h5:
                 captured["values"] = h5["inputs/live"][:]

@@ -1019,6 +1019,7 @@ def test_project_transfer_keeps_mesh_paths_remote_safe(tmp_path):
     config_path = tmp_path / "site.toml"
     config_path.write_text(f'[host]\ntmp_dir = "{staging_parent.as_posix()}"\n')
     captured = {}
+    targets = []
 
     class CaptureSite:
         work_dir = remote
@@ -1026,13 +1027,13 @@ def test_project_transfer_keeps_mesh_paths_remote_safe(tmp_path):
 
         def put(self, local, target):
             local = Path(local)
+            target = Path(target)
+            targets.append(target)
             if local.is_dir():
-                captured["staging_parent"] = local.parent
-                sim_json = local / "simulations" / "axisym" / "axisym.json"
+                captured["staging_parent"] = local.parent.parent
+                sim_json = local / "axisym" / "axisym.json"
                 captured["simulation"] = json.loads(sim_json.read_text())
-                captured["mesh_exists"] = (
-                    local / "simulations" / "axisym" / "mesh.gmp"
-                ).exists()
+                captured["mesh_exists"] = (local / "axisym" / "mesh.gmp").exists()
 
     sim_payload = json.loads(sim.save().read_text())
 
@@ -1042,6 +1043,8 @@ def test_project_transfer_keeps_mesh_paths_remote_safe(tmp_path):
 
     assert captured["mesh_exists"] is True
     assert captured["staging_parent"] == staging_parent
+    assert remote not in targets
+    assert remote / "simulations" in targets
     assert project.path not in captured["staging_parent"].parents
     assert captured["simulation"]["project_path"] == str(remote)
     assert captured["simulation"]["Mesh"]["file"] == "simulations/axisym/mesh.gmp"
