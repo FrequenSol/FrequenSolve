@@ -286,19 +286,23 @@ class RunMetadata:
         if self.result_path is None or not self.result_path.exists():
             return []
 
+        result_root = self.result_path.resolve(strict=False)
         scan_suffixes = suffixes or _kind_suffixes(kind)
-        if not scan_suffixes:
+        if scan_suffixes:
+            files = []
+            for suffix in scan_suffixes:
+                files.extend(self.result_path.rglob(f"*{suffix}"))
+        elif kind is None:
+            files = list(self.result_path.rglob("*"))
+        else:
             return []
-
-        files = []
-        for suffix in scan_suffixes:
-            files.extend(self.result_path.rglob(f"*{suffix}"))
 
         return [
             path
             for path in sorted(set(files))
-            if path.is_file()
+            if _is_discovered_output_file(path, result_root=result_root)
             and "_fs_run" not in path.relative_to(self.result_path).parts
+            and path.name != "_fs_python_run.json"
             and _artifact_matches_kind(
                 OutputArtifact(path=path, kind=path.suffix.lstrip(".")),
                 kind,
@@ -1725,6 +1729,18 @@ def _path_identity_key(path: Path) -> tuple[Any, ...]:
     except OSError:
         return ("path", str(path.resolve(strict=False)))
     return ("stat", stat.st_dev, stat.st_ino)
+
+
+def _is_discovered_output_file(path: Path, *, result_root: Path) -> bool:
+    """Return whether a discovered regular file stays within the result tree."""
+
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        path.resolve(strict=True).relative_to(result_root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
 
 
 def _artifact_matches_kind(artifact: "OutputArtifact", kind: Optional[str]) -> bool:

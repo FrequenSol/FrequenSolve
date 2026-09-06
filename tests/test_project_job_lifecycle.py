@@ -505,6 +505,63 @@ def test_run_result_fetches_remote_output_files_when_matching_files_are_missing(
     assert site.filters == (None, ".vtu")
 
 
+def test_run_result_fetches_all_remote_output_files_without_filters(tmp_path):
+    result_path = tmp_path / "results"
+    expected = result_path / "ParaView" / "pv_00000.vtu"
+
+    class FetchingSite:
+        def fetch_output_files(self, job, *, kind=None, suffix=None):
+            expected.parent.mkdir(parents=True)
+            expected.write_text("<VTKFile></VTKFile>")
+            (result_path / "_fs_python_run.json").write_text("{}")
+            metadata = result_path / "_fs_run" / "run_manifest.json"
+            metadata.parent.mkdir()
+            metadata.write_text("{}")
+
+    result = RunResult(
+        job=object(),
+        status=JobStatus(state="completed", return_code=0),
+        site=FetchingSite(),
+        run_metadata=RunMetadata(result_path=result_path),
+    )
+
+    assert result.output_files(existing=True) == [expected]
+
+
+def test_run_metadata_rejects_symlinks_that_escape_result_path(tmp_path, monkeypatch):
+    result_path = tmp_path / "results"
+    paraview = result_path / "ParaView"
+    paraview.mkdir(parents=True)
+    expected = paraview / "expected.vtu"
+    expected.write_text("<VTKFile></VTKFile>")
+
+    outside_file = tmp_path / "outside.vtu"
+    outside_file.write_text("outside")
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    escaped_child = outside_dir / "escaped.vtu"
+    escaped_child.write_text("outside")
+    linked_file = paraview / "linked.vtu"
+    linked_dir = result_path / "linked-dir"
+    try:
+        linked_file.symlink_to(outside_file)
+        linked_dir.symlink_to(outside_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"filesystem does not support symbolic links: {exc}")
+
+    discovered = [expected, linked_file, linked_dir / escaped_child.name]
+
+    def rglob_with_directory_symlink(self, pattern):
+        assert self == result_path
+        return iter(discovered)
+
+    monkeypatch.setattr(Path, "rglob", rglob_with_directory_symlink)
+    metadata = RunMetadata(result_path=result_path)
+
+    assert metadata.output_files(existing=True) == [expected]
+    assert metadata.output_files(suffix=".vtu", existing=True) == [expected]
+
+
 def test_run_result_can_skip_remote_output_file_fetch(tmp_path):
     class FetchingSite:
         def __init__(self):
