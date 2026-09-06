@@ -1558,7 +1558,7 @@ class TraceStore:
         coordinates = np.asarray(receiver_catalog.get("coordinates", []), dtype=float)
         if coordinates.ndim == 2 and coordinates.shape[1] == len(catalog_ids):
             coordinates = coordinates.T
-        coordinate_values = {}
+        coordinate_values: Dict[str, Any] = {}
         if coordinates.size:
             if coordinates.ndim != 2 or coordinates.shape[0] != len(catalog_ids):
                 raise ValueError(
@@ -1584,19 +1584,21 @@ class TraceStore:
             }
 
         return gather.assign_coords(
-            receiver=("receiver", receiver_ids[selected]),
-            trace_id=(
-                "receiver",
-                column("trace_id", np.arange(1, trace_count + 1))[selected],
-            ),
-            receiver_id=("receiver", receiver_ids[selected]),
-            source_id=("receiver", source_ids[selected]),
-            component=("receiver", component_names[selected]),
-            weight=(
-                "receiver",
-                column("weight", np.ones(trace_count, dtype=float))[selected],
-            ),
-            **coordinate_values,
+            {
+                "receiver": ("receiver", receiver_ids[selected]),
+                "trace_id": (
+                    "receiver",
+                    column("trace_id", np.arange(1, trace_count + 1))[selected],
+                ),
+                "receiver_id": ("receiver", receiver_ids[selected]),
+                "source_id": ("receiver", source_ids[selected]),
+                "component": ("receiver", component_names[selected]),
+                "weight": (
+                    "receiver",
+                    column("weight", np.ones(trace_count, dtype=float))[selected],
+                ),
+                **coordinate_values,
+            }
         )
 
     def read_h5(self, group: str) -> DataArray:
