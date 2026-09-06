@@ -525,6 +525,62 @@ def test_run_result_can_skip_remote_output_file_fetch(tmp_path):
     assert site.calls == 0
 
 
+def test_run_result_logs_reuses_fetched_local_logs(tmp_path):
+    logs_path = tmp_path / "logs"
+    logs_path.mkdir()
+    (logs_path / "task_1.log").write_text("completed\n")
+
+    class FetchingSite:
+        def fetch_logs(self, job, **kwargs):
+            raise AssertionError("existing local logs must not be fetched again")
+
+    result = RunResult(
+        job=object(),
+        status=JobStatus(state="completed", return_code=0),
+        site=FetchingSite(),
+        logs_path=logs_path,
+    )
+
+    assert result.logs() == logs_path
+
+
+@pytest.mark.parametrize(
+    ("cache_state", "kwargs"),
+    [
+        ("missing", {}),
+        ("empty", {}),
+        ("populated", {"task": 1}),
+    ],
+)
+def test_run_result_logs_delegates_when_local_cache_cannot_answer(
+    tmp_path, cache_state, kwargs
+):
+    logs_path = tmp_path / "logs"
+    if cache_state != "missing":
+        logs_path.mkdir()
+    if cache_state == "populated":
+        (logs_path / "task_1.log").write_text("completed\n")
+
+    job = object()
+    fetched = tmp_path / "fetched-logs"
+    calls = []
+
+    class FetchingSite:
+        def fetch_logs(self, requested_job, **requested_kwargs):
+            calls.append((requested_job, requested_kwargs))
+            return fetched
+
+    result = RunResult(
+        job=job,
+        status=JobStatus(state="completed", return_code=0),
+        site=FetchingSite(),
+        logs_path=logs_path,
+    )
+
+    assert result.logs(**kwargs) == fetched
+    assert calls == [(job, kwargs)]
+
+
 def test_run_metadata_discovers_unregistered_vtu_files(tmp_path):
     result_path = tmp_path / "results"
     paraview = result_path / "ParaView"

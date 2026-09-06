@@ -627,6 +627,12 @@ class RunResult:
             Path to logs, fetched log mapping, or ``None`` when unavailable.
         """
 
+        if not kwargs and self.logs_path is not None:
+            local_logs = Path(self.logs_path)
+            if local_logs.is_file() or (
+                local_logs.is_dir() and next(local_logs.iterdir(), None) is not None
+            ):
+                return self.logs_path
         if self.site is not None:
             return self.site.fetch_logs(self.job, **kwargs)
         if hasattr(self.job, "_stdout_path"):
