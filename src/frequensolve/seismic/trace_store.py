@@ -1508,7 +1508,7 @@ class TraceStore:
         trace_table = receiver_group.get("traces", {})
         trace_count = dset.sizes["trace"]
 
-        def column(name: str, default=None) -> np.ndarray:
+        def column(name: str, default: Optional[Any] = None) -> np.ndarray:
             values = trace_table.get(name, default)
             if values is None:
                 raise ValueError(f"Sparse trace catalog is missing {name!r}")
