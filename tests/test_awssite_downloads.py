@@ -124,6 +124,23 @@ def test_get_refreshes_expired_credentials_once_then_downloads(tmp_path):
     assert (tmp_path / "downloads" / "result.json").read_text() == "{}"
 
 
+def test_get_refreshes_when_head_object_masks_expired_credentials(tmp_path):
+    masked_expiry = ClientError(
+        {"Error": {"Code": "400", "Message": "private provider detail"}},
+        "HeadObject",
+    )
+    s3_client = FakeS3Client({"path/result.json": "{}"}, failures=[masked_expiry])
+    site = make_site(s3_client)
+    refreshes = []
+    site.cognito_auth = object()
+    site._refresh_s3_credentials = lambda: refreshes.append(True)
+
+    site.get("s3://bucket/path/result.json", tmp_path / "downloads")
+
+    assert refreshes == [True]
+    assert (tmp_path / "downloads" / "result.json").read_text() == "{}"
+
+
 def test_get_stops_after_one_refresh_and_sanitizes_provider_failure(tmp_path):
     failures = [
         ClientError(
@@ -232,7 +249,13 @@ def test_fetch_image_rejects_paths_outside_the_project(tmp_path):
         site.fetch_image(job)
 
 
-def test_fetch_image_normalizes_missing_output_after_credential_refresh(tmp_path):
+@pytest.mark.parametrize(
+    ("credential_error_code", "operation_name"),
+    [("ExpiredToken", "GetObject"), ("400", "HeadObject")],
+)
+def test_fetch_image_normalizes_missing_output_after_credential_refresh(
+    tmp_path, credential_error_code, operation_name
+):
     project_path = tmp_path / "imaging-project"
 
     class ExpiredThenMissingS3Client:
@@ -241,10 +264,10 @@ def test_fetch_image_normalizes_missing_output_after_credential_refresh(tmp_path
 
         def download_file(self, bucket, key, filename):
             self.attempts += 1
-            code = "ExpiredToken" if self.attempts == 1 else "NoSuchKey"
+            code = credential_error_code if self.attempts == 1 else "NoSuchKey"
             raise ClientError(
                 {"Error": {"Code": code, "Message": code}},
-                "GetObject",
+                operation_name if self.attempts == 1 else "GetObject",
             )
 
     s3_client = ExpiredThenMissingS3Client()
@@ -385,6 +408,117 @@ def test_fetch_run_metadata_downloads_job_run_directory(tmp_path):
         "Fetched AWS run metadata from "
         "s3://bucket/project-a/jobs/simulation-a/job-a/results/_fs_run"
     ]
+
+
+def test_fetch_logs_falls_back_to_authenticated_cloudwatch_events(tmp_path):
+    class CloudLogs:
+        def __init__(self):
+            self.requested = []
+
+        def list_simulation_frequency_jobs(self, simulation_id):
+            assert simulation_id == "simulation-1"
+            return [
+                {"frequencyIndex": 0, "batchJobId": "batch-1"},
+                {"frequencyIndex": 1, "batchJobId": "batch-2"},
+            ]
+
+        def get_job_logs(self, batch_job_id):
+            self.requested.append(batch_job_id)
+            return [
+                {
+                    "timestamp": "2026-09-06T14:00:00.000Z",
+                    "message": f"{batch_job_id} complete\n",
+                }
+            ]
+
+    site = AWSSite.__new__(AWSSite)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    site.graphql_client = CloudLogs()
+    site.get = lambda remote, local: (_ for _ in ()).throw(FileNotFoundError())
+    job = SimpleNamespace(
+        project_path=tmp_path / "project-a",
+        _stdout_path=tmp_path / "project-a/logs",
+        _job_id="simulation-1",
+        f_list=[10.0, 20.0],
+        name="job-a",
+        simulation=SimpleNamespace(name="simulation-a"),
+    )
+    job._stdout_path.mkdir(parents=True)
+    (job._stdout_path / "task_99.log").write_text("stale\n")
+
+    assert site.fetch_logs(job) == job._stdout_path
+    assert site.graphql_client.requested == ["batch-1", "batch-2"]
+    assert not (job._stdout_path / "task_99.log").exists()
+    assert (job._stdout_path / "task_1.log").read_text() == "batch-1 complete\n"
+    assert (job._stdout_path / "task_2.log").read_text() == "batch-2 complete\n"
+
+
+def test_fetch_logs_cloudwatch_fallback_honors_frequency_selector(tmp_path):
+    class CloudLogs:
+        def list_simulation_frequency_jobs(self, simulation_id):
+            return [
+                {"frequencyIndex": 0, "batchJobId": "batch-1"},
+                {"frequencyIndex": 1, "batchJobId": "batch-2"},
+            ]
+
+        def get_job_logs(self, batch_job_id):
+            assert batch_job_id == "batch-2"
+            return [{"timestamp": "now", "message": "selected"}]
+
+    site = AWSSite.__new__(AWSSite)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    site.graphql_client = CloudLogs()
+    site.get = lambda remote, local: (_ for _ in ()).throw(FileNotFoundError())
+    job = SimpleNamespace(
+        project_path=tmp_path / "project-a",
+        _stdout_path=tmp_path / "project-a/logs",
+        _job_id="simulation-1",
+        f_list=[10.0, 20.0],
+        name="job-a",
+        simulation=SimpleNamespace(name="simulation-a"),
+    )
+
+    selected = site.fetch_logs(job, frequency=20.0)
+
+    assert selected == job._stdout_path / "task_2.log"
+    assert selected.read_text() == "selected\n"
+    assert not (job._stdout_path / "task_1.log").exists()
+
+
+def test_fetch_logs_cloudwatch_failure_preserves_existing_cache(tmp_path):
+    class CloudLogs:
+        def list_simulation_frequency_jobs(self, simulation_id):
+            return [
+                {"frequencyIndex": 0, "batchJobId": "batch-1"},
+                {"frequencyIndex": 1, "batchJobId": "batch-2"},
+            ]
+
+        def get_job_logs(self, batch_job_id):
+            if batch_job_id == "batch-2":
+                raise RuntimeError("CloudWatch unavailable")
+            return [{"timestamp": "now", "message": "replacement"}]
+
+    site = AWSSite.__new__(AWSSite)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    site.graphql_client = CloudLogs()
+    site.get = lambda remote, local: (_ for _ in ()).throw(FileNotFoundError())
+    job = SimpleNamespace(
+        project_path=tmp_path / "project-a",
+        _stdout_path=tmp_path / "project-a/logs",
+        _job_id="simulation-1",
+        f_list=[10.0, 20.0],
+        name="job-a",
+        simulation=SimpleNamespace(name="simulation-a"),
+    )
+    job._stdout_path.mkdir(parents=True)
+    (job._stdout_path / "task_1.log").write_text("cached one\n")
+    (job._stdout_path / "task_2.log").write_text("cached two\n")
+
+    with pytest.raises(RuntimeError, match="CloudWatch unavailable"):
+        site.fetch_logs(job)
+
+    assert (job._stdout_path / "task_1.log").read_text() == "cached one\n"
+    assert (job._stdout_path / "task_2.log").read_text() == "cached two\n"
 
 
 def test_fetch_outputs_downloads_complete_configured_artifact_set():

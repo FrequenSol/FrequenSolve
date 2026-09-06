@@ -777,6 +777,87 @@ class GraphQLClient:
 
         return str(self.get_simulation_status_details(simulation_id)["status"])
 
+    def list_simulation_frequency_jobs(
+        self, simulation_id: str
+    ) -> list[Dict[str, Any]]:
+        """Return every frequency job owned by one Cloud simulation."""
+
+        query = """
+            query GetSimulationFrequencyJobs(
+                $id: ID!
+                $limit: Int
+                $nextToken: String
+            ) {
+                getSimulation(id: $id) {
+                    frequencyJobs(limit: $limit, nextToken: $nextToken) {
+                        items {
+                            frequencyIndex
+                            batchJobId
+                        }
+                        nextToken
+                    }
+                }
+            }
+        """
+        rows: list[Dict[str, Any]] = []
+        next_token: Optional[str] = None
+        while True:
+            result = self.execute(
+                query,
+                {
+                    "id": simulation_id,
+                    "limit": 100,
+                    "nextToken": next_token,
+                },
+            )
+            simulation = result.get("getSimulation")
+            if not isinstance(simulation, Mapping):
+                raise RuntimeError("Cloud simulation was not found")
+            page = simulation.get("frequencyJobs")
+            if not isinstance(page, Mapping):
+                raise RuntimeError("Cloud API returned no frequency-job page")
+            items = page.get("items")
+            if not isinstance(items, list):
+                raise RuntimeError("Cloud API returned malformed frequency jobs")
+            rows.extend(dict(item) for item in items if isinstance(item, Mapping))
+            token = page.get("nextToken")
+            if token is None:
+                return rows
+            if not isinstance(token, str) or not token:
+                raise RuntimeError("Cloud API returned an invalid frequency-job cursor")
+            next_token = token
+
+    def get_job_logs(self, batch_job_id: str) -> list[Dict[str, str]]:
+        """Return authenticated CloudWatch log events for one Batch job."""
+
+        query = """
+            query GetJobLogs($batchJobId: String!) {
+                getJobLogs(batchJobId: $batchJobId) {
+                    logs {
+                        timestamp
+                        message
+                    }
+                }
+            }
+        """
+        result = self.execute(query, {"batchJobId": batch_job_id})
+        payload = result.get("getJobLogs")
+        logs = payload.get("logs") if isinstance(payload, Mapping) else None
+        if not isinstance(logs, list):
+            raise RuntimeError("Cloud API returned malformed Batch job logs")
+        events: list[Dict[str, str]] = []
+        for event in logs:
+            if (
+                not isinstance(event, Mapping)
+                or not isinstance(event.get("timestamp"), str)
+                or not isinstance(event.get("message"), str)
+            ):
+                raise RuntimeError("Cloud API returned a malformed log event")
+            events.append(
+                {"timestamp": event["timestamp"], "message": event["message"]}
+            )
+        return events
+
     def deploy_storage_stack(self, environment: Optional[str] = None) -> Dict[str, Any]:
         """Deploy storage infrastructure stack.
 

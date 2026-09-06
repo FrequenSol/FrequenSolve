@@ -4,6 +4,7 @@ import getpass
 import json
 import os
 import subprocess
+import tempfile
 import uuid
 import warnings
 from dataclasses import dataclass
@@ -570,6 +571,20 @@ class AWSSite(BaseSite):
         )
         self.s3_client = self.session.client("s3", region_name=self.config.region)
         logger.debug("Refreshed AWS session and S3 client from Identity Pool")
+
+    @staticmethod
+    def _s3_error_requires_credential_refresh(error: ClientError) -> bool:
+        """Return whether an S3 error can represent expired session credentials.
+
+        S3 ``HeadObject`` responses do not include an error body, so botocore
+        reports an expired or invalid session token as the generic code ``400``
+        instead of ``ExpiredToken`` or ``InvalidToken``. Treat that one
+        operation/code pair as refreshable; the caller still retries only once.
+        """
+        error_code = error.response.get("Error", {}).get("Code", "")
+        return error_code in ("ExpiredToken", "InvalidToken") or (
+            error_code == "400" and error.operation_name == "HeadObject"
+        )
 
     def _aws_cli_env(self) -> Dict[str, str]:
         """Build a process environment so the AWS CLI uses Cognito Identity Pool credentials.
@@ -1309,15 +1324,15 @@ class AWSSite(BaseSite):
                 self.s3_client.download_file(bucket, key, str(local_image_file))
                 break
             except ClientError as exc:
-                error_code = exc.response.get("Error", {}).get("Code", "")
                 if (
-                    error_code in ("ExpiredToken", "InvalidToken")
+                    self._s3_error_requires_credential_refresh(exc)
                     and not refreshed_credentials
                     and hasattr(self, "cognito_auth")
                 ):
                     refreshed_credentials = True
                     self._refresh_s3_credentials()
                     continue
+                error_code = exc.response.get("Error", {}).get("Code", "")
                 if error_code in ("404", "NoSuchKey", "NotFound"):
                     raise FileNotFoundError(
                         f"AWS imaging output s3://{bucket}/{key} is missing"
@@ -1395,7 +1410,18 @@ class AWSSite(BaseSite):
             else:
                 log_dir = requested_local_dir / item.name
 
-            self.get(remote_logs_path, log_dir)
+            try:
+                self.get(remote_logs_path, log_dir)
+            except FileNotFoundError:
+                self._fetch_cloudwatch_logs(
+                    item,
+                    log_dir,
+                    task=(
+                        self._frequency_task(item, frequency)
+                        if frequency is not None
+                        else task
+                    ),
+                )
             selected = self._select_log_path(
                 item,
                 log_dir,
@@ -1409,6 +1435,65 @@ class AWSSite(BaseSite):
         if single:
             return result[jobs[0].name]
         return result
+
+    def _fetch_cloudwatch_logs(
+        self,
+        job: BaseJob,
+        log_dir: Path,
+        *,
+        task: Optional[int],
+    ) -> None:
+        """Materialize Cloud task logs when the runtime has no S3 log prefix."""
+
+        simulation_id = getattr(job, "_job_id", None)
+        if self.graphql_client is None or not simulation_id:
+            raise FileNotFoundError(
+                "Cloud task logs are unavailable from storage or the Cloud API"
+            )
+        rows = self.graphql_client.list_simulation_frequency_jobs(str(simulation_id))
+        indexed: dict[int, str] = {}
+        for row in rows:
+            frequency_index = row.get("frequencyIndex")
+            batch_job_id = row.get("batchJobId")
+            if not isinstance(frequency_index, int) or not isinstance(
+                batch_job_id, str
+            ):
+                continue
+            task_number = frequency_index + 1
+            if task_number in indexed:
+                raise RuntimeError(
+                    f"Cloud returned duplicate logs for task {task_number}"
+                )
+            indexed[task_number] = batch_job_id
+
+        requested_tasks = [task] if task is not None else sorted(indexed)
+        if not requested_tasks or any(
+            number not in indexed for number in requested_tasks
+        ):
+            raise FileNotFoundError("Cloud returned no Batch task logs for this run")
+
+        log_dir.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            dir=log_dir.parent,
+            prefix=f".{log_dir.name}-",
+        ) as staging_dir:
+            staged = Path(staging_dir)
+            for task_number in requested_tasks:
+                events = self.graphql_client.get_job_logs(indexed[task_number])
+                (staged / f"task_{task_number}.log").write_text(
+                    "".join(event["message"].rstrip("\n") + "\n" for event in events),
+                    encoding="utf-8",
+                )
+
+            log_dir.mkdir(parents=True, exist_ok=True)
+            staged_names = {path.name for path in staged.iterdir()}
+            for path in staged.iterdir():
+                path.replace(log_dir / path.name)
+            if task is None:
+                for pattern in ("task_*.log", "task_*.txt", "task_*.out"):
+                    for stale in log_dir.glob(pattern):
+                        if stale.name not in staged_names:
+                            stale.unlink()
 
     def test_api_connectivity(self) -> bool:
         """Verify the authenticated GraphQL submission contract is reachable.
@@ -1648,9 +1733,8 @@ class AWSSite(BaseSite):
                 _do_get()
                 return
             except ClientError as exc:
-                error_code = exc.response.get("Error", {}).get("Code", "unknown")
                 if (
-                    error_code in ("ExpiredToken", "InvalidToken")
+                    self._s3_error_requires_credential_refresh(exc)
                     and not refreshed
                     and hasattr(self, "cognito_auth")
                 ):
@@ -1658,6 +1742,7 @@ class AWSSite(BaseSite):
                     self._refresh_s3_credentials()
                     refreshed = True
                     continue
+                error_code = exc.response.get("Error", {}).get("Code", "unknown")
                 logger.error("S3 transfer failed (AWS error code %s)", error_code)
                 raise RuntimeError(
                     f"S3 transfer failed (AWS error code {error_code})"
