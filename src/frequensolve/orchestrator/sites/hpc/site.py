@@ -1041,7 +1041,7 @@ class SlurmSite(BaseSite):
                 _wait_fn=self._wait_attached_run,
                 _wait_async_fn=self._wait_attached_run_async,
                 _generic_wait=False,
-                _cancel_fn=lambda run: self.cancel_job(str(run.id)),
+                _cancel_fn=self._cancel_attached_run,
                 _pending_fetch_fn=(
                     (lambda run: self.fetch_outputs(run.job)) if fetch else None
                 ),
@@ -2652,6 +2652,12 @@ class SlurmSite(BaseSite):
                 )
             return JobStatus(state="completed", return_code=0, job_id=run.id)
         return JobStatus(state="running", job_id=run.id)
+
+    def _cancel_attached_run(self, _run: RunHandle) -> None:
+        raise NotImplementedError(
+            "Cancelling one attached run without cancelling its shared allocation "
+            "is not supported; wait for the run or cancel the allocation explicitly."
+        )
 
     def _wait_attached_run(
         self,

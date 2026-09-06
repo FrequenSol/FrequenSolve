@@ -2467,6 +2467,31 @@ def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
     assert run.status().state == "running"
 
 
+def test_attached_run_cancel_does_not_cancel_shared_allocation(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
+    site = DummySlurmSite("project/run")
+    site.pool.id = "42"
+
+    class DummyFuture:
+        def done(self):
+            return False
+
+    monkeypatch.setattr(
+        site, "_submit_attached", lambda job, ranks_per_task=2, **kwargs: DummyFuture()
+    )
+    monkeypatch.setattr(
+        site,
+        "cancel_job",
+        lambda job_id: pytest.fail(f"cancelled shared allocation {job_id}"),
+    )
+
+    run = site.submit(DummyJob(), mode="attached")
+
+    with pytest.raises(NotImplementedError, match="shared allocation"):
+        run.cancel()
+
+
 def test_fresh_attached_submit_without_allocation_id_fails_before_launch(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
