@@ -316,8 +316,12 @@ class JobRunStateMixin:
             if status == "failed" or self._record_solver_failed(record):
                 if not row["current"]:
                     row["status"] = "failed"
-            elif status == "succeeded" and row["current"] and row["status"] != "failed":
-                row["status"] = "succeeded"
+            elif status == "succeeded" and row["status"] != "failed":
+                completed_current_run = bool(record.get("complete")) and str(
+                    record.get("fingerprint", "")
+                ) == self.task_policy_fingerprint(task)
+                if row["current"] or completed_current_run:
+                    row["status"] = "succeeded"
 
         return [rows[task] for task in sorted(rows)]
 

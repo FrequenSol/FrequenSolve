@@ -1303,6 +1303,50 @@ def test_job_collects_task_run_manifests_into_job_manifest(tmp_path):
     assert mirrored["solver"]["convergence"]["residual"] == 0.002
 
 
+def test_fetched_task_metadata_reports_success_without_local_outputs(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[12.0])
+    job.save()
+    task_manifest = job.task_run_manifest_path(1)
+    task_manifest.parent.mkdir(parents=True, exist_ok=True)
+    task_manifest.write_text(
+        json.dumps(
+            {
+                "exit_status": {"code": 0, "status": "success"},
+                "inputs": {
+                    "task": {
+                        "frequency": 12.0,
+                        "outputs_hash": job._task_outputs_hash(1),
+                    }
+                },
+            }
+        )
+    )
+    run_dir = job._result_path / "_fs_run"
+    (run_dir / "timings.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-timings-1",
+                "tasks": [{"task": 1, "elapsed_s": 1.25}],
+            }
+        )
+    )
+
+    job.collect_task_run_manifests()
+
+    row = job.frequency_status()[0]
+    assert row["status"] == "succeeded"
+    assert row["current"] is False
+    assert row["trace_exists"] is False
+    assert job.frequency_summary() == {
+        "total": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "not_run": 0,
+    }
+    assert job.task_timings()[0]["status"] == "succeeded"
+
+
 def test_job_collects_skipped_task_run_manifests_as_successful(tmp_path):
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
