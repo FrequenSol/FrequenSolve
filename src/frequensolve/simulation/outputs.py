@@ -890,6 +890,7 @@ class VtkOutput(Output):
 
         if "upscale" in kwargs:
             raise ValueError("ParaView grid targets do not support upscale")
+        kwargs.setdefault("format", "vtr")
         return cls(target="grid", grid=grid, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
@@ -904,6 +905,9 @@ class VtkOutput(Output):
         Raises:
             ValueError: If grid-target output is missing a grid.
         """
+
+        if self._inferred_target() == "grid" and self.format != "vtr":
+            raise ValueError("ParaView grid targets require format='vtr'")
 
         payload = {
             "_type": "ParaviewOutput",
@@ -1048,7 +1052,10 @@ class VtkOutput(Output):
 
     def _inferred_target(self) -> str:
         if self.target is not None:
-            return _choice(str(self.target), self._TARGETS, "VtkOutput.target")
+            target = (
+                self.target["kind"] if isinstance(self.target, Mapping) else self.target
+            )
+            return _choice(str(target), self._TARGETS, "VtkOutput.target")
         if self.grid_spec is not None:
             return "grid"
         if self.shell or self.surfaces or self.boundaries or self._planes:

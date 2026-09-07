@@ -2627,7 +2627,24 @@ def test_paraview_grid_and_plane_selection_serialize_with_units():
     grid_payload = grid_output.to_fs()
     assert grid_payload["target"] == {"kind": "grid", "grid": grid}
     assert "source" not in grid_payload
-    assert grid_payload["writer"] == {"format": "vtu", "encoding": "appended"}
+    assert grid_payload["writer"] == {"format": "vtr", "encoding": "appended"}
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        VtkOutput.grid({"axes": []}, fields=["pressure"], format="vtu"),
+        VtkOutput(
+            target="grid",
+            grid={"axes": []},
+            fields=["pressure"],
+            format="xdmf",
+        ),
+    ],
+)
+def test_paraview_grid_targets_reject_non_vtr_writers(output):
+    with pytest.raises(ValueError, match="grid targets require format='vtr'"):
+        output.to_fs()
 
 
 def test_paraview_from_fs_preserves_new_blocks_and_extra():
