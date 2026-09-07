@@ -16,6 +16,9 @@ from frequensolve.orchestrator.sites.aws.cache_paths import (
     cloud_config_cache_path,
     legacy_config_cache_path,
 )
+from frequensolve.orchestrator.sites.aws.execution_profile import (
+    ManagedExecutionProfile,
+)
 
 try:
     import boto3
@@ -83,6 +86,12 @@ class AWSSiteConfig(BaseSiteConfig):
     region: str = "us-east-1"
     s3_prefix: str = ""
     max_duration: Optional[str] = None
+    execution_backend: str = "batch"
+    compute_mode: Optional[str] = "auto"
+    slurm_partition: Optional[str] = None
+    slurm_nodes: Optional[int] = None
+    slurm_ranks_per_node: Optional[int] = None
+    slurm_wall_time: Optional[str] = None
 
     @classmethod
     def from_domain(cls, domain: Optional[str] = None) -> "AWSSiteConfig":
@@ -246,6 +255,12 @@ class AWSSite(BaseSite):
         verbose: bool = False,
         force_login: bool = False,
         _credential_profile: Optional[str] = None,
+        execution_backend: Optional[str] = None,
+        compute_mode: Optional[str] = None,
+        slurm_partition: Optional[str] = None,
+        slurm_nodes: Optional[int] = None,
+        slurm_ranks_per_node: Optional[int] = None,
+        slurm_wall_time: Optional[str] = None,
     ):
         """Initialize AWS site with domain-based authentication.
 
@@ -273,12 +288,36 @@ class AWSSite(BaseSite):
 
         self.verbose = verbose
         self._site_profile = _credential_profile
+        profile_values = {
+            name: value
+            for name, value in {
+                "execution_backend": execution_backend,
+                "compute_mode": compute_mode,
+                "slurm_partition": slurm_partition,
+                "slurm_nodes": slurm_nodes,
+                "slurm_ranks_per_node": slurm_ranks_per_node,
+                "slurm_wall_time": slurm_wall_time,
+            }.items()
+            if value is not None
+        }
+        if profile_values and _credential_profile is None:
+            raise ValueError(
+                "Managed Cloud execution settings may only be loaded from a "
+                "named site.toml profile via fs.Site(profile=...)"
+            )
+        self.execution_profile = ManagedExecutionProfile.from_mapping(profile_values)
 
         # Load configuration from domain
         self._emit(
             f"Loading AWS configuration for {domain or os.getenv('FREQUENSOL_DOMAIN')}"
         )
         config = AWSSiteConfig.from_domain(domain)
+        config.execution_backend = self.execution_profile.backend
+        config.compute_mode = self.execution_profile.compute_mode
+        config.slurm_partition = self.execution_profile.slurm_partition
+        config.slurm_nodes = self.execution_profile.slurm_nodes
+        config.slurm_ranks_per_node = self.execution_profile.slurm_ranks_per_node
+        config.slurm_wall_time = self.execution_profile.slurm_wall_time
 
         # Store domain for potential config refresh
         if domain is None:
@@ -448,6 +487,14 @@ class AWSSite(BaseSite):
             logger.error(f"Failed to fetch stack info: {e}")
             raise RuntimeError(f"Failed to fetch stack information: {e}") from e
 
+        # A domain-config refresh replaces the dataclass instance, so reapply
+        # the immutable named-profile selection before exposing it.
+        config.execution_backend = self.execution_profile.backend
+        config.compute_mode = self.execution_profile.compute_mode
+        config.slurm_partition = self.execution_profile.slurm_partition
+        config.slurm_nodes = self.execution_profile.slurm_nodes
+        config.slurm_ranks_per_node = self.execution_profile.slurm_ranks_per_node
+        config.slurm_wall_time = self.execution_profile.slurm_wall_time
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
 
@@ -981,6 +1028,28 @@ class AWSSite(BaseSite):
         Raises:
             RuntimeError: If job submission fails or stack creation fails.
         """
+        forbidden_execution_overrides = sorted(
+            {
+                "execution",
+                "execution_backend",
+                "compute_mode",
+                "nodes",
+                "ranks_per_node",
+                "partition",
+                "wall_time",
+                "slurm_partition",
+                "slurm_nodes",
+                "slurm_ranks_per_node",
+                "slurm_wall_time",
+            }
+            & kwargs.keys()
+        )
+        if forbidden_execution_overrides:
+            raise ValueError(
+                "Managed Cloud execution and resources may only be selected "
+                "through a named site.toml profile: "
+                + ", ".join(forbidden_execution_overrides)
+            )
         fresh_run = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
         skip_policy = SkipPolicy.from_value(
             kwargs.pop("skip", kwargs.pop("skip_policy", None))
@@ -992,6 +1061,12 @@ class AWSSite(BaseSite):
         poll_interval = kwargs.pop("poll_interval", 10)
         vcpu = kwargs.pop("vcpu", None)
         memory = kwargs.pop("memory", None)
+        if self.execution_profile.backend == "slurm" and (
+            vcpu is not None or memory is not None
+        ):
+            raise ValueError(
+                "Managed Slurm profiles cannot use Batch vcpu or memory overrides"
+            )
         if self.graphql_client is None:
             raise RuntimeError(
                 "FrequenSolve Cloud requires Cognito authentication and the "
@@ -1081,6 +1156,7 @@ class AWSSite(BaseSite):
                 simulation_job_name=job.name,
                 send_simulation_status_email=kwargs.get("send_simulation_status_email"),
                 fresh=fresh_run,
+                **self.execution_profile.graphql_arguments(),
             )
 
             simulation_id = result["simulationId"]
@@ -1095,6 +1171,21 @@ class AWSSite(BaseSite):
                 poll_interval=poll_interval,
                 fetch=fetch,
                 check=check,
+                backend={
+                    key: value
+                    for key, value in {
+                        "executionBackend": result.get(
+                            "executionBackend", self.execution_profile.backend
+                        ),
+                        "executionTarget": result.get("executionTarget"),
+                        "slurmPartition": result.get("slurmPartition"),
+                        "slurmNodes": result.get("slurmNodes"),
+                        "slurmRanksPerNode": result.get("slurmRanksPerNode"),
+                        "slurmWallTimeSeconds": result.get("slurmWallTimeSeconds"),
+                        "providerAttemptId": result.get("providerAttemptId"),
+                    }.items()
+                    if value is not None
+                },
             )
 
         except Exception as e:
@@ -1107,6 +1198,7 @@ class AWSSite(BaseSite):
         poll_interval: float = 10,
         fetch: bool = False,
         check: bool = False,
+        backend: Optional[Dict[str, Any]] = None,
     ) -> RunHandle:
         return RunHandle(
             site=self,
@@ -1115,6 +1207,7 @@ class AWSSite(BaseSite):
             mode="aws",
             poll_interval=poll_interval,
             check=check,
+            backend=backend or {"executionBackend": "batch"},
             _status_fn=self._poll_run,
             _cancel_fn=lambda run: self.cancel_job(str(run.id)),
             _pending_fetch_fn=(
@@ -1130,6 +1223,17 @@ class AWSSite(BaseSite):
         )
         if callable(details_getter):
             status_details = details_getter(str(run.id))
+            for key in (
+                "executionBackend",
+                "executionTarget",
+                "slurmPartition",
+                "slurmNodes",
+                "slurmRanksPerNode",
+                "slurmWallTimeSeconds",
+                "providerAttemptId",
+            ):
+                if status_details.get(key) is not None:
+                    run.backend[key] = status_details[key]
             raw_status = status_details["status"]
             raw = {**status_details, "source": "graphql"}
             message = str(status_details.get("failureMessage") or "")

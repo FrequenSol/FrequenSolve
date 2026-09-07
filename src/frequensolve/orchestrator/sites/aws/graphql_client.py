@@ -565,7 +565,13 @@ class GraphQLClient:
         project_display_name: Optional[str] = None,
         simulation_name: Optional[str] = None,
         simulation_job_name: Optional[str] = None,
-    ) -> Dict[str, str]:
+        execution_backend: Optional[str] = None,
+        compute_mode: Optional[str] = None,
+        slurm_partition: Optional[str] = None,
+        slurm_nodes: Optional[int] = None,
+        slurm_ranks_per_node: Optional[int] = None,
+        slurm_wall_time_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Submit a simulation job.
 
         Args:
@@ -602,6 +608,7 @@ class GraphQLClient:
             "simulationJobName": simulation_job_name,
         }
         metadata = {key: value for key, value in metadata.items() if value is not None}
+        execution_fields = execution_backend is not None
 
         def build_mutation(include_metadata: bool) -> str:
             force_var = "$forceRun: Boolean" if fresh else ""
@@ -621,6 +628,35 @@ class GraphQLClient:
                     simulationName: $simulationName
                     simulationJobName: $simulationJobName
                 """
+            execution_variables = ""
+            execution_arguments = ""
+            execution_response = ""
+            if execution_fields:
+                execution_variables = """
+                $executionBackend: String
+                $computeMode: String
+                $slurmPartition: String
+                $slurmNodes: Int
+                $slurmRanksPerNode: Int
+                $slurmWallTimeSeconds: Int
+                """
+                execution_arguments = """
+                    executionBackend: $executionBackend
+                    computeMode: $computeMode
+                    slurmPartition: $slurmPartition
+                    slurmNodes: $slurmNodes
+                    slurmRanksPerNode: $slurmRanksPerNode
+                    slurmWallTimeSeconds: $slurmWallTimeSeconds
+                """
+                execution_response = """
+                    executionBackend
+                    executionTarget
+                    slurmPartition
+                    slurmNodes
+                    slurmRanksPerNode
+                    slurmWallTimeSeconds
+                    providerAttemptId
+                """
             return f"""
             mutation SubmitJob(
                 $jobFileS3Key: String!
@@ -629,6 +665,7 @@ class GraphQLClient:
                 $jobName: String
                 $sendSimulationStatusEmail: Boolean
                 {metadata_variables}
+                {execution_variables}
                 {force_var}
             ) {{
                 submitJob(
@@ -638,11 +675,13 @@ class GraphQLClient:
                     jobName: $jobName
                     sendSimulationStatusEmail: $sendSimulationStatusEmail
                     {metadata_arguments}
+                    {execution_arguments}
                     {force_arg}
                 ) {{
                     simulationId
                     batchJobId
                     status
+                    {execution_response}
                 }}
             }}
         """
@@ -661,6 +700,17 @@ class GraphQLClient:
         variables.update(metadata)
         if fresh:
             variables["forceRun"] = True
+        if execution_fields:
+            variables.update(
+                {
+                    "executionBackend": execution_backend,
+                    "computeMode": compute_mode,
+                    "slurmPartition": slurm_partition,
+                    "slurmNodes": slurm_nodes,
+                    "slurmRanksPerNode": slurm_ranks_per_node,
+                    "slurmWallTimeSeconds": slurm_wall_time_seconds,
+                }
+            )
 
         def execute_submission(include_metadata: bool) -> Dict[str, Any]:
             request_variables = dict(variables)
@@ -727,6 +777,13 @@ class GraphQLClient:
                     status
                     failureCode
                     failureMessage
+                    executionBackend
+                    executionTarget
+                    slurmPartition
+                    slurmNodes
+                    slurmRanksPerNode
+                    slurmWallTimeSeconds
+                    providerAttemptId
                 }
             }
         """
@@ -736,8 +793,19 @@ class GraphQLClient:
             result = self.execute(query, variables)
         except RuntimeError as exc:
             error_message = str(exc)
-            unsupported_failure_fields = (
-                "failureCode" in error_message or "failureMessage" in error_message
+            unsupported_failure_fields = any(
+                field in error_message
+                for field in (
+                    "failureCode",
+                    "failureMessage",
+                    "executionBackend",
+                    "executionTarget",
+                    "slurmPartition",
+                    "slurmNodes",
+                    "slurmRanksPerNode",
+                    "slurmWallTimeSeconds",
+                    "providerAttemptId",
+                )
             ) and (
                 "Cannot query field" in error_message or "is undefined" in error_message
             )
@@ -770,6 +838,19 @@ class GraphQLClient:
             "status": status,
             "failureCode": details.get("failureCode"),
             "failureMessage": details.get("failureMessage"),
+            **{
+                key: details[key]
+                for key in (
+                    "executionBackend",
+                    "executionTarget",
+                    "slurmPartition",
+                    "slurmNodes",
+                    "slurmRanksPerNode",
+                    "slurmWallTimeSeconds",
+                    "providerAttemptId",
+                )
+                if details.get(key) is not None
+            },
         }
 
     def get_simulation_status(self, simulation_id: str) -> str:

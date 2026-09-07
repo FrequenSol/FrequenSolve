@@ -179,6 +179,8 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
     starter_config = sites.load_site_config(config_path)
     assert set(starter_config["sites"]) == {
         "cloud",
+        "cloud-batch",
+        "cloud-slurm",
         "local",
         "hpc",
         "stampede3",
@@ -246,6 +248,90 @@ verbose = true
         "shutdown_on_completion": True,
         "verbose": False,
     }
+
+
+def test_site_factory_validates_managed_slurm_profile(monkeypatch, tmp_path):
+    config_path = tmp_path / "sites.toml"
+    config_path.write_text(
+        """
+default = "cloud"
+
+[sites.cloud]
+type = "aws"
+domain = "app.frequensol.com"
+
+[sites.cloud-slurm]
+type = "aws"
+domain = "app.frequensol.com"
+execution_backend = "slurm"
+slurm_partition = "cpu-efa"
+slurm_nodes = 2
+slurm_ranks_per_node = 4
+slurm_wall_time = "00-00:30:00"
+""".strip()
+    )
+    monkeypatch.setattr(sites, "AWSSite", FakeSite)
+
+    site = sites.Site(config_path=config_path, profile="cloud-slurm")
+
+    assert site.kwargs == {
+        "domain": "app.frequensol.com",
+        "execution_backend": "slurm",
+        "slurm_partition": "cpu-efa",
+        "slurm_nodes": 2,
+        "slurm_ranks_per_node": 4,
+        "slurm_wall_time": "00-00:30:00",
+        "_credential_profile": "cloud-slurm",
+    }
+
+
+@pytest.mark.parametrize(
+    ("profile_body", "message"),
+    [
+        (
+            'execution_backend = "batch"\nslurm_nodes = 2',
+            "Batch profiles cannot set Slurm fields",
+        ),
+        (
+            'execution_backend = "slurm"\ncompute_mode = "auto"',
+            "Slurm profiles cannot set compute_mode",
+        ),
+        (
+            'execution_backend = "slurm"\nslurm_partition = "cpu-efa"\n'
+            "slurm_nodes = 3\nslurm_ranks_per_node = 4\n"
+            'slurm_wall_time = "00-00:30:00"',
+            "slurm_nodes must be from 1 through 2",
+        ),
+    ],
+)
+def test_site_factory_rejects_invalid_managed_profiles(
+    monkeypatch, tmp_path, profile_body, message
+):
+    config_path = tmp_path / "sites.toml"
+    config_path.write_text(
+        f'default = "cloud"\n[sites.cloud]\ntype = "aws"\n'
+        f'domain = "app.frequensol.com"\n{profile_body}\n'
+    )
+    monkeypatch.setattr(sites, "AWSSite", FakeSite)
+
+    with pytest.raises(ValueError, match=message):
+        sites.Site(config_path=config_path)
+
+
+def test_managed_cloud_resources_cannot_be_overridden_at_factory_call(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "sites.toml"
+    config_path.write_text(
+        'default = "cloud"\n[sites.cloud]\ntype = "aws"\n'
+        'domain = "app.frequensol.com"\n'
+    )
+    monkeypatch.setattr(sites, "AWSSite", FakeSite)
+
+    with pytest.raises(ValueError, match="only be selected through a named"):
+        sites.Site(config_path=config_path, execution_backend="slurm")
+    with pytest.raises(ValueError, match="direct Slurm-site overrides"):
+        sites.Site(config_path=config_path, nodes=2)
 
 
 def test_site_factory_rejects_single_site_table(tmp_path):

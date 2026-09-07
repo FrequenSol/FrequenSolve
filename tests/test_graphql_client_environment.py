@@ -361,6 +361,33 @@ def test_submit_job_sends_optional_cloud_run_metadata():
     }
 
 
+def test_submit_job_sends_managed_slurm_contract_and_reads_target_details():
+    client = CapturingGraphQLClient()
+
+    result = client.submit_job(
+        "project/jobs/model/job/job.json",
+        execution_backend="slurm",
+        slurm_partition="cpu-efa",
+        slurm_nodes=2,
+        slurm_ranks_per_node=4,
+        slurm_wall_time_seconds=1800,
+    )
+
+    assert "executionBackend: $executionBackend" in client.last_query
+    assert "providerAttemptId" in client.last_query
+    assert client.last_variables == {
+        "jobFileS3Key": "project/jobs/model/job/job.json",
+        "sendSimulationStatusEmail": None,
+        "executionBackend": "slurm",
+        "computeMode": None,
+        "slurmPartition": "cpu-efa",
+        "slurmNodes": 2,
+        "slurmRanksPerNode": 4,
+        "slurmWallTimeSeconds": 1800,
+    }
+    assert result["simulationId"] == "simulation-1"
+
+
 def test_submit_job_retries_legacy_cloud_without_optional_metadata(monkeypatch):
     client = CapturingGraphQLClient()
     calls = []
