@@ -30,11 +30,6 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
-from frequensolve.frequensolver import (
-    FrequenSolverCompatibility,
-    check_frequensolver_compatibility,
-    resolve_frequensolver_policy,
-)
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
@@ -55,6 +50,11 @@ from frequensolve.orchestrator.utils.environment import (
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
+from frequensolve.solver import (
+    SolverCompatibility,
+    check_solver_compatibility,
+    resolve_solver_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -476,7 +476,7 @@ class LocalSite(BaseSite):
         solver: Path to the local solver executable.
         environment: Non-secret environment values added to worker and solver
             subprocesses.
-        frequensolver_policy: Compatibility behavior: ``"warn"`` (default),
+        solver_policy: Compatibility behavior: ``"warn"`` (default),
             ``"strict"``, or ``"off"``.
         shutdown_on_completion: Whether to close the Dask cluster after a run
             completes.
@@ -488,7 +488,7 @@ class LocalSite(BaseSite):
     executable: Optional[str] = field(init=False)
     env: Dict[str, str] = field(default_factory=dict)
     solver: Optional[Union[str, Path]] = None
-    frequensolver_policy: Optional[str] = None
+    solver_policy: Optional[str] = None
     environment: Mapping[str, object] = field(default_factory=dict)
     n_workers: Optional[int] = None
     threads_per_worker: Optional[int] = None
@@ -506,10 +506,10 @@ class LocalSite(BaseSite):
     _active_threads_per_worker: Optional[int] = field(default=None, init=False)
     _active_memory_per_worker: Optional[int] = field(default=None, init=False)
     _closed: bool = field(default=True, init=False)
-    _frequensolver_compatibility_result: Optional[FrequenSolverCompatibility] = field(
+    _solver_compatibility_result: Optional[SolverCompatibility] = field(
         default=None, init=False
     )
-    _frequensolver_compatibility_policy: Optional[str] = field(default=None, init=False)
+    _solver_compatibility_policy: Optional[str] = field(default=None, init=False)
 
     # ----------------- lifecycle -----------------
 
@@ -542,9 +542,7 @@ class LocalSite(BaseSite):
             RunHandle for the submitted tasks
         """
         check = bool(kwargs.pop("check", False))
-        frequensolver_policy = kwargs.pop(
-            "frequensolver_policy", self.frequensolver_policy
-        )
+        solver_policy = kwargs.pop("solver_policy", self.solver_policy)
         fresh_run = bool(
             kwargs.pop("force_run", False)
             or kwargs.pop("force", False)
@@ -579,7 +577,7 @@ class LocalSite(BaseSite):
         shutdown_on_completion = bool(
             kwargs.pop("shutdown_on_completion", self.shutdown_on_completion)
         )
-        self.check_frequensolver_compatibility(policy=frequensolver_policy)
+        self.check_solver_compatibility(policy=solver_policy)
         self.prepare_job(job, validate=validate)
         if not fresh_run and job.is_run_current():
             logger.info(
@@ -642,30 +640,30 @@ class LocalSite(BaseSite):
         handle.backend["shutdown_on_completion"] = shutdown_on_completion
         return handle
 
-    def check_frequensolver_compatibility(
+    def check_solver_compatibility(
         self,
         *,
         policy: Optional[str] = None,
         force: bool = False,
-    ) -> FrequenSolverCompatibility:
+    ) -> SolverCompatibility:
         """Check the local solver once before this site submits work."""
 
-        selected = resolve_frequensolver_policy(
-            policy if policy is not None else self.frequensolver_policy
+        selected = resolve_solver_policy(
+            policy if policy is not None else self.solver_policy
         )
         if (
             not force
-            and self._frequensolver_compatibility_result is not None
-            and self._frequensolver_compatibility_policy == selected
+            and self._solver_compatibility_result is not None
+            and self._solver_compatibility_policy == selected
         ):
-            return self._frequensolver_compatibility_result
-        result = check_frequensolver_compatibility(
+            return self._solver_compatibility_result
+        result = check_solver_compatibility(
             self.executable or self.solver or "",
             policy=selected,
             environment=self.env,
         )
-        self._frequensolver_compatibility_result = result
-        self._frequensolver_compatibility_policy = selected
+        self._solver_compatibility_result = result
+        self._solver_compatibility_policy = selected
         return result
 
     def _submit_local_smooth_task(

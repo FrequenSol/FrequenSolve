@@ -19,7 +19,8 @@ except ModuleNotFoundError:  # Direct execution sets sys.path to scripts/.
 
 
 LEGACY_SCHEMA = "frequensolve-release-evidence/v2"
-SCHEMA = "frequensolve-release-evidence/v3"
+PROFILE_SCHEMA = "frequensolve-release-evidence/v3"
+SCHEMA = "frequensolve-release-evidence/v4"
 STANDARD_PROFILE = "standard"
 SOLVER_BACKED_PROFILE = "solver-backed"
 VALIDATION_PROFILES = frozenset({STANDARD_PROFILE, SOLVER_BACKED_PROFILE})
@@ -51,9 +52,9 @@ STANDARD_FORBIDDEN_FIELDS = frozenset(
         "dockerTestArchiveSha256",
         "dockerTestEvidence",
         "dockerDispatchEvidence",
-        "frequensolverVersion",
-        "frequensolverBuildId",
-        "frequensolverGitCommit",
+        "solverVersion",
+        "solverBuildId",
+        "solverGitCommit",
         "fsMumpsRef",
         "fsMumpsCommit",
     }
@@ -66,9 +67,9 @@ def release_evidence_profile(evidence: dict[str, Any]) -> str:
     schema = evidence.get("schemaVersion")
     if schema == LEGACY_SCHEMA:
         return SOLVER_BACKED_PROFILE
-    if schema != SCHEMA:
+    if schema not in {PROFILE_SCHEMA, SCHEMA}:
         raise ValueError(
-            f"schemaVersion must be {SCHEMA!r} or legacy {LEGACY_SCHEMA!r}, "
+            f"schemaVersion must be {SCHEMA!r}, {PROFILE_SCHEMA!r}, or {LEGACY_SCHEMA!r}, "
             f"got {schema!r}"
         )
     profile = evidence.get("validationProfile")
@@ -77,6 +78,23 @@ def release_evidence_profile(evidence: dict[str, Any]) -> str:
             f"validationProfile must be 'standard' or 'solver-backed', got {profile!r}"
         )
     return str(profile)
+
+
+def normalized_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return current field names without modifying sealed v2/v3 evidence."""
+
+    normalized = dict(evidence)
+    legacy = evidence.get("schemaVersion") in {LEGACY_SCHEMA, PROFILE_SCHEMA}
+    for suffix in ("Release", "ReleaseUrl", "Version", "BuildId", "GitCommit"):
+        old, new = f"frequensolver{suffix}", f"solver{suffix}"
+        forbidden = new if legacy else old
+        if forbidden in evidence:
+            raise ValueError(
+                f"{forbidden} is not a field of {evidence.get('schemaVersion')!r}"
+            )
+        if legacy and old in normalized:
+            normalized[new] = normalized.pop(old)
+    return normalized
 
 
 def _positive_integer(value: object) -> bool:
@@ -90,6 +108,7 @@ def _valid_sha(value: object) -> bool:
 def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
     """Raise ``ValueError`` unless evidence proves the expected commit."""
 
+    evidence = normalized_evidence(evidence)
     mismatches: list[str] = []
     try:
         profile = release_evidence_profile(evidence)
@@ -108,7 +127,7 @@ def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
         if evidence.get(name) != expected
     )
 
-    if evidence.get("schemaVersion") == SCHEMA:
+    if evidence.get("schemaVersion") in {PROFILE_SCHEMA, SCHEMA}:
         expected_status = {
             STANDARD_PROFILE: "not-run",
             SOLVER_BACKED_PROFILE: "passed",
@@ -132,24 +151,20 @@ def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
     if evidence.get("ciRunUrl") != expected_ci_url:
         mismatches.append("ciRunUrl must identify ciRunId in FrequenSolve")
 
-    frequensolver_release = evidence.get("frequensolverRelease", "")
-    if not isinstance(frequensolver_release, str) or not FINAL_RELEASE_RE.fullmatch(
-        frequensolver_release
+    solver_release = evidence.get("solverRelease", "")
+    if not isinstance(solver_release, str) or not FINAL_RELEASE_RE.fullmatch(
+        solver_release
     ):
-        mismatches.append(
-            "frequensolverRelease must be an immutable final release tag vX.Y.Z"
-        )
-    if evidence.get("sauceRef") != frequensolver_release:
-        mismatches.append("sauceRef must equal frequensolverRelease")
+        mismatches.append("solverRelease must be an immutable final release tag vX.Y.Z")
+    if evidence.get("sauceRef") != solver_release:
+        mismatches.append("sauceRef must equal solverRelease")
     if not _valid_sha(evidence.get("sauceCommit")):
         mismatches.append("sauceCommit must be a lowercase 40-character Git SHA")
     expected_release_url = (
-        f"https://github.com/FrequenSol/Sauce/releases/tag/{frequensolver_release}"
+        f"https://github.com/FrequenSol/Sauce/releases/tag/{solver_release}"
     )
-    if evidence.get("frequensolverReleaseUrl") != expected_release_url:
-        mismatches.append(
-            "frequensolverReleaseUrl must identify the immutable FrequenSolver release"
-        )
+    if evidence.get("solverReleaseUrl") != expected_release_url:
+        mismatches.append("solverReleaseUrl must identify the immutable Solver release")
 
     if profile == STANDARD_PROFILE:
         forbidden = sorted(STANDARD_FORBIDDEN_FIELDS.intersection(evidence))
@@ -173,7 +188,7 @@ def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
         _validate_solver_backed_evidence(
             evidence,
             expected_commit=expected_commit,
-            frequensolver_release=frequensolver_release,
+            solver_release=solver_release,
             mismatches=mismatches,
         )
 
@@ -185,7 +200,7 @@ def _validate_solver_backed_evidence(
     evidence: dict[str, Any],
     *,
     expected_commit: str,
-    frequensolver_release: object,
+    solver_release: object,
     mismatches: list[str],
 ) -> None:
     """Append failures for the complete Docker and solver-backed contract."""
@@ -210,12 +225,12 @@ def _validate_solver_backed_evidence(
             mismatches.append(f"{name} must be a lowercase 40-character Git SHA")
     if evidence.get("fsMumpsRef") != evidence.get("fsMumpsCommit"):
         mismatches.append("fsMumpsRef must equal the immutable fsMumpsCommit")
-    if evidence.get("frequensolverVersion") != frequensolver_release:
-        mismatches.append("frequensolverVersion must equal frequensolverRelease")
-    if evidence.get("frequensolverGitCommit") != evidence.get("sauceCommit"):
-        mismatches.append("frequensolverGitCommit must equal sauceCommit")
-    if not evidence.get("frequensolverBuildId"):
-        mismatches.append("frequensolverBuildId must be non-empty")
+    if evidence.get("solverVersion") != solver_release:
+        mismatches.append("solverVersion must equal solverRelease")
+    if evidence.get("solverGitCommit") != evidence.get("sauceCommit"):
+        mismatches.append("solverGitCommit must equal sauceCommit")
+    if not evidence.get("solverBuildId"):
+        mismatches.append("solverBuildId must be non-empty")
     for name in ("dockerCallerRunId", "dockerEvidenceRunId"):
         value = evidence.get(name)
         if not _positive_integer(value):

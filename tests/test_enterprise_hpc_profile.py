@@ -42,8 +42,8 @@ SOLVER_SHA = "9" * 64
 SDK_SHA = "d" * 64
 COMMIT = "1" * 40
 SOLVER_IDENTITY = {
-    "schema": "frequensolver-identity-1",
-    "product": "FrequenSolver",
+    "schema": "fs-solver-identity-1",
+    "product": "FS_solver",
     "version": "1.2.3",
     "build_id": "synthetic-build",
     "git_commit": COMMIT,
@@ -667,9 +667,9 @@ def _successful_remote_runner(site, *, identity=None, calls=None):
         elif "--identity-json" in command:
             output = "\n".join(
                 [
-                    "frequensolve-frequensolver-identity-begin",
+                    "frequensolve-solver-identity-begin",
                     json.dumps(solver_identity),
-                    "frequensolve-frequensolver-identity-ok",
+                    "frequensolve-solver-identity-ok",
                 ]
             )
         elif "/opt/frequensolve/bin/FS_seismic" in command and "hashlib" in command:

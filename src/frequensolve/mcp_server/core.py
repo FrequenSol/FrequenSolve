@@ -137,8 +137,8 @@ def identity_payload() -> dict[str, JsonValue]:
         },
         "solver": {
             "compatibility_schema": identities.compatibility_schema,
-            "preferred_release": identities.preferred_frequensolver_release,
-            "preferred_commit": identities.preferred_frequensolver_commit,
+            "preferred_release": identities.preferred_solver_release,
+            "preferred_commit": identities.preferred_solver_commit,
             "validation_profile": identities.solver_validation_profile,
         },
         "contracts": [

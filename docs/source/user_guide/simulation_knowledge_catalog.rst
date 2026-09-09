@@ -13,7 +13,7 @@ entirely offline:
    catalog = fs.load_simulation_knowledge()
    print(catalog.identities.package_version)
    print(catalog.identities.catalog_version)
-   print(catalog.identities.preferred_frequensolver_release)
+   print(catalog.identities.preferred_solver_release)
 
 The combined identity also names the Sauce-owned public simulation,
 acquisition, and job contracts referenced by this package release, including
@@ -132,7 +132,7 @@ evaluation and tests.
 Safety Boundary
 ---------------
 
-Loading the catalog never runs FrequenSolver, calls a Cloud API, reads customer
+Loading the catalog never runs Solver, calls a Cloud API, reads customer
 data, or checks remote files. It also cannot perform Cloud-only authorization,
 quota, storage-existence, or deployment checks. Those checks belong to the
 service handling submission.

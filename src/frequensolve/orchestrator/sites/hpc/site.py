@@ -51,13 +51,6 @@ except ModuleNotFoundError as exc:
 
 from jinja2 import Environment, PackageLoader
 
-from frequensolve.frequensolver import (
-    IDENTITY_QUERY_TIMEOUT_SECONDS,
-    FrequenSolverCompatibility,
-    check_frequensolver_compatibility,
-    query_remote_frequensolver_identity,
-    resolve_frequensolver_policy,
-)
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
@@ -120,6 +113,13 @@ from frequensolve.orchestrator.utils.ssh import SSHClientClass
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.simulation.jobs.imaging import ImagingJob
+from frequensolve.solver import (
+    IDENTITY_QUERY_TIMEOUT_SECONDS,
+    SolverCompatibility,
+    check_solver_compatibility,
+    query_remote_solver_identity,
+    resolve_solver_policy,
+)
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = [
@@ -616,7 +616,7 @@ class SlurmSite(BaseSite):
         modules: Environment modules loaded before remote solver execution.
         environment: Non-secret environment values exported before remote
             solver execution.
-        frequensolver_policy: Compatibility behavior: ``"warn"`` (default),
+        solver_policy: Compatibility behavior: ``"warn"`` (default),
             ``"strict"``, or ``"off"``.
         run_config: Default SLURM resource request.
         config.tmp_dir: Optional remote directory for transient transfer
@@ -639,9 +639,9 @@ class SlurmSite(BaseSite):
     _scratch_dir: Optional[Path]
     modules: List[str]
     environment: Dict[str, str]
-    frequensolver_policy: Optional[str]
-    _frequensolver_compatibility_result: Optional[FrequenSolverCompatibility]
-    _frequensolver_compatibility_policy: Optional[str]
+    solver_policy: Optional[str]
+    _solver_compatibility_result: Optional[SolverCompatibility]
+    _solver_compatibility_policy: Optional[str]
     enterprise_hpc: Optional[_EnterpriseHPCProfile]
     _enterprise_hpc_preflight_result: Optional[EnterpriseHPCPreflightResult]
     _enterprise_hpc_limits: Optional[_EnterpriseLimits]
@@ -678,7 +678,7 @@ class SlurmSite(BaseSite):
         environment: Optional[Mapping[str, object]] = None,
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
-        frequensolver_policy: Optional[str] = None,
+        solver_policy: Optional[str] = None,
     ):
         if (
             default_partition is not None
@@ -761,9 +761,9 @@ class SlurmSite(BaseSite):
             raise ValueError("modules must be an array of module names")
         self.modules = [str(module) for module in (modules or [])]
         self.environment = validate_environment(environment)
-        self.frequensolver_policy = frequensolver_policy
-        self._frequensolver_compatibility_result = None
-        self._frequensolver_compatibility_policy = None
+        self.solver_policy = solver_policy
+        self._solver_compatibility_result = None
+        self._solver_compatibility_policy = None
         self._enterprise_hpc_preflight_result = None
         self._enterprise_hpc_limits = None
         self.transfer_method = transfer_method
@@ -955,9 +955,7 @@ class SlurmSite(BaseSite):
                 if value is not None
             }
         )
-        frequensolver_policy = overrides.pop(
-            "frequensolver_policy", self.frequensolver_policy
-        )
+        solver_policy = overrides.pop("solver_policy", self.solver_policy)
         fresh_run = bool(force or overrides.pop("rerun", False))
         skip_policy_value = overrides.pop("skip", overrides.pop("skip_policy", None))
         residual = overrides.pop("residual", None)
@@ -982,7 +980,7 @@ class SlurmSite(BaseSite):
         validate = overrides.pop("validate", True)
         enterprise_hpc = getattr(self, "enterprise_hpc", None)
         if enterprise_hpc is None:
-            self.check_frequensolver_compatibility(policy=frequensolver_policy)
+            self.check_solver_compatibility(policy=solver_policy)
         self.prepare_job(job, validate=validate)
         if mode not in {"auto", "attached", "batch"}:
             raise ValueError("mode must be 'auto', 'attached', or 'batch'")
@@ -1146,24 +1144,24 @@ class SlurmSite(BaseSite):
             handle.backend["task_plan"] = task_plan
         return handle
 
-    def check_frequensolver_compatibility(
+    def check_solver_compatibility(
         self,
         *,
         policy: Optional[str] = None,
         force: bool = False,
-    ) -> FrequenSolverCompatibility:
+    ) -> SolverCompatibility:
         """Check the remote solver once before this site submits work."""
 
-        selected = resolve_frequensolver_policy(
-            policy if policy is not None else self.frequensolver_policy
+        selected = resolve_solver_policy(
+            policy if policy is not None else self.solver_policy
         )
         if (
             not force
-            and self._frequensolver_compatibility_result is not None
-            and self._frequensolver_compatibility_policy == selected
+            and self._solver_compatibility_result is not None
+            and self._solver_compatibility_policy == selected
         ):
-            return self._frequensolver_compatibility_result
-        result = check_frequensolver_compatibility(
+            return self._solver_compatibility_result
+        result = check_solver_compatibility(
             self.executable,
             policy=selected,
             remote_runner=lambda command: self.run_login(
@@ -1172,8 +1170,8 @@ class SlurmSite(BaseSite):
             ),
             setup_commands=self._runtime_setup_lines(),
         )
-        self._frequensolver_compatibility_result = result
-        self._frequensolver_compatibility_policy = selected
+        self._solver_compatibility_result = result
+        self._solver_compatibility_policy = selected
         return result
 
     def _run_login_checked(self, command: str, *, purpose: str) -> str:
@@ -1357,7 +1355,7 @@ class SlurmSite(BaseSite):
             profile.installed_path(COMPATIBILITY_SCHEMA_RELATIVE),
             "compatibility schema",
         )
-        identity_query = query_remote_frequensolver_identity(
+        identity_query = query_remote_solver_identity(
             solver_path,
             lambda command: self._run_login_checked(
                 command,

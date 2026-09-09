@@ -1,4 +1,4 @@
-"""Materialize packaged FrequenSolver compatibility metadata from release evidence."""
+"""Materialize packaged Solver compatibility metadata from release evidence."""
 
 from __future__ import annotations
 
@@ -11,18 +11,20 @@ from typing import Any
 try:
     from scripts.validate_release_evidence import (
         SOLVER_BACKED_PROFILE,
+        normalized_evidence,
         release_evidence_profile,
         validate_evidence,
     )
 except ModuleNotFoundError:  # Direct execution sets sys.path to scripts/.
     from validate_release_evidence import (
         SOLVER_BACKED_PROFILE,
+        normalized_evidence,
         release_evidence_profile,
         validate_evidence,
     )
 
 
-SCHEMA = "frequensolve-frequensolver-compatibility/v2"
+SCHEMA = "frequensolve-solver-compatibility/v2"
 PACKAGE_RELEASE_RE = re.compile(
     r"^(?:0|[1-9][0-9]*)\."
     r"(?:0|[1-9][0-9]*)\."
@@ -41,6 +43,7 @@ def manifest_from_evidence(
     if not PACKAGE_RELEASE_RE.fullmatch(package_release):
         raise ValueError("package_release must be canonical X.Y.Z or X.Y.ZrcN")
     validate_evidence(evidence, package_commit)
+    evidence = normalized_evidence(evidence)
     profile = release_evidence_profile(evidence)
     solver_backed = profile == SOLVER_BACKED_PROFILE
     evidence_run_id = (
@@ -52,10 +55,10 @@ def manifest_from_evidence(
     return {
         "schema": SCHEMA,
         "package_release": package_release,
-        "preferred_frequensolver": {
-            "release": evidence["frequensolverRelease"],
+        "preferred_solver": {
+            "release": evidence["solverRelease"],
             "git_commit": evidence["sauceCommit"],
-            "release_url": evidence["frequensolverReleaseUrl"],
+            "release_url": evidence["solverReleaseUrl"],
         },
         "validation": {
             "profile": profile,
@@ -91,8 +94,8 @@ def main() -> int:
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         parser.error(str(exc))
     print(
-        "materialized preferred FrequenSolver "
-        f"{manifest['preferred_frequensolver']['release']} for "
+        "materialized preferred Solver "
+        f"{manifest['preferred_solver']['release']} for "
         f"FrequenSolve {args.package_release}"
     )
     return 0

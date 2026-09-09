@@ -20,9 +20,13 @@ on:
         options:
           - standard
           - solver-backed
+      solver_release:
+        description: Immutable final solver release preferred by this package, such as v0.1.0 (or use the legacy alias below)
+        required: false
+        type: string
       frequensolver_release:
-        description: Immutable final FrequenSolver release preferred by this package, such as v0.1.0
-        required: true
+        description: Legacy alias for solver_release; solver_release takes precedence
+        required: false
         type: string
       notes:
         description: Optional release candidate notes
@@ -45,9 +49,9 @@ jobs:
       target_sha: ${{ steps.prepare.outputs.target_sha }}
       ci_run_id: ${{ steps.prepare.outputs.ci_run_id }}
       ci_run_url: ${{ steps.prepare.outputs.ci_run_url }}
-      frequensolver_release: ${{ steps.prepare.outputs.frequensolver_release }}
-      frequensolver_commit: ${{ steps.prepare.outputs.frequensolver_commit }}
-      frequensolver_release_url: ${{ steps.prepare.outputs.frequensolver_release_url }}
+      solver_release: ${{ steps.prepare.outputs.solver_release }}
+      solver_commit: ${{ steps.prepare.outputs.solver_commit }}
+      solver_release_url: ${{ steps.prepare.outputs.solver_release_url }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -58,8 +62,8 @@ jobs:
         id: generate-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
-          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolve, Sauce
           permission-actions: read
@@ -69,7 +73,7 @@ jobs:
         id: prepare
         env:
           TARGET_REF: ${{ inputs.target_ref }}
-          FREQUENSOLVER_RELEASE: ${{ inputs.frequensolver_release }}
+          FS_SOLVER_RELEASE: ${{ inputs.solver_release || inputs.frequensolver_release }}
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
         run: |
           set -euo pipefail
@@ -88,33 +92,33 @@ jobs:
           ci_run_id="$(jq -r '.runId' <<<"$ci_evidence")"
           ci_run_url="$(jq -r '.runUrl' <<<"$ci_evidence")"
 
-          if [[ ! "$FREQUENSOLVER_RELEASE" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "FrequenSolver release must be a final canonical vX.Y.Z tag." >&2
+          if [[ ! "$FS_SOLVER_RELEASE" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Solver release must be a final canonical vX.Y.Z tag." >&2
             exit 1
           fi
-          frequensolver_release="$(
-            gh api "repos/FrequenSol/Sauce/releases/tags/${FREQUENSOLVER_RELEASE}"
+          solver_release="$(
+            gh api "repos/FrequenSol/Sauce/releases/tags/${FS_SOLVER_RELEASE}"
           )"
-          test "$(jq -r '.tag_name' <<<"$frequensolver_release")" = "$FREQUENSOLVER_RELEASE"
-          test "$(jq -r '.draft | tostring' <<<"$frequensolver_release")" = false
-          test "$(jq -r '.prerelease | tostring' <<<"$frequensolver_release")" = false
-          frequensolver_release_url="$(jq -r '.html_url' <<<"$frequensolver_release")"
-          test "$frequensolver_release_url" = "https://github.com/FrequenSol/Sauce/releases/tag/${FREQUENSOLVER_RELEASE}"
-          frequensolver_commit="$(
-            gh api "repos/FrequenSol/Sauce/commits/${FREQUENSOLVER_RELEASE}" --jq .sha
+          test "$(jq -r '.tag_name' <<<"$solver_release")" = "$FS_SOLVER_RELEASE"
+          test "$(jq -r '.draft | tostring' <<<"$solver_release")" = false
+          test "$(jq -r '.prerelease | tostring' <<<"$solver_release")" = false
+          solver_release_url="$(jq -r '.html_url' <<<"$solver_release")"
+          test "$solver_release_url" = "https://github.com/FrequenSol/Sauce/releases/tag/${FS_SOLVER_RELEASE}"
+          solver_commit="$(
+            gh api "repos/FrequenSol/Sauce/commits/${FS_SOLVER_RELEASE}" --jq .sha
           )"
-          [[ "$frequensolver_commit" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$solver_commit" =~ ^[0-9a-f]{40}$ ]]
           {
             echo "target_sha=$target_sha"
             echo "ci_run_id=$ci_run_id"
             echo "ci_run_url=$ci_run_url"
-            echo "frequensolver_release=$FREQUENSOLVER_RELEASE"
-            echo "frequensolver_commit=$frequensolver_commit"
-            echo "frequensolver_release_url=$frequensolver_release_url"
+            echo "solver_release=$FS_SOLVER_RELEASE"
+            echo "solver_commit=$solver_commit"
+            echo "solver_release_url=$solver_release_url"
           } >> "$GITHUB_OUTPUT"
 
   docker-integration:
-    name: Manual FrequenSolver-backed release evidence
+    name: Manual Solver-backed release evidence
     needs: prepare-evidence
     if: ${{ inputs.validation_profile == 'solver-backed' }}
     runs-on: ubuntu-latest
@@ -127,9 +131,9 @@ jobs:
     outputs:
       sauce_ref: ${{ steps.evidence.outputs.sauce_ref }}
       sauce_commit: ${{ steps.evidence.outputs.sauce_commit }}
-      frequensolver_version: ${{ steps.evidence.outputs.frequensolver_version }}
-      frequensolver_build_id: ${{ steps.evidence.outputs.frequensolver_build_id }}
-      frequensolver_git_commit: ${{ steps.evidence.outputs.frequensolver_git_commit }}
+      solver_version: ${{ steps.evidence.outputs.solver_version }}
+      solver_build_id: ${{ steps.evidence.outputs.solver_build_id }}
+      solver_git_commit: ${{ steps.evidence.outputs.solver_git_commit }}
       fs_mumps_ref: ${{ steps.evidence.outputs.fs_mumps_ref }}
       fs_mumps_commit: ${{ steps.evidence.outputs.fs_mumps_commit }}
       frequensolve_ref: ${{ steps.evidence.outputs.frequensolve_ref }}
@@ -150,8 +154,8 @@ jobs:
         id: resolve-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
-          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolveDockerImage, FS_MUMPS
           permission-contents: read
@@ -180,8 +184,8 @@ jobs:
         id: dispatch-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
-          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolveDockerImage
           permission-actions: write
@@ -195,7 +199,7 @@ jobs:
           DOWNSTREAM_WORKFLOW: cicd-workflow.yml
           DOWNSTREAM_REF: main
           DOCKER_WORKFLOW_COMMIT: 6c7ffe8c60ae544060cbe7a4c046bb6b05f87729
-          FREQUENSOLVER_RELEASE: ${{ needs.prepare-evidence.outputs.frequensolver_release }}
+          FS_SOLVER_RELEASE: ${{ needs.prepare-evidence.outputs.solver_release }}
           FS_MUMPS_COMMIT: ${{ steps.resolve.outputs.fs_mumps_commit }}
           FREQUENSOLVE_COMMIT: ${{ needs.prepare-evidence.outputs.target_sha }}
           DISPATCH_ACTOR: ${{ steps.dispatch-token.outputs.app-slug }}[bot]
@@ -210,7 +214,7 @@ jobs:
             -f SOURCE_REF="$DOWNSTREAM_REF" \
             -f SOURCE_COMMIT="$DOCKER_WORKFLOW_COMMIT" \
             -f REQUEST_ID="$request_id" \
-            -f SAUCE_REF="$FREQUENSOLVER_RELEASE" \
+            -f SAUCE_REF="$FS_SOLVER_RELEASE" \
             -f FS_MUMPS_REF="$FS_MUMPS_COMMIT" \
             -f FREQUENSOLVE_BRANCH="$FREQUENSOLVE_COMMIT" \
             -f FREQUENSOLVE_SOURCE=git \
@@ -263,8 +267,8 @@ jobs:
         id: wait-token-1
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
-          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolveDockerImage
           permission-actions: read
@@ -285,8 +289,8 @@ jobs:
         id: wait-token-2
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
-          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolveDockerImage
           permission-actions: read
@@ -308,8 +312,8 @@ jobs:
         id: wait-token-3
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
-          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolveDockerImage
           permission-actions: read
@@ -331,8 +335,8 @@ jobs:
         id: wait-token-4
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
-          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolveDockerImage
           permission-actions: read
@@ -359,8 +363,8 @@ jobs:
         id: evidence-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
-          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolveDockerImage
           permission-actions: read
@@ -409,8 +413,8 @@ jobs:
         id: evidence
         env:
           TARGET_SHA: ${{ needs.prepare-evidence.outputs.target_sha }}
-          FREQUENSOLVER_RELEASE: ${{ needs.prepare-evidence.outputs.frequensolver_release }}
-          FREQUENSOLVER_EXPECTED_COMMIT: ${{ needs.prepare-evidence.outputs.frequensolver_commit }}
+          FS_SOLVER_RELEASE: ${{ needs.prepare-evidence.outputs.solver_release }}
+          FS_SOLVER_EXPECTED_COMMIT: ${{ needs.prepare-evidence.outputs.solver_commit }}
           FS_MUMPS_COMMIT: ${{ steps.resolve.outputs.fs_mumps_commit }}
           DOCKER_WORKFLOW_COMMIT: 6c7ffe8c60ae544060cbe7a4c046bb6b05f87729
           DOCKER_EVIDENCE_RUN_ID: ${{ steps.dispatch.outputs.run_id }}
@@ -418,45 +422,48 @@ jobs:
         run: |
           set -euo pipefail
           heavy_evidence=.solver-evidence/frequensolve-test-evidence.json
-          frequensolver_identity=.solver-evidence/frequensolver-identity.json
+          solver_identity=.solver-evidence/solver-identity.json
+          if [[ ! -e "$solver_identity" && ! -L "$solver_identity" ]]; then
+            solver_identity=.solver-evidence/frequensolver-identity.json
+          fi
           dispatch_evidence=.solver-evidence/docker-dispatch-evidence.json
           test -f "$heavy_evidence"
-          test -f "$frequensolver_identity"
+          test -f "$solver_identity"
           test -f "$dispatch_evidence"
           test ! -L "$heavy_evidence"
-          test ! -L "$frequensolver_identity"
+          test ! -L "$solver_identity"
           test ! -L "$dispatch_evidence"
           python scripts/validate_heavy_test_evidence.py \
             "$heavy_evidence" \
             --commit "$TARGET_SHA"
 
-          frequensolver_version="$(jq -er .version "$frequensolver_identity")"
-          frequensolver_build_id="$(jq -er .build_id "$frequensolver_identity")"
-          frequensolver_git_commit="$(jq -er .git_commit "$frequensolver_identity")"
-          python scripts/validate_frequensolver_identity.py \
-            "$frequensolver_identity" \
-            --version "$FREQUENSOLVER_RELEASE" \
-            --commit "$FREQUENSOLVER_EXPECTED_COMMIT" \
-            --build-id="$frequensolver_build_id"
-          test "$frequensolver_version" = "$FREQUENSOLVER_RELEASE"
-          test "$frequensolver_git_commit" = "$FREQUENSOLVER_EXPECTED_COMMIT"
+          solver_version="$(jq -er .version "$solver_identity")"
+          solver_build_id="$(jq -er .build_id "$solver_identity")"
+          solver_git_commit="$(jq -er .git_commit "$solver_identity")"
+          python scripts/validate_solver_identity.py \
+            "$solver_identity" \
+            --version "$FS_SOLVER_RELEASE" \
+            --commit "$FS_SOLVER_EXPECTED_COMMIT" \
+            --build-id="$solver_build_id"
+          test "$solver_version" = "$FS_SOLVER_RELEASE"
+          test "$solver_git_commit" = "$FS_SOLVER_EXPECTED_COMMIT"
           python scripts/validate_docker_dispatch_evidence.py \
             "$dispatch_evidence" \
             --run-id "$DOCKER_EVIDENCE_RUN_ID" \
             --request-id "$DOCKER_REQUEST_ID" \
             --workflow-commit "$DOCKER_WORKFLOW_COMMIT" \
             --source-ref main \
-            --sauce-ref "$FREQUENSOLVER_RELEASE" \
-            --sauce-commit "$FREQUENSOLVER_EXPECTED_COMMIT" \
+            --sauce-ref "$FS_SOLVER_RELEASE" \
+            --sauce-commit "$FS_SOLVER_EXPECTED_COMMIT" \
             --fs-mumps-commit "$FS_MUMPS_COMMIT" \
             --frequensolve-commit "$TARGET_SHA"
 
           {
-            echo "sauce_ref=$FREQUENSOLVER_RELEASE"
-            echo "sauce_commit=$frequensolver_git_commit"
-            echo "frequensolver_version=$frequensolver_version"
-            echo "frequensolver_build_id=$frequensolver_build_id"
-            echo "frequensolver_git_commit=$frequensolver_git_commit"
+            echo "sauce_ref=$FS_SOLVER_RELEASE"
+            echo "sauce_commit=$solver_git_commit"
+            echo "solver_version=$solver_version"
+            echo "solver_build_id=$solver_build_id"
+            echo "solver_git_commit=$solver_git_commit"
             echo "fs_mumps_ref=$FS_MUMPS_COMMIT"
             echo "fs_mumps_commit=$FS_MUMPS_COMMIT"
             echo "frequensolve_ref=$TARGET_SHA"
@@ -534,14 +541,14 @@ jobs:
           DOCKER_STATUS: ${{ needs.docker-integration.outputs.frequensolve_test_status }}
           DOCKER_ARTIFACT: ${{ needs.docker-integration.outputs.frequensolve_test_artifact }}
           DOCKER_IMAGE_TAG: ${{ needs.docker-integration.outputs.image_tag }}
-          SAUCE_REF: ${{ needs.prepare-evidence.outputs.frequensolver_release }}
-          SAUCE_COMMIT: ${{ needs.prepare-evidence.outputs.frequensolver_commit }}
-          FREQUENSOLVER_RELEASE: ${{ needs.prepare-evidence.outputs.frequensolver_release }}
-          FREQUENSOLVER_EXPECTED_COMMIT: ${{ needs.prepare-evidence.outputs.frequensolver_commit }}
-          FREQUENSOLVER_RELEASE_URL: ${{ needs.prepare-evidence.outputs.frequensolver_release_url }}
-          FREQUENSOLVER_VERSION: ${{ needs.docker-integration.outputs.frequensolver_version }}
-          FREQUENSOLVER_BUILD_ID: ${{ needs.docker-integration.outputs.frequensolver_build_id }}
-          FREQUENSOLVER_GIT_COMMIT: ${{ needs.docker-integration.outputs.frequensolver_git_commit }}
+          SAUCE_REF: ${{ needs.prepare-evidence.outputs.solver_release }}
+          SAUCE_COMMIT: ${{ needs.prepare-evidence.outputs.solver_commit }}
+          FS_SOLVER_RELEASE: ${{ needs.prepare-evidence.outputs.solver_release }}
+          FS_SOLVER_EXPECTED_COMMIT: ${{ needs.prepare-evidence.outputs.solver_commit }}
+          FS_SOLVER_RELEASE_URL: ${{ needs.prepare-evidence.outputs.solver_release_url }}
+          FS_SOLVER_VERSION: ${{ needs.docker-integration.outputs.solver_version }}
+          FS_SOLVER_BUILD_ID: ${{ needs.docker-integration.outputs.solver_build_id }}
+          FS_SOLVER_GIT_COMMIT: ${{ needs.docker-integration.outputs.solver_git_commit }}
           FS_MUMPS_REF: ${{ needs.docker-integration.outputs.fs_mumps_ref }}
           FS_MUMPS_COMMIT: ${{ needs.docker-integration.outputs.fs_mumps_commit }}
           GH_TOKEN: ${{ github.token }}
@@ -554,8 +561,8 @@ jobs:
               exit 1
               ;;
           esac
-          test "$SAUCE_REF" = "$FREQUENSOLVER_RELEASE"
-          test "$SAUCE_COMMIT" = "$FREQUENSOLVER_EXPECTED_COMMIT"
+          test "$SAUCE_REF" = "$FS_SOLVER_RELEASE"
+          test "$SAUCE_COMMIT" = "$FS_SOLVER_EXPECTED_COMMIT"
           [[ "$SAUCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
 
           python scripts/verify_ci_evidence.py \
@@ -565,7 +572,7 @@ jobs:
 
           if [ "$VALIDATION_PROFILE" = standard ]; then
             jq -n \
-              --arg schemaVersion "frequensolve-release-evidence/v3" \
+              --arg schemaVersion "frequensolve-release-evidence/v4" \
               --arg validationProfile "$VALIDATION_PROFILE" \
               --arg solverValidationStatus "not-run" \
               --arg commit "$TARGET_SHA" \
@@ -575,8 +582,8 @@ jobs:
               --arg ciRequiredJob "Required CI" \
               --arg sauceRef "$SAUCE_REF" \
               --arg sauceCommit "$SAUCE_COMMIT" \
-              --arg frequensolverRelease "$FREQUENSOLVER_RELEASE" \
-              --arg frequensolverReleaseUrl "$FREQUENSOLVER_RELEASE_URL" \
+              --arg solverRelease "$FS_SOLVER_RELEASE" \
+              --arg solverReleaseUrl "$FS_SOLVER_RELEASE_URL" \
               '{
                 schemaVersion: $schemaVersion,
                 validationProfile: $validationProfile,
@@ -588,8 +595,8 @@ jobs:
                 ciRequiredJob: $ciRequiredJob,
                 sauceRef: $sauceRef,
                 sauceCommit: $sauceCommit,
-                frequensolverRelease: $frequensolverRelease,
-                frequensolverReleaseUrl: $frequensolverReleaseUrl
+                solverRelease: $solverRelease,
+                solverReleaseUrl: $solverReleaseUrl
               }' > release-evidence.json
           else
           test "$DOCKER_REF" = "$TARGET_SHA"
@@ -599,11 +606,11 @@ jobs:
           test "$DOCKER_STATUS" = passed
           test "$DOCKER_ARTIFACT" = frequensolve-test-evidence
           test -n "$DOCKER_IMAGE_TAG"
-          test "$SAUCE_REF" = "$FREQUENSOLVER_RELEASE"
-          test "$SAUCE_COMMIT" = "$FREQUENSOLVER_EXPECTED_COMMIT"
-          test "$FREQUENSOLVER_VERSION" = "$FREQUENSOLVER_RELEASE"
-          test -n "$FREQUENSOLVER_BUILD_ID"
-          test "$FREQUENSOLVER_GIT_COMMIT" = "$SAUCE_COMMIT"
+          test "$SAUCE_REF" = "$FS_SOLVER_RELEASE"
+          test "$SAUCE_COMMIT" = "$FS_SOLVER_EXPECTED_COMMIT"
+          test "$FS_SOLVER_VERSION" = "$FS_SOLVER_RELEASE"
+          test -n "$FS_SOLVER_BUILD_ID"
+          test "$FS_SOLVER_GIT_COMMIT" = "$SAUCE_COMMIT"
           test "$FS_MUMPS_REF" = "$FS_MUMPS_COMMIT"
           [[ "$SAUCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$FS_MUMPS_REF" =~ ^[0-9a-f]{40}$ ]]
@@ -613,16 +620,19 @@ jobs:
           [[ "$DOCKER_REQUEST_ID" =~ ^frequensolve-rc-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-[0-9a-f]{32}$ ]]
 
           heavy_evidence=.solver-evidence/frequensolve-test-evidence.json
-          frequensolver_identity=.solver-evidence/frequensolver-identity.json
+          solver_identity=.solver-evidence/solver-identity.json
+          if [[ ! -e "$solver_identity" && ! -L "$solver_identity" ]]; then
+            solver_identity=.solver-evidence/frequensolver-identity.json
+          fi
           dispatch_evidence=.solver-evidence/docker-dispatch-evidence.json
           python scripts/validate_heavy_test_evidence.py \
             "$heavy_evidence" \
             --commit "$TARGET_SHA"
-          python scripts/validate_frequensolver_identity.py \
-            "$frequensolver_identity" \
-            --version "$FREQUENSOLVER_VERSION" \
-            --commit "$FREQUENSOLVER_GIT_COMMIT" \
-            --build-id="$FREQUENSOLVER_BUILD_ID"
+          python scripts/validate_solver_identity.py \
+            "$solver_identity" \
+            --version "$FS_SOLVER_VERSION" \
+            --commit "$FS_SOLVER_GIT_COMMIT" \
+            --build-id="$FS_SOLVER_BUILD_ID"
           python scripts/validate_docker_dispatch_evidence.py \
             "$dispatch_evidence" \
             --run-id "$DOCKER_EVIDENCE_RUN_ID" \
@@ -637,7 +647,7 @@ jobs:
           archive_sha256="$(sha256sum frequensolve-test-evidence.tar.gz | awk '{print $1}')"
 
           jq -n \
-            --arg schemaVersion "frequensolve-release-evidence/v3" \
+            --arg schemaVersion "frequensolve-release-evidence/v4" \
             --arg validationProfile "$VALIDATION_PROFILE" \
             --arg solverValidationStatus "passed" \
             --arg commit "$TARGET_SHA" \
@@ -663,11 +673,11 @@ jobs:
             --slurpfile dockerDispatchEvidence "$dispatch_evidence" \
             --arg sauceRef "$SAUCE_REF" \
             --arg sauceCommit "$SAUCE_COMMIT" \
-            --arg frequensolverRelease "$FREQUENSOLVER_RELEASE" \
-            --arg frequensolverReleaseUrl "$FREQUENSOLVER_RELEASE_URL" \
-            --arg frequensolverVersion "$FREQUENSOLVER_VERSION" \
-            --arg frequensolverBuildId "$FREQUENSOLVER_BUILD_ID" \
-            --arg frequensolverGitCommit "$FREQUENSOLVER_GIT_COMMIT" \
+            --arg solverRelease "$FS_SOLVER_RELEASE" \
+            --arg solverReleaseUrl "$FS_SOLVER_RELEASE_URL" \
+            --arg solverVersion "$FS_SOLVER_VERSION" \
+            --arg solverBuildId "$FS_SOLVER_BUILD_ID" \
+            --arg solverGitCommit "$FS_SOLVER_GIT_COMMIT" \
             --arg fsMumpsRef "$FS_MUMPS_REF" \
             --arg fsMumpsCommit "$FS_MUMPS_COMMIT" \
             '{
@@ -697,11 +707,11 @@ jobs:
               dockerDispatchEvidence: $dockerDispatchEvidence[0],
               sauceRef: $sauceRef,
               sauceCommit: $sauceCommit,
-              frequensolverRelease: $frequensolverRelease,
-              frequensolverReleaseUrl: $frequensolverReleaseUrl,
-              frequensolverVersion: $frequensolverVersion,
-              frequensolverBuildId: $frequensolverBuildId,
-              frequensolverGitCommit: $frequensolverGitCommit,
+              solverRelease: $solverRelease,
+              solverReleaseUrl: $solverReleaseUrl,
+              solverVersion: $solverVersion,
+              solverBuildId: $solverBuildId,
+              solverGitCommit: $solverGitCommit,
               fsMumpsRef: $fsMumpsRef,
               fsMumpsCommit: $fsMumpsCommit
             }' > release-evidence.json
@@ -852,8 +862,8 @@ jobs:
               --print-profile
           )"
           ci_run_url="$(jq -r '.ciRunUrl' release-evidence.json)"
-          frequensolver_release="$(jq -r '.frequensolverRelease' release-evidence.json)"
-          frequensolver_release_url="$(jq -r '.frequensolverReleaseUrl' release-evidence.json)"
+          solver_release="$(jq -r '.solverRelease' release-evidence.json)"
+          solver_release_url="$(jq -r '.solverReleaseUrl' release-evidence.json)"
           {
             echo "FrequenSolve release candidate ${tag_name}"
             echo
@@ -861,7 +871,7 @@ jobs:
             echo "- Source commit: ${TARGET_SHA}"
             echo "- Package version: ${tag_name#v}"
             echo "- Required CI: ${ci_run_url}"
-            echo "- Preferred FrequenSolver: [${frequensolver_release}](${frequensolver_release_url})"
+            echo "- Preferred Solver: [${solver_release}](${solver_release_url})"
             if [ "$validation_profile" = solver-backed ]; then
               docker_run_url="$(jq -r '.dockerEvidenceRunUrl' release-evidence.json)"
               docker_image_tag="$(jq -r '.dockerImageTag' release-evidence.json)"
@@ -1022,6 +1032,6 @@ jobs:
             echo "- Package version: \`${tag_name#v}\`"
             echo "- Exact source commit: \`${TARGET_SHA}\`"
             echo "- Validation profile: \`${validation_profile}\`"
-            echo "- Preferred FrequenSolver: \`${frequensolver_release}\`"
+            echo "- Preferred Solver: \`${solver_release}\`"
             echo "- Publish target: TestPyPI"
           } >> "$GITHUB_STEP_SUMMARY"

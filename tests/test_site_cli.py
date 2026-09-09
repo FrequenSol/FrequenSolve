@@ -478,7 +478,7 @@ def test_check_reports_resolved_site_defaults_and_closes(monkeypatch):
             assert "module load phdf5" in command
             return "module setup output\nfrequensolve-solver-ready"
 
-        def check_frequensolver_compatibility(self):
+        def check_solver_compatibility(self):
             return SimpleNamespace(
                 confirmed=True,
                 status="compatible",

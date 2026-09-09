@@ -94,7 +94,7 @@ def test_packaged_catalog_matches_its_json_schema():
 
 def test_catalog_exposes_exact_installed_release_identities():
     catalog = fs.load_simulation_knowledge()
-    compatibility = fs.load_frequensolver_compatibility()
+    compatibility = fs.load_solver_compatibility()
 
     assert catalog.identities.package_version == fs.__version__
     assert catalog.identities.declared_package_release == compatibility.package_release
@@ -102,11 +102,11 @@ def test_catalog_exposes_exact_installed_release_identities():
     assert catalog.identities.catalog_version == "1.0.0"
     assert catalog.identities.authoring_rules_schema == fs.AUTHORING_RULES_SCHEMA
     assert catalog.identities.compatibility_schema == compatibility.schema
-    preferred = compatibility.preferred_frequensolver
-    assert catalog.identities.preferred_frequensolver_release == (
+    preferred = compatibility.preferred_solver
+    assert catalog.identities.preferred_solver_release == (
         preferred.release if preferred is not None else None
     )
-    assert catalog.identities.preferred_frequensolver_commit == (
+    assert catalog.identities.preferred_solver_commit == (
         preferred.git_commit if preferred is not None else None
     )
     assert tuple(

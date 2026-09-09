@@ -1026,7 +1026,7 @@ class SourceEncoding(ExtraFieldsMixin):
 
         The coefficient dataset uses h5py shape
         ``(encoded_field_count, source_count, 2)``. The final axis stores the
-        real and imaginary components expected by FrequenSolver.
+        real and imaginary components expected by Solver.
         """
 
         return cls(
