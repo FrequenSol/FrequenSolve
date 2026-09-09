@@ -966,23 +966,68 @@ def test_existing_slurm_run_config_public_call_shape_is_unchanged():
         "notify_email",
         "poll_interval",
         "scheduler_heartbeat_timeout",
-        "mpi_health_check_timeout",
         "run_path",
         "slurm_args",
+        "mpi_health_check_timeout",
         "aliases",
     )
     config = SlurmRunConfig(
-        queue="existing-partition",
-        nodes=2,
-        duration="00-00:30:00",
-        ranks_per_node=4,
-        ranks_per_task=2,
-        account="existing-account",
-        slurm_args=["--exclusive"],
+        "existing-partition",
+        2,
+        "00-00:30:00",
+        4,
+        2,
+        False,
+        3,
+        "existing-account",
+        "fail",
+        "notify@example.com",
+        7,
+        90,
+        "/scratch/project",
+        ["--exclusive"],
+        mpi_health_check_timeout="00:02:00",
     )
     assert config.queue == "existing-partition"
     assert config.account == "existing-account"
+    assert config.poll_interval == 7
+    assert config.scheduler_heartbeat_timeout == 90
+    assert config.run_path == "/scratch/project"
     assert config.slurm_args == ["--exclusive"]
+    assert config.mpi_health_check_timeout == "0-00:02:00"
+
+
+def test_slurm_site_config_preserves_existing_positional_arguments():
+    config = SlurmSiteConfig(
+        "login.example.edu",
+        2222,
+        None,
+        None,
+        "debug",
+        "SLURM",
+        "srun",
+        7,
+        "existing-account",
+        "/tmp/project",
+        "00-00:30:00",
+        1,
+        2,
+        8,
+        2,
+        32768,
+        1,
+        {},
+        launcher_args=["--wait=30"],
+    )
+    assert config.poll_interval == 7
+    assert config.account == "existing-account"
+    assert config.tmp_dir == "/tmp/project"
+    assert config.max_duration == "00-00:30:00"
+    assert (config.min_nodes, config.max_nodes) == (1, 2)
+    assert (config.cores_per_node, config.sockets_per_node) == (8, 2)
+    assert (config.memory_per_node, config.gpus_per_node) == (32768, 1)
+    assert config.partitions == {}
+    assert config.launcher_args == ("--wait=30",)
 
 
 def test_slurm_run_config_validates_mpi_health_check_timeout():

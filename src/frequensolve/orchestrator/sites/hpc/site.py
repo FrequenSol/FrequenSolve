@@ -201,7 +201,7 @@ class SlurmSiteConfig(BaseSiteConfig):
     queue: str = "normal"
     scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
-    launcher_args: tuple[str, ...] = ()
+    launcher_args: tuple[str, ...] = field(default=(), kw_only=True)
     poll_interval: int = 5
     account: str = ""
     tmp_dir: Optional[Union[str, Path]] = None
@@ -436,9 +436,10 @@ class SlurmRunConfig:
         scheduler_heartbeat_timeout: Optional[float] = (
             _ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT
         ),
-        mpi_health_check_timeout: Optional[str] = None,
         run_path: Optional[Union[str, Path]] = None,
         slurm_args: Optional[List[str]] = None,
+        *,
+        mpi_health_check_timeout: Optional[str] = None,
         **aliases,
     ):
         values = _normalize_rank_aliases(
