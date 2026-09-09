@@ -1345,10 +1345,7 @@ class SparseSurvey(ExtraFieldsMixin):
             and ctx is not None
             and ctx.path is not None
             and not any(trace.extra for trace in self._storage.traces)
-            and not any(
-                sample.extra or sample.x is not None or sample.direction is not None
-                for sample in self.eval_samples
-            )
+            and not any(sample.extra for sample in self.eval_samples)
             and not any(sample.extra for sample in self.trace_samples)
         ):
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.name).strip("._")
@@ -1496,6 +1493,31 @@ class SparseSurvey(ExtraFieldsMixin):
         path = Path(file)
         if not isinstance(self._storage, _InlineSparseSurvey):
             raise ValueError("Only inline sparse surveys can be written to HDF5")
+        dimension = None
+        for sample in self.eval_samples:
+            if sample.sample_id is not None and sample.sample_id < 0:
+                raise ValueError(
+                    "EvalSample requires a positive sample_id or export row"
+                )
+            for name in ("x", "direction"):
+                value = getattr(sample, name)
+                if value is None:
+                    continue
+                vector = np.asarray(value)
+                if (
+                    vector.ndim != 1
+                    or vector.size not in (2, 3)
+                    or vector.dtype.kind not in "iuf"
+                    or not np.all(np.isfinite(vector))
+                ):
+                    raise ValueError(
+                        f"EvalSample.{name} must be a finite 2D or 3D vector"
+                    )
+                if dimension is not None and vector.size != dimension:
+                    raise ValueError(
+                        "Evaluation geometry must use one consistent dimension"
+                    )
+                dimension = vector.size
         path.parent.mkdir(parents=True, exist_ok=True)
         columns = self._trace_columns(component_map)
         string_dtype = h5py.string_dtype(encoding="utf-8")
@@ -1539,18 +1561,21 @@ class SparseSurvey(ExtraFieldsMixin):
             if "azimuth" in columns:
                 write_float(trace_group, "azimuth", columns["azimuth"])
             if self.eval_samples:
-                evals = [
-                    sample.to_fs(sample_id=i)
-                    for i, sample in enumerate(self.eval_samples, start=1)
-                ]
                 group = survey.require_group("eval_samples")
-                write_int(group, "sample_id", [row["sample_id"] for row in evals])
-                write_int(group, "point_id", [row["point_id"] for row in evals])
-                write_int(
-                    group,
-                    "receiver_position_id",
-                    [row.get("receiver_position_id", 0) for row in evals],
-                )
+                eval_samples = self.eval_samples
+                for name in ("sample_id", "point_id", "receiver_position_id"):
+                    values = np.fromiter(
+                        (
+                            getattr(sample, name)
+                            or (index if name == "sample_id" else 0)
+                            for index, sample in enumerate(eval_samples, start=1)
+                        ),
+                        dtype=np.int32,
+                        count=len(eval_samples),
+                    )
+                    group.create_dataset(name, data=values)
+                if dimension is not None:
+                    self._write_hdf5_eval_geometry(group, dimension)
 
             if self.trace_samples:
                 samples = [
@@ -1571,6 +1596,39 @@ class SparseSurvey(ExtraFieldsMixin):
             self._write_hdf5_catalogs(survey, columns, string_dtype)
 
         return path
+
+    def _write_hdf5_eval_geometry(self, group: h5py.Group, dimension: int) -> None:
+        """Pack optional geometry in bounded blocks, preserving absent rows."""
+
+        samples = self.eval_samples
+        count = len(samples)
+        block_size = min(count, 4096)
+        for name in ("x", "direction"):
+            if not any(getattr(sample, name) is not None for sample in samples):
+                continue
+            values = group.create_dataset(
+                name,
+                shape=(count, dimension),
+                dtype=np.float64,
+                chunks=(block_size, dimension),
+            )
+            present = group.create_dataset(
+                f"{name}_present",
+                shape=(count,),
+                dtype=np.bool_,
+                chunks=(block_size,),
+            )
+            for start in range(0, count, block_size):
+                stop = min(start + block_size, count)
+                block = np.zeros((stop - start, dimension), dtype=np.float64)
+                mask = np.zeros(stop - start, dtype=np.bool_)
+                for index in range(start, stop):
+                    vector = getattr(samples[index], name)
+                    if vector is not None:
+                        block[index - start] = vector
+                        mask[index - start] = True
+                values[start:stop] = block
+                present[start:stop] = mask
 
     def _write_hdf5_catalogs(
         self,

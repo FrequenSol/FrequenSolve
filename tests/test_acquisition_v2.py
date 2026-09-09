@@ -1556,12 +1556,89 @@ def test_single_receiver_split_weights_use_explicit_component_axis():
     np.testing.assert_allclose(canonical.weights[:, 0], [[1, 2], [3, 4]])
 
 
-@pytest.mark.parametrize("geometry", [{"x": [1.0, 2.0]}, {"direction": [0.0, 1.0]}])
-def test_large_survey_keeps_authored_eval_geometry_inline(tmp_path, geometry):
-    survey = SparseSurvey.from_product("geometry", sources=[1], receivers=range(1, 202))
-    survey.add_eval_sample(EvalSample(sample_id=1, point_id=1, **geometry))
+@pytest.mark.parametrize("dimension", [2, 3])
+def test_large_survey_packs_eval_geometry_without_json_rows(
+    tmp_path, dimension, monkeypatch
+):
+    count = 4100
+    survey = SparseSurvey.from_product(
+        "geometry", sources=[1], receivers=range(1, count + 1)
+    )
+    for index in range(count):
+        survey.add_eval_sample(
+            EvalSample(
+                point_id=index + 1,
+                x=[float(index)] * dimension if index % 2 == 0 else None,
+                direction=(
+                    (
+                        [0.0] * dimension
+                        if index == 0
+                        else [
+                            (index + axis) * 0.123456789012345
+                            for axis in range(dimension)
+                        ]
+                    )
+                    if index % 3 == 0
+                    else None
+                ),
+            )
+        )
+
+    def forbid_json_rows(*args, **kwargs):
+        raise AssertionError("Packing must not construct inline sample dictionaries")
+
+    monkeypatch.setattr(EvalSample, "to_fs", forbid_json_rows)
     payload = survey.to_fs(ExportContext(tmp_path))
-    assert payload["_type"] != "HDF5TraceStore"
+    assert payload["_type"] == "HDF5TraceStore"
+    assert "eval_samples" not in payload
+    assert "traces" not in payload
+    assert len(json.dumps(payload)) < 1000
     restored = SparseSurvey.from_fs(payload)
-    for key, value in geometry.items():
-        assert getattr(restored.eval_samples[0], key) == value
+    with h5py.File(tmp_path / restored.layout_file, "r") as h5:
+        group = h5["survey/eval_samples"]
+        assert group["x"].shape == (count, dimension)
+        assert group["direction"].shape == (count, dimension)
+        for index in (0, 1, 2, 3, 4095, 4096, 4098, 4099):
+            assert group["sample_id"][index] == index + 1
+            assert group["point_id"][index] == index + 1
+            assert bool(group["x_present"][index]) == (index % 2 == 0)
+            assert bool(group["direction_present"][index]) == (index % 3 == 0)
+            if index % 2 == 0:
+                np.testing.assert_array_equal(
+                    group["x"][index], [float(index)] * dimension
+                )
+            if index % 3 == 0:
+                np.testing.assert_array_equal(
+                    group["direction"][index], survey.eval_samples[index].direction
+                )
+
+
+@pytest.mark.parametrize("geometry", [{"x": [1.0, 2.0]}, {"direction": [0.0, 1.0]}])
+def test_explicit_hdf5_packing_preserves_single_geometry_column(tmp_path, geometry):
+    survey = SparseSurvey.from_product("single", sources=[1], receivers=[1])
+    survey.add_eval_sample(point=1, **geometry)
+    with h5py.File(survey.write_hdf5(tmp_path / "single.h5"), "r") as h5:
+        group = h5["survey/eval_samples"]
+        for name in ("x", "direction"):
+            if name in geometry:
+                np.testing.assert_array_equal(group[name][0], geometry[name])
+                assert group[f"{name}_present"][0]
+            else:
+                assert name not in group
+
+
+@pytest.mark.parametrize(
+    "geometry",
+    [
+        {"x": [1.0]},
+        {"direction": [float("nan"), 1.0]},
+        {"x": [1.0, 2.0], "direction": [1.0, 2.0, 3.0]},
+    ],
+)
+def test_hdf5_packing_rejects_invalid_eval_geometry_before_writing(tmp_path, geometry):
+    survey = SparseSurvey.from_product("invalid", sources=[1], receivers=[1])
+    survey.add_eval_sample(point=1, **geometry)
+    path = tmp_path / "invalid.h5"
+    with pytest.raises(ValueError, match="vector|dimension"):
+        survey.write_hdf5(path)
+    assert not path.exists()

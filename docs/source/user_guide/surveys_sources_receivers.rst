@@ -297,3 +297,19 @@ can be attached without constructing one ``SparseTrace`` per row:
        component=components,
    )
    survey = fs.SparseSurvey.from_table("selected_traces", table)
+
+Packed evaluation geometry
+--------------------------
+
+Large sparse surveys retain evaluation-point coordinates and directions in
+``/survey/eval_samples/x`` and ``direction``. These float64 datasets have shape
+``(sample_count, dimension)``; matching boolean ``x_present`` and
+``direction_present`` datasets distinguish omitted values from authored zeros.
+An entirely absent geometry column is omitted. All authored vectors must use
+the same 2D or 3D dimension. Packing writes geometry in blocks of at most 4,096
+rows without building inline JSON sample dictionaries.
+
+These datasets preserve the authored metadata in the packed survey. The current
+Sauce reader (``e1fd719``) does not consume evaluation-sample tables from either
+inline JSON or HDF5. Solver evaluation of these coordinates/directions therefore
+requires a companion reader update; storing them does not enable that behavior.
