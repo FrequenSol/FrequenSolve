@@ -1010,10 +1010,16 @@ class SlurmSite(BaseSite):
                     self.fetch_outputs(job)
                 return handle
 
-        self.prepare_job(job, sync_project=True, validate=False)
-
         active_allocation = self.provisioned if mode in {"auto", "attached"} else False
         use_attached = mode == "attached" or (mode == "auto" and active_allocation)
+        if run_config.mpi_health_check_timeout is not None:
+            if use_attached or Path(self.mpi_cmd).name != "srun":
+                raise ValueError(
+                    "mpi_health_check_timeout requires batch mode with the srun launcher; "
+                    "use mode='batch' with mpi_wrapper='srun', or disable the check "
+                    "with mpi_health_check_timeout=None"
+                )
+        self.prepare_job(job, sync_project=True, validate=False)
         if use_attached:
             if not active_allocation:
                 raise RuntimeError(

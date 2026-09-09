@@ -440,7 +440,9 @@ The generated profile is equivalent to this minimal configuration:
    * - ``mpi_health_check_timeout``
      - Optional SLURM step time limit for a full-rank solver MPI health check
        before sizing. The solver must support ``--mpi-health-check``. Disabled
-       by default for compatibility with older solver installations.
+       by default for compatibility with older solver installations. Requires
+       batch mode with ``srun``; attached allocations and other MPI launchers
+       reject this option before input upload or launch.
    * - ``account``
      - HPC allocation/account name.
    * - ``max_duration``

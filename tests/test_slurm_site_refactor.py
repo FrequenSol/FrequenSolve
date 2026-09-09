@@ -2865,3 +2865,32 @@ def test_slurm_site_config_accepts_launcher_argument_arrays(value):
     assert SlurmSiteConfig(
         hostname="login.example.edu", launcher_args=value
     ).launcher_args == tuple(value)
+
+
+@pytest.mark.parametrize(
+    "launcher,mode,active",
+    [
+        ("ibrun", "batch", False),
+        ("mpirun", "batch", False),
+        ("srun", "attached", True),
+        ("srun", "auto", True),
+    ],
+)
+def test_mpi_health_check_rejects_unsupported_launch_before_sync(
+    monkeypatch, launcher, mode, active
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: active))
+    site = DummySlurmSite("project/run")
+    site.config.mpi_wrapper = launcher
+    site.pool.id = "42" if active else None
+    site.run_config = SlurmRunConfig(mpi_health_check_timeout="00:02:00")
+    sync_calls = []
+    monkeypatch.setattr(
+        site,
+        "prepare_job",
+        lambda *args, **kwargs: sync_calls.append(kwargs.get("sync_project", False)),
+    )
+    with pytest.raises(ValueError, match="requires batch mode with the srun launcher"):
+        site.submit(DummyJob(), mode=mode, fresh=True)
+    assert not any(sync_calls)
