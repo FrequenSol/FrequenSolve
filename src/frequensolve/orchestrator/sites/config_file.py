@@ -72,6 +72,7 @@ default_partition = "debug"
 account = "allocation"
 transfer_method = "rsync"
 modules = []
+launcher_args = []
 verbose = true
 
 # Define one table per partition using limits and node resources supplied by
@@ -96,6 +97,8 @@ ranks_per_node = 4
 ranks_per_task = 1
 poll_interval = 10
 scheduler_heartbeat_timeout = 60
+# Optional full-rank solver MPI check before sizing, using a Slurm step limit.
+# mpi_health_check_timeout = "00:02:00"
 
 # Stampede3 uses built-in host, launcher, partition, and node-shape defaults.
 [sites.stampede3]

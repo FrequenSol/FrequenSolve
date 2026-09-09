@@ -315,6 +315,13 @@ class SlurmTransferManager:
             )
 
     def _put_dir(self, sftp: Any, local_dir: Path, remote_dir: PurePosixPath) -> None:
+        """Merge validated inputs; a failed copy can leave partial input updates.
+
+        Like rsync, this is not a transaction across the destination tree. Errors
+        propagate before job submission; retry synchronization before submitting.
+        Never replace the live root or roll back concurrently generated outputs.
+        """
+
         with tempfile.NamedTemporaryFile(
             suffix=".tar.gz",
             dir=self._local_tmp_parent(),
@@ -331,13 +338,11 @@ class SlurmTransferManager:
                 staging_dir = remote_dir.with_name(
                     f".{remote_dir.name}.frequensolve-{token}.partial"
                 )
-                backup_dir = remote_dir.with_name(
-                    f".{remote_dir.name}.frequensolve-{token}.backup"
-                )
+                # Project uploads contain only inputs. Merge the validated tree
+                # without replacing the root or removing remotely generated files.
                 _, stdout, stderr = self.site.run_login_cmd(
                     "set -eu; "
                     f"staging={shlex.quote(str(staging_dir))}; "
-                    f"backup={shlex.quote(str(backup_dir))}; "
                     f"destination={shlex.quote(str(remote_dir))}; "
                     f"archive={shlex.quote(str(remote_tar))}; "
                     f"entry={shlex.quote(remote_dir.name)}; "
@@ -347,16 +352,8 @@ class SlurmTransferManager:
                     'mkdir -- "$staging"; '
                     'tar xzf "$archive" -C "$staging"; '
                     'test -d "$staging/$entry"; '
-                    "had_destination=0; "
-                    'if [ -e "$destination" ] || [ -L "$destination" ]; then '
-                    'mv -- "$destination" "$backup"; had_destination=1; fi; '
-                    'if mv -- "$staging/$entry" "$destination"; then '
-                    '[ "$had_destination" -eq 0 ] || rm -rf -- "$backup"; '
-                    "else status=$?; "
-                    'if [ "$had_destination" -eq 1 ] && '
-                    '[ ! -e "$destination" ] && [ ! -L "$destination" ]; then '
-                    'mv -- "$backup" "$destination" || true; fi; '
-                    'exit "$status"; fi'
+                    'mkdir -p -- "$destination"; '
+                    'cp -a -- "$staging/$entry/." "$destination/"'
                 )
 
                 err = stderr.read().decode().strip()

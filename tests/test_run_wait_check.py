@@ -110,6 +110,64 @@ def test_precompleted_fetch_intent_retries_after_fetch_failure():
     assert fetch_calls == [None, None]
 
 
+@pytest.mark.parametrize("precompleted", [False, True])
+def test_watch_fetches_before_yielding_success_once(precompleted):
+    run = (
+        RunHandle.skipped(DummySite(), DummyJob()) if precompleted else successful_run()
+    )
+    calls = []
+    run._pending_fetch_fn = lambda _: calls.append("fetch")
+
+    watcher = run.watch()
+    assert next(watcher).is_successful
+    assert calls == ["fetch"]
+    watcher.close()
+    assert list(run.watch())[0].is_successful
+    assert run.wait().successful
+    assert calls == ["fetch"]
+
+
+@pytest.mark.parametrize("retry_with", ["watch", "wait"])
+def test_watch_retries_failed_download_without_finalizing_again(retry_with):
+    run = successful_run()
+    calls = []
+    finalized = []
+
+    def finalize(handle, status):
+        finalized.append(status)
+        return handle._make_result(status)
+
+    def fetch(handle):
+        calls.append(handle.id)
+        if len(calls) == 1:
+            raise RuntimeError("temporary download failure")
+
+    run._finalize_fn = finalize
+    run._pending_fetch_fn = fetch
+    with pytest.raises(RuntimeError, match="temporary download failure"):
+        list(run.watch())
+
+    if retry_with == "watch":
+        assert list(run.watch())[0].is_successful
+    else:
+        assert run.wait().successful
+    assert len(finalized) == 1
+    assert calls == ["run-1", "run-1"]
+    assert run._pending_fetch_fn is None
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled", "timeout"])
+def test_watch_does_not_fetch_unsuccessful_outputs(state):
+    run = failed_run()
+    run._status_fn = lambda _: JobStatus(state=state, return_code=1)
+    calls = []
+    run._pending_fetch_fn = lambda _: calls.append("fetch")
+
+    assert list(run.watch())[0].state == state
+    assert calls == []
+    assert run._pending_fetch_fn is not None
+
+
 def test_wait_all_fetches_precompleted_submit_outputs_once():
     fetch_calls = []
     run = RunHandle.skipped(DummySite(), DummyJob())

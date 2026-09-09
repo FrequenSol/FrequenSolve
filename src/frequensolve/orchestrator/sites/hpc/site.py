@@ -201,6 +201,7 @@ class SlurmSiteConfig(BaseSiteConfig):
     queue: str = "normal"
     scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
+    launcher_args: tuple[str, ...] = field(default=(), kw_only=True)
     poll_interval: int = 5
     account: str = ""
     tmp_dir: Optional[Union[str, Path]] = None
@@ -225,6 +226,12 @@ class SlurmSiteConfig(BaseSiteConfig):
         self.ssh_port = ssh_port
         if self.known_hosts_file is not None:
             self.known_hosts_file = Path(self.known_hosts_file).expanduser()
+
+        if not isinstance(self.launcher_args, (list, tuple)) or any(
+            not isinstance(value, str) for value in self.launcher_args
+        ):
+            raise ValueError("launcher_args must be an array of strings")
+        self.launcher_args = tuple(self.launcher_args)
         normalized: Dict[str, SlurmPartitionConfig] = {}
         for name, value in self.partitions.items():
             if isinstance(value, SlurmPartitionConfig):
@@ -391,6 +398,8 @@ class SlurmRunConfig:
         scheduler_heartbeat_timeout: Maximum seconds without a new adaptive
             scheduler heartbeat before the run is reported failed. ``None``
             disables heartbeat enforcement.
+        mpi_health_check_timeout: Optional Slurm time limit for a full-rank MPI
+            health check before solver initialization. ``None`` disables it.
         run_path: Remote run directory override.
         slurm_args: Additional raw ``sbatch`` arguments.
     """
@@ -407,6 +416,7 @@ class SlurmRunConfig:
     notify_email: Optional[str] = None
     poll_interval: Optional[int] = None
     scheduler_heartbeat_timeout: Optional[float] = _ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT
+    mpi_health_check_timeout: Optional[str] = None
     run_path: Optional[Union[str, Path]] = None
     slurm_args: List[str] = field(default_factory=list)
 
@@ -428,6 +438,8 @@ class SlurmRunConfig:
         ),
         run_path: Optional[Union[str, Path]] = None,
         slurm_args: Optional[List[str]] = None,
+        *,
+        mpi_health_check_timeout: Optional[str] = None,
         **aliases,
     ):
         values = _normalize_rank_aliases(
@@ -474,6 +486,17 @@ class SlurmRunConfig:
             if scheduler_heartbeat_timeout is None
             else float(scheduler_heartbeat_timeout)
         )
+        if mpi_health_check_timeout is not None:
+            try:
+                timeout_seconds = _hms_to_seconds(str(mpi_health_check_timeout))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "mpi_health_check_timeout must use HH:MM:SS or D-HH:MM:SS"
+                ) from exc
+            if timeout_seconds <= 0:
+                raise ValueError("mpi_health_check_timeout must be greater than zero")
+            mpi_health_check_timeout = _seconds_to_hms(timeout_seconds)
+        self.mpi_health_check_timeout = mpi_health_check_timeout
         self.run_path = run_path
         self.slurm_args = list(slurm_args or [])
 
@@ -527,6 +550,7 @@ class SlurmRunConfig:
             "notify_email": self.notify_email,
             "poll_interval": self.poll_interval,
             "scheduler_heartbeat_timeout": self.scheduler_heartbeat_timeout,
+            "mpi_health_check_timeout": self.mpi_health_check_timeout,
             "run_path": self.run_path,
             "slurm_args": list(self.slurm_args),
         }
@@ -804,6 +828,11 @@ class SlurmSite(BaseSite):
         return f"{self.config.mpi_wrapper}"
 
     @property
+    def mpi_args(self) -> tuple[str, ...]:
+        """Get site-configured arguments passed to every MPI launch."""
+        return self.config.launcher_args
+
+    @property
     def pool_host(self) -> str:
         """Get the resource pool host node."""
         return self._authenticator.get_job_host(self.pool.id)
@@ -981,10 +1010,16 @@ class SlurmSite(BaseSite):
                     self.fetch_outputs(job)
                 return handle
 
-        self.prepare_job(job, sync_project=True, validate=False)
-
         active_allocation = self.provisioned if mode in {"auto", "attached"} else False
         use_attached = mode == "attached" or (mode == "auto" and active_allocation)
+        if run_config.mpi_health_check_timeout is not None:
+            if use_attached or Path(self.mpi_cmd).name != "srun":
+                raise ValueError(
+                    "mpi_health_check_timeout requires batch mode with the srun launcher; "
+                    "use mode='batch' with mpi_wrapper='srun', or disable the check "
+                    "with mpi_health_check_timeout=None"
+                )
+        self.prepare_job(job, sync_project=True, validate=False)
         if use_attached:
             if not active_allocation:
                 raise RuntimeError(
@@ -2572,6 +2607,11 @@ class SlurmSite(BaseSite):
             )
         task_indices = [int(index) + 1 for index in task_plan["pending_indices"]]
         kwargs.setdefault("skip_sizing", len(task_indices) == 1)
+        job_rank_limit = getattr(job, "max_ranks_per_task", None)
+        if job_rank_limit is not None:
+            kwargs["max_ranks_per_task"] = min(
+                job_rank_limit, int(kwargs.get("max_ranks_per_task", job_rank_limit))
+            )
         run_path = self._remote_run_path(config.run_path, job=job)
         script = self._sweep_SLURM_script(
             n_tasks=len(task_indices),
@@ -2582,6 +2622,7 @@ class SlurmSite(BaseSite):
             duration=duration,
             imaging_job=isinstance(job, ImagingJob),
             mpi_async_progress=config.mpi_async_progress,
+            mpi_health_check_timeout=config.mpi_health_check_timeout,
             **(
                 {"ranks_per_task": config.ranks_per_task}
                 if config.ranks_per_task is not None
@@ -2741,6 +2782,9 @@ class SlurmSite(BaseSite):
             mpi_async_progress=mpi_async_progress,
         )
         ntasks_per_item = max(ranks_per_task, self.pool.nproc // job.n_tasks)
+        max_ranks = getattr(job, "max_ranks_per_task", None)
+        if max_ranks is not None:
+            ntasks_per_item = min(ntasks_per_item, max_ranks)
 
         if self._compute_client.is_proxy():
             interactive = self.compute_client.invoke_shell()
@@ -3122,11 +3166,16 @@ class SlurmSite(BaseSite):
             batch_job=False,
             n_tasks=n_tasks,
             n_procs=self.pool.nproc,
+            init_ranks=min(
+                self.pool.nproc,
+                getattr(job, "max_ranks_per_task", None) or self.pool.nproc,
+            ),
             n_threads=n_threads,
             mpi_shell=shlex.quote(str(self.mpi_cmd)),
             dir_out_shell=shlex.quote(dir_out),
             executable_shell=shlex.quote(str(self.executable)),
             imaging_job=isinstance(job, ImagingJob),
+            mpi_args_shell=" ".join(shlex.quote(value) for value in self.mpi_args),
             pack_job=bool(pack_job),
             runtime_setup=self._runtime_setup_lines(),
             mpi_async_progress_setup=mpi_async_progress_setup,
@@ -3193,6 +3242,11 @@ class SlurmSite(BaseSite):
         min_ranks = int(kwargs.pop("min_ranks", 1))
         round_to = int(kwargs.pop("round_to", 1))
         cap_fraction = float(kwargs.pop("cap_fraction", 1.0))
+        max_ranks_per_task = int(
+            kwargs.pop("max_ranks_per_task", n_nodes * ranks_per_node)
+        )
+        if max_ranks_per_task < 1 or min_ranks > max_ranks_per_task:
+            raise ValueError("max_ranks_per_task must be positive and >= min_ranks")
         kwargs.pop("tail_threshold", None)
         boost_max_factor = float(kwargs.pop("boost_max_factor", 8.0))
         tolerate_failures = _normalize_failure_tolerance(
@@ -3203,6 +3257,7 @@ class SlurmSite(BaseSite):
         if not sizing_json:
             sizing_json = str(Path(stdout).parent / "FS_sizing.json")
         launch_delay_seconds = float(kwargs.pop("launch_delay_seconds", 0.25))
+        mpi_health_check_timeout = kwargs.pop("mpi_health_check_timeout", None)
         pack_job = bool(kwargs.pop("pack", True))
         mpi_async_progress = bool(kwargs.pop("mpi_async_progress", False))
         kwargs.pop("executable", None)
@@ -3224,6 +3279,7 @@ class SlurmSite(BaseSite):
         scheduler_config = {
             "executable": str(self.executable),
             "mpi": str(self.mpi_cmd),
+            "mpi_args": list(self.mpi_args),
             "fresh": bool(kwargs.get("fresh", False)),
             "total_ranks": n_nodes * ranks_per_node,
             "omp_threads": n_threads,
@@ -3234,6 +3290,7 @@ class SlurmSite(BaseSite):
             "min_ranks": min_ranks,
             "round_to": round_to,
             "cap_fraction": cap_fraction,
+            "max_ranks_per_task": max_ranks_per_task,
             "mem_cushion": mem_cushion,
             "boost_max_factor": boost_max_factor,
             "failure_tolerance": tolerate_failures,
@@ -3258,6 +3315,7 @@ class SlurmSite(BaseSite):
             skip_sizing=1 if skip_sizing else 0,
             n_nodes=n_nodes,
             n_procs=n_nodes * ranks_per_node,
+            init_ranks=min(n_nodes * ranks_per_node, max_ranks_per_task),
             n_threads=n_threads,
             n_tasks=n_tasks,
             n_job_tasks=n_job_tasks,
@@ -3269,6 +3327,13 @@ class SlurmSite(BaseSite):
             pack_job=pack_job,
             mpi_shell=shlex.quote(str(self.mpi_cmd)),
             executable_shell=shlex.quote(str(self.executable)),
+            mpi_args_shell=" ".join(shlex.quote(value) for value in self.mpi_args),
+            mpi_health_check_timeout=mpi_health_check_timeout,
+            mpi_health_check_timeout_shell=(
+                shlex.quote(str(mpi_health_check_timeout))
+                if mpi_health_check_timeout is not None
+                else ""
+            ),
             runtime_setup=self._runtime_setup_lines(),
             mpi_async_progress_setup=mpi_async_progress_setup,
             scheduler_config_shell=shlex.quote(json.dumps(scheduler_config, indent=2)),

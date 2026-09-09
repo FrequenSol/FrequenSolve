@@ -791,15 +791,27 @@ def test_directory_upload_failure_cleans_remote_archive_and_hides_stderr(tmp_pat
     assert any(command.startswith("rm -f /remote/tmp/") for command in commands)
 
 
-def test_directory_upload_tar_failure_preserves_existing_remote_tree(tmp_path):
+@pytest.mark.parametrize("destination_exists", [False, True])
+def test_directory_upload_merges_inputs_only_after_valid_extraction(
+    tmp_path, destination_exists
+):
     source = tmp_path / "local" / "project"
     source.mkdir(parents=True)
-    (source / "new.txt").write_text("new")
+    (source / "simulations").mkdir()
+    (source / "simulations/new.json").write_text("new")
+    (source / "simulations/input.json").write_text("updated")
 
     remote_parent = tmp_path / "remote"
     destination = remote_parent / "project"
-    destination.mkdir(parents=True)
-    (destination / "existing.txt").write_text("existing")
+    remote_parent.mkdir()
+    if destination_exists:
+        (destination / "simulations").mkdir(parents=True)
+        (destination / "simulations/input.json").write_text("original")
+        (destination / "simulations/other.json").write_text("other")
+        (destination / "project.json").write_text("project")
+        (destination / "jobs").mkdir()
+        (destination / "jobs/result.h5").write_bytes(b"existing result")
+        destination_inode = destination.stat().st_ino
     remote_tmp = tmp_path / "remote-tmp"
     corrupt_archive = True
 
@@ -847,16 +859,25 @@ def test_directory_upload_tar_failure_preserves_existing_remote_tree(tmp_path):
     with pytest.raises(RuntimeError, match="Remote directory extraction failed"):
         manager.put(source, destination)
 
-    assert (destination / "existing.txt").read_text() == "existing"
-    assert not (destination / "new.txt").exists()
+    if destination_exists:
+        assert (destination / "simulations/input.json").read_text() == "original"
+        assert (destination / "jobs/result.h5").read_bytes() == b"existing result"
+    else:
+        assert not destination.exists()
+    assert not (destination / "simulations/new.json").exists()
     assert list(remote_parent.glob(".project.frequensolve-*")) == []
     assert list(remote_tmp.glob("frequensolve-*")) == []
 
     corrupt_archive = False
     manager.put(source, destination)
 
-    assert (destination / "new.txt").read_text() == "new"
-    assert not (destination / "existing.txt").exists()
+    assert (destination / "simulations/new.json").read_text() == "new"
+    assert (destination / "simulations/input.json").read_text() == "updated"
+    if destination_exists:
+        assert (destination / "project.json").read_text() == "project"
+        assert (destination / "jobs/result.h5").read_bytes() == b"existing result"
+        assert (destination / "simulations/other.json").read_text() == "other"
+        assert destination.stat().st_ino == destination_inode
     assert list(remote_parent.glob(".project.frequensolve-*")) == []
     assert list(remote_tmp.glob("frequensolve-*")) == []
 

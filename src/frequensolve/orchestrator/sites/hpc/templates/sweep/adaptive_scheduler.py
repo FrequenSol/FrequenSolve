@@ -124,6 +124,7 @@ class AdaptiveScheduler:
         self.status_file = Path(status)
         self.executable = str(config["executable"])
         self.mpi = str(config.get("mpi", "ibrun"))
+        self.mpi_args = [str(value) for value in config.get("mpi_args", [])]
         self.mpi_launcher = Path(self.mpi).name
         self.fresh_flag = ["--fresh"] if config.get("fresh") else []
         self.total_ranks = int(config["total_ranks"])
@@ -147,10 +148,19 @@ class AdaptiveScheduler:
             if self.skip_sizing
             else max(1, int(self.total_ranks * self.cap_fraction))
         )
+        rank_limit = int(config.get("max_ranks_per_task", self.total_ranks))
+        if rank_limit < 1 or self.min_ranks > rank_limit:
+            raise ValueError("max_ranks_per_task must be positive and >= min_ranks")
+        self.max_ranks_per_task = min(self.max_ranks_per_task, rank_limit)
+        if self.mpi_launcher in {"mpiexec", "mpirun"}:
+            # These launchers cannot isolate concurrent steps within an allocation.
+            self.max_ranks_per_task = min(self.total_ranks, rank_limit)
         self.running = []
         self.successful_tasks = []
         self.failed_tasks = []
         self.free_intervals = [(0, self.total_ranks)]
+        if self.mpi_launcher in {"mpiexec", "mpirun"}:
+            self.free_intervals = [(0, self.max_ranks_per_task)]
 
     def _load_task_memory(self):
         if self.skip_sizing:
@@ -159,12 +169,14 @@ class AdaptiveScheduler:
 
     def _choose_base_ranks(self, task_memory: float) -> int:
         if self.mpi_launcher in {"mpiexec", "mpirun"}:
-            return self.total_ranks
+            return self.max_ranks_per_task
         ranks = int(math.ceil(task_memory * self.mem_cushion / self.mem_per_rank))
         ranks = max(ranks, self.min_ranks)
         ranks = min(ranks, self.max_ranks_per_task, self.total_ranks)
         ranks = _round_up(ranks, self.round_to)
-        return min(max(ranks, self.min_ranks), self.total_ranks)
+        return min(
+            max(ranks, self.min_ranks), self.total_ranks, self.max_ranks_per_task
+        )
 
     def _write_status(self, state: str, *, aborted=None, reason=None):
         running = [entry[3] for entry in self.running]
@@ -205,15 +217,17 @@ class AdaptiveScheduler:
                 str(self.omp_threads),
             ]
         elif self.mpi_launcher in {"mpiexec", "mpirun"}:
-            if offset != 0 or ranks != self.total_ranks:
+            if offset != 0 or ranks != self.max_ranks_per_task:
                 raise SystemExit(
-                    f"{self.mpi_launcher} task launch requires the full allocation"
+                    f"{self.mpi_launcher} task launch requires exclusive use of the allocation"
                 )
             prefix = [self.mpi, "-n", str(ranks)]
         else:
             raise SystemExit(f"unsupported MPI launcher: {self.mpi_launcher}")
         return [
-            *prefix,
+            prefix[0],
+            *self.mpi_args,
+            *prefix[1:],
             self.executable,
             "-nthreads",
             str(self.omp_threads),
@@ -310,7 +324,9 @@ class AdaptiveScheduler:
                         max(base, share),
                         int(math.ceil(max(2.0, self.boost_max_factor) * base)),
                     )
-                minimum = min(max(base, self.min_ranks), self.total_ranks)
+                minimum = min(
+                    max(base, self.min_ranks), self.total_ranks, self.max_ranks_per_task
+                )
                 maximum = min(
                     max(maximum, minimum), self.max_ranks_per_task, self.total_ranks
                 )
