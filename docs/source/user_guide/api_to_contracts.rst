@@ -8,14 +8,14 @@ auditable interface consumed by launchers and the :term:`fast solver`.
 
 Related tutorials:
 
-- :download:`Acoustic modeling <../../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>`
+- :download:`Acoustic modeling <../../../tutorials/01_modeling_basics/01_acoustic.ipynb>`
   for the first :term:`project`, :term:`simulation`, :term:`job`, and result
   artifacts.
-- :download:`Layered models <../../../examples/tutorials/03_velocity_model_building/03_layered_models.ipynb>`
+- :download:`Layered models <../../../tutorials/03_velocity_model_building/03_layered_models.ipynb>`
   for exported material and geometry contracts.
-- :download:`Traces <../../../examples/tutorials/06_outputs/01_traces.ipynb>`
+- :download:`Traces <../../../tutorials/06_outputs/01_traces.ipynb>`
   for :term:`HDF5` trace output and :term:`TraceDataset <trace dataset>` reads.
-- :download:`ParaView and VTK <../../../examples/tutorials/06_outputs/02_paraview_vtk.ipynb>`
+- :download:`ParaView and VTK <../../../tutorials/06_outputs/02_paraview_vtk.ipynb>`
   for job-owned visualization output contracts.
 
 Authoring Flow

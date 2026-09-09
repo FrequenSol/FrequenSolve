@@ -8,13 +8,13 @@ layouts. Coordinates are physical global coordinates by default, or
 
 Related tutorials:
 
-- :download:`Receivers <../../../examples/tutorials/05_surveys/01_receivers.ipynb>`
+- :download:`Receivers <../../../tutorials/05_surveys/01_receivers.ipynb>`
   for multi-component :term:`receiver devices <receiver device>` and dense groups.
-- :download:`DAS <../../../examples/tutorials/05_surveys/02_das.ipynb>`
+- :download:`DAS <../../../tutorials/05_surveys/02_das.ipynb>`
   for fiber-style strain receivers.
-- :download:`Sources <../../../examples/tutorials/05_surveys/03_sources.ipynb>`
+- :download:`Sources <../../../tutorials/05_surveys/03_sources.ipynb>`
   for physical point catalogs and sparse distributed source fields.
-- :download:`Sparse surveys <../../../examples/tutorials/05_surveys/04_sparse_surveys.ipynb>`
+- :download:`Sparse surveys <../../../tutorials/05_surveys/04_sparse_surveys.ipynb>`
   for offset windows and explicit source-receiver layouts.
 
 Survey Receivers

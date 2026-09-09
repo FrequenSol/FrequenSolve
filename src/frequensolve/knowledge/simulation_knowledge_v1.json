@@ -2092,7 +2092,7 @@
       "id": "saved-project-job-workflow",
       "title": "Saved project and job workflow",
       "summary": "Save, reload, inspect, and resubmit concrete FrequenSolve job types through BaseJob and Project helpers.",
-      "source_path": "examples/tutorials/02_sites/04_save_load_projects_jobs.ipynb",
+      "source_path": "tutorials/02_sites/04_save_load_projects_jobs.ipynb",
       "tested_by": [
         "tests/test_project_job_lifecycle.py"
       ]
