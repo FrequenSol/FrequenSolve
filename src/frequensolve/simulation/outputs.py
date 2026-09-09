@@ -1195,6 +1195,8 @@ class WavefieldOutput(Output):
         path: Output directory relative to the job result directory.
         fields: One or more solver fields to sample on the grid.
         field: Convenience spelling for a single sampled field.
+        properties: Realized material properties sampled on the wavefield grid
+            and stored once as static arrays in the packed wavefield product.
         device: Receiver device that defines named wavefield components.
         grid: Grid object, xarray object, or serialized grid mapping.
         dims: xarray-style dimension names when ``coords`` is provided directly.
@@ -1214,6 +1216,7 @@ class WavefieldOutput(Output):
     name: str = "wavefield"
     path: Union[str, Path] = "wavefields"
     fields: Optional[List[str]] = None
+    properties: Optional[List[str]] = None
     device: Optional[ReceiverDevice] = None
     grid: Optional[Dict[str, Any]] = None
     sources: Optional[List[int]] = None
@@ -1224,6 +1227,7 @@ class WavefieldOutput(Output):
         path: Union[str, Path] = "wavefields",
         fields: Optional[Union[str, Iterable[str]]] = None,
         field: Optional[str] = None,
+        properties: Optional[Iterable[str]] = None,
         device: Optional[Union[ReceiverDevice, Mapping[str, Any]]] = None,
         grid: Optional[
             Union[CartesianGrid, xr.DataArray, xr.Dataset, Mapping[str, Any]]
@@ -1256,6 +1260,7 @@ class WavefieldOutput(Output):
             self.fields = (
                 canonical_fields(_as_list(field_value)) if field_value else None
             )
+        self.properties = [str(prop) for prop in _as_list(properties)] or None
         self.grid = _wavefield_grid_payload(
             grid=grid,
             dims=dims,
@@ -1339,6 +1344,8 @@ class WavefieldOutput(Output):
                 payload["fields"] = fields
         if self.sources is not None:
             payload["sources"] = self.sources
+        if self.properties is not None:
+            payload["properties"] = list(self.properties)
         return merge_extra(payload, self.extra, "WavefieldOutput")
 
     @classmethod
@@ -1363,6 +1370,7 @@ class WavefieldOutput(Output):
             path=data.pop("path", "wavefields"),
             field=field,
             fields=None if device is not None else fields,
+            properties=data.pop("properties", None),
             device=device,
             grid=grid,
             sources=data.pop("sources", None),
@@ -1918,6 +1926,7 @@ def wavefield(
     name: Optional[str] = None,
     path: Union[str, Path] = "wavefields",
     field: Optional[str] = None,
+    properties: Optional[Iterable[str]] = None,
     device: Optional[Union[ReceiverDevice, Mapping[str, Any]]] = None,
     grid: Optional[
         Union[CartesianGrid, xr.DataArray, xr.Dataset, Mapping[str, Any]]
@@ -1939,6 +1948,8 @@ def wavefield(
         path: Output directory relative to the job result directory.
         field: Keyword-only spelling for a single field. Mutually exclusive
             with ``fields``.
+        properties: Realized material properties sampled on the wavefield grid
+            and stored once as static arrays in the packed wavefield product.
         device: Receiver device or serialized device mapping describing named
             wavefield components.
         grid: Grid object, xarray object, or serialized xarray-style grid.
@@ -1967,6 +1978,7 @@ def wavefield(
             name=name,
             path=path,
             field=requested,
+            properties=properties,
             device=device,
             grid=grid,
             dims=dims,
@@ -1980,6 +1992,7 @@ def wavefield(
         name=name,
         path=path,
         fields=requested,
+        properties=properties,
         device=device,
         grid=grid,
         dims=dims,

@@ -335,7 +335,8 @@ def test_remote_hdf5_property_locator_infers_format():
     payload = Property.file("remote:/server/model/vp.h5:vp", units="m/s").to_fs()
 
     assert payload == {
-        "file": "/server/model/vp.h5:vp",
+        "file": "/server/model/vp.h5",
+        "dataset": "vp",
         "format": "hdf5",
         "absolute": True,
         "units": "m/s",
@@ -419,7 +420,8 @@ def test_derived_property_expressions_export_to_solver_ast():
     props = payload["properties"]
 
     assert props["vp"] == {
-        "file": "/server/model/vp.h5:vp",
+        "file": "/server/model/vp.h5",
+        "dataset": "vp",
         "format": "hdf5",
         "absolute": True,
         "units": "m/s",
@@ -719,22 +721,29 @@ def test_remap_expression_macro_can_preserve_values_outside_source_range():
                     ],
                 },
                 "then": {
-                    "op": "add",
+                    "op": "clamp",
                     "args": [
-                        {"value": 600, "units": "m/s"},
                         {
-                            "op": "mul",
+                            "op": "add",
                             "args": [
+                                {"value": 600, "units": "m/s"},
                                 {
-                                    "op": "sub",
+                                    "op": "mul",
                                     "args": [
-                                        base_node,
-                                        {"value": 800, "units": "m/s"},
+                                        {
+                                            "op": "sub",
+                                            "args": [
+                                                base_node,
+                                                {"value": 800, "units": "m/s"},
+                                            ],
+                                        },
+                                        {"value": 2.0},
                                     ],
                                 },
-                                {"value": 2.0},
                             ],
                         },
+                        {"value": 600, "units": "m/s"},
+                        {"value": 1000, "units": "m/s"},
                     ],
                 },
             }
@@ -1339,10 +1348,8 @@ def test_large_receiver_carpet_stays_lazy_until_hdf5_export(tmp_path):
     coords = payload["Acquisition"]["receiver_groups"][0]["coordinates"]
 
     assert coords["_type"] == "CoordsFromFile"
-    assert (
-        coords["file"]
-        == "simulations/simple/simple.h5:inputs/acquisition/receivers/surface/coordinates"
-    )
+    assert coords["file"] == "simulations/simple/simple.h5"
+    assert coords["dataset"] == "inputs/acquisition/receivers/surface/coordinates"
     assert coords["units"] == "km"
     assert coords["system"] == "top"
     with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
@@ -1462,7 +1469,7 @@ def test_source_and_receiver_coordinate_arrays_are_float64():
         coords=np.asarray([[0.125, 0.0], [0.875, 0.0]], dtype=np.float32),
         names=["left", "right"],
     )
-    acq.add_distributed_source("compound", {"left": 1.0, "right": 1.0})
+    acq.add_encoded_source("compound", {"left": 1.0, "right": 1.0})
     acq.add_receiver_group(
         name="surface",
         device=geophone,
@@ -1733,7 +1740,7 @@ def test_named_source_encoding_replaces_compound_source_weights():
         names=["left", "right"],
         direction=[0.0, 1.0],
     )
-    acq.add_distributed_source("dipole_like", {"left": 1.0, "right": -1.0})
+    acq.add_encoded_source("dipole_like", {"left": 1.0, "right": -1.0})
 
     payload = acq.to_fs()
 
@@ -1748,6 +1755,7 @@ def test_wavefield_output_uses_grid_contract():
     output = WavefieldOutput(
         name="movie",
         field="pressure",
+        properties=["Vp", "Vs", "Rho"],
         dims=("z", "r"),
         coords={
             "z": [0.0, 0.1, 0.25, 0.5],
@@ -1762,6 +1770,7 @@ def test_wavefield_output_uses_grid_contract():
     assert output.grid["dims"] == ["z", "r"]
     assert payload["_type"] == "WavefieldOutput"
     assert payload["field"] == "pressure"
+    assert payload["properties"] == ["Vp", "Vs", "Rho"]
     assert "fields" not in payload
     assert payload["grid"]["_type"] == "XArrayGrid"
     assert payload["grid"]["dims"] == ["z", "r"]
@@ -3393,13 +3402,13 @@ def test_array_properties_materialize_to_simulation_hdf5_with_hash(tmp_path):
     payload = sim.to_fs()
     prop = payload["Model"]["subdomains"][0]["properties"]["vp"]
 
-    assert prop["format"] == "hdf5"
-    assert (
-        prop["file"]
-        == "simulations/simple/simple.h5:inputs/model/subdomains/1/properties/vp"
-    )
+    assert "format" not in prop
+    assert prop["file"] == "simulations/simple/simple.h5"
     assert prop["dataset"] == "inputs/model/subdomains/1/properties/vp"
     assert prop["hash"].startswith("blake3:")
+    roundtripped = Property.from_value(prop).to_fs()
+    assert str(roundtripped["file"]) == prop["file"]
+    assert roundtripped["dataset"] == prop["dataset"]
 
     with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
         dset = h5[prop["dataset"]]
@@ -3417,6 +3426,34 @@ def test_array_properties_materialize_to_simulation_hdf5_with_hash(tmp_path):
     )
     with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
         assert h5[prop["dataset"]].attrs["sentinel"] == "kept"
+
+
+def test_legacy_property_locator_roundtrips_as_structured_reference():
+    prop = Property.from_value(
+        {
+            "file": "simulation.h5:inputs/model/properties/vp",
+            "dataset": "inputs/model/properties/vp",
+            "format": "hdf5",
+        }
+    )
+
+    payload = prop.to_fs()
+
+    assert payload["file"] == Path("simulation.h5")
+    assert payload["dataset"] == "inputs/model/properties/vp"
+
+
+def test_legacy_property_locator_rejects_conflicting_dataset():
+    prop = Property.from_value(
+        {
+            "file": "simulation.h5:inputs/model/properties/vp",
+            "dataset": "other/property",
+            "format": "hdf5",
+        }
+    )
+
+    with pytest.raises(ValueError, match="Conflicting HDF5 datasets"):
+        prop.to_fs()
 
 
 def test_large_model_field_coordinates_use_hdf5_dataset_reference(tmp_path):
@@ -3477,10 +3514,8 @@ def test_large_receiver_coordinates_materialize_to_simulation_hdf5(tmp_path):
     payload = sim.to_fs()
     coords = payload["Acquisition"]["receiver_groups"][0]["coordinates"]
 
-    assert (
-        coords["file"]
-        == "simulations/simple/simple.h5:inputs/acquisition/receivers/surface/coordinates"
-    )
+    assert coords["file"] == "simulations/simple/simple.h5"
+    assert coords["dataset"] == "inputs/acquisition/receivers/surface/coordinates"
     assert coords["hash"].startswith("blake3:")
     with h5py.File(tmp_path / "simulations/simple/simple.h5", "r") as h5:
         assert "inputs/acquisition/receivers/surface/coordinates" in h5
@@ -3597,7 +3632,7 @@ def test_large_receiver_coordinates_inline_without_simulation_path():
     coords = acq.to_fs()["receiver_groups"][0]["coordinates"]
 
     assert coords["_type"] == "CoordsArray"
-    assert len(coords["coords"]) == 201
+    assert len(coords["value"]) == 201
     assert "file" not in coords
 
 
@@ -3630,10 +3665,9 @@ def test_receiver_coordinate_file_exports_project_relative_locator(tmp_path):
     sim_file = sim.save()
     payload = json.loads(sim_file.read_text())
 
-    assert (
-        payload["Acquisition"]["receiver_groups"][0]["coordinates"]["file"]
-        == "simulations/simple/simple.h5:inputs/acquisition/receivers/surface/coordinates"
-    )
+    serialized = payload["Acquisition"]["receiver_groups"][0]["coordinates"]
+    assert serialized["file"] == "simulations/simple/simple.h5"
+    assert serialized["dataset"] == "inputs/acquisition/receivers/surface/coordinates"
 
 
 def test_loaded_receiver_coordinate_file_resolves_project_relative_get(tmp_path):

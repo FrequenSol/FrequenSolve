@@ -152,14 +152,14 @@
         },
         "file": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-          "description": "Authoritative property file, RSF/DDS header, or HDF5 object locator, e.g. simulation.h5:inputs/model/properties/vp."
+          "description": "Property file or RSF/DDS header. Legacy HDF5 object locators remain readable; new HDF5 references use dataset separately."
         },
         "format": {
           "type": "string"
         },
         "dataset": {
           "type": "string",
-          "description": "Optional tooling metadata for HDF5-backed properties. Current readers use the object locator in file."
+          "description": "Authoritative HDF5 dataset path when file names an HDF5 container."
         },
         "hash": {
           "type": "string",

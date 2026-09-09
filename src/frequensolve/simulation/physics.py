@@ -79,6 +79,7 @@ class AcousticComponents(ValidComponents):
     """Valid output components for acoustic simulations."""
 
     primary = list(family_components("acoustic")[0])
+    secondary = list(family_components("acoustic")[1])
 
 
 class EMComponents(ValidComponents):
@@ -92,6 +93,13 @@ class ElasticComponents(ValidComponents):
 
     primary = list(family_components("elastic")[0])
     secondary = list(family_components("elastic")[1])
+
+
+class ElasticTorsionComponents(ValidComponents):
+    """Elastic outputs available without whole-vector Helmholtz projection."""
+
+    primary = list(family_components("elastic-torsion")[0])
+    secondary = list(family_components("elastic-torsion")[1])
 
 
 class PoroelasticComponents(ValidComponents):
@@ -113,11 +121,11 @@ _COMPONENTS_BY_PHYSICS = {
     "acoustic_axisym": AcousticComponents,
     "elastic": ElasticComponents,
     "elastic_axisym": ElasticComponents,
-    "elastic_axisym_torsion": ElasticComponents,
+    "elastic_axisym_torsion": ElasticTorsionComponents,
     "coupled": ElasticComponents,
     "coupled_aep": CoupledAEPComponents,
     "coupled_axisym": ElasticComponents,
-    "coupled_axisym_torsion": ElasticComponents,
+    "coupled_axisym_torsion": ElasticTorsionComponents,
     "poroelastic": PoroelasticComponents,
     "em": EMComponents,
 }

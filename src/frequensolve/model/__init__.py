@@ -9,13 +9,19 @@ from frequensolve.model.layered import *  # noqa: F403
 from frequensolve.model.layered import __all__ as _layered_all
 from frequensolve.model.model import *  # noqa: F403
 from frequensolve.model.model import __all__ as _model_all
+from frequensolve.model.parameterization import *  # noqa: F403
+from frequensolve.model.parameterization import __all__ as _parameterization_all
 from frequensolve.model.property import *  # noqa: F403
 from frequensolve.model.property import __all__ as _property_all
+from frequensolve.model.representation import *  # noqa: F403
+from frequensolve.model.representation import __all__ as _representation_all
 
 __all__ = unique_exports(
     _attenuation_all,
     _dispersion_all,
     _model_all,
     _layered_all,
+    _parameterization_all,
     _property_all,
+    _representation_all,
 )

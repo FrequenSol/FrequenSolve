@@ -8,6 +8,8 @@ when exporting JSON.
 from __future__ import annotations
 
 import copy
+import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
@@ -26,6 +28,7 @@ __all__ = [
     "ReceiverSampling",
     "SparseSurvey",
     "SparseTrace",
+    "SparseTraceTable",
     "EvalSample",
     "TraceSample",
 ]
@@ -277,6 +280,24 @@ class SparseTrace(ExtraFieldsMixin):
         self.receiver_name = receiver_name
         self.component_name = component_name
         self._init_extra(extra, **kwargs)
+        for label, value in (
+            ("source_id", self.source_id),
+            ("receiver_id", self.receiver_id),
+            ("receiver_position_id", self.receiver_position_id),
+            ("trace_id", self.trace_id),
+            ("channel_number", self.channel_number),
+            ("field_record", self.field_record),
+            ("point_first", self.point_first),
+            ("point_last", self.point_last),
+        ):
+            if value is not None and value < 1:
+                raise ValueError(f"SparseTrace {label} must be positive")
+        if (
+            self.point_first is not None
+            and self.point_last is not None
+            and self.point_last < self.point_first
+        ):
+            raise ValueError("SparseTrace point_last must be >= point_first")
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "SparseTrace":
@@ -499,6 +520,401 @@ class TraceSample(ExtraFieldsMixin):
         return merge_extra(payload, self.extra, "TraceSample")
 
 
+class SparseTraceTable:
+    """Columnar sparse traces for production-scale survey construction."""
+
+    _OPTIONAL_COLUMNS = {
+        "trace_id",
+        "component_id",
+        "channel_number",
+        "field_record",
+        "point_first",
+        "point_last",
+        "active",
+        "offset",
+        "azimuth",
+        "source_name",
+        "receiver_name",
+        "component_name",
+    }
+
+    def __init__(
+        self,
+        *,
+        source_id: Any,
+        receiver_id: Any,
+        component: Any = 1,
+        receiver_position_id: Optional[Any] = None,
+        **columns: Any,
+    ) -> None:
+        unknown = set(columns).difference(self._OPTIONAL_COLUMNS)
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise TypeError(f"Unsupported sparse trace columns: {names}")
+        source = np.asarray(source_id, dtype=np.int64)
+        receiver = np.asarray(receiver_id, dtype=np.int64)
+        if source.ndim == 0:
+            source = source.reshape(1)
+        if receiver.ndim == 0:
+            receiver = receiver.reshape(1)
+        if source.ndim != 1 or receiver.shape != source.shape:
+            raise ValueError("source_id and receiver_id must be equal-length vectors")
+        if np.any(source < 1) or np.any(receiver < 1):
+            raise ValueError("source_id and receiver_id must be positive")
+        self._columns: Dict[str, np.ndarray] = {
+            "source_id": source,
+            "receiver_id": receiver,
+            "receiver_position_id": self._column(
+                receiver if receiver_position_id is None else receiver_position_id,
+                len(source),
+                "receiver_position_id",
+                dtype=np.int64,
+            ),
+            "component": self._column(
+                component,
+                len(source),
+                "component",
+                dtype=None,
+            ),
+        }
+        component_values = self._columns["component"]
+        if "component_name" not in columns:
+            if component_values.dtype.kind in {"S", "U"}:
+                columns["component_name"] = component_values
+            elif component_values.dtype.kind == "O" and any(
+                isinstance(value, str) for value in np.unique(component_values)
+            ):
+                columns["component_name"] = np.asarray(
+                    [
+                        value if isinstance(value, str) else ""
+                        for value in component_values
+                    ],
+                    dtype=object,
+                )
+        for name, values in columns.items():
+            dtype = (
+                None
+                if name.endswith("_name")
+                else (
+                    np.bool_
+                    if name == "active"
+                    else (
+                        np.float64
+                        if name in {"offset", "azimuth"}
+                        else None if name == "component_id" else np.int64
+                    )
+                )
+            )
+            self._columns[name] = self._column(
+                values,
+                len(source),
+                name,
+                dtype=dtype,
+            )
+        for name in (
+            "receiver_position_id",
+            "trace_id",
+            "channel_number",
+            "field_record",
+            "point_first",
+            "point_last",
+        ):
+            values = self._columns.get(name)
+            if values is not None and np.any(values < 1):
+                raise ValueError(f"{name} must be positive")
+
+    @staticmethod
+    def _column(values: Any, size: int, name: str, *, dtype: Any) -> np.ndarray:
+        """Normalize one scalar or vector trace column."""
+
+        if isinstance(values, (str, bytes)) or np.isscalar(values):
+            value = values.item() if isinstance(values, np.generic) else values
+            return np.full(size, value, dtype=dtype)
+        array = np.asarray(values, dtype=dtype)
+        if array.ndim != 1 or len(array) != size:
+            raise ValueError(f"{name} must be a scalar or a {size}-element vector")
+        return array
+
+    @classmethod
+    def from_pairs(
+        cls,
+        pairs: Iterable[Tuple[int, int]],
+        *,
+        component: ComponentKey = 1,
+        receiver_points: Optional[Mapping[int, int]] = None,
+    ) -> "SparseTraceTable":
+        """Build a trace table from source/receiver pairs."""
+
+        def pair_values() -> Iterable[int]:
+            for pair in pairs:
+                try:
+                    source_id, receiver_id = pair
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "pairs must contain (source_id, receiver_id) rows"
+                    ) from exc
+                yield source_id
+                yield receiver_id
+
+        values = np.fromiter(
+            pair_values(),
+            dtype=np.int64,
+        )
+        if values.size == 0:
+            values = values.reshape(0, 2)
+        elif values.size % 2:
+            raise ValueError("pairs must contain (source_id, receiver_id) rows")
+        else:
+            values = values.reshape(-1, 2)
+        receiver = values[:, 1]
+        positions = (
+            receiver
+            if receiver_points is None
+            else np.fromiter(
+                (
+                    receiver_points.get(int(value), int(value)) or int(value)
+                    for value in receiver
+                ),
+                dtype=np.int64,
+                count=len(receiver),
+            )
+        )
+        return cls(
+            source_id=values[:, 0],
+            receiver_id=receiver,
+            receiver_position_id=positions,
+            component=component,
+        )
+
+    @classmethod
+    def from_product(
+        cls,
+        *,
+        sources: Iterable[int],
+        receivers: Iterable[int],
+        components: Union[ComponentKey, Iterable[ComponentKey]] = 1,
+        receiver_points: Optional[Mapping[int, int]] = None,
+    ) -> "SparseTraceTable":
+        """Build a trace table with vectorized Cartesian-product columns."""
+
+        source = (
+            np.asarray(sources, dtype=np.int64)
+            if isinstance(sources, np.ndarray)
+            else np.fromiter(sources, dtype=np.int64)
+        )
+        receiver = (
+            np.asarray(receivers, dtype=np.int64)
+            if isinstance(receivers, np.ndarray)
+            else np.fromiter(receivers, dtype=np.int64)
+        )
+        if source.ndim != 1 or receiver.ndim != 1:
+            raise ValueError("sources and receivers must be one-dimensional")
+        if isinstance(components, (str, int, np.integer)):
+            component = np.asarray([components])
+        else:
+            component_items = list(components)
+            component = np.asarray(
+                component_items,
+                dtype=(
+                    None
+                    if all(isinstance(value, str) for value in component_items)
+                    or all(
+                        isinstance(value, (int, np.integer))
+                        for value in component_items
+                    )
+                    else object
+                ),
+            )
+        if component.ndim != 1 or len(component) == 0:
+            raise ValueError("components must not be empty")
+        n_receiver_component = len(receiver) * len(component)
+        source_id = np.repeat(source, n_receiver_component)
+        receiver_id = np.tile(np.repeat(receiver, len(component)), len(source))
+        component_values = np.tile(component, len(source) * len(receiver))
+        positions = (
+            receiver_id
+            if receiver_points is None
+            else np.fromiter(
+                (
+                    receiver_points.get(int(value), int(value)) or int(value)
+                    for value in receiver_id
+                ),
+                dtype=np.int64,
+                count=len(receiver_id),
+            )
+        )
+        return cls(
+            source_id=source_id,
+            receiver_id=receiver_id,
+            receiver_position_id=positions,
+            component=component_values,
+        )
+
+    def __len__(self) -> int:
+        return len(self._columns["source_id"])
+
+    def columns(
+        self,
+        component_map: Optional[Mapping[str, int]] = None,
+    ) -> Dict[str, np.ndarray]:
+        """Return resolved solver columns without constructing trace objects."""
+
+        size = len(self)
+        trace_id = self._columns.get(
+            "trace_id",
+            np.arange(1, size + 1, dtype=np.int64),
+        )
+        component = self._resolve_components(
+            self._columns["component"],
+            component_map,
+        )
+        component_id = self._resolve_components(
+            self._columns.get("component_id", component),
+            component_map,
+        )
+        if np.any(component < 1) or np.any(component_id < 1):
+            raise ValueError("component ids must be positive")
+        position = self._columns["receiver_position_id"]
+        point_first = self._columns.get("point_first", position)
+        point_last = self._columns.get("point_last", point_first)
+        if np.any(point_last < point_first):
+            raise ValueError("point_last must be >= point_first")
+        result = {
+            "trace_id": np.asarray(trace_id, dtype=np.int64),
+            "source_id": self._columns["source_id"],
+            "receiver_id": self._columns["receiver_id"],
+            "receiver_position_id": position,
+            "component_id": component_id,
+            "component": component,
+            "channel_number": np.asarray(
+                self._columns.get("channel_number", trace_id),
+                dtype=np.int64,
+            ),
+            "field_record": np.asarray(
+                self._columns.get("field_record", self._columns["source_id"]),
+                dtype=np.int64,
+            ),
+            "point_first": np.asarray(point_first, dtype=np.int64),
+            "point_last": np.asarray(point_last, dtype=np.int64),
+            "n_points": np.asarray(point_last - point_first + 1, dtype=np.int64),
+            "active": np.asarray(
+                self._columns.get("active", np.ones(size, dtype=np.bool_)),
+                dtype=np.bool_,
+            ),
+        }
+        for name in (
+            "offset",
+            "azimuth",
+            "source_name",
+            "receiver_name",
+            "component_name",
+        ):
+            if name in self._columns:
+                result[name] = self._columns[name]
+        return result
+
+    @staticmethod
+    def _resolve_components(
+        values: np.ndarray,
+        component_map: Optional[Mapping[str, int]],
+    ) -> np.ndarray:
+        """Resolve numeric or named components once per distinct value."""
+
+        values = np.asarray(values)
+        if values.dtype.kind in {"i", "u"}:
+            return values.astype(np.int64, copy=False)
+        if values.dtype.kind not in {"O", "S", "U"}:
+            return values.astype(np.int64)
+        unique_values = np.unique(values)
+        if not any(isinstance(value, str) for value in unique_values):
+            return values.astype(np.int64)
+        resolved = np.empty(len(values), dtype=np.int64)
+        for value in unique_values:
+            resolved[values == value] = _resolve_component(value, component_map)
+        return resolved
+
+    def rows(
+        self,
+        component_map: Optional[Mapping[str, int]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Materialize JSON rows for small examples."""
+
+        columns = self.columns(component_map)
+        rows = []
+        for index in range(len(self)):
+            row = {}
+            for name, values in columns.items():
+                value = values[index]
+                row[name] = value.item() if isinstance(value, np.generic) else value
+            rows.append(row)
+        return rows
+
+    def trace(self, index: int) -> SparseTrace:
+        """Materialize one trace object from the columnar table."""
+
+        size = len(self)
+        if index < 0:
+            index += size
+        if index < 0 or index >= size:
+            raise IndexError("sparse trace index is out of range")
+        values = self._columns
+        optional = {
+            name: (
+                column[index].item()
+                if isinstance(column[index], np.generic)
+                else column[index]
+            )
+            for name, column in values.items()
+            if name
+            not in {
+                "source_id",
+                "receiver_id",
+                "receiver_position_id",
+                "component",
+            }
+        }
+        return SparseTrace(
+            source_id=int(values["source_id"][index]),
+            receiver_id=int(values["receiver_id"][index]),
+            receiver_position_id=int(values["receiver_position_id"][index]),
+            component=values["component"][index],
+            **optional,
+        )
+
+
+@dataclass
+class _InlineSparseSurvey:
+    table: Optional[SparseTraceTable]
+    traces: List[SparseTrace]
+    eval_samples: List[EvalSample]
+    trace_samples: List[TraceSample]
+
+
+@dataclass
+class _HDF5SparseSurvey:
+    layout_file: Union[str, Path]
+
+
+@dataclass
+class _SPSSparseSurvey:
+    source_file: Union[str, Path]
+    receiver_file: Union[str, Path]
+    relation_file: Union[str, Path]
+
+
+@dataclass
+class _OffsetSparseSurvey:
+    offset_domain: Mapping[str, Any]
+
+
+SparseSurveyStorage = Union[
+    _InlineSparseSurvey,
+    _HDF5SparseSurvey,
+    _SPSSparseSurvey,
+    _OffsetSparseSurvey,
+]
+
+
 @dataclass(init=False)
 class SparseSurvey(ExtraFieldsMixin):
     """Named fast solver sparse survey layout.
@@ -524,16 +940,8 @@ class SparseSurvey(ExtraFieldsMixin):
     """
 
     name: str
-    kind: str
-    traces: List[SparseTrace]
-    eval_samples: List[EvalSample]
-    trace_samples: List[TraceSample]
-    layout_file: Optional[Union[str, Path]]
-    source_file: Optional[Union[str, Path]]
-    receiver_file: Optional[Union[str, Path]]
-    relation_file: Optional[Union[str, Path]]
-    offset_domain: Optional[Mapping[str, Any]]
     extra: Dict[str, Any]
+    _storage: SparseSurveyStorage
 
     def __init__(
         self,
@@ -541,6 +949,7 @@ class SparseSurvey(ExtraFieldsMixin):
         traces: Optional[Iterable[Union[SparseTrace, Mapping[str, Any]]]] = None,
         *,
         kind: Optional[str] = None,
+        trace_table: Optional[SparseTraceTable] = None,
         eval_samples: Optional[Iterable[Union[EvalSample, Mapping[str, Any]]]] = None,
         trace_samples: Optional[Iterable[Union[TraceSample, Mapping[str, Any]]]] = None,
         layout_file: Optional[Union[str, Path]] = None,
@@ -565,18 +974,159 @@ class SparseSurvey(ExtraFieldsMixin):
             else:
                 kind = "Sparse"
         self.name = name
-        self.kind = kind
-        self.traces = [_as_trace(trace) for trace in (traces or [])]
-        self.eval_samples = [_as_eval_sample(sample) for sample in (eval_samples or [])]
-        self.trace_samples = [
-            _as_trace_sample(sample) for sample in (trace_samples or [])
-        ]
-        self.layout_file = layout_file
-        self.source_file = source_file
-        self.receiver_file = receiver_file
-        self.relation_file = relation_file
-        self.offset_domain = copy.deepcopy(dict(offset_domain or {})) or None
+        trace_rows = [_as_trace(trace) for trace in (traces or [])]
+        if trace_table is not None and not isinstance(trace_table, SparseTraceTable):
+            raise TypeError("trace_table must be a SparseTraceTable")
+        eval_rows = [_as_eval_sample(sample) for sample in (eval_samples or [])]
+        sample_rows = [_as_trace_sample(sample) for sample in (trace_samples or [])]
         self._init_extra(extra, **kwargs)
+        normalized_kind = str(kind).strip().lower()
+        has_sps = any(
+            value is not None for value in (source_file, receiver_file, relation_file)
+        )
+        if normalized_kind == "sparse":
+            if layout_file is not None or has_sps or offset_domain is not None:
+                raise ValueError("Sparse survey cannot mix external survey storage")
+            self._storage = _InlineSparseSurvey(
+                table=trace_table,
+                traces=trace_rows,
+                eval_samples=eval_rows,
+                trace_samples=sample_rows,
+            )
+        elif normalized_kind == "hdf5tracestore":
+            if layout_file is None:
+                raise ValueError("HDF5TraceStore survey requires layout_file")
+            if (
+                trace_table is not None
+                or trace_rows
+                or eval_rows
+                or sample_rows
+                or has_sps
+                or offset_domain is not None
+            ):
+                raise ValueError(
+                    "HDF5TraceStore survey cannot include inline traces or SPS files"
+                )
+            self._storage = _HDF5SparseSurvey(layout_file)
+        elif normalized_kind == "spsfiles":
+            if not all(
+                value is not None
+                for value in (
+                    source_file,
+                    receiver_file,
+                    relation_file,
+                )
+            ):
+                raise ValueError("SPSFiles survey requires all three SPS files")
+            if (
+                trace_table is not None
+                or trace_rows
+                or eval_rows
+                or sample_rows
+                or layout_file is not None
+                or offset_domain is not None
+            ):
+                raise ValueError("SPSFiles survey cannot mix other survey storage")
+            assert source_file is not None
+            assert receiver_file is not None
+            assert relation_file is not None
+            self._storage = _SPSSparseSurvey(
+                source_file=source_file,
+                receiver_file=receiver_file,
+                relation_file=relation_file,
+            )
+        elif normalized_kind == "offsetdomain":
+            if offset_domain is None:
+                raise ValueError("OffsetDomain survey requires offset_domain")
+            if (
+                trace_table is not None
+                or trace_rows
+                or eval_rows
+                or sample_rows
+                or layout_file is not None
+                or has_sps
+            ):
+                raise ValueError("OffsetDomain survey cannot mix other survey storage")
+            self._storage = _OffsetSparseSurvey(copy.deepcopy(dict(offset_domain)))
+        else:
+            raise ValueError(f"Unsupported sparse survey type: {kind}")
+
+    @property
+    def kind(self) -> str:
+        if isinstance(self._storage, _InlineSparseSurvey):
+            return "Sparse"
+        if isinstance(self._storage, _HDF5SparseSurvey):
+            return "HDF5TraceStore"
+        if isinstance(self._storage, _SPSSparseSurvey):
+            return "SPSFiles"
+        return "OffsetDomain"
+
+    @property
+    def traces(self) -> List[SparseTrace]:
+        """Return the legacy mutable trace list, expanding a table on demand."""
+
+        if not isinstance(self._storage, _InlineSparseSurvey):
+            return []
+        storage = self._storage
+        if storage.table is not None:
+            storage.traces[:0] = [
+                storage.table.trace(index) for index in range(len(storage.table))
+            ]
+            storage.table = None
+        return storage.traces
+
+    @property
+    def eval_samples(self) -> List[EvalSample]:
+        if isinstance(self._storage, _InlineSparseSurvey):
+            return self._storage.eval_samples
+        return []
+
+    @property
+    def trace_samples(self) -> List[TraceSample]:
+        if isinstance(self._storage, _InlineSparseSurvey):
+            return self._storage.trace_samples
+        return []
+
+    @property
+    def layout_file(self) -> Optional[Union[str, Path]]:
+        return (
+            self._storage.layout_file
+            if isinstance(self._storage, _HDF5SparseSurvey)
+            else None
+        )
+
+    @property
+    def source_file(self) -> Optional[Union[str, Path]]:
+        return (
+            self._storage.source_file
+            if isinstance(self._storage, _SPSSparseSurvey)
+            else None
+        )
+
+    @property
+    def receiver_file(self) -> Optional[Union[str, Path]]:
+        return (
+            self._storage.receiver_file
+            if isinstance(self._storage, _SPSSparseSurvey)
+            else None
+        )
+
+    @property
+    def relation_file(self) -> Optional[Union[str, Path]]:
+        return (
+            self._storage.relation_file
+            if isinstance(self._storage, _SPSSparseSurvey)
+            else None
+        )
+
+    @property
+    def trace_count(self) -> int:
+        """Return the trace count without expanding columnar storage."""
+
+        if not isinstance(self._storage, _InlineSparseSurvey):
+            return 0
+        table_count = len(self._storage.table) if self._storage.table is not None else 0
+        return table_count + len(self._storage.traces)
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "SparseSurvey":
@@ -663,6 +1213,17 @@ class SparseSurvey(ExtraFieldsMixin):
         )
 
     @classmethod
+    def from_table(
+        cls,
+        name: str,
+        trace_table: SparseTraceTable,
+        **kwargs: Any,
+    ) -> "SparseSurvey":
+        """Create an inline survey from an existing columnar trace table."""
+
+        return cls(name, trace_table=trace_table, **kwargs)
+
+    @classmethod
     def from_pairs(
         cls,
         name: str,
@@ -692,22 +1253,20 @@ class SparseSurvey(ExtraFieldsMixin):
             Populated ``SparseSurvey``.
         """
 
-        survey = cls(name, **kwargs)
         if pairs is None:
             if source_ids is None or receiver_ids is None:
                 raise ValueError(
                     "from_pairs requires pairs or source_ids and receiver_ids"
                 )
             pairs = zip(source_ids, receiver_ids)
-        for source_id, receiver_id in pairs:
-            point = (
-                receiver_points.get(receiver_id)
-                if receiver_points is not None
-                else None
-            )
-            survey.add_trace(
-                source=source_id, receiver=receiver_id, component=component, point=point
-            )
+        survey = cls(name, **kwargs)
+        if not isinstance(survey._storage, _InlineSparseSurvey):
+            raise ValueError("from_pairs requires inline Sparse survey storage")
+        survey._storage.table = SparseTraceTable.from_pairs(
+            pairs,
+            component=component,
+            receiver_points=receiver_points,
+        )
         return survey
 
     @classmethod
@@ -723,25 +1282,15 @@ class SparseSurvey(ExtraFieldsMixin):
     ) -> "SparseSurvey":
         """Create traces for the Cartesian product of sources and receivers."""
 
-        if isinstance(components, (str, int)):
-            component_list = [components]
-        else:
-            component_list = list(components)
         survey = cls(name, **kwargs)
-        for source_id in sources:
-            for receiver_id in receivers:
-                point = (
-                    receiver_points.get(receiver_id)
-                    if receiver_points is not None
-                    else None
-                )
-                for component in component_list:
-                    survey.add_trace(
-                        source=source_id,
-                        receiver=receiver_id,
-                        component=component,
-                        point=point,
-                    )
+        if not isinstance(survey._storage, _InlineSparseSurvey):
+            raise ValueError("from_product requires inline Sparse survey storage")
+        survey._storage.table = SparseTraceTable.from_product(
+            sources=sources,
+            receivers=receivers,
+            components=components,
+            receiver_points=receiver_points,
+        )
         return survey
 
     def add_trace(self, *args: Any, **kwargs: Any) -> SparseTrace:
@@ -749,7 +1298,9 @@ class SparseSurvey(ExtraFieldsMixin):
 
         trace = args[0] if args else SparseTrace(**kwargs)
         trace = _as_trace(trace)
-        self.traces.append(trace)
+        if not isinstance(self._storage, _InlineSparseSurvey):
+            raise ValueError("Cannot add inline traces to external survey storage")
+        self._storage.traces.append(trace)
         return trace
 
     def add_eval_sample(self, *args: Any, **kwargs: Any) -> EvalSample:
@@ -757,7 +1308,9 @@ class SparseSurvey(ExtraFieldsMixin):
 
         sample = args[0] if args else EvalSample(**kwargs)
         sample = _as_eval_sample(sample)
-        self.eval_samples.append(sample)
+        if not isinstance(self._storage, _InlineSparseSurvey):
+            raise ValueError("Cannot add inline samples to external survey storage")
+        self._storage.eval_samples.append(sample)
         return sample
 
     def add_trace_sample(self, *args: Any, **kwargs: Any) -> TraceSample:
@@ -765,7 +1318,9 @@ class SparseSurvey(ExtraFieldsMixin):
 
         sample = args[0] if args else TraceSample(**kwargs)
         sample = _as_trace_sample(sample)
-        self.trace_samples.append(sample)
+        if not isinstance(self._storage, _InlineSparseSurvey):
+            raise ValueError("Cannot add inline samples to external survey storage")
+        self._storage.trace_samples.append(sample)
         return sample
 
     def sampling(self) -> ReceiverSampling:
@@ -784,6 +1339,36 @@ class SparseSurvey(ExtraFieldsMixin):
         payload: Dict[str, Any] = {"name": self.name, "_type": self.kind}
         kind = self.kind.strip().lower()
 
+        if (
+            isinstance(self._storage, _InlineSparseSurvey)
+            and self.trace_count > 200
+            and ctx is not None
+            and ctx.path is not None
+            and not any(trace.extra for trace in self._storage.traces)
+            and not any(sample.extra for sample in self.eval_samples)
+            and not any(sample.extra for sample in self.trace_samples)
+        ):
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.name).strip("._")
+            if not safe_name:
+                safe_name = "survey"
+            if safe_name != self.name:
+                digest = hashlib.blake2s(
+                    self.name.encode("utf-8"),
+                    digest_size=4,
+                ).hexdigest()
+                safe_name = f"{safe_name}-{digest}"
+            file = ctx.path / "surveys" / f"{safe_name}.h5"
+            self.write_hdf5(file, component_map=component_map)
+            return merge_extra(
+                {
+                    "name": self.name,
+                    "_type": "HDF5TraceStore",
+                    "layout_file": _path_to_fs(file, ctx),
+                },
+                self.extra,
+                "SparseSurvey",
+            )
+
         if self.layout_file is not None:
             payload["layout_file"] = _path_to_fs(self.layout_file, ctx)
         if self.source_file is not None:
@@ -792,14 +1377,11 @@ class SparseSurvey(ExtraFieldsMixin):
             payload["receiver_file"] = _path_to_fs(self.receiver_file, ctx)
         if self.relation_file is not None:
             payload["relation_file"] = _path_to_fs(self.relation_file, ctx)
-        if self.offset_domain is not None:
-            payload["offset_domain"] = copy.deepcopy(dict(self.offset_domain))
+        if isinstance(self._storage, _OffsetSparseSurvey):
+            payload["offset_domain"] = copy.deepcopy(dict(self._storage.offset_domain))
 
-        if kind == "sparse" or self.traces:
-            payload["traces"] = [
-                trace.to_fs(trace_id=i, component_map=component_map)
-                for i, trace in enumerate(self.traces, start=1)
-            ]
+        if kind == "sparse":
+            payload["traces"] = self._trace_rows(component_map)
             if self.eval_samples:
                 payload["eval_samples"] = [
                     sample.to_fs(sample_id=i)
@@ -812,6 +1394,84 @@ class SparseSurvey(ExtraFieldsMixin):
                 ]
 
         return merge_extra(payload, self.extra, "SparseSurvey")
+
+    def _trace_rows(
+        self,
+        component_map: Optional[Mapping[str, int]],
+    ) -> List[Dict[str, Any]]:
+        """Materialize inline trace rows only at the JSON boundary."""
+
+        if not isinstance(self._storage, _InlineSparseSurvey):
+            return []
+        storage = self._storage
+        rows = storage.table.rows(component_map) if storage.table is not None else []
+        rows.extend(
+            trace.to_fs(trace_id=index, component_map=component_map)
+            for index, trace in enumerate(storage.traces, start=len(rows) + 1)
+        )
+        return rows
+
+    def _trace_columns(
+        self,
+        component_map: Optional[Mapping[str, int]],
+    ) -> Dict[str, np.ndarray]:
+        """Return trace columns, preserving the vectorized path when possible."""
+
+        if not isinstance(self._storage, _InlineSparseSurvey):
+            return {}
+        storage = self._storage
+        if storage.table is not None and not storage.traces:
+            return storage.table.columns(component_map)
+        rows = self._trace_rows(component_map)
+        if not rows:
+            return {
+                name: np.empty(0, dtype=np.int64)
+                for name in (
+                    "trace_id",
+                    "source_id",
+                    "receiver_id",
+                    "receiver_position_id",
+                    "component_id",
+                    "component",
+                    "channel_number",
+                    "field_record",
+                    "point_first",
+                    "point_last",
+                    "n_points",
+                    "active",
+                )
+            }
+        columns: Dict[str, np.ndarray] = {}
+        required = (
+            "trace_id",
+            "source_id",
+            "receiver_id",
+            "receiver_position_id",
+            "component_id",
+            "component",
+            "channel_number",
+            "field_record",
+            "point_first",
+            "point_last",
+            "n_points",
+            "active",
+        )
+        for name in required:
+            columns[name] = np.asarray([row[name] for row in rows])
+        for name in (
+            "offset",
+            "azimuth",
+            "source_name",
+            "receiver_name",
+            "component_name",
+        ):
+            if any(name in row for row in rows):
+                default = "" if name.endswith("_name") else 0.0
+                columns[name] = np.asarray(
+                    [row.get(name, default) for row in rows],
+                    dtype=object if name.endswith("_name") else np.float64,
+                )
+        return columns
 
     def write_hdf5(
         self,
@@ -831,20 +1491,19 @@ class SparseSurvey(ExtraFieldsMixin):
         """
 
         path = Path(file)
+        if not isinstance(self._storage, _InlineSparseSurvey):
+            raise ValueError("Only inline sparse surveys can be written to HDF5")
         path.parent.mkdir(parents=True, exist_ok=True)
-        traces = [
-            trace.to_fs(trace_id=i, component_map=component_map)
-            for i, trace in enumerate(self.traces, start=1)
-        ]
+        columns = self._trace_columns(component_map)
         string_dtype = h5py.string_dtype(encoding="utf-8")
 
-        def write_int(group: h5py.Group, name: str, values: List[int]) -> None:
+        def write_int(group: h5py.Group, name: str, values: Any) -> None:
             group.create_dataset(name, data=np.asarray(values, dtype=np.int32))
 
-        def write_float(group: h5py.Group, name: str, values: List[float]) -> None:
+        def write_float(group: h5py.Group, name: str, values: Any) -> None:
             group.create_dataset(name, data=np.asarray(values, dtype=np.float64))
 
-        def write_str(group: h5py.Group, name: str, values: List[str]) -> None:
+        def write_str(group: h5py.Group, name: str, values: Any) -> None:
             group.create_dataset(
                 name,
                 data=np.asarray([value or "" for value in values], dtype=object),
@@ -857,58 +1516,25 @@ class SparseSurvey(ExtraFieldsMixin):
             write_str(survey, "layout_kind", ["sparse_trace_v1"])
 
             trace_group = survey.require_group("traces")
-            write_int(trace_group, "trace_id", [row["trace_id"] for row in traces])
-            write_int(trace_group, "source_id", [row["source_id"] for row in traces])
-            write_int(
-                trace_group, "receiver_id", [row["receiver_id"] for row in traces]
-            )
-            write_int(
-                trace_group,
+            for name in (
+                "trace_id",
+                "source_id",
+                "receiver_id",
                 "receiver_position_id",
-                [row["receiver_position_id"] for row in traces],
-            )
-            write_int(
-                trace_group, "component_id", [row["component_id"] for row in traces]
-            )
-            write_int(trace_group, "component", [row["component"] for row in traces])
-            write_int(
-                trace_group, "channel_number", [row["channel_number"] for row in traces]
-            )
-            write_int(
-                trace_group, "field_record", [row["field_record"] for row in traces]
-            )
-            write_int(
-                trace_group,
+                "component_id",
+                "component",
+                "channel_number",
+                "field_record",
                 "active",
-                [1 if row.get("active", True) else 0 for row in traces],
-            )
-            write_int(
-                trace_group, "point_first", [row["point_first"] for row in traces]
-            )
-            write_int(trace_group, "point_last", [row["point_last"] for row in traces])
-            write_int(trace_group, "n_points", [row["n_points"] for row in traces])
-            write_float(
-                trace_group, "offset", [row.get("offset", 0.0) for row in traces]
-            )
-            write_float(
-                trace_group, "azimuth", [row.get("azimuth", 0.0) for row in traces]
-            )
-            write_str(
-                trace_group,
-                "source_name",
-                [row.get("source_name", "") for row in traces],
-            )
-            write_str(
-                trace_group,
-                "receiver_name",
-                [row.get("receiver_name", "") for row in traces],
-            )
-            write_str(
-                trace_group,
-                "component_name",
-                [row.get("component_name", "") for row in traces],
-            )
-
+                "point_first",
+                "point_last",
+                "n_points",
+            ):
+                write_int(trace_group, name, columns[name])
+            if "offset" in columns:
+                write_float(trace_group, "offset", columns["offset"])
+            if "azimuth" in columns:
+                write_float(trace_group, "azimuth", columns["azimuth"])
             if self.eval_samples:
                 evals = [
                     sample.to_fs(sample_id=i)
@@ -939,98 +1565,91 @@ class SparseSurvey(ExtraFieldsMixin):
                     ),
                 )
 
-            self._write_hdf5_catalogs(survey, traces, string_dtype)
+            self._write_hdf5_catalogs(survey, columns, string_dtype)
 
         return path
 
     def _write_hdf5_catalogs(
         self,
         survey: h5py.Group,
-        traces: List[Mapping[str, Any]],
+        columns: Mapping[str, np.ndarray],
         string_dtype: h5py.Datatype,
     ) -> None:
-        sources: Dict[int, Mapping[str, Any]] = {}
-        receivers: Dict[int, Mapping[str, Any]] = {}
-        receiver_positions: Dict[int, Mapping[str, Any]] = {}
-        components: Dict[int, Mapping[str, Any]] = {}
+        """Write compact catalogs directly from trace columns."""
 
-        for row in traces:
-            sources.setdefault(row["source_id"], row)
-            receivers.setdefault(row["receiver_id"], row)
-            receiver_positions.setdefault(row["receiver_position_id"], row)
-            components.setdefault(row["component_id"], row)
-
-        def write_str(group: h5py.Group, name: str, values: List[str]) -> None:
+        def write_str(group: h5py.Group, name: str, values: Any) -> None:
             group.create_dataset(
                 name,
                 data=np.asarray([value or "" for value in values], dtype=object),
                 dtype=string_dtype,
             )
 
-        if sources:
+        def first_indices(values: np.ndarray) -> np.ndarray:
+            _, indices = np.unique(values, return_index=True)
+            return np.sort(indices)
+
+        if len(columns["source_id"]):
+            indices = first_indices(columns["source_id"])
             group = survey.require_group("sources")
-            ids = list(sources)
-            group.create_dataset("source_id", data=np.asarray(ids, dtype=np.int32))
+            group.create_dataset(
+                "source_id",
+                data=np.asarray(columns["source_id"][indices], dtype=np.int32),
+            )
             group.create_dataset(
                 "field_record",
-                data=np.asarray(
-                    [sources[i].get("field_record", i) for i in ids], dtype=np.int32
-                ),
+                data=np.asarray(columns["field_record"][indices], dtype=np.int32),
             )
-            write_str(
-                group, "source_name", [sources[i].get("source_name", "") for i in ids]
-            )
+            names = columns.get("source_name")
+            if names is not None and np.any(names[indices] != ""):
+                write_str(group, "source_name", names[indices])
 
-        if receivers:
+        if len(columns["receiver_id"]):
+            indices = first_indices(columns["receiver_id"])
             group = survey.require_group("receivers")
-            ids = list(receivers)
-            group.create_dataset("receiver_id", data=np.asarray(ids, dtype=np.int32))
-            write_str(
-                group,
-                "receiver_name",
-                [receivers[i].get("receiver_name", "") for i in ids],
-            )
-
-        if receiver_positions:
-            group = survey.require_group("receiver_positions")
-            ids = list(receiver_positions)
             group.create_dataset(
-                "receiver_position_id", data=np.asarray(ids, dtype=np.int32)
+                "receiver_id",
+                data=np.asarray(columns["receiver_id"][indices], dtype=np.int32),
+            )
+            names = columns.get("receiver_name")
+            if names is not None and np.any(names[indices] != ""):
+                write_str(group, "receiver_name", names[indices])
+
+        if len(columns["receiver_position_id"]):
+            indices = first_indices(columns["receiver_position_id"])
+            group = survey.require_group("receiver_positions")
+            group.create_dataset(
+                "receiver_position_id",
+                data=np.asarray(
+                    columns["receiver_position_id"][indices], dtype=np.int32
+                ),
             )
             group.create_dataset(
                 "receiver_id",
-                data=np.asarray(
-                    [receiver_positions[i].get("receiver_id", i) for i in ids],
-                    dtype=np.int32,
-                ),
+                data=np.asarray(columns["receiver_id"][indices], dtype=np.int32),
             )
             group.create_dataset(
                 "point_first",
-                data=np.asarray(
-                    [receiver_positions[i].get("point_first", i) for i in ids],
-                    dtype=np.int32,
-                ),
+                data=np.asarray(columns["point_first"][indices], dtype=np.int32),
             )
             group.create_dataset(
                 "point_last",
-                data=np.asarray(
-                    [receiver_positions[i].get("point_last", i) for i in ids],
-                    dtype=np.int32,
-                ),
+                data=np.asarray(columns["point_last"][indices], dtype=np.int32),
             )
 
-        if components:
+        if len(columns["component_id"]):
+            indices = first_indices(columns["component_id"])
             group = survey.require_group("components")
-            ids = list(components)
-            group.create_dataset("component_id", data=np.asarray(ids, dtype=np.int32))
+            group.create_dataset(
+                "component_id",
+                data=np.asarray(columns["component_id"][indices], dtype=np.int32),
+            )
             group.create_dataset(
                 "component",
-                data=np.asarray(
-                    [components[i].get("component", i) for i in ids], dtype=np.int32
-                ),
+                data=np.asarray(columns["component"][indices], dtype=np.int32),
             )
+            names = columns.get("component_name")
             write_str(
                 group,
                 "component_name",
-                [components[i].get("component_name", "") for i in ids],
+                names[indices] if names is not None else [""] * len(indices),
             )

@@ -255,6 +255,74 @@ Poroelastic free surfaces usually combine mechanical and fluid conditions:
        boundaries=["z_min"],
    )
 
+Storm Loading on a Gravity Surface
+----------------------------------
+
+``GravitySurfaceBC`` couples the acoustic pressure and normal-flux traces for
+linear surface gravity waves. Supplying ``pressure`` adds a nonhomogeneous
+external pressure, such as a storm-pressure spectrum, without exposing those
+trace variables in the authoring API:
+
+.. code-block:: python
+
+   pressure = xr.DataArray(
+       pressure_values,
+       dims=("source", "x", "frequency"),
+       coords={
+           "source": ["wind_sea", "swell"],
+           "x": xr.DataArray(x, dims="x", attrs={"units": "m"}),
+           "frequency": xr.DataArray(
+               frequencies, dims="frequency", attrs={"units": "Hz"}
+           ),
+       },
+       attrs={"units": "Pa", "system": "global"},
+   )
+
+   sim += fs.GravitySurfaceBC(
+       boundaries="ocean_top",
+       name="ocean_surface",
+       pressure=pressure,
+   )
+
+The optional ``source`` dimension defines separate logical right-hand sides.
+A dataset whose variables are sources, or a mapping from source names to data
+arrays, permits each source to use a different surface grid. Spatial axes stay
+in the existing xarray interpolator; the sampled frequency and source axes are
+resolved by the acquisition store before interpolation.
+
+Frequency-domain complex values are positive-frequency phasors for Sauce's
+``exp(+i omega t)`` convention. FrequenSolve derives a private RHS scale from
+each field's largest magnitude; users continue to supply pressure in physical
+units, while Sauce solves a well-scaled RHS and records the physical scale with
+the source.
+
+Real, uniformly sampled time histories are also accepted by replacing the
+``frequency`` dimension with ``time``. Set ``window="hann"`` or
+``detrend="mean"`` on ``GravitySurfaceBC`` when desired. FFTW is used for
+aligned Fourier bins and arbitrary requested frequencies use direct Fourier
+evaluation. The transform returns the same positive-frequency phasor convention.
+
+For reusable acquisition definitions, split the load from the boundary while
+keeping the same stable boundary name:
+
+.. code-block:: python
+
+   sim += fs.GravitySurfaceBC(
+       boundaries="ocean_top",
+       name="ocean_surface",
+   )
+   sim.acquisition.boundary_loadings.append(
+       fs.SurfacePressureLoading(
+           pressure,
+           boundary_condition="ocean_surface",
+       )
+   )
+
+Every forced gravity surface must have a matching loading at export time. Use
+``unforced=True`` only for the homogeneous gravity-surface operator. Distributed
+surface-pressure loading currently requires a coupled acoustic DPG
+discretization.
+
 Coupled Models
 --------------
 

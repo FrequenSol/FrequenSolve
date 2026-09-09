@@ -402,7 +402,7 @@
       "aliases": [],
       "kind": "class",
       "category": "jobs",
-      "summary": "Create a job for one or more explicit positive modeled frequencies.",
+      "summary": "Create a job for one or more explicit positive modeled frequencies, optionally computing physical-frequency derivatives through fourth order.",
       "related_glossary": [
         "job",
         "frequency-domain"
@@ -415,7 +415,7 @@
       "aliases": [],
       "kind": "class",
       "category": "jobs",
-      "summary": "Create a time-domain job from a valid uniform frequency sweep and damping settings.",
+      "summary": "Create a time-domain job from a valid frequency sweep, optionally combining Laplace damping, phase derivatives, derivative-assisted interpolation, and a smooth high-frequency continuation.",
       "related_glossary": [
         "job",
         "time-domain"
@@ -785,7 +785,9 @@
       ],
       "output_components": [
         "pressure",
-        "velocity"
+        "velocity",
+        "p_velocity",
+        "s_velocity"
       ],
       "guided_scenario_id": "known-small-2d-acoustic"
     },
@@ -806,7 +808,9 @@
       ],
       "output_components": [
         "pressure",
-        "velocity"
+        "velocity",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -831,7 +835,9 @@
         "velocity",
         "stress",
         "strain",
-        "pressure"
+        "pressure",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -854,7 +860,9 @@
         "velocity",
         "stress",
         "strain",
-        "pressure"
+        "pressure",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -897,7 +905,9 @@
         "velocity",
         "stress",
         "strain",
-        "pressure"
+        "pressure",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -922,7 +932,9 @@
         "stress",
         "strain",
         "displacement",
-        "fluid_displacement"
+        "fluid_displacement",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -940,7 +952,9 @@
         "velocity",
         "stress",
         "strain",
-        "pressure"
+        "pressure",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -1208,34 +1222,6 @@
       "remediation": "Give every encoded source field a unique name."
     },
     {
-      "code": "acquisition.source_encoding.reference_coordinates.dataset_missing",
-      "severity": "error",
-      "path": "acquisition.source_encoding.reference_coordinates_dataset",
-      "explanation": "The optional HDF5 reference-coordinate dataset does not exist.",
-      "remediation": "Choose an existing coordinate dataset or omit reference_coordinates_dataset."
-    },
-    {
-      "code": "acquisition.source_encoding.reference_coordinates.shape",
-      "severity": "error",
-      "path": "acquisition.source_encoding.reference_coordinates_dataset",
-      "explanation": "The HDF5 reference coordinates do not contain one coordinate row per encoded field in the simulation dimension.",
-      "remediation": "Use shape (encoded_field_count, simulation_dimension)."
-    },
-    {
-      "code": "acquisition.source_encoding.reference_coordinates.dataset_numeric",
-      "severity": "error",
-      "path": "acquisition.source_encoding.reference_coordinates_dataset",
-      "explanation": "The HDF5 reference coordinates are not stored as readable integer or floating-point values.",
-      "remediation": "Store reference coordinates in a readable real numeric HDF5 dataset."
-    },
-    {
-      "code": "acquisition.source_encoding.reference_coordinates.dataset_nonfinite",
-      "severity": "error",
-      "path": "acquisition.source_encoding.reference_coordinates_dataset",
-      "explanation": "The HDF5 reference-coordinate dataset contains a NaN or infinite value.",
-      "remediation": "Replace every non-finite reference coordinate with a finite value."
-    },
-    {
       "code": "acquisition.source_encoding.reference_coordinates.invalid",
       "severity": "error",
       "path": "acquisition.source_encoding.fields[*].reference_coordinates",
@@ -1297,6 +1283,13 @@
       "path": "dimension",
       "explanation": "The simulation dimension cannot be normalized to 2D, 2.5D, or 3D.",
       "remediation": "Use 2, 2.5, or 3 and follow any formulation-specific dimension constraints."
+    },
+    {
+      "code": "discretization.method.incompatible",
+      "severity": "error",
+      "path": "discretization.method",
+      "explanation": "The selected finite-element discretization is unavailable for the simulation physics.",
+      "remediation": "Use a discretization supported by the physics; Galerkin currently supports acoustic, acoustic_axisym, and elastic."
     },
     {
       "code": "model.missing",

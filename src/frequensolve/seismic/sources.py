@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import warnings
 from dataclasses import dataclass, field
 from numbers import Number
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+)
 
 import numpy as np
+import xarray as xr
 
 from frequensolve.geometry.frame import (
     CoordinateValue,
@@ -26,7 +39,6 @@ from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
     merge_extra,
-    warn_deprecated_path_api,
 )
 
 __all__ = [
@@ -37,6 +49,7 @@ __all__ = [
     "PointSource",
     "SourceGeometry",
     "SourceEncoding",
+    "EncodedSource",
     "DistributedSource",
 ]
 
@@ -281,7 +294,7 @@ def _as_source_point(value: Union["PointSource", Mapping[str, Any]]) -> "PointSo
 
 def _source_names(names: Optional[Iterable[str]], n_sources: int) -> List[str]:
     if names is None:
-        return [f"source_{index:03d}" for index in range(1, n_sources + 1)]
+        return [f"source_{index:06d}" for index in range(1, n_sources + 1)]
     values = [str(name) for name in names]
     if len(values) != n_sources:
         raise ValueError(f"names must have exactly {n_sources} entries")
@@ -298,20 +311,65 @@ def _complex_to_fs(value: Any) -> Any:
     if isinstance(value, complex):
         real = float(value.real)
         imag = float(value.imag)
-        return real if imag == 0.0 else [real, imag]
-    if isinstance(value, Number):
-        return float(value)
-    if isinstance(value, np.ndarray):
-        value = value.tolist()
-    if (
-        isinstance(value, (list, tuple))
-        and len(value) == 2
-        and all(isinstance(item, Number) for item in value)
-    ):
+    elif isinstance(value, Number) and not isinstance(value, (bool, np.bool_)):
+        real = float(value)
+        imag = 0.0
+    else:
+        if isinstance(value, np.ndarray):
+            value = value.tolist()
+        if not (
+            isinstance(value, (list, tuple))
+            and len(value) == 2
+            and all(
+                isinstance(item, Number) and not isinstance(item, (bool, np.bool_))
+                for item in value
+            )
+        ):
+            raise TypeError(f"Invalid source-encoding coefficient {value!r}")
         real = float(value[0])
         imag = float(value[1])
-        return real if imag == 0.0 else [real, imag]
-    raise TypeError(f"Invalid source-encoding coefficient {value!r}")
+    if not np.isfinite(real) or not np.isfinite(imag):
+        raise ValueError("source-encoding coefficients must be finite")
+    return real if imag == 0.0 else [real, imag]
+
+
+def _source_coefficient_array(values: Any, *, ndim: int, label: str) -> np.ndarray:
+    """Normalize dense source coefficients with vectorized validation."""
+
+    if isinstance(values, xr.DataArray):
+        values = values.data
+    if isinstance(values, (str, bytes)):
+        raise TypeError(f"{label} must be a numeric array")
+    try:
+        authored = np.asarray(values)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{label} must be a numeric array") from exc
+    if authored.dtype.kind not in {"i", "u", "f", "c"}:
+        raise TypeError(f"{label} must be a numeric array")
+
+    if authored.ndim == ndim + 1 and authored.shape[-1] == 2:
+        result = np.asarray(authored[..., 0], dtype=np.complex64)
+        result.imag = np.asarray(authored[..., 1], dtype=np.float32)
+    elif authored.ndim == ndim:
+        result = np.asarray(authored, dtype=np.complex64)
+    else:
+        shape = "vector" if ndim == 1 else "matrix"
+        raise ValueError(f"{label} must be a {shape}")
+
+    if result.size == 0:
+        raise ValueError(f"{label} must not be empty")
+    if not np.all(np.isfinite(result)):
+        raise ValueError(f"{label} must be finite")
+    return result
+
+
+def _complex_value(value: Any) -> complex:
+    """Return one source-encoding coefficient as a complex scalar."""
+
+    serialized = _complex_to_fs(value)
+    if isinstance(serialized, list):
+        return complex(serialized[0], serialized[1])
+    return complex(serialized)
 
 
 def _coefficient_abs(value: Any) -> float:
@@ -516,23 +574,57 @@ class PointSource(ExtraFieldsMixin):
         return merge_extra(payload, self.extra, "PointSource")
 
 
+@dataclass
+class _InlineSourceGeometry:
+    sources: List[PointSource]
+
+
+@dataclass
+class _BulkSourceGeometry:
+    coordinates: np.ndarray
+    names: Optional[List[str]] = None
+    directions: Optional[np.ndarray] = None
+    units: Optional[Any] = None
+    system: Optional[str] = None
+    coordinate_extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _HDF5SourceGeometry:
+    file: Union[str, Path]
+    dataset: str
+    names_dataset: Optional[str] = None
+    system: Optional[str] = None
+    units: Optional[Any] = None
+    count: Optional[int] = None
+
+
+@dataclass
+class _SPSSourceGeometry:
+    source_file: Union[str, Path]
+    system: Optional[str] = None
+    units: Optional[Any] = None
+    count: Optional[int] = None
+
+
+SourceGeometryStorage = Union[
+    _InlineSourceGeometry,
+    _BulkSourceGeometry,
+    _HDF5SourceGeometry,
+    _SPSSourceGeometry,
+]
+
+
 @dataclass(init=False)
 class SourceGeometry(ExtraFieldsMixin):
-    """Physical source catalog used by an acquisition."""
+    """Physical source catalog with one concrete storage representation."""
 
     kind: str
-    geometry_type: str
     name: Optional[str]
     domain: Optional[int]
-    sources: List[PointSource]
-    file: Optional[Union[str, Path]]
-    dataset: Optional[str]
-    source_file: Optional[Union[str, Path]]
-    system: Optional[str]
-    units: Optional[Any]
-    count: Optional[int]
     defaults: Dict[str, Any]
     extra: Dict[str, Any]
+    _storage: SourceGeometryStorage
 
     def __init__(
         self,
@@ -544,6 +636,7 @@ class SourceGeometry(ExtraFieldsMixin):
         sources: Optional[Iterable[Union[PointSource, Mapping[str, Any]]]] = None,
         file: Optional[Union[str, Path]] = None,
         dataset: Optional[str] = None,
+        names_dataset: Optional[str] = None,
         source_file: Optional[Union[str, Path]] = None,
         system: Optional[str] = None,
         units: Optional[Any] = None,
@@ -553,19 +646,75 @@ class SourceGeometry(ExtraFieldsMixin):
         **kwargs: Any,
     ) -> None:
         self.kind = _source_kind(kind)
-        self.geometry_type = geometry_type
         self.name = name
         self.domain = None if domain is None else int(domain)
-        self.sources = [_as_source_point(source) for source in (sources or [])]
-        self.file = file
-        self.dataset = dataset
-        self.source_file = source_file
-        self.system = system
-        self.units = units
-        self.count = None if count is None else int(count)
         self.defaults = copy.deepcopy(dict(defaults or {}))
         self._init_extra(extra, **kwargs)
-        self._validate()
+        normalized_type = str(geometry_type).strip().lower()
+        source_points = [_as_source_point(source) for source in (sources or [])]
+        normalized_count = None if count is None else int(count)
+        if normalized_count is not None and normalized_count < 1:
+            raise ValueError("source geometry count must be >= 1")
+
+        if normalized_type == "inline":
+            if not source_points:
+                raise ValueError("Inline source geometry requires at least one source")
+            if any(
+                value is not None
+                for value in (
+                    file,
+                    dataset,
+                    names_dataset,
+                    source_file,
+                    normalized_count,
+                    system,
+                    units,
+                )
+            ):
+                raise ValueError(
+                    "Inline source geometry cannot include external storage"
+                )
+            names = [source.name for source in source_points if source.name is not None]
+            if len(names) != len(set(names)):
+                raise ValueError("source names must be unique")
+            self._storage = _InlineSourceGeometry(source_points)
+        elif normalized_type == "hdf5":
+            if file is None or not dataset:
+                raise ValueError("HDF5 source geometry requires file and dataset")
+            if names_dataset is not None and not str(names_dataset).strip():
+                raise ValueError("HDF5 source names_dataset must not be empty")
+            if source_points or source_file is not None:
+                raise ValueError(
+                    "HDF5 source geometry cannot include inline or SPS storage"
+                )
+            self._storage = _HDF5SourceGeometry(
+                file=file,
+                dataset=str(dataset),
+                names_dataset=names_dataset,
+                system=system,
+                units=units,
+                count=normalized_count,
+            )
+        elif normalized_type == "spsfiles":
+            if not source_file:
+                raise ValueError("SPS source geometry requires source_file")
+            if (
+                source_points
+                or file is not None
+                or dataset is not None
+                or names_dataset is not None
+            ):
+                raise ValueError(
+                    "SPS source geometry cannot include inline or HDF5 storage"
+                )
+            self._storage = _SPSSourceGeometry(
+                source_file=source_file,
+                system=system,
+                units=units,
+                count=normalized_count,
+            )
+        else:
+            raise ValueError("source geometry type must be Inline, HDF5, or SPSFiles")
 
     @classmethod
     def points(
@@ -586,8 +735,29 @@ class SourceGeometry(ExtraFieldsMixin):
     ) -> "SourceGeometry":
         """Create inline point-source geometry from coordinate rows."""
 
-        rows = _coordinate_rows(coords, units=units, system=system)
-        source_names = _source_names(names, len(rows))
+        coordinate_extra: Dict[str, Any] = {}
+        if isinstance(coords, CoordinateValue):
+            units = coords.units if units is None else units
+            system = coords.system if system is None else system
+            coordinate_extra = copy.deepcopy(coords.extra)
+            coords = coords.value
+        if is_quantity(coords):
+            target_units = units or coords.units
+            raw_coordinates = coords.to(target_units).magnitude
+            units = target_units
+        else:
+            raw_coordinates = coords
+        try:
+            matrix = np.asarray(raw_coordinates, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("source coordinates must have shape (n, dim)") from exc
+        if matrix.ndim == 1:
+            matrix = matrix.reshape(1, -1)
+        if matrix.ndim != 2 or matrix.shape[0] == 0 or matrix.shape[1] == 0:
+            raise ValueError("source coordinates must have shape (n, dim)")
+        if not np.all(np.isfinite(matrix)):
+            raise ValueError("source coordinates must be finite")
+        source_names = None if names is None else _source_names(names, len(matrix))
         direction_rows = None
         if direction is not None and not isinstance(direction, Mapping):
             try:
@@ -595,32 +765,32 @@ class SourceGeometry(ExtraFieldsMixin):
             except (TypeError, ValueError):
                 direction_array = None
             if direction_array is not None and direction_array.ndim == 2:
-                if len(direction_array) != len(rows):
+                if len(direction_array) != len(matrix):
                     raise ValueError("direction must have one row per coordinate")
-                direction_rows = direction_array.tolist()
-
-        source_points = [
-            PointSource(name=source_name, coordinates=row)
-            for source_name, row in zip(source_names, rows)
-        ]
-        if direction_rows is not None:
-            for source, source_direction in zip(source_points, direction_rows):
-                source.direction = source_direction
+                if not np.all(np.isfinite(direction_array)):
+                    raise ValueError("direction must be finite")
+                direction_rows = np.asarray(direction_array, dtype=np.float64)
         default_payload = _basis_to_fs(
             direction=None if direction_rows is not None else direction,
             amplitude=amplitude,
             mechanism=mechanism,
             extra=defaults,
         )
-        return cls(
-            geometry_type="Inline",
-            name=name,
-            kind=kind,
-            domain=domain,
-            defaults=default_payload,
-            sources=source_points,
-            **kwargs,
+        geometry = cls.__new__(cls)
+        geometry.kind = _source_kind(kind)
+        geometry.name = name
+        geometry.domain = None if domain is None else int(domain)
+        geometry.defaults = default_payload
+        geometry._init_extra(kwargs.pop("extra", None), **kwargs)
+        geometry._storage = _BulkSourceGeometry(
+            coordinates=np.ascontiguousarray(matrix),
+            names=source_names,
+            directions=direction_rows,
+            units=units,
+            system=system,
+            coordinate_extra=coordinate_extra,
         )
+        return geometry
 
     @classmethod
     def inline(
@@ -657,6 +827,7 @@ class SourceGeometry(ExtraFieldsMixin):
         system: Optional[str] = None,
         units: Optional[Any] = None,
         count: Optional[int] = None,
+        names_dataset: Optional[str] = None,
         defaults: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> "SourceGeometry":
@@ -669,6 +840,7 @@ class SourceGeometry(ExtraFieldsMixin):
             domain=domain,
             file=file,
             dataset=dataset,
+            names_dataset=names_dataset,
             system=system,
             units=units,
             count=count,
@@ -718,6 +890,7 @@ class SourceGeometry(ExtraFieldsMixin):
             sources=sources,
             file=payload.pop("file", None),
             dataset=payload.pop("dataset", None),
+            names_dataset=payload.pop("names_dataset", None),
             source_file=payload.pop("source_file", None),
             system=payload.pop("system", None),
             units=payload.pop("units", None),
@@ -726,23 +899,95 @@ class SourceGeometry(ExtraFieldsMixin):
             extra=payload,
         )
 
-    def _validate(self) -> None:
-        geometry_type = self.geometry_type
-        if geometry_type not in {"Inline", "HDF5", "SPSFiles"}:
-            raise ValueError("source geometry type must be Inline, HDF5, or SPSFiles")
-        if geometry_type == "Inline":
-            if not self.sources:
-                raise ValueError("Inline source geometry requires at least one source")
-            names = [source.name for source in self.sources if source.name is not None]
-            if len(names) != len(set(names)):
-                raise ValueError("source names must be unique")
-        elif geometry_type == "HDF5":
-            if self.file is None or not self.dataset:
-                raise ValueError("HDF5 source geometry requires file and dataset")
-        elif not self.source_file:
-            raise ValueError("SPS source geometry requires source_file")
-        if self.count is not None and self.count < 1:
-            raise ValueError("source geometry count must be >= 1")
+    @property
+    def geometry_type(self) -> str:
+        if isinstance(self._storage, (_InlineSourceGeometry, _BulkSourceGeometry)):
+            return "Inline"
+        if isinstance(self._storage, _HDF5SourceGeometry):
+            return "HDF5"
+        return "SPSFiles"
+
+    @property
+    def sources(self) -> List[PointSource]:
+        """Return the legacy mutable point list, materializing bulk storage lazily."""
+
+        if isinstance(self._storage, _InlineSourceGeometry):
+            return self._storage.sources
+        if not isinstance(self._storage, _BulkSourceGeometry):
+            return []
+        storage = self._storage
+        names = storage.names
+        sources = []
+        for index, row in enumerate(storage.coordinates):
+            coordinates: Any = row.tolist()
+            if (
+                storage.units is not None
+                or storage.system is not None
+                or storage.coordinate_extra
+            ):
+                coordinates = CoordinateValue(
+                    coordinates,
+                    units=storage.units,
+                    system=storage.system,
+                    extra=copy.deepcopy(storage.coordinate_extra),
+                )
+            sources.append(
+                PointSource(
+                    name=(names[index] if names is not None else None),
+                    coordinates=coordinates,
+                    direction=(
+                        storage.directions[index].tolist()
+                        if storage.directions is not None
+                        else None
+                    ),
+                )
+            )
+        self._storage = _InlineSourceGeometry(sources)
+        return sources
+
+    @property
+    def file(self) -> Optional[Union[str, Path]]:
+        return (
+            self._storage.file
+            if isinstance(self._storage, _HDF5SourceGeometry)
+            else None
+        )
+
+    @property
+    def dataset(self) -> Optional[str]:
+        return (
+            self._storage.dataset
+            if isinstance(self._storage, _HDF5SourceGeometry)
+            else None
+        )
+
+    @property
+    def names_dataset(self) -> Optional[str]:
+        return (
+            self._storage.names_dataset
+            if isinstance(self._storage, _HDF5SourceGeometry)
+            else None
+        )
+
+    @property
+    def source_file(self) -> Optional[Union[str, Path]]:
+        return (
+            self._storage.source_file
+            if isinstance(self._storage, _SPSSourceGeometry)
+            else None
+        )
+
+    @property
+    def system(self) -> Optional[str]:
+        return getattr(self._storage, "system", None)
+
+    @property
+    def units(self) -> Optional[Any]:
+        return getattr(self._storage, "units", None)
+
+    @property
+    def count(self) -> Optional[int]:
+        return getattr(self._storage, "count", None)
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -754,12 +999,16 @@ class SourceGeometry(ExtraFieldsMixin):
         if self.defaults:
             payload["defaults"] = _source_basis_to_fs(self.defaults)
         if self.geometry_type == "Inline":
-            payload["sources"] = [
-                source.to_fs(ctx, include_domain=False) for source in self.sources
-            ]
+            materialized = self._materialize_inline(ctx, payload)
+            if materialized is not None:
+                return merge_extra(materialized, self.extra, "SourceGeometry")
+            payload["sources"] = self._inline_rows(ctx)
         elif self.geometry_type == "HDF5":
+            assert self.file is not None
             payload["file"] = _path_to_fs(self.file, ctx)
             payload["dataset"] = self.dataset
+            if self.names_dataset is not None:
+                payload["names_dataset"] = self.names_dataset
             if self.system is not None:
                 payload["system"] = self.system
             if self.units is not None:
@@ -776,19 +1025,266 @@ class SourceGeometry(ExtraFieldsMixin):
                 payload["count"] = self.count
         return merge_extra(payload, self.extra, "SourceGeometry")
 
+    def _materialize_inline(
+        self,
+        ctx: Optional[ExportContext],
+        base_payload: Mapping[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Materialize a large homogeneous source catalog in the input store."""
+
+        store = getattr(ctx, "store", None) if ctx is not None else None
+        if (self.point_count or 0) <= 200 or store is None:
+            return None
+        if isinstance(self._storage, _BulkSourceGeometry):
+            storage = self._storage
+            if storage.directions is not None or storage.coordinate_extra:
+                return None
+            matrix = storage.coordinates
+            units = storage.units
+            system = storage.system
+            names = storage.names
+        else:
+            for source in self.sources:
+                coordinates = source.coordinates
+                if (
+                    source.direction is not None
+                    or source.amplitude is not None
+                    or source.mechanism is not None
+                    or source.domain is not None
+                    or source.extra
+                    or (
+                        source.kind is not None
+                        and _source_kind(source.kind) != self.kind
+                    )
+                    or (isinstance(coordinates, CoordinateValue) and coordinates.extra)
+                ):
+                    return None
+            matrix, units, system = _source_coordinate_matrix(self.coordinate_values())
+            explicit_names = [source.name for source in self.sources]
+            names = (
+                self.point_names()
+                if any(name is not None for name in explicit_names)
+                else None
+            )
+        coordinate = (
+            ["x", "z"]
+            if matrix.shape[1] == 2
+            else (
+                ["x", "y", "z"]
+                if matrix.shape[1] == 3
+                else list(range(matrix.shape[1]))
+            )
+        )
+        attrs = {"fs_kind": "source_geometry_coordinates"}
+        if units is not None:
+            attrs["units"] = unit_expression(units)
+        if system is not None:
+            attrs["system"] = system
+        ref = store.put_dataarray(
+            "inputs/acquisition/source_geometry/coordinates",
+            xr.DataArray(
+                matrix,
+                dims=("source", "coordinate"),
+                coords={"coordinate": coordinate},
+            ),
+            attrs=attrs,
+            coordinate_dims=("coordinate",),
+            dtype=np.float64,
+        )
+        payload = {
+            **dict(base_payload),
+            "_type": "HDF5",
+            **ref.to_fs(),
+            **({"units": unit_expression(units)} if units is not None else {}),
+            **({"system": system} if system is not None else {}),
+        }
+        default_names = [f"source_{index:06d}" for index in range(1, len(matrix) + 1)]
+        if names is not None and list(names) != default_names:
+            names_ref = store.put_string_array(
+                "inputs/acquisition/source_geometry/names",
+                names,
+                dimension="source",
+                attrs={"fs_kind": "source_geometry_names"},
+            )
+            payload["names_dataset"] = names_ref.clean_dataset
+        return payload
+
     @property
     def point_count(self) -> Optional[int]:
-        if self.geometry_type != "Inline":
-            return self.count
-        return len(self.sources)
+        if isinstance(self._storage, _InlineSourceGeometry):
+            return len(self._storage.sources)
+        if isinstance(self._storage, _BulkSourceGeometry):
+            return len(self._storage.coordinates)
+        return self.count
+
+    @property
+    def is_bulk(self) -> bool:
+        """Return whether inline points are still held as one NumPy matrix."""
+
+        return isinstance(self._storage, _BulkSourceGeometry)
 
     def point_names(self) -> List[str]:
-        if self.geometry_type != "Inline":
+        if isinstance(self._storage, _BulkSourceGeometry):
+            if self._storage.names is not None:
+                return list(self._storage.names)
+            return [
+                f"source_{index:06d}"
+                for index in range(1, len(self._storage.coordinates) + 1)
+            ]
+        if isinstance(self._storage, _InlineSourceGeometry):
+            return [
+                source.name if source.name is not None else f"source_{index:06d}"
+                for index, source in enumerate(self._storage.sources, start=1)
+            ]
+        return []
+
+    def has_explicit_names(self) -> bool:
+        """Return whether every inline source has an authored name."""
+
+        if isinstance(self._storage, _BulkSourceGeometry):
+            return True
+        if isinstance(self._storage, _InlineSourceGeometry):
+            return all(source.name is not None for source in self._storage.sources)
+        return False
+
+    def validate_unique_names(self) -> None:
+        """Validate authored inline names without generating default-name lists."""
+
+        if isinstance(self._storage, _BulkSourceGeometry):
+            names = self._storage.names
+        elif isinstance(self._storage, _InlineSourceGeometry):
+            names = [
+                source.name if source.name is not None else f"source_{index:06d}"
+                for index, source in enumerate(self._storage.sources, start=1)
+            ]
+        else:
+            return
+        if names is not None and len(names) != len(set(names)):
+            raise ValueError("Inline source names must be unique")
+
+    def set_point_names(self, names: Iterable[str]) -> None:
+        """Set stable names without materializing bulk source points."""
+
+        values = _source_names(names, int(self.point_count or 0))
+        if isinstance(self._storage, _BulkSourceGeometry):
+            self._storage.names = values
+            return
+        if isinstance(self._storage, _InlineSourceGeometry):
+            for source, name in zip(self._storage.sources, values):
+                source.name = name
+            return
+        raise ValueError("Cannot set names on external source geometry")
+
+    def point(self, index: int) -> PointSource:
+        """Return one inline point without expanding the rest of a bulk catalog."""
+
+        count = int(self.point_count or 0)
+        if index < 0 or index >= count:
+            raise IndexError("source point index is out of range")
+        if isinstance(self._storage, _InlineSourceGeometry):
+            return self._storage.sources[index]
+        if not isinstance(self._storage, _BulkSourceGeometry):
+            raise ValueError("Source-point metadata is stored externally")
+        storage = self._storage
+        coordinates: Any = storage.coordinates[index].tolist()
+        if (
+            storage.units is not None
+            or storage.system is not None
+            or storage.coordinate_extra
+        ):
+            coordinates = CoordinateValue(
+                coordinates,
+                units=storage.units,
+                system=storage.system,
+                extra=copy.deepcopy(storage.coordinate_extra),
+            )
+        return PointSource(
+            name=(storage.names[index] if storage.names is not None else None),
+            coordinates=coordinates,
+            direction=(
+                storage.directions[index].tolist()
+                if storage.directions is not None
+                else None
+            ),
+        )
+
+    def extend_inline(self, other: "SourceGeometry") -> None:
+        """Append compatible inline geometry while preserving bulk arrays."""
+
+        if self.geometry_type != "Inline" or other.geometry_type != "Inline":
+            raise ValueError("Cannot append inline sources to file-backed geometry")
+        if isinstance(self._storage, _BulkSourceGeometry) and isinstance(
+            other._storage, _BulkSourceGeometry
+        ):
+            left, right = self._storage, other._storage
+            if (
+                (unit_expression(left.units) if left.units is not None else None)
+                == (unit_expression(right.units) if right.units is not None else None)
+                and left.system == right.system
+                and left.coordinate_extra == right.coordinate_extra
+                and ((left.directions is None) == (right.directions is None))
+            ):
+                if left.coordinates.shape[1] != right.coordinates.shape[1]:
+                    raise ValueError("Source points must use one coordinate dimension")
+                left.coordinates = np.concatenate((left.coordinates, right.coordinates))
+                if left.directions is not None:
+                    assert right.directions is not None
+                    if left.directions.shape[1] != right.directions.shape[1]:
+                        raise ValueError("Source directions must use one dimension")
+                    left.directions = np.concatenate(
+                        (left.directions, right.directions)
+                    )
+                if left.names is not None or right.names is not None:
+                    left_names = left.names or [
+                        f"source_{index:06d}"
+                        for index in range(
+                            1, len(left.coordinates) - len(right.coordinates) + 1
+                        )
+                    ]
+                    right_names = right.names or [
+                        f"source_{index:06d}"
+                        for index in range(1, len(right.coordinates) + 1)
+                    ]
+                    left.names = [*left_names, *right_names]
+                return
+        self.sources.extend(other.sources)
+
+    def _inline_rows(self, ctx: Optional[ExportContext]) -> List[Dict[str, Any]]:
+        """Serialize inline storage, expanding rows only for small JSON payloads."""
+
+        if isinstance(self._storage, _InlineSourceGeometry):
+            return [
+                source.to_fs(ctx, include_domain=False)
+                for source in self._storage.sources
+            ]
+        storage = self._storage
+        if not isinstance(storage, _BulkSourceGeometry):
             return []
-        return [
-            source.name if source.name is not None else f"source_{index:06d}"
-            for index, source in enumerate(self.sources, start=1)
-        ]
+        rows = []
+        for index, coordinates in enumerate(storage.coordinates):
+            coordinate_value: Any = coordinates.tolist()
+            if (
+                storage.units is not None
+                or storage.system is not None
+                or storage.coordinate_extra
+            ):
+                coordinate_value = CoordinateValue(
+                    coordinate_value,
+                    units=storage.units,
+                    system=storage.system,
+                    extra=copy.deepcopy(storage.coordinate_extra),
+                )
+            source = PointSource(
+                name=(storage.names[index] if storage.names is not None else None),
+                coordinates=coordinate_value,
+                direction=(
+                    storage.directions[index].tolist()
+                    if storage.directions is not None
+                    else None
+                ),
+            )
+            rows.append(source.to_fs(ctx, include_domain=False))
+        return rows
 
     def coordinates(self) -> np.ndarray:
         """Return inline source-point coordinates as a numeric array."""
@@ -797,6 +1293,8 @@ class SourceGeometry(ExtraFieldsMixin):
             raise ValueError(
                 "Source coordinates are only available for inline geometry"
             )
+        if isinstance(self._storage, _BulkSourceGeometry):
+            return self._storage.coordinates.copy()
         values = []
         for source in self.sources:
             coords = source.coordinates
@@ -814,20 +1312,37 @@ class SourceGeometry(ExtraFieldsMixin):
             raise ValueError(
                 "Source coordinates are only available for inline geometry"
             )
+        if isinstance(self._storage, _BulkSourceGeometry):
+            storage = self._storage
+            if (
+                storage.units is None
+                and storage.system is None
+                and not storage.coordinate_extra
+            ):
+                return [row.copy() for row in storage.coordinates]
+            return [
+                CoordinateValue(
+                    row.tolist(),
+                    units=storage.units,
+                    system=storage.system,
+                    extra=copy.deepcopy(storage.coordinate_extra),
+                )
+                for row in storage.coordinates
+            ]
         return [copy.deepcopy(source.coordinates) for source in self.sources]
 
 
 @dataclass
-class DistributedSource:
-    """One simulated source field distributed over physical point sources."""
+class EncodedSource:
+    """One encoded solver source field over physical source points."""
 
     name: Optional[str] = None
     terms: Dict[str, Any] = field(default_factory=dict)
-    coefficients: Optional[Sequence[Any]] = None
+    coefficients: Optional[Union[Sequence[Any], np.ndarray]] = None
     reference_coordinates: Optional[Any] = None
 
     @classmethod
-    def named(cls, name: str, terms: Mapping[str, Any]) -> "DistributedSource":
+    def named(cls, name: str, terms: Mapping[str, Any]) -> "EncodedSource":
         return cls(name=name, terms=dict(terms))
 
     @classmethod
@@ -837,15 +1352,26 @@ class DistributedSource:
         *,
         name: Optional[str] = None,
         reference_coordinates: Optional[Any] = None,
-    ) -> "DistributedSource":
+    ) -> "EncodedSource":
+        if reference_coordinates is not None:
+            warnings.warn(
+                "EncodedSource reference_coordinates is deprecated; use the "
+                "simulation coordinate system and physical source geometry",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return cls(
             name=name,
-            coefficients=list(coefficients),
+            coefficients=_source_coefficient_array(
+                coefficients,
+                ndim=1,
+                label="EncodedSource coefficients",
+            ),
             reference_coordinates=reference_coordinates,
         )
 
     @classmethod
-    def from_named_fs(cls, data: Mapping[str, Any]) -> "DistributedSource":
+    def from_named_fs(cls, data: Mapping[str, Any]) -> "EncodedSource":
         payload = copy.deepcopy(dict(data))
         terms = {
             str(term["source"]): term["coefficient"]
@@ -854,11 +1380,15 @@ class DistributedSource:
         return cls(name=payload.pop("name", None), terms=terms)
 
     @classmethod
-    def from_dense_fs(cls, data: Mapping[str, Any]) -> "DistributedSource":
+    def from_dense_fs(cls, data: Mapping[str, Any]) -> "EncodedSource":
         payload = copy.deepcopy(dict(data))
         return cls(
             name=payload.pop("name", None),
-            coefficients=payload.pop("coefficients"),
+            coefficients=_source_coefficient_array(
+                payload.pop("coefficients"),
+                ndim=1,
+                label="EncodedSource coefficients",
+            ),
             reference_coordinates=(
                 CoordinateValue.from_fs(payload.pop("reference_coordinates"))
                 if "reference_coordinates" in payload
@@ -868,7 +1398,7 @@ class DistributedSource:
 
     def to_named_fs(self) -> Dict[str, Any]:
         if not self.terms:
-            raise ValueError("DistributedSource requires at least one term")
+            raise ValueError("EncodedSource requires at least one term")
         payload: Dict[str, Any] = {
             **({"name": self.name} if self.name is not None else {}),
             "terms": [
@@ -878,15 +1408,15 @@ class DistributedSource:
             ],
         }
         if not payload["terms"]:
-            raise ValueError("DistributedSource needs a nonzero coefficient")
+            raise ValueError("EncodedSource needs a nonzero coefficient")
         return payload
 
     def to_dense_fs(self) -> Dict[str, Any]:
         if self.coefficients is None:
-            raise ValueError("Dense DistributedSource requires coefficients")
+            raise ValueError("Dense EncodedSource requires coefficients")
         coefficients = [_complex_to_fs(value) for value in self.coefficients]
         if not any(_coefficient_abs(value) != 0.0 for value in self.coefficients):
-            raise ValueError("Dense DistributedSource needs a nonzero coefficient")
+            raise ValueError("Dense EncodedSource needs a nonzero coefficient")
         payload: Dict[str, Any] = {
             **({"name": self.name} if self.name is not None else {}),
             "coefficients": coefficients,
@@ -897,52 +1427,420 @@ class DistributedSource:
             )
         return payload
 
+    def conjugated(self) -> "EncodedSource":
+        """Return a copy with all source-encoding coefficients conjugated."""
+
+        source = copy.deepcopy(self)
+        source.terms = {
+            name: _complex_value(value).conjugate()
+            for name, value in source.terms.items()
+        }
+        if source.coefficients is not None:
+            source.coefficients = np.conjugate(source.coefficients)
+        return source
+
+    time_reversed = conjugated
+
+
+class DistributedSource(EncodedSource):
+    """Deprecated name for :class:`EncodedSource`."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        warnings.warn(
+            "DistributedSource is deprecated; use EncodedSource.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)
+
+
+@dataclass
+class _NamedSourceEncoding:
+    fields: List[EncodedSource]
+
+
+@dataclass
+class _DenseSourceEncoding:
+    fields: List[EncodedSource]
+    coefficients: np.ndarray
+
+
+@dataclass
+class _FrequencyDenseSourceEncoding:
+    fields: List[EncodedSource]
+    coefficients: np.ndarray
+    frequencies: np.ndarray
+
+
+@dataclass
+class _HDF5SourceEncoding:
+    file: Union[str, Path]
+    dataset: str
+    field_names_dataset: Optional[str] = None
+    frequencies_dataset: Optional[str] = None
+    count: Optional[int] = None
+
+
+SourceEncodingStorage = Union[
+    _NamedSourceEncoding,
+    _DenseSourceEncoding,
+    _FrequencyDenseSourceEncoding,
+    _HDF5SourceEncoding,
+]
+
 
 @dataclass(init=False)
 class SourceEncoding(ExtraFieldsMixin):
-    """Optional encoding from physical source points to RHS/source fields."""
+    """Optional source encoding with one concrete storage representation."""
 
-    encoding_type: str
     name: Optional[str]
-    fields: List[DistributedSource]
-    file: Optional[Union[str, Path]]
-    dataset: Optional[str]
-    field_names_dataset: Optional[str]
-    reference_coordinates_dataset: Optional[str]
-    count: Optional[int]
+    conjugate_coefficients: bool
     extra: Dict[str, Any]
+    _storage: SourceEncodingStorage
 
     def __init__(
         self,
         *,
         encoding_type: str,
         name: Optional[str] = None,
-        fields: Optional[Iterable[DistributedSource]] = None,
+        fields: Optional[Iterable[EncodedSource]] = None,
+        weights: Optional[Any] = None,
+        coefficients: Optional[Any] = None,
+        frequencies: Optional[Any] = None,
         file: Optional[Union[str, Path]] = None,
         dataset: Optional[str] = None,
         field_names_dataset: Optional[str] = None,
-        reference_coordinates_dataset: Optional[str] = None,
+        frequencies_dataset: Optional[str] = None,
         count: Optional[int] = None,
+        conjugate_coefficients: bool = False,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
-        self.encoding_type = encoding_type
         self.name = name
-        self.fields = list(fields or [])
-        self.file = file
-        self.dataset = dataset
-        self.field_names_dataset = field_names_dataset
-        self.reference_coordinates_dataset = reference_coordinates_dataset
-        self.count = None if count is None else int(count)
+        normalized_type = str(encoding_type).strip().lower()
+        field_objects = list(fields or [])
+        if weights is not None and coefficients is not None:
+            raise TypeError("Use either weights or coefficients, not both")
+        if coefficients is not None:
+            warnings.warn(
+                "SourceEncoding(coefficients=...) is deprecated; use "
+                "weights= with encoding-major axes instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            matrix_values: Optional[Any] = np.swapaxes(np.asarray(coefficients), -1, -2)
+        else:
+            matrix_values = weights
+        matrix = (
+            None
+            if matrix_values is None
+            else _source_coefficient_array(
+                matrix_values,
+                ndim=3 if normalized_type == "frequencydense" else 2,
+                label="SourceEncoding weights",
+            )
+        )
+        frequency_axis = None
+        if frequencies is not None:
+            frequency_axis = np.asarray(frequencies, dtype=np.float64)
+            if frequency_axis.ndim != 1 or frequency_axis.size < 1:
+                raise ValueError("SourceEncoding frequencies must be one-dimensional")
+            if not np.all(np.isfinite(frequency_axis)):
+                raise ValueError("SourceEncoding frequencies must be finite")
+            if np.any(frequency_axis < 0.0):
+                raise ValueError("SourceEncoding frequencies must be nonnegative")
+            if np.unique(frequency_axis).size != frequency_axis.size:
+                raise ValueError("SourceEncoding frequencies must be unique")
+            frequency_axis = np.ascontiguousarray(frequency_axis)
+        legacy_reference_dataset = kwargs.pop("reference_coordinates_dataset", None)
+        if legacy_reference_dataset is not None:
+            warnings.warn(
+                "reference_coordinates_dataset is deprecated and ignored; Sauce "
+                "computes encoded-source reference coordinates from source geometry",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        normalized_count = None if count is None else int(count)
+        if not isinstance(conjugate_coefficients, (bool, np.bool_)):
+            raise TypeError("conjugate_coefficients must be boolean")
+        self.conjugate_coefficients = bool(conjugate_coefficients)
         self._init_extra(extra, **kwargs)
-        self._validate()
+        if normalized_type == "named":
+            if not field_objects:
+                raise ValueError("Named source encoding requires fields")
+            if matrix is not None or file is not None or dataset:
+                raise ValueError(
+                    "Named source encoding cannot include dense or HDF5 storage"
+                )
+            if (
+                field_names_dataset is not None
+                or frequencies_dataset is not None
+                or normalized_count is not None
+                or frequency_axis is not None
+            ):
+                raise ValueError("Named source encoding cannot include HDF5 metadata")
+            self._storage = _NamedSourceEncoding(field_objects)
+        elif normalized_type == "jsondense":
+            if matrix is None:
+                if not field_objects:
+                    raise ValueError("JsonDense source encoding requires fields")
+                columns = [
+                    _source_coefficient_array(
+                        field_obj.coefficients,
+                        ndim=1,
+                        label="EncodedSource coefficients",
+                    )
+                    for field_obj in field_objects
+                ]
+                lengths = {len(column) for column in columns}
+                if len(lengths) != 1:
+                    raise ValueError(
+                        "JsonDense fields must have the same source coefficient count"
+                    )
+                matrix = np.stack(columns).astype(np.complex64, copy=False)
+            if not field_objects:
+                raise ValueError("JsonDense source encoding requires fields")
+            if file is not None or dataset:
+                raise ValueError(
+                    "JsonDense source encoding cannot include HDF5 storage"
+                )
+            if (
+                field_names_dataset is not None
+                or frequencies_dataset is not None
+                or normalized_count is not None
+                or frequency_axis is not None
+            ):
+                raise ValueError(
+                    "JsonDense source encoding cannot include HDF5 metadata"
+                )
+            if matrix.shape[0] != len(field_objects):
+                raise ValueError(
+                    "JsonDense weight rows must match the encoded field count"
+                )
+            self._storage = _DenseSourceEncoding(field_objects, matrix)
+            for index, field_obj in enumerate(field_objects):
+                field_obj.coefficients = matrix[index, :]
+        elif normalized_type == "frequencydense":
+            if matrix is None or frequency_axis is None or not field_objects:
+                raise ValueError(
+                    "FrequencyDense source encoding requires weights, "
+                    "frequencies, and fields"
+                )
+            if file is not None or dataset:
+                raise ValueError(
+                    "FrequencyDense source encoding cannot include HDF5 storage"
+                )
+            if field_names_dataset is not None or frequencies_dataset is not None:
+                raise ValueError(
+                    "FrequencyDense source encoding cannot include HDF5 metadata"
+                )
+            if normalized_count is not None:
+                raise ValueError("FrequencyDense source encoding infers its count")
+            if matrix.shape[0] != frequency_axis.size:
+                raise ValueError("FrequencyDense weight slices must match frequencies")
+            if matrix.shape[1] != len(field_objects):
+                raise ValueError("FrequencyDense weight rows must match encoded names")
+            self._storage = _FrequencyDenseSourceEncoding(
+                field_objects,
+                matrix,
+                frequency_axis,
+            )
+        elif normalized_type == "hdf5dense":
+            if file is None or not dataset:
+                raise ValueError("HDF5Dense source encoding requires file and dataset")
+            if field_names_dataset is not None and not str(field_names_dataset).strip():
+                raise ValueError(
+                    "HDF5Dense source field_names_dataset must not be empty"
+                )
+            if frequencies_dataset is not None and not str(frequencies_dataset).strip():
+                raise ValueError(
+                    "HDF5Dense source frequencies_dataset must not be empty"
+                )
+            if field_objects or matrix is not None:
+                raise ValueError(
+                    "HDF5Dense source encoding cannot include inline fields"
+                )
+            self._storage = _HDF5SourceEncoding(
+                file=file,
+                dataset=str(dataset),
+                field_names_dataset=field_names_dataset,
+                frequencies_dataset=frequencies_dataset,
+                count=normalized_count,
+            )
+        else:
+            raise ValueError(
+                "source encoding type must be Named, JsonDense, FrequencyDense, "
+                "or HDF5Dense"
+            )
+        if normalized_count is not None and normalized_count < 1:
+            raise ValueError("source encoding count must be >= 1")
+        self._validate_fields()
+
+    @property
+    def encoding_type(self) -> str:
+        if isinstance(self._storage, _NamedSourceEncoding):
+            return "Named"
+        if isinstance(self._storage, _DenseSourceEncoding):
+            return "JsonDense"
+        if isinstance(self._storage, _FrequencyDenseSourceEncoding):
+            return "FrequencyDense"
+        return "HDF5Dense"
+
+    @property
+    def fields(self) -> List[EncodedSource]:
+        return getattr(self._storage, "fields", [])
+
+    @property
+    def coefficients(self) -> Optional[np.ndarray]:
+        """Compatibility alias for :attr:`weights`."""
+
+        return self.weights
+
+    @property
+    def weights(self) -> Optional[np.ndarray]:
+        """Encoding-major complex weights.
+
+        Static weights have shape ``(encoded_source, physical_source)``;
+        frequency-dependent weights have shape
+        ``(frequency, encoded_source, physical_source)``.
+        """
+
+        if isinstance(
+            self._storage,
+            (_DenseSourceEncoding, _FrequencyDenseSourceEncoding),
+        ):
+            return self._storage.coefficients
+        return None
+
+    @property
+    def frequencies(self) -> Optional[np.ndarray]:
+        if isinstance(self._storage, _FrequencyDenseSourceEncoding):
+            return self._storage.frequencies
+        return None
+
+    @property
+    def file(self) -> Optional[Union[str, Path]]:
+        return (
+            self._storage.file
+            if isinstance(self._storage, _HDF5SourceEncoding)
+            else None
+        )
+
+    @property
+    def dataset(self) -> Optional[str]:
+        return (
+            self._storage.dataset
+            if isinstance(self._storage, _HDF5SourceEncoding)
+            else None
+        )
+
+    @property
+    def field_names_dataset(self) -> Optional[str]:
+        if isinstance(self._storage, _HDF5SourceEncoding):
+            return self._storage.field_names_dataset
+        return None
+
+    @property
+    def frequencies_dataset(self) -> Optional[str]:
+        if isinstance(self._storage, _HDF5SourceEncoding):
+            return self._storage.frequencies_dataset
+        return None
+
+    @property
+    def count(self) -> Optional[int]:
+        return (
+            self._storage.count
+            if isinstance(self._storage, _HDF5SourceEncoding)
+            else None
+        )
+
+    def _validate_fields(self) -> None:
+        """Validate fields after the concrete storage variant is selected."""
+
+        if self.encoding_type == "Named":
+            if any(
+                field.coefficients is not None
+                or field.reference_coordinates is not None
+                for field in self.fields
+            ):
+                raise ValueError(
+                    "Named source fields cannot include dense coefficients or "
+                    "reference coordinates"
+                )
+            for field_obj in self.fields:
+                if not field_obj.terms:
+                    raise ValueError("Named source fields require at least one term")
+                values = np.asarray(
+                    [_complex_value(value) for value in field_obj.terms.values()],
+                    dtype=np.complex64,
+                )
+                if not np.any(values != 0.0):
+                    raise ValueError("Named source fields require a nonzero term")
+        elif self.encoding_type == "JsonDense":
+            if any(field.terms for field in self.fields):
+                raise ValueError("JsonDense source fields cannot include named terms")
+            self.validate_dense_shape()
+            if not np.all(np.any(self.weights != 0.0, axis=1)):
+                raise ValueError(
+                    "Every JsonDense source field requires a nonzero coefficient"
+                )
+        elif self.encoding_type == "FrequencyDense":
+            if any(
+                field.terms
+                or field.coefficients is not None
+                or field.reference_coordinates is not None
+                for field in self.fields
+            ):
+                raise ValueError(
+                    "FrequencyDense fields contain names only; coefficients and "
+                    "coordinates live in bulk storage"
+                )
+            self.validate_dense_shape()
+            if not np.all(np.any(self.weights != 0.0, axis=2)):
+                raise ValueError(
+                    "Every FrequencyDense field requires a nonzero coefficient "
+                    "at every frequency"
+                )
+
+    def validate_dense_shape(self, source_count: Optional[int] = None) -> None:
+        """Validate dense rows and absorb compatible field assignment."""
+
+        if isinstance(self._storage, _FrequencyDenseSourceEncoding):
+            if source_count is not None and self._storage.coefficients.shape[2] != int(
+                source_count
+            ):
+                raise ValueError(
+                    "FrequencyDense source dimension must match physical "
+                    "source-point count"
+                )
+            return
+        if not isinstance(self._storage, _DenseSourceEncoding):
+            return
+        matrix = self._storage.coefficients
+        for index, field_obj in enumerate(self._storage.fields):
+            values = _source_coefficient_array(
+                field_obj.coefficients,
+                ndim=1,
+                label="EncodedSource coefficients",
+            )
+            if len(values) != matrix.shape[1]:
+                raise ValueError(
+                    "JsonDense coefficient count must match physical source-point count"
+                )
+            if not np.shares_memory(values, matrix):
+                matrix[index, :] = values
+                field_obj.coefficients = matrix[index, :]
+        if source_count is not None and matrix.shape[1] != int(source_count):
+            raise ValueError(
+                "JsonDense coefficient count must match physical source-point count"
+            )
 
     @classmethod
     def named(
         cls,
         fields: Union[
             Mapping[str, Mapping[str, Any]],
-            Iterable[Union[DistributedSource, Mapping[str, Any]]],
+            Iterable[Union[EncodedSource, Mapping[str, Any]]],
         ],
         *,
         name: Optional[str] = None,
@@ -952,15 +1850,15 @@ class SourceEncoding(ExtraFieldsMixin):
 
         if isinstance(fields, Mapping):
             field_objects = [
-                DistributedSource.named(field_name, terms)
+                EncodedSource.named(field_name, terms)
                 for field_name, terms in fields.items()
             ]
         else:
             field_objects = [
                 (
                     field
-                    if isinstance(field, DistributedSource)
-                    else DistributedSource.from_named_fs(field)
+                    if isinstance(field, EncodedSource)
+                    else EncodedSource.from_named_fs(field)
                 )
                 for field in fields
             ]
@@ -974,30 +1872,78 @@ class SourceEncoding(ExtraFieldsMixin):
     @classmethod
     def dense(
         cls,
-        coefficients: Any,
+        weights: Optional[Any] = None,
         *,
+        coefficients: Optional[Any] = None,
         names: Optional[Iterable[str]] = None,
         reference_coordinates: Optional[Any] = None,
         name: Optional[str] = None,
+        conjugate: bool = False,
         **kwargs: Any,
     ) -> "SourceEncoding":
-        """Create JSON dense encoding from an ``n_source x n_field`` matrix."""
+        """Create dense encoding from an ``n_encoded x n_source`` matrix.
 
-        matrix = np.asarray(coefficients)
+        Each row defines one encoded field and each column follows physical
+        source-geometry order. Positional input and ``weights=`` use the same
+        field-major convention as the solver's JSON and HDF5 contracts. The
+        deprecated ``coefficients=`` keyword accepts source-major input and
+        transposes it; positional input is never transposed implicitly.
+
+        Saved simulations materialize the coefficients in HDF5. Calling
+        :meth:`to_fs` without a store retains a compact JSON representation for
+        interactive examples and compatibility.
+
+        Args:
+            weights: Real or complex encoding-major weight matrix.
+            names: Optional encoded-source labels.
+            reference_coordinates: Optional reference coordinate per field.
+            name: Optional encoding name.
+            conjugate: Conjugate the authored coefficients, which implements
+                frequency-domain time reversal for forward responses.
+        """
+
+        if weights is not None and coefficients is not None:
+            raise TypeError("Use either weights or coefficients, not both")
+        if coefficients is not None:
+            warnings.warn(
+                "SourceEncoding.dense(coefficients=...) is deprecated; use "
+                "weights= with encoding-major axes instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            matrix = np.asarray(coefficients)
+            matrix = (
+                matrix.reshape(1, -1)
+                if matrix.ndim == 1
+                else np.swapaxes(matrix, -1, -2)
+            )
+        elif weights is not None:
+            matrix = np.asarray(weights)
+        else:
+            raise TypeError("SourceEncoding.dense() requires weights")
         if matrix.ndim == 1:
-            matrix = matrix.reshape(-1, 1)
-        if matrix.ndim != 2:
-            raise ValueError("dense coefficients must have shape (n_source, n_field)")
-        n_fields = int(matrix.shape[1])
+            matrix = matrix.reshape(1, -1)
+        matrix = _source_coefficient_array(
+            matrix,
+            ndim=2,
+            label="dense weights",
+        )
+        n_fields = int(matrix.shape[0])
         field_names = (
             _source_names(names, n_fields)
             if names is not None
-            else [f"field_{index:03d}" for index in range(1, n_fields + 1)]
+            else [f"field_{index:06d}" for index in range(1, n_fields + 1)]
         )
+        if reference_coordinates is not None:
+            warnings.warn(
+                "SourceEncoding reference_coordinates is deprecated; use the "
+                "simulation coordinate system and physical source geometry",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         refs = _reference_rows(reference_coordinates, n_fields)
         fields = [
-            DistributedSource.dense(
-                matrix[:, index].tolist(),
+            EncodedSource(
                 name=field_names[index],
                 reference_coordinates=refs[index],
             )
@@ -1007,6 +1953,70 @@ class SourceEncoding(ExtraFieldsMixin):
             encoding_type="JsonDense",
             name=name,
             fields=fields,
+            weights=matrix,
+            conjugate_coefficients=conjugate,
+            **kwargs,
+        )
+
+    @classmethod
+    def frequency_dense(
+        cls,
+        weights: Optional[Any] = None,
+        frequencies: Optional[Any] = None,
+        *,
+        coefficients: Optional[Any] = None,
+        names: Optional[Iterable[str]] = None,
+        name: Optional[str] = None,
+        conjugate: bool = False,
+        **kwargs: Any,
+    ) -> "SourceEncoding":
+        """Create frequency-dependent dense source encoding.
+
+        Args:
+            weights: Complex tensor with shape
+                ``(n_frequency, n_encoded, n_source)``.
+            frequencies: Physical frequency in Hz for every tensor slice.
+            names: Optional encoded-field names.
+            name: Optional encoding name.
+            conjugate: Conjugate coefficients lazily in Sauce.
+
+        Saved simulations materialize the tensor and its small frequency axis
+        in HDF5. Inline JSON serialization is intentionally unsupported.
+        """
+
+        if weights is not None and coefficients is not None:
+            raise TypeError("Use either weights or coefficients, not both")
+        if coefficients is not None:
+            warnings.warn(
+                "SourceEncoding.frequency_dense(coefficients=...) is "
+                "deprecated; use weights= with encoding-major axes instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            weights = np.swapaxes(np.asarray(coefficients), -1, -2)
+        if weights is None:
+            raise TypeError("SourceEncoding.frequency_dense() requires weights")
+        if frequencies is None:
+            raise TypeError("SourceEncoding.frequency_dense() requires frequencies")
+        tensor = _source_coefficient_array(
+            weights,
+            ndim=3,
+            label="frequency-dependent dense weights",
+        )
+        n_fields = int(tensor.shape[1])
+        field_names = (
+            _source_names(names, n_fields)
+            if names is not None
+            else [f"field_{index:06d}" for index in range(1, n_fields + 1)]
+        )
+        fields = [EncodedSource(name=field_name) for field_name in field_names]
+        return cls(
+            encoding_type="FrequencyDense",
+            name=name,
+            fields=fields,
+            weights=tensor,
+            frequencies=frequencies,
+            conjugate_coefficients=conjugate,
             **kwargs,
         )
 
@@ -1018,25 +2028,36 @@ class SourceEncoding(ExtraFieldsMixin):
         dataset: str,
         name: Optional[str] = None,
         field_names_dataset: Optional[str] = None,
-        reference_coordinates_dataset: Optional[str] = None,
+        frequencies_dataset: Optional[str] = None,
         count: Optional[int] = None,
+        conjugate: bool = False,
         **kwargs: Any,
     ) -> "SourceEncoding":
         """Create HDF5 dense source encoding.
 
-        The coefficient dataset uses h5py shape
-        ``(encoded_field_count, source_count, 2)``. The final axis stores the
-        real and imaginary components expected by Solver.
+        Static weights use h5py shape ``(field, source, complex=2)``.
+        Frequency-dependent weights use shape
+        ``(frequency, field, source, complex=2)`` and require
+        ``frequencies_dataset``.
         """
 
+        legacy_reference_dataset = kwargs.pop("reference_coordinates_dataset", None)
+        if legacy_reference_dataset is not None:
+            warnings.warn(
+                "reference_coordinates_dataset is deprecated and ignored; Sauce "
+                "computes encoded-source reference coordinates from source geometry",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return cls(
             encoding_type="HDF5Dense",
             name=name,
             file=file,
             dataset=dataset,
             field_names_dataset=field_names_dataset,
-            reference_coordinates_dataset=reference_coordinates_dataset,
+            frequencies_dataset=frequencies_dataset,
             count=count,
+            conjugate_coefficients=conjugate,
             **kwargs,
         )
 
@@ -1048,16 +2069,20 @@ class SourceEncoding(ExtraFieldsMixin):
             raise ValueError("SourceEncoding payload requires _type or encoding_type")
         if encoding_type == "Named":
             fields = [
-                DistributedSource.from_named_fs(field)
+                EncodedSource.from_named_fs(field)
                 for field in payload.pop("fields", [])
             ]
         elif encoding_type == "JsonDense":
             fields = [
-                DistributedSource.from_dense_fs(field)
+                EncodedSource.from_dense_fs(field)
                 for field in payload.pop("fields", [])
             ]
         else:
             fields = []
+        legacy_reference_dataset = payload.pop(
+            "reference_coordinates_dataset",
+            None,
+        )
         return cls(
             encoding_type=encoding_type,
             name=payload.pop("name", None),
@@ -1065,47 +2090,165 @@ class SourceEncoding(ExtraFieldsMixin):
             file=payload.pop("file", None),
             dataset=payload.pop("dataset", None),
             field_names_dataset=payload.pop("field_names_dataset", None),
-            reference_coordinates_dataset=payload.pop(
-                "reference_coordinates_dataset", None
-            ),
+            frequencies_dataset=payload.pop("frequencies_dataset", None),
             count=payload.pop("count", payload.pop("field_count", None)),
+            conjugate_coefficients=payload.pop("conjugate_coefficients", False),
             extra=payload,
+            **(
+                {"reference_coordinates_dataset": legacy_reference_dataset}
+                if legacy_reference_dataset is not None
+                else {}
+            ),
         )
 
-    def _validate(self) -> None:
-        if self.encoding_type not in {"Named", "JsonDense", "HDF5Dense"}:
-            raise ValueError(
-                "source encoding type must be Named, JsonDense, or HDF5Dense"
-            )
-        if self.encoding_type in {"Named", "JsonDense"} and not self.fields:
-            raise ValueError(f"{self.encoding_type} source encoding requires fields")
-        if self.encoding_type == "HDF5Dense" and (
-            self.file is None or not self.dataset
-        ):
-            raise ValueError("HDF5Dense source encoding requires file and dataset")
-        if self.count is not None and self.count < 1:
-            raise ValueError("source encoding count must be >= 1")
-
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
+        self.validate_dense_shape()
+        store = getattr(ctx, "store", None) if ctx is not None else None
+        if self.encoding_type == "FrequencyDense":
+            if store is None:
+                raise ValueError(
+                    "FrequencyDense source encoding requires a simulation/project "
+                    "store so coefficients can be materialized in HDF5"
+                )
+            tensor = self.weights
+            assert tensor is not None and self.frequencies is not None
+            n_frequency, n_field, n_source = tensor.shape
+
+            def coefficient_chunks() -> Iterator[np.ndarray]:
+                target_bytes = 32 * 1024 * 1024
+                slice_bytes = max(
+                    1,
+                    n_field * n_source * 2 * np.dtype(np.float32).itemsize,
+                )
+                slices_per_chunk = max(1, target_bytes // slice_bytes)
+                for start in range(0, n_frequency, slices_per_chunk):
+                    stop = min(n_frequency, start + slices_per_chunk)
+                    values = tensor[start:stop]
+                    split = np.empty((*values.shape, 2), dtype=np.float32)
+                    split[..., 0] = values.real
+                    split[..., 1] = values.imag
+                    yield split
+
+            ref = store.put_array_chunks(
+                "inputs/acquisition/source_encoding/coefficients",
+                (n_frequency, n_field, n_source, 2),
+                coefficient_chunks,
+                attrs={
+                    "fs_kind": "source_encoding_coefficients",
+                    "frequency_axis_hash": hashlib.sha256(
+                        memoryview(self.frequencies).cast("B")
+                    ).hexdigest(),
+                },
+                dims=("frequency", "field", "source", "complex"),
+                dtype=np.float32,
+            )
+            frequency_ref = store.put_array_chunks(
+                "inputs/acquisition/source_encoding/frequencies",
+                (n_frequency,),
+                lambda: (self.frequencies,),
+                attrs={
+                    "fs_kind": "source_encoding_frequencies",
+                    "units": "Hz",
+                },
+                dims=("frequency",),
+                dtype=np.float64,
+            )
+            payload = {
+                "_type": "HDF5Dense",
+                **({"name": self.name} if self.name is not None else {}),
+                **ref.to_fs(),
+                "frequencies_dataset": frequency_ref.clean_dataset,
+                **(
+                    {"conjugate_coefficients": True}
+                    if self.conjugate_coefficients
+                    else {}
+                ),
+            }
+            field_names = self.field_names()
+            default_names = [f"field_{index:06d}" for index in range(1, n_field + 1)]
+            if field_names != default_names:
+                names_ref = store.put_string_array(
+                    "inputs/acquisition/source_encoding/field_names",
+                    field_names,
+                    dimension="field",
+                    attrs={"fs_kind": "source_encoding_field_names"},
+                )
+                payload["field_names_dataset"] = names_ref.clean_dataset
+            return payload
+
+        if self.encoding_type == "JsonDense" and store is not None:
+            matrix = self.weights
+            assert matrix is not None
+            n_field, n_source = matrix.shape
+
+            def coefficient_chunks() -> Iterator[np.ndarray]:
+                target_bytes = 32 * 1024 * 1024
+                row_bytes = max(1, n_source * 2 * np.dtype(np.float32).itemsize)
+                rows_per_chunk = max(1, target_bytes // row_bytes)
+                for start in range(0, n_field, rows_per_chunk):
+                    stop = min(n_field, start + rows_per_chunk)
+                    values = matrix[start:stop, :]
+                    split = np.empty((*values.shape, 2), dtype=np.float32)
+                    split[..., 0] = values.real
+                    split[..., 1] = values.imag
+                    yield split
+
+            ref = store.put_array_chunks(
+                "inputs/acquisition/source_encoding/coefficients",
+                (n_field, n_source, 2),
+                coefficient_chunks,
+                attrs={"fs_kind": "source_encoding_coefficients"},
+                dims=("field", "source", "complex"),
+                dtype=np.float32,
+            )
+            payload = {
+                "_type": "HDF5Dense",
+                **({"name": self.name} if self.name is not None else {}),
+                **ref.to_fs(),
+                **(
+                    {"conjugate_coefficients": True}
+                    if self.conjugate_coefficients
+                    else {}
+                ),
+            }
+            field_names = self.field_names()
+            default_names = [f"field_{index:06d}" for index in range(1, n_field + 1)]
+            if field_names != default_names:
+                names_ref = store.put_string_array(
+                    "inputs/acquisition/source_encoding/field_names",
+                    field_names,
+                    dimension="field",
+                    attrs={"fs_kind": "source_encoding_field_names"},
+                )
+                payload["field_names_dataset"] = names_ref.clean_dataset
+            return payload
+
+        payload = {
             "_type": self.encoding_type,
             **({"name": self.name} if self.name is not None else {}),
         }
         if self.encoding_type == "Named":
             payload["fields"] = [field.to_named_fs() for field in self.fields]
         elif self.encoding_type == "JsonDense":
+            assert self.weights is not None
+            if self.weights.size > 256:
+                raise ValueError(
+                    "JsonDense source encoding is limited to 256 coefficients; "
+                    "save through a simulation/project context to materialize HDF5"
+                )
             payload["fields"] = [field.to_dense_fs() for field in self.fields]
         else:
+            assert self.file is not None
             payload["file"] = _path_to_fs(self.file, ctx)
             payload["dataset"] = self.dataset
             if self.field_names_dataset is not None:
                 payload["field_names_dataset"] = self.field_names_dataset
-            if self.reference_coordinates_dataset is not None:
-                payload["reference_coordinates_dataset"] = (
-                    self.reference_coordinates_dataset
-                )
+            if self.frequencies_dataset is not None:
+                payload["frequencies_dataset"] = self.frequencies_dataset
             if self.count is not None:
                 payload["count"] = self.count
+        if self.conjugate_coefficients:
+            payload["conjugate_coefficients"] = True
         return merge_extra(payload, self.extra, "SourceEncoding")
 
     @property
@@ -1118,7 +2261,7 @@ class SourceEncoding(ExtraFieldsMixin):
         if self.encoding_type == "HDF5Dense":
             return []
         return [
-            field.name if field.name is not None else f"field_{index:03d}"
+            field.name if field.name is not None else f"field_{index:06d}"
             for index, field in enumerate(self.fields, start=1)
         ]
 
@@ -1131,25 +2274,88 @@ class SourceEncoding(ExtraFieldsMixin):
         needs_computed_reference = any(
             field.reference_coordinates is None for field in self.fields
         )
+        bulk_storage = (
+            geometry._storage
+            if isinstance(geometry._storage, _BulkSourceGeometry)
+            else None
+        )
         source_values: List[Any] = []
         index_by_name: Dict[str, int] = {}
-        if needs_computed_reference:
+        if needs_computed_reference and bulk_storage is None:
             source_values = geometry.coordinate_values()
+            source_names = geometry.point_names()
+            index_by_name = {name: index for index, name in enumerate(source_names)}
+        elif needs_computed_reference and self.encoding_type == "Named":
             source_names = geometry.point_names()
             index_by_name = {name: index for index, name in enumerate(source_names)}
         refs = []
 
-        for field_obj in self.fields:
+        for field_index, field_obj in enumerate(self.fields):
             explicit_ref = field_obj.reference_coordinates
             if explicit_ref is not None:
                 refs.append(copy.deepcopy(explicit_ref))
                 continue
 
-            if self.encoding_type == "Named":
+            if bulk_storage is not None and self.encoding_type == "Named":
+                indices = np.fromiter(
+                    (index_by_name[str(source)] for source in field_obj.terms),
+                    dtype=np.int64,
+                    count=len(field_obj.terms),
+                )
+                weights = np.fromiter(
+                    (
+                        _coefficient_abs(coefficient)
+                        for coefficient in field_obj.terms.values()
+                    ),
+                    dtype=np.float64,
+                    count=len(field_obj.terms),
+                )
+                active = weights != 0.0
+                source_coords = bulk_storage.coordinates[indices[active]]
+                weights = weights[active]
+                source_units = bulk_storage.units
+                source_system = bulk_storage.system
+            elif self.encoding_type == "Named":
                 weights = np.zeros(len(source_values), dtype=float)
                 for source, coefficient in field_obj.terms.items():
                     weights[index_by_name[str(source)]] += _coefficient_abs(coefficient)
+                active_indices = np.flatnonzero(weights != 0.0)
+                source_coords, source_units, source_system = _source_coordinate_matrix(
+                    [source_values[index] for index in active_indices]
+                )
+                weights = weights[active_indices]
+            elif isinstance(self._storage, _FrequencyDenseSourceEncoding):
+                weights = np.sqrt(
+                    np.mean(
+                        np.abs(self._storage.coefficients[:, field_index, :]) ** 2,
+                        axis=0,
+                    )
+                )
+                if bulk_storage is not None:
+                    source_coords = bulk_storage.coordinates
+                    source_units = bulk_storage.units
+                    source_system = bulk_storage.system
+                else:
+                    source_coords, source_units, source_system = (
+                        _source_coordinate_matrix(source_values)
+                    )
+                active = weights != 0.0
+                source_coords = source_coords[active]
+                weights = weights[active]
+            elif bulk_storage is not None:
+                weights = np.abs(np.asarray(field_obj.coefficients))
+                if len(weights) != len(bulk_storage.coordinates):
+                    raise ValueError(
+                        "JsonDense coefficient count must match physical "
+                        "source-point count"
+                    )
+                active = weights != 0.0
+                source_coords = bulk_storage.coordinates[active]
+                weights = weights[active]
+                source_units = bulk_storage.units
+                source_system = bulk_storage.system
             else:
+                assert field_obj.coefficients is not None
                 weights = np.asarray(
                     [_coefficient_abs(value) for value in field_obj.coefficients],
                     dtype=float,
@@ -1159,17 +2365,18 @@ class SourceEncoding(ExtraFieldsMixin):
                         "JsonDense coefficient count must match physical "
                         "source-point count"
                     )
-            active_indices = np.flatnonzero(weights != 0.0)
-            total = float(np.sum(weights[active_indices]))
+                active_indices = np.flatnonzero(weights != 0.0)
+                source_coords, source_units, source_system = _source_coordinate_matrix(
+                    [source_values[index] for index in active_indices]
+                )
+                weights = weights[active_indices]
+            total = float(np.sum(weights))
             if total <= 0.0:
                 raise ValueError("Cannot compute reference coordinates for zero field")
-            source_coords, source_units, source_system = _source_coordinate_matrix(
-                [source_values[index] for index in active_indices]
-            )
             reference = np.average(
                 source_coords,
                 axis=0,
-                weights=weights[active_indices],
+                weights=weights,
             )
             if source_units is not None or source_system is not None:
                 refs.append(
@@ -1192,121 +2399,29 @@ class SourceEncoding(ExtraFieldsMixin):
             dtype=float,
         )
 
+    def conjugated(self) -> "SourceEncoding":
+        """Return a lazy conjugated view without copying weight arrays."""
 
-class Source:
-    """Compatibility dispatcher for legacy source-group payloads."""
-
-    @classmethod
-    def from_fs(cls, data: Mapping[str, Any]) -> Any:
-        payload = copy.deepcopy(dict(data))
-        source_type = payload.pop("_type", "PointSource")
-        if source_type == "PointSource":
-            return PointSource.from_fs(payload)
-        if source_type == "CompoundSource":
-            return CompoundSource.from_fs(payload)
-        if source_type == "RuptureSource":
-            return RuptureSource.from_fs(payload)
-        raise ValueError(f"Unsupported legacy source type {source_type!r}")
-
-
-@dataclass
-class RuptureSource(Source):
-    """Deprecated legacy SRF source retained for input compatibility."""
-
-    srf_file: str
-    name: str = "rupture"
-
-    @classmethod
-    def from_fs(cls, data: Mapping[str, Any]) -> "RuptureSource":
-        return cls(**copy.deepcopy(dict(data)))
-
-    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
-        return {
-            "_type": "RuptureSource",
-            "srf_file": self.srf_file,
-            "name": self.name,
-        }
-
-
-@dataclass
-class CompoundSource(Source):
-    """Deprecated weighted-point source retained as an adapter input."""
-
-    kind: str
-    coordinates: Any = field(default_factory=list)
-    direction: Any = field(default_factory=list)
-    domain: Optional[int] = None
-    name: str = "compound"
-
-    @classmethod
-    def from_fs(cls, data: Mapping[str, Any]) -> "CompoundSource":
-        payload = copy.deepcopy(dict(data))
-        payload.pop("n_points", None)
-        payload.pop("frame", None)
-        if "coordinates" in payload:
-            payload["coordinates"] = CoordinateValue.from_fs(payload["coordinates"])
-        if "direction" in payload:
-            payload["direction"] = Direction.from_fs(payload["direction"])
-        return cls(**payload)
-
-    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
-        return {
-            "_type": "CompoundSource",
-            "name": self.name,
-            "kind": self.kind,
-            "n_points": len(self.coordinates),
-            "coordinates": coordinate_value_to_fs(self.coordinates),
-            **(
-                {"direction": direction_to_fs(self.direction)}
-                if self.direction is not None
-                else {}
+        encoding = copy.copy(self)
+        encoding._storage = copy.copy(self._storage)
+        if isinstance(
+            encoding._storage,
+            (
+                _NamedSourceEncoding,
+                _DenseSourceEncoding,
+                _FrequencyDenseSourceEncoding,
             ),
-            **({"domain": self.domain} if self.domain is not None else {}),
-        }
+        ):
+            encoding._storage.fields = [copy.copy(field) for field in self.fields]
+        encoding.conjugate_coefficients = not self.conjugate_coefficients
+        return encoding
+
+    time_reversed = conjugated
 
 
-@dataclass
-class SourceGroup:
-    """Deprecated logical-source view used by pre-v2 callers."""
-
-    source: Any
-    _proj_path: Optional[Path] = None
-    _rel_path: Optional[Path] = None
-
-    @classmethod
-    def from_fs(cls, data: Mapping[str, Any]) -> "SourceGroup":
-        return cls(source=Source.from_fs(copy.deepcopy(data.get("source", {}))))
-
-    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
-        source = self.source.to_fs(ctx)
-        if isinstance(self.source, PointSource):
-            source = {"_type": "PointSource", **source}
-        return {"source": source}
-
-    def _set_path(self, proj_path: Path, rel_path: Path) -> None:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._set_path")
-        self._proj_path = Path(proj_path)
-        self._rel_path = Path(rel_path)
-
-    def get_coordinates(self) -> np.ndarray:
-        """Return source coordinates as a two-dimensional array."""
-
-        coords = self.source.coordinates
-        if isinstance(coords, CoordinateValue):
-            coords = coords.value
-        if is_quantity(coords):
-            coords = coords.magnitude
-        values = np.asarray(coords, dtype=float)
-        if values.ndim == 1:
-            return values.reshape(1, -1)
-        return values
-
-    def coordinates(self) -> np.ndarray:
-        """Compatibility alias for :meth:`get_coordinates`."""
-
-        return self.get_coordinates()
-
-    @property
-    def _path(self) -> Path:
-        warn_deprecated_path_api(f"{self.__class__.__name__}._path")
-        return self._proj_path / self._rel_path
+from frequensolve.seismic._legacy_source_types import (  # noqa: E402
+    CompoundSource,
+    RuptureSource,
+    Source,
+    SourceGroup,
+)

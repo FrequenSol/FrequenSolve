@@ -13,9 +13,11 @@ from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import CoordsFromFile, ReceiverNode
 from frequensolve.seismic.sources import SourceEncoding, SourceGeometry
+from frequensolve.simulation.discretization import Discretization
 from frequensolve.simulation.jobs import FrequencyDomainJob
 from frequensolve.simulation.outputs import VtkOutput, WavefieldOutput
 from frequensolve.simulation.simulation import SeismicSimulation
+from frequensolve.simulation.solver import SolverConfig
 from frequensolve.units import ureg
 from frequensolve.validation import ValidationError
 
@@ -222,6 +224,51 @@ def test_validation_accepts_component_and_derived_field_selectors(tmp_path):
     report = job.validate()
 
     assert report.ok
+
+
+def test_validation_accepts_galerkin_elastic_velocity_observable(tmp_path):
+    job = _simple_job(
+        tmp_path,
+        physics="elastic",
+        source_kind="vector",
+        receiver_field="velocity_z",
+    )
+    job.simulation.discretization = Discretization(method="Galerkin")
+    job.simulation.solver = SolverConfig(grids=1)
+
+    report = job.validate()
+    payload = job.simulation.to_fs()
+
+    assert report.ok
+    assert payload["physics"] == "elastic"
+    assert payload["Discretization"] == {"method": "Galerkin"}
+    assert payload["Solver"]["grids"] == 1
+
+
+def test_validation_rejects_unavailable_field_for_galerkin_elastic(tmp_path):
+    job = _simple_job(
+        tmp_path,
+        physics="elastic",
+        source_kind="vector",
+        receiver_field="stress",
+    )
+    job.simulation.discretization = Discretization(method="Galerkin")
+
+    report = job.validate()
+
+    assert "field.unsupported" in _codes(report)
+
+
+@pytest.mark.parametrize("grids", [None, 1, 2])
+def test_validation_allows_backend_grid_selection_for_galerkin(tmp_path, grids):
+    job = _simple_job(tmp_path)
+    job.simulation.discretization = Discretization(method="galerkin")
+    job.simulation.solver = SolverConfig(**({} if grids is None else {"grids": grids}))
+
+    report = job.validate()
+
+    assert report.ok
+    assert job.simulation.to_fs()["Discretization"] == {"method": "galerkin"}
 
 
 def test_validation_catches_bad_source_kind(tmp_path):
@@ -639,12 +686,10 @@ def test_validation_rejects_inconsistent_external_source_encoding_metadata(tmp_p
     with h5py.File(encoding_file, "w") as h5:
         h5.create_dataset("coefficients", data=np.ones((2, 1, 2)))
         h5.create_dataset("field_names", data=np.asarray([b"only-one"]))
-        h5.create_dataset("reference_coordinates", data=np.ones((2, 3)))
     job.simulation.acquisition.source_encoding = SourceEncoding.hdf5(
         encoding_file,
         dataset="coefficients",
         field_names_dataset="field_names",
-        reference_coordinates_dataset="reference_coordinates",
         count=2,
     )
 
@@ -652,10 +697,9 @@ def test_validation_rejects_inconsistent_external_source_encoding_metadata(tmp_p
 
     assert not report.ok
     assert "acquisition.source_encoding.field_names.length_mismatch" in _codes(report)
-    assert "acquisition.source_encoding.reference_coordinates.shape" in _codes(report)
 
 
-def test_validation_rejects_complex_external_source_reference_coordinates(tmp_path):
+def test_deprecated_external_source_reference_coordinates_are_ignored(tmp_path):
     job = _simple_job(tmp_path)
     encoding_file = tmp_path / "encoding.h5"
     with h5py.File(encoding_file, "w") as h5:
@@ -664,19 +708,19 @@ def test_validation_rejects_complex_external_source_reference_coordinates(tmp_pa
             "reference_coordinates",
             data=np.asarray([[0.5 + 0.1j, 0.25 + 0.0j]]),
         )
-    job.simulation.acquisition.source_encoding = SourceEncoding.hdf5(
-        encoding_file,
-        dataset="coefficients",
-        reference_coordinates_dataset="reference_coordinates",
-        count=1,
-    )
+    with pytest.warns(DeprecationWarning, match="deprecated and ignored"):
+        job.simulation.acquisition.source_encoding = SourceEncoding.hdf5(
+            encoding_file,
+            dataset="coefficients",
+            reference_coordinates_dataset="reference_coordinates",
+            count=1,
+        )
 
     report = job.validate()
 
-    assert not report.ok
-    assert (
-        "acquisition.source_encoding.reference_coordinates.dataset_numeric"
-        in _codes(report)
+    assert report.ok
+    assert "reference_coordinates_dataset" not in (
+        job.simulation.acquisition.source_encoding.to_fs()
     )
 
 
@@ -778,25 +822,6 @@ def test_validation_rejects_invalid_external_source_encoding_field_names(
 
     assert not report.ok
     assert code in _codes(report)
-
-
-def test_validation_rejects_external_encoding_reference_outside_domain(tmp_path):
-    job = _simple_job(tmp_path)
-    encoding_file = tmp_path / "encoding.h5"
-    with h5py.File(encoding_file, "w") as h5:
-        h5.create_dataset("coefficients", data=np.ones((1, 1, 2)))
-        h5.create_dataset("reference_coordinates", data=[[1.5, 0.25]])
-    job.simulation.acquisition.source_encoding = SourceEncoding.hdf5(
-        encoding_file,
-        dataset="coefficients",
-        reference_coordinates_dataset="reference_coordinates",
-        count=1,
-    )
-
-    report = job.validate()
-
-    assert not report.ok
-    assert "coordinates.domain.outside" in _codes(report)
 
 
 def test_validation_rejects_encoded_source_reference_outside_domain(tmp_path):
