@@ -147,6 +147,10 @@ class AdaptiveScheduler:
             if self.skip_sizing
             else max(1, int(self.total_ranks * self.cap_fraction))
         )
+        rank_limit = int(config.get("max_ranks_per_task", self.total_ranks))
+        if rank_limit < 1 or self.min_ranks > rank_limit:
+            raise ValueError("max_ranks_per_task must be positive and >= min_ranks")
+        self.max_ranks_per_task = min(self.max_ranks_per_task, rank_limit)
         self.running = []
         self.successful_tasks = []
         self.failed_tasks = []
@@ -162,7 +166,9 @@ class AdaptiveScheduler:
         ranks = max(ranks, self.min_ranks)
         ranks = min(ranks, self.max_ranks_per_task, self.total_ranks)
         ranks = _round_up(ranks, self.round_to)
-        return min(max(ranks, self.min_ranks), self.total_ranks)
+        return min(
+            max(ranks, self.min_ranks), self.total_ranks, self.max_ranks_per_task
+        )
 
     def _write_status(self, state: str, *, aborted=None, reason=None):
         running = [entry[3] for entry in self.running]
@@ -292,7 +298,9 @@ class AdaptiveScheduler:
                         max(base, share),
                         int(math.ceil(max(2.0, self.boost_max_factor) * base)),
                     )
-                minimum = min(max(base, self.min_ranks), self.total_ranks)
+                minimum = min(
+                    max(base, self.min_ranks), self.total_ranks, self.max_ranks_per_task
+                )
                 maximum = min(
                     max(maximum, minimum), self.max_ranks_per_task, self.total_ranks
                 )

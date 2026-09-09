@@ -280,3 +280,30 @@ def test_plot_eikonal_draws_field_and_characteristics(tmp_path):
     assert ax.get_xlabel() == "x (m)"
     assert len(ax.collections) >= 3
     plt.close(ax.figure)
+
+
+@pytest.mark.parametrize(
+    "damage", ["bytes", "schema", "missing_group", "manifest", "shape"]
+)
+def test_eikonal_damaged_products_are_scheduled_again(tmp_path, damage):
+    _project, _sim, job = _eikonal_job(tmp_path)
+    job.save()
+    _write_eikonal_product(job)
+    job.write_run_state(status="completed", tasks=[{"task": 1, "status": "success"}])
+    assert job.is_run_current()
+    if damage == "bytes":
+        job.eikonal_hdf5_file.write_bytes(b"interrupted HDF5 output")
+    elif damage == "manifest":
+        job.eikonal_manifest_file.write_text("[]")
+    else:
+        with h5py.File(job.eikonal_hdf5_file, "r+") as h5:
+            if damage == "schema":
+                h5["schema"][()] = "wrong-schema"
+            elif damage == "missing_group":
+                del h5["sources"]
+            else:
+                del h5["field/travel_time"]
+                h5["field/travel_time"] = np.zeros((3, 3))
+    assert not job.results_exist()
+    assert not job.is_run_current()
+    assert job.task_run_plan()["pending_indices"] == [0]

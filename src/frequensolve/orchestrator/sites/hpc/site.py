@@ -2281,6 +2281,11 @@ class SlurmSite(BaseSite):
             )
         task_indices = [int(index) + 1 for index in task_plan["pending_indices"]]
         kwargs.setdefault("skip_sizing", len(task_indices) == 1)
+        job_rank_limit = getattr(job, "max_ranks_per_task", None)
+        if job_rank_limit is not None:
+            kwargs["max_ranks_per_task"] = min(
+                job_rank_limit, int(kwargs.get("max_ranks_per_task", job_rank_limit))
+            )
         run_path = self._remote_run_path(config.run_path, job=job)
         script = self._sweep_SLURM_script(
             n_tasks=len(task_indices),
@@ -2883,6 +2888,11 @@ class SlurmSite(BaseSite):
         min_ranks = int(kwargs.pop("min_ranks", 1))
         round_to = int(kwargs.pop("round_to", 1))
         cap_fraction = float(kwargs.pop("cap_fraction", 1.0))
+        max_ranks_per_task = int(
+            kwargs.pop("max_ranks_per_task", n_nodes * ranks_per_node)
+        )
+        if max_ranks_per_task < 1 or min_ranks > max_ranks_per_task:
+            raise ValueError("max_ranks_per_task must be positive and >= min_ranks")
         kwargs.pop("tail_threshold", None)
         boost_max_factor = float(kwargs.pop("boost_max_factor", 8.0))
         tolerate_failures = _normalize_failure_tolerance(
@@ -2926,6 +2936,7 @@ class SlurmSite(BaseSite):
             "min_ranks": min_ranks,
             "round_to": round_to,
             "cap_fraction": cap_fraction,
+            "max_ranks_per_task": max_ranks_per_task,
             "mem_cushion": mem_cushion,
             "boost_max_factor": boost_max_factor,
             "failure_tolerance": tolerate_failures,
@@ -2950,6 +2961,7 @@ class SlurmSite(BaseSite):
             skip_sizing=1 if skip_sizing else 0,
             n_nodes=n_nodes,
             n_procs=n_nodes * ranks_per_node,
+            init_ranks=min(n_nodes * ranks_per_node, max_ranks_per_task),
             n_threads=n_threads,
             n_tasks=n_tasks,
             n_job_tasks=n_job_tasks,

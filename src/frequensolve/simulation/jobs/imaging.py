@@ -722,6 +722,18 @@ class ObservedTraceDerivatives:
         return ObservedTraceDerivatives(df=resolve_path(self.df))
 
 
+def _derivative_input_fingerprint(
+    derivatives: ObservedTraceDerivatives,
+    fingerprint,
+) -> Dict[str, Any]:
+    """Fingerprint the file that owns one observed df reference."""
+
+    df = derivatives.df
+    if hasattr(df, "file"):
+        return fingerprint(df.file)
+    return fingerprint(df)
+
+
 @dataclass(kw_only=True)
 class MisfitGroup:
     """Observed and simulated trace paths for one receiver group misfit.
@@ -1397,6 +1409,18 @@ class ImagingJob(BaseJob):
             "Image": imaging,
         }
 
+    def _input_fingerprint_payload(self) -> Dict[str, Any]:
+        """Hash observed derivative inputs for every receiver group."""
+
+        derivatives = {
+            group.name: _derivative_input_fingerprint(
+                group.observed_derivatives, self._path_content_fingerprint
+            )
+            for group in self.misfit.receiver_groups
+            if group.observed_derivatives is not None
+        }
+        return {"observed_derivatives": derivatives} if derivatives else {}
+
     def _smoothing_to_fs(self) -> Dict[str, Any]:
         """Serialize smoothing for the Cartesian-image FEM implementation."""
 
@@ -1647,9 +1671,14 @@ class LSRTMGradientJob(ImagingJob):
     def _input_fingerprint_payload(self) -> Dict[str, Any]:
         """Hash the Cartesian iterate consumed by the fused gradient."""
 
-        if self.direction is None:
-            return {"direction": {"kind": "zero"}}
-        return {"direction": self._path_content_fingerprint(self.direction)}
+        return {
+            **super()._input_fingerprint_payload(),
+            "direction": (
+                {"kind": "zero"}
+                if self.direction is None
+                else self._path_content_fingerprint(self.direction)
+            ),
+        }
 
     @property
     def trace_outputs(self):

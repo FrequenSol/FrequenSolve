@@ -153,3 +153,37 @@ def test_adaptive_scheduler_requires_one_task_when_sizing_is_skipped(tmp_path):
 
     with pytest.raises(SystemExit, match="requires exactly one submitted task"):
         instance.run()
+
+
+@pytest.mark.parametrize("skip_sizing", [False, True])
+@pytest.mark.parametrize("limit", [1, 3, 8])
+def test_scheduler_caps_rounding_and_single_task_boost(
+    monkeypatch, tmp_path, skip_sizing, limit
+):
+    module = _load_scheduler_module()
+    instance = module.AdaptiveScheduler(
+        {
+            "executable": "unused-solver",
+            "total_ranks": 8,
+            "omp_threads": 1,
+            "mem_per_rank_gib": 1,
+            "job_task_count": 1,
+            "task_indices": [1],
+            "skip_sizing": skip_sizing,
+            "round_to": 4,
+            "max_ranks_per_task": limit,
+        },
+        job_file="job.json",
+        output=str(tmp_path),
+        status=str(tmp_path / "status.json"),
+    )
+    monkeypatch.setattr(instance, "_load_task_memory", lambda: [100.0])
+    launches = []
+
+    def launch(task, offset, ranks, memory):
+        launches.append(ranks)
+        instance.successful_tasks.append(task)
+
+    monkeypatch.setattr(instance, "_launch", launch)
+    instance.run()
+    assert launches == [limit]

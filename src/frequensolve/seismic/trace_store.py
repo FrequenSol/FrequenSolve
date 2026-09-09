@@ -2023,7 +2023,10 @@ class TraceStore:
             source,
             max_bytes=max_bytes,
         )
-        derivative_group = f"{group}_df"
+        order = self._frequency_derivative_order(group)
+        derivative_group = (
+            f"{group.rsplit('_', 1)[0]}_d{order + 1}f" if order else f"{group}_df"
+        )
         try:
             derivative = self._read_raw_selected_fd(
                 derivative_group,

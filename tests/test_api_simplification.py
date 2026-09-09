@@ -6824,3 +6824,47 @@ def test_simulation_accepts_boundary_conditions_directly(tmp_path):
             "name": "pml_xmin",
         },
     ]
+
+
+@pytest.mark.parametrize("order", [1, 2, 3])
+@pytest.mark.parametrize("domain", ["td", "ld"])
+def test_derivative_channel_hermite_uses_next_order(tmp_path, order, domain):
+    dense = tmp_path / "dense.h5"
+    sparse = tmp_path / "sparse.h5"
+    _write_base_and_df_trace_product(
+        dense, np.arange(1.0, 26.0), delay=0.03, derivative_order=4
+    )
+    _write_base_and_df_trace_product(
+        sparse, np.arange(1.0, 26.0, 4.0), delay=0.03, derivative_order=4
+    )
+    group = "surface_df" if order == 1 else f"surface_d{order}f"
+    reference = getattr(TraceDataset.open(dense), domain)(
+        group, "p", 7, RickerWavelet(f=10.0, center=0.0)
+    )
+    reconstructed = getattr(TraceDataset.open(sparse), domain)(
+        group,
+        "p",
+        7,
+        RickerWavelet(f=10.0, center=0.0),
+        reconstruction="hermite",
+        target_df=1.0,
+    )
+    error = np.linalg.norm(reconstructed.values - reference.values) / np.linalg.norm(
+        reference.values
+    )
+    assert error < 0.02
+    assert reconstructed.attrs["phase_derivative_order"] == order
+
+
+def test_derivative_channel_hermite_reports_missing_next_order(tmp_path):
+    path = tmp_path / "first_derivative_only.h5"
+    _write_base_and_df_trace_product(path, np.arange(1.0, 26.0, 4.0), delay=0.03)
+    with pytest.raises(ValueError, match="surface_d2f"):
+        TraceDataset.open(path).td(
+            "surface_df",
+            "p",
+            7,
+            RickerWavelet(f=10.0, center=0.0),
+            reconstruction="hermite",
+            target_df=1.0,
+        )

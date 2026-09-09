@@ -53,6 +53,7 @@ skip_sizing={{skip_sizing}}
 mpi_exec={{mpi}}
 mpi_args=( {{mpi_args_shell}} )
 n_procs={{n_procs}}
+init_ranks={{init_ranks}}
 n_threads={{n_threads}}
 export OMP_NUM_THREADS=$n_threads
 {% for line in mpi_async_progress_setup %}
@@ -201,11 +202,11 @@ start_time=$(date +%s)
 rm -f "$sizing_json"
 set +e
 if [ "$skip_sizing" = "1" ]; then
-    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size"
-    "$mpi_exec" "${mpi_args[@]}" -n $n_procs "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --init-no-size > "$dir_out/init.log" 2>&1
+    echo "$mpi_exec -n $init_ranks $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size"
+    "$mpi_exec" "${mpi_args[@]}" -n "$init_ranks" "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --init-no-size > "$dir_out/init.log" 2>&1
 else
-    echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $job_file $fresh_flag --init"
-    "$mpi_exec" "${mpi_args[@]}" -n $n_procs "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --init > "$dir_out/init.log" 2>&1
+    echo "$mpi_exec -n $init_ranks $executable -nthreads $n_threads --job $job_file $fresh_flag --init"
+    "$mpi_exec" "${mpi_args[@]}" -n "$init_ranks" "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --init > "$dir_out/init.log" 2>&1
 fi
 sizing_rc=$?
 set -e

@@ -432,6 +432,11 @@ class JobRemoteMixin:
             file_ref = value.get("file")
             if isinstance(file_ref, (str, Path)):
                 yield JobRemoteMixin._strip_file_locator(file_ref)
+            derivatives = value.get("observed_derivatives")
+            if isinstance(derivatives, Mapping):
+                df = derivatives.get("df")
+                if isinstance(df, (str, Path)):
+                    yield JobRemoteMixin._strip_file_locator(df)
             for item in value.values():
                 yield from JobRemoteMixin._iter_file_references(item)
         elif isinstance(value, list):

@@ -9,7 +9,6 @@ on one MPI rank and does not use ``f_list`` or trace packing.
 from __future__ import annotations
 
 import copy
-import json
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -520,13 +519,13 @@ class EikonalJob(BaseJob):
         ):
             return False
         try:
-            manifest = json.loads(self.eikonal_manifest_file.read_text())
-        except (OSError, json.JSONDecodeError):
+            results = self.results
+            return (
+                results.status == "complete"
+                and results.hdf5_file == self.eikonal_hdf5_file.resolve()
+            )
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
             return False
-        return (
-            manifest.get("schema") == "fs-eikonal-output-1"
-            and manifest.get("status") == "complete"
-        )
 
     def _remove_result_products(self) -> bool:
         removed = False

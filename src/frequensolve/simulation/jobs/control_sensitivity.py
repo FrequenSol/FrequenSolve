@@ -16,6 +16,7 @@ from frequensolve.simulation.jobs.imaging import (
     MisfitComparison,
     ObservedTraceDerivatives,
     PreprocessHook,
+    _derivative_input_fingerprint,
     _preprocess_from_fs,
     _preprocess_to_fs,
 )
@@ -339,18 +340,6 @@ def _derivatives_to_fs(
     else:
         payload["df"] = _job_path(df, ctx, project_relative)
     return payload
-
-
-def _derivative_input_fingerprint(
-    derivatives: ObservedTraceDerivatives,
-    fingerprint,
-) -> Dict[str, Any]:
-    """Fingerprint the file that owns one observed df reference."""
-
-    df = derivatives.df
-    if hasattr(df, "file"):
-        return fingerprint(df.file)
-    return fingerprint(df)
 
 
 def _resolve_saved_job_path(

@@ -19,11 +19,13 @@ from frequensolve.seismic.sources import SourceGeometry
 from frequensolve.simulation.jobs import BaseJob, FrequencyDomainJob
 from frequensolve.simulation.jobs.fwi import DataSpace, ModelSpace
 from frequensolve.simulation.jobs.imaging import (
+    HDF5TraceStore,
     ImageDatabase,
     ImagingJob,
     LSRTMGradientJob,
     LSRTMNormalJob,
     MisfitComparison,
+    MisfitGroup,
     ObservedTraceDerivatives,
 )
 from frequensolve.simulation.outputs import VtkOutput
@@ -811,3 +813,52 @@ def test_fwi_jacobian_dot_test_and_taylor_test_use_hermitian_products(tmp_path):
     assert dot["relative_error"] < 1.0e-12
     assert taylor["passed"]
     assert taylor["rates"][-1] > 1.8
+
+
+@pytest.mark.parametrize("job_type", [ImagingJob, LSRTMGradientJob])
+@pytest.mark.parametrize("descriptor", [False, True])
+def test_imaging_derivative_inputs_are_hashed_and_staged(
+    tmp_path, job_type, descriptor
+):
+    sim = _elastic_simulation(tmp_path)
+    observed = tmp_path / "observed"
+    observed.mkdir()
+    files = [observed / "surface.h5", observed / "other.h5"]
+    for path in files:
+        with h5py.File(path, "w") as h5:
+            h5["df"] = [1.0]
+
+    def reference(path):
+        return ObservedTraceDerivatives(
+            df=HDF5TraceStore(file=path, dataset="df") if descriptor else path
+        )
+
+    job = job_type(
+        name="derivative_inputs",
+        simulation=sim,
+        f_list=[5.0],
+        data_path=observed,
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        comparison=MisfitComparison.phase_derivative(),
+        observed_derivatives=reference(files[0]),
+    )
+    job.misfit.receiver_groups.append(
+        MisfitGroup(
+            name="other", observed=observed, observed_derivatives=reference(files[1])
+        )
+    )
+    loaded = BaseJob.load(job.save())
+    assert loaded._input_fingerprint_payload() == job._input_fingerprint_payload()
+    if isinstance(job, LSRTMGradientJob):
+        assert job._input_fingerprint_payload()["direction"] == {"kind": "zero"}
+
+    remote_root = tmp_path / "remote"
+    staged = loaded.remote_input_files(remote_root)
+    for path in files:
+        assert (path, remote_root / path.relative_to(tmp_path)) in staged
+        before = loaded.fingerprint(), loaded.task_fingerprint(1)
+        with h5py.File(path, "r+") as h5:
+            h5["df"][0] += 1.0
+        after = loaded.fingerprint(), loaded.task_fingerprint(1)
+        assert all(old != new for old, new in zip(before, after))
+    assert loaded._input_fingerprint_payload() == job._input_fingerprint_payload()
