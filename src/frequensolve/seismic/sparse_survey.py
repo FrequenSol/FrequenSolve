@@ -1345,7 +1345,10 @@ class SparseSurvey(ExtraFieldsMixin):
             and ctx is not None
             and ctx.path is not None
             and not any(trace.extra for trace in self._storage.traces)
-            and not any(sample.extra for sample in self.eval_samples)
+            and not any(
+                sample.extra or sample.x is not None or sample.direction is not None
+                for sample in self.eval_samples
+            )
             and not any(sample.extra for sample in self.trace_samples)
         ):
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.name).strip("._")

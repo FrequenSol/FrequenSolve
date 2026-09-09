@@ -2284,7 +2284,18 @@ class SourceEncoding(ExtraFieldsMixin):
 
     def field_names(self) -> List[str]:
         if self.encoding_type == "HDF5Dense":
-            return []
+            if self.file is None or not Path(self.file).is_file():
+                return []
+            if self.field_names_dataset is None:
+                return []
+            with h5py.File(self.file, "r") as h5:
+                dataset = h5[self.field_names_dataset]
+                if dataset.ndim != 1:
+                    raise ValueError(
+                        "Source field names must be a one-dimensional dataset"
+                    )
+                names = dataset.asstr()[:].tolist()
+            return _source_names(names, self.field_count or len(names))
         return [
             field.name if field.name is not None else f"field_{index:06d}"
             for index, field in enumerate(self.fields, start=1)

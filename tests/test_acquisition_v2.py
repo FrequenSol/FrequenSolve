@@ -22,7 +22,11 @@ from frequensolve import (
     SourceGroup,
 )
 from frequensolve.seismic.receivers import ReceiverDevice, ReceiverNode
-from frequensolve.seismic.sparse_survey import SparseSurvey, SparseTraceTable
+from frequensolve.seismic.sparse_survey import (
+    EvalSample,
+    SparseSurvey,
+    SparseTraceTable,
+)
 from frequensolve.units import ureg
 from frequensolve.util.mixins import ExportContext
 from frequensolve.util.store import SimulationStore
@@ -1466,10 +1470,14 @@ def test_materialized_source_counts_survive_round_trip(tmp_path, encoding_kind):
     geometry = SourceGeometry.points(kind="scalar", coords=np.zeros((count, 2)))
     encoding = None
     if encoding_kind == "dense":
-        encoding = SourceEncoding.dense(np.ones((3, count), dtype=complex))
+        encoding = SourceEncoding.dense(
+            np.ones((3, count), dtype=complex), names=["focus", "reference", "other"]
+        )
     elif encoding_kind == "frequency":
         encoding = SourceEncoding.frequency_dense(
-            weights=np.ones((2, 3, count), dtype=complex), frequencies=[1.0, 2.0]
+            weights=np.ones((2, 3, count), dtype=complex),
+            frequencies=[1.0, 2.0],
+            names=["focus", "reference", "other"],
         )
     acquisition = Acquisition(source_geometry=geometry, source_encoding=encoding)
     store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
@@ -1481,6 +1489,8 @@ def test_materialized_source_counts_survive_round_trip(tmp_path, encoding_kind):
     fields = count if encoding_kind == "identity" else 3
     assert restored.known_source_field_count() == fields
     assert restored.list_sources() == list(range(1, fields + 1))
+    if encoding is not None:
+        assert restored.source_field_names() == ["focus", "reference", "other"]
     _sauce_acquisition_validator().validate(payload)
 
 
@@ -1491,7 +1501,9 @@ def test_external_receiver_names_survive_simulation_load(tmp_path):
     names = [f"channel_{index:03d}" for index in range(65)]
     acquisition = Acquisition(
         source_geometry=SourceGeometry.points(kind="scalar", coords=[[0.0, 0.0]]),
-        source_encoding=SourceEncoding.dense(np.ones((2, 1), dtype=complex)),
+        source_encoding=SourceEncoding.dense(
+            np.ones((2, 1), dtype=complex), names=["focus", "reference"]
+        ),
     )
     acquisition.add_receiver_group(
         "surface",
@@ -1509,6 +1521,7 @@ def test_external_receiver_names_survive_simulation_load(tmp_path):
     restored = SeismicSimulation.load(simulation.save())
     assert restored.acquisition.list_fields() == [f"surface:{name}" for name in names]
     assert restored.acquisition.list_sources() == [1, 2]
+    assert restored.acquisition.source_field_names() == ["focus", "reference"]
     assert DataSpace.from_simulation(restored, [1.0]).size == 130
 
 
@@ -1541,3 +1554,14 @@ def test_single_receiver_split_weights_use_explicit_component_axis():
     canonical = EncodedReceiver(components=components, weights=split[:, 0])
     canonical.validate_size(2)
     np.testing.assert_allclose(canonical.weights[:, 0], [[1, 2], [3, 4]])
+
+
+@pytest.mark.parametrize("geometry", [{"x": [1.0, 2.0]}, {"direction": [0.0, 1.0]}])
+def test_large_survey_keeps_authored_eval_geometry_inline(tmp_path, geometry):
+    survey = SparseSurvey.from_product("geometry", sources=[1], receivers=range(1, 202))
+    survey.add_eval_sample(EvalSample(sample_id=1, point_id=1, **geometry))
+    payload = survey.to_fs(ExportContext(tmp_path))
+    assert payload["_type"] != "HDF5TraceStore"
+    restored = SparseSurvey.from_fs(payload)
+    for key, value in geometry.items():
+        assert getattr(restored.eval_samples[0], key) == value

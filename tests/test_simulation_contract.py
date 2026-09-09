@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
 
-from jsonschema import Draft202012Validator
+import pytest
+from jsonschema import Draft202012Validator, ValidationError
 from referencing import Registry, Resource
 
 from frequensolve import SeismicSimulation
@@ -38,3 +39,36 @@ def test_electromagnetic_export_matches_pinned_sauce_contract(tmp_path):
     assert payload["schema"] == "fs-simulation-1"
     assert payload["physics"] == "em"
     assert payload["Outputs"]["Units"]["geometry"] == "m"
+
+
+@pytest.mark.parametrize("kind", ["hat", "bspline"])
+def test_parameterized_property_matches_adopted_material_contract(kind):
+    from frequensolve.model.parameterization import (
+        BSplineControl,
+        HatControl,
+        ParameterizedProperty,
+    )
+    from frequensolve.model.property import Property
+
+    control = (
+        HatControl(axis="z", spacing=1.0, coefficients=[0.0, 1.0])
+        if kind == "hat"
+        else BSplineControl(
+            axis="z", degree=1, knots=[0.0, 0.0, 1.0, 1.0], coefficients=[0.0, 1.0]
+        )
+    )
+    prop = ParameterizedProperty(Property(1500.0), id="vp", control=control)
+    schema = json.loads(
+        (CONTRACT_ROOT / "inputs/fs-material-model-1/schema.json").read_text()
+    )
+    validator = _sauce_simulation_validator().evolve(
+        schema={"$ref": schema["$id"] + "#/$defs/property"}
+    )
+    payload = prop.to_fs()
+    validator.validate(payload)
+    validator.validate(ParameterizedProperty.from_fs(payload).to_fs())
+    with pytest.raises(ValidationError):
+        validator.validate({**payload, "value": 1500.0})
+    payload["parameterized"]["control"]["kind"] = "unsupported"
+    with pytest.raises(ValidationError):
+        validator.validate(payload)
