@@ -29,8 +29,6 @@ __all__ = [
     "SparseSurvey",
     "SparseTrace",
     "SparseTraceTable",
-    "EvalSample",
-    "TraceSample",
 ]
 
 
@@ -74,22 +72,6 @@ def _as_trace(value: Union["SparseTrace", Mapping[str, Any]]) -> "SparseTrace":
     if isinstance(value, Mapping):
         return SparseTrace.from_fs(value)
     raise TypeError(f"Cannot convert {type(value)} to SparseTrace")
-
-
-def _as_eval_sample(value: Union["EvalSample", Mapping[str, Any]]) -> "EvalSample":
-    if isinstance(value, EvalSample):
-        return value
-    if isinstance(value, Mapping):
-        return EvalSample.from_fs(value)
-    raise TypeError(f"Cannot convert {type(value)} to EvalSample")
-
-
-def _as_trace_sample(value: Union["TraceSample", Mapping[str, Any]]) -> "TraceSample":
-    if isinstance(value, TraceSample):
-        return value
-    if isinstance(value, Mapping):
-        return TraceSample.from_fs(value)
-    raise TypeError(f"Cannot convert {type(value)} to TraceSample")
 
 
 @dataclass
@@ -369,155 +351,6 @@ class SparseTrace(ExtraFieldsMixin):
         if self.component_name is not None:
             payload["component_name"] = self.component_name
         return merge_extra(payload, self.extra, "SparseTrace")
-
-
-@dataclass(init=False)
-class EvalSample(ExtraFieldsMixin):
-    """Optional sparse sample row used for weighted/fiber-style traces.
-
-    Args:
-        point: Alias for ``point_id``.
-        point_id: Receiver point id sampled by this row.
-        sample_id: Optional sample id. Export assigns this when omitted.
-        receiver_position: Alias for ``receiver_position_id``.
-        receiver_position_id: Optional receiver position id.
-        x: Optional physical sample coordinate.
-        direction: Optional sample direction vector.
-        extra: Additional solver-facing sample fields.
-        **kwargs: Additional solver-facing sample fields.
-    """
-
-    sample_id: Optional[int]
-    point_id: int
-    receiver_position_id: Optional[int]
-    x: Optional[Sequence[float]]
-    direction: Optional[Sequence[float]]
-    extra: Dict[str, Any]
-
-    def __init__(
-        self,
-        *,
-        point: Optional[int] = None,
-        point_id: Optional[int] = None,
-        sample_id: Optional[int] = None,
-        receiver_position: Optional[int] = None,
-        receiver_position_id: Optional[int] = None,
-        x: Optional[Sequence[float]] = None,
-        direction: Optional[Sequence[float]] = None,
-        extra: Optional[Mapping[str, Any]] = None,
-        **kwargs: Any,
-    ) -> None:
-        if point_id is None:
-            point_id = point
-        if receiver_position_id is None:
-            receiver_position_id = receiver_position
-        if point_id is None:
-            raise ValueError("EvalSample requires point/point_id")
-        self.sample_id = None if sample_id is None else int(sample_id)
-        self.point_id = int(point_id)
-        self.receiver_position_id = (
-            None if receiver_position_id is None else int(receiver_position_id)
-        )
-        self.x = None if x is None else list(x)
-        self.direction = None if direction is None else list(direction)
-        self._init_extra(extra, **kwargs)
-
-    @classmethod
-    def from_fs(cls, data: Mapping[str, Any]) -> "EvalSample":
-        """Deserialize an evaluation sample row."""
-
-        payload = copy.deepcopy(dict(data))
-        if "recveiver_position_id" in payload and "receiver_position_id" not in payload:
-            payload["receiver_position_id"] = payload.pop("recveiver_position_id")
-        return cls(**payload)
-
-    def to_fs(self, sample_id: Optional[int] = None) -> Dict[str, Any]:
-        """Serialize this evaluation sample row for solver input."""
-
-        out_sample_id = int(self.sample_id or sample_id or 0)
-        if out_sample_id <= 0:
-            raise ValueError("EvalSample requires a positive sample_id or export row")
-        payload: Dict[str, Any] = {
-            "sample_id": out_sample_id,
-            "point_id": self.point_id,
-        }
-        if self.receiver_position_id is not None:
-            payload["receiver_position_id"] = self.receiver_position_id
-            # The fast solver's current JSON reader has this misspelling; emit both until
-            # the backend accepts the correctly spelled field.
-            payload["recveiver_position_id"] = self.receiver_position_id
-        if self.x is not None:
-            payload["x"] = list(self.x)
-        if self.direction is not None:
-            payload["direction"] = list(self.direction)
-        return merge_extra(payload, self.extra, "EvalSample")
-
-
-@dataclass(init=False)
-class TraceSample(ExtraFieldsMixin):
-    """Optional sparse trace/sample weight row.
-
-    Args:
-        trace: Alias for ``trace_row``.
-        trace_row: One-based trace row id.
-        sample: Alias for ``sample_id``.
-        sample_id: One-based evaluation sample id.
-        component: Component id or component name.
-        weight: Sample contribution weight.
-        extra: Additional solver-facing row fields.
-        **kwargs: Additional solver-facing row fields.
-    """
-
-    trace_row: int
-    sample_id: int
-    component: Optional[ComponentKey]
-    weight: float
-    extra: Dict[str, Any]
-
-    def __init__(
-        self,
-        *,
-        trace: Optional[int] = None,
-        trace_row: Optional[int] = None,
-        sample: Optional[int] = None,
-        sample_id: Optional[int] = None,
-        component: Optional[ComponentKey] = 1,
-        weight: float = 1.0,
-        extra: Optional[Mapping[str, Any]] = None,
-        **kwargs: Any,
-    ) -> None:
-        if trace_row is None:
-            trace_row = trace
-        if sample_id is None:
-            sample_id = sample
-        if trace_row is None or sample_id is None:
-            raise ValueError(
-                "TraceSample requires trace/trace_row and sample/sample_id"
-            )
-        self.trace_row = int(trace_row)
-        self.sample_id = int(sample_id)
-        self.component = component
-        self.weight = float(weight)
-        self._init_extra(extra, **kwargs)
-
-    @classmethod
-    def from_fs(cls, data: Mapping[str, Any]) -> "TraceSample":
-        """Deserialize a trace/sample weight row."""
-
-        return cls(**copy.deepcopy(dict(data)))
-
-    def to_fs(
-        self, component_map: Optional[Mapping[str, int]] = None
-    ) -> Dict[str, Any]:
-        """Serialize this trace/sample weight row for solver input."""
-
-        payload = {
-            "trace_row": self.trace_row,
-            "sample_id": self.sample_id,
-            "component": _resolve_component(self.component, component_map),
-            "weight": self.weight,
-        }
-        return merge_extra(payload, self.extra, "TraceSample")
 
 
 class SparseTraceTable:
@@ -886,8 +719,6 @@ class SparseTraceTable:
 class _InlineSparseSurvey:
     table: Optional[SparseTraceTable]
     traces: List[SparseTrace]
-    eval_samples: List[EvalSample]
-    trace_samples: List[TraceSample]
 
 
 @dataclass
@@ -928,8 +759,6 @@ class SparseSurvey(ExtraFieldsMixin):
         traces: Inline sparse trace rows.
         kind: Solver survey kind. Inferred from file/offset arguments when
             omitted.
-        eval_samples: Optional evaluation sample rows.
-        trace_samples: Optional trace/sample weighting rows.
         layout_file: Existing HDF5 trace-store layout file.
         source_file: SPS source file.
         receiver_file: SPS receiver file.
@@ -943,6 +772,16 @@ class SparseSurvey(ExtraFieldsMixin):
     extra: Dict[str, Any]
     _storage: SparseSurveyStorage
 
+    def _reject_unsupported_sample_tables(self) -> None:
+        removed = sorted({"eval_samples", "trace_samples"}.intersection(self.extra))
+        if removed:
+            raise ValueError(
+                "SparseSurvey no longer supports "
+                + ", ".join(removed)
+                + "; Sauce does not read custom sample tables. "
+                "Use receiver-group coordinates and supported receiver sampling."
+            )
+
     def __init__(
         self,
         name: str,
@@ -950,8 +789,6 @@ class SparseSurvey(ExtraFieldsMixin):
         *,
         kind: Optional[str] = None,
         trace_table: Optional[SparseTraceTable] = None,
-        eval_samples: Optional[Iterable[Union[EvalSample, Mapping[str, Any]]]] = None,
-        trace_samples: Optional[Iterable[Union[TraceSample, Mapping[str, Any]]]] = None,
         layout_file: Optional[Union[str, Path]] = None,
         source_file: Optional[Union[str, Path]] = None,
         receiver_file: Optional[Union[str, Path]] = None,
@@ -977,9 +814,8 @@ class SparseSurvey(ExtraFieldsMixin):
         trace_rows = [_as_trace(trace) for trace in (traces or [])]
         if trace_table is not None and not isinstance(trace_table, SparseTraceTable):
             raise TypeError("trace_table must be a SparseTraceTable")
-        eval_rows = [_as_eval_sample(sample) for sample in (eval_samples or [])]
-        sample_rows = [_as_trace_sample(sample) for sample in (trace_samples or [])]
         self._init_extra(extra, **kwargs)
+        self._reject_unsupported_sample_tables()
         normalized_kind = str(kind).strip().lower()
         has_sps = any(
             value is not None for value in (source_file, receiver_file, relation_file)
@@ -990,8 +826,6 @@ class SparseSurvey(ExtraFieldsMixin):
             self._storage = _InlineSparseSurvey(
                 table=trace_table,
                 traces=trace_rows,
-                eval_samples=eval_rows,
-                trace_samples=sample_rows,
             )
         elif normalized_kind == "hdf5tracestore":
             if layout_file is None:
@@ -999,8 +833,6 @@ class SparseSurvey(ExtraFieldsMixin):
             if (
                 trace_table is not None
                 or trace_rows
-                or eval_rows
-                or sample_rows
                 or has_sps
                 or offset_domain is not None
             ):
@@ -1021,8 +853,6 @@ class SparseSurvey(ExtraFieldsMixin):
             if (
                 trace_table is not None
                 or trace_rows
-                or eval_rows
-                or sample_rows
                 or layout_file is not None
                 or offset_domain is not None
             ):
@@ -1041,8 +871,6 @@ class SparseSurvey(ExtraFieldsMixin):
             if (
                 trace_table is not None
                 or trace_rows
-                or eval_rows
-                or sample_rows
                 or layout_file is not None
                 or has_sps
             ):
@@ -1074,18 +902,6 @@ class SparseSurvey(ExtraFieldsMixin):
             ]
             storage.table = None
         return storage.traces
-
-    @property
-    def eval_samples(self) -> List[EvalSample]:
-        if isinstance(self._storage, _InlineSparseSurvey):
-            return self._storage.eval_samples
-        return []
-
-    @property
-    def trace_samples(self) -> List[TraceSample]:
-        if isinstance(self._storage, _InlineSparseSurvey):
-            return self._storage.trace_samples
-        return []
 
     @property
     def layout_file(self) -> Optional[Union[str, Path]]:
@@ -1303,26 +1119,6 @@ class SparseSurvey(ExtraFieldsMixin):
         self._storage.traces.append(trace)
         return trace
 
-    def add_eval_sample(self, *args: Any, **kwargs: Any) -> EvalSample:
-        """Append an evaluation sample row and return it."""
-
-        sample = args[0] if args else EvalSample(**kwargs)
-        sample = _as_eval_sample(sample)
-        if not isinstance(self._storage, _InlineSparseSurvey):
-            raise ValueError("Cannot add inline samples to external survey storage")
-        self._storage.eval_samples.append(sample)
-        return sample
-
-    def add_trace_sample(self, *args: Any, **kwargs: Any) -> TraceSample:
-        """Append a trace/sample weighting row and return it."""
-
-        sample = args[0] if args else TraceSample(**kwargs)
-        sample = _as_trace_sample(sample)
-        if not isinstance(self._storage, _InlineSparseSurvey):
-            raise ValueError("Cannot add inline samples to external survey storage")
-        self._storage.trace_samples.append(sample)
-        return sample
-
     def sampling(self) -> ReceiverSampling:
         """Return receiver sampling that references this survey."""
 
@@ -1336,6 +1132,7 @@ class SparseSurvey(ExtraFieldsMixin):
     ) -> Dict[str, Any]:
         """Serialize this sparse survey for solver input."""
 
+        self._reject_unsupported_sample_tables()
         payload: Dict[str, Any] = {"name": self.name, "_type": self.kind}
         kind = self.kind.strip().lower()
 
@@ -1345,8 +1142,6 @@ class SparseSurvey(ExtraFieldsMixin):
             and ctx is not None
             and ctx.path is not None
             and not any(trace.extra for trace in self._storage.traces)
-            and not any(sample.extra for sample in self.eval_samples)
-            and not any(sample.extra for sample in self.trace_samples)
         ):
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.name).strip("._")
             if not safe_name:
@@ -1382,16 +1177,6 @@ class SparseSurvey(ExtraFieldsMixin):
 
         if kind == "sparse":
             payload["traces"] = self._trace_rows(component_map)
-            if self.eval_samples:
-                payload["eval_samples"] = [
-                    sample.to_fs(sample_id=i)
-                    for i, sample in enumerate(self.eval_samples, start=1)
-                ]
-            if self.trace_samples:
-                payload["trace_samples"] = [
-                    sample.to_fs(component_map=component_map)
-                    for sample in self.trace_samples
-                ]
 
         return merge_extra(payload, self.extra, "SparseSurvey")
 
@@ -1490,34 +1275,10 @@ class SparseSurvey(ExtraFieldsMixin):
             Path to the written HDF5 file.
         """
 
+        self._reject_unsupported_sample_tables()
         path = Path(file)
         if not isinstance(self._storage, _InlineSparseSurvey):
             raise ValueError("Only inline sparse surveys can be written to HDF5")
-        dimension = None
-        for sample in self.eval_samples:
-            if sample.sample_id is not None and sample.sample_id < 0:
-                raise ValueError(
-                    "EvalSample requires a positive sample_id or export row"
-                )
-            for name in ("x", "direction"):
-                value = getattr(sample, name)
-                if value is None:
-                    continue
-                vector = np.asarray(value)
-                if (
-                    vector.ndim != 1
-                    or vector.size not in (2, 3)
-                    or vector.dtype.kind not in "iuf"
-                    or not np.all(np.isfinite(vector))
-                ):
-                    raise ValueError(
-                        f"EvalSample.{name} must be a finite 2D or 3D vector"
-                    )
-                if dimension is not None and vector.size != dimension:
-                    raise ValueError(
-                        "Evaluation geometry must use one consistent dimension"
-                    )
-                dimension = vector.size
         path.parent.mkdir(parents=True, exist_ok=True)
         columns = self._trace_columns(component_map)
         string_dtype = h5py.string_dtype(encoding="utf-8")
@@ -1560,75 +1321,9 @@ class SparseSurvey(ExtraFieldsMixin):
                 write_float(trace_group, "offset", columns["offset"])
             if "azimuth" in columns:
                 write_float(trace_group, "azimuth", columns["azimuth"])
-            if self.eval_samples:
-                group = survey.require_group("eval_samples")
-                eval_samples = self.eval_samples
-                for name in ("sample_id", "point_id", "receiver_position_id"):
-                    values = np.fromiter(
-                        (
-                            getattr(sample, name)
-                            or (index if name == "sample_id" else 0)
-                            for index, sample in enumerate(eval_samples, start=1)
-                        ),
-                        dtype=np.int32,
-                        count=len(eval_samples),
-                    )
-                    group.create_dataset(name, data=values)
-                if dimension is not None:
-                    self._write_hdf5_eval_geometry(group, dimension)
-
-            if self.trace_samples:
-                samples = [
-                    sample.to_fs(component_map=component_map)
-                    for sample in self.trace_samples
-                ]
-                group = survey.require_group("trace_samples")
-                write_int(group, "trace_row", [row["trace_row"] for row in samples])
-                write_int(group, "sample_id", [row["sample_id"] for row in samples])
-                write_int(group, "component", [row["component"] for row in samples])
-                group.create_dataset(
-                    "weight",
-                    data=np.asarray(
-                        [row["weight"] for row in samples], dtype=np.float32
-                    ),
-                )
-
             self._write_hdf5_catalogs(survey, columns, string_dtype)
 
         return path
-
-    def _write_hdf5_eval_geometry(self, group: h5py.Group, dimension: int) -> None:
-        """Pack optional geometry in bounded blocks, preserving absent rows."""
-
-        samples = self.eval_samples
-        count = len(samples)
-        block_size = min(count, 4096)
-        for name in ("x", "direction"):
-            if not any(getattr(sample, name) is not None for sample in samples):
-                continue
-            values = group.create_dataset(
-                name,
-                shape=(count, dimension),
-                dtype=np.float64,
-                chunks=(block_size, dimension),
-            )
-            present = group.create_dataset(
-                f"{name}_present",
-                shape=(count,),
-                dtype=np.bool_,
-                chunks=(block_size,),
-            )
-            for start in range(0, count, block_size):
-                stop = min(start + block_size, count)
-                block = np.zeros((stop - start, dimension), dtype=np.float64)
-                mask = np.zeros(stop - start, dtype=np.bool_)
-                for index in range(start, stop):
-                    vector = getattr(samples[index], name)
-                    if vector is not None:
-                        block[index - start] = vector
-                        mask[index - start] = True
-                values[start:stop] = block
-                present[start:stop] = mask
 
     def _write_hdf5_catalogs(
         self,

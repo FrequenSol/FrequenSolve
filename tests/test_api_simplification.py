@@ -6348,8 +6348,6 @@ def test_sparse_hdf5_survey_reference_does_not_touch_server_file():
 def test_sparse_survey_writes_fast_solver_hdf5_trace_store(tmp_path):
     survey = SparseSurvey("marine")
     survey.add_trace(source=1, receiver=1, component=1, point=1, component_name="p")
-    survey.add_eval_sample(sample_id=1, point=1, receiver_position=1)
-    survey.add_trace_sample(trace=1, sample=1, component=1, weight=0.5)
 
     file = survey.write_hdf5(tmp_path / "marine_layout.h5")
 
@@ -6359,9 +6357,8 @@ def test_sparse_survey_writes_fast_solver_hdf5_trace_store(tmp_path):
         assert h5["/survey/traces/receiver_id"][:].tolist() == [1]
         assert h5["/survey/traces/receiver_position_id"][:].tolist() == [1]
         assert h5["/survey/traces/component_id"][:].tolist() == [1]
-        assert h5["/survey/eval_samples/sample_id"][:].tolist() == [1]
-        assert h5["/survey/eval_samples/receiver_position_id"][:].tolist() == [1]
-        assert h5["/survey/trace_samples/weight"][:].tolist() == [0.5]
+        assert "eval_samples" not in h5["survey"]
+        assert "trace_samples" not in h5["survey"]
 
 
 def test_sparse_survey_roundtrip_does_not_mutate_input():
@@ -6378,7 +6375,6 @@ def test_sparse_survey_roundtrip_does_not_mutate_input():
                 "point_first": 1,
             }
         ],
-        "eval_samples": [{"sample_id": 1, "point_id": 1, "recveiver_position_id": 10}],
         "advanced_layout_flag": True,
     }
     original = copy.deepcopy(data)
@@ -6388,8 +6384,6 @@ def test_sparse_survey_roundtrip_does_not_mutate_input():
 
     assert data == original
     assert payload["advanced_layout_flag"] is True
-    assert payload["eval_samples"][0]["receiver_position_id"] == 10
-    assert payload["eval_samples"][0]["recveiver_position_id"] == 10
 
 
 def test_boundary_condition_serializes_multiple_conditions_without_name():
