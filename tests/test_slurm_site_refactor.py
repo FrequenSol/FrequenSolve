@@ -2807,3 +2807,16 @@ def test_stampede3_site_is_specific_slurm_subclass():
     assert config.memory_per_node == 262144
     assert config.memory_per_core == 3276.8
     assert config.for_partition("spr").cores_per_node == 112
+
+
+@pytest.mark.parametrize("value", ["--wait=30", 30, None, {"wait": 30}, [None], [30]])
+def test_slurm_site_config_rejects_invalid_launcher_arguments(value):
+    with pytest.raises(ValueError, match="launcher_args must be an array of strings"):
+        SlurmSiteConfig(hostname="login.example.edu", launcher_args=value)
+
+
+@pytest.mark.parametrize("value", [["--wait=30"], ("--wait=30",), []])
+def test_slurm_site_config_accepts_launcher_argument_arrays(value):
+    assert SlurmSiteConfig(
+        hostname="login.example.edu", launcher_args=value
+    ).launcher_args == tuple(value)

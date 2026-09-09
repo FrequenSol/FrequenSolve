@@ -189,3 +189,9 @@ the HPC site's current guidance before changing `~/.ssh/known_hosts`.
   not use this setup from a shared local login.
 - The HPC site's login, host-key, and MFA policies remain authoritative. Follow
   its current documentation and security requirements.
+
+Directory uploads merge inputs into the existing remote project and preserve
+remotely generated outputs. If a copy fails partway through, some inputs may
+already have been updated. The exception stops job submission; retry the upload
+after correcting the failure before submitting again. Synchronization is not a
+transaction across the live project directory.

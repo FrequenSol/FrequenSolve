@@ -315,6 +315,13 @@ class SlurmTransferManager:
             )
 
     def _put_dir(self, sftp: Any, local_dir: Path, remote_dir: PurePosixPath) -> None:
+        """Merge validated inputs; a failed copy can leave partial input updates.
+
+        Like rsync, this is not a transaction across the destination tree. Errors
+        propagate before job submission; retry synchronization before submitting.
+        Never replace the live root or roll back concurrently generated outputs.
+        """
+
         with tempfile.NamedTemporaryFile(
             suffix=".tar.gz",
             dir=self._local_tmp_parent(),

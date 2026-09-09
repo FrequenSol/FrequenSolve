@@ -227,7 +227,11 @@ class SlurmSiteConfig(BaseSiteConfig):
         if self.known_hosts_file is not None:
             self.known_hosts_file = Path(self.known_hosts_file).expanduser()
 
-        self.launcher_args = tuple(str(value) for value in self.launcher_args)
+        if not isinstance(self.launcher_args, (list, tuple)) or any(
+            not isinstance(value, str) for value in self.launcher_args
+        ):
+            raise ValueError("launcher_args must be an array of strings")
+        self.launcher_args = tuple(self.launcher_args)
         normalized: Dict[str, SlurmPartitionConfig] = {}
         for name, value in self.partitions.items():
             if isinstance(value, SlurmPartitionConfig):
