@@ -947,10 +947,21 @@ class SlurmSite(BaseSite):
                     "No active compute allocation is attached; use mode='batch' "
                     "or allow mode='auto' to submit a batch job."
                 )
-            pack = bool(extra_kwargs.pop("pack", True))
+            pack = bool(extra_kwargs.pop("pack", True)) and bool(
+                getattr(job, "supports_trace_packing", True)
+            )
+            ranks_per_task = run_config.ranks_per_task
+            max_ranks = getattr(job, "max_ranks_per_task", None)
+            if ranks_per_task is None:
+                ranks_per_task = max_ranks or 2
+            if max_ranks is not None and ranks_per_task > max_ranks:
+                raise ValueError(
+                    f"{type(job).__name__} supports at most {max_ranks} MPI rank "
+                    f"per task; received {ranks_per_task}"
+                )
             future = self._submit_attached(
                 job,
-                ranks_per_task=run_config.ranks_per_task or 2,
+                ranks_per_task=ranks_per_task,
                 mpi_async_progress=run_config.mpi_async_progress,
                 fresh=fresh_run,
                 **({"pack": pack} if not pack else {}),
@@ -1008,6 +1019,28 @@ class SlurmSite(BaseSite):
                 self.fetch_outputs(job)
             return handle
 
+        if not getattr(job, "supports_trace_packing", True):
+            extra_kwargs["pack"] = False
+        max_ranks = getattr(job, "max_ranks_per_task", None)
+        if (
+            max_ranks is not None
+            and run_config.ranks_per_task is not None
+            and run_config.ranks_per_task > max_ranks
+        ):
+            raise ValueError(
+                f"{type(job).__name__} supports at most {max_ranks} MPI rank "
+                f"per task; received {run_config.ranks_per_task}"
+            )
+        if max_ranks == 1:
+            requested_min_ranks = int(extra_kwargs.get("min_ranks", 1))
+            if requested_min_ranks > 1:
+                raise ValueError(
+                    f"{type(job).__name__} requires one MPI rank per task; "
+                    f"received min_ranks={requested_min_ranks}"
+                )
+            extra_kwargs["min_ranks"] = 1
+            extra_kwargs["round_to"] = 1
+            extra_kwargs["skip_sizing"] = True
         job_id = self._submit_slurm_batch(
             job,
             run_config,
@@ -1380,7 +1413,7 @@ class SlurmSite(BaseSite):
         return db_map
 
     def fetch_outputs(self, job: BaseJob):
-        """Fetch common result metadata and trace outputs for a completed job."""
+        """Fetch typed products or common traces for a completed job."""
 
         local_results = job._local_path / "results"
         local_results.mkdir(parents=True, exist_ok=True)
@@ -1393,6 +1426,14 @@ class SlurmSite(BaseSite):
             )
         except Exception as exc:
             logger.debug("Could not fetch logs for job %s: %s", job.name, exc)
+
+        if hasattr(job, "result_manifest_file"):
+            relative_output = job.output_directory.relative_to(job._result_path)
+            remote_dir = self._remote_result_dir(job) / relative_output
+            local_dir = job.output_directory
+            local_dir.mkdir(parents=True, exist_ok=True)
+            self.get(remote_dir, local_dir, overwrite=True)
+            return local_results
 
         try:
             self.fetch_traces(job)
@@ -2404,6 +2445,9 @@ class SlurmSite(BaseSite):
             mpi_async_progress=mpi_async_progress,
         )
         ntasks_per_item = max(ranks_per_task, self.pool.nproc // job.n_tasks)
+        max_ranks = getattr(job, "max_ranks_per_task", None)
+        if max_ranks is not None:
+            ntasks_per_item = min(ntasks_per_item, max_ranks)
 
         if self._compute_client.is_proxy():
             interactive = self.compute_client.invoke_shell()

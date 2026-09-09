@@ -9,15 +9,21 @@ from frequensolve.simulation.jobs.control_sensitivity import *  # noqa: F403
 from frequensolve.simulation.jobs.control_sensitivity import (
     __all__ as _control_sensitivity_all,
 )
+from frequensolve.simulation.jobs.eikonal import *  # noqa: F403
+from frequensolve.simulation.jobs.eikonal import __all__ as _eikonal_all
 from frequensolve.simulation.jobs.forward import *  # noqa: F403
 from frequensolve.simulation.jobs.forward import __all__ as _forward_all
 from frequensolve.simulation.jobs.imaging import *  # noqa: F403
 from frequensolve.simulation.jobs.imaging import __all__ as _imaging_all
+from frequensolve.simulation.jobs.ray_tracing import *  # noqa: F403
+from frequensolve.simulation.jobs.ray_tracing import __all__ as _ray_tracing_all
 
 __all__ = unique_exports(
     _artifacts_all,
     _base_all,
     _control_sensitivity_all,
+    _eikonal_all,
     _forward_all,
     _imaging_all,
+    _ray_tracing_all,
 )

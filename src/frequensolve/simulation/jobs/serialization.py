@@ -105,8 +105,10 @@ class JobSerializationMixin:
         class_name = data.get("_type")
         if class_name not in class_registry:
             import frequensolve.simulation.jobs.control_sensitivity  # noqa: F401
+            import frequensolve.simulation.jobs.eikonal  # noqa: F401
             import frequensolve.simulation.jobs.forward  # noqa: F401
             import frequensolve.simulation.jobs.imaging  # noqa: F401
+            import frequensolve.simulation.jobs.ray_tracing  # noqa: F401
 
         if class_name not in class_registry:
             raise ValueError(f"Unknown job class: {class_name}")
@@ -164,18 +166,7 @@ class JobSerializationMixin:
         if self.simulation._file is None:
             raise ValueError("Simulation must be saved before fingerprinting a job")
         simulation_hash = self._hash_json_file(self.simulation._file)
-        job_payload = {
-            "_type": job_data["_type"],
-            "workflow": job_data["workflow"],
-            "f_list": job_data["f_list"],
-            "Outputs": job_data["Outputs"],
-        }
-        if "Image" in job_data:
-            job_payload["Image"] = job_data["Image"]
-        if "control_sensitivities" in job_data:
-            job_payload["control_sensitivities"] = job_data["control_sensitivities"]
-        if "focus" in job_data:
-            job_payload["focus"] = job_data["focus"]
+        job_payload = self._fingerprint_job_payload(job_data, include_frequencies=True)
         payload = {
             "schema": "frequensolve-job-fingerprint-1",
             "job": job_payload,
@@ -220,27 +211,45 @@ class JobSerializationMixin:
         if self.simulation._file is None:
             raise ValueError("Simulation must be saved before fingerprinting a task")
         simulation_hash = self._hash_json_file(self.simulation._file)
-        job_payload = {
-            "_type": job_data["_type"],
-            "workflow": job_data["workflow"],
-            "Outputs": job_data["Outputs"],
-        }
-        if "Image" in job_data:
-            job_payload["Image"] = job_data["Image"]
-        if "control_sensitivities" in job_data:
-            job_payload["control_sensitivities"] = job_data["control_sensitivities"]
-        if "focus" in job_data:
-            job_payload["focus"] = job_data["focus"]
+        job_payload = self._fingerprint_job_payload(job_data)
         payload = {
             "schema": "frequensolve-job-task-fingerprint-1",
             "job": job_payload,
             "simulation": {"hash": simulation_hash},
-            "frequency": self._canonical_frequency_value(self.f_list[task - 1]),
         }
+        if "f_list" in job_data:
+            payload["frequency"] = self._canonical_frequency_value(
+                self.f_list[task - 1]
+            )
         inputs = self._input_fingerprint_payload()
         if inputs:
             payload["inputs"] = inputs
         return payload
+
+    @staticmethod
+    def _fingerprint_job_payload(
+        job_data: Dict[str, Any],
+        *,
+        include_frequencies: bool = False,
+    ) -> Dict[str, Any]:
+        """Select solver-relevant job fields for stable fingerprints."""
+
+        fields = ["_type", "workflow"]
+        if include_frequencies:
+            fields.append("f_list")
+        fields.extend(
+            [
+                "Outputs",
+                "Eikonal",
+                "Image",
+                "RayTracing",
+                "control_sensitivities",
+                "focus",
+                "time_reconstruction",
+                "derivative_order",
+            ]
+        )
+        return {field: job_data[field] for field in fields if field in job_data}
 
     def task_fingerprint(self, task: int) -> str:
         """Return the stable hash for one one-based frequency task.

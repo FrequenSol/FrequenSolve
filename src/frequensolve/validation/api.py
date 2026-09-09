@@ -92,7 +92,8 @@ def validate_job(
 
 
 def _validate_job(job: Any, ctx: _ValidationContext) -> None:
-    _validate_frequencies(getattr(job, "f_list", None), ctx.report)
+    if not getattr(job, "frequency_independent", False):
+        _validate_frequencies(getattr(job, "f_list", None), ctx.report)
     outputs = getattr(job, "outputs", None)
     if not isinstance(outputs, JobOutputs):
         try:

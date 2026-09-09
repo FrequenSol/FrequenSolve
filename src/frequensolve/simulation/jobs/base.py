@@ -7,7 +7,7 @@ run-state mixins used by concrete forward and imaging jobs.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
+from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Union
 
 import numpy as np
 
@@ -369,6 +369,15 @@ class BaseJob(
     outputs: JobOutputs = field(default_factory=JobOutputs)
     _file: Optional[Path] = None
     _job_id: Optional[str] = None
+
+    supports_trace_packing: ClassVar[bool] = True
+    """Whether execution sites should run Sauce's trace-packing phase."""
+
+    frequency_independent: ClassVar[bool] = False
+    """Whether the solver contract omits a physical frequency list."""
+
+    max_ranks_per_task: ClassVar[Optional[int]] = None
+    """Optional solver limit on MPI ranks used by one task."""
 
     def __post_init__(self) -> None:
         if not self.name:

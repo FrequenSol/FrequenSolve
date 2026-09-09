@@ -596,18 +596,19 @@ class JobRunStateMixin:
         if task < 1 or task > self.n_tasks:
             raise IndexError(f"Task {task} is outside 1..{self.n_tasks}")
         job_data = self.to_fs(self.export_context())
+        job_payload = self._fingerprint_job_payload(job_data)
         return {
             "schema": "frequensolve-job-task-compatibility-fingerprint-1",
-            "job": {
-                "_type": job_data["_type"],
-                "workflow": job_data["workflow"],
-                "Outputs": job_data["Outputs"],
-            },
+            "job": job_payload,
             "simulation": {
                 "hash": self._simulation_hash_for_policy(policy),
                 "ignored_keys": list(policy.ignored_simulation_keys),
             },
-            "frequency": self._canonical_frequency_value(self.f_list[task - 1]),
+            **(
+                {"frequency": self._canonical_frequency_value(self.f_list[task - 1])}
+                if "f_list" in job_data
+                else {}
+            ),
         }
 
     def task_policy_fingerprint(

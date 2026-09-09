@@ -51,6 +51,14 @@ The core workflow is intentionally repetitive across tutorials:
    * - ``TimeDomainJob`` / ``FrequencyDomainJob``
      - ``fs-job-1`` plus job-owned outputs
      - Frequency list or band, result path, logs, traces, and visualization requests.
+   * - ``RayTracingJob`` / ``RayTracingConfig``
+     - ``fs-job-1`` with ``fs-ray-tracing-1``
+     - Physical sources, launch directions, integration and branching budgets,
+       receiver apertures, retained-path policy, and ray output paths.
+   * - ``EikonalJob`` / ``EikonalConfig``
+     - ``fs-job-1`` with ``fs-eikonal-1``
+     - First-arrival sources and receivers, FIM tolerances and budgets,
+       retained field/characteristic products, and output paths.
    * - ``VtkOutput``
      - ``fs-output-config-1``
      - Output target, fields, properties, sources, :term:`PML` visibility, :term:`upscaling`, and :term:`VTK` files.
@@ -58,6 +66,14 @@ The core workflow is intentionally repetitive across tutorials:
      - ``fs_seismic_trace_store_v1`` HDF5 trace output
      - Groups, :term:`components <component>`, source ids, dense/sparse layout,
        frequency and :term:`time-domain` reads.
+   * - ``RayResults``
+     - ``fs-rays-1`` indexed HDF5 output
+     - Source/ray tables, retained paths, events, receiver hits, status-code
+       registries, and CSR consistency.
+   * - ``EikonalResults``
+     - ``fs-eikonal-output-1`` HDF5 output
+     - Native-vertex fields, receiver-time matrices, per-source diagnostics,
+       winning-stencil characteristics, and ragged-offset consistency.
 
 Material Names
 --------------

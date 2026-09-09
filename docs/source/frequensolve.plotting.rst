@@ -17,6 +17,22 @@ Trace Analysis
    :show-inheritance:
    :noindex:
 
+Ray Plotting
+------------
+
+.. automodule:: frequensolve.plotting.rays
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Eikonal Plotting
+----------------
+
+.. automodule:: frequensolve.plotting.eikonal
+   :members:
+   :show-inheritance:
+   :noindex:
+
 Animation
 ---------
 

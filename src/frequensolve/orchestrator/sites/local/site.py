@@ -610,7 +610,9 @@ class LocalSite(BaseSite):
         )
         fresh_run = bool(fresh_run or skip_policy.force)
         validate = kwargs.pop("validate", True)
-        pack = bool(kwargs.pop("pack", True))
+        pack = bool(kwargs.pop("pack", True)) and bool(
+            getattr(job, "supports_trace_packing", True)
+        )
         tolerate_failures = _normalize_failure_tolerance(
             kwargs.pop("tolerate_failures", 4),
             default=4,
@@ -1381,9 +1383,15 @@ class LocalSite(BaseSite):
         if not pending_indices:
             return LocalTaskSubmission(futures=[], task_plan=task_plan)
 
-        self._ensure_dask_for_tasks(1)
-
         n_ranks = kwargs.get("procs_per_job", 1)
+        max_ranks = getattr(job, "max_ranks_per_task", None)
+        if max_ranks is not None and n_ranks > max_ranks:
+            raise ValueError(
+                f"{type(job).__name__} supports at most {max_ranks} MPI rank "
+                f"per task; received {n_ranks}"
+            )
+
+        self._ensure_dask_for_tasks(1)
 
         stdout_dir = str(job._stdout_path)
         os.makedirs(stdout_dir, exist_ok=True)

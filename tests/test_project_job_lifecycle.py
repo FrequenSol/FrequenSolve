@@ -737,6 +737,84 @@ def test_time_domain_job_supports_damping_factor_and_direct_laplace(tmp_path):
     assert [freq.imag for freq in direct.f_list] == pytest.approx([-0.25, -0.25])
 
 
+def test_time_domain_job_supports_sparse_hermite_reconstruction(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = TimeDomainJob(
+        name="td_hermite",
+        simulation=sim,
+        f_min=1.0,
+        f_max=25.0,
+        df=1.0,
+        reconstruction="hermite",
+        sample_every=4,
+        high_frequency_taper=4.0,
+        interpolation_time_shift=0.35,
+    )
+
+    assert job.workflow == "forward_df"
+    assert job.phase_derivatives == 1
+    assert job.f_list == [1.0, 5.0, 9.0, 13.0, 17.0, 21.0, 25.0]
+    assert len(job.f_list) < 0.3 * 25
+    assert job.time_reconstruction == {
+        "method": "hermite",
+        "target_df": 1.0,
+        "sample_every": 4,
+        "high_frequency_taper": 4.0,
+        "interpolation_time_shift": 0.35,
+    }
+
+    job_file = job.save()
+    payload = json.loads(job_file.read_text())
+    loaded = BaseJob.load(job_file)
+
+    assert payload["workflow"] == "forward_df"
+    assert payload["derivative_order"] == 1
+    assert payload["time_reconstruction"] == job.time_reconstruction
+    assert loaded.f_list == job.f_list
+    assert loaded.phase_derivatives == 1
+    assert loaded.time_reconstruction == job.time_reconstruction
+
+    legacy_payload = json.loads(job_file.read_text())
+    legacy_reconstruction = legacy_payload["time_reconstruction"]
+    legacy_reconstruction["frequency_reduction"] = legacy_reconstruction.pop(
+        "sample_every"
+    )
+    job_file.write_text(json.dumps(legacy_payload))
+    legacy_loaded = BaseJob.load(job_file)
+
+    assert legacy_loaded.sample_every == 4
+    assert legacy_loaded.time_reconstruction["sample_every"] == 4
+    assert "frequency_reduction" not in legacy_loaded.time_reconstruction
+
+
+def test_time_domain_job_hermite_frequencies_are_exact_fine_grid_subset(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    fine = TimeDomainJob(
+        name="td_fine",
+        simulation=sim,
+        f_min=0.0,
+        f_max=35.0,
+        T_max=3.0,
+    )
+    quarter = TimeDomainJob(
+        name="td_quarter",
+        simulation=sim,
+        f_min=0.0,
+        f_max=25.0,
+        T_max=3.0,
+        reconstruction="hermite",
+        sample_every=4,
+    )
+
+    fine_through_25 = [frequency for frequency in fine.f_list if frequency <= 25.0]
+    expected = fine_through_25[::4]
+    if expected[-1] != fine_through_25[-1]:
+        expected.append(fine_through_25[-1])
+
+    assert quarter.f_list == expected
+    assert all(frequency in fine.f_list for frequency in quarter.f_list)
+
+
 def test_local_submit_autosaves_job_and_simulation(monkeypatch, tmp_path):
     monkeypatch.setattr(LocalSite, "_get_solver_path", lambda self: "/bin/echo")
     _, sim = _project_with_trace_simulation(tmp_path)
