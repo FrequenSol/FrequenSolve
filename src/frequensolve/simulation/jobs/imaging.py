@@ -1466,7 +1466,7 @@ class ImagingJob(BaseJob):
         }
 
     def _input_fingerprint_payload(self) -> Dict[str, Any]:
-        """Hash observed derivative inputs for every receiver group."""
+        """Hash observed derivatives and any explicit Cartesian direction."""
 
         derivatives = {
             group.name: _derivative_input_fingerprint(
@@ -1475,7 +1475,11 @@ class ImagingJob(BaseJob):
             for group in self.misfit.receiver_groups
             if group.observed_derivatives is not None
         }
-        return {"observed_derivatives": derivatives} if derivatives else {}
+        inputs = {"observed_derivatives": derivatives} if derivatives else {}
+        direction = self.kwargs.get("direction")
+        if direction is not None:
+            inputs["direction"] = self._path_content_fingerprint(direction)
+        return inputs
 
     def _smoothing_to_fs(self) -> Dict[str, Any]:
         """Serialize smoothing for the Cartesian-image FEM implementation."""

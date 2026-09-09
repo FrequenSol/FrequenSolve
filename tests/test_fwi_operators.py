@@ -877,13 +877,14 @@ def test_imaging_derivative_inputs_are_hashed_and_staged(
     assert loaded._input_fingerprint_payload() == job._input_fingerprint_payload()
 
 
-def test_loaded_lsrtm_gradient_stages_direction_file(tmp_path):
+@pytest.mark.parametrize("job_type", [LSRTMGradientJob, LSRTMNormalJob])
+def test_loaded_lsrtm_job_stages_and_fingerprints_direction_file(tmp_path, job_type):
     sim = _elastic_simulation(tmp_path)
     direction = tmp_path / "direction.h5"
     direction.write_bytes(b"direction")
     observed = tmp_path / "observed.h5"
     observed.write_bytes(b"observed")
-    job = LSRTMGradientJob(
+    job = job_type(
         "gradient",
         sim,
         f_list=[5.0],
@@ -896,3 +897,17 @@ def test_loaded_lsrtm_gradient_stages_direction_file(tmp_path):
         direction,
         type(direction)("/remote/project/direction.h5"),
     ) in loaded.remote_input_files("/remote/project")
+
+    before = (
+        loaded.fingerprint(),
+        loaded.task_fingerprint(1),
+        loaded.task_policy_fingerprint(1, "compatible"),
+    )
+    direction.write_bytes(b"updated direction")
+    after = (
+        loaded.fingerprint(),
+        loaded.task_fingerprint(1),
+        loaded.task_policy_fingerprint(1, "compatible"),
+    )
+    assert all(old != new for old, new in zip(before, after))
+    assert loaded._input_fingerprint_payload() == job._input_fingerprint_payload()

@@ -607,7 +607,10 @@ def test_fetch_outputs_downloads_control_postprocess_products(tmp_path, focus):
         gradient=tmp_path / "gradient.h5",
         **kwargs,
     )
-    outputs = job.postprocess_fetch_files()
+    outputs = [tmp_path / "gradient_raw.h5", tmp_path / "gradient.h5"]
+    if focus:
+        outputs.append(tmp_path / "objective.json")
+    assert job.postprocess_fetch_files() == outputs
     objects = {
         f"{tmp_path.name}/{path.relative_to(tmp_path).as_posix()}": path.name
         for path in outputs

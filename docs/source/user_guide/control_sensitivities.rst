@@ -374,8 +374,9 @@ all frequency tasks have completed:
 For a requested ``control_gradient.h5``, task ``i`` writes
 ``control_gradient_i.h5``. Postprocessing preserves the weighted aggregate as
 ``control_gradient_raw.h5`` and writes the variationally smoothed result to the
-requested final path. With no smoothing configuration, the final file is the
-raw aggregate.
+requested final path. With no smoothing configuration, both files are still
+written and contain the same raw aggregate. Omitting ``raw_gradient`` selects
+the default ``<gradient_stem>_raw.h5`` path; it does not disable that output.
 
 The native Tikhonov system is
 
