@@ -14,13 +14,13 @@ automatically create an electromagnetic model, mesh, sources, or boundaries.
 
 Related tutorials:
 
-- :download:`Acoustic modeling <../../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>`
+- :download:`Acoustic modeling <../../../tutorials/01_modeling_basics/01_acoustic.ipynb>`
   for the simplest complete material and boundary workflow.
-- :download:`Elastic modeling <../../../examples/tutorials/01_modeling_basics/02_elastic.ipynb>`
+- :download:`Elastic modeling <../../../tutorials/01_modeling_basics/02_elastic.ipynb>`
   for shear-wave properties, :term:`attenuation`, and elastic receivers.
-- :download:`Poroelastic modeling <../../../examples/tutorials/01_modeling_basics/03_poroelastic.ipynb>`
+- :download:`Poroelastic modeling <../../../tutorials/01_modeling_basics/03_poroelastic.ipynb>`
   for :term:`Biot`-frame and pore-fluid properties.
-- :download:`Coupled modeling <../../../examples/tutorials/01_modeling_basics/04_coupled.ipynb>`
+- :download:`Coupled modeling <../../../tutorials/01_modeling_basics/04_coupled.ipynb>`
   for mixed material families in one model.
 
 Model Material Properties

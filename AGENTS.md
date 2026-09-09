@@ -209,7 +209,7 @@ validator.
 ├── tests/                  # pytest suite and fixtures
 ├── tests/reference_images/ # pytest-mpl baselines
 ├── docs/                   # Sphinx documentation
-├── examples/               # examples and tutorial material
+├── tutorials/              # tutorial notebooks and assets
 ├── pyproject.toml          # package metadata and tool configuration
 └── Makefile                # common test/reference-image entrypoints
 ```
