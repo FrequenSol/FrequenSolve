@@ -712,6 +712,9 @@ class EikonalResults:
     def _source_major(self, value: Any, records: int, name: str) -> np.ndarray:
         array = np.asarray(value)
         self._validate_source_major_shape(array.shape, self.source_count, records, name)
+        # The producer's Fortran (record, source) shape is (source, record)
+        # through h5py. Preserve that canonical orientation for square tables;
+        # the reversed-layout fallback is unambiguous only for non-square data.
         if array.shape == (records, self.source_count) and array.shape != (
             self.source_count,
             records,

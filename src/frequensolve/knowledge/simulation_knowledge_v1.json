@@ -1852,6 +1852,13 @@
       "remediation": "Use a valid inverse-length unit such as 1/m or 1/km."
     },
     {
+      "code": "job.config.invalid",
+      "severity": "error",
+      "path": "Eikonal",
+      "explanation": "The frequency-independent job configuration is invalid for its simulation.",
+      "remediation": "Use finite explicit coordinates matching the simulation dimension and supported Eikonal options."
+    },
+    {
       "code": "job.outputs.invalid",
       "severity": "error",
       "path": "outputs",

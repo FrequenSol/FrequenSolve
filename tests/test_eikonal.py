@@ -307,3 +307,85 @@ def test_eikonal_damaged_products_are_scheduled_again(tmp_path, damage):
     assert not job.results_exist()
     assert not job.is_run_current()
     assert job.task_run_plan()["pending_indices"] == [0]
+
+
+@pytest.mark.parametrize(
+    "coordinates",
+    [
+        None,
+        ["x", "z"],
+        [0.0, float("nan")],
+        [0.0, float("inf")],
+        [1.0],
+        [1, 2, 3, 4],
+        [[0.0, 1.0]],
+    ],
+)
+@pytest.mark.parametrize("section", ["sources", "receivers"])
+def test_eikonal_rejects_invalid_explicit_coordinates(coordinates, section):
+    factory = EikonalSources if section == "sources" else EikonalReceivers
+    with pytest.raises(ValueError, match="finite numeric coordinates"):
+        EikonalConfig(
+            **{
+                section: factory.explicit(
+                    [{"name": "point", "coordinates": coordinates}]
+                )
+            }
+        )
+
+
+def test_eikonal_coordinates_follow_simulation_dimension_and_normalize_units(tmp_path):
+    _, sim, _ = _eikonal_job(tmp_path)
+    point = {
+        "name": "source",
+        "coordinates": fs.CoordinateValue([0.0, 1.0], units="km"),
+    }
+    job = EikonalJob("explicit", sim, sources=EikonalSources.explicit([point]))
+    job.save()
+    assert job.to_fs()["Eikonal"]["sources"]["points"][0]["coordinates"] == {
+        "value": [0.0, 1.0],
+        "units": "km",
+    }
+    sim.dimension = 3
+    assert "job.config.invalid" in {issue.code for issue in job.validate().issues}
+    with pytest.raises(ValueError, match="3 coordinates"):
+        job.to_fs()
+    with pytest.raises(ValueError, match="3 coordinates"):
+        EikonalJob("bad", sim, sources=EikonalSources.explicit([point]))
+
+
+def test_square_eikonal_tables_keep_h5py_source_major_orientation(tmp_path):
+    _, _, job = _eikonal_job(tmp_path)
+    _write_eikonal_product(job)
+    with h5py.File(job.eikonal_hdf5_file, "a") as h5:
+        h5["metadata/source_count"][()] = 2
+        h5["metadata/characteristic_count"][()] = 0
+        h5["metadata/characteristic_point_count"][()] = 0
+        del h5["characteristics"]
+        for name in list(h5["sources"]):
+            del h5["sources"][name]
+        h5["sources"].create_dataset("id", data=[1, 2])
+        h5["sources"].create_dataset("owner_cell", data=[1, 1])
+        h5["sources"].create_dataset("position", data=[[0.0, 0.0], [1.0, 2.0]])
+        _string(h5["sources"], "name", ["shot_1", "shot_2"])
+        for name in list(h5["diagnostics"]):
+            value = h5["diagnostics"][name][0]
+            del h5["diagnostics"][name]
+            h5["diagnostics"].create_dataset(name, data=[value, value])
+        for name, values in {
+            "travel_time": [[2.0, 3.0], [11.0, 13.0]],
+            "status": [[0, 0], [0, 0]],
+            "ambiguous": [[0, 1], [1, 0]],
+        }.items():
+            del h5["receiver_times"][name]
+            h5["receiver_times"].create_dataset(name, data=values)
+        del h5["field/travel_time"]
+        h5["field"].create_dataset("travel_time", data=[[0, 1, 2, 3], [4, 5, 6, 7]])
+    manifest = json.loads(job.eikonal_manifest_file.read_text())
+    manifest.update(
+        source_count=2, characteristics_retained=False, characteristic_point_count=0
+    )
+    job.eikonal_manifest_file.write_text(json.dumps(manifest))
+    result = EikonalResults.from_job(job)
+    np.testing.assert_allclose(result.receiver_times_for_source("shot_2"), [11.0, 13.0])
+    np.testing.assert_allclose(result.receiver_times_for_source("shot_1"), [2.0, 3.0])

@@ -96,7 +96,12 @@ def validate_job(
 
 
 def _validate_job(job: Any, ctx: _ValidationContext) -> None:
-    if not getattr(job, "frequency_independent", False):
+    if getattr(job, "frequency_independent", False):
+        try:
+            job.validate_outputs()
+        except (TypeError, ValueError) as exc:
+            ctx.report.error("job.config.invalid", str(exc), path="Eikonal")
+    else:
         _validate_frequencies(getattr(job, "f_list", None), ctx.report)
     _validate_half_dimension_wavenumbers(job, ctx)
     outputs = getattr(job, "outputs", None)

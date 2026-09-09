@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Union
 
+import numpy as np
+
+from frequensolve.geometry.frame import coordinate_value_to_fs
 from frequensolve.seismic.eikonal import EikonalResults
 from frequensolve.simulation.jobs.base import BaseJob
 from frequensolve.simulation.jobs.run_state import SkipPolicy, TaskRunPlan
@@ -96,6 +99,26 @@ def _string_list(value: Any, name: str) -> list[str]:
     return result
 
 
+def _point_coordinates(value: Any, name: str, dimension: Optional[int] = None) -> Any:
+    """Normalize a finite physical-coordinate vector for an explicit point."""
+
+    payload = coordinate_value_to_fs(value)
+    raw = payload.get("value") if isinstance(payload, Mapping) else payload
+    array = np.asarray(raw)
+    if (
+        array.ndim != 1
+        or array.dtype.kind not in {"i", "u", "f"}
+        or array.size not in {2, 3}
+        or not np.all(np.isfinite(array))
+    ):
+        raise ValueError(f"{name} must contain two or three finite numeric coordinates")
+    if dimension is not None and array.size != dimension:
+        raise ValueError(
+            f"{name} must have {dimension} coordinates for this simulation"
+        )
+    return payload
+
+
 def _named_points(points: Any, name: str) -> None:
     if not isinstance(points, list) or not points:
         raise ValueError(f"{name} must be a non-empty list")
@@ -104,6 +127,7 @@ def _named_points(points: Any, name: str) -> None:
         item = _mapping(point, f"{name}[{index}]")
         _unknown(item, {"name", "coordinates"}, f"{name}[{index}]")
         _required(item, {"name", "coordinates"}, f"{name}[{index}]")
+        _point_coordinates(item["coordinates"], f"{name}[{index}].coordinates")
         names.append(str(item["name"]))
     if any(not item for item in names) or len(set(names)) != len(names):
         raise ValueError(f"{name} names must be non-empty and unique")
@@ -232,7 +256,13 @@ class EikonalConfig:
     def to_fs(self) -> Dict[str, Any]:
         """Return an isolated JSON-compatible solver payload."""
 
-        return copy.deepcopy(self._data)
+        payload = copy.deepcopy(self._data)
+        for section in ("sources", "receivers"):
+            for index, point in enumerate(payload[section].get("points", [])):
+                point["coordinates"] = _point_coordinates(
+                    point["coordinates"], f"{section}.points[{index}].coordinates"
+                )
+        return payload
 
     def with_updates(self, **sections: Mapping[str, Any]) -> "EikonalConfig":
         """Return a copy with complete top-level sections replaced."""
@@ -428,6 +458,14 @@ class EikonalJob(BaseJob):
         dimension = int(getattr(self.simulation, "dimension", 0))
         if dimension not in {2, 3}:
             raise ValueError("Eikonal supports only full-dimensional 2D and 3D")
+        config = self.eikonal.to_fs()
+        for section in ("sources", "receivers"):
+            for index, point in enumerate(config[section].get("points", [])):
+                _point_coordinates(
+                    point["coordinates"],
+                    f"{section}.points[{index}].coordinates",
+                    dimension,
+                )
         if bool(getattr(self.simulation, "axisymmetric", False)):
             raise ValueError("Eikonal does not support axisymmetric simulations")
 
@@ -442,6 +480,7 @@ class EikonalJob(BaseJob):
     ) -> Dict[str, Any]:
         """Serialize a Sauce ``eikonal`` job without ``f_list`` or ``Outputs``."""
 
+        self._validate_simulation_support()
         payload = super().to_fs(ctx, project_relative=project_relative)
         payload.pop("f_list", None)
         payload.pop("Outputs", None)
@@ -504,8 +543,6 @@ class EikonalJob(BaseJob):
     @property
     def results(self) -> EikonalResults:
         """Open the typed ``fs-eikonal-output-1`` result handle."""
-
-        from frequensolve.seismic.eikonal import EikonalResults
 
         return EikonalResults.from_job(self)
 
