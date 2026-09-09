@@ -589,7 +589,10 @@ class EncodedReceiver(ReceiverDevice):
 
     Args:
         weights: Optional complex weight tensor. Split real/imaginary storage
-            is accepted with an additional final axis of length two.
+            is accepted with an additional final axis of length two. Ambiguous
+            real arrays shaped ``(encoding, 1, 2)`` use the canonical three-axis
+            tensor form (two receivers); use ``(encoding, 1, 1, 2)`` for split
+            weights over one receiver.
         encoding_names: Optional output encoding names. Generated names are
             omitted from JSON; large explicit name lists are stored in HDF5.
         encoding_count: Required for external tables when names are omitted.
@@ -749,6 +752,46 @@ class EncodedReceiver(ReceiverDevice):
 
         return self.weights is not None or bool(self._weight_blocks)
 
+    def conjugated(self) -> "EncodedReceiver":
+        """Return a conjugated view sharing authored weight arrays."""
+
+        if self.weight_table is not None:
+            raise ValueError("Conjugating a receiver requires authored weights")
+        result = copy.copy(self)
+        result.weights = None
+        result._weight_blocks = [
+            (block, not conjugate)
+            for block, conjugate in self._authored_weight_blocks()
+        ]
+        if self.encoding_names is not None:
+            result.encoding_names = list(self.encoding_names)
+        return result
+
+    time_reversed = conjugated
+
+    def _load_encoding_names(self) -> None:
+        """Resolve external channel identities after project paths are relocated."""
+
+        table = self.weight_table
+        if (
+            self.encoding_names is not None
+            or table is None
+            or table.names_dataset is None
+        ):
+            return
+        if _is_remote_file_reference(table.file):
+            raise ValueError(
+                "Download the receiver encoding names before listing fields"
+            )
+        with h5py.File(table.file, "r") as h5:
+            dataset = h5[table.names_dataset]
+            if dataset.shape != (self.encoding_count,):
+                raise ValueError("Receiver encoding names must match encoding_count")
+            names = dataset.asstr()[:].tolist()
+        if any(not name for name in names) or len(set(names)) != len(names):
+            raise ValueError("Receiver encoding names must be non-empty and unique")
+        self.encoding_names = names
+
     def _encoding_name(self, index: int) -> str:
         if self.encoding_names is not None:
             return self.encoding_names[index]
@@ -757,6 +800,7 @@ class EncodedReceiver(ReceiverDevice):
     def output_components(self) -> Iterator[ReceiverComponent]:
         """Iterate expanded encoding/component trace descriptors lazily."""
 
+        self._load_encoding_names()
         if self.encoding_count == 1 and self.encoding_names is None:
             yield from self.components
             return

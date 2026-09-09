@@ -20,6 +20,7 @@ from typing import (
     Union,
 )
 
+import h5py
 import numpy as np
 import xarray as xr
 
@@ -1094,6 +1095,7 @@ class SourceGeometry(ExtraFieldsMixin):
         payload = {
             **dict(base_payload),
             "_type": "HDF5",
+            "count": len(matrix),
             **ref.to_fs(),
             **({"units": unit_expression(units)} if units is not None else {}),
             **({"system": system} if system is not None else {}),
@@ -2245,15 +2247,38 @@ class SourceEncoding(ExtraFieldsMixin):
                 payload["field_names_dataset"] = self.field_names_dataset
             if self.frequencies_dataset is not None:
                 payload["frequencies_dataset"] = self.frequencies_dataset
-            if self.count is not None:
-                payload["count"] = self.count
         if self.conjugate_coefficients:
             payload["conjugate_coefficients"] = True
         return merge_extra(payload, self.extra, "SourceEncoding")
 
+    def _resolve_project_reference(self, project_path: Path) -> None:
+        """Resolve a loaded local coefficient reference without reading weights."""
+
+        if not isinstance(self._storage, _HDF5SourceEncoding):
+            return
+        text = str(self._storage.file)
+        if text.startswith("remote:") or "://" in text:
+            return
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            self._storage.file = project_path / path
+
     @property
     def field_count(self) -> Optional[int]:
         if self.encoding_type == "HDF5Dense":
+            if (
+                self.count is None
+                and self.file is not None
+                and Path(self.file).is_file()
+            ):
+                with h5py.File(self.file, "r") as h5:
+                    shape = h5[self.dataset].shape
+                if len(shape) not in {3, 4} or shape[-1] != 2:
+                    raise ValueError(
+                        "Source encoding requires a split-complex rank-3 or rank-4 tensor"
+                    )
+                assert isinstance(self._storage, _HDF5SourceEncoding)
+                self._storage.count = shape[-3]
             return self.count
         return len(self.fields)
 

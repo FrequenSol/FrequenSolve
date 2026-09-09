@@ -839,7 +839,10 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
     ) -> None:
         """Normalize loaded file references that need project context at runtime."""
 
-        from frequensolve.seismic.receivers import CoordsFromFile
+        from frequensolve.seismic.receivers import (
+            CoordsFromFile,
+            _is_remote_file_reference,
+        )
 
         target_project_path = Path(self.project_path).expanduser().resolve()
         if source_project_path is not None:
@@ -855,6 +858,21 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         if not self.acquisition:
             return
         ctx = self.export_context()
+        encoding = self.acquisition.source_encoding
+        if encoding is not None:
+            encoding._resolve_project_reference(target_project_path)
+        references = (
+            getattr(group.device, "weight_table", None)
+            for group in self.acquisition.receiver_groups
+        )
+        for reference in references:
+            if reference is None:
+                continue
+            file = getattr(reference, "file", None)
+            if file is not None and not _is_remote_file_reference(file):
+                path = Path(file).expanduser()
+                if not path.is_absolute():
+                    reference.file = target_project_path / path
         for group in self.acquisition.receiver_groups:
             coords = getattr(group, "coordinates", None)
             if isinstance(coords, CoordsFromFile):

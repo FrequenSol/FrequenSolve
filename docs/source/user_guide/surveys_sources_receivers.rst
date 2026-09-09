@@ -93,12 +93,16 @@ as ``(encoding, component, receiver)``:
 
 Each target response above has shape ``(component, receiver)``. The resulting
 channels are named ``focus_a:vx``, ``focus_a:vz``, and so on. For a scalar
-device, ``(encoding, receiver)`` is accepted as a convenience.
+device, ``(encoding, receiver)`` is accepted as a convenience. For split
+real/imaginary weights over a single receiver, use the explicit shape
+``(encoding, 1, 1, 2)``. A real ``(encoding, 1, 2)`` tensor means two receivers;
+this shape is otherwise ambiguous.
 
 Use ``reduction="mean"`` for normalized encoding or ``"none"`` to retain one
 trace per receiver point. The bulk tensor path is preferred for production: it
 uses vectorized validation, streams real/imaginary blocks to HDF5, and
-``time_reversed()`` does not copy the tensor. ``add_encoding(...)`` is a
+``time_reversed()`` does not copy authored tensors. External weight tables must
+be conjugated before they are attached. ``add_encoding(...)`` is a
 convenient incremental builder. Base component descriptors occur only once;
 large explicit encoding-name lists are also moved to HDF5 to keep acquisition
 metadata small.

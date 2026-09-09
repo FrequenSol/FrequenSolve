@@ -1149,7 +1149,10 @@ def test_external_source_geometry_count_roundtrips(geometry):
     assert loaded.to_fs() == payload
 
 
-def test_external_source_encoding_count_roundtrips():
+def test_external_source_encoding_count_roundtrips(tmp_path):
+    encoding_file = tmp_path / "encoding.h5"
+    with h5py.File(encoding_file, "w") as h5:
+        h5.create_dataset("coefficients", data=np.ones((2, 4, 2)))
     acquisition = Acquisition(
         source_geometry=SourceGeometry.hdf5(
             "inputs/sources.h5",
@@ -1158,7 +1161,7 @@ def test_external_source_encoding_count_roundtrips():
             count=4,
         ),
         source_encoding=SourceEncoding.hdf5(
-            "inputs/encoding.h5",
+            encoding_file,
             dataset="/coefficients",
             count=2,
         ),
@@ -1168,7 +1171,8 @@ def test_external_source_encoding_count_roundtrips():
     loaded = Acquisition.from_fs(payload)
 
     assert payload["source_geometry"]["count"] == 4
-    assert payload["source_encoding"]["count"] == 2
+    assert "count" not in payload["source_encoding"]
+    _sauce_acquisition_validator().validate(payload)
     assert loaded.known_source_point_count() == 4
     assert loaded.known_source_field_count() == 2
     assert loaded.to_fs() == payload
@@ -1454,3 +1458,86 @@ def test_deprecated_helpers_preserve_zero_based_logical_source_names():
             "source_2",
             "source_3",
         ]
+
+
+@pytest.mark.parametrize("encoding_kind", ["identity", "dense", "frequency"])
+def test_materialized_source_counts_survive_round_trip(tmp_path, encoding_kind):
+    count = 201
+    geometry = SourceGeometry.points(kind="scalar", coords=np.zeros((count, 2)))
+    encoding = None
+    if encoding_kind == "dense":
+        encoding = SourceEncoding.dense(np.ones((3, count), dtype=complex))
+    elif encoding_kind == "frequency":
+        encoding = SourceEncoding.frequency_dense(
+            weights=np.ones((2, 3, count), dtype=complex), frequencies=[1.0, 2.0]
+        )
+    acquisition = Acquisition(source_geometry=geometry, source_encoding=encoding)
+    store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
+    payload = acquisition.to_fs(ExportContext(tmp_path, store=store))
+    if encoding is not None:
+        payload["source_encoding"]["file"] = str(tmp_path / "simulation.h5")
+    restored = Acquisition.from_fs(payload)
+    assert restored.known_source_point_count() == count
+    fields = count if encoding_kind == "identity" else 3
+    assert restored.known_source_field_count() == fields
+    assert restored.list_sources() == list(range(1, fields + 1))
+    _sauce_acquisition_validator().validate(payload)
+
+
+def test_external_receiver_names_survive_simulation_load(tmp_path):
+    from frequensolve.simulation.jobs.fwi import DataSpace
+    from frequensolve.simulation.simulation import SeismicSimulation
+
+    names = [f"channel_{index:03d}" for index in range(65)]
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(kind="scalar", coords=[[0.0, 0.0]]),
+        source_encoding=SourceEncoding.dense(np.ones((2, 1), dtype=complex)),
+    )
+    acquisition.add_receiver_group(
+        "surface",
+        EncodedReceiver(
+            components=[ReceiverComponent(name="p", field="pressure")],
+            encoding_names=names,
+            weights=np.ones((65, 1, 3), dtype=complex),
+        ),
+        coords=[[0.0, 0.0], [0.5, 0.0], [1.0, 0.0]],
+    )
+    simulation = SeismicSimulation(
+        name="named", physics="acoustic", dimension=2, project_path=tmp_path
+    )
+    simulation.acquisition = acquisition
+    restored = SeismicSimulation.load(simulation.save())
+    assert restored.acquisition.list_fields() == [f"surface:{name}" for name in names]
+    assert restored.acquisition.list_sources() == [1, 2]
+    assert DataSpace.from_simulation(restored, [1.0]).size == 130
+
+
+def test_encoded_receiver_time_reversal_shares_and_conjugates_weights(tmp_path):
+    weights = np.asarray([[1.0 + 2.0j, 3.0 - 4.0j]])
+    device = EncodedReceiver(
+        components=[ReceiverComponent(name="p", field="pressure")], weights=weights
+    )
+    reversed_device = device.time_reversed()
+    block, conjugate = next(reversed_device._authored_weight_blocks())
+    assert np.shares_memory(block, device.weights)
+    assert conjugate
+    assert not next(reversed_device.time_reversed()._authored_weight_blocks())[1]
+    store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
+    payload = reversed_device.to_fs(
+        ExportContext(tmp_path, store=store), group_name="surface", point_count=2
+    )
+    with h5py.File(store.path, "r") as h5:
+        split = h5[payload["weights"]["dataset"]][:]
+    np.testing.assert_allclose(split[..., 0] + 1j * split[..., 1], weights.conj())
+    np.testing.assert_allclose(device.weights[0, 0], weights[0])
+
+
+def test_single_receiver_split_weights_use_explicit_component_axis():
+    split = np.asarray([[[[1.0, 2.0]]], [[[3.0, 4.0]]]])
+    components = [ReceiverComponent(name="p", field="pressure")]
+    device = EncodedReceiver(components=components, weights=split)
+    device.validate_size(1)
+    np.testing.assert_allclose(device.weights[:, 0, 0], [1 + 2j, 3 + 4j])
+    canonical = EncodedReceiver(components=components, weights=split[:, 0])
+    canonical.validate_size(2)
+    np.testing.assert_allclose(canonical.weights[:, 0], [[1, 2], [3, 4]])
