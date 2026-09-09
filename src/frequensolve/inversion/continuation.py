@@ -376,6 +376,7 @@ class ContinuationResult:
 
     model: np.ndarray
     stage_results: tuple[Any, ...]
+    stage_initial_models: tuple[np.ndarray, ...] = ()
 
 
 def run_continuation(
@@ -384,12 +385,27 @@ def run_continuation(
     solve_stage: Callable[[ContinuationStage, np.ndarray], Any],
     *,
     callback: Optional[Callable[[ContinuationStage, Any], None]] = None,
+    transition: Optional[
+        Callable[[ContinuationStage, ContinuationStage, np.ndarray], Sequence[float]]
+    ] = None,
 ) -> ContinuationResult:
     """Warm-start every continuation stage from the preceding stage result.
 
     A stage result may expose its terminal model as either ``model`` or ``x``.
     Iteration-limit termination is intentionally left to ``solve_stage`` so a
     caller can continue after useful, deliberately inexact stage solves.
+
+    ``transition(previous_stage, next_stage, accepted_model)`` is called only
+    between stages. It may rebuild the stage-local backend/control space and
+    return a different-sized initial vector. Transfer the represented physical
+    model (or its latent field when references and transforms agree), not vector
+    indices. The next ``solve_stage`` must rebuild its bounds, regularization,
+    caches and optimizer history for that space. Dimensions may never change
+    inside a stage solve. Without this hook the fixed-space behavior is unchanged.
+
+    Results and ``stage_initial_models`` retain each stage's local vector shape;
+    ``model`` belongs to the final stage only. Hooks receive copies of accepted
+    vectors so an in-place transfer cannot modify earlier optimizer results.
     """
 
     if not isinstance(schedule, ContinuationSchedule):
@@ -398,6 +414,8 @@ def run_continuation(
         raise TypeError("solve_stage must be callable")
     if callback is not None and not callable(callback):
         raise TypeError("continuation callback must be callable")
+    if transition is not None and not callable(transition):
+        raise TypeError("continuation transition must be callable")
     model = np.asarray(initial_model)
     if np.iscomplexobj(model):
         raise ValueError("continuation models must be real-valued")
@@ -405,7 +423,22 @@ def run_continuation(
     if model.size < 1 or not np.all(np.isfinite(model)):
         raise ValueError("initial continuation model must be a finite vector")
     results = []
-    for stage in schedule.stages:
+    initial_models = []
+    for index, stage in enumerate(schedule.stages):
+        if index and transition is not None:
+            transferred = np.asarray(
+                transition(
+                    schedule.stages[index - 1], stage, np.array(model, copy=True)
+                )
+            )
+            if np.iscomplexobj(transferred):
+                raise ValueError("transferred continuation models must be real-valued")
+            model = np.asarray(transferred, dtype=np.float64).reshape(-1)
+            if model.size < 1 or not np.all(np.isfinite(model)):
+                raise ValueError(
+                    "transferred continuation model must be a finite vector"
+                )
+        initial_models.append(np.array(model, copy=True))
         result = solve_stage(stage, np.array(model, copy=True))
         terminal = getattr(result, "model", getattr(result, "x", None))
         if terminal is None:
@@ -422,4 +455,4 @@ def run_continuation(
         results.append(result)
         if callback is not None:
             callback(stage, result)
-    return ContinuationResult(model, tuple(results))
+    return ContinuationResult(model, tuple(results), tuple(initial_models))

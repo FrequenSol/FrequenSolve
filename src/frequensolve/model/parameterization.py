@@ -9,6 +9,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Union
 import numpy as np
 
 from frequensolve.model.property import Property
+from frequensolve.units import unit_expression
 from frequensolve.util.mixins import ExportContext
 
 __all__ = [
@@ -241,7 +242,19 @@ class ParameterizedProperty(Property):
         transform: str = "identity",
         **extra: Any,
     ):
-        super().__init__(0.0)
+        reference = Property.from_value(reference)
+        wrapper_units = extra.pop("units", None)
+        reference_units = reference.units
+        if wrapper_units is None:
+            wrapper_units = reference_units
+        elif reference_units is not None:
+            wrapper_units = unit_expression(wrapper_units)
+            if wrapper_units != reference_units:
+                raise ValueError(
+                    "parameterized property units disagree with reference units: "
+                    f"{wrapper_units!r} != {reference_units!r}"
+                )
+        super().__init__(0.0, units=wrapper_units)
         block_id = str(id).strip()
         if not block_id:
             raise ValueError("parameterized property requires a non-empty block id")
@@ -250,7 +263,7 @@ class ParameterizedProperty(Property):
         transform = str(transform).lower()
         if transform not in {"identity", "log"}:
             raise ValueError("parameterized property transform must be identity or log")
-        self.reference = Property.from_value(reference)
+        self.reference = reference
         self.id = block_id
         self.control = (
             control_from_fs(control) if isinstance(control, Mapping) else control
@@ -282,6 +295,7 @@ class ParameterizedProperty(Property):
             id=self.id,
             control=self.control.with_coefficients(coefficients),
             transform=self.transform,
+            units=self.units,
             **copy.deepcopy(self.extra),
         )
 
@@ -301,6 +315,7 @@ class ParameterizedProperty(Property):
             dataset=reference_dataset,
             preserve_inline_coordinates=preserve_inline_coordinates,
         )
+        reference.pop("units", None)
         payload = {
             "parameterized": {
                 "id": self.id,
@@ -309,6 +324,8 @@ class ParameterizedProperty(Property):
                 "control": self.control.to_fs(),
             }
         }
+        if self.units is not None:
+            payload["units"] = self.units
         payload.update(copy.deepcopy(self.extra))
         return payload
 

@@ -356,6 +356,7 @@ class FieldRepresentation(ABC):
         *,
         weights: Optional[Any] = None,
         damping: float = 0.0,
+        tolerance: float = 1.0e-6,
     ) -> np.ndarray:
         """Least-squares project point samples into this representation."""
 
@@ -377,7 +378,12 @@ class FieldRepresentation(ABC):
         damping = float(damping)
         if not np.isfinite(damping) or damping < 0.0:
             raise ValueError("projection damping must be finite and nonnegative")
-        return lsqr(operator, values, damp=np.sqrt(damping))[0]
+        tolerance = float(tolerance)
+        if not np.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError("projection tolerance must be finite and positive")
+        return lsqr(
+            operator, values, damp=np.sqrt(damping), atol=tolerance, btol=tolerance
+        )[0]
 
     def transfer_to(
         self,
@@ -387,11 +393,14 @@ class FieldRepresentation(ABC):
         *,
         weights: Optional[Any] = None,
         damping: float = 0.0,
+        tolerance: float = 1.0e-6,
     ) -> np.ndarray:
         """Evaluate here and project into another representation."""
 
         samples = self.evaluate(coefficients, context, reshape=False)
-        return target.project(samples, context, weights=weights, damping=damping)
+        return target.project(
+            samples, context, weights=weights, damping=damping, tolerance=tolerance
+        )
 
     def _vector(self, values: Sequence[float], name: str) -> np.ndarray:
         vector = np.asarray(values)
