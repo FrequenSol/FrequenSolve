@@ -389,3 +389,92 @@ def test_square_eikonal_tables_keep_h5py_source_major_orientation(tmp_path):
     result = EikonalResults.from_job(job)
     np.testing.assert_allclose(result.receiver_times_for_source("shot_2"), [11.0, 13.0])
     np.testing.assert_allclose(result.receiver_times_for_source("shot_1"), [2.0, 3.0])
+
+
+@pytest.mark.parametrize("dimension", [2.5, "2.5D"])
+def test_eikonal_rejects_half_dimension_without_truncation(tmp_path, dimension):
+    _, sim, job = _eikonal_job(tmp_path)
+    sim.dimension = dimension
+    with pytest.raises(ValueError, match="full-dimensional"):
+        EikonalJob("invalid", sim)
+    assert "job.config.invalid" in {issue.code for issue in job.validate().issues}
+    with pytest.raises(ValueError, match="full-dimensional"):
+        job.to_fs()
+
+
+@pytest.mark.parametrize("section", ["sources", "receivers"])
+def test_eikonal_validates_locally_known_acquisition_selectors(tmp_path, section):
+    from frequensolve.seismic.acquisition import Acquisition
+    from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
+    from frequensolve.seismic.sources import SourceGeometry
+
+    _, sim, job = _eikonal_job(tmp_path)
+    sim.acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar", coords=[[0.0, 0.0]], names=["shot_1"]
+        )
+    )
+    sim.acquisition.add_receiver_group(
+        "surface",
+        ReceiverNode(
+            name="hydrophone",
+            components=[ReceiverComponent(name="p", field="pressure")],
+        ),
+        coords=[[0.0, 0.0]],
+    )
+    job.validate_outputs()
+    replacement = (
+        EikonalSources.acquisition(["missing-shot"])
+        if section == "sources"
+        else EikonalReceivers.acquisition(["missing-group"])
+    )
+    job.eikonal = job.eikonal.with_updates(**{section: replacement})
+    assert "job.config.invalid" in {issue.code for issue in job.validate().issues}
+    with pytest.raises(ValueError, match="Unknown Eikonal acquisition"):
+        job.to_fs()
+
+
+def test_eikonal_defers_external_source_catalog_validation(tmp_path):
+    from frequensolve.seismic.acquisition import Acquisition
+    from frequensolve.seismic.sources import SourceGeometry
+
+    _, sim, job = _eikonal_job(tmp_path)
+    sim.acquisition = Acquisition(
+        source_geometry=SourceGeometry.hdf5(
+            file="remote:source.h5", dataset="coordinates", kind="scalar"
+        )
+    )
+    job.validate_outputs()
+
+
+@pytest.mark.parametrize("field", ["directory", "hdf5_file"])
+@pytest.mark.parametrize("value", [None, 4, True, [], {}])
+def test_eikonal_rejects_non_path_output_values(field, value):
+    with pytest.raises(ValueError, match="relative path"):
+        EikonalConfig(output={field: value})
+
+
+def test_eikonal_normalizes_path_output_values():
+    from pathlib import Path
+
+    config = EikonalConfig(
+        output={"directory": Path("results"), "hdf5_file": Path("arrival.h5")}
+    )
+    payload = config.to_fs()
+    assert payload["output"]["directory"] == "results"
+    assert payload["output"]["hdf5_file"] == "arrival.h5"
+    assert json.loads(json.dumps(payload)) == payload
+
+
+@pytest.mark.parametrize(
+    "solver",
+    [
+        {"rel_tolerance": "1e-9"},
+        {"tie_tolerance": "1e-9"},
+        {"abs_tolerance": {"value": "1e-9", "units": "s"}},
+        {"minimum_full_stencil_quality": "0.5"},
+    ],
+)
+def test_eikonal_rejects_string_floating_solver_values(solver):
+    with pytest.raises(ValueError):
+        EikonalConfig(solver=solver)

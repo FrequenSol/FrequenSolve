@@ -24,6 +24,7 @@ from frequensolve.simulation.outputs import JobOutputs
 from frequensolve.simulation.simulation import BaseSimulation
 from frequensolve.util.class_registry import register_class
 from frequensolve.util.mixins import ExportContext
+from frequensolve.util.physics import canonical_dimension
 
 __all__ = [
     "EikonalConfig",
@@ -73,7 +74,7 @@ def _positive(value: Any, name: str) -> None:
         if not isinstance(item["units"], str) or not item["units"]:
             raise ValueError(f"{name}.units must be a non-empty string")
         value = item["value"]
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{name} must be finite and positive")
     try:
         scalar = float(value)
@@ -84,7 +85,9 @@ def _positive(value: Any, name: str) -> None:
 
 
 def _output_path(value: Any, name: str) -> str:
-    path = Path(str(value))
+    if not isinstance(value, (str, Path)):
+        raise ValueError(f"{name} must be a non-empty relative path")
+    path = Path(value)
     if not str(value) or path.is_absolute() or ".." in path.parts:
         raise ValueError(f"{name} must be a non-empty relative path")
     return path.as_posix()
@@ -257,6 +260,10 @@ class EikonalConfig:
         """Return an isolated JSON-compatible solver payload."""
 
         payload = copy.deepcopy(self._data)
+        for key in ("directory", "hdf5_file"):
+            payload["output"][key] = _output_path(
+                payload["output"][key], f"output.{key}"
+            )
         for section in ("sources", "receivers"):
             for index, point in enumerate(payload[section].get("points", [])):
                 point["coordinates"] = _point_coordinates(
@@ -362,7 +369,9 @@ class EikonalConfig:
             if field in data:
                 _integer(data[field], f"solver.{field}", minimum=1)
         if "minimum_full_stencil_quality" in data:
-            if isinstance(data["minimum_full_stencil_quality"], bool):
+            if isinstance(data["minimum_full_stencil_quality"], bool) or not isinstance(
+                data["minimum_full_stencil_quality"], (int, float)
+            ):
                 raise ValueError(
                     "solver.minimum_full_stencil_quality must be between 0 and 1"
                 )
@@ -455,19 +464,45 @@ class EikonalJob(BaseJob):
         physics = str(getattr(self.simulation, "physics", "")).lower()
         if physics != "acoustic":
             raise ValueError("fs-eikonal-1 supports acoustic simulations only")
-        dimension = int(getattr(self.simulation, "dimension", 0))
+        dimension = canonical_dimension(getattr(self.simulation, "dimension", 0))
         if dimension not in {2, 3}:
             raise ValueError("Eikonal supports only full-dimensional 2D and 3D")
         config = self.eikonal.to_fs()
+        self._validate_acquisition_selectors(config)
         for section in ("sources", "receivers"):
             for index, point in enumerate(config[section].get("points", [])):
                 _point_coordinates(
                     point["coordinates"],
                     f"{section}.points[{index}].coordinates",
-                    dimension,
+                    int(dimension),
                 )
         if bool(getattr(self.simulation, "axisymmetric", False)):
             raise ValueError("Eikonal does not support axisymmetric simulations")
+
+    def _validate_acquisition_selectors(self, config: Mapping[str, Any]) -> None:
+        """Check selector names when a local acquisition catalog is available."""
+
+        acquisition = getattr(self.simulation, "acquisition", None)
+        if acquisition is None:
+            return
+        sources = config["sources"]
+        if sources["kind"] == "acquisition" and "names" in sources:
+            known = set(acquisition.source_point_names())
+            if known:
+                missing = sorted(set(sources["names"]) - known)
+                if missing:
+                    raise ValueError(
+                        f"Unknown Eikonal acquisition source names: {missing}"
+                    )
+        receivers = config["receivers"]
+        if receivers.get("kind") == "acquisition":
+            known = {group.name for group in acquisition.receiver_groups}
+            if known:
+                missing = sorted(set(receivers["groups"]) - known)
+                if missing:
+                    raise ValueError(
+                        f"Unknown Eikonal acquisition receiver groups: {missing}"
+                    )
 
     def validate_outputs(self) -> None:
         """Validate the Eikonal contract instead of frequency outputs."""
