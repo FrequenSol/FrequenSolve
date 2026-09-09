@@ -50,14 +50,6 @@ Traces
    :show-inheritance:
    :noindex:
 
-Ray Results
------------
-
-.. automodule:: frequensolve.seismic.rays
-   :members:
-   :show-inheritance:
-   :noindex:
-
 Eikonal Results
 ---------------
 

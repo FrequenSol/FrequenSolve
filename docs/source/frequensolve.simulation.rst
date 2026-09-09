@@ -41,14 +41,6 @@ Forward Jobs
    :show-inheritance:
    :noindex:
 
-Ray-Tracing Jobs
-----------------
-
-.. automodule:: frequensolve.simulation.jobs.ray_tracing
-   :members:
-   :show-inheritance:
-   :noindex:
-
 Eikonal Jobs
 ------------
 

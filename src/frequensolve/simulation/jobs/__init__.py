@@ -15,8 +15,6 @@ from frequensolve.simulation.jobs.forward import *  # noqa: F403
 from frequensolve.simulation.jobs.forward import __all__ as _forward_all
 from frequensolve.simulation.jobs.imaging import *  # noqa: F403
 from frequensolve.simulation.jobs.imaging import __all__ as _imaging_all
-from frequensolve.simulation.jobs.ray_tracing import *  # noqa: F403
-from frequensolve.simulation.jobs.ray_tracing import __all__ as _ray_tracing_all
 
 __all__ = unique_exports(
     _artifacts_all,
@@ -25,5 +23,4 @@ __all__ = unique_exports(
     _eikonal_all,
     _forward_all,
     _imaging_all,
-    _ray_tracing_all,
 )

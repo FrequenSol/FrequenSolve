@@ -108,7 +108,6 @@ class JobSerializationMixin:
             import frequensolve.simulation.jobs.eikonal  # noqa: F401
             import frequensolve.simulation.jobs.forward  # noqa: F401
             import frequensolve.simulation.jobs.imaging  # noqa: F401
-            import frequensolve.simulation.jobs.ray_tracing  # noqa: F401
 
         if class_name not in class_registry:
             raise ValueError(f"Unknown job class: {class_name}")
@@ -242,7 +241,6 @@ class JobSerializationMixin:
                 "Outputs",
                 "Eikonal",
                 "Image",
-                "RayTracing",
                 "control_sensitivities",
                 "focus",
                 "time_reconstruction",

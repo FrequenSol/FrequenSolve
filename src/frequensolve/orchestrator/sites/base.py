@@ -524,16 +524,6 @@ class RunResult:
             return self.site.fetch_wavefields(self.job, upscale=upscale)
         return self.job.wavefields.open(upscale=upscale)
 
-    def rays(self):
-        """Open authoritative ray-tracing results for this run."""
-
-        self.raise_for_status()
-        if getattr(self.job, "workflow", None) != "raytrace":
-            raise TypeError("rays() requires a RayTracingJob")
-        if self.site is not None and hasattr(self.site, "fetch_outputs"):
-            self.site.fetch_outputs(self.job)
-        return self.job.results
-
     def eikonal(self):
         """Open authoritative Eikonal first-arrival results for this run."""
 
@@ -895,14 +885,6 @@ class RunHandle:
 
         self.fetch()
         return self.site.fetch_wavefields(self.job, upscale=upscale)
-
-    def rays(self):
-        """Fetch if needed and open authoritative ray-tracing results."""
-
-        if getattr(self.job, "workflow", None) != "raytrace":
-            raise TypeError("rays() requires a RayTracingJob")
-        self.fetch()
-        return self.job.results
 
     def eikonal(self):
         """Fetch if needed and open authoritative Eikonal results."""

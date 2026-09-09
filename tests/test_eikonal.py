@@ -263,8 +263,6 @@ def test_completed_run_opens_eikonal_results(tmp_path):
     )
 
     assert isinstance(completed.eikonal(), EikonalResults)
-    with pytest.raises(TypeError, match="RayTracingJob"):
-        completed.rays()
 
 
 @pytest.mark.visual
