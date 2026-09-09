@@ -31,6 +31,7 @@ from scripts.validate_heavy_test_evidence import (
 from scripts.validate_release_evidence import (
     DOCKER_WORKFLOW_PREFIX,
     LEGACY_SCHEMA,
+    PROFILE_SCHEMA,
     SCHEMA,
     SOLVER_BACKED_PROFILE,
     STANDARD_PROFILE,
@@ -234,7 +235,7 @@ def test_release_evidence_accepts_standard_exact_tree_ci_and_solver_identity():
 
 def test_release_evidence_maps_legacy_v2_to_solver_backed():
     evidence = _release_evidence()
-    evidence["schemaVersion"] = LEGACY_SCHEMA
+    evidence = _legacy_release_evidence(evidence, LEGACY_SCHEMA)
     evidence.pop("validationProfile")
     evidence.pop("solverValidationStatus")
 
@@ -922,3 +923,47 @@ def test_evidence_archive_extractor_rejects_unsafe_members(
         extract_archive(archive_path, tmp_path / "extracted")
 
     assert not (tmp_path / "outside.txt").exists()
+
+
+def _legacy_release_evidence(evidence, schema):
+    legacy = {**evidence, "schemaVersion": schema}
+    for suffix in ("Release", "ReleaseUrl", "Version", "BuildId", "GitCommit"):
+        current = f"solver{suffix}"
+        if current in legacy:
+            legacy[f"frequensolver{suffix}"] = legacy.pop(current)
+    return legacy
+
+
+@pytest.mark.parametrize("schema", [LEGACY_SCHEMA, PROFILE_SCHEMA])
+def test_sealed_legacy_evidence_validates_and_materializes_without_mutation(schema):
+    evidence = _legacy_release_evidence(_release_evidence(), schema)
+    if schema == LEGACY_SCHEMA:
+        evidence.pop("validationProfile")
+        evidence.pop("solverValidationStatus")
+    before = json.dumps(evidence, sort_keys=True)
+    validate_evidence(evidence, COMMIT)
+    manifest = manifest_from_evidence(
+        evidence, package_release="0.3.0", package_commit=COMMIT
+    )
+    assert manifest["preferred_solver"]["release"] == "v0.1.0"
+    assert json.dumps(evidence, sort_keys=True) == before
+
+
+def test_sealed_v3_standard_evidence_retains_profile_validation():
+    evidence = _legacy_release_evidence(_standard_release_evidence(), PROFILE_SCHEMA)
+    validate_evidence(evidence, COMMIT)
+    assert release_evidence_profile(evidence) == STANDARD_PROFILE
+    evidence["solverValidationStatus"] = "passed"
+    with pytest.raises(ValueError, match="solverValidationStatus"):
+        validate_evidence(evidence, COMMIT)
+
+
+@pytest.mark.parametrize("schema", [LEGACY_SCHEMA, PROFILE_SCHEMA, SCHEMA])
+def test_release_evidence_rejects_field_names_from_another_schema(schema):
+    evidence = _release_evidence()
+    if schema == SCHEMA:
+        evidence["frequensolverRelease"] = evidence.pop("solverRelease")
+    else:
+        evidence["schemaVersion"] = schema
+    with pytest.raises(ValueError, match="is not a field"):
+        validate_evidence(evidence, COMMIT)

@@ -44,9 +44,14 @@ Docker evidence consumers accept `solver-identity.json`, falling back to the
 legacy `frequensolver-identity.json` filename emitted by the pinned producer.
 Both use the backend identity contract `fs-solver-identity-1` and product
 `FS_solver`; identity and archive-checksum validation remain mandatory.
-Release evidence and compatibility manifests using former backend field names
-must be regenerated with the current tooling; this rename does not migrate
-sealed historical artifacts.
+New release evidence uses schema `frequensolve-release-evidence/v4` and
+`solver*` fields. Readers retain the original field definitions for sealed v2/v3
+evidence, normalize only an in-memory copy, and preserve the published bytes.
+
+Python integrations should import `frequensolve.solver` and use the `Solver*`
+compatibility classes/functions. In existing site profiles and Python constructor
+arguments, rename `frequensolver_policy` to `solver_policy`. These API/configuration
+renames are intentional; the environment-variable fallbacks above remain supported.
 
 Both validation profiles require read-only Solver Builder GitHub App
 access to resolve the immutable release and commit in the internal Sauce

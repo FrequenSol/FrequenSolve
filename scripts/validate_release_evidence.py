@@ -19,7 +19,8 @@ except ModuleNotFoundError:  # Direct execution sets sys.path to scripts/.
 
 
 LEGACY_SCHEMA = "frequensolve-release-evidence/v2"
-SCHEMA = "frequensolve-release-evidence/v3"
+PROFILE_SCHEMA = "frequensolve-release-evidence/v3"
+SCHEMA = "frequensolve-release-evidence/v4"
 STANDARD_PROFILE = "standard"
 SOLVER_BACKED_PROFILE = "solver-backed"
 VALIDATION_PROFILES = frozenset({STANDARD_PROFILE, SOLVER_BACKED_PROFILE})
@@ -66,9 +67,9 @@ def release_evidence_profile(evidence: dict[str, Any]) -> str:
     schema = evidence.get("schemaVersion")
     if schema == LEGACY_SCHEMA:
         return SOLVER_BACKED_PROFILE
-    if schema != SCHEMA:
+    if schema not in {PROFILE_SCHEMA, SCHEMA}:
         raise ValueError(
-            f"schemaVersion must be {SCHEMA!r} or legacy {LEGACY_SCHEMA!r}, "
+            f"schemaVersion must be {SCHEMA!r}, {PROFILE_SCHEMA!r}, or {LEGACY_SCHEMA!r}, "
             f"got {schema!r}"
         )
     profile = evidence.get("validationProfile")
@@ -77,6 +78,23 @@ def release_evidence_profile(evidence: dict[str, Any]) -> str:
             f"validationProfile must be 'standard' or 'solver-backed', got {profile!r}"
         )
     return str(profile)
+
+
+def normalized_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return current field names without modifying sealed v2/v3 evidence."""
+
+    normalized = dict(evidence)
+    legacy = evidence.get("schemaVersion") in {LEGACY_SCHEMA, PROFILE_SCHEMA}
+    for suffix in ("Release", "ReleaseUrl", "Version", "BuildId", "GitCommit"):
+        old, new = f"frequensolver{suffix}", f"solver{suffix}"
+        forbidden = new if legacy else old
+        if forbidden in evidence:
+            raise ValueError(
+                f"{forbidden} is not a field of {evidence.get('schemaVersion')!r}"
+            )
+        if legacy and old in normalized:
+            normalized[new] = normalized.pop(old)
+    return normalized
 
 
 def _positive_integer(value: object) -> bool:
@@ -90,6 +108,7 @@ def _valid_sha(value: object) -> bool:
 def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
     """Raise ``ValueError`` unless evidence proves the expected commit."""
 
+    evidence = normalized_evidence(evidence)
     mismatches: list[str] = []
     try:
         profile = release_evidence_profile(evidence)
@@ -108,7 +127,7 @@ def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
         if evidence.get(name) != expected
     )
 
-    if evidence.get("schemaVersion") == SCHEMA:
+    if evidence.get("schemaVersion") in {PROFILE_SCHEMA, SCHEMA}:
         expected_status = {
             STANDARD_PROFILE: "not-run",
             SOLVER_BACKED_PROFILE: "passed",

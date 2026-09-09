@@ -11,12 +11,14 @@ from typing import Any
 try:
     from scripts.validate_release_evidence import (
         SOLVER_BACKED_PROFILE,
+        normalized_evidence,
         release_evidence_profile,
         validate_evidence,
     )
 except ModuleNotFoundError:  # Direct execution sets sys.path to scripts/.
     from validate_release_evidence import (
         SOLVER_BACKED_PROFILE,
+        normalized_evidence,
         release_evidence_profile,
         validate_evidence,
     )
@@ -41,6 +43,7 @@ def manifest_from_evidence(
     if not PACKAGE_RELEASE_RE.fullmatch(package_release):
         raise ValueError("package_release must be canonical X.Y.Z or X.Y.ZrcN")
     validate_evidence(evidence, package_commit)
+    evidence = normalized_evidence(evidence)
     profile = release_evidence_profile(evidence)
     solver_backed = profile == SOLVER_BACKED_PROFILE
     evidence_run_id = (

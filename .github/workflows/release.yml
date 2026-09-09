@@ -135,9 +135,9 @@ jobs:
               fi
               python scripts/validate_solver_identity.py \
                 "$solver_identity" \
-                --version "$(jq -r '.solverVersion' "$evidence_file")" \
-                --commit "$(jq -r '.solverGitCommit' "$evidence_file")" \
-                --build-id="$(jq -r '.solverBuildId' "$evidence_file")"
+                --version "$(jq -r '.solverVersion // .frequensolverVersion' "$evidence_file")" \
+                --commit "$(jq -r '.solverGitCommit // .frequensolverGitCommit' "$evidence_file")" \
+                --build-id="$(jq -r '.solverBuildId // .frequensolverBuildId' "$evidence_file")"
               ;;
             *)
               echo "Unexpected validated profile: ${validation_profile}" >&2

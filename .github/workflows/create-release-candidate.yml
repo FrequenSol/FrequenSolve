@@ -572,7 +572,7 @@ jobs:
 
           if [ "$VALIDATION_PROFILE" = standard ]; then
             jq -n \
-              --arg schemaVersion "frequensolve-release-evidence/v3" \
+              --arg schemaVersion "frequensolve-release-evidence/v4" \
               --arg validationProfile "$VALIDATION_PROFILE" \
               --arg solverValidationStatus "not-run" \
               --arg commit "$TARGET_SHA" \
@@ -647,7 +647,7 @@ jobs:
           archive_sha256="$(sha256sum frequensolve-test-evidence.tar.gz | awk '{print $1}')"
 
           jq -n \
-            --arg schemaVersion "frequensolve-release-evidence/v3" \
+            --arg schemaVersion "frequensolve-release-evidence/v4" \
             --arg validationProfile "$VALIDATION_PROFILE" \
             --arg solverValidationStatus "passed" \
             --arg commit "$TARGET_SHA" \
