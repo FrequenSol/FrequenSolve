@@ -860,6 +860,9 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         if not self.acquisition:
             return
         ctx = self.export_context()
+        geometry = self.acquisition.source_geometry
+        if geometry is not None:
+            geometry._resolve_project_reference(target_project_path)
         encoding = self.acquisition.source_encoding
         if encoding is not None:
             encoding._resolve_project_reference(target_project_path)

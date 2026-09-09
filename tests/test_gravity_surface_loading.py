@@ -285,3 +285,45 @@ def test_generic_gravity_boundary_loading_survives_simulation_reload(
     assert after["BCs"] == before["BCs"]
     assert after["Acquisition"]["boundary_loadings"][0]["boundary_condition"] == "ocean"
     assert loaded.BCs["ocean"].conditions == conditions
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.parametrize("count", [None, 100])
+def test_external_source_count_with_loading_names_is_unknown(tmp_path, encoded, count):
+    from frequensolve.seismic.sources import SourceEncoding, SourceGeometry
+
+    geometry = SourceGeometry.hdf5(
+        file=tmp_path / "external.h5", dataset="coordinates", kind="scalar", count=count
+    )
+    encoding = (
+        SourceEncoding.hdf5(
+            file=tmp_path / "encoding.h5", dataset="weights", count=count
+        )
+        if encoded
+        else None
+    )
+    acquisition = Acquisition(
+        source_geometry=geometry,
+        source_encoding=encoding,
+        boundary_loadings=SurfacePressureLoading(
+            _frequency_pressure(), boundary_condition="ocean"
+        ),
+    )
+    assert acquisition.known_source_field_count() is None
+
+
+@pytest.mark.parametrize(
+    "names, expected", [(["wind_sea", "other"], 3), (["wind_sea", "swell"], 2)]
+)
+def test_source_counts_union_loading_and_physical_identities(names, expected):
+    from frequensolve.seismic.sources import SourceGeometry
+
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar", coords=[[0, 0], [1, 0]], names=names
+        ),
+        boundary_loadings=SurfacePressureLoading(
+            _frequency_pressure(), boundary_condition="ocean"
+        ),
+    )
+    assert acquisition.known_source_field_count() == expected

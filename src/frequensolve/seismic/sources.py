@@ -1138,7 +1138,35 @@ class SourceGeometry(ExtraFieldsMixin):
                 source.name if source.name is not None else f"source_{index:06d}"
                 for index, source in enumerate(self._storage.sources, start=1)
             ]
+        if (
+            isinstance(self._storage, _HDF5SourceGeometry)
+            and self.names_dataset is not None
+            and Path(self._storage.file).is_file()
+        ):
+            with h5py.File(self._storage.file, "r") as h5:
+                dataset = h5[self.names_dataset]
+                if dataset.ndim != 1:
+                    raise ValueError(
+                        "Source point names must be a one-dimensional dataset"
+                    )
+                names = dataset.asstr()[:].tolist()
+                count = self.point_count
+                if count is None:
+                    count = h5[self._storage.dataset].shape[0]
+            return _source_names(names, count)
         return []
+
+    def _resolve_project_reference(self, project_path: Path) -> None:
+        """Resolve loaded local geometry metadata without reading coordinates."""
+
+        if not isinstance(self._storage, _HDF5SourceGeometry):
+            return
+        text = str(self._storage.file)
+        if text.startswith("remote:") or "://" in text:
+            return
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            self._storage.file = project_path / path
 
     def has_explicit_names(self) -> bool:
         """Return whether every inline source has an authored name."""

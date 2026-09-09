@@ -1580,3 +1580,42 @@ def test_sparse_survey_rejects_unsupported_sample_tables(tmp_path, table, entryp
             else:
                 survey.write_hdf5(tmp_path / "unsupported.h5")
     assert not (tmp_path / "unsupported.h5").exists()
+
+
+def test_materialized_physical_source_names_survive_project_reload(
+    tmp_path, monkeypatch
+):
+    from frequensolve.simulation.simulation import SeismicSimulation
+
+    names = [f"shot-{index}" for index in range(201)]
+    simulation = SeismicSimulation(
+        name="names",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path / "project",
+        acquisition=Acquisition(
+            source_geometry=SourceGeometry.points(
+                kind="scalar", coords=np.zeros((201, 2)), names=names
+            )
+        ),
+    )
+    path = simulation.save()
+    monkeypatch.chdir(tmp_path)
+    restored = SeismicSimulation.load(path)
+    assert restored.acquisition.source_point_names() == names
+    assert restored.acquisition.known_source_field_count() == 201
+
+
+@pytest.mark.parametrize(
+    "names", [["same", "same"], ["only-one"], [["a", "b"]], ["", "b"]]
+)
+def test_external_physical_source_names_are_validated(tmp_path, names):
+    file = tmp_path / "geometry.h5"
+    with h5py.File(file, "w") as h5:
+        h5.create_dataset("coordinates", data=np.zeros((2, 2)))
+        h5.create_dataset("names", data=names, dtype=h5py.string_dtype("utf-8"))
+    geometry = SourceGeometry.hdf5(
+        file=file, dataset="coordinates", names_dataset="names", kind="scalar"
+    )
+    with pytest.raises(ValueError):
+        geometry.point_names()

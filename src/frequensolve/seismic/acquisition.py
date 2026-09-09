@@ -647,12 +647,24 @@ class Acquisition(ExtraFieldsMixin):
     def known_source_field_count(self) -> Optional[int]:
         """Return the logical RHS/source-field count when locally known."""
 
-        names = self.source_field_names()
-        if names:
-            return len(names)
         if self.source_encoding is not None:
-            return self.source_encoding.field_count
-        return self.known_source_point_count()
+            names = self.source_encoding.field_names()
+            count = self.source_encoding.field_count
+        else:
+            names = self.source_point_names()
+            count = self.known_source_point_count()
+        loading_names = {
+            name
+            for loading in self.boundary_loadings
+            for name in _loading_source_names(loading)
+        }
+        if loading_names and not names and count != 0:
+            # Loading fields may share identities with external sources. Without
+            # those identities we cannot determine the size of their union.
+            return None
+        if names or loading_names:
+            return len(set(names) | loading_names)
+        return count
 
     def source_field_count(self) -> int:
         """Return the number of locally addressable RHS/source fields."""
