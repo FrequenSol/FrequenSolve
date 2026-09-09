@@ -443,6 +443,48 @@ def test_run_task_reports_solver_convergence_failure(monkeypatch, tmp_path):
     assert convergence["residual"] == 0.0022
 
 
+def test_run_task_returns_producer_authored_artifacts(monkeypatch, tmp_path):
+    class FakeProcess:
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        local_module.subprocess,
+        "Popen",
+        lambda args, **kwargs: FakeProcess(),
+    )
+    job_file = tmp_path / "job.json"
+    job_file.write_text(
+        json.dumps(
+            {
+                "project_path": str(tmp_path),
+                "result_path": "results",
+            }
+        )
+    )
+    task_dir = tmp_path / "results/_fs_run/tasks/task_000001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "run_manifest.json").write_text(
+        json.dumps({"exit_status": {"code": 0, "status": "success"}})
+    )
+    artifacts = [
+        {
+            "path": "traces/shards/task_000001_generation_1.h5",
+            "kind": "traces",
+            "schema": "fs_trace_payload_shard_v1",
+            "task": 1,
+        }
+    ]
+    outputs = task_dir / "outputs.json"
+    outputs.write_text(json.dumps({"schema": "fs-outputs-1", "files": artifacts}))
+
+    result = run_task(str(job_file), 0, "/solver", {}, stdout_dir=None)
+
+    assert result["status"] == "success"
+    assert result["outputs_manifest"] == str(outputs)
+    assert result["artifacts"] == artifacts
+
+
 def test_submit_local_tasks_captures_init_log(monkeypatch, tmp_path):
     site, _closed = make_site(monkeypatch)
     site.executable = "/solver"
@@ -971,6 +1013,93 @@ def test_local_wait_smooth_only_runs_imaging_postprocess(monkeypatch, tmp_path):
     assert job.states[-1][0] == "completed"
     assert job.states[-1][1]["smooth"]["status"] == "success"
     assert closed == [{"wait": True, "retire": True}]
+
+
+def test_local_submit_postprocess_only_never_plans_frequency_tasks(
+    monkeypatch, tmp_path
+):
+    site, _closed = make_site(monkeypatch)
+    submitted = []
+
+    class PostprocessJob(DummyJob):
+        name = "postprocess-only"
+        n_tasks = 1
+
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def is_run_current(self):
+            return False
+
+        def requires_postprocess(self):
+            return True
+
+        def postprocess_part_outputs_exist(self):
+            return True
+
+        def postprocess_output_exists(self):
+            return False
+
+        def needs_postprocess(self):
+            return True
+
+    monkeypatch.setattr(site, "check_solver_compatibility", lambda **_: None)
+    monkeypatch.setattr(site, "prepare_job", lambda *_, **__: None)
+    monkeypatch.setattr(
+        site,
+        "_submit_local_tasks",
+        lambda *args, **kwargs: submitted.append((args, kwargs)),
+    )
+
+    run = site.submit(
+        PostprocessJob(),
+        postprocess_only=True,
+        shutdown_on_completion=False,
+    )
+
+    assert submitted == []
+    assert run.backend["futures"] == []
+    assert run.backend["task_plan"]["pending_indices"] == []
+    assert run.backend["smooth_only"] is True
+
+
+def test_local_submit_force_runs_current_postprocess(monkeypatch, tmp_path):
+    site, _closed = make_site(monkeypatch)
+
+    class PostprocessJob(DummyJob):
+        name = "postprocess-only"
+        n_tasks = 1
+
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def requires_postprocess(self):
+            return True
+
+        def postprocess_part_outputs_exist(self):
+            return True
+
+        def needs_postprocess(self):
+            return False
+
+    monkeypatch.setattr(site, "check_solver_compatibility", lambda **_: None)
+    monkeypatch.setattr(site, "prepare_job", lambda *_, **__: None)
+
+    run = site.submit(
+        PostprocessJob(),
+        postprocess_only=True,
+        force_run=True,
+        shutdown_on_completion=False,
+    )
+
+    assert run.backend["smooth_only"] is True
+    assert run.backend["fresh"] is True
 
 
 def test_local_watch_reuses_terminal_smooth_only_result(monkeypatch, tmp_path):

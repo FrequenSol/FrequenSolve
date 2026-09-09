@@ -145,6 +145,15 @@ _ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT = 60.0
 _SHELL_ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
+def _job_requires_postprocess(job: Any) -> bool:
+    """Return a job's optional frequency-postprocess capability."""
+
+    requires = getattr(job, "requires_postprocess", None)
+    if callable(requires):
+        return bool(requires())
+    return isinstance(job, ImagingJob)
+
+
 def _quote_runtime_environment_value(value: str) -> str:
     """Quote an environment value while expanding simple ``${NAME}`` refs."""
 
@@ -1045,10 +1054,21 @@ class SlurmSite(BaseSite):
                     ranks=int(self.pool.nproc),
                     cores=int(self.pool.ncore),
                 )
-            pack = bool(extra_kwargs.pop("pack", True))
+            pack = bool(extra_kwargs.pop("pack", True)) and bool(
+                getattr(job, "supports_trace_packing", True)
+            )
+            ranks_per_task = run_config.ranks_per_task
+            max_ranks = getattr(job, "max_ranks_per_task", None)
+            if ranks_per_task is None:
+                ranks_per_task = max_ranks or 2
+            if max_ranks is not None and ranks_per_task > max_ranks:
+                raise ValueError(
+                    f"{type(job).__name__} supports at most {max_ranks} MPI rank "
+                    f"per task; received {ranks_per_task}"
+                )
             future = self._submit_attached(
                 job,
-                ranks_per_task=run_config.ranks_per_task or 2,
+                ranks_per_task=ranks_per_task,
                 mpi_async_progress=run_config.mpi_async_progress,
                 fresh=fresh_run,
                 **({"pack": pack} if not pack else {}),
@@ -1094,9 +1114,9 @@ class SlurmSite(BaseSite):
         else:
             pending_indices = list(range(int(getattr(job, "n_tasks", 0))))
         smooth_only = (
-            isinstance(job, ImagingJob)
+            _job_requires_postprocess(job)
             and not pending_indices
-            and self._remote_image_smoothing_needed(job)
+            and self._remote_job_postprocess_needed(job)
         )
         if task_plan is not None and not pending_indices and not smooth_only:
             job.write_run_state(
@@ -1116,6 +1136,28 @@ class SlurmSite(BaseSite):
                 self.fetch_outputs(job)
             return handle
 
+        if not getattr(job, "supports_trace_packing", True):
+            extra_kwargs["pack"] = False
+        max_ranks = getattr(job, "max_ranks_per_task", None)
+        if (
+            max_ranks is not None
+            and run_config.ranks_per_task is not None
+            and run_config.ranks_per_task > max_ranks
+        ):
+            raise ValueError(
+                f"{type(job).__name__} supports at most {max_ranks} MPI rank "
+                f"per task; received {run_config.ranks_per_task}"
+            )
+        if max_ranks == 1:
+            requested_min_ranks = int(extra_kwargs.get("min_ranks", 1))
+            if requested_min_ranks > 1:
+                raise ValueError(
+                    f"{type(job).__name__} requires one MPI rank per task; "
+                    f"received min_ranks={requested_min_ranks}"
+                )
+            extra_kwargs["min_ranks"] = 1
+            extra_kwargs["round_to"] = 1
+            extra_kwargs["skip_sizing"] = True
         job_id = self._submit_slurm_batch(
             job,
             run_config,
@@ -1565,8 +1607,10 @@ class SlurmSite(BaseSite):
             return False
         if not self._remote_run_successful(record):
             return False
-        if isinstance(job, ImagingJob):
-            return self._remote_image_output_exists(job)
+        if _job_requires_postprocess(job):
+            if isinstance(job, ImagingJob):
+                return self._remote_image_output_exists(job)
+            return self._remote_postprocess_output_exists(job)
         return True
 
     def _remote_file_exists(self, path: Union[str, Path]) -> bool:
@@ -1580,23 +1624,65 @@ class SlurmSite(BaseSite):
             return False
 
     def _remote_image_file(self, job: ImagingJob, part: Optional[int] = None) -> Path:
-        image_dir = job._remote_image_path(self.work_dir)
-        if part is None:
-            return image_dir / "image.h5"
-        return image_dir / f"image_{part}.h5"
+        return self._remote_postprocess_file(job, part)
+
+    def _remote_postprocess_file(
+        self, job: BaseJob, part: Optional[int] = None
+    ) -> Path:
+        """Map one job-owned postprocess product into the remote project."""
+
+        return self._remote_project_artifact_file(job, job.postprocess_file(part))
+
+    def _remote_project_artifact_file(
+        self, job: BaseJob, local: Union[str, Path]
+    ) -> Path:
+        """Map one project-owned artifact into the remote project root."""
+
+        local = Path(local).resolve()
+        try:
+            relative = local.relative_to(Path(job.project_path).resolve())
+        except ValueError as error:
+            raise ValueError(
+                "remote postprocess outputs must be located below the project path"
+            ) from error
+        return Path(self.work_dir) / relative
+
+    def _remote_postprocess_output_exists(self, job: BaseJob) -> bool:
+        """Return whether a remote aggregate postprocess product exists."""
+
+        return self._remote_file_exists(self._remote_postprocess_file(job))
+
+    def _remote_postprocess_part_outputs_exist(self, job: BaseJob) -> bool:
+        """Return whether every remote task-local postprocess input exists."""
+
+        return all(
+            self._remote_file_exists(self._remote_postprocess_file(job, part))
+            for part in range(1, job.n_tasks + 1)
+        )
+
+    def _remote_postprocess_needed(self, job: BaseJob) -> bool:
+        """Return whether remote shards still need the final postprocess."""
+
+        return self._remote_postprocess_part_outputs_exist(
+            job
+        ) and not self._remote_postprocess_output_exists(job)
+
+    def _remote_job_postprocess_needed(self, job: BaseJob) -> bool:
+        """Dispatch compatibility image checks or the generic job protocol."""
+
+        if isinstance(job, ImagingJob):
+            return self._remote_image_smoothing_needed(job)
+        return self._remote_postprocess_needed(job)
 
     def _remote_image_output_exists(self, job: ImagingJob) -> bool:
         """Return whether the remote aggregate image file exists."""
 
-        return self._remote_file_exists(self._remote_image_file(job))
+        return self._remote_postprocess_output_exists(job)
 
     def _remote_image_part_outputs_exist(self, job: ImagingJob) -> bool:
         """Return whether all remote per-frequency image shards exist."""
 
-        return all(
-            self._remote_file_exists(self._remote_image_file(job, part))
-            for part in range(1, job.n_tasks + 1)
-        )
+        return self._remote_postprocess_part_outputs_exist(job)
 
     def _remote_image_smoothing_needed(self, job: ImagingJob) -> bool:
         """Return whether remote image shards need the final smooth/stack step."""
@@ -1729,7 +1815,7 @@ class SlurmSite(BaseSite):
         return db_map
 
     def fetch_outputs(self, job: BaseJob):
-        """Fetch common result metadata and trace outputs for a completed job."""
+        """Fetch typed products or common traces for a completed job."""
 
         local_results = job._local_path / "results"
         local_results.mkdir(parents=True, exist_ok=True)
@@ -1742,6 +1828,14 @@ class SlurmSite(BaseSite):
             )
         except Exception as exc:
             logger.debug("Could not fetch logs for job %s: %s", job.name, exc)
+
+        if hasattr(job, "result_manifest_file") and hasattr(job, "output_directory"):
+            relative_output = job.output_directory.relative_to(job._result_path)
+            remote_dir = self._remote_result_dir(job) / relative_output
+            local_dir = job.output_directory
+            local_dir.mkdir(parents=True, exist_ok=True)
+            self.get(remote_dir, local_dir, overwrite=True)
+            return local_results
 
         try:
             self.fetch_traces(job)
@@ -1768,7 +1862,27 @@ class SlurmSite(BaseSite):
                     exc,
                 )
 
+        if _job_requires_postprocess(job) and not isinstance(job, ImagingJob):
+            # Control gradients/objectives are required results, not optional
+            # diagnostics. A failed transfer must be visible to the caller.
+            self.fetch_postprocess(job)
+
         return local_results
+
+    def fetch_postprocess(self, job: BaseJob) -> list[Path]:
+        """Fetch finalized generic postprocess products into the local project."""
+
+        fetched = []
+        for local in job.postprocess_fetch_files():
+            local = Path(local).resolve()
+            remote = self._remote_project_artifact_file(job, local)
+            local.parent.mkdir(parents=True, exist_ok=True)
+            self._emit(
+                self._fetch_message("Fetching solver postprocess output", remote, local)
+            )
+            self.get(remote, local, overwrite=True)
+            fetched.append(local)
+        return fetched
 
     @staticmethod
     def _fetch_message(
@@ -2618,7 +2732,7 @@ class SlurmSite(BaseSite):
             n_nodes=config.nodes,
             stdout=str(job._remote_path(self.work_dir) / "logs"),
             duration=duration,
-            imaging_job=isinstance(job, ImagingJob),
+            imaging_job=_job_requires_postprocess(job),
             mpi_async_progress=config.mpi_async_progress,
             mpi_health_check_timeout=config.mpi_health_check_timeout,
             **(
@@ -3172,7 +3286,7 @@ class SlurmSite(BaseSite):
             mpi_shell=shlex.quote(str(self.mpi_cmd)),
             dir_out_shell=shlex.quote(dir_out),
             executable_shell=shlex.quote(str(self.executable)),
-            imaging_job=isinstance(job, ImagingJob),
+            imaging_job=_job_requires_postprocess(job),
             mpi_args_shell=" ".join(shlex.quote(value) for value in self.mpi_args),
             pack_job=bool(pack_job),
             runtime_setup=self._runtime_setup_lines(),

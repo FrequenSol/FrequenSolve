@@ -1349,12 +1349,25 @@ class AWSSite(BaseSite):
             job: Completed job whose S3 artifacts should be downloaded.
 
         Returns:
-            Trace dataset, or a mapping containing traces and wavefields when
-            wavefield outputs exist. Run metadata and configured ParaView
-            outputs are downloaded as side effects.
+            A typed frequency-independent product, a trace dataset, or a
+            mapping containing traces and wavefields when those outputs exist.
         """
 
         self.fetch_run_metadata(job)
+        if hasattr(job, "result_manifest_file"):
+            project_name = job.project_path.name
+            output_dir = job.output_directory.relative_to(job._result_path)
+            results_path = (
+                Path("jobs") / job.simulation.name / job.name / "results" / output_dir
+            )
+            s3_results_path = (
+                f"s3://{self.config.s3_bucket}/{project_name}/{results_path.as_posix()}"
+            )
+            job.output_directory.mkdir(parents=True, exist_ok=True)
+            self.get(s3_results_path, job.output_directory, overwrite=True)
+            self._emit(f"Fetched AWS {job.workflow} results from {s3_results_path}")
+            return job.results
+
         traces = self.fetch_traces(job)
         wavefields = None
         if getattr(job.outputs, "wavefields", None):

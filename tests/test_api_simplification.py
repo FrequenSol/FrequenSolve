@@ -4115,6 +4115,7 @@ def test_job_wavefields_use_output_requests_not_trace_receiver_groups(tmp_path):
     job += WavefieldOutput(
         name="pressure_wavefield",
         field="pressure",
+        properties=["Vp", "Vs", "Rho"],
         grid=wavefield_grid,
     )
     job.save()
@@ -4140,6 +4141,15 @@ def test_job_wavefields_use_output_requests_not_trace_receiver_groups(tmp_path):
     assert job.wavefield_outputs["pressure_wavefield"]["components"] == [
         "pressure_wavefield:pressure"
     ]
+    assert job.wavefield_outputs["pressure_wavefield"]["requested_properties"] == [
+        "Vp",
+        "Vs",
+        "Rho",
+    ]
+    assert job.wavefield_outputs["pressure_wavefield"]["properties"]["Vp"] == {
+        "dataset": "/properties/Vp",
+        "static": True,
+    }
     payload = job.to_fs()
     assert payload["Outputs"]["wavefields"][0]["name"] == "pressure_wavefield"
     assert "pressure_wavefield" not in {
@@ -4916,6 +4926,37 @@ def test_trace_dataset_uses_named_wavefield_packed_products(tmp_path):
 
     assert full_fd.values[:, 0].real.tolist() == [1.0, 2.0]
     assert fracture_fd.values[:, 0].real.tolist() == [3.0, 4.0]
+
+
+def test_trace_dataset_reads_static_wavefield_properties(tmp_path):
+    packed = tmp_path / "wavefield.h5"
+    _write_indexed_packed_trace_product(
+        packed,
+        "wavefield",
+        frequencies=[1.0],
+        values=[1.0],
+    )
+    with h5py.File(packed, "a") as h5:
+        vp = h5.create_dataset("properties/Vp", data=[1500.0])
+        vp.attrs["units"] = ["m/s"]
+
+    store = TraceStore(
+        metadata={
+            "groups": ["wavefield"],
+            "f_map": {1: 1.0},
+            "df": 1.0,
+            "f_max": 1.0,
+        },
+        files=[packed],
+    )
+    store.consolidate()
+    traces = TraceDataset.__new__(TraceDataset)
+    traces._store = store
+
+    assert traces.properties("wavefield") == ["Vp"]
+    values = traces.property("wavefield", "Vp")
+    assert values.values.tolist() == [1500.0]
+    assert values.attrs["units"] == "m/s"
 
 
 def test_trace_dataset_reports_packed_product_with_no_requested_frequencies(tmp_path):
@@ -5939,6 +5980,395 @@ def test_trace_dataset_td_applies_wavelet_before_interpolating_oscillatory_respo
     )
 
 
+def _write_base_and_df_trace_product(
+    path,
+    frequencies,
+    delay,
+    laplace=0.0,
+    derivative_order=1,
+):
+    frequencies = np.asarray(frequencies, dtype=float)
+    response = np.exp(-2.0j * np.pi * frequencies * delay)
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("frequency", data=frequencies)
+        h5.create_dataset("laplace", data=np.full(frequencies.size, float(laplace)))
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        datasets = [("surface", response)]
+        for order in range(1, derivative_order + 1):
+            suffix = "_df" if order == 1 else f"_d{order}f"
+            datasets.append(
+                (f"surface{suffix}", (-2.0j * np.pi * delay) ** order * response)
+            )
+        for name, values in datasets:
+            data = np.zeros((frequencies.size, 1, 1, 1, 2), dtype=np.float64)
+            data[:, 0, 0, 0, 0] = values.real
+            data[:, 0, 0, 0, 1] = values.imag
+            dset = h5.create_dataset(name, data=data)
+            dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+            dset.attrs["receiver"] = np.array([101], dtype=np.int32)
+            dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+            dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+
+def test_trace_dataset_td_restores_frequency_derivative_parity(tmp_path):
+    packed_path = tmp_path / "phase_derivatives.h5"
+    delay = 0.03
+    _write_base_and_df_trace_product(
+        packed_path,
+        np.arange(1.0, 26.0),
+        delay=delay,
+        laplace=-0.25,
+        derivative_order=4,
+    )
+    traces = TraceDataset.open(packed_path)
+
+    def reconstruct(group):
+        return traces.td(
+            group,
+            "p",
+            source=7,
+            wavelet=RickerWavelet(f=10.0, center=0.0),
+        )
+
+    base = reconstruct("surface")
+    derivatives = {
+        order: reconstruct("surface_df" if order == 1 else f"surface_d{order}f")
+        for order in range(1, 5)
+    }
+    for order, derivative in derivatives.items():
+        np.testing.assert_allclose(
+            derivative,
+            (2.0 * np.pi * delay) ** order * base,
+            atol=1.0e-12,
+        )
+        assert derivative.attrs["phase_derivative_order"] == order
+
+    first_ld = traces.ld(
+        "surface_df",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=10.0, center=0.0),
+    )
+    compensation = np.exp(-2.0 * np.pi * first_ld.attrs["laplace"] * first_ld.time)
+    np.testing.assert_allclose(derivatives[1], first_ld * compensation, atol=1.0e-12)
+
+
+def test_trace_dataset_td_hermite_interpolates_response_before_wavelet(tmp_path):
+    dense_path = tmp_path / "dense.h5"
+    sparse_path = tmp_path / "sparse.h5"
+    _write_base_and_df_trace_product(dense_path, np.arange(1.0, 26.0), delay=0.03)
+    _write_base_and_df_trace_product(
+        sparse_path,
+        np.array(
+            [
+                1.0,
+                5.0,
+                9.0,
+                13.0,
+                17.0,
+                21.0,
+                np.nextafter(25.0, 0.0),
+            ]
+        ),
+        delay=0.03,
+    )
+
+    reference = TraceDataset.open(dense_path).td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=10.0, center=0.0),
+    )
+    hermite = TraceDataset.open(sparse_path).td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=10.0, center=0.0),
+        reconstruction="hermite",
+        target_df=1.0,
+    )
+
+    relative_error = np.linalg.norm(hermite.values - reference.values) / np.linalg.norm(
+        reference.values
+    )
+    assert relative_error < 2.0e-2
+    assert hermite.attrs["reconstruction"] == "hermite"
+    assert hermite.attrs["solved_frequency_count"] == 7
+    assert hermite.attrs["reconstructed_frequency_count"] == 26
+
+
+def test_trace_dataset_td_hermite_upscale_only_zero_pads_spectrum(tmp_path):
+    sparse_path = tmp_path / "sparse.h5"
+    _write_base_and_df_trace_product(
+        sparse_path,
+        np.array([1.0, 5.0, 9.0, 13.0, 17.0, 21.0, 25.0]),
+        delay=0.03,
+    )
+    traces = TraceDataset.open(sparse_path)
+
+    base = traces.td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=10.0, center=0.0),
+        reconstruction="hermite",
+        target_df=1.0,
+        upscale=1,
+    )
+    upscaled = traces.td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=10.0, center=0.0),
+        reconstruction="hermite",
+        target_df=1.0,
+        upscale=4,
+    )
+
+    base_spectrum = np.fft.rfft(base.values[:, 0])
+    upscaled_spectrum = np.fft.rfft(upscaled.values[:, 0])
+    # The base-grid final bin is its real-valued Nyquist bin; after zero-padding
+    # that same frequency is interior and may retain an imaginary component.
+    assert upscaled_spectrum[: base_spectrum.size - 1] == pytest.approx(
+        base_spectrum[:-1]
+    )
+    assert upscaled_spectrum[base_spectrum.size :] == pytest.approx(0.0j)
+
+
+def test_trace_dataset_td_hermite_can_roll_high_frequency_spectrum_to_zero(tmp_path):
+    sparse_path = tmp_path / "sparse.h5"
+    _write_base_and_df_trace_product(
+        sparse_path,
+        np.array(
+            [
+                1.0,
+                5.0,
+                9.0,
+                13.0,
+                17.0,
+                21.0,
+                np.nextafter(25.0, 0.0),
+            ]
+        ),
+        delay=0.03,
+    )
+
+    traces = TraceDataset.open(sparse_path)
+    untapered = traces.td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=10.0, center=0.15),
+        reconstruction="hermite",
+        target_df=1.0,
+        upscale=2,
+    )
+    td = traces.td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=10.0, center=0.15),
+        reconstruction="hermite",
+        target_df=1.0,
+        upscale=2,
+        high_frequency_taper=True,
+    )
+    spectrum = np.fft.rfft(td.values[:, 0])
+    untapered_spectrum = np.fft.rfft(untapered.values[:, 0])
+
+    assert td.attrs["high_frequency_taper_width"] == pytest.approx(4.0)
+    assert td.attrs["wavelet_application"] == "post_interpolation"
+    frequencies = np.fft.rfftfreq(
+        td.sizes["time"], d=float(td.time.values[1] - td.time.values[0])
+    )
+    taper_endpoint = int(np.argmin(np.abs(frequencies - 29.0)))
+    assert spectrum[taper_endpoint] == pytest.approx(0.0j, abs=1.0e-12)
+    near_endpoint = int(np.argmin(np.abs(frequencies - 28.0)))
+    assert abs(spectrum[near_endpoint]) < 5.0e-3 * np.max(np.abs(spectrum))
+    # DFT coefficients scale with transform length. Compare X/N so extending
+    # the inverse-FFT grid for the rolloff cannot alter physical amplitudes at
+    # any frequency below the original cutoff.
+    solved_bins = frequencies <= 25.0 + 1.0e-12
+    assert spectrum[solved_bins] / td.sizes["time"] == pytest.approx(
+        untapered_spectrum[: np.count_nonzero(solved_bins)] / untapered.sizes["time"]
+    )
+
+
+def test_trace_dataset_td_standard_can_use_endpoint_derivative_taper_with_laplace(
+    tmp_path,
+):
+    packed_path = tmp_path / "standard_taper.h5"
+    _write_base_and_df_trace_product(
+        packed_path,
+        np.arange(1.0, 26.0),
+        delay=0.03,
+        laplace=-0.25,
+    )
+    traces = TraceDataset.open(packed_path)
+    wavelet = RickerWavelet(f=10.0, center=0.15)
+
+    untapered = traces.td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=wavelet,
+        upscale=2,
+        laplace_compensation="off",
+    )
+    tapered = traces.td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=10.0, center=0.15),
+        upscale=2,
+        laplace_compensation="off",
+        high_frequency_taper=True,
+    )
+
+    untapered_spectrum = np.fft.rfft(untapered.values[:, 0])
+    tapered_spectrum = np.fft.rfft(tapered.values[:, 0])
+    frequencies = np.fft.rfftfreq(
+        tapered.sizes["time"],
+        d=float(tapered.time.values[1] - tapered.time.values[0]),
+    )
+    solved_bins = frequencies <= 25.0 + 1.0e-12
+    taper_endpoint = int(np.argmin(np.abs(frequencies - 26.0)))
+
+    assert tapered.attrs["reconstruction"] == "standard"
+    assert tapered.attrs["high_frequency_taper_width"] == pytest.approx(1.0)
+    assert tapered.attrs["laplace"] == pytest.approx(-0.25)
+    assert tapered.attrs["laplace_compensated"] is False
+    assert tapered_spectrum[taper_endpoint] == pytest.approx(0.0j, abs=1.0e-12)
+    assert tapered_spectrum[solved_bins] / tapered.sizes["time"] == pytest.approx(
+        untapered_spectrum[: np.count_nonzero(solved_bins)] / untapered.sizes["time"]
+    )
+
+
+def test_trace_dataset_td_standard_taper_requires_first_derivative_group(tmp_path):
+    packed_path = tmp_path / "missing_derivative.h5"
+    _write_base_and_df_trace_product(
+        packed_path,
+        np.arange(1.0, 6.0),
+        delay=0.03,
+        derivative_order=0,
+    )
+
+    with pytest.raises(ValueError, match="frequency-derivative.*surface_df"):
+        TraceDataset.open(packed_path).td(
+            "surface",
+            "p",
+            source=7,
+            wavelet=RickerWavelet(f=2.0),
+            high_frequency_taper=True,
+        )
+
+
+def test_trace_dataset_td_hermite_phase_smoothing_removes_reference_delay(tmp_path):
+    dense_path = tmp_path / "dense.h5"
+    sparse_path = tmp_path / "sparse.h5"
+    delay = 0.35
+    dense_frequencies = np.arange(0.5, 25.0 + 0.25, 0.5)
+    sparse_frequencies = dense_frequencies[::4]
+    if sparse_frequencies[-1] != dense_frequencies[-1]:
+        sparse_frequencies = np.append(sparse_frequencies, dense_frequencies[-1])
+    _write_base_and_df_trace_product(dense_path, dense_frequencies, delay=delay)
+    _write_base_and_df_trace_product(sparse_path, sparse_frequencies, delay=delay)
+
+    reference = TraceDataset.open(dense_path).td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=10.0, center=0.0),
+    )
+    traces = TraceDataset.open(sparse_path)
+    unshifted = traces.td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=10.0, center=0.0),
+        reconstruction="hermite",
+        target_df=0.5,
+    )
+    shifted = traces.td(
+        "surface",
+        "p",
+        source=7,
+        wavelet=RickerWavelet(f=10.0, center=0.0),
+        reconstruction="hermite",
+        target_df=0.5,
+        interpolation_time_shift=delay,
+    )
+
+    def relative_error(actual):
+        return np.linalg.norm(actual.values - reference.values) / np.linalg.norm(
+            reference.values
+        )
+
+    assert relative_error(shifted) < 2.0e-2
+    assert relative_error(shifted) < 0.1 * relative_error(unshifted)
+    assert shifted.attrs["interpolation_time_shift"] == pytest.approx(delay)
+
+
+def test_trace_dataset_td_eagerly_reads_small_dense_gather(monkeypatch, tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    frequencies = np.arange(200.0)
+    data = np.zeros((frequencies.size, 2, 2, 641, 2), dtype=np.float32)
+    data[:, 0, 0, :, 0] = 1.0
+
+    with h5py.File(packed, "w") as h5:
+        h5.create_dataset("frequency", data=frequencies)
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["packed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        dset = h5.create_dataset("surface", data=data)
+        dset.attrs["dims"] = ["receiver", "component", "shot", "frequency"]
+        dset.attrs["layout_kind"] = ["dense_trace_v1"]
+        dset.attrs["receiver"] = np.arange(1, 642, dtype=np.int32)
+        dset.attrs["component"] = np.array(["p", "v_z"], dtype=string_dtype)
+        dset.attrs["shot"] = np.array([7, 8], dtype=np.int32)
+
+    def no_lazy_read(*args, **kwargs):
+        raise AssertionError("small trace gathers must not construct a Dask graph")
+
+    monkeypatch.setattr(TraceStore, "read_FD", no_lazy_read)
+    traces = TraceDataset.open(packed)
+    td = traces.td("surface", "p", source=7, wavelet=RickerWavelet(f=40.0))
+
+    assert td.sizes["receiver"] == 641
+    assert not callable(getattr(td.data, "__dask_graph__", None))
+
+
+def test_trace_dataset_td_eagerly_reads_small_indexed_gather(monkeypatch, tmp_path):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    _write_indexed_packed_trace_product(
+        packed,
+        "surface",
+        frequencies=[0.0, 1.0, 2.0, 3.0],
+        values=[1.0, 1.0, 1.0, 1.0],
+    )
+
+    def no_lazy_read(*args, **kwargs):
+        raise AssertionError("small trace gathers must not construct a Dask graph")
+
+    monkeypatch.setattr(TraceStore, "read_FD", no_lazy_read)
+    traces = TraceDataset.open(packed)
+    td = traces.td("surface", "p", source=7, wavelet=RickerWavelet(f=1.0))
+
+    assert td.sizes["receiver"] == 1
+    assert not callable(getattr(td.data, "__dask_graph__", None))
+
+
 def test_trace_store_reads_indexed_solver_packed_trace_file(tmp_path):
     trace_dir = tmp_path / "results" / "traces"
     trace_dir.mkdir(parents=True)
@@ -6553,3 +6983,47 @@ def test_simulation_accepts_boundary_conditions_directly(tmp_path):
             "name": "pml_xmin",
         },
     ]
+
+
+@pytest.mark.parametrize("order", [1, 2, 3])
+@pytest.mark.parametrize("domain", ["td", "ld"])
+def test_derivative_channel_hermite_uses_next_order(tmp_path, order, domain):
+    dense = tmp_path / "dense.h5"
+    sparse = tmp_path / "sparse.h5"
+    _write_base_and_df_trace_product(
+        dense, np.arange(1.0, 26.0), delay=0.03, derivative_order=4
+    )
+    _write_base_and_df_trace_product(
+        sparse, np.arange(1.0, 26.0, 4.0), delay=0.03, derivative_order=4
+    )
+    group = "surface_df" if order == 1 else f"surface_d{order}f"
+    reference = getattr(TraceDataset.open(dense), domain)(
+        group, "p", 7, RickerWavelet(f=10.0, center=0.0)
+    )
+    reconstructed = getattr(TraceDataset.open(sparse), domain)(
+        group,
+        "p",
+        7,
+        RickerWavelet(f=10.0, center=0.0),
+        reconstruction="hermite",
+        target_df=1.0,
+    )
+    error = np.linalg.norm(reconstructed.values - reference.values) / np.linalg.norm(
+        reference.values
+    )
+    assert error < 0.02
+    assert reconstructed.attrs["phase_derivative_order"] == order
+
+
+def test_derivative_channel_hermite_reports_missing_next_order(tmp_path):
+    path = tmp_path / "first_derivative_only.h5"
+    _write_base_and_df_trace_product(path, np.arange(1.0, 26.0, 4.0), delay=0.03)
+    with pytest.raises(ValueError, match="surface_d2f"):
+        TraceDataset.open(path).td(
+            "surface_df",
+            "p",
+            7,
+            RickerWavelet(f=10.0, center=0.0),
+            reconstruction="hermite",
+            target_df=1.0,
+        )

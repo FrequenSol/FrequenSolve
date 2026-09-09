@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 
@@ -17,6 +19,7 @@ import numpy as np
 
 from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
 from frequensolve.util.class_registry import class_registry
+from frequensolve.util.mixins import ExportContext
 
 if TYPE_CHECKING:
     from frequensolve.simulation.jobs.base import BaseJob
@@ -29,6 +32,10 @@ class JobSerializationMixin:
     ``to_fs`` fields such as ``name`` and ``f_list``, and project path helpers
     from ``BaseJob``.
     """
+
+    if TYPE_CHECKING:
+
+        def export_context(self) -> ExportContext: ...
 
     @classmethod
     def load(
@@ -102,6 +109,7 @@ class JobSerializationMixin:
         data = dict(d)
         class_name = data.get("_type")
         if class_name not in class_registry:
+            import frequensolve.simulation.jobs.control_sensitivity  # noqa: F401
             import frequensolve.simulation.jobs.forward  # noqa: F401
             import frequensolve.simulation.jobs.imaging  # noqa: F401
 
@@ -114,10 +122,14 @@ class JobSerializationMixin:
             project_path=project_path,
         )
 
-    def to_fs(self, *, project_relative: bool = False) -> Dict[str, Any]:
+    def to_fs(
+        self, ctx: Optional[ExportContext] = None, *, project_relative: bool = False
+    ) -> Dict[str, Any]:
         """Serialize this job to the job JSON contract.
 
         Args:
+            ctx: Optional export context for job-owned bulk arrays. The base
+                job has no arrays of its own.
             project_relative: When true, emit simulation and result paths
                 relative to the project root where possible.
 
@@ -156,22 +168,21 @@ class JobSerializationMixin:
             ValueError: If the simulation has not been saved.
         """
 
-        job_data = self.to_fs()
+        job_data = self.to_fs(self.export_context())
         if self.simulation._file is None:
             raise ValueError("Simulation must be saved before fingerprinting a job")
         simulation_hash = self._hash_json_file(self.simulation._file)
-        job_fingerprint = {
-            "_type": job_data["_type"],
-            "workflow": job_data["workflow"],
-            "f_list": job_data["f_list"],
-            "Outputs": job_data["Outputs"],
-        }
-        job_fingerprint.update(self._wavenumber_payload())
-        return {
+        job_payload = self._fingerprint_job_payload(job_data, include_frequencies=True)
+        job_payload.update(self._wavenumber_payload())
+        payload = {
             "schema": "frequensolve-job-fingerprint-1",
-            "job": job_fingerprint,
+            "job": job_payload,
             "simulation": {"hash": simulation_hash},
         }
+        inputs = self._input_fingerprint_payload()
+        if inputs:
+            payload["inputs"] = inputs
+        return payload
 
     def fingerprint(self) -> str:
         """Return the stable hash identifying this job definition.
@@ -203,22 +214,48 @@ class JobSerializationMixin:
 
         if task < 1 or task > self.n_tasks:
             raise IndexError(f"Task {task} is outside 1..{self.n_tasks}")
-        job_data = self.to_fs()
+        job_data = self.to_fs(self.export_context())
         if self.simulation._file is None:
             raise ValueError("Simulation must be saved before fingerprinting a task")
         simulation_hash = self._hash_json_file(self.simulation._file)
-        job_fingerprint = {
-            "_type": job_data["_type"],
-            "workflow": job_data["workflow"],
-            "Outputs": job_data["Outputs"],
-        }
-        job_fingerprint.update(self._wavenumber_payload())
-        return {
+        job_payload = self._fingerprint_job_payload(job_data)
+        job_payload.update(self._wavenumber_payload())
+        payload = {
             "schema": "frequensolve-job-task-fingerprint-1",
-            "job": job_fingerprint,
+            "job": job_payload,
             "simulation": {"hash": simulation_hash},
-            "frequency": self._canonical_frequency_value(self.f_list[task - 1]),
         }
+        if "f_list" in job_data:
+            payload["frequency"] = self._canonical_frequency_value(
+                self.f_list[task - 1]
+            )
+        inputs = self._input_fingerprint_payload()
+        if inputs:
+            payload["inputs"] = inputs
+        return payload
+
+    @staticmethod
+    def _fingerprint_job_payload(
+        job_data: Dict[str, Any],
+        *,
+        include_frequencies: bool = False,
+    ) -> Dict[str, Any]:
+        """Select solver-relevant job fields for stable fingerprints."""
+
+        fields = ["_type", "workflow"]
+        if include_frequencies:
+            fields.append("f_list")
+        fields.extend(
+            [
+                "Outputs",
+                "Image",
+                "control_sensitivities",
+                "focus",
+                "time_reconstruction",
+                "derivative_order",
+            ]
+        )
+        return {field: job_data[field] for field in fields if field in job_data}
 
     def task_fingerprint(self, task: int) -> str:
         """Return the stable hash for one one-based frequency task.
@@ -370,6 +407,30 @@ class JobSerializationMixin:
                 digest.update(chunk)
         return f"sha256:{digest.hexdigest()}"
 
+    @classmethod
+    def _path_content_fingerprint(cls, path: Union[str, Path]) -> Dict[str, Any]:
+        """Hash one required file or a deterministic recursive directory tree."""
+
+        path = Path(path)
+        if path.is_file():
+            return {"kind": "file", "sha256": cls._sha256_file(path)}
+        if path.is_dir():
+            files = []
+            for file in sorted(item for item in path.rglob("*") if item.is_file()):
+                files.append(
+                    {
+                        "path": file.relative_to(path).as_posix(),
+                        "sha256": cls._sha256_file(file),
+                    }
+                )
+            return {"kind": "directory", "files": files}
+        raise FileNotFoundError(f"Required job input does not exist: {path}")
+
+    def _input_fingerprint_payload(self) -> Dict[str, Any]:
+        """Return content hashes for subclass-owned external inputs."""
+
+        return {}
+
     @staticmethod
     def _canonical_frequency_value(value: Any) -> Any:
         if isinstance(value, np.generic):
@@ -392,6 +453,18 @@ class JobSerializationMixin:
     @staticmethod
     def _write_json_file(path: Path, payload: Dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.tmp")
-        tmp.write_text(json.dumps(payload, cls=CustomJSONEncoder, indent=3))
-        tmp.replace(path)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, cls=CustomJSONEncoder, indent=3)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise

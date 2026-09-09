@@ -13,9 +13,11 @@ import shutil
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from frequensolve.simulation.jobs.artifacts import OutputManifest, TraceManifest
 from frequensolve.simulation.simulation import CustomJSONEncoder
+from frequensolve.util.mixins import ExportContext
 
 SOLVER_RESIDUAL_FAILURE_THRESHOLD = 1.0e-3
 
@@ -170,6 +172,18 @@ class JobRunStateMixin:
     Python-side run-state summary used by local status widgets and rerun logic.
     """
 
+    if TYPE_CHECKING:
+
+        def export_context(self) -> ExportContext: ...
+
+        @staticmethod
+        def _fingerprint_job_payload(
+            job_data: Dict[str, Any], *, include_frequencies: bool = False
+        ) -> Dict[str, Any]: ...
+
+        @property
+        def wavefield_manifest(self) -> TraceManifest: ...
+
     @classmethod
     def solver_convergence_summary(
         cls,
@@ -291,7 +305,7 @@ class JobRunStateMixin:
                 task,
                 manifest=manifest,
             )
-            current = self.is_task_current(task, state=state)
+            current = self.is_task_current(task, state=state, manifest=manifest)
             rows[task] = {
                 "task": task,
                 "frequency": manifest.frequencies.get(task),
@@ -477,19 +491,22 @@ class JobRunStateMixin:
         task: int,
         *,
         state: Optional[Mapping[str, Any]] = None,
+        manifest: Optional[Any] = None,
     ) -> bool:
         """Return whether a one-based task has current reusable outputs.
 
         Args:
             task: One-based solver task number.
             state: Optional preloaded run-state mapping.
+            manifest: Optional preloaded trace manifest for batch checks.
 
         Returns:
             ``True`` when the task output exists and matches the current task
             fingerprint; otherwise ``False``.
         """
 
-        files = self.expected_trace_files()
+        manifest = self.trace_manifest if manifest is None else manifest
+        files = list(manifest.files)
         if task < 1 or task > len(files):
             return False
         state = self.run_state() if state is None else state
@@ -502,7 +519,6 @@ class JobRunStateMixin:
                 expected_total=len(files),
             )
         )
-        manifest = self.trace_manifest
         trace_file, expected_exists = self._trace_output_path_for_task(
             task,
             manifest=manifest,
@@ -564,10 +580,11 @@ class JobRunStateMixin:
         """
 
         state = self.run_state()
+        manifest = self.trace_manifest
         return [
             task
             for task in range(1, self.n_tasks + 1)
-            if self.is_task_current(task, state=state)
+            if self.is_task_current(task, state=state, manifest=manifest)
         ]
 
     def _simulation_hash_for_policy(self, policy: SkipPolicy) -> str:
@@ -595,19 +612,20 @@ class JobRunStateMixin:
             return self.task_fingerprint_payload(task)
         if task < 1 or task > self.n_tasks:
             raise IndexError(f"Task {task} is outside 1..{self.n_tasks}")
-        job_data = self.to_fs()
+        job_data = self.to_fs(self.export_context())
+        job_payload = self._fingerprint_job_payload(job_data)
         return {
             "schema": "frequensolve-job-task-compatibility-fingerprint-1",
-            "job": {
-                "_type": job_data["_type"],
-                "workflow": job_data["workflow"],
-                "Outputs": job_data["Outputs"],
-            },
+            "job": job_payload,
             "simulation": {
                 "hash": self._simulation_hash_for_policy(policy),
                 "ignored_keys": list(policy.ignored_simulation_keys),
             },
-            "frequency": self._canonical_frequency_value(self.f_list[task - 1]),
+            **(
+                {"frequency": self._canonical_frequency_value(self.f_list[task - 1])}
+                if "f_list" in job_data
+                else {}
+            ),
         }
 
     def task_policy_fingerprint(
@@ -875,9 +893,13 @@ class JobRunStateMixin:
         if force:
             pending = list(range(self.n_tasks))
             if apply:
-                removed_stale_outputs = self._remove_trace_outputs_for_tasks(
-                    range(1, self.n_tasks + 1),
-                    remove_matching_shards=True,
+                removed_stale_outputs = self._remove_all_trace_shards()
+                removed_stale_outputs = (
+                    self._remove_trace_outputs_for_tasks(
+                        range(1, self.n_tasks + 1),
+                        remove_matching_shards=True,
+                    )
+                    or removed_stale_outputs
                 )
                 removed_stale_outputs = (
                     self.remove_packed_trace_products() or removed_stale_outputs
@@ -901,8 +923,8 @@ class JobRunStateMixin:
         state = self.run_state()
         current_records = []
         manifest = self.trace_manifest
-        for task, _path in enumerate(self.expected_trace_files(), start=1):
-            if not self.is_task_current(task, state=state):
+        for task, _path in enumerate(manifest.files, start=1):
+            if not self.is_task_current(task, state=state, manifest=manifest):
                 continue
             file_path, _exists = self._trace_output_path_for_task(
                 task,
@@ -1092,7 +1114,7 @@ class JobRunStateMixin:
         files = []
         task_rows = []
         manifest = self.trace_manifest
-        for task, path in enumerate(self.expected_trace_files(), start=1):
+        for task, path in enumerate(manifest.files, start=1):
             file_path, exists = self._trace_output_path_for_task(
                 task,
                 manifest=manifest,
@@ -1104,7 +1126,11 @@ class JobRunStateMixin:
             raw_status = str(result.get("status", "")).strip().lower().replace(" ", "_")
             accepted_by_policy = raw_status in {"accepted", "accepted_failed"}
             task_status = self._normalized_task_status(result.get("status"))
-            previously_current = self.is_task_current(task, state=previous_state)
+            previously_current = self.is_task_current(
+                task,
+                state=previous_state,
+                manifest=manifest,
+            )
             if not result and previously_current:
                 result = dict(previous_by_task.get(task, {}))
                 raw_status = (
@@ -1160,6 +1186,8 @@ class JobRunStateMixin:
                 "threads_per_rank",
                 "n_threads",
                 "threads",
+                "outputs_manifest",
+                "artifacts",
             ):
                 if key in result:
                     row[key] = result[key]
@@ -1337,6 +1365,13 @@ class JobRunStateMixin:
                 openmp = execution.get("openmp")
                 if isinstance(openmp, Mapping) and "threads" in openmp:
                     record["threads_per_rank"] = openmp["threads"]
+            outputs = OutputManifest.read(
+                manifest_path.parent / "outputs.json",
+                result_path=self._result_path,
+            )
+            if outputs.valid:
+                record["outputs_manifest"] = str(outputs.path)
+                record["artifacts"] = outputs.records
             task_records.append(record)
 
         if not task_records:
@@ -1516,31 +1551,34 @@ class JobRunStateMixin:
         manifest_path: Path,
         trace_file: Path,
     ) -> bool:
-        if self._is_modern_frequency_trace_shard(trace_file):
-            return True
         outputs_path = manifest_path.parent / "outputs.json"
-        if not outputs_path.exists():
-            return True
-        try:
-            outputs = json.loads(outputs_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return True
-        files = self._as_records(
-            outputs.get("files") if isinstance(outputs, Mapping) else None
+        outputs = OutputManifest.read(
+            outputs_path,
+            result_path=self._result_path,
         )
-        if not files:
-            return True
+        if not outputs.valid:
+            return self._is_modern_frequency_trace_shard(trace_file) or not (
+                outputs_path.exists()
+            )
         trace_key = str(Path(trace_file).resolve(strict=False))
-        for record in files:
-            raw_path = record.get("path") or record.get("relative_path")
-            if not raw_path:
-                continue
-            path = Path(str(raw_path))
-            if not path.is_absolute():
-                path = self._result_path / path
-            if str(path.resolve(strict=False)) == trace_key:
+        for artifact in outputs.artifacts:
+            if str(artifact.path.resolve(strict=False)) == trace_key:
                 return True
-        return False
+        # Early fs-run-1 producers omitted modern frequency shards from the
+        # inventory. Retain that compatibility only when another trace-family
+        # payload was not authoritatively reported for this task.
+        has_trace_payload = any(
+            artifact.kind in {"traces", "receiver", "wavefield", "wavefields"}
+            or (
+                artifact.schema is not None
+                and "trace" in str(artifact.schema).lower()
+                and "metadata" not in str(artifact.schema).lower()
+            )
+            for artifact in outputs.artifacts
+        )
+        return self._is_modern_frequency_trace_shard(trace_file) and not (
+            has_trace_payload
+        )
 
     @staticmethod
     def _is_modern_frequency_trace_shard(path: Path) -> bool:
@@ -2035,6 +2073,7 @@ class JobRunStateMixin:
     def _reusable_task_outputs_from_state(
         self, state: Mapping[str, Any]
     ) -> List[Dict[str, Any]]:
+        manifest = self.trace_manifest
         records = self._state_task_records(state)
         source_by_fingerprint: Dict[str, Path] = {}
         for record in records:
@@ -2044,14 +2083,14 @@ class JobRunStateMixin:
             source = self._resolve_stored_trace_path(
                 record.get("path") or record.get("trace_file")
             )
-            if source is not None and source in self.trace_manifest.packed_files:
+            if source is not None and source in manifest.packed_files:
                 continue
             if fingerprint and source is not None and self._trace_file_exists(source):
                 source_by_fingerprint.setdefault(fingerprint, source)
 
         copies = []
-        for task, target in enumerate(self.expected_trace_files(), start=1):
-            if self.is_task_current(task, state=state):
+        for task, target in enumerate(manifest.files, start=1):
+            if self.is_task_current(task, state=state, manifest=manifest):
                 continue
             source = source_by_fingerprint.get(self.task_fingerprint(task))
             if source is None:
@@ -2094,11 +2133,17 @@ class JobRunStateMixin:
         remove_matching_shards: bool = False,
     ) -> bool:
         removed = False
-        files = self.expected_trace_files()
+        task_files = [
+            self.trace_outputs.path / f"traces_{task}.h5"
+            for task in range(1, self.n_tasks + 1)
+        ]
         for task in tasks:
-            if task < 1 or task > len(files):
+            if task < 1 or task > len(task_files):
                 continue
-            paths = {files[task - 1], self._legacy_trace_file(files[task - 1])}
+            paths = {
+                task_files[task - 1],
+                self._legacy_trace_file(task_files[task - 1]),
+            }
             shard = (
                 self._matching_frequency_trace_file(task)
                 if remove_matching_shards
@@ -2112,6 +2157,54 @@ class JobRunStateMixin:
                     removed = True
                 except FileNotFoundError:
                     pass
+        return removed
+
+    def _remove_all_trace_shards(self) -> bool:
+        """Remove every task shard owned by this job before a forced rerun."""
+
+        manifests = [self.trace_manifest]
+        try:
+            wavefield_manifest = self.wavefield_manifest
+        except Exception:
+            wavefield_manifest = None
+        if wavefield_manifest is not None and wavefield_manifest.groups:
+            manifests.append(wavefield_manifest)
+
+        patterns = (
+            "f_*.h5",
+            "traces_*.h5",
+            "receivers_*.h5",
+            "trace_frequency_*.h5",
+        )
+        candidates = set()
+        for manifest in manifests:
+            roots = (manifest.output_path, manifest.result_path)
+            for root in roots:
+                directories = (
+                    root,
+                    root / "shards",
+                    root / "traces" / "shards",
+                    root / "wavefields" / "shards",
+                )
+                for directory in directories:
+                    if not directory.exists():
+                        continue
+                    for pattern in patterns:
+                        candidates.update(directory.glob(pattern))
+            for group in [*manifest.groups, *manifest.wavefields]:
+                directory = manifest.output_path / str(group)
+                if not directory.exists():
+                    continue
+                for pattern in patterns:
+                    candidates.update(directory.glob(pattern))
+
+        removed = False
+        for path in candidates:
+            try:
+                path.unlink()
+                removed = True
+            except FileNotFoundError:
+                pass
         return removed
 
     @staticmethod
