@@ -63,11 +63,16 @@ def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) ->
             hint="Create one FrequencyDomainJob per plotted frequency.",
         )
     acquisition = getattr(ctx.simulation, "acquisition", None)
-    source_count = (
-        acquisition.known_source_field_count()
-        if acquisition is not None and hasattr(acquisition, "known_source_field_count")
-        else 0
-    )
+    # Acquisition diagnostics are already reported. Avoid deriving output bounds
+    # from invalid external metadata, which can itself raise while loading names.
+    source_count = None
+    if not any(issue.code.startswith("acquisition.") for issue in ctx.report.errors):
+        source_count = (
+            acquisition.known_source_field_count()
+            if acquisition is not None
+            and hasattr(acquisition, "known_source_field_count")
+            else 0
+        )
     for index, vtk_output in enumerate(outputs.vtk):
         _validate_paraview_output(vtk_output, index, source_count, ctx)
     for index, wavefield_output in enumerate(outputs.wavefields):
