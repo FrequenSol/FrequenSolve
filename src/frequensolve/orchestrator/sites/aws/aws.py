@@ -615,22 +615,35 @@ class AWSSite(BaseSite):
         project_name = Path(job.simulation.project_path).name
         simulation_name = job.simulation.name
         job_name = job.name
-        results_vtk_path = f"jobs/{simulation_name}/{job_name}/results/ParaView"
-        s3_results_path = (
-            f"s3://{self.config.s3_bucket}/{project_name}/{results_vtk_path}"
-        )
-        local_results_path = path / results_vtk_path
+        vtk_paths: List[str] = []
+        outputs = getattr(getattr(job, "outputs", None), "paraview", None) or []
+        for output in outputs:
+            output_path = getattr(output, "path", None)
+            if output_path is None:
+                continue
+            normalized = PurePosixPath(str(output_path)).as_posix().strip("/")
+            if normalized and normalized != "." and normalized not in vtk_paths:
+                vtk_paths.append(normalized)
+        if not vtk_paths:
+            vtk_paths.append("ParaView")
 
-        try:
-            logger.info(
-                "Fetching VTK outputs from %s to %s",
-                s3_results_path,
-                local_results_path,
+        for vtk_path in vtk_paths:
+            results_vtk_path = f"jobs/{simulation_name}/{job_name}/results/{vtk_path}"
+            s3_results_path = (
+                f"s3://{self.config.s3_bucket}/{project_name}/{results_vtk_path}"
             )
-            self.get(s3_results_path, local_results_path)
-        except Exception as e:
-            logger.exception("Error downloading VTK outputs: %s", str(e))
-            raise
+            local_results_path = path / results_vtk_path
+
+            try:
+                logger.info(
+                    "Fetching VTK outputs from %s to %s",
+                    s3_results_path,
+                    local_results_path,
+                )
+                self.get(s3_results_path, local_results_path)
+            except Exception as e:
+                logger.exception("Error downloading VTK outputs: %s", str(e))
+                raise
 
     def fetch_paraview(
         self, job: BaseJob, path: Optional[Union[str, Path]] = None
@@ -909,9 +922,7 @@ class AWSSite(BaseSite):
                 vcpu=vcpu,
                 memory=memory,
                 job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
-                send_simulation_status_email=kwargs.get(
-                    "send_simulation_status_email"
-                ),
+                send_simulation_status_email=kwargs.get("send_simulation_status_email"),
                 fresh=fresh_run,
             )
 
@@ -988,6 +999,7 @@ class AWSSite(BaseSite):
             state=state,
             return_code=return_code,
             job_id=str(run.id),
+            message=message,
             raw=raw,
         )
 

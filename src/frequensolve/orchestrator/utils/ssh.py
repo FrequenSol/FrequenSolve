@@ -6,6 +6,7 @@ avoid re-authenticating each time a connection is made.
 import shlex
 import subprocess
 import time
+from typing import Any
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.util.setup_logger import init_logger
@@ -226,7 +227,6 @@ class SSHProxy:
             BytesIO(stderr_bytes, channel=channel),
         )
 
-
     def exec_command_term(self, command):
         """Execute a login-node command with a pseudo-terminal.
 
@@ -246,7 +246,6 @@ class SSHProxy:
             BytesIO(stdout_bytes, channel=channel),
             BytesIO(stderr_bytes, channel=channel),
         )
-
 
     def _exec_on_login(self, command, term=False, timeout=None):
         cmd = self._login_ssh_command()

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 _PROJECT_FILE_REFERENCE_KEYS = ("file", "data_path", "observed")
 
+
 class JobRemoteMixin:
     """Save and stage job inputs for local and remote execution.
 

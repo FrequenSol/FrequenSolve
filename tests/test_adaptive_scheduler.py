@@ -85,11 +85,12 @@ def test_adaptive_scheduler_passes_configured_mpi_arguments(monkeypatch, tmp_pat
 
     instance._launch(task_id=1, offset=0, ranks=2, memory=1.0)
 
-    assert launched["command"][:5] == [
+    assert launched["command"][:6] == [
         "srun",
         "--kill-on-bad-exit=1",
         "--wait=30",
-        "-n",
+        "--exclusive",
+        "--ntasks",
         "2",
     ]
     instance.running[-1][-1].close()
@@ -225,29 +226,36 @@ def test_adaptive_scheduler_builds_launcher_specific_task_commands(
     assert command[-2:] == ["--task", "1"]
 
 
-def test_adaptive_scheduler_mpirun_uses_full_allocation_without_ibrun_flags(tmp_path):
+@pytest.mark.parametrize("rank_limit", [None, 1, 3])
+@pytest.mark.parametrize("launcher", ["mpirun", "mpiexec"])
+def test_adaptive_scheduler_mpirun_uses_full_allocation_without_ibrun_flags(
+    tmp_path, rank_limit, launcher
+):
     scheduler = _load_scheduler_module()
     instance = scheduler.AdaptiveScheduler(
         {
             "executable": "/remote/bin/solver",
-            "mpi": "/usr/bin/mpirun",
+            "mpi": f"/usr/bin/{launcher}",
             "total_ranks": 4,
             "omp_threads": 1,
             "mem_per_rank_gib": 4,
             "job_task_count": 1,
             "task_indices": [1],
             "sizing_json": str(tmp_path / "sizing.json"),
+            **({"max_ranks_per_task": rank_limit} if rank_limit else {}),
         },
         job_file="job.json",
         output=str(tmp_path),
         status=str(tmp_path / "status.json"),
     )
 
-    assert instance._choose_base_ranks(0.25) == 4
-    command = instance._launch_command(task_id=1, offset=0, ranks=4)
-    assert command[:3] == ["/usr/bin/mpirun", "-n", "4"]
+    ranks = rank_limit or 4
+    assert instance._choose_base_ranks(0.25) == ranks
+    assert instance.free_intervals == [(0, ranks)]
+    command = instance._launch_command(task_id=1, offset=0, ranks=ranks)
+    assert command[:3] == [f"/usr/bin/{launcher}", "-n", str(ranks)]
     assert "-o" not in command
     assert "task_affinity" not in command
 
-    with pytest.raises(SystemExit, match="requires the full allocation"):
+    with pytest.raises(SystemExit, match="requires exclusive use"):
         instance._launch_command(task_id=1, offset=1, ranks=3)

@@ -7,7 +7,18 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Protocol, Union, cast
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    Mapping,
+    Optional,
+    Protocol,
+    Union,
+    cast,
+)
 
 from frequensolve.simulation.jobs.run_state import SkipPolicy
 

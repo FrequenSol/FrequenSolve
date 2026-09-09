@@ -2751,7 +2751,7 @@ def test_stampede3_site_is_specific_slurm_subclass():
 
 def test_eikonal_batch_caps_initialization_and_task_launches(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    launcher = tmp_path / "fake-mpi"
+    launcher = tmp_path / "srun"
     calls = tmp_path / "launches.txt"
     launcher.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$LAUNCH_LOG"\n')
     launcher.chmod(0o755)
@@ -2808,7 +2808,8 @@ def test_eikonal_batch_caps_initialization_and_task_launches(monkeypatch, tmp_pa
     assert len(launches) == 2
     assert "--init-no-size" in launches[0]
     assert "--task" in launches[1]
-    assert [args[args.index("-n") + 1] for args in launches] == ["1", "1"]
+    assert launches[0][launches[0].index("-n") + 1] == "1"
+    assert launches[1][launches[1].index("--ntasks") + 1] == "1"
     config = json.loads((tmp_path / "logs/scheduler_config.json").read_text())
     assert config["total_ranks"] == 8
     assert config["max_ranks_per_task"] == 1
