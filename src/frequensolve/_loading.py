@@ -14,7 +14,8 @@ def load(source: Any, *, kind: Optional[str] = None, **kwargs) -> Any:
         source: JSON file, directory containing one JSON file, existing job
             object, trace file, or object accepted by an explicit loader.
         kind: Optional loader hint. Supported values are ``"job"``,
-            ``"project"``, ``"simulation"``, ``"survey"``, and ``"traces"``.
+            ``"project"``, ``"simulation"``, ``"survey"``, ``"traces"``,
+            and ``"eikonal"``.
         **kwargs: Extra keyword arguments forwarded to the selected loader.
 
     Returns:
@@ -31,6 +32,8 @@ def load(source: Any, *, kind: Optional[str] = None, **kwargs) -> Any:
         return BaseJob.load(source, **kwargs)
 
     path = Path(source).expanduser().resolve()
+    if _is_eikonal_result_path(path):
+        return _load_with_kind(path, "eikonal", **kwargs)
     if _is_trace_store_path(path):
         return _load_with_kind(path, "traces", **kwargs)
 
@@ -68,6 +71,10 @@ def _normalize_kind(kind: Optional[str]) -> Optional[str]:
         "trace": "traces",
         "traces": "traces",
         "trace_dataset": "traces",
+        "eikonal": "eikonal",
+        "eikonal_results": "eikonal",
+        "first_arrival": "eikonal",
+        "first_arrivals": "eikonal",
     }
     return aliases.get(text, text)
 
@@ -93,8 +100,13 @@ def _load_with_kind(source: Any, kind: str, **kwargs) -> Any:
         from frequensolve.seismic import TraceDataset
 
         return TraceDataset.open(source, **kwargs)
+    if kind == "eikonal":
+        from frequensolve.seismic import EikonalResults
+
+        return EikonalResults.open(source, **kwargs)
     raise ValueError(
-        "kind must be one of 'job', 'project', 'simulation', 'survey', or 'traces'"
+        "kind must be one of 'job', 'project', 'simulation', 'survey', "
+        "'traces', or 'eikonal'"
     )
 
 
@@ -126,6 +138,33 @@ def _is_trace_store_path(path: Path) -> bool:
 
         TraceStore._read_trace_frequencies(path)
         return bool(TraceStore.discover_trace_groups(path))
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _is_eikonal_result_path(path: Path) -> bool:
+    candidate = path / "manifest.json" if path.is_dir() else path
+    if candidate.is_file() and candidate.suffix.lower() == ".json":
+        try:
+            payload = _read_json(candidate)
+        except ValueError:
+            return False
+        return payload.get("schema") == "fs-eikonal-output-1"
+    if not path.is_file() or path.suffix.lower() not in {".h5", ".hdf5", ".hdf"}:
+        return False
+    try:
+        import h5py
+
+        with h5py.File(path, "r") as h5:
+            if "schema" in h5:
+                value = h5["schema"][()]
+            else:
+                value = h5["metadata/schema"][()]
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        if hasattr(value, "item"):
+            value = value.item()
+        return value == "fs-eikonal-output-1"
     except (OSError, KeyError, TypeError, ValueError):
         return False
 

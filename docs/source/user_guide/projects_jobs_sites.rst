@@ -6,7 +6,8 @@ The high-level workflow is:
 1. Create a ``Project``.
 2. Create a project-owned :term:`simulation` with ``project.new_simulation(...)``.
 3. Add model, mesh, boundary conditions, acquisition, and numerics.
-4. Create a ``TimeDomainJob`` or ``FrequencyDomainJob``.
+4. Create a wave job such as ``TimeDomainJob`` / ``FrequencyDomainJob``, or a
+   frequency-independent ``EikonalJob``.
 5. Submit the job to a :term:`site` and read the :term:`run result`.
 
 Related tutorials:

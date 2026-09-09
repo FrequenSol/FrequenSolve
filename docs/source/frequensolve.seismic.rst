@@ -50,6 +50,14 @@ Traces
    :show-inheritance:
    :noindex:
 
+Eikonal Results
+---------------
+
+.. automodule:: frequensolve.seismic.eikonal
+   :members:
+   :show-inheritance:
+   :noindex:
+
 Trace Records
 -------------
 

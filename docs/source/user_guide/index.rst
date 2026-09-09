@@ -24,4 +24,5 @@ unfamiliar, check the :doc:`../glossary`.
    mesh_generation_adaptivity
    surveys_sources_receivers
    traces_paraview_outputs
+   eikonal
    boreholes

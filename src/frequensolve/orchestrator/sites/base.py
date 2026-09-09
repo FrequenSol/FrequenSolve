@@ -556,6 +556,16 @@ class RunResult:
             return site.fetch_image(self.job)
         return self.job.load_images()
 
+    def eikonal(self) -> Any:
+        """Open authoritative Eikonal first-arrival results for this run."""
+
+        self.raise_for_status()
+        if getattr(self.job, "workflow", None) != "eikonal":
+            raise TypeError("eikonal() requires an EikonalJob")
+        if self.site is not None and hasattr(self.site, "fetch_outputs"):
+            self.site.fetch_outputs(self.job)
+        return self.job.results
+
     def output_files(
         self,
         *,
@@ -972,6 +982,14 @@ class RunHandle:
 
         self.fetch()
         return self.site.fetch_wavefields(self.job, upscale=upscale)
+
+    def eikonal(self) -> Any:
+        """Fetch if needed and open authoritative Eikonal results."""
+
+        if getattr(self.job, "workflow", None) != "eikonal":
+            raise TypeError("eikonal() requires an EikonalJob")
+        self.fetch()
+        return self.job.results
 
     def logs(self, **kwargs: Any) -> Any:
         """Return or fetch logs for this run.

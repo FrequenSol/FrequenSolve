@@ -17,6 +17,14 @@ Trace Analysis
    :show-inheritance:
    :noindex:
 
+Eikonal Plotting
+----------------
+
+.. automodule:: frequensolve.plotting.eikonal
+   :members:
+   :show-inheritance:
+   :noindex:
+
 Animation
 ---------
 
