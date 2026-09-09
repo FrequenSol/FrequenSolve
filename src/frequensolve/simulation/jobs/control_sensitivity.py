@@ -402,6 +402,25 @@ def _resolve_saved_job_path(
     return path
 
 
+@overload
+def _control_path(value: Union[str, Path], simulation: BaseSimulation) -> Path: ...
+
+
+@overload
+def _control_path(value: None, simulation: BaseSimulation) -> None: ...
+
+
+def _control_path(
+    value: Optional[Union[str, Path]], simulation: BaseSimulation
+) -> Optional[Path]:
+    return _resolve_saved_job_path(
+        value,
+        base_path=None,
+        project_path=getattr(simulation, "project_path", None),
+        source_project=None,
+    )
+
+
 @register_class
 class BornControlSensitivityJob(BaseJob):
     """Apply the native physical-operator JVP to one control direction."""
@@ -426,8 +445,8 @@ class BornControlSensitivityJob(BaseJob):
             _normalized_frequencies(f_list),
             JobOutputs(outputs),
         )
-        self.direction = Path(direction)
-        self.current = None if current is None else Path(current)
+        self.direction = _control_path(direction, simulation)
+        self.current = _control_path(current, simulation)
         self.active = _active_controls(active)
         self.source_taper = _source_taper(source_taper)
         self.spatial_window = _spatial_window(spatial_window)
@@ -576,15 +595,18 @@ class RTMControlSensitivityJob(BaseJob):
         if isinstance(observed, Mapping):
             if not observed:
                 raise ValueError("RTM control sensitivity requires observed data")
-            self.observed = {str(name): Path(path) for name, path in observed.items()}
+            self.observed = {
+                str(name): _control_path(path, simulation)
+                for name, path in observed.items()
+            }
         else:
-            self.observed = {"surface": Path(observed)}
-        self.gradient = Path(gradient)
-        self._objective_file = None if objective_file is None else Path(objective_file)
+            self.observed = {"surface": _control_path(observed, simulation)}
+        self.gradient = _control_path(gradient, simulation)
+        self._objective_file = _control_path(objective_file, simulation)
         if gram_derivative not in {"frozen", "total"}:
             raise ValueError("gram_derivative must be 'frozen' or 'total'")
         self.gram_derivative = gram_derivative
-        self.current = None if current is None else Path(current)
+        self.current = _control_path(current, simulation)
         self.active = _active_controls(active)
         self.source_taper = _source_taper(source_taper)
         self.spatial_window = _spatial_window(spatial_window)
@@ -615,6 +637,10 @@ class RTMControlSensitivityJob(BaseJob):
                 "phase-derivative comparison requires observed_derivatives for "
                 "every receiver group"
             )
+        self.observed_derivatives = {
+            name: spec.resolved(lambda path: _control_path(path, simulation))
+            for name, spec in self.observed_derivatives.items()
+        }
         self.preprocess = list(preprocess or [])
         if weights is None:
             self.weights = None
@@ -633,7 +659,7 @@ class RTMControlSensitivityJob(BaseJob):
                 )
             self.weights = frequency_weights.tolist()
         self.smoothing = VariationalSmoothing.from_value(smoothing)
-        self.raw_gradient = None if raw_gradient is None else Path(raw_gradient)
+        self.raw_gradient = _control_path(raw_gradient, simulation)
 
     def gradient_file(self, part: Optional[int] = None, *, raw: bool = False) -> Path:
         """Return the final, raw aggregate, or task-local gradient path."""
@@ -974,7 +1000,7 @@ class TimeReversalFocusJob(RTMControlSensitivityJob):
             outputs=outputs,
         )
         self.workflow = "focus"
-        self._focus_objective_file = Path(objective_file)
+        self._focus_objective_file = _control_path(objective_file, simulation)
         self.softening = float(softening)
         self.distance_power = float(distance_power)
         if not np.isfinite(self.softening) or self.softening <= 0:

@@ -737,3 +737,52 @@ def test_loaded_control_jobs_stage_direction_and_current_files(tmp_path):
         loaded = BaseJob.load(job.save())
         pairs = loaded.remote_input_files("/remote/project")
         assert (direction, type(direction)("/remote/project/direction.h5")) in pairs
+
+
+def test_control_paths_are_project_relative_before_and_after_reload(
+    tmp_path, monkeypatch
+):
+    from frequensolve.simulation.jobs.imaging import ObservedTraceDerivatives
+
+    project = tmp_path / "project"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    simulation = _saved_simulation(project)
+    born = BornControlSensitivityJob(
+        "born-paths", simulation, [1.0], direction="direction.h5", current="current.h5"
+    )
+    rtm = RTMControlSensitivityJob(
+        "rtm-paths",
+        simulation,
+        [1.0],
+        observed="observed.h5",
+        gradient="gradient.h5",
+        current="current.h5",
+        objective_file="objective.h5",
+        raw_gradient="raw.h5",
+        observed_derivatives=ObservedTraceDerivatives.packed(
+            "derivatives.h5", receiver_group="surface"
+        ),
+    )
+    focus = TimeReversalFocusJob(
+        "focus-paths",
+        simulation,
+        [1.0],
+        observed="observed.h5",
+        gradient="focus-gradient.h5",
+        objective_file="focus-objective.h5",
+        softening=1.0,
+    )
+    assert born.direction == project / "direction.h5"
+    assert born.current == project / "current.h5"
+    assert rtm.observed["surface"] == project / "observed.h5"
+    assert rtm.gradient == project / "gradient.h5"
+    assert rtm.current == project / "current.h5"
+    assert rtm._objective_file == project / "objective.h5"
+    assert rtm.raw_gradient == project / "raw.h5"
+    assert rtm.observed_derivatives["surface"].df.file == project / "derivatives.h5"
+    assert focus.focus_objective_file() == project / "focus-objective.h5"
+    for job in (born, rtm, focus):
+        restored = BaseJob.load(job.save())
+        assert restored.to_fs() == job.to_fs()
