@@ -40,6 +40,7 @@ from frequensolve.orchestrator.utils.pool import PoolStatus
 from frequensolve.orchestrator.utils.progress import status_table_html, wait_all
 from frequensolve.project.project import Project
 from frequensolve.simulation.jobs import (
+    EikonalJob,
     FrequencyDomainJob,
     RTMControlSensitivityJob,
     SkipPolicy,
@@ -2954,3 +2955,69 @@ def test_attached_initialization_respects_job_rank_limit(
     init = next(line for line in log.read_text().splitlines() if "--init" in line)
     args = init.split()
     assert args[args.index("-n") + 1] == str(expected)
+
+
+def test_eikonal_batch_caps_initialization_and_task_launches(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    launcher = tmp_path / "srun"
+    calls = tmp_path / "launches.txt"
+    launcher.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$LAUNCH_LOG"\n')
+    launcher.chmod(0o755)
+    monkeypatch.setenv("LAUNCH_LOG", str(calls))
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    site = DummySlurmSite("project/run", solver_policy="off")
+    site.config.mpi_wrapper = str(launcher)
+    site.config.launcher_args = ("--fake-launch",)
+    monkeypatch.setattr(site, "_sync_project", lambda project: None)
+    runner = Path(hpc.__file__).parent / "templates/sweep/adaptive_scheduler.py"
+    monkeypatch.setattr(site, "_adaptive_scheduler_remote_path", lambda: runner)
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = EikonalJob("first_arrivals", sim)
+    sweep = tmp_path / "sweep.sh"
+    render = site._sweep_SLURM_script
+
+    def local_script(**kwargs):
+        kwargs.update(
+            stdout=str(tmp_path / "logs"),
+            run_path=str(tmp_path),
+            mpi_health_check_timeout=None,
+        )
+        return render(**kwargs)
+
+    def stage(script, job):
+        sweep.write_text(script)
+        return sweep, job.job_file
+
+    monkeypatch.setattr(site, "_sweep_SLURM_script", local_script)
+    monkeypatch.setattr(site, "_transfer_SLURM_job", stage)
+    monkeypatch.setattr(site, "_submit_sbatch", lambda command: "123")
+    monkeypatch.setattr(
+        site, "_store_remote_run_records", lambda job, record=None: None
+    )
+    site.submit(
+        job,
+        mode="batch",
+        nodes=1,
+        ranks_per_node=8,
+        validate=False,
+        launch_delay_seconds=0,
+    )
+    completed = subprocess.run(
+        ["bash", str(sweep), str(job.job_file)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    launches = [line.split() for line in calls.read_text().splitlines()]
+    assert len(launches) == 2
+    assert "--init-no-size" in launches[0]
+    assert "--task" in launches[1]
+    assert launches[0][launches[0].index("-n") + 1] == "1"
+    assert launches[1][launches[1].index("--ntasks") + 1] == "1"
+    config = json.loads((tmp_path / "logs/scheduler_config.json").read_text())
+    assert config["total_ranks"] == 8
+    assert config["max_ranks_per_task"] == 1
