@@ -33,6 +33,23 @@ def _eikonal_job(tmp_path, *, dimension=2):
             n=[2] * dimension,
         )
     )
+    from frequensolve.seismic import Acquisition
+    from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
+    from frequensolve.seismic.sources import SourceGeometry
+
+    sim.acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar", coords=[[0.0] * dimension], names=["shot_1"]
+        )
+    )
+    sim.acquisition.add_receiver_group(
+        "surface",
+        ReceiverNode(
+            name="hydrophone",
+            components=[ReceiverComponent(name="p", field="pressure")],
+        ),
+        coords=[[0.0] * dimension],
+    )
     job = EikonalJob(
         "first_arrivals",
         sim,
@@ -444,6 +461,10 @@ def test_eikonal_defers_external_source_catalog_validation(tmp_path):
             file="remote:source.h5", dataset="coordinates", kind="scalar"
         )
     )
+    job.eikonal = job.eikonal.with_updates(
+        receivers=EikonalReceivers.disabled(),
+        products={"field": True, "characteristics": False},
+    )
     job.validate_outputs()
 
 
@@ -478,3 +499,42 @@ def test_eikonal_normalizes_path_output_values():
 def test_eikonal_rejects_string_floating_solver_values(solver):
     with pytest.raises(ValueError):
         EikonalConfig(solver=solver)
+
+
+@pytest.mark.parametrize("value", [True, False, 1.9, "1", 0])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_eikonal_source_factories_reject_invalid_incidence(value, explicit):
+    with pytest.raises(ValueError, match="incidence_slot"):
+        if explicit:
+            EikonalSources.explicit(
+                [{"name": "s", "coordinates": [0, 0]}], incidence_slot=value
+            )
+        else:
+            EikonalSources.acquisition(incidence_slot=value)
+
+
+@pytest.mark.parametrize("value", [None, 2, True, "", "  "])
+@pytest.mark.parametrize("section", ["sources", "receivers"])
+def test_eikonal_rejects_invalid_explicit_point_names(value, section):
+    factory = EikonalSources if section == "sources" else EikonalReceivers
+    with pytest.raises(ValueError, match="name"):
+        EikonalConfig(
+            **{section: factory.explicit([{"name": value, "coordinates": [0, 0]}])}
+        )
+
+
+@pytest.mark.parametrize(
+    "filename", ["manifest.json", "./manifest.json", ".//manifest.json"]
+)
+def test_eikonal_output_cannot_overwrite_manifest(filename):
+    with pytest.raises(ValueError, match="collide"):
+        EikonalConfig(output={"hdf5_file": filename})
+
+
+def test_eikonal_rejects_receiver_selector_in_empty_catalog(tmp_path):
+    from frequensolve.seismic.acquisition import Acquisition
+
+    _, simulation, job = _eikonal_job(tmp_path)
+    simulation.acquisition = Acquisition()
+    with pytest.raises(ValueError, match="Unknown Eikonal acquisition receiver"):
+        job.to_fs()

@@ -131,7 +131,9 @@ def _named_points(points: Any, name: str) -> None:
         _unknown(item, {"name", "coordinates"}, f"{name}[{index}]")
         _required(item, {"name", "coordinates"}, f"{name}[{index}]")
         _point_coordinates(item["coordinates"], f"{name}[{index}].coordinates")
-        names.append(str(item["name"]))
+        if not isinstance(item["name"], str) or not item["name"].strip():
+            raise ValueError(f"{name}[{index}].name must be a non-empty string")
+        names.append(item["name"])
     if any(not item for item in names) or len(set(names)) != len(names):
         raise ValueError(f"{name} names must be non-empty and unique")
 
@@ -151,7 +153,9 @@ class EikonalSources:
         if names is not None:
             result["names"] = [str(name) for name in names]
         if incidence_slot is not None:
-            result["incidence_slot"] = int(incidence_slot)
+            result["incidence_slot"] = _integer(
+                incidence_slot, "sources.incidence_slot", minimum=1
+            )
         return result
 
     @staticmethod
@@ -167,7 +171,9 @@ class EikonalSources:
             "points": [copy.deepcopy(dict(point)) for point in points],
         }
         if incidence_slot is not None:
-            result["incidence_slot"] = int(incidence_slot)
+            result["incidence_slot"] = _integer(
+                incidence_slot, "sources.incidence_slot", minimum=1
+            )
         return result
 
 
@@ -419,7 +425,9 @@ class EikonalConfig:
         _unknown(data, {"directory", "hdf5_file", "overwrite"}, "output")
         _required(data, {"directory", "hdf5_file"}, "output")
         _output_path(data["directory"], "output.directory")
-        _output_path(data["hdf5_file"], "output.hdf5_file")
+        hdf5_file = _output_path(data["hdf5_file"], "output.hdf5_file")
+        if hdf5_file == "manifest.json":
+            raise ValueError("output.hdf5_file must not collide with manifest.json")
         if "overwrite" in data and not isinstance(data["overwrite"], bool):
             raise ValueError("output.overwrite must be boolean")
 
@@ -497,12 +505,11 @@ class EikonalJob(BaseJob):
         receivers = config["receivers"]
         if receivers.get("kind") == "acquisition":
             known = {group.name for group in acquisition.receiver_groups}
-            if known:
-                missing = sorted(set(receivers["groups"]) - known)
-                if missing:
-                    raise ValueError(
-                        f"Unknown Eikonal acquisition receiver groups: {missing}"
-                    )
+            missing = sorted(set(receivers["groups"]) - known)
+            if missing:
+                raise ValueError(
+                    f"Unknown Eikonal acquisition receiver groups: {missing}"
+                )
 
     def validate_outputs(self) -> None:
         """Validate the Eikonal contract instead of frequency outputs."""
