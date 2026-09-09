@@ -9,21 +9,17 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
-from frequensolve.geometry.frame import CoordinateValue, Direction
+from frequensolve.seismic.boundary_loadings import SurfacePressureLoading
 from frequensolve.seismic.receivers import (
     CoordsSurfaceCarpet,
     ReceiverDevice,
     ReceiverGroup,
-    coordinate_array_metadata,
 )
 from frequensolve.seismic.sources import (
-    CompoundSource,
-    DistributedSource,
+    EncodedSource,
     PointSource,
-    RuptureSource,
     SourceEncoding,
     SourceGeometry,
-    SourceGroup,
 )
 from frequensolve.seismic.sparse_survey import ReceiverSampling, SparseSurvey
 from frequensolve.util.mixins import (
@@ -71,74 +67,37 @@ def _encoded_terms(terms: Mapping[Any, Any]) -> Dict[str, Any]:
     return encoded
 
 
-def _deprecated_source_groups() -> None:
-    warnings.warn(
-        "Acquisition.source_groups is deprecated; use source_geometry, "
-        "source_encoding, source_point_names(), and source_field_names().",
-        DeprecationWarning,
-        stacklevel=3,
-    )
-
-
-class _SourceGroupCompatibilityView(NamedList):
-    """Read-only list returned by the deprecated ``source_groups`` property."""
-
-    @staticmethod
-    def _reject_mutation(*_args: Any, **_kwargs: Any) -> None:
-        raise TypeError(
-            "Acquisition.source_groups is a read-only compatibility view; "
-            "use add_sources(), set_sources(), or set_source_encoding()"
-        )
-
-    append = _reject_mutation
-    clear = _reject_mutation
-    extend = _reject_mutation
-    insert = _reject_mutation
-    pop = _reject_mutation
-    remove = _reject_mutation
-    reverse = _reject_mutation
-    sort = _reject_mutation
-    __delitem__ = _reject_mutation
-    __iadd__ = _reject_mutation
-    __imul__ = _reject_mutation
-    __setitem__ = _reject_mutation
-
-
-def _coefficient_value(value: Any) -> complex:
-    if isinstance(value, np.generic):
-        value = value.item()
-    if isinstance(value, (list, tuple)) and len(value) == 2:
-        return complex(float(value[0]), float(value[1]))
-    return complex(value)
-
-
-def _coefficient_magnitude(value: Any) -> float:
-    return abs(_coefficient_value(value))
-
-
-def _coefficient_is_one(value: Any) -> bool:
-    return _coefficient_value(value) == complex(1.0, 0.0)
-
-
-def _coordinate_value(value: Any) -> np.ndarray:
-    values, _units, _system = coordinate_array_metadata(value)
-    result = np.asarray(values, dtype=np.float64)
-    if result.ndim == 2 and len(result) == 1:
-        return result[0]
+def _coerce_boundary_loadings(value: Optional[Any]) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, (SurfacePressureLoading, Mapping)):
+        value = [value]
+    result = []
+    for loading in value:
+        if isinstance(loading, SurfacePressureLoading):
+            result.append(loading)
+        elif isinstance(loading, Mapping):
+            result.append(copy.deepcopy(dict(loading)))
+        else:
+            raise TypeError(
+                "Boundary loadings must be SurfacePressureLoading objects or "
+                "materialized solver mappings"
+            )
     return result
 
 
-def _weighted_direction(direction: Any, coefficient: Any) -> np.ndarray:
-    weight = _coefficient_value(coefficient)
-    if weight.imag != 0.0:
-        raise ValueError(
-            "Complex source encoding cannot be represented by legacy source_groups"
-        )
-    if isinstance(direction, Direction):
-        direction = direction.value
-    if direction is None:
-        direction = [1.0]
-    return np.asarray(direction, dtype=float) * float(weight.real)
+def _loading_source_names(loading: Any) -> List[str]:
+    if isinstance(loading, SurfacePressureLoading):
+        return loading.source_names()
+    fields = loading.get("fields", [])
+    return [str(field["source"]) for field in fields if "source" in field]
+
+
+def _loading_boundary_name(loading: Any) -> Optional[str]:
+    if isinstance(loading, SurfacePressureLoading):
+        return loading.boundary_condition
+    value = loading.get("boundary_condition")
+    return None if value is None else str(value)
 
 
 @dataclass(init=False)
@@ -147,6 +106,7 @@ class Acquisition(ExtraFieldsMixin):
 
     source_geometry: Optional[SourceGeometry] = None
     source_encoding: Optional[SourceEncoding] = None
+    boundary_loadings: List[Any] = field(default_factory=list)
     receiver_groups: NamedList = field(default_factory=NamedList)
     surveys: NamedList = field(default_factory=NamedList)
     max_batch: Optional[int] = None
@@ -160,6 +120,7 @@ class Acquisition(ExtraFieldsMixin):
         sources: Optional[Any] = None,
         source_encoding: Optional[Any] = None,
         source_groups: Optional[Any] = None,
+        boundary_loadings: Optional[Any] = None,
         receivers: Optional[Any] = None,
         receiver_groups: Optional[Any] = None,
         surveys: Optional[Any] = None,
@@ -190,6 +151,7 @@ class Acquisition(ExtraFieldsMixin):
             source_geometry if source_geometry is not None else sources
         )
         self.source_encoding = _coerce_source_encoding(source_encoding)
+        self.boundary_loadings = _coerce_boundary_loadings(boundary_loadings)
         self.receiver_groups = NamedList(
             receiver_groups if receiver_groups is not None else receivers or []
         )
@@ -199,7 +161,11 @@ class Acquisition(ExtraFieldsMixin):
         self._init_extra(extra_fields, **kwargs)
         self._coerce_receivers_and_surveys()
         if source_groups is not None:
-            self._load_legacy_source_groups(source_groups)
+            from frequensolve.seismic import _legacy_sources
+
+            self.source_geometry, self.source_encoding = (
+                _legacy_sources.migrate_source_groups(source_groups)
+            )
 
     @property
     def sources(self) -> Optional[SourceGeometry]:
@@ -252,6 +218,7 @@ class Acquisition(ExtraFieldsMixin):
         return bool(
             self.source_geometry is not None
             or self.source_encoding is not None
+            or self.boundary_loadings
             or self.receiver_groups
             or self.surveys
             or self.max_batch is not None
@@ -271,6 +238,7 @@ class Acquisition(ExtraFieldsMixin):
         return cls(
             source_geometry=source_geometry,
             source_encoding=payload.pop("source_encoding", None),
+            boundary_loadings=payload.pop("boundary_loadings", None),
             source_groups=payload.pop("source_groups", None),
             receiver_groups=NamedList(
                 [
@@ -286,7 +254,12 @@ class Acquisition(ExtraFieldsMixin):
             extra=payload,
         )
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(
+        self,
+        ctx=None,
+        *,
+        boundary_loadings: Optional[Sequence[Any]] = None,
+    ) -> Dict:
         """Serialize acquisition geometry for solver input.
 
         Args:
@@ -297,25 +270,13 @@ class Acquisition(ExtraFieldsMixin):
             JSON-compatible acquisition block.
         """
 
-        from ..util.printing import print_warn
-
-        self._validate_export_contract()
+        all_boundary_loadings = [
+            *self.boundary_loadings,
+            *_coerce_boundary_loadings(boundary_loadings),
+        ]
+        self._validate_export_contract(all_boundary_loadings)
 
         ctx = ctx or ExportContext()
-
-        # Ensure receiver groups have unique names
-        names = {}
-        for group in self.receiver_groups:
-            name = group.name
-            if name in names:
-                i = 1
-                while f"{name}_{i}" in names:
-                    i += 1
-                group.name = f"{name}_{i}"
-                print_warn(
-                    f"Duplicate receiver group names detected. Renaming receiver group {name} to {group.name}"
-                )
-            names[group.name] = group.name
 
         survey_component_maps = self._survey_component_maps()
 
@@ -331,6 +292,15 @@ class Acquisition(ExtraFieldsMixin):
             payload["source_geometry"] = self.source_geometry.to_fs(ctx)
         if self.source_encoding is not None:
             payload["source_encoding"] = self.source_encoding.to_fs(ctx)
+        if all_boundary_loadings:
+            payload["boundary_loadings"] = [
+                (
+                    loading.to_fs(ctx, loading_index=index)
+                    if isinstance(loading, SurfacePressureLoading)
+                    else copy.deepcopy(loading)
+                )
+                for index, loading in enumerate(all_boundary_loadings)
+            ]
         if self.surveys:
             payload["surveys"] = [
                 (
@@ -342,7 +312,9 @@ class Acquisition(ExtraFieldsMixin):
             ]
         return merge_extra(payload, self.extra, "Acquisition")
 
-    def _validate_export_contract(self) -> None:
+    def _validate_export_contract(
+        self, boundary_loadings: Optional[Sequence[Any]] = None
+    ) -> None:
         """Reject incomplete or inconsistent acquisition-v2 exports."""
 
         if "source_groups" in self.extra:
@@ -350,31 +322,62 @@ class Acquisition(ExtraFieldsMixin):
                 "Acquisition.extra cannot contain legacy source_groups in a "
                 "current acquisition export"
             )
+        receiver_names = [group.name for group in self.receiver_groups]
+        if len(receiver_names) != len(set(receiver_names)):
+            raise ValueError("Receiver group names must be unique")
+        survey_names = [survey.name for survey in self.surveys]
+        if len(survey_names) != len(set(survey_names)):
+            raise ValueError("Survey names must be unique")
+        known_surveys = set(survey_names)
+        for group in self.receiver_groups:
+            survey = group.survey
+            if survey is not None and survey not in known_surveys:
+                raise ValueError(
+                    f"Receiver group {group.name!r} references unknown survey "
+                    f"{survey!r}"
+                )
+        loadings = list(
+            self.boundary_loadings if boundary_loadings is None else boundary_loadings
+        )
+        for loading in loadings:
+            if not _loading_boundary_name(loading):
+                raise ValueError(
+                    "Every surface-pressure loading must name its boundary condition"
+                )
+            names = _loading_source_names(loading)
+            if not names or any(not name.strip() for name in names):
+                raise ValueError(
+                    "Every surface-pressure loading requires at least one named source"
+                )
+
         geometry = self.source_geometry
         if geometry is None:
-            raise ValueError("fs-acquisition-2 requires source_geometry before export")
+            if self.source_encoding is not None:
+                raise ValueError("source_encoding requires source_geometry")
+            if not loadings:
+                raise ValueError(
+                    "fs-acquisition-2 requires source_geometry or boundary_loadings"
+                )
+            return
         if geometry.kind not in _SOURCE_KINDS:
             choices = ", ".join(sorted(_SOURCE_KINDS))
             raise ValueError(
                 f"Unsupported source kind {geometry.kind!r}; use one of: {choices}"
             )
         if geometry.geometry_type == "Inline":
-            if not geometry.sources:
+            if not geometry.point_count:
                 raise ValueError("Inline source_geometry requires source points")
-            for index, source in enumerate(geometry.sources):
-                if source.kind is not None and (
-                    str(source.kind).strip().lower() != geometry.kind
-                ):
-                    raise ValueError(
-                        "Inline source point kind must match source_geometry.kind: "
-                        f"sources[{index}] is {source.kind!r}, geometry is "
-                        f"{geometry.kind!r}"
-                    )
-            names = geometry.point_names()
-            if len(names) != len(set(names)):
-                raise ValueError("Inline source names must be unique")
-        else:
-            names = []
+            if not geometry.is_bulk:
+                for index, source in enumerate(geometry.sources):
+                    if source.kind is not None and (
+                        str(source.kind).strip().lower() != geometry.kind
+                    ):
+                        raise ValueError(
+                            "Inline source point kind must match source_geometry.kind: "
+                            f"sources[{index}] is {source.kind!r}, geometry is "
+                            f"{geometry.kind!r}"
+                        )
+            geometry.validate_unique_names()
 
         encoding = self.source_encoding
         if encoding is None or encoding.encoding_type == "HDF5Dense":
@@ -382,29 +385,22 @@ class Acquisition(ExtraFieldsMixin):
         field_names = encoding.field_names()
         if len(field_names) != len(set(field_names)):
             raise ValueError("Source-encoding field names must be unique")
-        if encoding.encoding_type == "Named" and names:
-            if geometry.geometry_type == "Inline" and any(
-                source.name is None for source in geometry.sources
-            ):
+        if encoding.encoding_type == "Named" and geometry.geometry_type == "Inline":
+            if geometry.geometry_type == "Inline" and not geometry.has_explicit_names():
                 raise ValueError(
                     "Named source encoding requires explicit names for every "
                     "inline physical source point"
                 )
-            known_names = set(names)
+            known_names = set(geometry.point_names())
             for field_obj in encoding.fields:
                 unknown = sorted(set(field_obj.terms).difference(known_names))
                 if unknown:
                     raise ValueError(
                         f"Source encoding references unknown sources: {unknown}"
                     )
-        elif encoding.encoding_type == "JsonDense" and names:
-            for field_obj in encoding.fields:
-                coefficients = field_obj.coefficients
-                if coefficients is None or len(coefficients) != len(names):
-                    raise ValueError(
-                        "JsonDense coefficient count must match physical "
-                        "source-point count"
-                    )
+        elif encoding.encoding_type in {"JsonDense", "FrequencyDense"}:
+            point_count = geometry.point_count
+            encoding.validate_dense_shape(point_count)
 
     def set_sources(self, sources: Any) -> SourceGeometry:
         """Set physical source geometry and return it."""
@@ -420,6 +416,65 @@ class Acquisition(ExtraFieldsMixin):
 
         self.source_encoding = _coerce_source_encoding(encoding)
         return self.source_encoding
+
+    def encode_sources(
+        self,
+        weights: Optional[Any] = None,
+        *,
+        coefficients: Optional[Any] = None,
+        names: Optional[Sequence[str]] = None,
+        reference_coordinates: Optional[Any] = None,
+        name: Optional[str] = None,
+        conjugate: bool = False,
+        frequencies: Optional[Sequence[float]] = None,
+    ) -> SourceEncoding:
+        """Set a dense complex source encoding on the current geometry.
+
+        Static ``weights`` use encoding-major shape ``(n_encoded, n_source)``.
+        Passing ``frequencies`` selects a frequency-dependent tensor with shape
+        ``(n_frequency, n_encoded, n_source)``. Set ``conjugate=True`` when the
+        values are forward responses that should be time-reversed.
+        """
+
+        if weights is not None and coefficients is not None:
+            raise TypeError("Use either weights or coefficients, not both")
+        if frequencies is None:
+            encoding = SourceEncoding.dense(
+                weights,
+                coefficients=coefficients,
+                names=names,
+                reference_coordinates=reference_coordinates,
+                name=name,
+                conjugate=conjugate,
+            )
+            source_axis = 1
+        else:
+            if reference_coordinates is not None:
+                raise ValueError(
+                    "Frequency-dependent source encoding computes reference "
+                    "coordinates from physical geometry"
+                )
+            encoding = SourceEncoding.frequency_dense(
+                weights,
+                frequencies,
+                coefficients=coefficients,
+                names=names,
+                name=name,
+                conjugate=conjugate,
+            )
+            source_axis = 2
+        point_count = self.known_source_point_count()
+        assert encoding.weights is not None
+        if (
+            point_count is not None
+            and encoding.weights.shape[source_axis] != point_count
+        ):
+            raise ValueError(
+                "source encoding coefficient count must match the "
+                f"{point_count} physical source points"
+            )
+        self.source_encoding = encoding
+        return encoding
 
     def add_sources(
         self,
@@ -438,15 +493,6 @@ class Acquisition(ExtraFieldsMixin):
         """Append physical point sources and return their stable names."""
 
         existing = self.source_point_count()
-        direction_array = None
-        if direction is not None and not isinstance(direction, Mapping):
-            try:
-                candidate = np.asarray(direction, dtype=float)
-            except (TypeError, ValueError):
-                candidate = None
-            if candidate is not None and candidate.ndim == 2:
-                direction_array = candidate
-
         probe = SourceGeometry.points(
             kind=kind,
             coords=coords,
@@ -454,23 +500,20 @@ class Acquisition(ExtraFieldsMixin):
             units=units,
             system=system,
             domain=domain,
-            direction=None if direction_array is not None else direction,
+            direction=direction,
             amplitude=amplitude,
             mechanism=mechanism,
             defaults=defaults,
         )
-        if direction_array is not None:
-            if len(direction_array) != len(probe.sources):
-                raise ValueError("direction must have one row per coordinate")
-            for source, source_direction in zip(probe.sources, direction_array):
-                source.direction = source_direction.tolist()
         if names is None:
             generated = [
-                f"source_{index:03d}"
-                for index in range(existing + 1, existing + len(probe.sources) + 1)
+                f"source_{index:06d}"
+                for index in range(
+                    existing + 1,
+                    existing + int(probe.point_count or 0) + 1,
+                )
             ]
-            for source, name in zip(probe.sources, generated):
-                source.name = name
+            probe.set_point_names(generated)
         return self._append_inline_sources(probe)
 
     add_source_points = add_sources
@@ -482,33 +525,17 @@ class Acquisition(ExtraFieldsMixin):
         direction: Optional[Any] = None,
         domain: Optional[int] = None,
     ) -> List[str]:
-        """Deprecated adapter that adds one identity field per point."""
+        """Add legacy identity source fields through the compatibility shim."""
 
-        warnings.warn(
-            "add_source_group() is deprecated; use add_sources().",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if (
-            self.source_encoding is not None
-            and self.source_encoding.encoding_type != "Named"
-        ):
-            raise ValueError("Cannot append identity fields to non-Named encoding")
-        rows = _source_coordinate_rows(coords)
-        first_field = self.source_field_count()
-        names = [
-            f"source_{index}" for index in range(first_field, first_field + len(rows))
-        ]
-        names = self.add_sources(
+        from frequensolve.seismic import _legacy_sources
+
+        return _legacy_sources.add_source_group(
+            self,
             kind=kind,
             coords=coords,
-            names=names,
             direction=direction,
             domain=domain,
         )
-        if self.source_encoding is not None:
-            self._append_identity_fields(names)
-        return names
 
     def add_compound_source(
         self,
@@ -517,84 +544,40 @@ class Acquisition(ExtraFieldsMixin):
         weights: np.ndarray,
         direction: Optional[np.ndarray] = None,
         domain: Optional[int] = None,
-    ) -> DistributedSource:
-        """Deprecated adapter for one weighted RHS field over physical points.
+    ) -> EncodedSource:
+        """Add a legacy weighted source through the compatibility shim."""
 
-        Args:
-            kind: Source kind understood by the solver.
-            coords: Coordinate array with one source point per row.
-            weights: Scalar weights applied to each point direction.
-            direction: Optional direction vector or per-point direction array.
-            domain: Optional domain where the source is evaluated.
+        from frequensolve.seismic import _legacy_sources
 
-        Raises:
-            ValueError: If ``direction`` does not have one row per coordinate.
-        """
-
-        warnings.warn(
-            "add_compound_source() is deprecated; use add_sources() plus "
-            "add_distributed_source().",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        coords = np.asarray(coords, dtype=np.float64)
-        weights = np.asarray(weights, dtype=float)
-        if coords.ndim != 2:
-            raise ValueError("coords must have shape (n, dim)")
-        if weights.ndim != 1 or len(weights) != len(coords):
-            raise ValueError("weights must have one value per coordinate row")
-        if direction is not None:
-            direction = np.asarray(direction, dtype=float)
-        if direction is not None and direction.ndim not in {1, 2}:
-            raise ValueError("direction must be a 1D vector or one row per coordinate")
-        if (
-            direction is not None
-            and direction.ndim == 2
-            and len(direction) != len(coords)
-        ):
-            raise ValueError("direction must have one row per coordinate")
-
-        if (
-            self.source_encoding is not None
-            and self.source_encoding.encoding_type != "Named"
-        ):
-            raise ValueError(
-                "add_compound_source cannot extend non-Named source encoding"
-            )
-
-        existing_names = self.source_point_names()
-        field_index = self.source_field_count()
-        field_name = f"source_{field_index}"
-        point_names = [
-            f"{field_name}_point_{index:03d}" for index in range(1, len(coords) + 1)
-        ]
-        geometry = SourceGeometry.points(
+        return _legacy_sources.add_compound_source(
+            self,
             kind=kind,
             coords=coords,
-            names=point_names,
+            weights=weights,
+            direction=direction,
             domain=domain,
-            direction=(
-                direction
-                if direction is None or np.asarray(direction).ndim == 1
-                else None
-            ),
         )
-        if direction is not None and np.asarray(direction).ndim == 2:
-            for source, source_direction in zip(geometry.sources, direction):
-                source.direction = source_direction.tolist()
-        self._append_inline_sources(geometry)
 
-        field_obj = DistributedSource.named(
-            field_name,
-            dict(zip(point_names, weights.tolist())),
-        )
+    def add_encoded_source(
+        self,
+        name: str,
+        terms: Mapping[Any, Any],
+    ) -> EncodedSource:
+        """Append one sparse named encoded-source field."""
+
+        encoded = _encoded_terms(terms)
+        known = set(self.source_point_names())
+        unknown = sorted(set(encoded).difference(known))
+        if unknown:
+            raise ValueError(f"Unknown physical source names: {unknown}")
+        field_obj = EncodedSource.named(name, encoded)
         if self.source_encoding is None:
-            fields = [
-                DistributedSource.named(name, {name: 1.0}) for name in existing_names
-            ]
-            fields.append(field_obj)
-            self.source_encoding = SourceEncoding.named(fields)
+            self.source_encoding = SourceEncoding.named([field_obj])
+        elif self.source_encoding.encoding_type != "Named":
+            raise ValueError("add_encoded_source can only extend Named source encoding")
         else:
+            if name in set(self.source_encoding.field_names()):
+                raise ValueError(f"Encoded source {name!r} already exists")
             self.source_encoding.fields.append(field_obj)
         return field_obj
 
@@ -602,26 +585,15 @@ class Acquisition(ExtraFieldsMixin):
         self,
         name: str,
         terms: Mapping[Any, Any],
-    ) -> DistributedSource:
-        """Append one sparse named RHS/source field."""
+    ) -> EncodedSource:
+        """Deprecated alias for :meth:`add_encoded_source`."""
 
-        encoded = _encoded_terms(terms)
-        known = set(self.source_point_names())
-        unknown = sorted(set(encoded).difference(known))
-        if unknown:
-            raise ValueError(f"Unknown physical source names: {unknown}")
-        field_obj = DistributedSource.named(name, encoded)
-        if self.source_encoding is None:
-            self.source_encoding = SourceEncoding.named([field_obj])
-        elif self.source_encoding.encoding_type != "Named":
-            raise ValueError(
-                "add_distributed_source can only extend Named source encoding"
-            )
-        else:
-            if name in set(self.source_encoding.field_names()):
-                raise ValueError(f"Distributed source {name!r} already exists")
-            self.source_encoding.fields.append(field_obj)
-        return field_obj
+        warnings.warn(
+            "add_distributed_source() is deprecated; use add_encoded_source().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.add_encoded_source(name, terms)
 
     def _append_inline_sources(self, geometry: SourceGeometry) -> List[str]:
         if self.source_geometry is None:
@@ -643,248 +615,22 @@ class Acquisition(ExtraFieldsMixin):
         duplicates = sorted(known.intersection(new_names))
         if duplicates:
             raise ValueError(f"Duplicate source names: {', '.join(duplicates)}")
-        current.sources.extend(geometry.sources)
+        current.extend_inline(geometry)
         return new_names
-
-    def _append_identity_fields(self, names: Sequence[str]) -> None:
-        if self.source_encoding is None:
-            return
-        if self.source_encoding.encoding_type != "Named":
-            raise ValueError("Cannot append identity fields to non-Named encoding")
-        for name in names:
-            self.source_encoding.fields.append(
-                DistributedSource.named(name, {name: 1.0})
-            )
-
-    def _load_legacy_source_groups(self, groups: Any) -> None:
-        """Convert pre-v2 logical source groups to v2 geometry and encoding."""
-
-        legacy_groups = [
-            group if isinstance(group, SourceGroup) else SourceGroup.from_fs(group)
-            for group in groups
-        ]
-        if not legacy_groups:
-            return
-
-        source_kind: Optional[str] = None
-        source_domain: Optional[int] = None
-        physical_sources: List[PointSource] = []
-        fields: List[DistributedSource] = []
-        needs_encoding = False
-        used_names: set[str] = set()
-
-        def unique_name(proposed: Optional[str], fallback_index: int) -> str:
-            stem = str(proposed or f"source_{fallback_index:03d}")
-            name = stem
-            suffix = 1
-            while name in used_names:
-                suffix += 1
-                name = f"{stem}_{suffix}"
-            used_names.add(name)
-            return name
-
-        for field_index, group in enumerate(legacy_groups, start=1):
-            source = group.source
-            if isinstance(source, RuptureSource):
-                raise ValueError(
-                    "Legacy RuptureSource inputs cannot be represented by "
-                    "fs-acquisition-2; use an Inline, HDF5, or SPS source geometry"
-                )
-
-            kind = getattr(source, "kind", None)
-            if kind is None:
-                raise ValueError("Legacy source groups require source.kind")
-            domain = getattr(source, "domain", None)
-            if domain is None and isinstance(source, PointSource):
-                domain = source.extra.get("domain")
-            if source_kind is None:
-                source_kind = str(kind)
-                source_domain = domain
-            elif str(kind) != source_kind or domain != source_domain:
-                raise ValueError(
-                    "fs-acquisition-2 requires one homogeneous source kind and "
-                    "domain per source geometry"
-                )
-
-            field_name = unique_name(getattr(source, "name", None), field_index)
-            if isinstance(source, PointSource):
-                point_extra = copy.deepcopy(source.extra)
-                point_extra.pop("domain", None)
-                physical_sources.append(
-                    PointSource(
-                        name=field_name,
-                        coordinates=copy.deepcopy(source.coordinates),
-                        direction=copy.deepcopy(source.direction),
-                        amplitude=copy.deepcopy(source.amplitude),
-                        mechanism=copy.deepcopy(source.mechanism),
-                        extra=point_extra,
-                    )
-                )
-                fields.append(DistributedSource.named(field_name, {field_name: 1.0}))
-                continue
-
-            if not isinstance(source, CompoundSource):
-                raise TypeError(
-                    f"Unsupported legacy source type {type(source).__name__}"
-                )
-            needs_encoding = True
-            coordinate_rows = _source_coordinate_rows(source.coordinates)
-            direction = source.direction
-            direction_array = None
-            if direction is not None:
-                direction_array = np.asarray(direction, dtype=float)
-                if direction_array.size == 0:
-                    direction_array = None
-            if direction_array is None:
-                direction_rows: List[Any] = [None] * len(coordinate_rows)
-            else:
-                if direction_array.ndim == 1:
-                    direction_array = np.tile(
-                        direction_array, (len(coordinate_rows), 1)
-                    )
-                if direction_array.ndim != 2 or len(direction_array) != len(
-                    coordinate_rows
-                ):
-                    raise ValueError(
-                        "Legacy compound-source direction must have one row per point"
-                    )
-                direction_rows = direction_array.tolist()
-
-            terms: Dict[str, float] = {}
-            for point_index, (coordinates, point_direction) in enumerate(
-                zip(coordinate_rows, direction_rows), start=1
-            ):
-                point_name = unique_name(
-                    f"{field_name}_point_{point_index:03d}",
-                    len(physical_sources) + 1,
-                )
-                physical_sources.append(
-                    PointSource(
-                        name=point_name,
-                        coordinates=copy.deepcopy(coordinates),
-                        direction=copy.deepcopy(point_direction),
-                    )
-                )
-                terms[point_name] = 1.0
-            fields.append(DistributedSource.named(field_name, terms))
-
-        self.source_geometry = SourceGeometry.inline(
-            kind=source_kind,
-            domain=source_domain,
-            sources=physical_sources,
-        )
-        self.source_encoding = SourceEncoding.named(fields) if needs_encoding else None
-
-    def _compat_source_groups(self) -> NamedList:
-        """Build a detached legacy logical-source view from the v2 model."""
-
-        geometry = self.source_geometry
-        if geometry is None or geometry.geometry_type != "Inline":
-            return _SourceGroupCompatibilityView()
-
-        points = {source.name: source for source in geometry.sources}
-        defaults = geometry.defaults
-
-        def point_direction(source: PointSource) -> Any:
-            value = source.direction
-            if value is None:
-                value = defaults.get("direction")
-            if isinstance(value, Mapping):
-                value = Direction.from_fs(value)
-            return copy.deepcopy(value)
-
-        def legacy_point(source: PointSource, *, name: str) -> SourceGroup:
-            return SourceGroup(
-                source=PointSource(
-                    name=name,
-                    kind=geometry.kind,
-                    coordinates=copy.deepcopy(source.coordinates),
-                    direction=point_direction(source),
-                    amplitude=copy.deepcopy(
-                        source.amplitude
-                        if source.amplitude is not None
-                        else defaults.get("amplitude")
-                    ),
-                    mechanism=copy.deepcopy(
-                        source.mechanism
-                        if source.mechanism is not None
-                        else defaults.get("mechanism")
-                    ),
-                    **(
-                        {"domain": geometry.domain}
-                        if geometry.domain is not None
-                        else {}
-                    ),
-                )
-            )
-
-        encoding = self.source_encoding
-        if encoding is None:
-            return _SourceGroupCompatibilityView(
-                [
-                    legacy_point(source, name=name)
-                    for source, name in zip(geometry.sources, geometry.point_names())
-                ]
-            )
-        if encoding.encoding_type == "HDF5Dense":
-            return _SourceGroupCompatibilityView()
-
-        groups: List[SourceGroup] = []
-        for field_index, field_obj in enumerate(encoding.fields, start=1):
-            field_name = field_obj.name or f"field_{field_index:03d}"
-            if encoding.encoding_type == "Named":
-                terms = list(field_obj.terms.items())
-            else:
-                terms = list(zip(geometry.point_names(), field_obj.coefficients or []))
-            nonzero_terms = [
-                (name, coefficient)
-                for name, coefficient in terms
-                if _coefficient_magnitude(coefficient) != 0.0
-            ]
-            if len(nonzero_terms) == 1 and _coefficient_is_one(nonzero_terms[0][1]):
-                point = points.get(str(nonzero_terms[0][0]))
-                if point is not None:
-                    groups.append(legacy_point(point, name=field_name))
-                    continue
-
-            coordinates = []
-            directions = []
-            for source_name, coefficient in nonzero_terms:
-                point = points.get(str(source_name))
-                if point is None:
-                    continue
-                coordinates.append(_coordinate_value(point.coordinates))
-                directions.append(
-                    _weighted_direction(point_direction(point), coefficient)
-                )
-            groups.append(
-                SourceGroup(
-                    source=CompoundSource(
-                        name=field_name,
-                        kind=geometry.kind,
-                        domain=geometry.domain,
-                        coordinates=np.asarray(coordinates, dtype=np.float64),
-                        direction=np.asarray(directions, dtype=float),
-                    )
-                )
-            )
-        return _SourceGroupCompatibilityView(groups)
 
     @property
     def source_groups(self) -> NamedList:
-        """Deprecated computed view of logical source fields."""
+        """Return the deprecated logical-source view from the legacy shim."""
 
-        _deprecated_source_groups()
-        return self._compat_source_groups()
+        from frequensolve.seismic import _legacy_sources
+
+        return _legacy_sources.source_groups(self)
 
     @source_groups.setter
     def source_groups(self, _value: Any) -> None:
-        _deprecated_source_groups()
-        raise TypeError(
-            "Acquisition.source_groups is a read-only compatibility view; "
-            "pass source_groups to Acquisition(...) for legacy migration or "
-            "use set_sources() and set_source_encoding()"
-        )
+        from frequensolve.seismic import _legacy_sources
+
+        _legacy_sources.reject_source_groups_assignment()
 
     def known_source_point_count(self) -> Optional[int]:
         """Return the physical point count, or ``None`` for external geometry."""
@@ -902,8 +648,23 @@ class Acquisition(ExtraFieldsMixin):
         """Return the logical RHS/source-field count when locally known."""
 
         if self.source_encoding is not None:
-            return self.source_encoding.field_count
-        return self.known_source_point_count()
+            names = self.source_encoding.field_names()
+            count = self.source_encoding.field_count
+        else:
+            names = self.source_point_names()
+            count = self.known_source_point_count()
+        loading_names = {
+            name
+            for loading in self.boundary_loadings
+            for name in _loading_source_names(loading)
+        }
+        if loading_names and not names and count != 0:
+            # Loading fields may share identities with external sources. Without
+            # those identities we cannot determine the size of their union.
+            return None
+        if names or loading_names:
+            return len(set(names) | loading_names)
+        return count
 
     def source_field_count(self) -> int:
         """Return the number of locally addressable RHS/source fields."""
@@ -919,8 +680,14 @@ class Acquisition(ExtraFieldsMixin):
         """Return source-field names when locally known."""
 
         if self.source_encoding is not None:
-            return self.source_encoding.field_names()
-        return self.source_point_names()
+            names = self.source_encoding.field_names()
+        else:
+            names = self.source_point_names()
+        for loading in self.boundary_loadings:
+            for name in _loading_source_names(loading):
+                if name not in names:
+                    names.append(name)
+        return names
 
     def source_point_names(self) -> List[str]:
         """Return physical source-point names when locally known."""
@@ -1112,12 +879,12 @@ class Acquisition(ExtraFieldsMixin):
 
         if recv_name:
             group = self.receiver_group(recv_name)
-            for field in group.components:
+            for field in group.device.output_components():
                 file = f"{group.name}:{field.name}"
                 field_list.append(file)
         else:
             for group in self.receiver_groups:
-                for field in group.components:
+                for field in group.device.output_components():
                     file = f"{group.name}:{field.name}"
                     field_list.append(file)
         return field_list
@@ -1127,20 +894,35 @@ class Acquisition(ExtraFieldsMixin):
 
         return self.source_field_ids()
 
-    def source(self, isrc: int) -> SourceGroup:
-        """Return a source group by one-based index.
+    def source_field(self, isrc: int) -> Union[PointSource, EncodedSource]:
+        """Return locally available source-field metadata by one-based index.
 
         Args:
             isrc: One-based source index.
 
         Returns:
-            Matching ``SourceGroup``.
+            An inline point source for identity encoding, or an encoded source
+            for explicit inline encoding.
         """
-        groups = self._compat_source_groups()
-        try:
-            return groups[isrc - 1]
-        except IndexError:
+        count = self.known_source_field_count()
+        if isrc < 1 or (count is not None and isrc > count):
             raise IndexError(f"Source index {isrc} is out of range.") from None
+        geometry = self.source_geometry
+        encoding = self.source_encoding
+        if encoding is None:
+            if geometry is None or geometry.geometry_type != "Inline":
+                raise ValueError("Source-field metadata is stored externally")
+            return geometry.sources[isrc - 1]
+        if encoding.encoding_type == "HDF5Dense":
+            raise ValueError("Source-field metadata is stored externally")
+        return encoding.fields[isrc - 1]
+
+    def source(self, isrc: int) -> Any:
+        """Return a legacy source group through the compatibility shim."""
+
+        from frequensolve.seismic import _legacy_sources
+
+        return _legacy_sources.source_group(self, isrc)
 
     def receiver_group(self, name: str) -> ReceiverGroup:
         """Return a receiver group by name."""
@@ -1192,7 +974,10 @@ class Acquisition(ExtraFieldsMixin):
             )
         if src is None:
             return coords
-        return coords[int(src) - 1]
+        index = int(src)
+        if index < 1 or index > len(coords):
+            raise IndexError(f"Source index {src} is out of range.")
+        return coords[index - 1]
 
     def offsets(self, src: int, group: str) -> Dict:
         """Return horizontal source-field/receiver offsets.
@@ -1212,7 +997,9 @@ class Acquisition(ExtraFieldsMixin):
             if not survey_name:
                 continue
             component_map = maps.setdefault(survey_name, {})
-            for index, component in enumerate(group.device.components, start=1):
+            for index, component in enumerate(
+                group.device.output_components(), start=1
+            ):
                 component_map.setdefault(str(index), index)
                 component_map.setdefault(component.name, index)
                 component_map.setdefault(component.name.lower(), index)
@@ -1252,28 +1039,3 @@ def _carpet_coordinates(
         above=above,
         below=below,
     )
-
-
-def _source_coordinate_rows(coords):
-    extra = {}
-    if isinstance(coords, CoordinateValue):
-        extra = copy.deepcopy(coords.extra)
-
-    values, units, system = coordinate_array_metadata(coords)
-    if values.ndim == 1:
-        values = values.reshape(1, -1)
-    if values.ndim != 2:
-        raise ValueError("source coordinates must be a 2D array")
-
-    if units is not None or system is not None:
-        return [
-            CoordinateValue(
-                row.tolist(),
-                units=units,
-                system=system,
-                extra=copy.deepcopy(extra),
-            )
-            for row in values
-        ]
-
-    return values

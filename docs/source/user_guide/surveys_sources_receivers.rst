@@ -13,7 +13,7 @@ Related tutorials:
 - :download:`DAS <../../../tutorials/05_surveys/02_das.ipynb>`
   for fiber-style strain receivers.
 - :download:`Sources <../../../tutorials/05_surveys/03_sources.ipynb>`
-  for physical point catalogs and sparse distributed source fields.
+  for physical point catalogs and sparse encoded-source fields.
 - :download:`Sparse surveys <../../../tutorials/05_surveys/04_sparse_surveys.ipynb>`
   for offset windows and explicit source-receiver layouts.
 
@@ -50,6 +50,70 @@ Supported fields depend on physics:
      - ``velocity``, ``stress``, ``strain``, ``pressure``
    * - Poroelastic
      - ``velocity``, ``fluid_flux``, ``stress``, ``pressure``, ``strain``, ``displacement``, ``fluid_displacement``
+
+Physical and Encoded Receiver Arrays
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``ReceiverArray`` places a physical array of receiver nodes around every
+coordinate in a receiver group. Offsets stay compact in the acquisition JSON;
+Sauce expands them when it maps receiver points:
+
+.. code-block:: python
+
+   device = fs.ReceiverArray(
+       components=[fs.ReceiverComponent(name="pressure", field="pressure")],
+       offsets=[[-2.0, 0.0], [0.0, 0.0], [2.0, 0.0]],
+       offset_units="m",
+       reduction="mean",
+   )
+   acq.add_receiver_group("surface", device, coords=receiver_coordinates)
+
+Use ``reduction="sum"`` to sum the physical nodes or ``"none"`` to retain
+every expanded node. ``ReceiverNodeArray`` remains as a deprecated loading shim
+and new files always use ``ReceiverArray``.
+
+``EncodedReceiver`` evaluates independently weighted responses on one fixed
+receiver geometry. Complex coefficients are conjugated conveniently for
+frequency-domain time reversal and are written to the simulation HDF5 input
+store, not embedded in JSON or receiver metadata. Its weight tensor is ordered
+as ``(encoding, component, receiver)``:
+
+.. code-block:: python
+
+   array = fs.EncodedReceiver(
+       reduction="sum",
+       components=[
+           fs.ReceiverComponent(name="vx", field="velocity", direction=[1, 0]),
+           fs.ReceiverComponent(name="vz", field="velocity", direction=[0, 1]),
+       ],
+       encoding_names=["focus_a", "focus_b"],
+       weights=np.stack([response_at_target_a, response_at_target_b]),
+   ).time_reversed()
+   acq.add_receiver_group("surface", array, coords=receiver_coordinates)
+
+Each target response above has shape ``(component, receiver)``. The resulting
+channels are named ``focus_a:vx``, ``focus_a:vz``, and so on. For a scalar
+device, ``(encoding, receiver)`` is accepted as a convenience. For split
+real/imaginary weights over a single receiver, use the explicit shape
+``(encoding, 1, 1, 2)``. A real ``(encoding, 1, 2)`` tensor means two receivers;
+this shape is otherwise ambiguous.
+
+Use ``reduction="mean"`` for normalized encoding or ``"none"`` to retain one
+trace per receiver point. The bulk tensor path is preferred for production: it
+uses vectorized validation, streams real/imaginary blocks to HDF5, and
+``time_reversed()`` does not copy authored tensors. External weight tables must
+be conjugated before they are attached. ``add_encoding(...)`` is a
+convenient incremental builder. Base component descriptors occur only once;
+large explicit encoding-name lists are also moved to HDF5 to keep acquisition
+metadata small.
+
+Acquisition-owned HDF5 payloads use separate ``file`` and ``dataset`` fields.
+The older ``file:dataset`` locator is accepted when loading existing receiver
+coordinate definitions, but new exports do not produce it. An existing weight
+table can be attached with ``ReceiverWeightTable`` without loading or copying
+its values in Python. Interim files that used a weighted ``ReceiverArray`` are
+accepted by both FrequenSolve and Sauce, but new exports use
+``EncodedReceiver``.
 
 DAS
 ---
@@ -104,14 +168,50 @@ and ``dipole``. ``SourceGeometry`` describes physical source points. When
        source_encoding=encoding,
    )
 
+For dense complex arrays, weights have encoding-major shape
+``(n_encoded, n_source)``: each row describes one encoded source over the
+physical source points. This matches encoded-receiver weights and the
+field-major solver storage. Saved simulations move them into HDF5
+automatically; the inline JSON form is retained only for small
+direct-serialization examples.
+Forward responses can be time-reversed while installing the encoding:
+
+.. code-block:: python
+
+   acq.encode_sources(
+       responses_at_target,
+       names=["focus"],
+       conjugate=True,
+   )
+
+Frequency-dependent weights have shape
+``(n_frequency, n_encoded, n_source)``. Passing the matching physical
+frequency axis stores one chunked HDF5 tensor and lets each Sauce task read
+only its slice:
+
+.. code-block:: python
+
+   acq.encode_sources(
+       frequency_codes,
+       frequencies=[2.0, 2.5, 3.0],
+       names=["blend_1", "blend_2"],
+   )
+
+Large homogeneous source catalogs, dense source encodings, and large inline
+sparse surveys are externalized automatically when a simulation is saved. The
+JSON retains only compact HDF5 references; custom source and encoded-field
+names are stored in HDF5 only when they differ from generated defaults.
+Source-encoding ``reference_coordinates`` are deprecated: physical source
+geometry and the simulation coordinate system are the authoritative location
+description.
+
 Use ``acq.source_point_count()`` for physical geometry size and
-``acq.source_field_count()`` for the number of solver RHS fields. The old
-``add_source_group``, ``add_compound_source``, and ``source_groups`` APIs are
-deprecated adapters: they still construct or expose this model but are never
-serialized. The computed ``source_groups`` compatibility view is read-only;
-use ``set_sources()`` and ``set_source_encoding()`` to update an acquisition.
-Legacy untagged and ``fs-acquisition-1`` payloads remain accepted on input and
-are always re-exported as ``fs-acquisition-2``.
+``acq.source_field_count()`` for the number of solver RHS fields. New code
+should use ``add_sources()``, ``add_encoded_source()``, and
+``source_encoding``. A small compatibility shim still accepts the deprecated
+``source_groups``, ``add_source_group()``, and ``add_compound_source()`` APIs;
+they are never serialized. Legacy untagged and ``fs-acquisition-1`` payloads
+are migrated on input and always re-exported as ``fs-acquisition-2``.
 The solver chooses efficient internal :term:`source batches <source batching>`
 automatically.
 
@@ -183,3 +283,23 @@ explicit :term:`trace` pairs are easier to define directly. Sparse survey inputs
 describe public trace identity: source ids, receiver ids, component names, and
 weights. Internal sample maps and point ranges are runtime details and should
 not be authored directly.
+
+Both factories build a columnar ``SparseTraceTable`` and write its NumPy
+columns directly to HDF5 for production-sized surveys. Existing column arrays
+can be attached without constructing one ``SparseTrace`` per row:
+
+.. code-block:: python
+
+   table = fs.SparseTraceTable(
+       source_id=source_ids,
+       receiver_id=receiver_ids,
+       receiver_position_id=receiver_position_ids,
+       component=components,
+   )
+   survey = fs.SparseSurvey.from_table("selected_traces", table)
+
+Custom ``EvalSample`` and ``TraceSample`` tables are unsupported because Sauce
+currently does not consume them. Older JSON containing ``eval_samples`` or
+``trace_samples`` is rejected with a migration error; remove those tables and
+express receiver geometry and sampling through supported receiver-group APIs.
+Large supported trace catalogs continue to be packed into HDF5 automatically.

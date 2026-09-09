@@ -253,7 +253,7 @@ class HDF5Reference:
         dataset: Dataset path inside ``file``.
         hash: BLAKE3 content hash without the ``blake3:`` prefix.
         project_path: Optional project root used to emit project-relative
-            locators.
+            file references.
     """
 
     file: Path
@@ -267,35 +267,29 @@ class HDF5Reference:
 
         return self.dataset.strip("/")
 
-    def locator(self) -> str:
-        """Return a ``file:dataset`` locator for this HDF5 reference.
+    def relative_file(self) -> Path:
+        """Return the project-relative file path when possible."""
 
-        Returns:
-            Project-relative locator when possible, otherwise an absolute file
-            locator.
-        """
-
-        file = self.file
         if self.project_path is not None:
             try:
-                file = file.resolve().relative_to(self.project_path.resolve())
+                return self.file.resolve().relative_to(self.project_path.resolve())
             except Exception:
                 pass
-        return f"{file}:{self.clean_dataset}"
+        return self.file
 
-    def to_fs(self) -> Dict[str, Any]:
-        """Serialize this HDF5 reference for solver input.
+    def to_fs(self, *, format: Optional[str] = None) -> Dict[str, Any]:
+        """Serialize the canonical structured HDF5 reference.
 
-        Returns:
-            Property/file payload containing locator, format, dataset, and
-            content hash.
+        ``file`` and ``dataset`` are deliberately separate. This is the common
+        acquisition reference shape and avoids duplicating the dataset in both
+        an HDF5 locator and a JSON field.
         """
 
         return {
-            "file": self.locator(),
-            "format": "hdf5",
+            "file": str(self.relative_file()),
             "dataset": self.clean_dataset,
             "hash": f"blake3:{self.hash}",
+            **({"format": format} if format is not None else {}),
         }
 
 
@@ -354,6 +348,7 @@ class SimulationStore:
         *,
         attrs: Optional[Mapping[str, Any]] = None,
         coordinate_dims: Optional[Sequence[str]] = None,
+        interpolation_dims: Optional[Sequence[str]] = None,
         compression: Optional[str] = None,
         dtype: Optional[Any] = np.float32,
     ) -> HDF5Reference:
@@ -366,6 +361,10 @@ class SimulationStore:
             coordinate_dims: Dimensions whose coordinates should be described
                 by HDF5 attributes. Large values are stored in referenced
                 datasets. Defaults to every dimension.
+            interpolation_dims: Dimensions presented to the solver's spatial
+                xarray evaluator. When omitted, every data dimension is an
+                interpolation dimension. Remaining dimensions must form one
+                trailing component axis in storage.
             compression: Optional HDF5 compression filter.
             dtype: Optional dtype used for stored values. ``None`` preserves
                 the input dtype.
@@ -377,8 +376,26 @@ class SimulationStore:
 
         dataset = dataset.strip("/")
         attrs = dict(attrs or {})
+        interpolation_dims = tuple(
+            data.dims if interpolation_dims is None else interpolation_dims
+        )
+        unknown_interpolation_dims = set(interpolation_dims) - set(data.dims)
+        if unknown_interpolation_dims:
+            unknown = ", ".join(sorted(unknown_interpolation_dims))
+            raise ValueError(
+                f"Interpolation dimensions are not present in data: {unknown}"
+            )
+        component_dims = tuple(
+            dim for dim in data.dims if dim not in interpolation_dims
+        )
+        if component_dims and (
+            len(component_dims) != 1 or data.dims[-1] != component_dims[0]
+        ):
+            raise ValueError(
+                "Non-interpolation data must use one trailing component dimension"
+            )
         coordinate_dims = tuple(
-            data.dims if coordinate_dims is None else coordinate_dims
+            interpolation_dims if coordinate_dims is None else coordinate_dims
         )
         unknown_dims = set(coordinate_dims) - set(data.dims)
         if unknown_dims:
@@ -389,13 +406,24 @@ class SimulationStore:
         hash_dtype = dtype
         if dtype is not None and np.dtype(dtype) == np.dtype(np.float32):
             hash_dtype = None
-        digest = hash_dataarray_payload(data, attrs=attrs, dtype=hash_dtype)
+        # The HDF5 ``dims`` contract changes how Sauce interprets the same
+        # numeric payload. Include storage semantics in the content identity so
+        # an existing dataset cannot be reused after its interpolation/component
+        # layout changes.
+        hash_attrs = {
+            "attrs": attrs,
+            "interpolation_dims": list(interpolation_dims),
+            "coordinate_dims": list(coordinate_dims),
+        }
+        digest = hash_dataarray_payload(data, attrs=hash_attrs, dtype=hash_dtype)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         values = np.ascontiguousarray(data.values)
         if dtype is not None:
             values = values.astype(dtype, copy=False)
-        axis_units = [data.coords[dim].attrs.get("units", "") for dim in data.dims]
+        axis_units = [
+            data.coords[dim].attrs.get("units", "") for dim in interpolation_dims
+        ]
         required_attrs = {
             "fs_hash",
             "fs_hash_algorithm",
@@ -422,7 +450,7 @@ class SimulationStore:
                 del h5[coordinate_group]
             dset = h5.create_dataset(dataset, data=values, compression=compression)
             try:
-                dset.attrs["dims"] = _h5_attr_value(list(data.dims))
+                dset.attrs["dims"] = _h5_attr_value(list(interpolation_dims))
                 _write_dimension_coordinates(
                     h5,
                     dset,
@@ -448,6 +476,59 @@ class SimulationStore:
                 if coordinate_group in h5:
                     del h5[coordinate_group]
                 raise
+
+        return HDF5Reference(self.path, dataset, digest, self.project_path)
+
+    def put_string_array(
+        self,
+        dataset: str,
+        values: Iterable[str],
+        *,
+        dimension: Optional[str] = None,
+        attrs: Optional[Mapping[str, Any]] = None,
+    ) -> HDF5Reference:
+        """Write a one-dimensional UTF-8 string array without JSON metadata."""
+
+        dataset = dataset.strip("/")
+        strings = [str(value) for value in values]
+        if not strings:
+            raise ValueError("String arrays must not be empty")
+        attrs = dict(attrs or {})
+        hasher = blake3.blake3()
+        _hash_update_json(
+            hasher,
+            {
+                "values": strings,
+                "dimension": dimension,
+                "attrs": attrs,
+            },
+        )
+        digest = hasher.hexdigest()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+        with h5py.File(self.path, "a") as h5:
+            if dataset in h5:
+                existing = h5[dataset]
+                if existing.attrs.get("fs_hash") == f"blake3:{digest}":
+                    return HDF5Reference(
+                        self.path,
+                        dataset,
+                        digest,
+                        self.project_path,
+                    )
+                del h5[dataset]
+            dset = h5.create_dataset(
+                dataset,
+                data=np.asarray(strings, dtype=object),
+                dtype=h5py.string_dtype(encoding="utf-8"),
+            )
+            if dimension is not None:
+                dset.attrs["dims"] = _h5_attr_value([dimension])
+            for key, value in attrs.items():
+                if value is not None:
+                    dset.attrs[key] = _h5_attr_value(_json_default(value))
+            dset.attrs["fs_hash_algorithm"] = "blake3"
+            dset.attrs["fs_hash"] = f"blake3:{digest}"
 
         return HDF5Reference(self.path, dataset, digest, self.project_path)
 
@@ -585,22 +666,38 @@ class SimulationStore:
             if isinstance(value, Mapping):
                 locator = value.get("file")
                 file_format = str(value.get("format", "")).lower()
+                reference_type = str(value.get("_type", "")).lower()
+                is_hdf5 = (
+                    file_format == "hdf5"
+                    or reference_type in {"hdf5", "hdf5dense"}
+                    or isinstance(value.get("dataset"), str)
+                )
                 dataset = value.get("dataset")
                 if (
                     not isinstance(dataset, str)
                     and isinstance(locator, (str, Path))
-                    and file_format == "hdf5"
+                    and is_hdf5
                 ):
                     locator_text = str(locator)
                     if ":" in locator_text:
                         _, dataset = locator_text.rsplit(":", 1)
-                if (
-                    isinstance(dataset, str)
-                    and isinstance(locator, (str, Path))
-                    and file_format == "hdf5"
-                    and self._locator_references_store(str(locator), dataset)
-                ):
-                    referenced.add(dataset.strip("/"))
+                datasets = [dataset]
+                datasets.extend(
+                    item
+                    for key, item in value.items()
+                    if key.endswith("_dataset") and key != "dataset"
+                )
+                for referenced_dataset in datasets:
+                    if (
+                        isinstance(referenced_dataset, str)
+                        and isinstance(locator, (str, Path))
+                        and is_hdf5
+                        and self._locator_references_store(
+                            str(locator),
+                            referenced_dataset,
+                        )
+                    ):
+                        referenced.add(referenced_dataset.strip("/"))
                 for item in value.values():
                     visit(item)
             elif isinstance(value, (list, tuple)):

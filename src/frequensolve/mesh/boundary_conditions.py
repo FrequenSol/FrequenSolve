@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 from frequensolve.util.mixins import ExtraFieldsMixin, merge_extra
 from frequensolve.util.named_list import NamedList
 
-__all__ = ["BoundaryCondition", "BoundaryConditions"]
+__all__ = ["BoundaryCondition", "GravitySurfaceBC", "BoundaryConditions"]
 
 ConditionInput = Union[str, Sequence[str]]
 BoundaryLabel = Union[str, int]
@@ -139,6 +139,16 @@ class BoundaryCondition(ExtraFieldsMixin):
         """
 
         data = copy.deepcopy(data)
+        serialized_conditions = data.get("conditions", [])
+        if isinstance(serialized_conditions, str):
+            serialized_conditions = [serialized_conditions]
+        if (
+            cls is BoundaryCondition
+            and data.get("name")
+            and [_normalize_condition(value) for value in serialized_conditions]
+            == ["gravity_surface"]
+        ):
+            return GravitySurfaceBC._from_fs(data)
         data.pop("_type", None)
         _reject_removed_fields(data, "BoundaryCondition")
         pml_reflection = data.pop("pml_reflection", None)
@@ -206,6 +216,86 @@ class BoundaryCondition(ExtraFieldsMixin):
         if self.name:
             bc_dict["name"] = self.name
         return merge_extra(bc_dict, self.extra, "BoundaryCondition")
+
+
+class GravitySurfaceBC(BoundaryCondition):
+    """Gravity free surface with optional storm-pressure loading.
+
+    The pressure input may be frequency-domain or time-domain xarray data.
+    A DataArray ``source`` dimension defines logical right-hand sides; a
+    Dataset or mapping permits each source to use an independent spatial grid.
+    The pressure is exported through Acquisition while this object emits only
+    the physical boundary operator.
+
+    Args:
+        boundaries: Mesh boundary label or labels.
+        pressure: Frequency- or time-domain surface pressure data.
+        pressure_spectrum: Explicit alias for frequency-domain ``pressure``.
+        name: Stable name used to connect the boundary and its loading.
+        window: Time-history window, either ``"none"`` or ``"hann"``.
+        detrend: Time-history detrending, either ``"none"`` or ``"mean"``.
+        unforced: Permit a homogeneous gravity surface without pressure data.
+        extra: Additional solver-facing gravity-surface parameters.
+    """
+
+    def __init__(
+        self,
+        boundaries: Optional[Union[BoundaryLabel, Sequence[BoundaryLabel]]] = None,
+        *,
+        pressure: Any = None,
+        pressure_spectrum: Any = None,
+        name: str = "gravity_surface",
+        window: str = "none",
+        detrend: str = "none",
+        unforced: bool = False,
+        extra: Optional[Mapping[str, Any]] = None,
+        **kwargs: Any,
+    ) -> None:
+        if pressure is not None and pressure_spectrum is not None:
+            raise ValueError("Specify only one of pressure or pressure_spectrum")
+        pressure_data = pressure if pressure is not None else pressure_spectrum
+        if not str(name).strip():
+            raise ValueError("GravitySurfaceBC requires a non-empty name")
+
+        self.pressure = pressure_data
+        self.window = window
+        self.detrend = detrend
+        self.unforced = bool(unforced)
+        super().__init__(
+            name=str(name),
+            boundaries=boundaries,
+            conditions="gravity_surface",
+            extra=extra,
+            **kwargs,
+        )
+
+    @classmethod
+    def _from_fs(cls, data: Dict[str, Any]) -> "GravitySurfaceBC":
+        """Deserialize a solver boundary; its loading lives in Acquisition."""
+
+        payload = copy.deepcopy(data)
+        payload.pop("_type", None)
+        payload.pop("conditions", None)
+        return cls(
+            name=payload.pop("name", "gravity_surface"),
+            boundaries=payload.pop("boundaries"),
+            unforced=True,
+            extra=payload,
+        )
+
+    def boundary_loading(self) -> Optional[Any]:
+        """Build the Acquisition loading represented by the pressure shortcut."""
+
+        if self.pressure is None:
+            return None
+        from frequensolve.seismic.boundary_loadings import SurfacePressureLoading
+
+        return SurfacePressureLoading(
+            pressure=self.pressure,
+            boundary_condition=self.name,
+            window=self.window,
+            detrend=self.detrend,
+        )
 
 
 class BoundaryConditions(NamedList):

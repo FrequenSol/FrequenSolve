@@ -16,7 +16,7 @@ from xarray import DataArray, register_dataarray_accessor
 from frequensolve._optional import optional_dependency_error
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverGroup, coordinate_array_metadata
-from frequensolve.seismic.sources import SourceGroup
+from frequensolve.seismic.sources import EncodedSource, PointSource, SourceGroup
 from frequensolve.units import unit_expression
 
 TraceRecord = DataArray
@@ -41,12 +41,22 @@ def _required_trace_attribute(trace: DataArray, name: str) -> Any:
         ) from None
 
 
-def _source_group(trace: DataArray) -> SourceGroup:
+def _acquisition(trace: DataArray) -> Acquisition:
     with open(_required_trace_attribute(trace, "simulation"), "r") as f:
         sim = json.load(f)
-    source_index = int(trace.attrs.get("source_id", trace.attrs.get("source_group", 1)))
-    acquisition = Acquisition.from_fs(sim["Acquisition"])
-    return acquisition.source(source_index)
+    return Acquisition.from_fs(sim["Acquisition"])
+
+
+def _source_index(trace: DataArray) -> int:
+    return int(trace.attrs.get("source_id", trace.attrs.get("source_group", 1)))
+
+
+def _source_field(trace: DataArray) -> PointSource | EncodedSource:
+    return _acquisition(trace).source_field(_source_index(trace))
+
+
+def _source_group(trace: DataArray) -> SourceGroup:
+    return _acquisition(trace).source(_source_index(trace))
 
 
 def _source_coordinates(
@@ -54,12 +64,8 @@ def _source_coordinates(
     *,
     preserve_metadata: bool = False,
 ) -> Any:
-    with open(_required_trace_attribute(trace, "simulation"), "r") as f:
-        sim = json.load(f)
-    acquisition = Acquisition.from_fs(sim["Acquisition"])
-    source_index = int(trace.attrs.get("source_id", trace.attrs.get("source_group", 1)))
-    coordinates = acquisition.source_coords(
-        source_index,
+    coordinates = _acquisition(trace).source_coords(
+        _source_index(trace),
         preserve_metadata=preserve_metadata,
     )
     if preserve_metadata:
@@ -159,6 +165,12 @@ class TraceAccessor:
         """Return source-group metadata reconstructed from trace attributes."""
 
         return _source_group(self._trace)
+
+    @property
+    def source_field(self) -> PointSource | EncodedSource:
+        """Return current source-field metadata reconstructed from the trace."""
+
+        return _source_field(self._trace)
 
     @property
     def source_coordinates(self) -> np.ndarray:

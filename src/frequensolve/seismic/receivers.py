@@ -4,8 +4,11 @@ This module defines the various types of receivers and their locations.
 """
 
 import copy
+import json
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from numbers import Number
 from pathlib import Path
 from typing import (
     Any,
@@ -20,6 +23,7 @@ from typing import (
     Union,
 )
 
+import blake3
 import h5py
 import numpy as np
 import xarray as xr
@@ -32,11 +36,12 @@ from frequensolve.units import is_quantity, unit_expression, value_and_units_to_
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.fields import canonical_field
 from frequensolve.util.mixins import (
+    ExportContext,
     ExtraFieldsMixin,
     TypeTaggedMixin,
     merge_extra,
 )
-from frequensolve.util.store import SimulationStore, hash_dataarray_payload
+from frequensolve.util.store import SimulationStore
 
 __all__ = [
     "CoordsArray",
@@ -47,6 +52,9 @@ __all__ = [
     "ReceiverGroup",
     "ReceiverCoords",
     "ReceiverDevice",
+    "ReceiverArray",
+    "EncodedReceiver",
+    "ReceiverWeightTable",
     "ReceiverNodeArray",
     "ReceiverNode",
     "ReceiverFiber",
@@ -57,6 +65,89 @@ __all__ = [
 def _is_remote_file_reference(value: Any) -> bool:
     text = str(value)
     return text.startswith("remote:") or "://" in text
+
+
+def _complex_to_fs(value: Any, *, label: str) -> Union[float, List[float]]:
+    """Serialize one finite complex scalar using the solver JSON convention."""
+
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, complex):
+        scalar = value
+    elif isinstance(value, Number) and not isinstance(value, (bool, np.bool_)):
+        scalar = complex(np.asarray(value).item())
+    elif (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(
+            isinstance(item, Number) and not isinstance(item, (bool, np.bool_))
+            for item in value
+        )
+    ):
+        scalar = complex(value[0], value[1])
+    else:
+        raise TypeError(
+            f"{label} must be a real scalar, complex scalar, or [real, imag] pair"
+        )
+    if not np.isfinite(scalar.real) or not np.isfinite(scalar.imag):
+        raise ValueError(f"{label} must be finite")
+    real = float(scalar.real)
+    imag = float(scalar.imag)
+    return real if imag == 0.0 else [real, imag]
+
+
+def _complex_from_value(value: Any, *, label: str) -> complex:
+    """Return one validated complex scalar from an authored value."""
+
+    serialized = _complex_to_fs(value, label=label)
+    if isinstance(serialized, list):
+        return complex(serialized[0], serialized[1])
+    return complex(serialized)
+
+
+def _receiver_weight_array(values: Any, *, ndim: int, label: str) -> np.ndarray:
+    """Normalize receiver weights with vectorized NumPy validation.
+
+    Real/complex arrays use their natural shape. A numeric final axis of length
+    two is also accepted as split real/imaginary storage when it is one rank
+    higher than the requested logical array.
+    """
+
+    if isinstance(values, xr.DataArray):
+        values = values.data
+    if isinstance(values, (str, bytes)):
+        raise TypeError(f"{label} must be a numeric array")
+    try:
+        authored = np.asarray(values)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{label} must be a numeric array") from exc
+    if authored.dtype.kind not in {"i", "u", "f", "c"}:
+        raise TypeError(f"{label} must be a numeric array")
+
+    if authored.ndim == ndim + 1 and authored.shape[-1] == 2:
+        real = np.asarray(authored[..., 0], dtype=np.float32)
+        imag = np.asarray(authored[..., 1], dtype=np.float32)
+        result = real.astype(np.complex64)
+        result.imag = imag
+    elif authored.ndim == ndim:
+        result = np.asarray(authored, dtype=np.complex64)
+    else:
+        shape = "vector" if ndim == 1 else "matrix"
+        raise ValueError(f"{label} must be a {shape}")
+
+    if result.size == 0:
+        raise ValueError(f"{label} must not be empty")
+    if not np.all(np.isfinite(result)):
+        raise ValueError(f"{label} must be finite")
+    return result
+
+
+def _conjugated_complex_value(value: Any, *, label: str) -> complex:
+    """Return the complex conjugate of one validated authored value."""
+
+    return _complex_from_value(value, label=label).conjugate()
 
 
 @dataclass(kw_only=True)
@@ -71,20 +162,26 @@ class ReceiverComponent:
         field: Physical field being measured.
         direction: Optional measurement direction for vector fields.
         units: Optional output units for this component.
-        weight: Optional scalar/vector weight applied to the component.
+        weight: Optional constant complex weight applied to the component.
     """
 
     name: str = "name"
     field: str
     direction: Optional[Union[List[float], Direction]] = None
     units: Optional[str] = None
-    weight: Optional[Union[float, List[float], Dict]] = None
+    weight: Optional[Any] = None
 
     def __post_init__(self) -> None:
         self.field = canonical_field(self.field)
+        if self.weight is not None:
+            _complex_to_fs(self.weight, label="receiver component weight")
 
-    def to_fs(self, ctx=None) -> dict:
-        """Serialize this receiver component for solver input."""
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> dict:
+        """Serialize scalar component metadata for solver input.
+
+        Pointwise values belong to the enclosing :class:`EncodedReceiver` bulk
+        table and are intentionally not embedded in component metadata.
+        """
 
         return {
             "name": self.name,
@@ -95,8 +192,30 @@ class ReceiverComponent:
                 else {}
             ),
             **({"units": self.units} if self.units is not None else {}),
-            **({"weight": self.weight} if self.weight is not None else {}),
+            **(
+                {
+                    "weight": _complex_to_fs(
+                        self.weight,
+                        label="receiver component weight",
+                    )
+                }
+                if self.weight is not None
+                else {}
+            ),
         }
+
+    def conjugated(self) -> "ReceiverComponent":
+        """Return a copy with its constant weight conjugated."""
+
+        component = copy.deepcopy(self)
+        if component.weight is not None:
+            component.weight = _conjugated_complex_value(
+                component.weight,
+                label="receiver component weight",
+            )
+        return component
+
+    time_reversed = conjugated
 
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverComponent":
@@ -119,6 +238,90 @@ class ReceiverComponent:
 # ----------------------------------------------------------------------
 _RECEIVER_FIBER_DEGREE_UNITS = {"deg", "degree", "degrees"}
 _RECEIVER_FIBER_RADIAN_UNITS = {"rad", "radian", "radians"}
+
+
+@dataclass(kw_only=True)
+class ReceiverWeightTable:
+    """External dense complex weights for an :class:`EncodedReceiver`.
+
+    The HDF5 dataset uses h5py shape
+    ``(encoding * component, receiver, 2)``. The final axis stores real and
+    imaginary parts; rows are encoding-major and component-minor.
+    """
+
+    file: Union[str, Path]
+    dataset: str
+    format: Literal["HDF5", "hdf5"] = "HDF5"
+    hash: Optional[str] = None
+    names_dataset: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not self.dataset:
+            raise ValueError("ReceiverWeightTable dataset must be non-empty")
+        if self.names_dataset is not None and not self.names_dataset:
+            raise ValueError("ReceiverWeightTable names_dataset must be non-empty")
+        if self.format.lower() != "hdf5":
+            raise ValueError("ReceiverWeightTable supports only HDF5")
+
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> dict:
+        """Serialize the small HDF5 reference without loading its values."""
+
+        file = Path(self.file)
+        if ctx is not None:
+            file = ctx.relative_to_project(file)
+        return {
+            "_type": "HDF5Dense",
+            "file": str(file),
+            "dataset": self.dataset,
+            "format": "HDF5",
+            **({"hash": self.hash} if self.hash is not None else {}),
+            **(
+                {"names_dataset": self.names_dataset}
+                if self.names_dataset is not None
+                else {}
+            ),
+        }
+
+    def validate_shape(
+        self,
+        row_count: int,
+        receiver_count: int,
+        ctx: Optional[ExportContext] = None,
+    ) -> None:
+        """Validate a local external table without loading its values."""
+
+        if _is_remote_file_reference(self.file):
+            return
+        file = Path(self.file).expanduser()
+        project_path = getattr(ctx, "project_path", None)
+        if not file.is_absolute() and project_path is not None:
+            file = Path(project_path) / file
+        if not file.exists():
+            return
+        with h5py.File(file, "r") as h5:
+            if self.dataset not in h5:
+                raise ValueError(
+                    f"EncodedReceiver weight dataset {self.dataset!r} is missing "
+                    f"from {file}"
+                )
+            shape = h5[self.dataset].shape
+        expected = (row_count, receiver_count, 2)
+        if shape != expected:
+            raise ValueError(
+                f"EncodedReceiver weight table has shape {shape}; expected {expected}"
+            )
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "ReceiverWeightTable":
+        """Deserialize an HDF5 receiver-weight reference."""
+
+        return cls(
+            file=data["file"],
+            dataset=data["dataset"],
+            format=data.get("format", "HDF5"),
+            hash=data.get("hash"),
+            names_dataset=data.get("names_dataset"),
+        )
 
 
 def _receiver_fiber_angle_degrees(angle: Any) -> float:
@@ -188,10 +391,19 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
 
     name: Optional[str] = None
     components: List[ReceiverComponent] = field(default_factory=list)
+    # TODO(receiver-response): replace Wavelet with a receiver-response contract
+    # that can evaluate a complex transfer function at job frequencies. Sauce
+    # must multiply synthetic channels by that response before trace output.
     response: Optional[Wavelet] = None
 
     def add_component(
-        self, name: str, field: str, direction: Optional[List[float]] = None
+        self,
+        name: str,
+        field: str,
+        direction: Optional[List[float]] = None,
+        *,
+        units: Optional[str] = None,
+        weight: Optional[Any] = None,
     ) -> "ReceiverComponent":
         """Add a measured component to this device.
 
@@ -199,6 +411,8 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
             name: Component name used in trace output.
             field: Physical field to measure.
             direction: Optional measurement direction for vector fields.
+            units: Optional output units.
+            weight: Optional constant complex component weight.
 
         Returns:
             Newly added ``ReceiverComponent``.
@@ -208,28 +422,600 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
             name=name,
             field=canonical_field(field),
             direction=direction,
+            units=units,
+            weight=weight,
         )
         self.components.append(component)
         return component
 
-    def to_fs(self, ctx=None) -> dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> dict:
         """Serialize this receiver device for solver input."""
+
+        if self.response is not None:
+            raise NotImplementedError(
+                "Receiver spectral response is reserved but not implemented. "
+                "A solver contract for complex transfer functions must be added "
+                "before response can be exported."
+            )
 
         return {
             **({"name": self.name} if self.name is not None else {}),
             "components": [c.to_fs(ctx) for c in self.components],
-            **(
-                {"response": (self.response.to_fs(ctx))}
-                if self.response is not None
-                else {}
-            ),
         }
+
+    def output_components(self) -> Iterator[ReceiverComponent]:
+        """Iterate the component names exposed in receiver trace output."""
+
+        return iter(self.components)
+
+    def output_receiver_count(self, point_count: int) -> int:
+        """Return the number of receiver rows emitted for ``point_count`` points."""
+
+        return int(point_count)
 
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverDevice":
         """Deserialize a registered receiver-device payload."""
 
         return cls.dispatch_from_fs(data, class_registry)
+
+
+@register_class
+@dataclass(kw_only=True)
+class ReceiverArray(ReceiverDevice):
+    """A physical array of receiver nodes around every group coordinate.
+
+    ``offsets`` are short model-coordinate displacement vectors. Sauce expands
+    each authored receiver coordinate by all offsets and then reduces the
+    resulting nodes back to one logical receiver by default.
+
+    Args:
+        offsets: Numeric matrix with shape ``(array_node, coordinate)``.
+        offset_units: Optional scalar or per-coordinate length units.
+        reduction: ``"mean"`` or ``"sum"`` combines the nodes around each
+            coordinate; ``"none"`` retains every expanded node.
+    """
+
+    offsets: Any
+    offset_units: Optional[Any] = None
+    reduction: Literal["none", "sum", "mean"] = "mean"
+
+    def __post_init__(self) -> None:
+        system = None
+        values = self.offsets
+        if isinstance(values, CoordinateValue):
+            system = values.system
+            if self.offset_units is None:
+                self.offset_units = values.units
+            values = values.value
+        if system not in {None, "", "global"}:
+            raise ValueError("ReceiverArray offsets use model-coordinate directions")
+
+        quantity_units = _first_quantity_units(values)
+        if quantity_units is not None:
+            if isinstance(self.offset_units, (list, tuple)):
+                raise ValueError(
+                    "ReceiverArray quantity offsets require one common offset unit"
+                )
+            units = (
+                self.offset_units if self.offset_units is not None else quantity_units
+            )
+            values = _strip_coordinate_quantities(values, units)
+            self.offset_units = units
+        try:
+            offsets = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("ReceiverArray offsets must be a numeric matrix") from exc
+        if offsets.ndim != 2 or offsets.shape[0] == 0 or offsets.shape[1] not in {2, 3}:
+            raise ValueError(
+                "ReceiverArray offsets must have shape (array_node, 2 or 3)"
+            )
+        if not np.all(np.isfinite(offsets)):
+            raise ValueError("ReceiverArray offsets must be finite")
+        if self.reduction not in {"none", "sum", "mean"}:
+            raise ValueError("ReceiverArray reduction must be 'none', 'sum', or 'mean'")
+        self.offsets = offsets
+
+    @property
+    def node_count(self) -> int:
+        """Return the number of physical receiver nodes around each coordinate."""
+
+        return int(self.offsets.shape[0])
+
+    def output_receiver_count(self, point_count: int) -> int:
+        """Return logical rows after the per-anchor array reduction."""
+
+        count = int(point_count)
+        return count * self.node_count if self.reduction == "none" else count
+
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> dict:
+        """Serialize the compact physical receiver-array definition."""
+
+        offset_units = self.offset_units
+        if isinstance(offset_units, (list, tuple)):
+            offset_units = [unit_expression(units) for units in offset_units]
+        elif offset_units is not None:
+            offset_units = unit_expression(offset_units)
+        return {
+            "_type": "ReceiverArray",
+            **ReceiverDevice.to_fs(self, ctx),
+            "offsets": self.offsets.tolist(),
+            **({"offset_units": offset_units} if offset_units is not None else {}),
+            "reduction": self.reduction,
+        }
+
+    @classmethod
+    def from_fs(cls, data: dict) -> "ReceiverDevice":
+        """Deserialize physical arrays and migrate interim weighted payloads."""
+
+        if "weights" in data and "offsets" not in data:
+            warnings.warn(
+                "Weighted ReceiverArray payloads are deprecated; use EncodedReceiver.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            migrated = dict(data)
+            migrated["_type"] = "EncodedReceiver"
+            migrated.setdefault("encoding_count", 1)
+            return EncodedReceiver.from_fs(migrated)
+        if "offsets" not in data:
+            warnings.warn(
+                "ReceiverArray payloads without offsets are deprecated; "
+                "loading this payload as ReceiverNode.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return ReceiverNode.from_fs(data)
+        return cls(
+            name=data.get("name"),
+            components=[ReceiverComponent.from_fs(c) for c in data["components"]],
+            response=data.get("response"),
+            offsets=data["offsets"],
+            offset_units=data.get("offset_units"),
+            reduction=data.get("reduction", "mean"),
+        )
+
+
+@register_class
+@dataclass(kw_only=True)
+class EncodedReceiver(ReceiverDevice):
+    """Complex receiver encodings evaluated on one fixed coordinate geometry.
+
+    In-memory weights use shape ``(encoding, component, receiver)``. For a
+    single component, the convenient ``(encoding, receiver)`` form is also
+    accepted. Each encoding weights every base component independently, so a
+    multi-component device produces one output channel per encoding/component
+    pair without duplicating component metadata.
+
+    Args:
+        weights: Optional complex weight tensor. Split real/imaginary storage
+            is accepted with an additional final axis of length two. Ambiguous
+            real arrays shaped ``(encoding, 1, 2)`` use the canonical three-axis
+            tensor form (two receivers); use ``(encoding, 1, 1, 2)`` for split
+            weights over one receiver.
+        encoding_names: Optional output encoding names. Generated names are
+            omitted from JSON; large explicit name lists are stored in HDF5.
+        encoding_count: Required for external tables when names are omitted.
+        reduction: Reduction across the fixed receiver geometry.
+        weight_table: Optional external HDF5 table.  Weights always define
+            the forward receiver operator; adjoint modeling applies its
+            Hermitian transpose automatically.
+    """
+
+    weights: Optional[Any] = field(default=None, repr=False)
+    encoding_names: Optional[Sequence[str]] = None
+    encoding_count: Optional[int] = None
+    reduction: Literal["none", "sum", "mean"] = "sum"
+    weight_table: Optional[ReceiverWeightTable] = None
+    _weight_blocks: List[Tuple[np.ndarray, bool]] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.reduction not in {"none", "sum", "mean"}:
+            raise ValueError(
+                "EncodedReceiver reduction must be 'none', 'sum', or 'mean'"
+            )
+        if isinstance(self.weight_table, Mapping):
+            self.weight_table = ReceiverWeightTable.from_fs(self.weight_table)
+        if self.weights is not None and self.weight_table is not None:
+            raise ValueError(
+                "EncodedReceiver accepts authored weights or an external table, not both"
+            )
+        names = self.encoding_names
+        if names is not None:
+            if isinstance(names, (str, bytes)):
+                raise TypeError("EncodedReceiver encoding_names must be a sequence")
+            names = [str(name) for name in names]
+            if any(not name for name in names):
+                raise ValueError("EncodedReceiver encoding names must be non-empty")
+            if len(names) != len(set(names)):
+                raise ValueError("EncodedReceiver encoding names must be unique")
+            self.encoding_names = names
+
+        explicit_count = self.encoding_count
+        if explicit_count is None and names is not None:
+            explicit_count = len(names)
+        if explicit_count is not None:
+            if (
+                isinstance(explicit_count, (bool, np.bool_))
+                or int(explicit_count) != explicit_count
+            ):
+                raise TypeError("EncodedReceiver encoding_count must be an integer")
+            explicit_count = int(explicit_count)
+            if explicit_count < 1:
+                raise ValueError("EncodedReceiver encoding_count must be positive")
+        if (
+            self.weights is None
+            and self.weight_table is None
+            and (names is not None or explicit_count is not None)
+        ):
+            raise ValueError(
+                "EncodedReceiver encoding metadata requires weights or a weight table"
+            )
+
+        if self.weights is not None:
+            self.weights = self._normalize_tensor(
+                self.weights,
+                encoding_count=explicit_count,
+                label="EncodedReceiver weights",
+            )
+            inferred_count = int(self.weights.shape[0])
+            if explicit_count is not None and explicit_count != inferred_count:
+                raise ValueError(
+                    "EncodedReceiver encoding_count does not match its weight tensor"
+                )
+            self.encoding_count = inferred_count
+        elif explicit_count is not None:
+            self.encoding_count = explicit_count
+        elif names is not None:
+            self.encoding_count = len(names)
+        else:
+            self.encoding_count = 0 if self.weight_table is None else 1
+
+        if names is not None and len(names) != self.encoding_count:
+            raise ValueError("EncodedReceiver encoding_names must match encoding_count")
+
+    def _normalize_tensor(
+        self,
+        values: Any,
+        *,
+        encoding_count: Optional[int],
+        label: str,
+    ) -> np.ndarray:
+        """Normalize one bulk encoding tensor without scalar Python objects."""
+
+        if isinstance(values, xr.DataArray):
+            values = values.data
+        try:
+            authored = np.asarray(values)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"{label} must be a numeric array") from exc
+        if authored.dtype.kind not in {"i", "u", "f", "c"}:
+            raise TypeError(f"{label} must be a numeric array")
+
+        component_count = len(self.components)
+        if authored.ndim == 4:
+            tensor = _receiver_weight_array(values, ndim=3, label=label)
+        elif authored.ndim == 3:
+            is_split_matrix = (
+                authored.dtype.kind != "c"
+                and authored.shape[-1] == 2
+                and (
+                    (component_count == 1 and authored.shape[1] != 1)
+                    or (encoding_count == 1 and authored.shape[0] == component_count)
+                )
+            )
+            if is_split_matrix:
+                matrix = _receiver_weight_array(values, ndim=2, label=label)
+                tensor = (
+                    matrix[:, np.newaxis, :]
+                    if component_count == 1
+                    else matrix[np.newaxis, :, :]
+                )
+            else:
+                tensor = _receiver_weight_array(values, ndim=3, label=label)
+        elif authored.ndim == 2:
+            matrix = _receiver_weight_array(values, ndim=2, label=label)
+            if component_count == 1:
+                tensor = matrix[:, np.newaxis, :]
+            elif encoding_count == 1 and matrix.shape[0] == component_count:
+                tensor = matrix[np.newaxis, :, :]
+            else:
+                raise ValueError(
+                    f"{label} must have shape (encoding, component, receiver)"
+                )
+        elif authored.ndim == 1 and component_count == 1:
+            vector = _receiver_weight_array(values, ndim=1, label=label)
+            tensor = vector[np.newaxis, np.newaxis, :]
+        else:
+            raise ValueError(f"{label} must have shape (encoding, component, receiver)")
+
+        if tensor.shape[1] != component_count:
+            raise ValueError(
+                "EncodedReceiver weight component dimension must match components"
+            )
+        return tensor
+
+    def _authored_weight_blocks(self) -> Iterator[Tuple[np.ndarray, bool]]:
+        """Iterate encoding-major weight tensors and conjugation states."""
+
+        if self.weights is not None:
+            yield self.weights, False
+        yield from self._weight_blocks
+
+    @property
+    def has_authored_weights(self) -> bool:
+        """Return whether this device owns in-memory pointwise weights."""
+
+        return self.weights is not None or bool(self._weight_blocks)
+
+    def conjugated(self) -> "EncodedReceiver":
+        """Return a conjugated view sharing authored weight arrays."""
+
+        if self.weight_table is not None:
+            raise ValueError("Conjugating a receiver requires authored weights")
+        result = copy.copy(self)
+        result.weights = None
+        result._weight_blocks = [
+            (block, not conjugate)
+            for block, conjugate in self._authored_weight_blocks()
+        ]
+        if self.encoding_names is not None:
+            result.encoding_names = list(self.encoding_names)
+        return result
+
+    time_reversed = conjugated
+
+    def _load_encoding_names(self) -> None:
+        """Resolve external channel identities after project paths are relocated."""
+
+        table = self.weight_table
+        if (
+            self.encoding_names is not None
+            or table is None
+            or table.names_dataset is None
+        ):
+            return
+        if _is_remote_file_reference(table.file):
+            raise ValueError(
+                "Download the receiver encoding names before listing fields"
+            )
+        with h5py.File(table.file, "r") as h5:
+            dataset = h5[table.names_dataset]
+            if dataset.shape != (self.encoding_count,):
+                raise ValueError("Receiver encoding names must match encoding_count")
+            names = dataset.asstr()[:].tolist()
+        if any(not name for name in names) or len(set(names)) != len(names):
+            raise ValueError("Receiver encoding names must be non-empty and unique")
+        self.encoding_names = names
+
+    def _encoding_name(self, index: int) -> str:
+        if self.encoding_names is not None:
+            return self.encoding_names[index]
+        return f"encoded_receiver_{index + 1:06d}"
+
+    def output_components(self) -> Iterator[ReceiverComponent]:
+        """Iterate expanded encoding/component trace descriptors lazily."""
+
+        self._load_encoding_names()
+        if self.encoding_count == 1 and self.encoding_names is None:
+            yield from self.components
+            return
+        for encoding_index in range(self.encoding_count or 0):
+            encoding_name = self._encoding_name(encoding_index)
+            for component in self.components:
+                output = copy.copy(component)
+                output.name = (
+                    encoding_name
+                    if len(self.components) == 1
+                    else f"{encoding_name}:{component.name}"
+                )
+                yield output
+
+    def output_receiver_count(self, point_count: int) -> int:
+        """Return rows after reducing the shared receiver geometry."""
+
+        return int(point_count) if self.reduction == "none" else 1
+
+    def add_encoding(
+        self,
+        name: str,
+        weights: Any,
+        *,
+        conjugate: bool = False,
+    ) -> "EncodedReceiver":
+        """Append one encoding over every base component and receiver point."""
+
+        if self.weight_table is not None:
+            raise ValueError(
+                "Cannot add authored encodings to an external weight table"
+            )
+        if not isinstance(conjugate, (bool, np.bool_)):
+            raise TypeError("EncodedReceiver conjugate must be boolean")
+        if not name:
+            raise ValueError("EncodedReceiver encoding names must be non-empty")
+
+        component_count = len(self.components)
+        authored = np.asarray(weights)
+        if component_count == 1 and authored.ndim in {1, 2}:
+            row = _receiver_weight_array(
+                weights,
+                ndim=1,
+                label=f"EncodedReceiver weights for {name!r}",
+            )
+            tensor = row[np.newaxis, np.newaxis, :]
+        else:
+            matrix = _receiver_weight_array(
+                weights,
+                ndim=2,
+                label=f"EncodedReceiver weights for {name!r}",
+            )
+            if matrix.shape[0] != component_count:
+                raise ValueError(
+                    "EncodedReceiver encoding rows must match the component count"
+                )
+            tensor = matrix[np.newaxis, :, :]
+
+        if self.encoding_names is None:
+            self.encoding_names = [
+                self._encoding_name(index) for index in range(self.encoding_count or 0)
+            ]
+        if name in self.encoding_names:
+            raise ValueError(f"EncodedReceiver encoding name {name!r} is duplicated")
+        self.encoding_names.append(name)
+        self._weight_blocks.append((tensor, bool(conjugate)))
+        self.encoding_count = (self.encoding_count or 0) + 1
+        return self
+
+    def validate_size(
+        self, point_count: int, ctx: Optional[ExportContext] = None
+    ) -> None:
+        """Validate the bulk tensor against its components and shared geometry."""
+
+        encoding_count = 0
+        for block, _ in self._authored_weight_blocks():
+            if block.shape[2] != point_count:
+                raise ValueError(
+                    f"EncodedReceiver weights have {block.shape[2]} receivers; "
+                    f"the receiver geometry has {point_count} points"
+                )
+            if block.shape[1] != len(self.components):
+                raise ValueError(
+                    "EncodedReceiver weight component dimension must match components"
+                )
+            encoding_count += block.shape[0]
+        if self.has_authored_weights and encoding_count != self.encoding_count:
+            raise ValueError(
+                "EncodedReceiver weight encoding dimension must match encoding_count"
+            )
+        has_pointwise = self.has_authored_weights or self.weight_table is not None
+        if not has_pointwise:
+            raise ValueError("EncodedReceiver requires a pointwise weight table")
+        if any(component.weight is not None for component in self.components):
+            raise ValueError(
+                "EncodedReceiver pointwise and component scalar weights cannot be mixed"
+            )
+        if not self.encoding_count:
+            raise ValueError("EncodedReceiver requires at least one encoding")
+        if self.weight_table is not None:
+            self.weight_table.validate_shape(
+                self.encoding_count * len(self.components),
+                point_count,
+                ctx,
+            )
+
+    def _materialize_weight_table(
+        self,
+        ctx: Optional[ExportContext],
+        *,
+        group_name: str,
+        point_count: int,
+    ) -> dict:
+        """Stream authored complex weights and large names into the input store."""
+
+        store = getattr(ctx, "store", None) if ctx is not None else None
+        if store is None:
+            raise ValueError(
+                "EncodedReceiver weights require an export context with an HDF5 store"
+            )
+
+        blocks = tuple(self._authored_weight_blocks())
+        component_count = len(self.components)
+        row_count = (self.encoding_count or 0) * component_count
+
+        def weight_chunks() -> Iterator[np.ndarray]:
+            target_bytes = 32 * 1024 * 1024
+            row_bytes = max(1, point_count * 2 * np.dtype(np.float32).itemsize)
+            rows_per_chunk = max(1, target_bytes // row_bytes)
+            for block, conjugate_block in blocks:
+                rows = block.reshape(-1, point_count)
+                for start in range(0, rows.shape[0], rows_per_chunk):
+                    stop = min(rows.shape[0], start + rows_per_chunk)
+                    values = rows[start:stop, :]
+                    split = np.empty((*values.shape, 2), dtype=np.float32)
+                    split[..., 0] = values.real
+                    split[..., 1] = values.imag
+                    if conjugate_block:
+                        split[..., 1] *= -1.0
+                    yield split
+
+        base = f"inputs/acquisition/receivers/{group_name}"
+        ref = store.put_array_chunks(
+            f"{base}/weights",
+            (row_count, point_count, 2),
+            weight_chunks,
+            attrs={"fs_kind": "encoded_receiver_weights"},
+            dims=("encoded_component", "receiver", "complex"),
+            dtype=np.float32,
+        )
+        payload = {"_type": "HDF5Dense", **ref.to_fs(format="HDF5")}
+        if self.encoding_names is not None and len(self.encoding_names) > 64:
+            names_ref = store.put_string_array(
+                f"{base}/encoding_names",
+                self.encoding_names,
+                dimension="encoding",
+                attrs={"fs_kind": "encoded_receiver_names"},
+            )
+            payload["names_dataset"] = names_ref.clean_dataset
+        return payload
+
+    def to_fs(
+        self,
+        ctx: Optional[ExportContext] = None,
+        *,
+        group_name: Optional[str] = None,
+        point_count: Optional[int] = None,
+    ) -> dict:
+        """Serialize the encoded receiver with one compact HDF5 weight table."""
+
+        if group_name is None or point_count is None:
+            if self.has_authored_weights:
+                raise ValueError(
+                    "EncodedReceiver weights must be serialized through ReceiverGroup"
+                )
+            if self.weight_table is None:
+                raise ValueError("EncodedReceiver requires a pointwise weight table")
+        if point_count is not None:
+            self.validate_size(point_count, ctx)
+        if self.has_authored_weights:
+            assert group_name is not None and point_count is not None
+            weight_payload = self._materialize_weight_table(
+                ctx, group_name=group_name, point_count=point_count
+            )
+        else:
+            assert self.weight_table is not None
+            weight_payload = self.weight_table.to_fs(ctx)
+        inline_names = (
+            self.encoding_names
+            if self.encoding_names is not None and "names_dataset" not in weight_payload
+            else None
+        )
+        return {
+            "_type": "EncodedReceiver",
+            **ReceiverDevice.to_fs(self, ctx),
+            "encoding_count": self.encoding_count,
+            **({"encoding_names": list(inline_names)} if inline_names else {}),
+            "reduction": self.reduction,
+            "weights": weight_payload,
+        }
+
+    @classmethod
+    def from_fs(cls, data: dict) -> "EncodedReceiver":
+        """Deserialize an encoded-receiver HDF5 reference."""
+
+        weight_table = ReceiverWeightTable.from_fs(data["weights"])
+        return cls(
+            name=data.get("name"),
+            components=[ReceiverComponent.from_fs(c) for c in data["components"]],
+            response=data.get("response"),
+            encoding_names=data.get("encoding_names"),
+            encoding_count=data.get("encoding_count"),
+            reduction=data.get("reduction", "sum"),
+            weight_table=weight_table,
+        )
 
 
 @register_class
@@ -306,7 +1092,7 @@ class ReceiverFiber(ReceiverDevice):
         self.angle = angle
         self._validate_helical_geometry()
 
-    def to_fs(self, ctx=None) -> dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> dict:
         """Serialize this fiber receiver device for solver input."""
 
         self._validate_helical_geometry()
@@ -361,27 +1147,16 @@ class ReceiverFiber(ReceiverDevice):
 
 @register_class
 @dataclass(kw_only=True)
-class ReceiverNodeArray(ReceiverDevice):
-    """Defines a group of nodes on a single channel; defined by list of offsets.
+class ReceiverNodeArray(ReceiverArray):
+    """Deprecated compatibility name for :class:`ReceiverArray`."""
 
-    Args:
-        offsets: Node offsets from each receiver location. The fast dimension
-            is coordinates and the slow dimension is array node index.
-        name: Optional device name.
-        components: Receiver components measured by each array.
-        response: Optional receiver response wavelet.
-    """
-
-    offsets: List[List[float]] = field(default_factory=list)
-
-    def to_fs(self, ctx=None) -> dict:
-        """Serialize this node-array device for solver input."""
-
-        return {
-            "_type": self.__class__.__name__,
-            **super().to_fs(ctx),
-            "offsets": self.offsets,
-        }
+    def __post_init__(self) -> None:
+        warnings.warn(
+            "ReceiverNodeArray is deprecated; use ReceiverArray.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__post_init__()
 
     @classmethod
     def from_fs(cls, data: dict) -> "ReceiverNodeArray":
@@ -392,6 +1167,8 @@ class ReceiverNodeArray(ReceiverDevice):
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
             response=data.get("response"),
             offsets=data["offsets"],
+            offset_units=data.get("offset_units"),
+            reduction=data.get("reduction", "mean"),
         )
 
 
@@ -400,7 +1177,7 @@ class ReceiverNodeArray(ReceiverDevice):
 class ReceiverNode(ReceiverDevice):
     """Point receiver device evaluated at each receiver coordinate."""
 
-    def to_fs(self, ctx=None) -> dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> dict:
         """Serialize this point receiver device for solver input."""
 
         return {"_type": self.__class__.__name__, **super().to_fs(ctx)}
@@ -430,6 +1207,7 @@ class ReceiverCoords(TypeTaggedMixin, ABC):
        name (str): Identifier for this set of coordinates.
     """
 
+    @property
     @abstractmethod
     def size(self) -> int:
         """Get the total number of receivers.
@@ -439,6 +1217,7 @@ class ReceiverCoords(TypeTaggedMixin, ABC):
         """
         pass
 
+    @property
     @abstractmethod
     def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
         """Get coordinate bounds without loading full dataset.
@@ -461,7 +1240,7 @@ class ReceiverCoords(TypeTaggedMixin, ABC):
         pass
 
     @abstractmethod
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Convert coordinates to a solver payload."""
         pass
 
@@ -519,6 +1298,10 @@ class CoordsFromFile(ReceiverCoords):
         self.units = units
         self.system = system
         self.hash = hash
+        self._hash_cache: Optional[tuple[tuple[Any, ...], str]] = None
+        self._bounds_cache: Optional[
+            tuple[tuple[Any, ...], Tuple[np.ndarray, np.ndarray]]
+        ] = None
 
     @classmethod
     def from_fs(cls, data: Dict) -> "CoordsFromFile":
@@ -535,7 +1318,7 @@ class CoordsFromFile(ReceiverCoords):
             if ":" in file:
                 file, dset = file.split(":", 1)
             else:
-                dset = "coords"
+                dset = data.get("dataset", "coords")
         return cls(
             file=Path(file),
             format=format,
@@ -652,33 +1435,58 @@ class CoordsFromFile(ReceiverCoords):
             with h5py.File(file, "r") as h5:
                 if dataset not in h5:
                     return None
-                values = np.asarray(h5[dataset][()])
+                dset = h5[dataset]
+                signature = (
+                    file.stat().st_mtime_ns,
+                    file.stat().st_size,
+                    dataset,
+                    dset.shape,
+                    str(dset.dtype),
+                    self.units,
+                    self.system,
+                    getattr(ctx, "default_length_units", None),
+                )
+                if self._hash_cache is not None and self._hash_cache[0] == signature:
+                    return self._hash_cache[1]
+                if dset.ndim not in {1, 2}:
+                    return None
+                width = 1 if dset.ndim == 1 else int(dset.shape[1])
+                if width == 2:
+                    coordinate = ["x", "z"]
+                elif width == 3:
+                    coordinate = ["x", "y", "z"]
+                else:
+                    coordinate = list(range(width))
+                file_units, file_system = self._hdf5_metadata(ctx)
+                units = (
+                    self.units
+                    or file_units
+                    or getattr(ctx, "default_length_units", None)
+                )
+                system = self.system or file_system
+                metadata = {
+                    "dtype": str(dset.dtype),
+                    "shape": tuple(int(value) for value in dset.shape),
+                    "dims": ["receiver", "coordinate"],
+                    "coordinate": coordinate,
+                    "units": unit_expression(units) if units is not None else None,
+                    "system": system,
+                }
+                hasher = blake3.blake3()
+                hasher.update(json.dumps(metadata, sort_keys=True).encode("utf-8"))
+                rows = int(dset.shape[0])
+                row_bytes = max(1, width * dset.dtype.itemsize)
+                rows_per_chunk = max(1, (32 * 1024 * 1024) // row_bytes)
+                for start in range(0, rows, rows_per_chunk):
+                    values = np.ascontiguousarray(
+                        dset[start : min(rows, start + rows_per_chunk)]
+                    )
+                    hasher.update(values.data.cast("B"))
         except OSError:
             return None
-        if values.ndim == 1:
-            values = values[:, np.newaxis]
-        if values.ndim != 2:
-            return None
-        if values.shape[1] == 2:
-            coordinate = ["x", "z"]
-        elif values.shape[1] == 3:
-            coordinate = ["x", "y", "z"]
-        else:
-            coordinate = list(range(values.shape[1]))
-        data = xr.DataArray(
-            values,
-            dims=["receiver", "coordinate"],
-            coords={"coordinate": coordinate},
-        )
-        attrs = {}
-        file_units, file_system = self._hdf5_metadata(ctx)
-        units = self.units or file_units or getattr(ctx, "default_length_units", None)
-        system = self.system or file_system
-        if units is not None:
-            attrs["units"] = unit_expression(units)
-        if system is not None:
-            attrs["system"] = system
-        return f"blake3:{hash_dataarray_payload(data, attrs=attrs)}"
+        result = f"blake3:{hasher.hexdigest()}"
+        self._hash_cache = (signature, result)
+        return result
 
     @property
     def size(self) -> int:
@@ -701,9 +1509,29 @@ class CoordsFromFile(ReceiverCoords):
            Tuple[np.ndarray, np.ndarray]: Min and max coordinates.
         """
         if self.format == "HDF5":
-            with h5py.File(self._local_file(), "r") as f:
-                coords = f[self.dset or "coords"]
-                return np.min(coords, axis=0), np.max(coords, axis=0)
+            file = self._local_file()
+            dataset = self.dset or "coords"
+            signature = (file.stat().st_mtime_ns, file.stat().st_size, dataset)
+            if self._bounds_cache is not None and self._bounds_cache[0] == signature:
+                return self._bounds_cache[1]
+            with h5py.File(file, "r") as f:
+                coords = f[dataset]
+                if coords.shape[0] == 0:
+                    raise ValueError("Receiver coordinate dataset must not be empty")
+                width = 1 if coords.ndim == 1 else int(coords.shape[1])
+                row_bytes = max(1, width * coords.dtype.itemsize)
+                rows_per_chunk = max(1, (32 * 1024 * 1024) // row_bytes)
+                lower = np.full(width, np.inf)
+                upper = np.full(width, -np.inf)
+                for start in range(0, int(coords.shape[0]), rows_per_chunk):
+                    chunk = np.asarray(
+                        coords[start : min(coords.shape[0], start + rows_per_chunk)]
+                    ).reshape(-1, width)
+                    lower = np.minimum(lower, np.min(chunk, axis=0))
+                    upper = np.maximum(upper, np.max(chunk, axis=0))
+                result = (lower, upper)
+                self._bounds_cache = (signature, result)
+                return result
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
@@ -746,7 +1574,7 @@ class CoordsFromFile(ReceiverCoords):
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Serialize file-backed receiver coordinates for solver input."""
 
         rel_path = self._relative_file(ctx)
@@ -755,17 +1583,16 @@ class CoordsFromFile(ReceiverCoords):
         system = self.system
 
         if self.format == "HDF5":
-            if self.dset is None:
-                file = str(rel_path.with_suffix(".h5")) + ":coords"
-            else:
-                file = str(rel_path.with_suffix(".h5")) + ":" + self.dset
+            file = str(rel_path)
+            dataset = self.dset or "coords"
         else:
             raise NotImplementedError(f"Format {self.format} not implemented")
 
-        file_hash = self._content_hash(ctx) or self.hash
+        file_hash = self.hash or self._content_hash(ctx)
         return {
             "_type": self.__class__.__name__,
             "file": file,
+            "dataset": dataset,
             "format": self.format,
             **({"hash": file_hash} if file_hash is not None else {}),
             **({"units": unit_expression(units)} if units is not None else {}),
@@ -792,7 +1619,7 @@ class CoordsGrid(ReceiverCoords):
     def size(self) -> int:
         """Return the number of receiver coordinates in the grid."""
 
-        return np.prod(self.grid.n)
+        return int(np.prod(self.grid.n))
 
     @property
     def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -820,6 +1647,9 @@ class CoordsGrid(ReceiverCoords):
         if indices is None:
             return self.grid.get_coords()
 
+        if isinstance(indices, list) and not indices:
+            return np.empty((0, len(self.grid.n)), dtype=float)
+
         # List[slice] case - pass directly to grid
         elif isinstance(indices, list) and isinstance(indices[0], slice):
             return self.grid.get_coords(indices)
@@ -846,17 +1676,13 @@ class CoordsGrid(ReceiverCoords):
             return self.grid.get_coords(tensor_indices)
 
         # For slice, get all coords and then slice
-        elif (
-            isinstance(indices, list)
-            and isinstance(indices[0], int)
-            or isinstance(indices, slice)
-        ):
+        elif isinstance(indices, slice):
             coords = self.grid.get_coords()
             return coords[indices]
         else:
             raise ValueError("Invalid indices type")
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Serialize grid receiver coordinates for solver input."""
 
         payload = {"_type": self.__class__.__name__, "grid": self.grid.to_fs(ctx)}
@@ -1064,7 +1890,7 @@ class CoordsSurfaceCarpet(ReceiverCoords):
             dtype=dtype,
         )
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Serialize inline when no HDF5 export context is available."""
 
         units = (
@@ -1226,19 +2052,15 @@ class CoordsArray(ReceiverCoords):
             system=self.system,
         )
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Serialize inline receiver coordinates for solver input."""
 
         values = np.asarray(self.coordinates.values, dtype=np.float64).tolist()
-        payload = {"_type": self.__class__.__name__}
-        if self.units is not None or self.system is not None:
-            payload["value"] = values
-            if self.units is not None:
-                payload["units"] = unit_expression(self.units)
-            if self.system is not None:
-                payload["system"] = self.system
-        else:
-            payload["coords"] = values
+        payload = {"_type": self.__class__.__name__, "value": values}
+        if self.units is not None:
+            payload["units"] = unit_expression(self.units)
+        if self.system is not None:
+            payload["system"] = self.system
         return payload
 
     @classmethod
@@ -1405,15 +2227,18 @@ class ReceiverGroup(ExtraFieldsMixin):
         return self.coordinates.size
 
     @property
+    def output_size(self) -> int:
+        """Return the receiver-row count written by this group's device."""
+
+        return self.device.output_receiver_count(self.size)
+
+    @property
     def grid(self) -> Optional[CartesianGrid]:
         """Return the receiver grid when this group uses ``CoordsGrid``."""
 
         if isinstance(self.coordinates, CoordsGrid):
             return self.coordinates.grid
         return None
-
-    # TODO: option to correct signature for device response
-    # TODO: method to define receivers
 
     def __init__(
         self,
@@ -1498,7 +2323,7 @@ class ReceiverGroup(ExtraFieldsMixin):
             raise ValueError(f"Unknown coordinates type: {type(coords)}")
         return out
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Serialize this receiver group for solver input.
 
         Large inline coordinate arrays may be written to the simulation store or
@@ -1506,6 +2331,8 @@ class ReceiverGroup(ExtraFieldsMixin):
         """
 
         coords = self.coordinates
+        if isinstance(self.device, EncodedReceiver):
+            self.device.validate_size(self.size, ctx)
         if isinstance(coords, CoordsSurfaceCarpet):
             default_units = getattr(ctx, "default_length_units", None)
             coordinate_units = (
@@ -1530,9 +2357,7 @@ class ReceiverGroup(ExtraFieldsMixin):
                 )
                 coords_payload = {
                     "_type": "CoordsFromFile",
-                    "file": ref.locator(),
-                    "format": "HDF5",
-                    "hash": f"blake3:{ref.hash}",
+                    **ref.to_fs(format="HDF5"),
                     **(
                         {"units": unit_expression(coordinate_units)}
                         if coordinate_units is not None
@@ -1556,9 +2381,7 @@ class ReceiverGroup(ExtraFieldsMixin):
                 )
                 coords_payload = {
                     "_type": "CoordsFromFile",
-                    "file": ref.locator(),
-                    "format": "HDF5",
-                    "hash": f"blake3:{ref.hash}",
+                    **ref.to_fs(format="HDF5"),
                     **(
                         {"units": unit_expression(coordinate_units)}
                         if coordinate_units is not None
@@ -1588,6 +2411,7 @@ class ReceiverGroup(ExtraFieldsMixin):
                     attrs["units"] = unit_expression(coordinate_units)
                 if coords.system is not None:
                     attrs["system"] = coords.system
+                assert isinstance(coords.coordinates, xr.DataArray)
                 coordinate_dim = coords.coordinates.dims[1]
                 ref = ctx.store.put_dataarray(
                     dataset,
@@ -1598,9 +2422,7 @@ class ReceiverGroup(ExtraFieldsMixin):
                 )
                 coords_payload = {
                     "_type": "CoordsFromFile",
-                    "file": ref.locator(),
-                    "format": "HDF5",
-                    "hash": f"blake3:{ref.hash}",
+                    **ref.to_fs(format="HDF5"),
                     **(
                         {"units": unit_expression(coordinate_units)}
                         if coordinate_units is not None
@@ -1628,9 +2450,18 @@ class ReceiverGroup(ExtraFieldsMixin):
         else:
             coords_payload = self.coordinates.to_fs(ctx)
 
+        device_payload = (
+            self.device.to_fs(
+                ctx,
+                group_name=self.name,
+                point_count=self.size,
+            )
+            if isinstance(self.device, EncodedReceiver)
+            else self.device.to_fs(ctx)
+        )
         payload = {
             "name": self.name,
-            "device": self.device.to_fs(ctx),
+            "device": device_payload,
             **({"domain": self.domain} if self.domain is not None else {}),
             **(
                 {"sampling": self.sampling.to_fs(ctx)}

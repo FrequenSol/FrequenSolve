@@ -1132,13 +1132,24 @@ def remap(
 
     if outside_mode == "preserve":
         condition = (value_expr >= interval_lower) & (value_expr <= interval_upper)
+        lower_mag = _remap_bound_magnitude(to_lower, range_units)
+        upper_mag = _remap_bound_magnitude(to_upper, range_units)
+        clamp_lower, clamp_upper = (
+            (to_lower_node, to_upper_node)
+            if lower_mag <= upper_mag
+            else (to_upper_node, to_lower_node)
+        )
+        bounded_expression = {
+            "op": "clamp",
+            "args": [expression.to_fs(), clamp_lower, clamp_upper],
+        }
         return PropertyExpression(
             {
                 "op": "case",
                 "branches": [
                     {
                         "if": condition.to_fs(),
-                        "then": expression.to_fs(),
+                        "then": bounded_expression,
                     }
                 ],
                 "else": value_expr.to_fs(),
@@ -1858,8 +1869,9 @@ class Property:
         """Create a lazy file-backed property.
 
         Args:
-            path: Local path, remote path prefixed by ``remote:``, or HDF5
-                locator of the form ``file.h5:dataset``.
+            path: Local path or remote path prefixed by ``remote:``. Legacy
+                ``file.h5:dataset`` locators remain accepted and serialize as
+                separate ``file`` and ``dataset`` fields.
             scale: Multiplicative scale recorded for the file data.
             units: Optional property value units.
             grid: Optional grid metadata required by raw binary files and some
@@ -1993,6 +2005,10 @@ class Property:
         if isinstance(value, Mapping):
             payload = dict(value)
             _normalize_system_alias(payload)
+            if "parameterized" in payload:
+                from frequensolve.model.parameterization import ParameterizedProperty
+
+                return ParameterizedProperty.from_fs(payload)
             if "expr" in payload:
                 payload.pop("depends_on", None)
                 return cls.expr(
@@ -2002,6 +2018,8 @@ class Property:
                     symbols=payload.pop("symbols", None),
                     **payload,
                 )
+            if "data" in payload and "value" not in payload:
+                payload["value"] = payload.pop("data")
             if "value" in payload and "file" not in payload:
                 prop_grid = payload.pop("grid", grid)
                 inline_dims = payload.pop("dims", None)
@@ -2263,16 +2281,30 @@ class Property:
 
     def _file_payload(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         path = self.file_path
+        source = self.remote_path if self.is_remote and self.remote_path else path
         if self.is_remote:
-            file_value = self.remote_path if self.remote_path is not None else str(path)
-        elif isinstance(path, str) and _is_hdf5_locator(path):
-            file_value = path
+            path = Path(_strip_remote_prefix(source))
+        legacy_dataset = None
+        if _is_hdf5_locator(source):
+            file_part, legacy_dataset = _strip_remote_prefix(source).split(":", 1)
+            path = Path(file_part)
+
+        if self.is_remote:
+            file_value = str(path)
         elif ctx is not None:
             file_value = ctx.relative_to_project(path)
         else:
             file_value = path
 
         payload: Dict[str, Any] = {"file": file_value}
+        if legacy_dataset is not None:
+            authored_dataset = self.extra.get("dataset")
+            if authored_dataset is not None and authored_dataset != legacy_dataset:
+                raise ValueError(
+                    "Conflicting HDF5 datasets in legacy file locator and dataset field"
+                )
+            if authored_dataset is None:
+                payload["dataset"] = legacy_dataset
         if self.format is not None:
             payload["format"] = self.format
         if self.absolute:

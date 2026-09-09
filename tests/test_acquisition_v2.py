@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pytest
 from jsonschema import Draft202012Validator
@@ -11,12 +12,23 @@ from frequensolve import (
     CoordinateValue,
     Direction,
     DistributedSource,
+    EncodedReceiver,
+    EncodedSource,
     PointSource,
+    ReceiverArray,
+    ReceiverComponent,
     SourceEncoding,
     SourceGeometry,
     SourceGroup,
 )
+from frequensolve.seismic.receivers import ReceiverDevice, ReceiverNode
+from frequensolve.seismic.sparse_survey import (
+    SparseSurvey,
+    SparseTraceTable,
+)
 from frequensolve.units import ureg
+from frequensolve.util.mixins import ExportContext
+from frequensolve.util.store import SimulationStore
 
 CONTRACT_ROOT = (
     Path(__file__).parent / "contracts" / "sauce-a54bdda" / "trunk" / "contracts"
@@ -48,10 +60,10 @@ def _five_point_four_field_acquisition() -> Acquisition:
     )
     encoding = SourceEncoding.named(
         [
-            DistributedSource.named("shot_left", {"shot_left": 1.0}),
-            DistributedSource.named("shot_center", {"shot_center": 1.0}),
-            DistributedSource.named("shot_right", {"shot_right": 1.0}),
-            DistributedSource.named("difference", {"pair_pos": 1.0, "pair_neg": -1.0}),
+            EncodedSource.named("shot_left", {"shot_left": 1.0}),
+            EncodedSource.named("shot_center", {"shot_center": 1.0}),
+            EncodedSource.named("shot_right", {"shot_right": 1.0}),
+            EncodedSource.named("difference", {"pair_pos": 1.0, "pair_neg": -1.0}),
         ]
     )
     return Acquisition(source_geometry=geometry, source_encoding=encoding)
@@ -250,7 +262,7 @@ def test_json_dense_encoding_roundtrips_against_pinned_sauce_schema():
             names=["left", "right"],
         ),
         source_encoding=SourceEncoding.dense(
-            [[1.0, 1.0], [0.0, -1.0]],
+            [[1.0, 0.0], [1.0, -1.0]],
             names=["left_only", "difference"],
         ),
     )
@@ -260,6 +272,610 @@ def test_json_dense_encoding_roundtrips_against_pinned_sauce_schema():
     _sauce_acquisition_validator().validate(payload)
     assert payload["source_encoding"]["_type"] == "JsonDense"
     assert Acquisition.from_fs(payload).to_fs() == payload
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [
+        [[1.0 + 2.0j, -3.0j], [0.0, 0.5]],
+        [[1.0 + 2.0j, -3.0j, 4.0], [0.0, 0.5, -2.0 + 1.0j]],
+    ],
+)
+def test_dense_encoding_materializes_in_hdf5_without_source_axis_metadata(
+    tmp_path, weights
+):
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar",
+            coords=[[float(index), 0.0] for index in range(len(weights[0]))],
+        ),
+        source_encoding=SourceEncoding.dense(
+            weights,
+            names=["focus", "reference"],
+        ),
+    )
+    # Sauce consumes one source-coefficient vector per encoded field in JSON,
+    # and the same field-major values as (field, source, complex) in HDF5.
+    inline = acquisition.to_fs()
+    _sauce_acquisition_validator().validate(inline)
+    for field, expected in zip(inline["source_encoding"]["fields"], weights):
+        actual = [
+            complex(*value) if isinstance(value, list) else complex(value)
+            for value in field["coefficients"]
+        ]
+        np.testing.assert_allclose(actual, expected)
+    store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
+    payload = acquisition.to_fs(ExportContext(tmp_path, store=store))
+
+    encoding = payload["source_encoding"]
+    assert encoding == {
+        "_type": "HDF5Dense",
+        "file": "simulation.h5",
+        "dataset": "inputs/acquisition/source_encoding/coefficients",
+        "field_names_dataset": "inputs/acquisition/source_encoding/field_names",
+        "hash": encoding["hash"],
+    }
+    with h5py.File(tmp_path / "simulation.h5", "r") as h5:
+        stored = h5[encoding["dataset"]]
+        assert stored.shape == (2, len(weights[0]), 2)
+        assert "field" not in stored.attrs
+        assert "source" not in stored.attrs
+        assert list(h5[encoding["field_names_dataset"]].asstr()[:]) == [
+            "focus",
+            "reference",
+        ]
+        np.testing.assert_allclose(
+            stored[..., 0] + 1j * stored[..., 1],
+            weights,
+        )
+
+
+def test_frequency_dense_encoding_materializes_one_hdf5_tensor(tmp_path):
+    weights = np.zeros((3, 2, 4), dtype=np.complex64)
+    weights[:, 0, :] = 1.0
+    weights[:, 1, :] = np.asarray(
+        [
+            [1.0, -1.0, 1.0, -1.0],
+            [1.0j, -1.0j, 1.0j, -1.0j],
+            [-1.0, -1.0, 1.0, 1.0],
+        ]
+    )
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar",
+            coords=[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]],
+        )
+    )
+    encoding = acquisition.encode_sources(
+        weights,
+        frequencies=[2.0, 3.0, 4.0],
+        names=["sum", "changing_code"],
+    )
+    store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
+    payload = acquisition.to_fs(ExportContext(tmp_path, store=store))
+
+    source_encoding = payload["source_encoding"]
+    assert encoding.weights is weights
+    assert source_encoding["_type"] == "HDF5Dense"
+    assert source_encoding["frequencies_dataset"].endswith("/frequencies")
+    _sauce_acquisition_validator().validate(payload)
+    with h5py.File(tmp_path / "simulation.h5", "r") as h5:
+        stored = h5[source_encoding["dataset"]]
+        frequencies = h5[source_encoding["frequencies_dataset"]]
+        assert stored.shape == (3, 2, 4, 2)
+        assert frequencies[...].tolist() == [2.0, 3.0, 4.0]
+        assert "frequency" not in stored.attrs
+        np.testing.assert_allclose(
+            stored[..., 0] + 1.0j * stored[..., 1],
+            weights,
+        )
+
+    with pytest.raises(ValueError, match="requires a simulation/project store"):
+        encoding.to_fs()
+    assert store.prune_unreferenced(payload) == []
+    _sauce_acquisition_validator().validate(payload)
+
+
+def test_large_source_catalog_materializes_coordinates_and_names_in_hdf5(tmp_path):
+    count = 1_000
+    coordinates = np.column_stack((np.linspace(0.0, 1.0, count), np.zeros(count)))
+    names = [f"shot-{index}" for index in range(count)]
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar",
+            coords=coordinates,
+            names=names,
+            units="m",
+            system="global",
+        )
+    )
+    store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
+
+    payload = acquisition.to_fs(ExportContext(tmp_path, store=store))
+    geometry = payload["source_geometry"]
+
+    assert geometry["_type"] == "HDF5"
+    assert geometry["file"] == "simulation.h5"
+    assert "sources" not in geometry
+    assert geometry["dataset"] == "inputs/acquisition/source_geometry/coordinates"
+    assert geometry["names_dataset"] == "inputs/acquisition/source_geometry/names"
+    with h5py.File(tmp_path / "simulation.h5", "r") as h5:
+        np.testing.assert_allclose(h5[geometry["dataset"]][:], coordinates)
+        assert list(h5[geometry["names_dataset"]].asstr()[:]) == names
+    assert store.prune_unreferenced(payload) == []
+    _sauce_acquisition_validator().validate(payload)
+
+
+def test_bulk_source_catalog_keeps_default_names_implicit(tmp_path):
+    count = 1_000
+    coordinates = np.column_stack((np.arange(count), np.zeros(count)))
+    geometry = SourceGeometry.points(kind="scalar", coords=coordinates, units="m")
+    store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
+
+    payload = geometry.to_fs(ExportContext(tmp_path, store=store))
+
+    assert geometry.is_bulk
+    assert geometry.point_count == count
+    assert payload["_type"] == "HDF5"
+    assert "names_dataset" not in payload
+    with h5py.File(tmp_path / "simulation.h5", "r") as h5:
+        np.testing.assert_allclose(h5[payload["dataset"]][:], coordinates)
+
+
+def test_large_sparse_survey_materializes_without_inline_trace_metadata(tmp_path):
+    survey = SparseSurvey.from_product(
+        "production survey",
+        sources=range(1, 6),
+        receivers=range(1, 101),
+    )
+    ctx = ExportContext(tmp_path, Path("simulations/model"))
+
+    payload = survey.to_fs(ctx)
+
+    assert payload["name"] == "production survey"
+    assert payload["_type"] == "HDF5TraceStore"
+    assert payload["layout_file"].startswith(
+        "simulations/model/surveys/production_survey-"
+    )
+    assert payload["layout_file"].endswith(".h5")
+    assert "traces" not in payload
+    with h5py.File(tmp_path / payload["layout_file"], "r") as h5:
+        assert h5["survey/traces/trace_id"].shape == (500,)
+        assert "source_name" not in h5["survey/traces"]
+        assert "receiver_name" not in h5["survey/traces"]
+        assert "component_name" not in h5["survey/traces"]
+        assert "offset" not in h5["survey/traces"]
+        assert "azimuth" not in h5["survey/traces"]
+
+
+def test_sparse_trace_table_vectorizes_named_component_products(tmp_path):
+    table = SparseTraceTable.from_product(
+        sources=range(1, 3),
+        receivers=[10, 20],
+        components=["p", "vx"],
+        receiver_points={10: 1, 20: 2},
+    )
+    survey = SparseSurvey.from_table("columnar", table)
+
+    columns = table.columns({"p": 1, "vx": 2})
+
+    assert survey.trace_count == 8
+    assert columns["source_id"].tolist() == [1, 1, 1, 1, 2, 2, 2, 2]
+    assert columns["receiver_id"].tolist() == [10, 10, 20, 20] * 2
+    assert columns["receiver_position_id"].tolist() == [1, 1, 2, 2] * 2
+    assert columns["component"].tolist() == [1, 2] * 4
+    assert columns["component_name"].tolist() == ["p", "vx"] * 4
+
+    numeric = SparseTraceTable.from_product(sources=[1], receivers=[1, 2])
+    assert numeric.columns()["component"].dtype == np.int64
+
+    path = survey.write_hdf5(
+        tmp_path / "named-components.h5", component_map={"p": 1, "vx": 2}
+    )
+    with h5py.File(path, "r") as h5:
+        assert "component_name" not in h5["survey/traces"]
+        assert h5["survey/components/component_name"].asstr()[:].tolist() == [
+            "p",
+            "vx",
+        ]
+
+
+def test_complex_source_responses_are_conveniently_time_reversed():
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar",
+            coords=[[0.0, 0.0], [0.5, 0.0], [1.0, 0.0]],
+            names=["left", "center", "right"],
+        )
+    )
+
+    weights = np.asarray(
+        [[1.0 + 2.0j, -3.0j, 0.5 - 0.25j]],
+        dtype=np.complex64,
+    )
+    encoding = acquisition.encode_sources(
+        weights,
+        names=["focus"],
+        conjugate=True,
+    )
+    payload = acquisition.to_fs()
+
+    assert encoding.weights is weights
+    assert payload["source_encoding"]["conjugate_coefficients"] is True
+    assert payload["source_encoding"]["fields"][0]["coefficients"] == [
+        [1.0, 2.0],
+        [0.0, -3.0],
+        [0.5, -0.25],
+    ]
+    assert encoding.time_reversed().time_reversed().to_fs() == encoding.to_fs()
+    _sauce_acquisition_validator().validate(payload)
+    assert Acquisition.from_fs(payload).to_fs() == payload
+
+
+def test_dense_source_encoding_keeps_one_shared_production_matrix():
+    weights = np.ones((4, 250_000), dtype=np.complex64)
+
+    encoding = SourceEncoding.dense(weights)
+    reversed_encoding = encoding.time_reversed()
+
+    assert encoding.weights is weights
+    assert reversed_encoding.weights is weights
+    assert reversed_encoding.conjugate_coefficients is True
+    assert encoding.conjugate_coefficients is False
+    for index, field in enumerate(encoding.fields):
+        assert np.shares_memory(field.coefficients, weights[index, :])
+
+
+def test_encoded_source_uses_encoding_major_weights_and_keeps_legacy_aliases():
+    weights = np.asarray(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, -1.0]],
+        dtype=np.complex64,
+    )
+    encoding = SourceEncoding.dense(weights, names=["left", "difference"])
+
+    assert encoding.weights is weights
+    np.testing.assert_allclose(encoding.fields[0].coefficients, [1.0, 0.0, 0.0])
+    np.testing.assert_allclose(encoding.fields[1].coefficients, [0.0, 1.0, -1.0])
+
+    legacy_coefficients = np.asarray(
+        [[1.0, 0.0], [0.0, 1.0], [0.0, -1.0]],
+        dtype=np.complex64,
+    )
+    with pytest.warns(DeprecationWarning, match="coefficients"):
+        legacy_encoding = SourceEncoding(
+            encoding_type="JsonDense",
+            fields=[EncodedSource(name="left"), EncodedSource(name="difference")],
+            coefficients=legacy_coefficients,
+        )
+    np.testing.assert_allclose(legacy_encoding.weights, weights)
+    with pytest.warns(DeprecationWarning, match="coefficients"):
+        legacy_factory_encoding = SourceEncoding.dense(
+            coefficients=legacy_coefficients,
+            names=["left", "difference"],
+        )
+    np.testing.assert_allclose(legacy_factory_encoding.weights, weights)
+    with pytest.warns(DeprecationWarning, match="coefficients"):
+        legacy_frequency_encoding = SourceEncoding.frequency_dense(
+            coefficients=legacy_coefficients[np.newaxis, :, :],
+            frequencies=[2.0],
+            names=["left", "difference"],
+        )
+    np.testing.assert_allclose(
+        legacy_frequency_encoding.weights,
+        weights[np.newaxis, :, :],
+    )
+
+    acquisition = Acquisition()
+    acquisition.add_sources(
+        kind="scalar",
+        coords=[[0.0, 0.0], [1.0, 0.0]],
+        names=["left", "right"],
+    )
+    encoded = acquisition.add_encoded_source("sum", {"left": 1.0, "right": 1.0})
+    assert isinstance(encoded, EncodedSource)
+    assert acquisition.source_field(1) is encoded
+
+    legacy_acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar",
+            coords=[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]],
+        )
+    )
+    with pytest.warns(DeprecationWarning, match="coefficients"):
+        legacy_acquisition_encoding = legacy_acquisition.encode_sources(
+            coefficients=legacy_coefficients
+        )
+    np.testing.assert_allclose(legacy_acquisition_encoding.weights, weights)
+
+    with pytest.warns(DeprecationWarning, match="DistributedSource"):
+        legacy_field = DistributedSource.named("left", {"left": 1.0})
+    assert isinstance(legacy_field, EncodedSource)
+    with pytest.warns(DeprecationWarning, match="add_distributed_source"):
+        legacy_added = acquisition.add_distributed_source("right", {"right": 1.0})
+    assert isinstance(legacy_added, EncodedSource)
+
+
+def test_acquisition_accessors_reject_zero_and_list_device_fields():
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(kind="scalar", coords=[[0.0, 0.0]])
+    )
+    device = ReceiverNode()
+    device.add_component("pressure", "pressure")
+    acquisition.add_receiver_group("surface", device, [[0.0, 0.0]])
+
+    assert acquisition.list_fields() == ["surface:pressure"]
+    assert acquisition.source_field(1) is acquisition.source_geometry.sources[0]
+    with pytest.raises(IndexError, match="Source index 0"):
+        acquisition.source_field(0)
+    with pytest.raises(IndexError, match="Source index 0"):
+        acquisition.source(0)
+    with pytest.raises(IndexError, match="Source index 0"):
+        acquisition.source_coords(0)
+
+
+def test_duplicate_receiver_names_are_rejected_without_mutation():
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(kind="scalar", coords=[[0.0, 0.0]])
+    )
+    for _ in range(2):
+        device = ReceiverNode()
+        device.add_component("pressure", "pressure")
+        acquisition.add_receiver_group("surface", device, [[0.0, 0.0]])
+
+    with pytest.raises(ValueError, match="Receiver group names must be unique"):
+        acquisition.to_fs()
+    assert [group.name for group in acquisition.receiver_groups] == [
+        "surface",
+        "surface",
+    ]
+
+
+def test_encoded_receivers_share_geometry_and_support_complex_time_reversal(tmp_path):
+    device = EncodedReceiver(
+        name="focused_arrays",
+        components=[ReceiverComponent(name="pressure", field="pressure")],
+    )
+    device.add_encoding(
+        name="target_a",
+        weights=[1.0 + 2.0j, -0.5j, 0.25],
+        conjugate=True,
+    )
+    device.add_encoding(
+        name="target_b",
+        weights=[-1.0j, 0.5 + 0.25j, 2.0],
+        conjugate=True,
+    )
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar",
+            coords=[[0.5, 0.5]],
+            names=["probe"],
+        )
+    )
+    acquisition.add_receiver_group(
+        name="surface",
+        device=device,
+        coords=[[0.0, 0.0], [0.5, 0.0], [1.0, 0.0]],
+    )
+    assert acquisition.receiver_groups[0].output_size == 1
+
+    store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
+    ctx = ExportContext(tmp_path, store=store)
+    payload = acquisition.to_fs(ctx)
+    receiver = payload["receiver_groups"][0]
+
+    assert receiver["device"]["_type"] == "EncodedReceiver"
+    assert receiver["device"]["encoding_count"] == 2
+    assert receiver["device"]["encoding_names"] == ["target_a", "target_b"]
+    assert receiver["device"]["reduction"] == "sum"
+    assert len(receiver["device"]["components"]) == 1
+    assert all(
+        "weights" not in component for component in receiver["device"]["components"]
+    )
+    assert receiver["device"]["weights"] == {
+        "_type": "HDF5Dense",
+        "file": "simulation.h5",
+        "dataset": "inputs/acquisition/receivers/surface/weights",
+        "format": "HDF5",
+        "hash": receiver["device"]["weights"]["hash"],
+    }
+    with h5py.File(tmp_path / "simulation.h5", "r") as h5:
+        stored = h5["inputs/acquisition/receivers/surface/weights"][:]
+        assert stored.shape == (2, 3, 2)
+        np.testing.assert_allclose(
+            stored[..., 0] + 1j * stored[..., 1],
+            np.asarray(
+                [
+                    [1.0 - 2.0j, 0.5j, 0.25],
+                    [1.0j, 0.5 - 0.25j, 2.0],
+                ]
+            ),
+        )
+        assert (
+            "receiver" not in h5["inputs/acquisition/receivers/surface/weights"].attrs
+        )
+    _sauce_acquisition_validator().validate(payload)
+    assert Acquisition.from_fs(payload).to_fs() == payload
+
+
+def test_encoded_receiver_bulk_tensor_is_lazy_shared_and_multicomponent(tmp_path):
+    weights = np.asarray(
+        [
+            [
+                [1.0 + 2.0j, -0.5j, 0.25],
+                [-1.0j, 0.5 + 0.25j, 2.0],
+            ],
+            [
+                [0.5 - 1.0j, 0.75j, -0.25],
+                [2.0j, -0.5 + 0.5j, 1.0],
+            ],
+        ],
+        dtype=np.complex64,
+    )
+    device = EncodedReceiver(
+        components=[
+            ReceiverComponent(name="vx", field="velocity", direction=[1.0, 0.0]),
+            ReceiverComponent(name="vz", field="velocity", direction=[0.0, 1.0]),
+        ],
+        encoding_names=["target_a", "target_b"],
+        weights=weights,
+    )
+    assert device.weights is weights
+    assert [component.name for component in device.output_components()] == [
+        "target_a:vx",
+        "target_a:vz",
+        "target_b:vx",
+        "target_b:vz",
+    ]
+
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar",
+            coords=[[0.5, 0.5]],
+            names=["probe"],
+        )
+    )
+    acquisition.add_receiver_group(
+        name="surface",
+        device=device,
+        coords=[[0.0, 0.0], [0.5, 0.0], [1.0, 0.0]],
+    )
+    store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
+    payload = acquisition.to_fs(ExportContext(tmp_path, store=store))
+    serialized = payload["receiver_groups"][0]["device"]
+
+    with h5py.File(tmp_path / "simulation.h5", "r") as h5:
+        stored = h5[serialized["weights"]["dataset"]][:]
+        assert stored.shape == (4, 3, 2)
+        np.testing.assert_allclose(
+            stored[..., 0] + 1j * stored[..., 1],
+            weights.reshape(4, 3),
+        )
+    _sauce_acquisition_validator().validate(payload)
+    assert Acquisition.from_fs(payload).to_fs() == payload
+
+
+def test_encoded_receiver_rejects_weights_that_do_not_match_shared_geometry():
+    device = EncodedReceiver(
+        components=[ReceiverComponent(name="pressure", field="pressure")]
+    )
+    device.add_encoding(name="focus", weights=[1.0, 2.0])
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar",
+            coords=[[0.5, 0.5]],
+        )
+    )
+    acquisition.add_receiver_group(
+        name="surface",
+        device=device,
+        coords=[[0.0, 0.0], [0.5, 0.0], [1.0, 0.0]],
+    )
+
+    with pytest.raises(ValueError, match="have 2 receivers.*has 3 points"):
+        acquisition.to_fs()
+
+
+def test_receiver_array_is_a_physical_offset_array_around_each_coordinate():
+    device = ReceiverArray(
+        components=[ReceiverComponent(name="pressure", field="pressure")],
+        offsets=[[-2.0, 0.0], [0.0, 0.0], [2.0, 0.0]],
+        offset_units="m",
+    )
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(kind="scalar", coords=[[0.5, 0.5]])
+    )
+    acquisition.add_receiver_group(
+        name="surface",
+        device=device,
+        coords=[[0.0, 0.0], [1.0, 0.0]],
+    )
+    assert acquisition.receiver_groups[0].output_size == 2
+    device.reduction = "none"
+    assert acquisition.receiver_groups[0].output_size == 6
+    device.reduction = "mean"
+
+    payload = acquisition.to_fs()
+    serialized = payload["receiver_groups"][0]["device"]
+
+    assert serialized == {
+        "_type": "ReceiverArray",
+        "components": [{"name": "pressure", "field": "pressure"}],
+        "offsets": [[-2.0, 0.0], [0.0, 0.0], [2.0, 0.0]],
+        "offset_units": "m",
+        "reduction": "mean",
+    }
+    _sauce_acquisition_validator().validate(payload)
+    assert Acquisition.from_fs(payload).to_fs() == payload
+
+
+def test_interim_weighted_receiver_array_payload_migrates_to_encoded_receiver():
+    legacy = {
+        "_type": "ReceiverArray",
+        "components": [
+            {"name": "focus_a", "field": "pressure"},
+            {"name": "focus_b", "field": "pressure"},
+        ],
+        "reduction": "sum",
+        "weights": {
+            "_type": "HDF5Dense",
+            "file": "weights.h5",
+            "dataset": "/weights",
+            "format": "HDF5",
+        },
+    }
+
+    with pytest.warns(DeprecationWarning, match="use EncodedReceiver"):
+        device = ReceiverDevice.from_fs(legacy)
+
+    assert isinstance(device, EncodedReceiver)
+    assert [component.name for component in device.output_components()] == [
+        "focus_a",
+        "focus_b",
+    ]
+    assert device.to_fs()["_type"] == "EncodedReceiver"
+
+
+def test_legacy_receiver_array_without_offsets_loads_as_receiver_node():
+    legacy = {
+        "_type": "ReceiverArray",
+        "components": [{"name": "pressure", "field": "pressure"}],
+    }
+
+    with pytest.warns(DeprecationWarning, match="loading.*as ReceiverNode"):
+        device = ReceiverDevice.from_fs(legacy)
+
+    assert isinstance(device, ReceiverNode)
+    assert device.to_fs()["_type"] == "ReceiverNode"
+
+
+def test_large_encoded_receiver_names_are_materialized_in_hdf5(tmp_path):
+    names = [f"target_{index:03d}" for index in range(65)]
+    weights = np.ones((65, 1, 3), dtype=np.complex64)
+    device = EncodedReceiver(
+        components=[ReceiverComponent(name="pressure", field="pressure")],
+        encoding_names=names,
+        weights=weights,
+    )
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(kind="scalar", coords=[[0.5, 0.5]])
+    )
+    acquisition.add_receiver_group(
+        name="surface",
+        device=device,
+        coords=[[0.0, 0.0], [0.5, 0.0], [1.0, 0.0]],
+    )
+    store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
+
+    payload = acquisition.to_fs(ExportContext(tmp_path, store=store))
+    serialized = payload["receiver_groups"][0]["device"]
+
+    assert "encoding_names" not in serialized
+    assert serialized["weights"]["names_dataset"].endswith("/encoding_names")
+    with h5py.File(tmp_path / "simulation.h5", "r") as h5:
+        stored_names = h5[serialized["weights"]["names_dataset"]][:].astype(str)
+        assert stored_names.tolist() == names
+    _sauce_acquisition_validator().validate(payload)
 
 
 def test_encoded_reference_coordinates_preserve_explicit_and_implicit_metadata():
@@ -273,7 +889,7 @@ def test_encoded_reference_coordinates_preserve_explicit_and_implicit_metadata()
     explicit = Acquisition(
         source_geometry=geometry,
         source_encoding=SourceEncoding.dense(
-            [[1.0], [0.0]],
+            [[1.0, 0.0]],
             names=["explicit"],
             reference_coordinates=CoordinateValue(
                 [750.0, 40.0],
@@ -285,7 +901,7 @@ def test_encoded_reference_coordinates_preserve_explicit_and_implicit_metadata()
     implicit = Acquisition(
         source_geometry=geometry,
         source_encoding=SourceEncoding.named(
-            [DistributedSource.named("midpoint", {"left": 1.0, "right": -1.0})]
+            [EncodedSource.named("midpoint", {"left": 1.0, "right": -1.0})]
         ),
     )
 
@@ -328,10 +944,10 @@ def test_implicit_encoded_reference_normalizes_compatible_source_units(encoding_
     )
     encoding = (
         SourceEncoding.named(
-            [DistributedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
+            [EncodedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
         )
         if encoding_type == "Named"
-        else SourceEncoding.dense([[1.0], [1.0]], names=["midpoint"])
+        else SourceEncoding.dense([[1.0, 1.0]], names=["midpoint"])
     )
     acquisition = Acquisition(
         source_geometry=geometry,
@@ -381,14 +997,14 @@ def test_implicit_encoded_reference_ignores_inactive_source_metadata(encoding_ty
     encoding = (
         SourceEncoding.named(
             [
-                DistributedSource.named(
+                EncodedSource.named(
                     "midpoint",
                     {"left": 1.0, "right": 1.0, "inactive": 0.0},
                 )
             ]
         )
         if encoding_type == "Named"
-        else SourceEncoding.dense([[1.0], [1.0], [0.0]], names=["midpoint"])
+        else SourceEncoding.dense([[1.0, 1.0, 0.0]], names=["midpoint"])
     )
     acquisition = Acquisition(
         source_geometry=geometry,
@@ -442,10 +1058,10 @@ def test_implicit_encoded_reference_rejects_incompatible_active_source_metadata(
     )
     encoding = (
         SourceEncoding.named(
-            [DistributedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
+            [EncodedSource.named("midpoint", {"left": 1.0, "right": 1.0})]
         )
         if encoding_type == "Named"
-        else SourceEncoding.dense([[1.0], [1.0]], names=["midpoint"])
+        else SourceEncoding.dense([[1.0, 1.0]], names=["midpoint"])
     )
     acquisition = Acquisition(
         source_geometry=geometry,
@@ -466,13 +1082,14 @@ def test_hdf5_geometry_and_encoding_match_pinned_sauce_schema_and_roundtrip():
         system="model",
         units="m",
     )
-    encoding = SourceEncoding.hdf5(
-        "inputs/encoding.h5",
-        dataset="/coefficients",
-        name="encoded_fields",
-        field_names_dataset="/field_names",
-        reference_coordinates_dataset="/reference_coordinates",
-    )
+    with pytest.warns(DeprecationWarning, match="deprecated and ignored"):
+        encoding = SourceEncoding.hdf5(
+            "inputs/encoding.h5",
+            dataset="/coefficients",
+            name="encoded_fields",
+            field_names_dataset="/field_names",
+            reference_coordinates_dataset="/reference_coordinates",
+        )
     acquisition = Acquisition(
         source_geometry=geometry,
         source_encoding=encoding,
@@ -497,7 +1114,6 @@ def test_hdf5_geometry_and_encoding_match_pinned_sauce_schema_and_roundtrip():
         "file": "inputs/encoding.h5",
         "dataset": "/coefficients",
         "field_names_dataset": "/field_names",
-        "reference_coordinates_dataset": "/reference_coordinates",
     }
     assert acquisition.known_source_point_count() is None
     assert acquisition.known_source_field_count() is None
@@ -536,7 +1152,10 @@ def test_external_source_geometry_count_roundtrips(geometry):
     assert loaded.to_fs() == payload
 
 
-def test_external_source_encoding_count_roundtrips():
+def test_external_source_encoding_count_roundtrips(tmp_path):
+    encoding_file = tmp_path / "encoding.h5"
+    with h5py.File(encoding_file, "w") as h5:
+        h5.create_dataset("coefficients", data=np.ones((2, 4, 2)))
     acquisition = Acquisition(
         source_geometry=SourceGeometry.hdf5(
             "inputs/sources.h5",
@@ -545,7 +1164,7 @@ def test_external_source_encoding_count_roundtrips():
             count=4,
         ),
         source_encoding=SourceEncoding.hdf5(
-            "inputs/encoding.h5",
+            encoding_file,
             dataset="/coefficients",
             count=2,
         ),
@@ -555,7 +1174,8 @@ def test_external_source_encoding_count_roundtrips():
     loaded = Acquisition.from_fs(payload)
 
     assert payload["source_geometry"]["count"] == 4
-    assert payload["source_encoding"]["count"] == 2
+    assert "count" not in payload["source_encoding"]
+    _sauce_acquisition_validator().validate(payload)
     assert loaded.known_source_point_count() == 4
     assert loaded.known_source_field_count() == 2
     assert loaded.to_fs() == payload
@@ -745,7 +1365,7 @@ def test_named_encoding_requires_explicit_inline_source_names():
         kind="scalar", sources=[PointSource(coordinates=[0.5, 0.05])]
     )
     encoding = SourceEncoding.named(
-        [DistributedSource.named("field", {"source_000001": 1.0})]
+        [EncodedSource.named("field", {"source_000001": 1.0})]
     )
 
     with pytest.raises(ValueError, match="requires explicit names"):
@@ -775,7 +1395,7 @@ def test_export_rejects_missing_geometry_and_inconsistent_encoding():
         names=["known"],
     )
     unknown_encoding = SourceEncoding.named(
-        [DistributedSource.named("bad", {"unknown": 1.0})]
+        [EncodedSource.named("bad", {"unknown": 1.0})]
     )
     with pytest.raises(ValueError, match="unknown sources"):
         Acquisition(
@@ -784,7 +1404,10 @@ def test_export_rejects_missing_geometry_and_inconsistent_encoding():
         ).to_fs()
 
     dense_encoding = SourceEncoding.dense([[1.0]], names=["field"])
-    dense_encoding.fields[0].coefficients.append(0.0)
+    dense_encoding.fields[0].coefficients = np.append(
+        dense_encoding.fields[0].coefficients,
+        0.0,
+    )
     with pytest.raises(ValueError, match="coefficient count"):
         Acquisition(
             source_geometry=geometry,
@@ -838,3 +1461,161 @@ def test_deprecated_helpers_preserve_zero_based_logical_source_names():
             "source_2",
             "source_3",
         ]
+
+
+@pytest.mark.parametrize("encoding_kind", ["identity", "dense", "frequency"])
+def test_materialized_source_counts_survive_round_trip(tmp_path, encoding_kind):
+    count = 201
+    geometry = SourceGeometry.points(kind="scalar", coords=np.zeros((count, 2)))
+    encoding = None
+    if encoding_kind == "dense":
+        encoding = SourceEncoding.dense(
+            np.ones((3, count), dtype=complex), names=["focus", "reference", "other"]
+        )
+    elif encoding_kind == "frequency":
+        encoding = SourceEncoding.frequency_dense(
+            weights=np.ones((2, 3, count), dtype=complex),
+            frequencies=[1.0, 2.0],
+            names=["focus", "reference", "other"],
+        )
+    acquisition = Acquisition(source_geometry=geometry, source_encoding=encoding)
+    store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
+    payload = acquisition.to_fs(ExportContext(tmp_path, store=store))
+    if encoding is not None:
+        payload["source_encoding"]["file"] = str(tmp_path / "simulation.h5")
+    restored = Acquisition.from_fs(payload)
+    assert restored.known_source_point_count() == count
+    fields = count if encoding_kind == "identity" else 3
+    assert restored.known_source_field_count() == fields
+    assert restored.list_sources() == list(range(1, fields + 1))
+    if encoding is not None:
+        assert restored.source_field_names() == ["focus", "reference", "other"]
+    _sauce_acquisition_validator().validate(payload)
+
+
+def test_external_receiver_names_survive_simulation_load(tmp_path):
+    from frequensolve.simulation.jobs.fwi import DataSpace
+    from frequensolve.simulation.simulation import SeismicSimulation
+
+    names = [f"channel_{index:03d}" for index in range(65)]
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(kind="scalar", coords=[[0.0, 0.0]]),
+        source_encoding=SourceEncoding.dense(
+            np.ones((2, 1), dtype=complex), names=["focus", "reference"]
+        ),
+    )
+    acquisition.add_receiver_group(
+        "surface",
+        EncodedReceiver(
+            components=[ReceiverComponent(name="p", field="pressure")],
+            encoding_names=names,
+            weights=np.ones((65, 1, 3), dtype=complex),
+        ),
+        coords=[[0.0, 0.0], [0.5, 0.0], [1.0, 0.0]],
+    )
+    simulation = SeismicSimulation(
+        name="named", physics="acoustic", dimension=2, project_path=tmp_path
+    )
+    simulation.acquisition = acquisition
+    restored = SeismicSimulation.load(simulation.save())
+    assert restored.acquisition.list_fields() == [f"surface:{name}" for name in names]
+    assert restored.acquisition.list_sources() == [1, 2]
+    assert restored.acquisition.source_field_names() == ["focus", "reference"]
+    assert DataSpace.from_simulation(restored, [1.0]).size == 130
+
+
+def test_encoded_receiver_time_reversal_shares_and_conjugates_weights(tmp_path):
+    weights = np.asarray([[1.0 + 2.0j, 3.0 - 4.0j]])
+    device = EncodedReceiver(
+        components=[ReceiverComponent(name="p", field="pressure")], weights=weights
+    )
+    reversed_device = device.time_reversed()
+    block, conjugate = next(reversed_device._authored_weight_blocks())
+    assert np.shares_memory(block, device.weights)
+    assert conjugate
+    assert not next(reversed_device.time_reversed()._authored_weight_blocks())[1]
+    store = SimulationStore(tmp_path / "simulation.h5", project_path=tmp_path)
+    payload = reversed_device.to_fs(
+        ExportContext(tmp_path, store=store), group_name="surface", point_count=2
+    )
+    with h5py.File(store.path, "r") as h5:
+        split = h5[payload["weights"]["dataset"]][:]
+    np.testing.assert_allclose(split[..., 0] + 1j * split[..., 1], weights.conj())
+    np.testing.assert_allclose(device.weights[0, 0], weights[0])
+
+
+def test_single_receiver_split_weights_use_explicit_component_axis():
+    split = np.asarray([[[[1.0, 2.0]]], [[[3.0, 4.0]]]])
+    components = [ReceiverComponent(name="p", field="pressure")]
+    device = EncodedReceiver(components=components, weights=split)
+    device.validate_size(1)
+    np.testing.assert_allclose(device.weights[:, 0, 0], [1 + 2j, 3 + 4j])
+    canonical = EncodedReceiver(components=components, weights=split[:, 0])
+    canonical.validate_size(2)
+    np.testing.assert_allclose(canonical.weights[:, 0], [[1, 2], [3, 4]])
+
+
+@pytest.mark.parametrize("table", ["eval_samples", "trace_samples"])
+@pytest.mark.parametrize(
+    "entrypoint", ["constructor", "extra", "load", "export", "pack"]
+)
+def test_sparse_survey_rejects_unsupported_sample_tables(tmp_path, table, entrypoint):
+    rows = [{"sample_id": 1, "point_id": 1, "x": [1.0, 2.0], "direction": [0.0, 1.0]}]
+    with pytest.raises(ValueError, match="Sauce does not read custom sample tables"):
+        if entrypoint == "constructor":
+            SparseSurvey("unsupported", **{table: rows})
+        elif entrypoint == "extra":
+            SparseSurvey("unsupported", extra={table: rows})
+        elif entrypoint == "load":
+            SparseSurvey.from_fs(
+                {"name": "unsupported", "_type": "Sparse", table: rows}
+            )
+        else:
+            survey = SparseSurvey.from_product(
+                "unsupported", sources=[1], receivers=[1]
+            )
+            survey.extra[table] = rows
+            if entrypoint == "export":
+                survey.to_fs()
+            else:
+                survey.write_hdf5(tmp_path / "unsupported.h5")
+    assert not (tmp_path / "unsupported.h5").exists()
+
+
+def test_materialized_physical_source_names_survive_project_reload(
+    tmp_path, monkeypatch
+):
+    from frequensolve.simulation.simulation import SeismicSimulation
+
+    names = [f"shot-{index}" for index in range(201)]
+    simulation = SeismicSimulation(
+        name="names",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path / "project",
+        acquisition=Acquisition(
+            source_geometry=SourceGeometry.points(
+                kind="scalar", coords=np.zeros((201, 2)), names=names
+            )
+        ),
+    )
+    path = simulation.save()
+    monkeypatch.chdir(tmp_path)
+    restored = SeismicSimulation.load(path)
+    assert restored.acquisition.source_point_names() == names
+    assert restored.acquisition.known_source_field_count() == 201
+
+
+@pytest.mark.parametrize(
+    "names", [["same", "same"], ["only-one"], [["a", "b"]], ["", "b"]]
+)
+def test_external_physical_source_names_are_validated(tmp_path, names):
+    file = tmp_path / "geometry.h5"
+    with h5py.File(file, "w") as h5:
+        h5.create_dataset("coordinates", data=np.zeros((2, 2)))
+        h5.create_dataset("names", data=names, dtype=h5py.string_dtype("utf-8"))
+    geometry = SourceGeometry.hdf5(
+        file=file, dataset="coordinates", names_dataset="names", kind="scalar"
+    )
+    with pytest.raises(ValueError):
+        geometry.point_names()

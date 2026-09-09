@@ -16,6 +16,8 @@ from frequensolve.seismic.receivers import (
     CoordsFromFile,
     CoordsGrid,
     CoordsSurfaceCarpet,
+    EncodedReceiver,
+    ReceiverArray,
     ReceiverGroup,
 )
 from frequensolve.units import unit_expression
@@ -47,6 +49,7 @@ _SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole"}
 def _validate_simulation(ctx: _ValidationContext) -> None:
     simulation = ctx.simulation
     _validate_simulation_identity(simulation, ctx.report)
+    _validate_formulation(simulation, ctx.report)
     _validate_coordinate_systems(ctx)
     _validate_unit_config(getattr(simulation, "units", None), ctx.report)
     _validate_model(getattr(simulation, "model", None), ctx)
@@ -85,6 +88,27 @@ def _validate_simulation_identity(simulation: Any, report: ValidationReport) -> 
                 str(exc),
                 path="dimension",
             )
+
+
+def _validate_formulation(simulation: Any, report: ValidationReport) -> None:
+    discretization = getattr(simulation, "discretization", None)
+    settings = getattr(discretization, "extra", {}) or {}
+    method = str(settings.get("method", "DPG")).strip().lower()
+    if method != "galerkin":
+        return
+
+    physics = str(getattr(simulation, "physics", ""))
+    if physics not in {"acoustic", "acoustic_axisym", "elastic"}:
+        report.error(
+            "discretization.method.incompatible",
+            f"Galerkin discretization is not supported by physics {physics!r}.",
+            path="discretization.method",
+            hint="Use acoustic, acoustic_axisym, or elastic physics.",
+        )
+
+    # The backend selects MUMPS and a single grid for frequency-domain
+    # Galerkin, unless its explicit galerkin_multigrid option is enabled.
+    # Authoring a Galerkin job therefore needs no grid-count override.
 
 
 def _validate_model(model: Any, ctx: _ValidationContext) -> None:
@@ -248,6 +272,30 @@ def _validate_acquisition(acquisition: Any, ctx: _ValidationContext) -> None:
 
     source_geometry = getattr(acquisition, "source_geometry", None)
     receiver_groups = list(getattr(acquisition, "receiver_groups", []) or [])
+    receiver_names = [getattr(group, "name", None) for group in receiver_groups]
+    if len(receiver_names) != len(set(receiver_names)):
+        ctx.report.error(
+            "acquisition.receiver_groups.names.duplicate",
+            "Receiver group names must be unique.",
+            path="acquisition.receiver_groups",
+        )
+    surveys = list(getattr(acquisition, "surveys", []) or [])
+    survey_names = [getattr(survey, "name", None) for survey in surveys]
+    if len(survey_names) != len(set(survey_names)):
+        ctx.report.error(
+            "acquisition.surveys.names.duplicate",
+            "Survey names must be unique.",
+            path="acquisition.surveys",
+        )
+    known_surveys = {name for name in survey_names if name}
+    for index, group in enumerate(receiver_groups):
+        survey = getattr(group, "survey", None)
+        if survey is not None and survey not in known_surveys:
+            ctx.report.error(
+                "acquisition.receiver_group.survey.unknown",
+                f"Receiver group references unknown survey {survey!r}.",
+                path=f"acquisition.receiver_groups[{index}].sampling.survey",
+            )
     if source_geometry is None:
         ctx.report.warning(
             "acquisition.sources.missing",
@@ -386,7 +434,12 @@ def _validate_source_encoding(
         return
     path = "acquisition.source_encoding"
     encoding_type = getattr(encoding, "encoding_type", None)
-    if encoding_type not in {"Named", "JsonDense", "HDF5Dense"}:
+    if encoding_type not in {
+        "Named",
+        "JsonDense",
+        "FrequencyDense",
+        "HDF5Dense",
+    }:
         ctx.report.error(
             "acquisition.source_encoding.type.unsupported",
             f"Unsupported source encoding type {encoding_type!r}.",
@@ -442,8 +495,9 @@ def _validate_source_encoding(
                         f"Source encoding references unknown source {source_name!r}.",
                         path=f"{field_path}.terms",
                     )
-        elif point_count is not None:
-            coefficients = list(getattr(field_obj, "coefficients", []) or [])
+        elif encoding_type == "JsonDense" and point_count is not None:
+            authored = getattr(field_obj, "coefficients", None)
+            coefficients = [] if authored is None else authored
             if len(coefficients) != point_count:
                 ctx.report.error(
                     "acquisition.source_encoding.coefficients.length",
@@ -520,6 +574,15 @@ def _validate_hdf5_source_geometry(
                 system=getattr(geometry, "system", None),
                 code_prefix="acquisition.source_geometry",
             )
+            _validate_optional_hdf5_names(
+                h5,
+                getattr(geometry, "names_dataset", None),
+                expected_length=dataset.shape[0],
+                path=f"{path}.names_dataset",
+                code_prefix="acquisition.source_geometry.names",
+                label="Source names",
+                ctx=ctx,
+            )
     except OSError:
         ctx.report.error(
             "acquisition.source_geometry.file_unreadable",
@@ -579,8 +642,8 @@ def _validate_hdf5_source_encoding(
                 )
                 return
             if (
-                matrix.ndim != 3
-                or matrix.shape[2] != 2
+                matrix.ndim not in {3, 4}
+                or matrix.shape[-1] != 2
                 or min(matrix.shape, default=0) < 1
             ):
                 ctx.report.error(
@@ -588,7 +651,10 @@ def _validate_hdf5_source_encoding(
                     "Source-encoding HDF5 dataset must use non-empty paired "
                     "real/imaginary coefficient storage.",
                     path=f"{path}.dataset",
-                    hint="Use shape (encoded_field_count, source_count, 2).",
+                    hint=(
+                        "Use shape (field, source, 2), or "
+                        "(frequency, field, source, 2)."
+                    ),
                 )
                 return
             _validate_hdf5_numeric_values(
@@ -599,8 +665,50 @@ def _validate_hdf5_source_encoding(
                 ctx=ctx,
             )
 
+            frequency_dependent = matrix.ndim == 4
+            field_axis = 1 if frequency_dependent else 0
+            source_axis = 2 if frequency_dependent else 1
+            frequency_dataset_name = getattr(
+                encoding,
+                "frequencies_dataset",
+                None,
+            )
+            if frequency_dependent:
+                frequencies = h5.get(str(frequency_dataset_name or ""))
+                if not isinstance(frequencies, h5py.Dataset):
+                    ctx.report.error(
+                        "acquisition.source_encoding.frequencies.dataset_missing",
+                        "Frequency-dependent source encoding requires a frequency "
+                        "dataset.",
+                        path=f"{path}.frequencies_dataset",
+                    )
+                elif frequencies.ndim != 1 or frequencies.shape[0] != matrix.shape[0]:
+                    ctx.report.error(
+                        "acquisition.source_encoding.frequencies.length_mismatch",
+                        "Source-encoding frequencies must contain one value per "
+                        "coefficient slice.",
+                        path=f"{path}.frequencies_dataset",
+                    )
+                else:
+                    _validate_hdf5_numeric_values(
+                        frequencies,
+                        path=f"{path}.frequencies_dataset",
+                        code_prefix="acquisition.source_encoding.frequencies",
+                        label="Source-encoding frequency",
+                        ctx=ctx,
+                    )
+            elif frequency_dataset_name is not None:
+                ctx.report.error(
+                    "acquisition.source_encoding.frequencies.unexpected",
+                    "Static source encoding cannot define frequencies_dataset.",
+                    path=f"{path}.frequencies_dataset",
+                )
+
             point_count = getattr(geometry, "point_count", None)
-            if point_count is not None and int(point_count) != matrix.shape[1]:
+            if (
+                point_count is not None
+                and int(point_count) != matrix.shape[source_axis]
+            ):
                 ctx.report.error(
                     "acquisition.source_encoding.source_count_mismatch",
                     "Source-encoding coefficient source count does not match "
@@ -608,32 +716,21 @@ def _validate_hdf5_source_encoding(
                     path=f"{path}.dataset",
                 )
             field_count = getattr(encoding, "count", None)
-            if field_count is not None and int(field_count) != matrix.shape[0]:
+            if field_count is not None and int(field_count) != matrix.shape[field_axis]:
                 ctx.report.error(
                     "acquisition.source_encoding.field_count_mismatch",
                     "Source-encoding count does not match its HDF5 dataset.",
                     path=f"{path}.count",
-                    hint=f"Use count={matrix.shape[0]} or omit count.",
+                    hint=f"Use count={matrix.shape[field_axis]} or omit count.",
                 )
 
-            _validate_optional_hdf5_field_names(
+            _validate_optional_hdf5_names(
                 h5,
                 getattr(encoding, "field_names_dataset", None),
-                expected_length=matrix.shape[0],
+                expected_length=matrix.shape[field_axis],
                 path=f"{path}.field_names_dataset",
-                ctx=ctx,
-            )
-            _validate_optional_hdf5_references(
-                h5,
-                getattr(encoding, "reference_coordinates_dataset", None),
-                expected_fields=matrix.shape[0],
-                path=f"{path}.reference_coordinates_dataset",
-                units=(
-                    unit_expression(geometry.units)
-                    if getattr(geometry, "units", None) is not None
-                    else _default_length_units(ctx)
-                ),
-                system=getattr(geometry, "system", None),
+                code_prefix="acquisition.source_encoding.field_names",
+                label="Source-encoding field names",
                 ctx=ctx,
             )
     except OSError:
@@ -645,12 +742,14 @@ def _validate_hdf5_source_encoding(
         )
 
 
-def _validate_optional_hdf5_field_names(
+def _validate_optional_hdf5_names(
     h5: h5py.File,
     dataset_name: Any,
     *,
     expected_length: int,
     path: str,
+    code_prefix: str,
+    label: str,
     ctx: _ValidationContext,
 ) -> None:
     if dataset_name is None:
@@ -658,15 +757,15 @@ def _validate_optional_hdf5_field_names(
     dataset = h5.get(str(dataset_name))
     if not isinstance(dataset, h5py.Dataset):
         ctx.report.error(
-            "acquisition.source_encoding.field_names.dataset_missing",
+            f"{code_prefix}.dataset_missing",
             "Referenced HDF5 metadata dataset does not exist.",
             path=path,
         )
         return
     if dataset.ndim != 1 or dataset.shape[0] != expected_length:
         ctx.report.error(
-            "acquisition.source_encoding.field_names.length_mismatch",
-            "Referenced HDF5 metadata must contain one value per encoded field.",
+            f"{code_prefix}.length_mismatch",
+            f"{label} must contain one value per referenced row.",
             path=path,
         )
         return
@@ -677,8 +776,8 @@ def _validate_optional_hdf5_field_names(
             values = np.asarray(dataset[start : start + 65_536]).reshape(-1)
         except OSError:
             ctx.report.error(
-                "acquisition.source_encoding.field_names.dataset_unreadable",
-                "Source-encoding field names could not be read.",
+                f"{code_prefix}.dataset_unreadable",
+                f"{label} could not be read.",
                 path=path,
             )
             return
@@ -694,61 +793,19 @@ def _validate_optional_hdf5_field_names(
                 name = ""
             if not name:
                 ctx.report.error(
-                    "acquisition.source_encoding.field_names.value_invalid",
-                    "Source-encoding field names must be non-empty UTF-8 strings.",
+                    f"{code_prefix}.value_invalid",
+                    f"{label} must be non-empty UTF-8 strings.",
                     path=path,
                 )
                 return
             if name in seen:
                 ctx.report.error(
-                    "acquisition.source_encoding.field_names.duplicate",
-                    "Source-encoding field names must be unique.",
+                    f"{code_prefix}.duplicate",
+                    f"{label} must be unique.",
                     path=path,
                 )
                 return
             seen.add(name)
-
-
-def _validate_optional_hdf5_references(
-    h5: h5py.File,
-    dataset_name: Any,
-    *,
-    expected_fields: int,
-    path: str,
-    units: Optional[str],
-    system: Optional[str],
-    ctx: _ValidationContext,
-) -> None:
-    if dataset_name is None:
-        return
-    dataset = h5.get(str(dataset_name))
-    if not isinstance(dataset, h5py.Dataset):
-        ctx.report.error(
-            "acquisition.source_encoding.reference_coordinates.dataset_missing",
-            "Referenced HDF5 reference-coordinate dataset does not exist.",
-            path=path,
-        )
-        return
-    if (
-        dataset.ndim != 2
-        or dataset.shape[0] != expected_fields
-        or (ctx.dimension and dataset.shape[1] != ctx.dimension)
-    ):
-        ctx.report.error(
-            "acquisition.source_encoding.reference_coordinates.shape",
-            "HDF5 reference coordinates must contain one coordinate row per "
-            "encoded field in the simulation dimension.",
-            path=path,
-        )
-        return
-    _validate_hdf5_coordinate_values(
-        dataset,
-        path=path,
-        ctx=ctx,
-        units=units,
-        system=system,
-        code_prefix="acquisition.source_encoding.reference_coordinates",
-    )
 
 
 def _validate_hdf5_coordinate_values(
@@ -1006,6 +1063,19 @@ def _validate_receiver_group(
             "Receiver device must define at least one component.",
             path=f"{path}.device.components",
         )
+    component_names = [getattr(component, "name", None) for component in components]
+    if len(component_names) != len(set(component_names)):
+        ctx.report.error(
+            "acquisition.receiver_group.components.names.duplicate",
+            "Receiver component names must be unique within a device.",
+            path=f"{path}.device.components",
+        )
+    if getattr(device, "response", None) is not None:
+        ctx.report.error(
+            "acquisition.receiver.response.unsupported",
+            "Receiver spectral response is reserved but is not yet implemented.",
+            path=f"{path}.device.response",
+        )
     for component_index, component in enumerate(components):
         component_path = f"{path}.device.components[{component_index}]"
         _validate_field(
@@ -1036,6 +1106,101 @@ def _validate_receiver_group(
         )
         return
     _validate_receiver_coordinates(coords, f"{path}.coordinates", ctx)
+    if isinstance(device, ReceiverArray) and device.offset_units is not None:
+        _validate_units(
+            device.offset_units,
+            f"{path}.device.offset_units",
+            ctx.report,
+            code="acquisition.receiver_array.offset_units.invalid",
+        )
+    if isinstance(device, EncodedReceiver) and device.weight_table is not None:
+        _validate_receiver_weight_table(
+            device,
+            coords,
+            path=f"{path}.device.weights",
+            ctx=ctx,
+        )
+
+
+def _validate_receiver_weight_table(
+    device: EncodedReceiver,
+    coords: Any,
+    *,
+    path: str,
+    ctx: _ValidationContext,
+) -> None:
+    table = device.weight_table
+    assert table is not None
+    file_reference = table.file
+    file = _resolve_project_file(file_reference, ctx)
+    if not _validate_local_file(
+        file,
+        authored_absolute=_is_absolute_file_reference(file_reference),
+        path=f"{path}.file",
+        missing_code="acquisition.receiver.weights.file_missing",
+        invalid_code="acquisition.receiver.weights.file_invalid",
+        label="Receiver weight",
+        ctx=ctx,
+    ):
+        return
+    try:
+        with h5py.File(file, "r") as h5:
+            weights = h5.get(table.dataset)
+            if not isinstance(weights, h5py.Dataset):
+                ctx.report.error(
+                    "acquisition.receiver.weights.dataset_missing",
+                    "Receiver weight HDF5 dataset does not exist.",
+                    path=f"{path}.dataset",
+                )
+                return
+            try:
+                receiver_count = int(coords.size)
+            except (OSError, ValueError, TypeError):
+                receiver_count = -1
+            expected = (
+                (device.encoding_count or 0) * len(device.components),
+                receiver_count,
+                2,
+            )
+            if (
+                weights.ndim != 3
+                or weights.shape[2] != 2
+                or (receiver_count >= 0 and weights.shape != expected)
+            ):
+                ctx.report.error(
+                    "acquisition.receiver.weights.shape",
+                    "Encoded receiver weights must use shape "
+                    "(encoding_count * component_count, receiver_count, 2).",
+                    path=f"{path}.dataset",
+                )
+                return
+            _validate_hdf5_numeric_values(
+                weights,
+                path=f"{path}.dataset",
+                code_prefix="acquisition.receiver.weights",
+                label="Receiver weight",
+                ctx=ctx,
+            )
+            if table.names_dataset is not None:
+                names = h5.get(table.names_dataset)
+                if not isinstance(names, h5py.Dataset):
+                    ctx.report.error(
+                        "acquisition.receiver.weights.names_dataset_missing",
+                        "Encoded receiver name HDF5 dataset does not exist.",
+                        path=f"{path}.names_dataset",
+                    )
+                elif names.ndim != 1 or names.shape[0] != device.encoding_count:
+                    ctx.report.error(
+                        "acquisition.receiver.weights.names_shape",
+                        "Encoded receiver names must match encoding_count.",
+                        path=f"{path}.names_dataset",
+                    )
+    except OSError:
+        ctx.report.error(
+            "acquisition.receiver.weights.file_unreadable",
+            "Receiver weight HDF5 file could not be read.",
+            path=f"{path}.file",
+        )
 
 
 def _validate_receiver_coordinates(
@@ -1141,9 +1306,33 @@ def _validate_receiver_coordinates(
         try:
             if coords.format == "HDF5":
                 with h5py.File(file, "r") as h5:
-                    values = h5[coords.dset or "coords"]
-                    lower = np.min(values, axis=0)
-                    upper = np.max(values, axis=0)
+                    values = h5.get(coords.dset or "coords")
+                    if not isinstance(values, h5py.Dataset):
+                        raise KeyError(coords.dset or "coords")
+                    if values.ndim != 2 or values.shape[0] < 1:
+                        ctx.report.error(
+                            "acquisition.receiver_coordinates.dataset_shape",
+                            "Receiver coordinates must be a non-empty "
+                            "two-dimensional array.",
+                            path=path,
+                        )
+                        return
+                    if ctx.dimension and values.shape[1] != ctx.dimension:
+                        ctx.report.error(
+                            "acquisition.receiver_coordinates.dimension_mismatch",
+                            "Receiver coordinate dimension does not match the "
+                            "simulation dimension.",
+                            path=path,
+                        )
+                    _validate_hdf5_coordinate_values(
+                        values,
+                        path=path,
+                        ctx=ctx,
+                        units=coords.units or _default_length_units(ctx),
+                        system=coords.system,
+                        code_prefix="acquisition.receiver_coordinates",
+                    )
+                    return
             else:
                 lower, upper = coords.bounds
         except Exception as exc:

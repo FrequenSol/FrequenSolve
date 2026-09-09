@@ -152,14 +152,14 @@
         },
         "file": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-          "description": "Authoritative property file, RSF/DDS header, or HDF5 object locator, e.g. simulation.h5:inputs/model/properties/vp."
+          "description": "Property file or RSF/DDS header. Legacy HDF5 object locators remain readable; new HDF5 references use dataset separately."
         },
         "format": {
           "type": "string"
         },
         "dataset": {
           "type": "string",
-          "description": "Optional tooling metadata for HDF5-backed properties. Current readers use the object locator in file."
+          "description": "Authoritative HDF5 dataset path when file names an HDF5 container."
         },
         "hash": {
           "type": "string",
@@ -184,6 +184,9 @@
         },
         "valid_range": {
           "$ref": "#/$defs/xarrayValidRange"
+        },
+        "parameterized": {
+          "$ref": "#/$defs/parameterizedProperty"
         }
       },
       "oneOf": [
@@ -200,6 +203,11 @@
         {
           "required": [
             "expr"
+          ]
+        },
+        {
+          "required": [
+            "parameterized"
           ]
         }
       ],
@@ -1448,6 +1456,175 @@
         }
       },
       "additionalProperties": true
+    },
+    "parameterizedProperty": {
+      "type": "object",
+      "description": "Parameterized control block decorating an ordinary scalar or file-backed reference property.",
+      "required": [
+        "id",
+        "reference",
+        "control"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Globally unique identifier for this whole coefficient block, used for vector ordering and its HDF5 dataset. Mesh coefficients additionally use stable integer identifiers within their frozen property space."
+        },
+        "reference": {
+          "type": "object",
+          "description": "Ordinary property reproduced exactly when all coefficients are zero.",
+          "oneOf": [
+            {
+              "required": [
+                "value"
+              ]
+            },
+            {
+              "required": [
+                "file"
+              ]
+            }
+          ],
+          "additionalProperties": true
+        },
+        "transform": {
+          "type": "string",
+          "enum": [
+            "identity",
+            "log",
+            "inverse"
+          ],
+          "default": "identity",
+          "description": "Control composition: identity uses reference+update, log uses reference*exp(update), and inverse uses 1/(1/reference+update)."
+        },
+        "control": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/bsplineControlMap"
+            },
+            {
+              "$ref": "#/$defs/hatControlMap"
+            },
+            {
+              "$ref": "#/$defs/meshControlMap"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "hatControlMap": {
+      "type": "object",
+      "description": "Uniform one-dimensional nodal grid with piecewise-linear hat basis functions. Coefficient i is the update at origin + (i-1) spacing.",
+      "required": [
+        "kind",
+        "axis",
+        "spacing",
+        "coefficients"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "hat"
+        },
+        "coordinate_system": {
+          "type": "string",
+          "default": "global"
+        },
+        "axis": {
+          "type": "string",
+          "minLength": 1
+        },
+        "units": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional units for origin and spacing; defaults to the model coordinate units."
+        },
+        "origin": {
+          "type": "number",
+          "default": 0.0
+        },
+        "spacing": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "coefficients": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "bsplineControlMap": {
+      "type": "object",
+      "description": "Sparse coordinate-based one-dimensional B-spline map.",
+      "required": [
+        "axis",
+        "knots",
+        "coefficients"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "bspline",
+          "default": "bspline"
+        },
+        "coordinate_system": {
+          "type": "string",
+          "default": "global"
+        },
+        "axis": {
+          "type": "string",
+          "minLength": 1
+        },
+        "units": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional units for knots; defaults to the model coordinate units."
+        },
+        "degree": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3
+        },
+        "knots": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2
+        },
+        "coefficients": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "meshControlMap": {
+      "type": "object",
+      "description": "First-order nodal controls on a named, frozen initial-mesh refinement hierarchy. Coefficients start at zero and are read through named control checkpoints.",
+      "required": [
+        "kind",
+        "space"
+      ],
+      "properties": {
+        "kind": {
+          "const": "mesh"
+        },
+        "space": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
     }
   },
   "type": "object",
@@ -1477,12 +1654,12 @@
         "$ref": "#/$defs/layer"
       }
     },
-        "boreholes": {
-          "type": "array",
-          "description": "Layered borehole geometry. Layers reference material subdomains by mesh_block_id; ordered radial surfaces define mesh intervals and may include same-material subdivisions.",
-          "items": {
-            "$ref": "#/$defs/borehole"
-          }
+    "boreholes": {
+      "type": "array",
+      "description": "Layered borehole geometry. Layers reference material subdomains by mesh_block_id; ordered radial surfaces define mesh intervals and may include same-material subdivisions.",
+      "items": {
+        "$ref": "#/$defs/borehole"
+      }
     },
     "surfaces": {
       "type": "array",
