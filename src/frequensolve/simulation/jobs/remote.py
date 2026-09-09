@@ -451,6 +451,16 @@ class JobRemoteMixin:
     @staticmethod
     def _iter_file_references(value: Any) -> Iterable[str]:
         if isinstance(value, Mapping):
+            for section, keys in (
+                ("control_sensitivities", ("direction", "current")),
+                ("Image", ("direction",)),
+            ):
+                config = value.get(section)
+                if isinstance(config, Mapping):
+                    for key in keys:
+                        path = config.get(key)
+                        if isinstance(path, (str, Path)):
+                            yield JobRemoteMixin._strip_file_locator(path)
             derivatives = value.get("observed_derivatives")
             if isinstance(derivatives, Mapping):
                 df = derivatives.get("df")

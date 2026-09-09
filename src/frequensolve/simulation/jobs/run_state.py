@@ -176,6 +176,8 @@ class JobRunStateMixin:
 
         def export_context(self) -> ExportContext: ...
 
+        def _input_fingerprint_payload(self) -> Dict[str, Any]: ...
+
         @staticmethod
         def _fingerprint_job_payload(
             job_data: Dict[str, Any], *, include_frequencies: bool = False
@@ -614,8 +616,10 @@ class JobRunStateMixin:
             raise IndexError(f"Task {task} is outside 1..{self.n_tasks}")
         job_data = self.to_fs(self.export_context())
         job_payload = self._fingerprint_job_payload(job_data)
+        inputs = self._input_fingerprint_payload()
         return {
             "schema": "frequensolve-job-task-compatibility-fingerprint-1",
+            **({"inputs": inputs} if inputs else {}),
             "job": job_payload,
             "simulation": {
                 "hash": self._simulation_hash_for_policy(policy),

@@ -875,3 +875,24 @@ def test_imaging_derivative_inputs_are_hashed_and_staged(
         after = loaded.fingerprint(), loaded.task_fingerprint(1)
         assert all(old != new for old, new in zip(before, after))
     assert loaded._input_fingerprint_payload() == job._input_fingerprint_payload()
+
+
+def test_loaded_lsrtm_gradient_stages_direction_file(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"direction")
+    observed = tmp_path / "observed.h5"
+    observed.write_bytes(b"observed")
+    job = LSRTMGradientJob(
+        "gradient",
+        sim,
+        f_list=[5.0],
+        data_path=observed,
+        direction=direction,
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+    )
+    loaded = BaseJob.load(job.save())
+    assert (
+        direction,
+        type(direction)("/remote/project/direction.h5"),
+    ) in loaded.remote_input_files("/remote/project")

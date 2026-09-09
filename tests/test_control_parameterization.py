@@ -522,6 +522,7 @@ def test_control_job_compatible_fingerprint_materializes_large_trace_weights(
     tmp_path,
 ):
     simulation = _saved_simulation(tmp_path)
+    (tmp_path / "observed.h5").write_bytes(b"observed")
     job = RTMControlSensitivityJob(
         "rtm",
         simulation,
@@ -699,13 +700,40 @@ def test_control_job_fingerprints_include_input_file_contents(tmp_path):
     )
     born_fingerprint = born.fingerprint()
     born_task_fingerprint = born.task_fingerprint(1)
+    born_compatible = born.task_policy_fingerprint(1, "compatible")
     rtm_fingerprint = rtm.fingerprint()
     rtm_task_fingerprint = rtm.task_fingerprint(1)
+    rtm_compatible = rtm.task_policy_fingerprint(1, "compatible")
 
     space.write_hdf5(direction, [0.0, 1.0])
     (observed / "trace.bin").write_bytes(b"second")
 
+    assert born.task_policy_fingerprint(1, "compatible") != born_compatible
+    assert rtm.task_policy_fingerprint(1, "compatible") != rtm_compatible
     assert born.fingerprint() != born_fingerprint
     assert born.task_fingerprint(1) != born_task_fingerprint
     assert rtm.fingerprint() != rtm_fingerprint
     assert rtm.task_fingerprint(1) != rtm_task_fingerprint
+
+
+def test_loaded_control_jobs_stage_direction_and_current_files(tmp_path):
+    simulation = _saved_simulation(tmp_path)
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"direction")
+    observed = tmp_path / "observed.h5"
+    observed.write_bytes(b"observed")
+    jobs = [
+        BornControlSensitivityJob("born", simulation, [3.0], direction=direction),
+        RTMControlSensitivityJob(
+            "rtm",
+            simulation,
+            [3.0],
+            observed=observed,
+            gradient=tmp_path / "gradient.h5",
+            current=direction,
+        ),
+    ]
+    for job in jobs:
+        loaded = BaseJob.load(job.save())
+        pairs = loaded.remote_input_files("/remote/project")
+        assert (direction, type(direction)("/remote/project/direction.h5")) in pairs
