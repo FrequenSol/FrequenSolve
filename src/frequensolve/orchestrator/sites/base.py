@@ -850,6 +850,7 @@ class RunHandle:
             status = self.status()
             if status.is_complete:
                 status = self._complete_from_status(status).status
+                self._fetch_pending_outputs()
             if status.state != last_state:
                 yield status
                 last_state = status.state
