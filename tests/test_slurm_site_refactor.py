@@ -2894,3 +2894,33 @@ def test_mpi_health_check_rejects_unsupported_launch_before_sync(
     with pytest.raises(ValueError, match="requires batch mode with the srun launcher"):
         site.submit(DummyJob(), mode=mode, fresh=True)
     assert not any(sync_calls)
+
+
+@pytest.mark.parametrize("limit, expected", [(None, 8), (1, 1), (4, 4)])
+def test_attached_initialization_respects_job_rank_limit(
+    monkeypatch, tmp_path, limit, expected
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    site.pool.nhost = 1
+    site.pool.nproc = 8
+    site.pool.ncore = 8
+    job = DummyJob()
+    job.max_ranks_per_task = limit
+    job.n_tasks = 1
+    launcher = tmp_path / "launcher"
+    log = tmp_path / "launches"
+    launcher.write_text('#!/bin/sh\nprintf "%s\n" "$*" >> "$LAUNCH_LOG"\n')
+    launcher.chmod(0o755)
+    monkeypatch.setenv("LAUNCH_LOG", str(log))
+    monkeypatch.setattr(type(site), "mpi_cmd", property(lambda self: str(launcher)))
+    monkeypatch.setattr(type(site), "work_dir", property(lambda self: tmp_path))
+    script = tmp_path / "sweep.sh"
+    script.write_text(site._sweep_script(job, pack=False))
+    result = subprocess.run(
+        ["bash", str(script), "job.json", "1"], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    init = next(line for line in log.read_text().splitlines() if "--init" in line)
+    args = init.split()
+    assert args[args.index("-n") + 1] == str(expected)

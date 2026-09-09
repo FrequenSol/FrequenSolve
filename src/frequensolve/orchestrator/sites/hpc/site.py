@@ -3166,6 +3166,10 @@ class SlurmSite(BaseSite):
             batch_job=False,
             n_tasks=n_tasks,
             n_procs=self.pool.nproc,
+            init_ranks=min(
+                self.pool.nproc,
+                getattr(job, "max_ranks_per_task", None) or self.pool.nproc,
+            ),
             n_threads=n_threads,
             mpi_shell=shlex.quote(str(self.mpi_cmd)),
             dir_out_shell=shlex.quote(dir_out),

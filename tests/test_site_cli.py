@@ -521,3 +521,13 @@ def test_check_fails_when_modules_or_remote_solver_are_unavailable(monkeypatch):
     assert result.exit_code != 0
     assert "modules could not be loaded or the solver is missing" in result.output
     assert fake_site.closed is True
+
+
+def test_empty_connection_commands_do_not_require_openssh(monkeypatch, tmp_path):
+    config = tmp_path / "site.toml"
+    config.write_text('default = "local"\n[sites.local]\ntype = "local"\n')
+    monkeypatch.setattr(site_commands.shutil, "which", lambda _: None)
+    for command in (["connections"], ["disconnect", "--all"]):
+        result = CliRunner().invoke(main, ["site", *command, "--config", str(config)])
+        assert result.exit_code == 0, result.output
+        assert "No " in result.output

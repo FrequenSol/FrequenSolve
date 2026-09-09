@@ -68,7 +68,7 @@ n_workers=$((n_procs / procs_per_task))
 
 start_time=$(date +%s)
 
-"$mpi_exec" "${mpi_args[@]}" -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --init > $dir_out/init.log 2>&1
+"$mpi_exec" "${mpi_args[@]}" -n {{init_ranks}} $executable -nthreads $n_threads --job $input_file $fresh_flag --init > $dir_out/init.log 2>&1
 
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))

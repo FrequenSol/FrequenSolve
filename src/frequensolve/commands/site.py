@@ -201,12 +201,12 @@ def connections(profile: Optional[str], config_path: Optional[Path]) -> None:
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    ssh = shutil.which("ssh")
-    if ssh is None:
-        raise click.ClickException("OpenSSH is required, but 'ssh' was not found.")
     if not configured:
         click.echo("No SSH-backed site profiles were found.")
         return
+    ssh = shutil.which("ssh")
+    if ssh is None:
+        raise click.ClickException("OpenSSH is required, but 'ssh' was not found.")
 
     rows = []
     for connection in configured:
@@ -262,6 +262,9 @@ def disconnect(
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
+    if not configured:
+        click.echo("No FrequenSolve-managed SSH connections are open.")
+        return
     ssh = shutil.which("ssh")
     if ssh is None:
         raise click.ClickException("OpenSSH is required, but 'ssh' was not found.")
