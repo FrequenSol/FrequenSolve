@@ -402,7 +402,7 @@
       "aliases": [],
       "kind": "class",
       "category": "jobs",
-      "summary": "Create a job for one or more explicit positive modeled frequencies.",
+      "summary": "Create a job for one or more explicit positive modeled frequencies, optionally computing physical-frequency derivatives through fourth order.",
       "related_glossary": [
         "job",
         "frequency-domain"
@@ -415,7 +415,7 @@
       "aliases": [],
       "kind": "class",
       "category": "jobs",
-      "summary": "Create a time-domain job from a valid uniform frequency sweep and damping settings.",
+      "summary": "Create a time-domain job from a valid frequency sweep, optionally combining Laplace damping, phase derivatives, derivative-assisted interpolation, and a smooth high-frequency continuation.",
       "related_glossary": [
         "job",
         "time-domain"
@@ -785,7 +785,9 @@
       ],
       "output_components": [
         "pressure",
-        "velocity"
+        "velocity",
+        "p_velocity",
+        "s_velocity"
       ],
       "guided_scenario_id": "known-small-2d-acoustic"
     },
@@ -806,7 +808,9 @@
       ],
       "output_components": [
         "pressure",
-        "velocity"
+        "velocity",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -831,7 +835,9 @@
         "velocity",
         "stress",
         "strain",
-        "pressure"
+        "pressure",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -854,7 +860,9 @@
         "velocity",
         "stress",
         "strain",
-        "pressure"
+        "pressure",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -897,7 +905,9 @@
         "velocity",
         "stress",
         "strain",
-        "pressure"
+        "pressure",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -922,7 +932,9 @@
         "stress",
         "strain",
         "displacement",
-        "fluid_displacement"
+        "fluid_displacement",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -940,7 +952,9 @@
         "velocity",
         "stress",
         "strain",
-        "pressure"
+        "pressure",
+        "p_velocity",
+        "s_velocity"
       ]
     },
     {
@@ -1276,13 +1290,6 @@
       "path": "discretization.method",
       "explanation": "The selected finite-element discretization is unavailable for the simulation physics.",
       "remediation": "Use a discretization supported by the physics; Galerkin currently supports acoustic, acoustic_axisym, and elastic."
-    },
-    {
-      "code": "solver.grids.galerkin",
-      "severity": "error",
-      "path": "solver.grids",
-      "explanation": "The Galerkin solver requires a single direct-solve grid.",
-      "remediation": "Attach SolverConfig(grids=1) to the simulation and use a MUMPS-enabled solver build."
     },
     {
       "code": "model.missing",

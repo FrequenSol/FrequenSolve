@@ -382,9 +382,9 @@ def _validate_field(field: Any, path: str, ctx: _ValidationContext) -> None:
     if str(settings.get("method", "DPG")).strip().lower() == "galerkin":
         physics = str(ctx.simulation.physics).strip().lower()
         if physics in {"acoustic", "acoustic_axisym"}:
-            allowed &= {"pressure"}
+            allowed &= {"pressure", "p_velocity", "s_velocity"}
         elif physics == "elastic":
-            allowed &= {"velocity"}
+            allowed &= {"velocity", "p_velocity", "s_velocity"}
     if value not in allowed and not _is_component_selector(value, allowed):
         ctx.report.error(
             "field.unsupported",

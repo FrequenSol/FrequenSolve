@@ -497,6 +497,7 @@ class TraceManifest:
         components: Component labels available in the trace product.
         sources: Source ids available in the trace product.
         wavefields: Wavefield output metadata keyed by group.
+        time_reconstruction: Optional frequency-to-time reconstruction settings.
         artifacts: Solver-reported artifacts associated with the run.
         run: Parsed run metadata associated with the result directory.
     """
@@ -512,6 +513,7 @@ class TraceManifest:
     components: List[str] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
     wavefields: Dict[str, Any] = field(default_factory=dict)
+    time_reconstruction: Dict[str, Any] = field(default_factory=dict)
     artifacts: List[OutputArtifact] = field(default_factory=list)
     run: RunMetadata = field(default_factory=RunMetadata)
 
@@ -619,6 +621,7 @@ class TraceManifest:
             components=list(output.components),
             sources=list(output.sources),
             wavefields=copy.deepcopy(output.wavefields),
+            time_reconstruction=copy.deepcopy(getattr(job, "time_reconstruction", {})),
             artifacts=artifacts,
             run=run,
         )
@@ -711,6 +714,7 @@ class TraceManifest:
             components=first.components,
             sources=first.sources,
             wavefields=copy.deepcopy(first.wavefields),
+            time_reconstruction=copy.deepcopy(first.time_reconstruction),
             artifacts=artifacts,
             run=run,
         )
@@ -914,6 +918,7 @@ class TraceManifest:
             "components": self.components,
             "sources": self.sources,
             "wavefields": copy.deepcopy(self.wavefields),
+            "time_reconstruction": copy.deepcopy(self.time_reconstruction),
             "artifacts": [
                 artifact.to_fs(self.project_path) for artifact in self.artifacts
             ],
@@ -1479,9 +1484,10 @@ class JobArtifactMixin:
         sources = []
 
         for group in sim.acquisition.receiver_groups:
-            groups.append(group.name)
-            for component in group.device.output_components():
-                components.append(f"{group.name}:{component.name}")
+            for variant_name, _ in _spectral_derivative_variants(self, group.name):
+                groups.append(variant_name)
+                for component in group.device.output_components():
+                    components.append(f"{variant_name}:{component.name}")
 
         for source_id in sim.acquisition.source_field_ids():
             sources.append(str(source_id))
@@ -1530,9 +1536,6 @@ class JobArtifactMixin:
             fields = out.fields if out.fields is not None else ["primary"]
             component_names = out.component_names
             component_specs = out.component_payloads()
-            components_for_group = [
-                f"{out.name}:{component_name}" for component_name in component_names
-            ]
             source_ids = (
                 [str(source) for source in out.sources]
                 if out.sources is not None
@@ -1541,32 +1544,42 @@ class JobArtifactMixin:
                     for source_id in self.simulation.acquisition.source_field_ids()
                 ]
             )
-            groups.append(out.name)
-            components.extend(components_for_group)
             sources.update(source_ids)
-            wavefield = {
-                "name": out.name,
-                "path": str(self._result_path / out.path),
-                "fields": list(fields),
-                "components": components_for_group,
-                "component_names": component_names,
-                "component_specs": component_specs,
-                "sources": source_ids,
-                "grid": copy.deepcopy(out.grid),
-            }
-            if out.properties:
-                wavefield["requested_properties"] = list(out.properties)
-                wavefield["property_output"] = "packed_static"
-                wavefield["properties"] = {
-                    name: {
-                        "dataset": f"/properties/{name}",
-                        "static": True,
-                    }
-                    for name in out.properties
+            for variant_name, derivative_order in _spectral_derivative_variants(
+                self, out.name
+            ):
+                groups.append(variant_name)
+                components_for_group = [
+                    f"{variant_name}:{component_name}"
+                    for component_name in component_names
+                ]
+                components.extend(components_for_group)
+                wavefield = {
+                    "name": variant_name,
+                    "path": str(self._result_path / out.path),
+                    "fields": list(fields),
+                    "components": components_for_group,
+                    "component_names": component_names,
+                    "component_specs": component_specs,
+                    "sources": source_ids,
+                    "grid": copy.deepcopy(out.grid),
                 }
-            if out.device is not None:
-                wavefield["device"] = out.device.to_fs()
-            wavefields[out.name] = wavefield
+                if derivative_order:
+                    wavefield["base_wavefield"] = out.name
+                    wavefield["phase_derivative_order"] = derivative_order
+                if out.properties:
+                    wavefield["requested_properties"] = list(out.properties)
+                    wavefield["property_output"] = "packed_static"
+                    wavefield["properties"] = {
+                        name: {
+                            "dataset": f"/properties/{name}",
+                            "static": True,
+                        }
+                        for name in out.properties
+                    }
+                if out.device is not None:
+                    wavefield["device"] = out.device.to_fs()
+                wavefields[variant_name] = wavefield
 
         if len(output_paths) > 1:
             raise ValueError(
@@ -1620,9 +1633,6 @@ class JobArtifactMixin:
             fields = out.fields if out.fields is not None else ["primary"]
             component_names = out.component_names
             component_specs = out.component_payloads()
-            components = [
-                f"{out.name}:{component_name}" for component_name in component_names
-            ]
             sources = (
                 [str(source) for source in out.sources]
                 if out.sources is not None
@@ -1631,29 +1641,41 @@ class JobArtifactMixin:
                     for source_id in self.simulation.acquisition.source_field_ids()
                 ]
             )
-            wave_out[out.name] = {
-                "domain": (self.__class__.__name__,),
-                "path": str(self._result_path / out.path),
-                "frequencies": self.f_list,
-                "grid": copy.deepcopy(out.grid),
-                "fields": list(fields),
-                "components": components,
-                "component_names": component_names,
-                "component_specs": component_specs,
-                "sources": sources,
-            }
-            if out.properties:
-                wave_out[out.name]["requested_properties"] = list(out.properties)
-                wave_out[out.name]["property_output"] = "packed_static"
-                wave_out[out.name]["properties"] = {
-                    name: {
-                        "dataset": f"/properties/{name}",
-                        "static": True,
-                    }
-                    for name in out.properties
+            for variant_name, derivative_order in _spectral_derivative_variants(
+                self, out.name
+            ):
+                components = [
+                    f"{variant_name}:{component_name}"
+                    for component_name in component_names
+                ]
+                wave_out[variant_name] = {
+                    "domain": (self.__class__.__name__,),
+                    "path": str(self._result_path / out.path),
+                    "frequencies": self.f_list,
+                    "grid": copy.deepcopy(out.grid),
+                    "fields": list(fields),
+                    "components": components,
+                    "component_names": component_names,
+                    "component_specs": component_specs,
+                    "sources": sources,
                 }
-            if out.device is not None:
-                wave_out[out.name]["device"] = out.device.to_fs()
+                if derivative_order:
+                    wave_out[variant_name]["base_wavefield"] = out.name
+                    wave_out[variant_name]["phase_derivative_order"] = derivative_order
+                if out.properties:
+                    wave_out[variant_name]["requested_properties"] = list(
+                        out.properties
+                    )
+                    wave_out[variant_name]["property_output"] = "packed_static"
+                    wave_out[variant_name]["properties"] = {
+                        name: {
+                            "dataset": f"/properties/{name}",
+                            "static": True,
+                        }
+                        for name in out.properties
+                    }
+                if out.device is not None:
+                    wave_out[variant_name]["device"] = out.device.to_fs()
         return wave_out
 
     @staticmethod
@@ -1852,6 +1874,25 @@ def _real_frequency(value: Union[float, complex]) -> float:
     if isinstance(value, np.generic):
         return _real_frequency(value.item())
     return float(value)
+
+
+def _spectral_derivative_variants(job: Any, base_name: str) -> List[tuple[str, int]]:
+    """Return base and solver-generated spectral derivative dataset names."""
+
+    workflow = str(getattr(job, "workflow", ""))
+    if workflow not in {"forward_df", "forward_ds"}:
+        return [(str(base_name), 0)]
+
+    order = getattr(job, "phase_derivatives", None)
+    if order is None or int(order) == 0:
+        order = getattr(job, "derivative_order", 1)
+    order = max(1, int(order))
+    axis = "f" if workflow == "forward_df" else "s"
+    variants = [(str(base_name), 0)]
+    for derivative_order in range(1, order + 1):
+        suffix = f"_d{derivative_order}{axis}" if derivative_order > 1 else f"_d{axis}"
+        variants.append((f"{base_name}{suffix}", derivative_order))
+    return variants
 
 
 def _laplace_frequency(value: Union[float, complex]) -> float:

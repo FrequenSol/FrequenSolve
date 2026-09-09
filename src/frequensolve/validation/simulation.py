@@ -105,15 +105,9 @@ def _validate_formulation(simulation: Any, report: ValidationReport) -> None:
             hint="Use acoustic, acoustic_axisym, or elastic physics.",
         )
 
-    solver = getattr(simulation, "solver", None)
-    solver_settings = getattr(solver, "extra", {}) or {}
-    if solver_settings.get("grids") != 1:
-        report.error(
-            "solver.grids.galerkin",
-            "Galerkin discretization requires Solver/grids = 1.",
-            path="solver.grids",
-            hint="Attach SolverConfig(grids=1) to the simulation.",
-        )
+    # The backend selects MUMPS and a single grid for frequency-domain
+    # Galerkin, unless its explicit galerkin_multigrid option is enabled.
+    # Authoring a Galerkin job therefore needs no grid-count override.
 
 
 def _validate_model(model: Any, ctx: _ValidationContext) -> None:

@@ -23,6 +23,8 @@ from frequensolve.simulation.jobs.imaging import (
     ImagingJob,
     LSRTMGradientJob,
     LSRTMNormalJob,
+    MisfitComparison,
+    ObservedTraceDerivatives,
 )
 from frequensolve.simulation.outputs import VtkOutput
 from frequensolve.simulation.simulation import SeismicSimulation
@@ -191,6 +193,88 @@ def test_imaging_job_syntax_serializes_trace_store_roots(tmp_path):
         {"name": "pressure", "IC": "pressure"},
         {"name": "up_down", "IC": "up_down"},
     ]
+
+
+def test_imaging_job_serializes_instantaneous_travel_time_comparison(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    observed = tmp_path / "observed"
+    observed.mkdir()
+
+    job = sim.imaging_job(
+        name="instantaneous_travel_time",
+        observed=observed,
+        frequencies=[5.0],
+        parameters=["vp"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        comparison=MisfitComparison.phase_derivative(
+            source_derivative="total",
+            relative_amplitude_floor=0.02,
+        ),
+        observed_derivatives=ObservedTraceDerivatives.packed(
+            observed,
+            receiver_group="surface",
+        ),
+    )
+
+    payload = job.to_fs()
+    comparison = payload["Image"]["misfit"]["comparison"]
+
+    assert comparison == {
+        "kind": "phase_derivative",
+        "derivative_axis": "frequency",
+        "source_derivative": "total",
+        "relative_amplitude_floor": 0.02,
+    }
+    assert payload["Image"]["misfit"]["receiver_groups"][0]["observed_derivatives"] == {
+        "df": {
+            "_type": "HDF5TraceStore",
+            "file": observed / "traces.h5",
+            "dataset": "surface_df",
+            "source_basis": "source_encoding",
+        }
+    }
+    loaded = BaseJob.load(job.save())
+    assert loaded.misfit.comparison == MisfitComparison.phase_derivative(
+        source_derivative="total",
+        relative_amplitude_floor=0.02,
+    )
+    assert loaded.misfit.receiver_groups[0].observed_derivatives == (
+        ObservedTraceDerivatives.packed(observed, receiver_group="surface")
+    )
+
+
+@pytest.mark.parametrize(
+    "comparison",
+    [
+        {"kind": "phase_derivative", "derivative_axis": "laplace"},
+        {"kind": "phase_derivative", "relative_amplitude_floor": 0.0},
+        {"kind": "unsupported"},
+    ],
+)
+def test_imaging_job_rejects_invalid_comparison_configuration(tmp_path, comparison):
+    sim = _elastic_simulation(tmp_path)
+
+    with pytest.raises(ValueError):
+        ImagingJob(
+            name="invalid_comparison",
+            simulation=sim,
+            f_list=[5.0],
+            grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+            comparison=comparison,
+        )
+
+
+def test_phase_derivative_imaging_requires_observed_df_reference(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+
+    with pytest.raises(ValueError, match="observed_derivatives"):
+        ImagingJob(
+            name="missing_observed_df",
+            simulation=sim,
+            f_list=[5.0],
+            grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+            comparison=MisfitComparison.phase_derivative(),
+        )
 
 
 def test_imaging_job_outputs_use_canonical_top_level_contract(tmp_path):

@@ -1,8 +1,10 @@
+from pathlib import Path
+
 import h5py
 import numpy as np
 import pytest
 
-from frequensolve import MisfitGroup, PreprocessHook
+from frequensolve import MisfitGroup, ObservedTraceDerivatives, PreprocessHook
 from frequensolve.units import ureg as u
 from frequensolve.util.mixins import ExportContext
 from frequensolve.util.store import SimulationStore
@@ -28,6 +30,30 @@ def test_trace_weight_infers_source_component_receiver_layout_and_roundtrips():
             },
         }
     ]
+    assert MisfitGroup.from_fs(payload).to_fs() == payload
+
+
+def test_packed_observed_df_reference_roundtrips_with_receiver_group():
+    group = MisfitGroup(
+        name="surface_pressure",
+        observed="observed",
+        observed_derivatives=ObservedTraceDerivatives.packed(
+            "observed",
+            receiver_group="surface_pressure",
+        ),
+        simulated="simulated",
+    )
+
+    payload = group.to_fs()
+
+    assert payload["observed_derivatives"] == {
+        "df": {
+            "_type": "HDF5TraceStore",
+            "file": Path("observed") / "traces.h5",
+            "dataset": "surface_pressure_df",
+            "source_basis": "source_encoding",
+        }
+    }
     assert MisfitGroup.from_fs(payload).to_fs() == payload
 
 

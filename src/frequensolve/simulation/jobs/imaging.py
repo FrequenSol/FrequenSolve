@@ -35,8 +35,11 @@ __all__ = [
     "ImagingJob",
     "LSRTMGradientJob",
     "LSRTMNormalJob",
+    "HDF5TraceStore",
     "Misfit",
+    "MisfitComparison",
     "MisfitGroup",
+    "ObservedTraceDerivatives",
     "PreprocessHook",
     "ImageDatabase",
     "extract_frequencies_for_job",
@@ -554,6 +557,171 @@ class ImageDatabase:
         return list(units)[::-1]
 
 
+@dataclass(frozen=True, kw_only=True)
+class HDF5TraceStore:
+    """One named receiver trace product in an HDF5 trace store.
+
+    A ``dataset`` may be a regular HDF5 dataset or a receiver-group name in a
+    packed FrequenSolve trace root.  Sauce resolves the latter for each active
+    frequency, so the reference remains valid for multi-frequency jobs.
+    """
+
+    file: Union[str, Path]
+    dataset: Optional[str] = None
+    missing: Optional[Literal["error", "zero", "zeros", "warn", "warning"]] = None
+    source_basis: Optional[Literal["source_encoding", "source_geometry"]] = None
+
+    def __post_init__(self) -> None:
+        """Validate the native trace-store descriptor fields."""
+
+        file = str(self.file).strip()
+        if not file:
+            raise ValueError("HDF5 trace-store file must be non-empty")
+        object.__setattr__(self, "file", Path(file))
+        if self.dataset is not None:
+            dataset = str(self.dataset).strip().strip("/")
+            if not dataset:
+                raise ValueError("HDF5 trace-store dataset must be non-empty")
+            object.__setattr__(self, "dataset", dataset)
+        if self.missing is not None:
+            missing = str(self.missing).strip().lower()
+            if missing not in {"error", "zero", "zeros", "warn", "warning"}:
+                raise ValueError("unsupported HDF5 trace-store missing policy")
+            object.__setattr__(self, "missing", missing)
+        if self.source_basis is not None:
+            source_basis = str(self.source_basis).strip().lower()
+            if source_basis not in {"source_encoding", "source_geometry"}:
+                raise ValueError("unsupported HDF5 trace-store source basis")
+            object.__setattr__(self, "source_basis", source_basis)
+
+    def to_fs(self) -> Dict[str, Any]:
+        """Serialize this reference using Sauce's HDF5 trace-store contract."""
+
+        return {
+            "_type": "HDF5TraceStore",
+            "file": self.file,
+            **({"dataset": self.dataset} if self.dataset is not None else {}),
+            **({"missing": self.missing} if self.missing is not None else {}),
+            **(
+                {"source_basis": self.source_basis}
+                if self.source_basis is not None
+                else {}
+            ),
+        }
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "HDF5TraceStore":
+        """Deserialize Sauce's HDF5 trace-store descriptor."""
+
+        allowed = {"_type", "file", "dataset", "missing", "source_basis"}
+        unknown = sorted(set(data).difference(allowed))
+        if unknown:
+            raise ValueError(
+                f"unsupported HDF5 trace-store option(s): {', '.join(unknown)}"
+            )
+        if data.get("_type") not in {"HDF5TraceStore", "SeismicStore"}:
+            raise ValueError("expected an HDF5TraceStore or SeismicStore descriptor")
+        return cls(
+            file=data["file"],
+            dataset=data.get("dataset"),
+            missing=data.get("missing"),
+            source_basis=data.get("source_basis"),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class ObservedTraceDerivatives:
+    """Explicit observed spectral derivatives needed by a comparison operator."""
+
+    df: Union[str, Path, HDF5TraceStore]
+
+    def __post_init__(self) -> None:
+        """Normalize one supported df trace reference."""
+
+        if isinstance(self.df, HDF5TraceStore):
+            return
+        if not isinstance(self.df, (str, Path)):
+            raise TypeError("df must be a path or HDF5TraceStore")
+        value = str(self.df).strip()
+        if not value:
+            raise ValueError("df trace reference must be non-empty")
+        object.__setattr__(self, "df", Path(value))
+
+    @classmethod
+    def packed(
+        cls,
+        trace_root: Union[str, Path],
+        *,
+        receiver_group: str,
+        source_basis: Literal["source_encoding", "source_geometry"] = "source_encoding",
+    ) -> "ObservedTraceDerivatives":
+        """Reference the first df channel for a packed FrequenSolve trace root."""
+
+        group = str(receiver_group).strip()
+        if not group:
+            raise ValueError("receiver_group must be non-empty")
+        trace_file = Path(trace_root)
+        if trace_file.suffix.lower() not in {".h5", ".hdf5"}:
+            trace_file = trace_file / "traces.h5"
+        return cls(
+            df=HDF5TraceStore(
+                file=trace_file,
+                dataset=f"{group}_df",
+                source_basis=source_basis,
+            )
+        )
+
+    @classmethod
+    def from_value(
+        cls,
+        value: Optional[
+            Union[
+                "ObservedTraceDerivatives",
+                str,
+                Path,
+                Mapping[str, Any],
+            ]
+        ],
+    ) -> Optional["ObservedTraceDerivatives"]:
+        """Normalize a public derivative reference or its serialized mapping."""
+
+        if value is None:
+            return None
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, (str, Path)):
+            return cls(df=value)
+        if not isinstance(value, Mapping):
+            raise TypeError("observed_derivatives must be a derivative reference")
+        if set(value) != {"df"}:
+            raise ValueError("observed_derivatives must contain only df")
+        df = value["df"]
+        if isinstance(df, Mapping):
+            df = HDF5TraceStore.from_fs(df)
+        return cls(df=df)
+
+    def to_fs(self) -> Dict[str, Any]:
+        """Serialize explicit observed derivatives for one receiver group."""
+
+        return {
+            "df": self.df.to_fs() if isinstance(self.df, HDF5TraceStore) else self.df
+        }
+
+    def resolved(self, resolve_path) -> "ObservedTraceDerivatives":
+        """Return an equivalent derivative reference with local paths resolved."""
+
+        if isinstance(self.df, HDF5TraceStore):
+            return ObservedTraceDerivatives(
+                df=HDF5TraceStore(
+                    file=resolve_path(self.df.file),
+                    dataset=self.df.dataset,
+                    missing=self.df.missing,
+                    source_basis=self.df.source_basis,
+                )
+            )
+        return ObservedTraceDerivatives(df=resolve_path(self.df))
+
+
 @dataclass(kw_only=True)
 class MisfitGroup:
     """Observed and simulated trace paths for one receiver group misfit.
@@ -562,11 +730,16 @@ class MisfitGroup:
         name: Receiver group name.
         observed: Trace-store root for observed receiver data, or
             ``None`` to request solver-side zero data.
+        observed_derivatives: Explicit observed derivative traces required by
+            spectral comparisons such as instantaneous travel-time FWI.
         simulated: Trace-store root for simulated receiver data.
     """
 
     name: str = ""
     observed: Optional[Union[str, Path]] = None
+    observed_derivatives: Optional[
+        Union[ObservedTraceDerivatives, str, Path, Mapping[str, Any]]
+    ] = None
     simulated: Union[str, Path] = ""
     preprocess: List[Union[PreprocessHook, Dict[str, Any]]] = field(
         default_factory=list
@@ -574,6 +747,9 @@ class MisfitGroup:
 
     def __post_init__(self):
         self.observed = None if self.observed is None else Path(self.observed)
+        self.observed_derivatives = ObservedTraceDerivatives.from_value(
+            self.observed_derivatives
+        )
         self.simulated = Path(self.simulated)
 
     def to_fs(
@@ -597,6 +773,11 @@ class MisfitGroup:
         return {
             "name": self.name,
             "observed": self.observed,
+            **(
+                {"observed_derivatives": self.observed_derivatives.to_fs()}
+                if self.observed_derivatives is not None
+                else {}
+            ),
             "simulated": self.simulated,
             **(
                 {
@@ -694,9 +875,102 @@ class MisfitGroup:
         return cls(
             name=data["name"],
             observed=data["observed"],
+            observed_derivatives=data.get("observed_derivatives"),
             simulated=data["simulated"],
             preprocess=_preprocess_from_fs(data.get("preprocess", [])),
         )
+
+
+@dataclass(frozen=True, kw_only=True)
+class MisfitComparison:
+    """Receiver-data comparison operator used before the misfit norm.
+
+    ``phase_derivative`` compares the stabilized instantaneous phase-frequency
+    slope, which is the frequency-domain instantaneous travel-time attribute.
+    Sauce consumes base and first real-frequency-derivative trace stores for
+    that comparison.
+    """
+
+    kind: Literal["waveform", "phase_derivative"] = "waveform"
+    derivative_axis: Literal["frequency"] = "frequency"
+    source_derivative: Literal["frozen", "total"] = "frozen"
+    relative_amplitude_floor: float = 0.01
+
+    def __post_init__(self) -> None:
+        """Normalize and validate one solver comparison configuration."""
+
+        kind = str(self.kind).strip().lower()
+        if kind not in {"waveform", "phase_derivative"}:
+            raise ValueError("comparison kind must be 'waveform' or 'phase_derivative'")
+        axis = str(self.derivative_axis).strip().lower()
+        if axis != "frequency":
+            raise ValueError(
+                "phase-derivative comparison requires derivative_axis='frequency'"
+            )
+        source_derivative = str(self.source_derivative).strip().lower()
+        if source_derivative not in {"frozen", "total"}:
+            raise ValueError("source_derivative must be 'frozen' or 'total'")
+        try:
+            floor = float(self.relative_amplitude_floor)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("relative_amplitude_floor must be numeric") from exc
+        if not np.isfinite(floor) or floor <= 0.0:
+            raise ValueError("relative_amplitude_floor must be finite and positive")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "derivative_axis", axis)
+        object.__setattr__(self, "source_derivative", source_derivative)
+        object.__setattr__(self, "relative_amplitude_floor", floor)
+
+    @classmethod
+    def phase_derivative(
+        cls,
+        *,
+        source_derivative: Literal["frozen", "total"] = "frozen",
+        relative_amplitude_floor: float = 0.01,
+    ) -> "MisfitComparison":
+        """Create an instantaneous travel-time phase-derivative comparison."""
+
+        return cls(
+            kind="phase_derivative",
+            source_derivative=source_derivative,
+            relative_amplitude_floor=relative_amplitude_floor,
+        )
+
+    @classmethod
+    def from_value(
+        cls,
+        value: Optional[Union["MisfitComparison", Mapping[str, Any]]],
+    ) -> Optional["MisfitComparison"]:
+        """Normalize a comparison object or its serialized mapping."""
+
+        if value is None:
+            return None
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise TypeError("comparison must be a MisfitComparison or mapping")
+        allowed = {
+            "kind",
+            "derivative_axis",
+            "source_derivative",
+            "relative_amplitude_floor",
+        }
+        unknown = sorted(set(value).difference(allowed))
+        if unknown:
+            raise ValueError(f"unsupported comparison option(s): {', '.join(unknown)}")
+        return cls(**dict(value))
+
+    def to_fs(self) -> Dict[str, Any]:
+        """Serialize the comparison using Sauce's imaging contract."""
+
+        if self.kind == "waveform":
+            return {"kind": "waveform"}
+        return {
+            "kind": self.kind,
+            "derivative_axis": self.derivative_axis,
+            "source_derivative": self.source_derivative,
+            "relative_amplitude_floor": self.relative_amplitude_floor,
+        }
 
 
 @dataclass(kw_only=True)
@@ -706,14 +980,23 @@ class Misfit:
     Args:
         norm: Misfit norm name. Currently the solver-facing contract supports
             ``"L2"``.
+        comparison: Optional receiver-data comparison operator. The
+            ``phase_derivative`` operator is the instantaneous travel-time
+            comparison and requires first frequency-derivative trace stores.
         receiver_groups: Receiver-group misfit path mappings.
     """
 
     norm: Literal["L2"] = "L2"
+    comparison: Optional[Union[MisfitComparison, Mapping[str, Any]]] = None
     receiver_groups: List[MisfitGroup] = field(default_factory=list)
     preprocess: List[Union[PreprocessHook, Dict[str, Any]]] = field(
         default_factory=list
     )
+
+    def __post_init__(self) -> None:
+        """Normalize the optional comparison operator."""
+
+        self.comparison = MisfitComparison.from_value(self.comparison)
 
     def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
         """Serialize the imaging misfit configuration.
@@ -729,6 +1012,11 @@ class Misfit:
 
         return {
             "norm": self.norm,
+            **(
+                {"comparison": self.comparison.to_fs()}
+                if self.comparison is not None
+                else {}
+            ),
             **(
                 {
                     "preprocess": _preprocess_to_fs(
@@ -762,6 +1050,7 @@ class Misfit:
 
         return cls(
             norm=data["norm"],
+            comparison=data.get("comparison"),
             preprocess=_preprocess_from_fs(data.get("preprocess", [])),
             receiver_groups=[
                 MisfitGroup.from_fs(group) for group in data["receiver_groups"]
@@ -788,6 +1077,13 @@ class ImagingJob(BaseJob):
         weights: Optional per-frequency weights.
         wavelet: Optional wavelet whose spectrum is sampled for weights.
         misfit_norm: Misfit norm name.
+        comparison: Optional receiver-data comparison operator. Use
+            :meth:`MisfitComparison.phase_derivative` for instantaneous
+            travel-time FWI. Supply ``observed_derivatives`` with base and
+            first ``df`` observed traces.
+        observed_derivatives: Explicit observed first frequency derivatives.
+            :meth:`ObservedTraceDerivatives.packed` references the ``_df``
+            channel of a packed FrequenSolve trace root.
         keep_forward: Keep forward wavefields after imaging.
         keep_adjoint: Keep adjoint wavefields after imaging.
         keep_unstacked: Keep per-source or per-frequency image contributions.
@@ -828,6 +1124,10 @@ class ImagingJob(BaseJob):
         weights: Optional[List[float]] = None,
         wavelet: Optional[Wavelet] = None,
         misfit_norm: Literal["L2"] = "L2",
+        comparison: Optional[Union[MisfitComparison, Mapping[str, Any]]] = None,
+        observed_derivatives: Optional[
+            Union[ObservedTraceDerivatives, str, Path, Mapping[str, Any]]
+        ] = None,
         keep_forward: bool = False,
         keep_adjoint: bool = False,
         keep_unstacked: bool = False,
@@ -913,12 +1213,25 @@ class ImagingJob(BaseJob):
         self.keep_forward = keep_forward
         self.keep_adjoint = keep_adjoint
         self.keep_unstacked = keep_unstacked
-        self.misfit = Misfit(norm=misfit_norm)
+        self.misfit = Misfit(norm=misfit_norm, comparison=comparison)
+        self.observed_derivatives = ObservedTraceDerivatives.from_value(
+            observed_derivatives
+        )
+        if (
+            self.misfit.comparison is not None
+            and self.misfit.comparison.kind == "phase_derivative"
+            and self.observed_derivatives is None
+        ):
+            raise ValueError(
+                "phase-derivative comparison requires observed_derivatives; "
+                "use ObservedTraceDerivatives.packed(...) for packed traces"
+            )
         for receiver_group in simulation.acquisition.receiver_groups:
             self.misfit.receiver_groups.append(
                 MisfitGroup(
                     name=receiver_group.name,
                     observed=self.data_path,
+                    observed_derivatives=self.observed_derivatives,
                     simulated=f_sim,
                 )
             )
@@ -1178,6 +1491,14 @@ class ImagingJob(BaseJob):
                 base_path=base_path,
                 project_path=resolved_project_path,
             )
+            if group.observed_derivatives is not None:
+                group.observed_derivatives = group.observed_derivatives.resolved(
+                    lambda path: cls._resolve_saved_path(
+                        path,
+                        base_path=base_path,
+                        project_path=resolved_project_path,
+                    )
+                )
         if "direction" in image_data:
             image_data["direction"] = cls._resolve_saved_path(
                 image_data["direction"],
@@ -1243,6 +1564,13 @@ class ImagingJob(BaseJob):
             group["simulated"] = self._export_path(
                 group["simulated"], project_relative=True
             )
+            derivatives = group.get("observed_derivatives")
+            if derivatives is not None:
+                df = derivatives["df"]
+                if isinstance(df, Mapping):
+                    df["file"] = self._export_path(df["file"], project_relative=True)
+                else:
+                    derivatives["df"] = self._export_path(df, project_relative=True)
         return payload
 
     @staticmethod

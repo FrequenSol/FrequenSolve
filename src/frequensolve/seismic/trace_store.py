@@ -1957,6 +1957,306 @@ class TraceStore:
         return fd * w
 
     @staticmethod
+    def _wavelet_value_and_derivative(
+        wavelet: Wavelet,
+        times: np.ndarray,
+        frequencies: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample a wavelet spectrum and its physical-frequency derivative."""
+
+        from scipy.interpolate import CubicSpline
+
+        wavelet.times = times
+        wavelet_frequencies = np.asarray(wavelet.frequencies, dtype=float)
+        wavelet_spectrum = np.asarray(wavelet.spectrum, dtype=np.complex128)
+        spline = CubicSpline(wavelet_frequencies, wavelet_spectrum, extrapolate=False)
+        return (
+            np.nan_to_num(spline(frequencies)),
+            np.nan_to_num(spline(frequencies, 1)),
+        )
+
+    def _read_raw_selected_fd(
+        self,
+        group: str,
+        component: str,
+        source: int,
+        *,
+        max_bytes: int,
+    ) -> DataArray:
+        """Read an unweighted base or derivative frequency gather."""
+
+        fd = self._read_fd_eager(
+            group,
+            component,
+            source,
+            max_bytes=max_bytes,
+        )
+        if fd is None:
+            fd = self.read_FD(group, component, source)
+            fd = self._coalesce_td_chunks(fd)
+        return fd
+
+    def _derivative_assisted_spectrum(
+        self,
+        group: str,
+        component: str,
+        source: int,
+        wavelet: Wavelet,
+        *,
+        target_df: float,
+        upscale: int,
+        high_frequency_taper: Union[bool, float],
+        interpolation_time_shift: float,
+        max_bytes: int,
+        reconstruction: str = "hermite",
+    ) -> tuple[DataArray, UniformSweepSampling]:
+        """Reconstruct or extend a spectrum using base and ``df`` channels."""
+
+        from scipy.interpolate import CubicHermiteSpline
+
+        if target_df <= 0.0:
+            raise ValueError("target_df must be positive")
+        interpolation_time_shift = float(interpolation_time_shift)
+        if not np.isfinite(interpolation_time_shift):
+            raise ValueError("interpolation_time_shift must be finite")
+
+        base = self._read_raw_selected_fd(
+            group,
+            component,
+            source,
+            max_bytes=max_bytes,
+        )
+        derivative_group = f"{group}_df"
+        try:
+            derivative = self._read_raw_selected_fd(
+                derivative_group,
+                component,
+                source,
+                max_bytes=max_bytes,
+            )
+        except (KeyError, ValueError) as exc:
+            raise ValueError(
+                "Derivative-assisted time reconstruction requires the packed "
+                f"frequency-derivative trace group {derivative_group!r}"
+            ) from exc
+
+        base_frequency = np.asarray(base.coords["frequency"].values, dtype=float)
+        derivative_frequency = np.asarray(
+            derivative.coords["frequency"].values, dtype=float
+        )
+        if base_frequency.size < 2:
+            raise ValueError(
+                "Derivative-assisted time reconstruction requires at least two "
+                "frequencies"
+            )
+        if not np.array_equal(base.dims, derivative.dims):
+            raise ValueError("Base and frequency-derivative trace dimensions differ")
+        if base_frequency.shape != derivative_frequency.shape or not np.allclose(
+            base_frequency,
+            derivative_frequency,
+            rtol=0.0,
+            atol=max(1.0e-9, target_df * 1.0e-8),
+        ):
+            raise ValueError("Base and frequency-derivative trace frequencies differ")
+
+        order = np.argsort(base_frequency)
+        base_frequency = base_frequency[order]
+        base_values = base.data
+        derivative_values = derivative.data
+        if callable(getattr(base_values, "compute", None)):
+            base_values = base_values.compute()
+        if callable(getattr(derivative_values, "compute", None)):
+            derivative_values = derivative_values.compute()
+        base_values = np.asarray(base_values)[order]
+        derivative_values = np.asarray(derivative_values)[order]
+
+        solved_f_max = float(base_frequency[-1])
+        coarse_steps = np.diff(base_frequency)
+        coarse_df = float(np.median(coarse_steps))
+        taper_width = 0.0
+        if isinstance(high_frequency_taper, (bool, np.bool_)):
+            if high_frequency_taper:
+                taper_width = coarse_df
+        else:
+            taper_width = float(high_frequency_taper)
+            if taper_width < 0.0:
+                raise ValueError("high_frequency_taper width must be non-negative")
+
+        untapered_sampling = UniformSweepSampling(
+            f_min=0.0,
+            f_max=solved_f_max,
+            df=target_df,
+            upscale=upscale,
+        )
+        reconstruction_f_max = solved_f_max
+        if taper_width > 0.0:
+            taper_steps = max(1, int(np.ceil(taper_width / target_df)))
+            reconstruction_f_max += taper_steps * target_df
+        reconstruction_steps = int(np.ceil(reconstruction_f_max / target_df))
+        reconstruction_f_max = reconstruction_steps * target_df
+        sampling = UniformSweepSampling(
+            f_min=0.0,
+            f_max=reconstruction_f_max,
+            df=target_df,
+            upscale=upscale,
+        )
+
+        # Interpolate the solver response before applying the wavelet. Extending
+        # an already weighted response to zero lets its endpoint derivative
+        # create a large cubic lobe even where the source spectrum should be
+        # rapidly decaying. A fixed, sufficiently oversampled wavelet grid is
+        # independent of the requested rolloff width, so adding the continuation
+        # cannot change the wavelet at any existing frequency.
+        base_wavelet_sampling = UniformSweepSampling(
+            f_min=0.0,
+            f_max=solved_f_max,
+            df=target_df,
+        )
+        declared_wavelet_f_max = float(
+            getattr(wavelet, "f_max", solved_f_max) or solved_f_max
+        )
+        wavelet_upscale = max(
+            4,
+            int(np.ceil(declared_wavelet_f_max / solved_f_max)),
+        )
+        wavelet_sampling = UniformSweepSampling(
+            f_min=0.0,
+            f_max=solved_f_max,
+            df=target_df,
+            upscale=wavelet_upscale,
+        )
+        base_wavelet_value, _ = self._wavelet_value_and_derivative(
+            wavelet,
+            base_wavelet_sampling.T_list,
+            sampling.F_list,
+        )
+        oversampled_wavelet_value, _ = self._wavelet_value_and_derivative(
+            wavelet,
+            wavelet_sampling.T_list,
+            sampling.F_list,
+        )
+        # Match the DFT normalization used by the standard path, which samples
+        # the wavelet on the base (non-upscaled) time grid.
+        oversampled_wavelet_value *= (
+            base_wavelet_sampling.T_list.size / wavelet_sampling.T_list.size
+        )
+        solved_endpoint_index = int(np.rint(solved_f_max / target_df))
+        endpoint_denominator = oversampled_wavelet_value[solved_endpoint_index]
+        if not np.isclose(endpoint_denominator, 0.0):
+            oversampled_wavelet_value *= (
+                base_wavelet_value[solved_endpoint_index] / endpoint_denominator
+            )
+        wavelet_value = np.where(
+            sampling.F_list <= solved_f_max + target_df * 1.0e-8,
+            base_wavelet_value,
+            oversampled_wavelet_value,
+        )
+
+        expand = (slice(None),) + (None,) * (base_values.ndim - 1)
+
+        # Remove a reference delay before interpolation. For the Fourier
+        # convention used here a delayed response is exp(-2j*pi*f*tau), so the
+        # demodulating factor is exp(+2j*pi*f*tau). Its derivative contributes
+        # the second product-rule term below. This is applied to the unweighted
+        # solver response; the wavelet is multiplied in only after the Hermite
+        # spline has been evaluated on the dense frequency grid.
+        response = base_values
+        response_derivative = derivative_values
+        if interpolation_time_shift != 0.0:
+            phase = np.exp(2.0j * np.pi * base_frequency * interpolation_time_shift)[
+                expand
+            ]
+            response = phase * response
+            response_derivative = phase * (
+                response_derivative
+                + 2.0j * np.pi * interpolation_time_shift * base_values
+            )
+
+        knot_frequency = base_frequency
+        knot_value = response
+        knot_derivative = response_derivative
+        if taper_width > 0.0:
+            zero_shape = (1, *knot_value.shape[1:])
+            knot_frequency = np.append(knot_frequency, reconstruction_f_max)
+            knot_value = np.concatenate(
+                (knot_value, np.zeros(zero_shape, dtype=knot_value.dtype)), axis=0
+            )
+            knot_derivative = np.concatenate(
+                (
+                    knot_derivative,
+                    np.zeros(zero_shape, dtype=knot_derivative.dtype),
+                ),
+                axis=0,
+            )
+
+        interpolator = CubicHermiteSpline(
+            knot_frequency,
+            knot_value,
+            knot_derivative,
+            axis=0,
+            extrapolate=False,
+        )
+        evaluation_frequency = np.array(sampling.F_list, copy=True)
+        # Frequencies loaded from a job can differ by a few ulps from the dense
+        # linspace grid (for example 24.999999999999996 versus 25.0). Hermite
+        # extrapolation is disabled, so evaluating the nominal endpoint just
+        # beyond its knot would otherwise produce NaN and silently zero the
+        # highest solved bin. Snap dense samples back to coincident knots.
+        for knot in knot_frequency:
+            grid_index = int(np.rint(knot / target_df))
+            if 0 <= grid_index < evaluation_frequency.size and np.isclose(
+                evaluation_frequency[grid_index],
+                knot,
+                rtol=0.0,
+                atol=target_df * 1.0e-8,
+            ):
+                evaluation_frequency[grid_index] = knot
+        values = np.nan_to_num(interpolator(evaluation_frequency))
+        if interpolation_time_shift != 0.0:
+            restore_phase = np.exp(
+                -2.0j * np.pi * sampling.F_list * interpolation_time_shift
+            )
+            values = (
+                values * restore_phase[(slice(None),) + (None,) * (values.ndim - 1)]
+            )
+        values = values * wavelet_value[expand]
+        # NumPy-style irfft applies a 1/N normalization. Extending the spectrum
+        # for a rolloff increases N, so unchanged Fourier coefficients would
+        # otherwise reduce every time-domain component, including frequencies
+        # below solved_f_max. Scale by the FFT-length ratio so X/N (the physical
+        # spectral amplitude) is invariant on all pre-existing bins. This is
+        # one only when no rolloff changes the reconstruction grid.
+        fft_length_scale = sampling.nTime / untapered_sampling.nTime
+        if fft_length_scale != 1.0:
+            values = values * fft_length_scale
+        dims = list(base.dims)
+        coords = {
+            dim: (sampling.F_list if dim == "frequency" else base.coords[dim])
+            for dim in dims
+        }
+        spectrum = DataArray(values, dims=dims, coords=coords)
+        spectrum.attrs.update(base.attrs)
+        spectrum.attrs.update(
+            {
+                "reconstruction": reconstruction,
+                "target_df": target_df,
+                "solved_frequency_count": int(base_frequency.size),
+                "reconstructed_frequency_count": int(sampling.nFreq),
+                "solved_f_max": solved_f_max,
+                "high_frequency_taper_width": taper_width,
+                "fft_length_scale": fft_length_scale,
+                "wavelet_application": "post_interpolation",
+                "interpolation_time_shift": interpolation_time_shift,
+            }
+        )
+        if "laplace" in base.coords:
+            laplace = self._uniform_laplace(base)
+            spectrum = spectrum.assign_coords(
+                laplace=("frequency", np.full(sampling.nFreq, laplace))
+            )
+        return spectrum, sampling
+
+    @staticmethod
     def _normalize_laplace_compensation(value: Union[str, bool]) -> str:
         if isinstance(value, bool):
             return "on" if value else "off"
@@ -2014,6 +2314,15 @@ class TraceStore:
     def _damping_factor(laplace: float, period: float) -> float:
         return float(np.exp(-2.0 * np.pi * laplace * period))
 
+    @staticmethod
+    def _frequency_derivative_order(group: str) -> int:
+        """Return the raw physical-frequency derivative order for a group."""
+
+        for order, suffix in ((1, "_df"), (2, "_d2f"), (3, "_d3f"), (4, "_d4f")):
+            if str(group).endswith(suffix):
+                return order
+        return 0
+
     def read_TD(
         self,
         group: str,
@@ -2023,6 +2332,10 @@ class TraceStore:
         upscale: int = 1,
         T_max: Optional[float] = None,
         laplace_compensation: Union[str, bool] = "auto",
+        reconstruction: Optional[str] = None,
+        target_df: Optional[float] = None,
+        high_frequency_taper: Optional[Union[bool, float]] = None,
+        interpolation_time_shift: Optional[float] = None,
         **kwargs,
     ) -> DataArray:
         """Read one reconstructed time-domain gather.
@@ -2036,6 +2349,16 @@ class TraceStore:
             T_max: Optional maximum time to return.
             laplace_compensation: ``"auto"``, ``"on"``, ``"off"``, or boolean
                 compatibility value controlling Laplace damping compensation.
+            reconstruction: ``"standard"`` or derivative-assisted ``"hermite"``.
+                Defaults to the job's saved time-reconstruction setting.
+            target_df: Dense output frequency spacing for Hermite reconstruction.
+            high_frequency_taper: ``True`` adds a one-solved-interval
+                continuation to a zero-value, zero-slope endpoint; a positive
+                number specifies its width in hertz. Standard reconstruction
+                requires a matching first-derivative trace group when enabled.
+            interpolation_time_shift: Time shift in seconds used to remove a
+                linear phase trend before Hermite interpolation and restore it
+                afterward. Defaults to the value saved with the job.
             **kwargs: Optional frequency-domain read controls.
 
         Returns:
@@ -2048,33 +2371,108 @@ class TraceStore:
         if int(eager_max_bytes) < 0:
             raise ValueError("eager_max_bytes must be non-negative or None")
         compensation_mode = self._normalize_laplace_compensation(laplace_compensation)
-        sampling = UniformSweepSampling(
-            f_min=0.0,
-            f_max=self.metadata["f_max"],
-            df=self.metadata["df"],
-            upscale=upscale,
-        )
-        fd = self._read_fd_eager(
-            group,
-            component,
-            source,
-            max_bytes=int(eager_max_bytes),
-        )
-        if fd is not None:
-            source_sampling = UniformSweepSampling(
-                f_min=0.0,
-                f_max=self.metadata["f_max"],
-                df=self.metadata["df"],
+        reconstruction_config = self.metadata.get("time_reconstruction", {})
+        if reconstruction is None:
+            reconstruction = reconstruction_config.get("method", "standard")
+        reconstruction = str(reconstruction).lower()
+        if reconstruction not in {"standard", "hermite"}:
+            raise ValueError("reconstruction must be 'standard' or 'hermite'")
+        if high_frequency_taper is None:
+            high_frequency_taper = reconstruction_config.get(
+                "high_frequency_taper", False
             )
-            wavelet.times = source_sampling.T_list
-            fd = self._apply_wavelet_to_fd(fd, wavelet, **kwargs)
+        derivative_assisted = False
+
+        if reconstruction == "hermite":
+            if "f_taper" in kwargs:
+                raise ValueError(
+                    "f_taper is not supported with Hermite reconstruction; "
+                    "use high_frequency_taper"
+                )
+            if target_df is None:
+                target_df = reconstruction_config.get("target_df")
+            if target_df is None:
+                sample_every = int(
+                    reconstruction_config.get(
+                        "sample_every",
+                        reconstruction_config.get("frequency_reduction", 4),
+                    )
+                )
+                target_df = self.metadata["df"] / sample_every
+            if interpolation_time_shift is None:
+                interpolation_time_shift = reconstruction_config.get(
+                    "interpolation_time_shift", 0.0
+                )
+            fd, sampling = self._derivative_assisted_spectrum(
+                group,
+                component,
+                source,
+                wavelet,
+                target_df=float(target_df),
+                upscale=upscale,
+                high_frequency_taper=high_frequency_taper,
+                interpolation_time_shift=float(interpolation_time_shift),
+                max_bytes=int(eager_max_bytes),
+            )
+            derivative_assisted = True
         else:
-            fd = self.read_FD(group, component, source, wavelet, **kwargs)
-            fd = self._coalesce_td_chunks(fd)
+            if high_frequency_taper:
+                if "f_taper" in kwargs:
+                    raise ValueError(
+                        "f_taper and high_frequency_taper cannot be used together"
+                    )
+                fd, sampling = self._derivative_assisted_spectrum(
+                    group,
+                    component,
+                    source,
+                    wavelet,
+                    target_df=float(self.metadata["df"]),
+                    upscale=upscale,
+                    high_frequency_taper=high_frequency_taper,
+                    interpolation_time_shift=0.0,
+                    max_bytes=int(eager_max_bytes),
+                    reconstruction="standard",
+                )
+                derivative_assisted = True
+            else:
+                sampling = UniformSweepSampling(
+                    f_min=0.0,
+                    f_max=self.metadata["f_max"],
+                    df=self.metadata["df"],
+                    upscale=upscale,
+                )
+                fd = self._read_fd_eager(
+                    group,
+                    component,
+                    source,
+                    max_bytes=int(eager_max_bytes),
+                )
+                if fd is not None:
+                    source_sampling = UniformSweepSampling(
+                        f_min=0.0,
+                        f_max=self.metadata["f_max"],
+                        df=self.metadata["df"],
+                    )
+                    wavelet.times = source_sampling.T_list
+                    fd = self._apply_wavelet_to_fd(fd, wavelet, **kwargs)
+                else:
+                    fd = self.read_FD(group, component, source, wavelet, **kwargs)
+                    fd = self._coalesce_td_chunks(fd)
         laplace = self._uniform_laplace(fd)
         wavelet.times = sampling.T_list
 
-        fd = fd.interp(frequency=sampling.F_list, kwargs={"fill_value": 0})
+        if reconstruction == "standard":
+            fd = fd.interp(frequency=sampling.F_list, kwargs={"fill_value": 0})
+
+        # For a real time signal, successive derivatives with respect to real
+        # Fourier frequency alternate between anti-Hermitian and Hermitian
+        # symmetry. Multiplication by i**order restores Hermitian symmetry so
+        # irfft returns the real time-moment representation. Derivatives with
+        # respect to imaginary (Laplace) frequency already retain Hermitian
+        # symmetry and need no phase rotation.
+        derivative_order = self._frequency_derivative_order(group)
+        if derivative_order:
+            fd = fd.copy(data=fd.data * (1j**derivative_order))
         fft = get_fft_backend()
         td = fft.irfft(fd.data, axis=0)
         dims = ["time" if d == "frequency" else d for d in fd.dims]
@@ -2110,6 +2508,20 @@ class TraceStore:
         td.attrs["laplace"] = laplace
         td.attrs["laplace_compensated"] = compensated
         td.attrs["damping_factor"] = self._damping_factor(laplace, sampling.T)
+        td.attrs["reconstruction"] = reconstruction
+        td.attrs["phase_derivative_order"] = derivative_order
+        if derivative_assisted:
+            for name in (
+                "target_df",
+                "solved_frequency_count",
+                "reconstructed_frequency_count",
+                "solved_f_max",
+                "high_frequency_taper_width",
+                "fft_length_scale",
+                "wavelet_application",
+                "interpolation_time_shift",
+            ):
+                td.attrs[name] = fd.attrs[name]
         for d in td.dims:
             td.coords[d].attrs["long_name"] = d.title()
             if d == "time":

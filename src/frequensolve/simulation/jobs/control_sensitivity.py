@@ -13,6 +13,8 @@ from frequensolve.model.representation import VariationalSmoothing
 from frequensolve.simulation.jobs.artifacts import TraceOutputSpec
 from frequensolve.simulation.jobs.base import BaseJob
 from frequensolve.simulation.jobs.imaging import (
+    MisfitComparison,
+    ObservedTraceDerivatives,
     PreprocessHook,
     _preprocess_from_fs,
     _preprocess_to_fs,
@@ -286,6 +288,71 @@ def _job_path(value: Optional[Union[str, Path]], ctx, project_relative: bool):
     return str(path)
 
 
+def _observed_derivative_groups(
+    value: Optional[
+        Union[
+            ObservedTraceDerivatives,
+            str,
+            Path,
+            Mapping[str, Any],
+        ]
+    ],
+    names: Sequence[str],
+) -> Dict[str, ObservedTraceDerivatives]:
+    """Normalize one shared or receiver-group keyed df reference mapping."""
+
+    if value is None:
+        return {}
+    if isinstance(value, ObservedTraceDerivatives) or isinstance(value, (str, Path)):
+        derivative = ObservedTraceDerivatives.from_value(value)
+        return {name: derivative for name in names}
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            "observed_derivatives must be a derivative reference or mapping"
+        )
+    if set(value) == {"df"}:
+        derivative = ObservedTraceDerivatives.from_value(value)
+        return {name: derivative for name in names}
+    unknown = sorted(set(value).difference(names))
+    if unknown:
+        raise ValueError(
+            "observed_derivatives contains unknown receiver group(s): "
+            f"{', '.join(unknown)}"
+        )
+    return {
+        str(name): ObservedTraceDerivatives.from_value(derivative)
+        for name, derivative in value.items()
+    }
+
+
+def _derivatives_to_fs(
+    derivatives: ObservedTraceDerivatives,
+    ctx,
+    project_relative: bool,
+) -> Dict[str, Any]:
+    """Serialize one df reference while preserving project-relative paths."""
+
+    payload = derivatives.to_fs()
+    df = payload["df"]
+    if isinstance(df, Mapping):
+        df["file"] = _job_path(df["file"], ctx, project_relative)
+    else:
+        payload["df"] = _job_path(df, ctx, project_relative)
+    return payload
+
+
+def _derivative_input_fingerprint(
+    derivatives: ObservedTraceDerivatives,
+    fingerprint,
+) -> Dict[str, Any]:
+    """Fingerprint the file that owns one observed df reference."""
+
+    df = derivatives.df
+    if hasattr(df, "file"):
+        return fingerprint(df.file)
+    return fingerprint(df)
+
+
 def _resolve_saved_job_path(
     value: Optional[Union[str, Path]],
     *,
@@ -442,7 +509,7 @@ class BornControlSensitivityJob(BaseJob):
 
 @register_class
 class RTMControlSensitivityJob(BaseJob):
-    """Apply the exact real-model transpose and write a control gradient."""
+    """Write a material control gradient, optionally including DPG Gram dependence."""
 
     def __init__(
         self,
@@ -453,11 +520,21 @@ class RTMControlSensitivityJob(BaseJob):
         observed: Union[str, Path, Mapping[str, Union[str, Path]]],
         gradient: Union[str, Path],
         objective_file: Optional[Union[str, Path]] = None,
+        gram_derivative: str = "frozen",
         current: Optional[Union[str, Path]] = None,
         active: Optional[Sequence[str]] = None,
         source_taper: Optional[Mapping[str, Any]] = None,
         spatial_window: Optional[Mapping[str, Any]] = None,
         objective: Optional[Mapping[str, Any]] = None,
+        comparison: Optional[Union[MisfitComparison, Mapping[str, Any]]] = None,
+        observed_derivatives: Optional[
+            Union[
+                ObservedTraceDerivatives,
+                str,
+                Path,
+                Mapping[str, Any],
+            ]
+        ] = None,
         preprocess: Optional[Sequence[Union[PreprocessHook, Mapping[str, Any]]]] = None,
         weights: Optional[Sequence[float]] = None,
         smoothing: Optional[Union[VariationalSmoothing, Mapping[str, Any]]] = None,
@@ -479,11 +556,40 @@ class RTMControlSensitivityJob(BaseJob):
             self.observed = {"surface": Path(observed)}
         self.gradient = Path(gradient)
         self._objective_file = None if objective_file is None else Path(objective_file)
+        if gram_derivative not in {"frozen", "total"}:
+            raise ValueError("gram_derivative must be 'frozen' or 'total'")
+        self.gram_derivative = gram_derivative
         self.current = None if current is None else Path(current)
         self.active = _active_controls(active)
         self.source_taper = _source_taper(source_taper)
         self.spatial_window = _spatial_window(spatial_window)
         self.objective = dict(objective or {"kind": "l2"})
+        self.comparison = MisfitComparison.from_value(comparison)
+        if self.gram_derivative == "total":
+            if self.source_taper is not None or self.spatial_window is not None:
+                raise ValueError(
+                    "total Gram derivatives do not support source_taper or spatial_window"
+                )
+            if (
+                self.comparison is not None
+                and self.comparison.kind == "phase_derivative"
+            ):
+                raise ValueError(
+                    "total Gram derivatives do not support phase_derivative comparisons"
+                )
+        self.observed_derivatives = _observed_derivative_groups(
+            observed_derivatives,
+            tuple(self.observed),
+        )
+        if (
+            self.comparison is not None
+            and self.comparison.kind == "phase_derivative"
+            and set(self.observed_derivatives) != set(self.observed)
+        ):
+            raise ValueError(
+                "phase-derivative comparison requires observed_derivatives for "
+                "every receiver group"
+            )
         self.preprocess = list(preprocess or [])
         if weights is None:
             self.weights = None
@@ -602,6 +708,11 @@ class RTMControlSensitivityJob(BaseJob):
         payload["control_sensitivities"] = {
             "gradient": _job_path(self.gradient, ctx, False),
             **(
+                {"gram_derivative": self.gram_derivative}
+                if self.gram_derivative != "frozen"
+                else {}
+            ),
+            **(
                 {"objective": _job_path(self._objective_file, ctx, False)}
                 if self._objective_file is not None
                 else {}
@@ -639,6 +750,11 @@ class RTMControlSensitivityJob(BaseJob):
             "name": self.name,
             "misfit": {
                 "objective": dict(self.objective),
+                **(
+                    {"comparison": self.comparison.to_fs()}
+                    if self.comparison is not None
+                    else {}
+                ),
                 "preprocess": {
                     # A native control VJP is the linear transpose used by
                     # matrix-free J.T J products.  In particular, it must not
@@ -656,6 +772,17 @@ class RTMControlSensitivityJob(BaseJob):
                     {
                         "name": name,
                         "observed": _job_path(path, ctx, project_relative),
+                        **(
+                            {
+                                "observed_derivatives": _derivatives_to_fs(
+                                    self.observed_derivatives[name],
+                                    ctx,
+                                    project_relative,
+                                )
+                            }
+                            if name in self.observed_derivatives
+                            else {}
+                        ),
                     }
                     for name, path in self.observed.items()
                 ],
@@ -670,7 +797,14 @@ class RTMControlSensitivityJob(BaseJob):
             "observed": {
                 name: self._path_content_fingerprint(path)
                 for name, path in sorted(self.observed.items())
-            }
+            },
+            "observed_derivatives": {
+                name: _derivative_input_fingerprint(
+                    derivatives,
+                    self._path_content_fingerprint,
+                )
+                for name, derivatives in sorted(self.observed_derivatives.items())
+            },
         }
         if self.current is not None:
             inputs["current"] = self._path_content_fingerprint(self.current)
@@ -699,6 +833,20 @@ class RTMControlSensitivityJob(BaseJob):
             )
             for group in misfit["receiver_groups"]
         }
+        observed_derivatives = {}
+        for group in misfit["receiver_groups"]:
+            derivatives = ObservedTraceDerivatives.from_value(
+                group.get("observed_derivatives")
+            )
+            if derivatives is not None:
+                observed_derivatives[group["name"]] = derivatives.resolved(
+                    lambda path: _resolve_saved_job_path(
+                        path,
+                        base_path=base_path,
+                        project_path=resolved_project,
+                        source_project=source_project,
+                    )
+                )
         job = cls(
             data["name"],
             sim,
@@ -726,6 +874,9 @@ class RTMControlSensitivityJob(BaseJob):
             source_taper=config.get("source_taper"),
             spatial_window=config.get("spatial_window"),
             objective=misfit.get("objective"),
+            gram_derivative=config.get("gram_derivative", "frozen"),
+            comparison=misfit.get("comparison"),
+            observed_derivatives=observed_derivatives or None,
             preprocess=_preprocess_from_fs(
                 misfit.get("preprocess", {}).get("hooks", [])
             ),
@@ -854,6 +1005,14 @@ class TimeReversalFocusJob(RTMControlSensitivityJob):
     @classmethod
     def from_fs(cls, data, base_path=None, project_path=None):
         """Deserialize a time-reversal focus job."""
+
+        if (
+            data.get("control_sensitivities", {}).get("gram_derivative", "frozen")
+            != "frozen"
+        ):
+            raise ValueError(
+                "total Gram derivatives do not support time-reversal focus"
+            )
 
         source_project = data.get("project_path")
         resolved_project = project_path or source_project

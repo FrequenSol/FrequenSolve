@@ -1,16 +1,26 @@
 """Dependency-free physics component identities used by package metadata."""
 
 _FAMILY_COMPONENTS = {
-    "acoustic": (("pressure", "velocity"), ()),
+    "acoustic": (("pressure", "velocity"), ("p_velocity", "s_velocity")),
     "electromagnetic": (("electric", "magnetic"), ()),
-    "elastic": (("velocity", "stress"), ("strain", "pressure")),
+    "elastic": (
+        ("velocity", "stress"),
+        ("strain", "pressure", "p_velocity", "s_velocity"),
+    ),
+    "elastic-torsion": (("velocity", "stress"), ("strain", "pressure")),
     "poroelastic": (
         ("velocity", "fluid_flux", "stress", "pressure"),
         ("strain", "displacement", "fluid_displacement"),
     ),
     "coupled-aep": (
         ("pressure", "velocity", "fluid_flux", "stress"),
-        ("strain", "displacement", "fluid_displacement"),
+        (
+            "strain",
+            "displacement",
+            "fluid_displacement",
+            "p_velocity",
+            "s_velocity",
+        ),
     ),
 }
 
@@ -19,11 +29,11 @@ _PHYSICS_FAMILIES = {
     "acoustic_axisym": "acoustic",
     "elastic": "elastic",
     "elastic_axisym": "elastic",
-    "elastic_axisym_torsion": "elastic",
+    "elastic_axisym_torsion": "elastic-torsion",
     "coupled": "elastic",
     "coupled_aep": "coupled-aep",
     "coupled_axisym": "elastic",
-    "coupled_axisym_torsion": "elastic",
+    "coupled_axisym_torsion": "elastic-torsion",
     "poroelastic": "poroelastic",
     "em": "electromagnetic",
 }

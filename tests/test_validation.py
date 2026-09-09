@@ -183,13 +183,16 @@ def test_validation_rejects_unavailable_field_for_galerkin_elastic(tmp_path):
     assert "field.unsupported" in _codes(report)
 
 
-def test_validation_requires_single_grid_for_galerkin(tmp_path):
+@pytest.mark.parametrize("grids", [None, 1, 2])
+def test_validation_allows_backend_grid_selection_for_galerkin(tmp_path, grids):
     job = _simple_job(tmp_path)
-    job.simulation.discretization = Discretization(method="Galerkin")
+    job.simulation.discretization = Discretization(method="galerkin")
+    job.simulation.solver = SolverConfig(**({} if grids is None else {"grids": grids}))
 
     report = job.validate()
 
-    assert "solver.grids.galerkin" in _codes(report)
+    assert report.ok
+    assert job.simulation.to_fs()["Discretization"] == {"method": "galerkin"}
 
 
 def test_validation_catches_bad_source_kind(tmp_path):

@@ -6,6 +6,45 @@ coordinates. They avoid first constructing a Cartesian image and then sampling
 that image during finite-element assembly. Sauce evaluates the control basis at
 the same quadrature points as the physical operator.
 
+Optional total DPG gradients
+----------------------------
+
+``RTMControlSensitivityJob(..., gram_derivative="total")`` opts into analytic
+Gram-matrix and trial-to-test derivatives in compatible Sauce builds. The
+default, ``"frozen"``, preserves the existing approximate gradient and does not
+allocate the additional forward-residual cache or perform its Gram solve.
+For a native RWI job, set
+``control_sensitivities: {"gram_derivative": "total", ...}`` in its job contract.
+
+Writing :math:`v=G^{-1}(l-Bu)`, the reduced RWI objective contributes
+:math:`-\tfrac12\operatorname{Re}(v^H\,\delta G\,v)` in addition to the
+operator/source contraction. This uses the existing optimal residual; it does
+not construct or invert a derivative matrix. Ordinary RTM/FWI also needs the
+derivative of the trial-to-test map; the optional path includes that term and
+caches a separately Gram-solved forward residual per element and source batch.
+The graph-norm material contraction is analytic and shared with the acoustic
+forms coefficient module, not a new legacy element kernel.
+
+Frozen Gram remains the default for both RTM and WRI. Use ``total`` primarily
+for objective-gradient verification; its practical effect depends on the case.
+Total mode requires ``Solver/relaxed_assembly=false``. Fast mode otherwise
+enables relaxed assembly, which can make the solved normal system inconsistent
+with the separately evaluated residual objective. For finite-difference checks,
+also use ``Solver/schur_precision="fp64"`` and a tight solver tolerance.
+
+The initial total-gradient implementation supports full-dimensional Cartesian
+acoustic material controls for RTM and native FWI ``linearize``, ``vjp``, and
+``wri`` actions. Unsupported elastic, Galerkin, 2.5-D, cylindrical, geometry,
+phase-derivative, focus, source-taper, spatial-window, and Born/JVP/model-normal
+combinations are rejected. Do not pair a total VJP with the frozen Born JVP
+when testing an adjoint identity. Keep the mesh, element orders, and quadrature
+fixed for objective finite differences. All PML elements remain excluded from
+sensitivities in both modes. The PML uses the one-dimensional outward extension
+of the boundary model, not independent inversion controls; hold that extension
+fixed during derivative checks. Thus ``total`` refers to the physical-domain
+material derivative including its Gram dependence. Smoothing/preconditioning changes the
+raw covector and should be disabled for these checks.
+
 Control blocks and coefficients
 -------------------------------
 
@@ -125,16 +164,15 @@ linearization and writes the coefficient gradient:
 
 The current vector is optional when the coefficients embedded in the material
 model are already current. After a nonlinear update, the forward operator and
-its factors must be reassembled. Within one JVP/VJP linearization, the Gram
-matrix, optimal-test map, normal system, and static-condensation factors remain
-frozen; their derivatives are intentionally excluded.
+its factors must be reassembled. With the default ``gram_derivative="frozen"``,
+the native JVP/VJP does not differentiate the Gram matrix or optimal-test map.
 
 This is the physical, optimize-then-discretize DPG gradient used by the native
-Born/adjoint kernels. Differentiating the assembled DPG normal equations would
-instead define a discretize-then-optimize objective and would introduce Gram
-and trial-to-test derivatives. That is a different derivative contract, not a
-missing term in the control VJP. The frozen components are nevertheless
-reassembled at every accepted nonlinear model.
+Born/adjoint kernels. ``gram_derivative="total"`` instead differentiates the
+fixed-discretization DPG normal equations for the supported VJP workflows,
+including Gram and trial-to-test terms. Both modes reassemble the forward
+operator at every nonlinear model; ``frozen`` describes the derivative
+approximation, not reuse of a stale forward operator.
 
 Time-reversal focusing
 ----------------------
@@ -498,6 +536,53 @@ for one fixed stage and returns an object exposing ``model`` or ``x``.
 ``run_continuation`` warm-starts the next stage from that terminal vector.
 Explicit ``ContinuationStage`` objects can represent nonuniform damping or
 arbitrary frequency groups when a Cartesian schedule is inappropriate.
+
+Changing model resolution between stages
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pass ``transition(previous_stage, next_stage, accepted_model)`` to
+``run_continuation`` to change parameterization between solves. The hook is
+called only between stages, receives a copy of the preceding terminal vector,
+and returns the next stage's initial vector. The returned size may differ;
+the optimizer result must still match its own stage's initial size. Each
+``solve_stage`` invocation should create a fresh optimizer and rebuild the
+control space, model/backend, bounds, regularization and preconditioner. Do not
+reuse L-BFGS pairs or Newton state across a change of basis.
+
+For unchanged property references, transforms and coordinate frames, transfer
+the latent field through its representation, for example:
+
+.. code-block:: python
+
+   def transition(previous, following, accepted):
+       source = representations[previous.name]
+       target = representations[following.name]
+       return source.transfer_to(
+           target, accepted, common_sample_context,
+           weights=quadrature_weights, tolerance=1.e-12,
+       )
+
+   result = fs.run_continuation(
+       schedule, coarse_initial, solve_stage, transition=transition,
+   )
+
+``FieldRepresentation.project`` and ``transfer_to`` expose the LSQR stopping
+``tolerance`` (default ``1.e-6``); it is not a physical transfer-error bound.
+Use adequate sampling/quadrature for both bases, evaluate the transferred
+physical field, and reject unacceptable projection or bounds-clipping error
+before launching the next solve. With different references or transforms,
+evaluate the physical material first and fit it in the destination
+parameterization; raw coefficient interpolation is not a valid general
+handoff. Future mesh representations can use the same hook with their own
+prolongation or projection operation.
+
+``result.model`` belongs to the final space only. ``stage_results`` and
+``stage_initial_models`` retain the vectors in each stage's own space, so they
+need not form a rectangular array. Checkpoints must identify the stage and
+the complete parameterization, including basis/mesh, coordinates, transform
+and reference; matching vector length or block names alone is insufficient.
+The runner does not infer transfer semantics or validate backend identities.
+Without ``transition``, the existing fixed-space behavior is unchanged.
 
 Pass an ``iteration_callback`` to ``ControlLeastSquaresProblem`` when a driver
 should replace its checkpoint after every new iterate rather than only at

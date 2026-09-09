@@ -35,6 +35,57 @@ def _saved_simulation(tmp_path):
     return simulation
 
 
+@pytest.mark.parametrize("mode", ["frozen", "total"])
+def test_rtm_gram_derivative_serialization_round_trip(tmp_path, mode):
+    job = RTMControlSensitivityJob(
+        "gram",
+        _saved_simulation(tmp_path),
+        [3.0],
+        observed=tmp_path / "observed.h5",
+        gradient=tmp_path / "gradient.h5",
+        gram_derivative=mode,
+    )
+    payload = job.to_fs()
+    config = payload["control_sensitivities"]
+    assert config.get("gram_derivative", "frozen") == mode
+    assert ("gram_derivative" in config) == (mode == "total")
+    restored = RTMControlSensitivityJob.from_fs(payload)
+    assert restored.gram_derivative == mode
+
+
+def test_rtm_rejects_unknown_gram_derivative_mode(tmp_path):
+    with pytest.raises(ValueError, match="gram_derivative"):
+        RTMControlSensitivityJob(
+            "gram",
+            _saved_simulation(tmp_path),
+            [3.0],
+            observed=tmp_path / "observed.h5",
+            gradient=tmp_path / "gradient.h5",
+            gram_derivative="totla",
+        )
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        {"source_taper": {"d0": 10.0, "d1": 20.0}},
+        {"spatial_window": {"axis": "z", "minimum": 0.0, "maximum": 100.0}},
+        {"comparison": {"kind": "phase_derivative"}},
+    ],
+)
+def test_total_gram_rejects_unsupported_gradient_modifications(tmp_path, option):
+    with pytest.raises(ValueError, match="total Gram derivatives"):
+        RTMControlSensitivityJob(
+            "gram",
+            _saved_simulation(tmp_path),
+            [3.0],
+            observed=tmp_path / "observed.h5",
+            gradient=tmp_path / "gradient.h5",
+            gram_derivative="total",
+            **option,
+        )
+
+
 def test_hat_control_is_an_ordered_uniform_grid_without_point_ids():
     control = HatControl(
         coordinate_system="top_relative",
@@ -164,6 +215,41 @@ def test_parameterized_property_preserves_value_and_control_units():
         },
         "units": "s/km",
     }
+
+
+def test_parameterized_property_promotes_reference_units_to_the_wrapper():
+    authored = ParameterizedProperty(
+        Property.file("starting_model.h5:/Vp", units="m/s"),
+        id="sediment_vp",
+        transform="log",
+        control=HatControl(
+            axis="z",
+            spacing=0.5,
+            coefficients=[0.0, 0.0],
+        ),
+    )
+
+    payload = authored.to_fs()
+
+    assert authored.units == "m/s"
+    assert payload["units"] == "m/s"
+    assert "units" not in payload["parameterized"]["reference"]
+    assert Property.from_value(payload).to_fs() == payload
+
+
+def test_parameterized_property_rejects_conflicting_reference_units():
+    with pytest.raises(ValueError, match="units disagree with reference units"):
+        ParameterizedProperty(
+            Property.file("starting_model.h5:/Vp", units="m/s"),
+            id="sediment_vp",
+            units="km/s",
+            transform="log",
+            control=HatControl(
+                axis="z",
+                spacing=0.5,
+                coefficients=[0.0, 0.0],
+            ),
+        )
 
 
 def test_control_space_uses_lexical_blocks_and_float64_hdf5(tmp_path):
