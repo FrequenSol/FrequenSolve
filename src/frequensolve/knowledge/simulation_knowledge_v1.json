@@ -2257,7 +2257,7 @@
         }
       },
       "limitations": [
-        "This scenario validates authoring and export shape but does not run FrequenSolver.",
+        "This scenario validates authoring and export shape but does not run Solver.",
         "The teaching mesh and frequency are intentionally small and are not production sizing guidance.",
         "Always use the installed package validators before upload or submission."
       ]

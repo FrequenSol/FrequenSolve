@@ -51,9 +51,9 @@ STANDARD_FORBIDDEN_FIELDS = frozenset(
         "dockerTestArchiveSha256",
         "dockerTestEvidence",
         "dockerDispatchEvidence",
-        "frequensolverVersion",
-        "frequensolverBuildId",
-        "frequensolverGitCommit",
+        "solverVersion",
+        "solverBuildId",
+        "solverGitCommit",
         "fsMumpsRef",
         "fsMumpsCommit",
     }
@@ -132,24 +132,20 @@ def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
     if evidence.get("ciRunUrl") != expected_ci_url:
         mismatches.append("ciRunUrl must identify ciRunId in FrequenSolve")
 
-    frequensolver_release = evidence.get("frequensolverRelease", "")
-    if not isinstance(frequensolver_release, str) or not FINAL_RELEASE_RE.fullmatch(
-        frequensolver_release
+    solver_release = evidence.get("solverRelease", "")
+    if not isinstance(solver_release, str) or not FINAL_RELEASE_RE.fullmatch(
+        solver_release
     ):
-        mismatches.append(
-            "frequensolverRelease must be an immutable final release tag vX.Y.Z"
-        )
-    if evidence.get("sauceRef") != frequensolver_release:
-        mismatches.append("sauceRef must equal frequensolverRelease")
+        mismatches.append("solverRelease must be an immutable final release tag vX.Y.Z")
+    if evidence.get("sauceRef") != solver_release:
+        mismatches.append("sauceRef must equal solverRelease")
     if not _valid_sha(evidence.get("sauceCommit")):
         mismatches.append("sauceCommit must be a lowercase 40-character Git SHA")
     expected_release_url = (
-        f"https://github.com/FrequenSol/Sauce/releases/tag/{frequensolver_release}"
+        f"https://github.com/FrequenSol/Sauce/releases/tag/{solver_release}"
     )
-    if evidence.get("frequensolverReleaseUrl") != expected_release_url:
-        mismatches.append(
-            "frequensolverReleaseUrl must identify the immutable FrequenSolver release"
-        )
+    if evidence.get("solverReleaseUrl") != expected_release_url:
+        mismatches.append("solverReleaseUrl must identify the immutable Solver release")
 
     if profile == STANDARD_PROFILE:
         forbidden = sorted(STANDARD_FORBIDDEN_FIELDS.intersection(evidence))
@@ -173,7 +169,7 @@ def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
         _validate_solver_backed_evidence(
             evidence,
             expected_commit=expected_commit,
-            frequensolver_release=frequensolver_release,
+            solver_release=solver_release,
             mismatches=mismatches,
         )
 
@@ -185,7 +181,7 @@ def _validate_solver_backed_evidence(
     evidence: dict[str, Any],
     *,
     expected_commit: str,
-    frequensolver_release: object,
+    solver_release: object,
     mismatches: list[str],
 ) -> None:
     """Append failures for the complete Docker and solver-backed contract."""
@@ -210,12 +206,12 @@ def _validate_solver_backed_evidence(
             mismatches.append(f"{name} must be a lowercase 40-character Git SHA")
     if evidence.get("fsMumpsRef") != evidence.get("fsMumpsCommit"):
         mismatches.append("fsMumpsRef must equal the immutable fsMumpsCommit")
-    if evidence.get("frequensolverVersion") != frequensolver_release:
-        mismatches.append("frequensolverVersion must equal frequensolverRelease")
-    if evidence.get("frequensolverGitCommit") != evidence.get("sauceCommit"):
-        mismatches.append("frequensolverGitCommit must equal sauceCommit")
-    if not evidence.get("frequensolverBuildId"):
-        mismatches.append("frequensolverBuildId must be non-empty")
+    if evidence.get("solverVersion") != solver_release:
+        mismatches.append("solverVersion must equal solverRelease")
+    if evidence.get("solverGitCommit") != evidence.get("sauceCommit"):
+        mismatches.append("solverGitCommit must equal sauceCommit")
+    if not evidence.get("solverBuildId"):
+        mismatches.append("solverBuildId must be non-empty")
     for name in ("dockerCallerRunId", "dockerEvidenceRunId"):
         value = evidence.get(name)
         if not _positive_integer(value):

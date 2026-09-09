@@ -330,7 +330,7 @@ def check(profile: Optional[str], config_path: Optional[Path]) -> None:
         click.echo(f"Solver: {solver}")
         modules = ", ".join(execution_site.modules) or "none"
         click.echo(f"Solver modules: {modules}")
-        compatibility = execution_site.check_frequensolver_compatibility()
+        compatibility = execution_site.check_solver_compatibility()
         if compatibility.confirmed or compatibility.status == "off":
             click.echo(compatibility.message)
     except click.ClickException:

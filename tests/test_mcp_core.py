@@ -49,8 +49,8 @@ def test_identity_payload_exposes_exact_installed_identities():
     }
     assert payload["solver"] == {
         "compatibility_schema": catalog.identities.compatibility_schema,
-        "preferred_release": catalog.identities.preferred_frequensolver_release,
-        "preferred_commit": catalog.identities.preferred_frequensolver_commit,
+        "preferred_release": catalog.identities.preferred_solver_release,
+        "preferred_commit": catalog.identities.preferred_solver_commit,
         "validation_profile": catalog.identities.solver_validation_profile,
     }
     assert payload["contracts"] == [

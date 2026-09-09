@@ -138,7 +138,7 @@ where = ["src"]
 include = ["frequensolve*"]
 
 [tool.setuptools.package-data]
-"frequensolve" = ["frequensolver_compatibility.json"]
+"frequensolve" = ["solver_compatibility.json"]
 "frequensolve.knowledge" = ["*.json"]
 "frequensolve.mcp_server" = ["contracts/*.json"]
 "frequensolve.orchestrator.sites" = ["site_presets.toml"]

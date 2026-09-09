@@ -16,7 +16,7 @@ publishing through GitHub Actions.
   final release tag.
 - The `Publish Package` workflow in `.github/workflows/release.yml` for
   building distributions and publishing to the selected package index.
-- An immutable, published final FrequenSolver GitHub release (`vX.Y.Z`) chosen
+- An immutable, published final Solver GitHub release (`vX.Y.Z`) chosen
   for the package release. Drafts, prereleases, branches, and mutable refs are
   not accepted as the preferred runtime.
 - A PyPI project owner must configure trusted publishing for the package
@@ -29,7 +29,26 @@ publishing through GitHub Actions.
 
 Do not add PyPI passwords or API tokens to the repository.
 
-Both validation profiles require read-only FrequenSolver Builder GitHub App
+CI and release workflows prefer the repository secrets
+`FS_SOLVER_BUILDER_CLIENT_ID` and `FS_SOLVER_BUILDER_APP_PRIVATE_KEY`, falling back to
+`FREQUENSOLVER_BUILDER_CLIENT_ID` and `FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY`.
+Existing builder secrets continue to work without migration. Release-candidate
+dispatches accept either `solver_release` or the legacy `frequensolver_release`
+input; `solver_release` takes precedence when both are supplied.
+
+Runtime compatibility checks prefer `FS_SOLVER_POLICY`, then fall back to
+`FREQUENSOLVE_SOLVER_POLICY` and `FREQUENSOLVE_FREQUENSOLVER_POLICY`, in that
+order. An explicit Python policy argument takes precedence over all three.
+
+Docker evidence consumers accept `solver-identity.json`, falling back to the
+legacy `frequensolver-identity.json` filename emitted by the pinned producer.
+Both use the backend identity contract `fs-solver-identity-1` and product
+`FS_solver`; identity and archive-checksum validation remain mandatory.
+Release evidence and compatibility manifests using former backend field names
+must be regenerated with the current tooling; this rename does not migrate
+sealed historical artifacts.
+
+Both validation profiles require read-only Solver Builder GitHub App
 access to resolve the immutable release and commit in the internal Sauce
 repository. The default `standard` profile does not dispatch a Docker build or
 mint an App token with write access. The optional `solver-backed` profile also
@@ -61,16 +80,16 @@ local equivalents.
 Use the release workflows for the normal maintainer flow:
 
 - Run `Create Release Candidate` with a final base version such as `0.2.0` and
-  the final `frequensolver_release` tag selected for that package line. Choose
+  the final `solver_release` tag selected for that package line. Choose
   one explicit validation profile:
 
   - `standard` (the default) requires successful exact-tree `Required CI` for
     the immutable source commit and records the immutable preferred
-    FrequenSolver release and commit. It does not dispatch Docker or claim that
+    Solver release and commit. It does not dispatch Docker or claim that
     the solver pairing was exercised. Its GitHub prerelease contains exactly
     one release evidence asset, `release-evidence.json`, and no heavy archive.
   - `solver-backed` requires the same exact-tree CI and immutable
-    FrequenSolver identity, then API-dispatches the pinned private
+    Solver identity, then API-dispatches the pinned private
     FrequenSolveDockerImage workflow with the exact FrequenSolve, Sauce, and
     FS_MUMPS commits. The returned evidence must bind the request, workflow,
     commits, no-push mode, and passing heavy-test contract. Its GitHub
@@ -95,7 +114,7 @@ published release is reused only when its assets exactly match the newly sealed
 set. Standard releases require exactly one `release-evidence.json` and zero
 heavy archives; solver-backed releases require exactly one of each. A stale,
 extra, or incomplete published set fails before release notes or assets are
-changed. Legacy v2 evidence remains readable as solver-backed evidence.
+changed. The v2 evidence shape remains supported with the current solver field names.
 
 `Publish Package` also supports manual `workflow_dispatch` for maintainers who
 need to retry publishing intentionally. Set the required `release_tag` input to
@@ -128,16 +147,16 @@ gh workflow run release.yml \
 reruns exact-SHA CI validation before it builds or publishes. For
 solver-backed evidence it also verifies the archive checksum and
 machine-readable heavy results. It materializes
-`frequensolver_compatibility.json` from that sealed evidence in a git-free
+`solver_compatibility.json` from that sealed evidence in a git-free
 staging tree, so the wheel and sdist carry the preferred immutable
-FrequenSolver release, commit, validation profile, and evidence URL without
+Solver release, commit, validation profile, and evidence URL without
 making Versioneer report a dirty version. It also runs
 `scripts/validate_release_version.py`. The version validator requires a tag ref
 named `v<Versioneer version>` and rejects
 dirty, untagged, branch-derived, local-version, or non-PEP-440 builds such as
 `0.0.1+278.gccbbd6f` or `0.2.0-rc.1`.
 
-## Runtime FrequenSolver Compatibility
+## Runtime Solver Compatibility
 
 `LocalSite` and `SlurmSite` query the configured executable directly with
 `--identity-json` once before the first submission. `frequensolve site check`
@@ -146,7 +165,7 @@ when the Python package is imported, and individual solver tasks do not repeat
 the check. Remote identity probes time out after 15 seconds so a legacy solver
 cannot leave site validation or submission blocked indefinitely.
 
-The `frequensolver_policy` site setting supports:
+The `solver_policy` site setting supports:
 
 - `warn` (default): continue but warn when the identity is unavailable or the
   release/commit differs from the preferred pair, or when a standard release
@@ -156,7 +175,7 @@ The `frequensolver_policy` site setting supports:
   `untested` and is rejected.
 - `off`: skip the identity query explicitly.
 
-The environment variable `FREQUENSOLVE_FREQUENSOLVER_POLICY` supplies the
+The environment variable `FS_SOLVER_POLICY` supplies the
 policy when a site does not set one. Different versions are described as
 untested rather than necessarily incompatible.
 

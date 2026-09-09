@@ -2,7 +2,7 @@
 
 The catalog is deliberately small and deterministic.  It describes the public
 FrequenSolve authoring surface that an agent may explain without importing a
-solver, calling a cloud API, or copying native FrequenSolver implementation
+solver, calling a cloud API, or copying native Solver implementation
 details.  Runtime version identities are joined with the packaged catalog when
 it is loaded so callers always see the exact installed package declaration.
 """
@@ -20,9 +20,9 @@ from typing import Any, Mapping, Optional, Union
 from frequensolve._physics_components import allowed_components_for_physics
 from frequensolve._property_names import canonical_property_name
 from frequensolve._version import get_versions
-from frequensolve.frequensolver import (
-    FrequenSolverCompatibilityManifest,
-    load_frequensolver_compatibility,
+from frequensolve.solver import (
+    SolverCompatibilityManifest,
+    load_solver_compatibility,
 )
 from frequensolve.util.physics import (
     canonical_dimension,
@@ -179,8 +179,8 @@ class VersionIdentities:
     catalog_version: str
     authoring_rules_schema: str
     compatibility_schema: str
-    preferred_frequensolver_release: Optional[str]
-    preferred_frequensolver_commit: Optional[str]
+    preferred_solver_release: Optional[str]
+    preferred_solver_commit: Optional[str]
     solver_validation_profile: Optional[str]
     contracts: tuple[ContractIdentity, ...]
 
@@ -468,7 +468,7 @@ class SimulationKnowledgeCatalog:
         payload: Mapping[str, object],
         *,
         package_version: Optional[str] = None,
-        compatibility: Optional[FrequenSolverCompatibilityManifest] = None,
+        compatibility: Optional[SolverCompatibilityManifest] = None,
     ) -> "SimulationKnowledgeCatalog":
         """Validate catalog data and attach installed release identities.
 
@@ -476,7 +476,7 @@ class SimulationKnowledgeCatalog:
             payload: Parsed catalog JSON.
             package_version: Installed package version override for build and
                 test tooling. Normal callers should omit it.
-            compatibility: Packaged FrequenSolver compatibility declaration
+            compatibility: Packaged Solver compatibility declaration
                 override. Normal callers should omit it.
 
         Returns:
@@ -580,8 +580,8 @@ class SimulationKnowledgeCatalog:
         )
         _validate_cross_references(physics_entries, examples, starter_scenarios)
 
-        loaded_compatibility = compatibility or load_frequensolver_compatibility()
-        preferred = loaded_compatibility.preferred_frequensolver
+        loaded_compatibility = compatibility or load_solver_compatibility()
+        preferred = loaded_compatibility.preferred_solver
         installed_version = package_version or get_versions()["version"]
         if not isinstance(installed_version, str) or not installed_version.strip():
             raise CatalogValidationError("package_version must be a non-empty string")
@@ -593,10 +593,10 @@ class SimulationKnowledgeCatalog:
             catalog_version=catalog_version,
             authoring_rules_schema=authoring_rules.schema,
             compatibility_schema=loaded_compatibility.schema,
-            preferred_frequensolver_release=(
+            preferred_solver_release=(
                 preferred.release if preferred is not None else None
             ),
-            preferred_frequensolver_commit=(
+            preferred_solver_commit=(
                 preferred.git_commit if preferred is not None else None
             ),
             solver_validation_profile=loaded_compatibility.validation_profile,

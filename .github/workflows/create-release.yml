@@ -148,11 +148,15 @@ jobs:
               python scripts/validate_heavy_test_evidence.py \
                 .release-evidence/heavy/frequensolve-test-evidence.json \
                 --commit "$rc_sha"
-              python scripts/validate_frequensolver_identity.py \
-                .release-evidence/heavy/frequensolver-identity.json \
-                --version "$(jq -r '.frequensolverVersion' "$evidence_file")" \
-                --commit "$(jq -r '.frequensolverGitCommit' "$evidence_file")" \
-                --build-id="$(jq -r '.frequensolverBuildId' "$evidence_file")"
+              solver_identity=.release-evidence/heavy/solver-identity.json
+              if [[ ! -e "$solver_identity" && ! -L "$solver_identity" ]]; then
+                solver_identity=.release-evidence/heavy/frequensolver-identity.json
+              fi
+              python scripts/validate_solver_identity.py \
+                "$solver_identity" \
+                --version "$(jq -r '.solverVersion' "$evidence_file")" \
+                --commit "$(jq -r '.solverGitCommit' "$evidence_file")" \
+                --build-id="$(jq -r '.solverBuildId' "$evidence_file")"
               ;;
             *)
               echo "Unexpected validated profile: ${validation_profile}" >&2
@@ -190,7 +194,7 @@ jobs:
             echo "- Source commit: ${rc_sha}"
             echo "- Package version: ${final_tag#v}"
             echo "- Required CI: $(jq -r '.ciRunUrl' "$evidence_file")"
-            echo "- Preferred FrequenSolver: [$(jq -r '.frequensolverRelease' "$evidence_file")]($(jq -r '.frequensolverReleaseUrl' "$evidence_file"))"
+            echo "- Preferred Solver: [$(jq -r '.solverRelease' "$evidence_file")]($(jq -r '.solverReleaseUrl' "$evidence_file"))"
             if [ "$validation_profile" = solver-backed ]; then
               echo "- Validation profile: solver-backed"
               echo "- Solver evidence run: $(jq -r '.dockerEvidenceRunUrl' "$evidence_file")"
