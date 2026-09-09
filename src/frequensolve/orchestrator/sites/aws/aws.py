@@ -1342,6 +1342,27 @@ class AWSSite(BaseSite):
         self._emit(f"Fetched AWS image from s3://{bucket}/{key}")
         return job.load_images()
 
+    def fetch_postprocess(self, job: BaseJob) -> list[Path]:
+        """Download the required aggregate products of a control/focus job."""
+
+        project = Path(job.project_path).resolve()
+        fetched = []
+        for output in job.postprocess_fetch_files():
+            local = Path(output).resolve()
+            try:
+                relative = local.relative_to(project)
+            except ValueError as exc:
+                raise ValueError(
+                    "Postprocess output must be below the project root"
+                ) from exc
+            remote = (
+                f"s3://{self.config.s3_bucket}/{project.name}/{relative.as_posix()}"
+            )
+            local.parent.mkdir(parents=True, exist_ok=True)
+            self.get(remote, local, overwrite=True)
+            fetched.append(local)
+        return fetched
+
     def fetch_outputs(self, job: BaseJob):
         """Fetch common AWS result artifacts for a completed job.
 
@@ -1349,12 +1370,34 @@ class AWSSite(BaseSite):
             job: Completed job whose S3 artifacts should be downloaded.
 
         Returns:
-            Trace dataset, or a mapping containing traces and wavefields when
-            wavefield outputs exist. Run metadata and configured ParaView
-            outputs are downloaded as side effects.
+            A typed frequency-independent product, control/focus product paths,
+            a trace dataset, or a
+            mapping containing traces and wavefields when those outputs exist.
         """
 
         self.fetch_run_metadata(job)
+        if hasattr(job, "result_manifest_file"):
+            project_name = job.project_path.name
+            output_dir = job.output_directory.relative_to(job._result_path)
+            results_path = (
+                Path("jobs") / job.simulation.name / job.name / "results" / output_dir
+            )
+            s3_results_path = (
+                f"s3://{self.config.s3_bucket}/{project_name}/{results_path.as_posix()}"
+            )
+            job.output_directory.mkdir(parents=True, exist_ok=True)
+            self.get(s3_results_path, job.output_directory, overwrite=True)
+            self._emit(f"Fetched AWS {job.workflow} results from {s3_results_path}")
+            return job.results
+
+        requires_postprocess = getattr(job, "requires_postprocess", None)
+        if (
+            callable(requires_postprocess)
+            and requires_postprocess()
+            and not isinstance(job, ImagingJob)
+        ):
+            return self.fetch_postprocess(job)
+
         traces = self.fetch_traces(job)
         wavefields = None
         if getattr(job.outputs, "wavefields", None):

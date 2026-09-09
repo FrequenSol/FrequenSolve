@@ -233,6 +233,7 @@ module = [
     "botocore.*",
     "distro",
     "h5py",
+    "mpl_toolkits.*",
     "nest_asyncio",
     "paramiko",
     "paramiko.*",

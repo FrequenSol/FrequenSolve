@@ -39,7 +39,11 @@ from frequensolve.orchestrator.sites.hpc.stampede3 import (
 from frequensolve.orchestrator.utils.pool import PoolStatus
 from frequensolve.orchestrator.utils.progress import status_table_html, wait_all
 from frequensolve.project.project import Project
-from frequensolve.simulation.jobs import FrequencyDomainJob, SkipPolicy
+from frequensolve.simulation.jobs import (
+    FrequencyDomainJob,
+    RTMControlSensitivityJob,
+    SkipPolicy,
+)
 from frequensolve.simulation.jobs.imaging import ImagingJob
 from frequensolve.simulation.outputs import WavefieldOutput
 
@@ -1570,6 +1574,32 @@ def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
     ) in script
     assert "--init" not in script
     assert '"--task", str(task_id)' not in script
+
+
+def test_control_postprocess_artifacts_map_into_remote_project(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("/scratch/user/project")
+    project = Project(name="project", path=tmp_path / "project")
+    simulation = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    gradient = project.path / "controls" / "gradient.h5"
+    job = RTMControlSensitivityJob(
+        "rtm",
+        simulation,
+        [3.0, 5.0],
+        observed=project.path / "observed.h5",
+        gradient=gradient,
+    )
+
+    assert site._remote_postprocess_file(job) == Path(
+        "/scratch/user/project/controls/gradient.h5"
+    )
+    assert site._remote_postprocess_file(job, 2) == Path(
+        "/scratch/user/project/controls/gradient_2.h5"
+    )
+    assert job.postprocess_fetch_files() == [
+        project.path / "controls" / "gradient_raw.h5",
+        gradient,
+    ]
 
 
 def test_slurm_submit_ignores_local_current_without_remote_record(

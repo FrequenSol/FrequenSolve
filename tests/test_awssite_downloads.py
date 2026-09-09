@@ -580,3 +580,56 @@ def test_aws_run_handle_honors_submit_time_fetch_after_success():
 
     assert result.successful
     assert fetch_calls == [job]
+
+
+@pytest.mark.parametrize("focus", [False, True])
+def test_fetch_outputs_downloads_control_postprocess_products(tmp_path, focus):
+    from frequensolve.simulation.jobs import (
+        RTMControlSensitivityJob,
+        TimeReversalFocusJob,
+    )
+    from frequensolve.simulation.simulation import SeismicSimulation
+
+    simulation = SeismicSimulation(
+        name="sim", physics="acoustic", dimension=2, project_path=tmp_path
+    )
+    job_type = TimeReversalFocusJob if focus else RTMControlSensitivityJob
+    kwargs = (
+        {"objective_file": tmp_path / "objective.json", "softening": 1.0}
+        if focus
+        else {}
+    )
+    job = job_type(
+        "gradient",
+        simulation,
+        [3.0],
+        observed=tmp_path / "observed.h5",
+        gradient=tmp_path / "gradient.h5",
+        **kwargs,
+    )
+    outputs = [tmp_path / "gradient_raw.h5", tmp_path / "gradient.h5"]
+    if focus:
+        outputs.append(tmp_path / "objective.json")
+    assert job.postprocess_fetch_files() == outputs
+    objects = {
+        f"{tmp_path.name}/{path.relative_to(tmp_path).as_posix()}": path.name
+        for path in outputs
+    }
+    client = FakeS3Client(objects)
+    site = make_site(client)
+    site.config = SimpleNamespace(s3_bucket="test-bucket")
+    site.fetch_run_metadata = lambda job: None
+    assert site.fetch_outputs(job) == outputs
+    assert [path.read_text() for path in outputs] == [path.name for path in outputs]
+    assert len(client.downloads) == len(outputs)
+
+
+def test_fetch_postprocess_propagates_missing_required_product(tmp_path):
+    site = make_site(FakeS3Client({}))
+    site.config = SimpleNamespace(s3_bucket="test-bucket")
+    job = SimpleNamespace(
+        project_path=tmp_path,
+        postprocess_fetch_files=lambda: [tmp_path / "gradient.h5"],
+    )
+    with pytest.raises(FileNotFoundError, match="No S3 objects"):
+        site.fetch_postprocess(job)

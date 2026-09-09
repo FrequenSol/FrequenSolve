@@ -1,25 +1,379 @@
 """Imaging-job definitions and readers for solver imaging products."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    overload,
+)
 
 import numpy as np
+import xarray as xr
 
 from frequensolve.geometry.grids import CartesianGrid
+from frequensolve.model.representation import (
+    CartesianGridRepresentation,
+    VariationalSmoothing,
+)
 from frequensolve.seismic.wavelet import Wavelet
+from frequensolve.simulation.jobs.artifacts import TraceOutputSpec
 from frequensolve.simulation.jobs.base import BaseJob
 from frequensolve.simulation.outputs import JobOutputs, Output
 from frequensolve.simulation.simulation import SeismicSimulation
+from frequensolve.units import value_and_units_to_fs
 from frequensolve.util.class_registry import register_class
+from frequensolve.util.mixins import ExportContext
 
 __all__ = [
     "ImagingJob",
+    "LSRTMGradientJob",
+    "LSRTMNormalJob",
+    "HDF5TraceStore",
     "Misfit",
+    "MisfitComparison",
     "MisfitGroup",
+    "ObservedTraceDerivatives",
+    "PreprocessHook",
     "ImageDatabase",
     "extract_frequencies_for_job",
 ]
+
+
+def _positive_physical_scalar(value: Any, name: str) -> Any:
+    """Validate and serialize one positive scalar with optional units."""
+
+    payload = value_and_units_to_fs(value)
+    magnitude = payload.get("value") if isinstance(payload, Mapping) else payload
+    values = np.asarray(magnitude)
+    if values.ndim != 0 or np.iscomplexobj(values):
+        raise ValueError(f"{name} must be a positive real scalar")
+    try:
+        scalar = float(values)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be numeric") from exc
+    if not np.isfinite(scalar) or scalar <= 0.0:
+        raise ValueError(f"{name} must be finite and positive")
+    return payload
+
+
+def _finite_fraction(value: Any, name: str, *, allow_zero: bool = False) -> float:
+    """Return one finite dimensionless filter fraction."""
+
+    try:
+        scalar = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be numeric") from exc
+    lower_ok = scalar >= 0.0 if allow_zero else scalar > 0.0
+    if not np.isfinite(scalar) or not lower_ok:
+        qualifier = "nonnegative" if allow_zero else "positive"
+        raise ValueError(f"{name} must be finite and {qualifier}")
+    return scalar
+
+
+@dataclass(kw_only=True)
+class PreprocessHook:
+    """One solver preprocessing hook.
+
+    Use :meth:`trace_weight` to author arbitrary nonnegative residual weights
+    with a shape that remains explicit in the solver payload.
+    """
+
+    kind: str
+    stage: str
+    params: Dict[str, Any] = field(default_factory=dict)
+    name: Optional[str] = None
+    schema: str = "fs-preprocess-hook-1"
+    _weight_values: Optional[np.ndarray] = field(default=None, repr=False)
+
+    _MAX_INLINE_TRACE_WEIGHTS: ClassVar[int] = 256
+
+    @classmethod
+    def trace_weight(
+        cls,
+        weights: Any,
+        *,
+        layout: Optional[
+            Literal[
+                "receiver",
+                "component_receiver",
+                "source_component_receiver",
+                "sparse_trace",
+            ]
+        ] = None,
+        name: Optional[str] = None,
+    ) -> "PreprocessHook":
+        """Create a residual-stage per-trace objective-weight hook.
+
+        Multidimensional arrays infer layouts ``receiver`` (1-D),
+        ``component_receiver`` (2-D), or ``source_component_receiver`` (3-D).
+        Receiver is always the fastest-varying flattened dimension. Sparse
+        trace-catalog weights require ``layout="sparse_trace"`` explicitly.
+        """
+
+        values = np.asarray(weights)
+        if values.ndim < 1 or values.ndim > 3 or values.size == 0:
+            raise ValueError("trace weights must be a nonempty 1-D, 2-D, or 3-D array")
+        if np.iscomplexobj(values) and np.any(np.imag(values) != 0):
+            raise ValueError("residual trace weights must be real")
+        try:
+            real_values = np.asarray(np.real(values), dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("residual trace weights must be numeric") from exc
+        if not np.all(np.isfinite(real_values)) or np.any(real_values < 0):
+            raise ValueError("residual trace weights must be finite and nonnegative")
+
+        inferred = {
+            1: "receiver",
+            2: "component_receiver",
+            3: "source_component_receiver",
+        }[real_values.ndim]
+        selected = inferred if layout is None else layout
+        allowed = {
+            "receiver",
+            "component_receiver",
+            "source_component_receiver",
+            "sparse_trace",
+        }
+        if selected not in allowed:
+            raise ValueError(f"unsupported trace-weight layout {selected!r}")
+        expected_ndim = {
+            "receiver": 1,
+            "component_receiver": 2,
+            "source_component_receiver": 3,
+            "sparse_trace": 1,
+        }[selected]
+        if real_values.ndim != expected_ndim:
+            raise ValueError(
+                f"trace-weight layout {selected!r} requires a {expected_ndim}-D array"
+            )
+        return cls(
+            kind="trace_weight",
+            stage="residual",
+            name=name,
+            params={"layout": selected},
+            _weight_values=np.array(real_values, dtype=np.float64, copy=True),
+        )
+
+    @classmethod
+    def receiver_ar1_whiten(
+        cls,
+        correlation: float,
+        *,
+        name: Optional[str] = None,
+    ) -> "PreprocessHook":
+        """Create exact stationary AR(1) whitening along a dense receiver axis."""
+
+        try:
+            rho = float(correlation)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("receiver AR(1) correlation must be numeric") from exc
+        if not np.isfinite(rho) or abs(rho) >= 1.0:
+            raise ValueError(
+                "receiver AR(1) correlation must be finite with absolute value below one"
+            )
+        return cls(
+            kind="receiver_ar1_whiten",
+            stage="trace_pair",
+            name=name,
+            params={"correlation": rho},
+        )
+
+    @classmethod
+    def scholte_notch(
+        cls,
+        phase_velocity: Optional[Any] = None,
+        *,
+        wavenumber: Optional[Any] = None,
+        relative_half_width: float = 0.04,
+        relative_taper_width: float = 0.04,
+        spacing_tolerance: float = 1.0e-3,
+        name: Optional[str] = None,
+    ) -> "PreprocessHook":
+        """Create a smooth receiver-wavenumber notch around a Scholte ridge.
+
+        Supply exactly one ridge description: ``phase_velocity`` predicts the
+        frequency-local angular wavenumber as ``2*pi*f/velocity``;
+        ``wavenumber`` supplies that angular wavenumber directly. The real,
+        symmetric mask is applied along a regularly sampled dense cable.
+        """
+
+        if (phase_velocity is None) == (wavenumber is None):
+            raise ValueError(
+                "scholte_notch requires exactly one of phase_velocity or wavenumber"
+            )
+        params = {
+            "relative_half_width": _finite_fraction(
+                relative_half_width,
+                "relative_half_width",
+                allow_zero=True,
+            ),
+            "relative_taper_width": _finite_fraction(
+                relative_taper_width,
+                "relative_taper_width",
+            ),
+            "spacing_tolerance": _finite_fraction(
+                spacing_tolerance,
+                "spacing_tolerance",
+            ),
+        }
+        if params["spacing_tolerance"] >= 1.0:
+            raise ValueError("spacing_tolerance must be less than one")
+        if phase_velocity is not None:
+            params["phase_velocity"] = _positive_physical_scalar(
+                phase_velocity,
+                "phase_velocity",
+            )
+        else:
+            params["wavenumber"] = _positive_physical_scalar(
+                wavenumber,
+                "wavenumber",
+            )
+        return cls(
+            kind="scholte_notch",
+            stage="trace_pair",
+            name=name,
+            params=params,
+        )
+
+    @classmethod
+    def slow_velocity_mute(
+        cls,
+        stop_velocity: Any,
+        pass_velocity: Any,
+        *,
+        mode: Literal["reject_slow", "keep_slow"] = "reject_slow",
+        spacing_tolerance: float = 1.0e-3,
+        name: Optional[str] = None,
+    ) -> "PreprocessHook":
+        """Create a smooth apparent-velocity fan mute along a dense cable.
+
+        ``reject_slow`` is zero below ``stop_velocity`` and one above
+        ``pass_velocity`` with a raised-cosine transition. ``keep_slow`` uses
+        the complementary mask for paired P/S experiments.
+        """
+
+        if mode not in {"reject_slow", "keep_slow"}:
+            raise ValueError(f"unsupported slow-velocity mute mode {mode!r}")
+        stop = _positive_physical_scalar(stop_velocity, "stop_velocity")
+        passed = _positive_physical_scalar(pass_velocity, "pass_velocity")
+        stop_value = stop["value"] if isinstance(stop, Mapping) else stop
+        pass_value = passed["value"] if isinstance(passed, Mapping) else passed
+        stop_units = stop.get("units") if isinstance(stop, Mapping) else None
+        pass_units = passed.get("units") if isinstance(passed, Mapping) else None
+        if stop_units == pass_units and float(pass_value) <= float(stop_value):
+            raise ValueError("pass_velocity must exceed stop_velocity")
+        tolerance = _finite_fraction(spacing_tolerance, "spacing_tolerance")
+        if tolerance >= 1.0:
+            raise ValueError("spacing_tolerance must be less than one")
+        return cls(
+            kind="slow_velocity_mute",
+            stage="trace_pair",
+            name=name,
+            params={
+                "stop_velocity": stop,
+                "pass_velocity": passed,
+                "mode": mode,
+                "spacing_tolerance": tolerance,
+            },
+        )
+
+    def to_fs(
+        self, ctx: Optional[ExportContext] = None, *, dataset: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Serialize this hook, materializing authored trace weights when possible."""
+
+        params = dict(self.params)
+        if self.kind == "trace_weight" and self._weight_values is not None:
+            store = getattr(ctx, "store", None) if ctx is not None else None
+            if store is None:
+                if self._weight_values.size > self._MAX_INLINE_TRACE_WEIGHTS:
+                    raise ValueError(
+                        "large trace weights require an export context with an HDF5 store"
+                    )
+                params["weights"] = self._weight_values.reshape(-1, order="C").tolist()
+            else:
+                if dataset is None:
+                    raise ValueError(
+                        "trace-weight HDF5 serialization requires a dataset path"
+                    )
+                dims = {
+                    1: ("receiver",),
+                    2: ("component", "receiver"),
+                    3: ("source", "component", "receiver"),
+                }[self._weight_values.ndim]
+                if params.get("layout") == "sparse_trace":
+                    dims = ("trace",)
+                ref = store.put_dataarray(
+                    dataset,
+                    xr.DataArray(self._weight_values, dims=dims),
+                    attrs={"fs_kind": "residual_trace_weights"},
+                    coordinate_dims=(),
+                    dtype=np.float64,
+                )
+                params["weights"] = {
+                    "_type": "HDF5Dense",
+                    **ref.to_fs(format="HDF5"),
+                }
+
+        return {
+            "schema": self.schema,
+            **({"name": self.name} if self.name is not None else {}),
+            "kind": self.kind,
+            "stage": self.stage,
+            "params": params,
+        }
+
+    @classmethod
+    def from_fs(cls, data: Dict[str, Any]) -> "PreprocessHook":
+        """Deserialize a preprocessing hook."""
+
+        return cls(
+            schema=data.get("schema", "fs-preprocess-hook-1"),
+            name=data.get("name"),
+            kind=data["kind"],
+            stage=data["stage"],
+            params=dict(data.get("params", {})),
+        )
+
+
+def _preprocess_to_fs(
+    hooks: Sequence[Union[PreprocessHook, Mapping[str, Any]]],
+    ctx: Optional[ExportContext] = None,
+    *,
+    scope: str,
+) -> List[Dict[str, Any]]:
+    """Serialize typed and raw preprocessing hooks without changing order."""
+
+    return [
+        (
+            hook.to_fs(
+                ctx,
+                dataset=f"inputs/imaging/trace_weights/{scope}/{index}",
+            )
+            if isinstance(hook, PreprocessHook)
+            else dict(hook)
+        )
+        for index, hook in enumerate(hooks)
+    ]
+
+
+def _preprocess_from_fs(
+    hooks: Sequence[Dict[str, Any]],
+) -> List[Union[PreprocessHook, Mapping[str, Any]]]:
+    """Deserialize preprocessing hook payloads."""
+
+    return [PreprocessHook.from_fs(hook) for hook in hooks]
 
 
 @dataclass(kw_only=True)
@@ -211,6 +565,195 @@ class ImageDatabase:
         return list(units)[::-1]
 
 
+@dataclass(frozen=True, kw_only=True)
+class HDF5TraceStore:
+    """One named receiver trace product in an HDF5 trace store.
+
+    A ``dataset`` may be a regular HDF5 dataset or a receiver-group name in a
+    packed FrequenSolve trace root.  Sauce resolves the latter for each active
+    frequency, so the reference remains valid for multi-frequency jobs.
+    """
+
+    file: Union[str, Path]
+    dataset: Optional[str] = None
+    missing: Optional[Literal["error", "zero", "zeros", "warn", "warning"]] = None
+    source_basis: Optional[Literal["source_encoding", "source_geometry"]] = None
+
+    def __post_init__(self) -> None:
+        """Validate the native trace-store descriptor fields."""
+
+        file = str(self.file).strip()
+        if not file:
+            raise ValueError("HDF5 trace-store file must be non-empty")
+        object.__setattr__(self, "file", Path(file))
+        if self.dataset is not None:
+            dataset = str(self.dataset).strip().strip("/")
+            if not dataset:
+                raise ValueError("HDF5 trace-store dataset must be non-empty")
+            object.__setattr__(self, "dataset", dataset)
+        if self.missing is not None:
+            missing = str(self.missing).strip().lower()
+            if missing not in {"error", "zero", "zeros", "warn", "warning"}:
+                raise ValueError("unsupported HDF5 trace-store missing policy")
+            object.__setattr__(self, "missing", missing)
+        if self.source_basis is not None:
+            source_basis = str(self.source_basis).strip().lower()
+            if source_basis not in {"source_encoding", "source_geometry"}:
+                raise ValueError("unsupported HDF5 trace-store source basis")
+            object.__setattr__(self, "source_basis", source_basis)
+
+    def to_fs(self) -> Dict[str, Any]:
+        """Serialize this reference using Sauce's HDF5 trace-store contract."""
+
+        return {
+            "_type": "HDF5TraceStore",
+            "file": self.file,
+            **({"dataset": self.dataset} if self.dataset is not None else {}),
+            **({"missing": self.missing} if self.missing is not None else {}),
+            **(
+                {"source_basis": self.source_basis}
+                if self.source_basis is not None
+                else {}
+            ),
+        }
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "HDF5TraceStore":
+        """Deserialize Sauce's HDF5 trace-store descriptor."""
+
+        allowed = {"_type", "file", "dataset", "missing", "source_basis"}
+        unknown = sorted(set(data).difference(allowed))
+        if unknown:
+            raise ValueError(
+                f"unsupported HDF5 trace-store option(s): {', '.join(unknown)}"
+            )
+        if data.get("_type") not in {"HDF5TraceStore", "SeismicStore"}:
+            raise ValueError("expected an HDF5TraceStore or SeismicStore descriptor")
+        return cls(
+            file=data["file"],
+            dataset=data.get("dataset"),
+            missing=data.get("missing"),
+            source_basis=data.get("source_basis"),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class ObservedTraceDerivatives:
+    """Explicit observed spectral derivatives needed by a comparison operator."""
+
+    df: Union[str, Path, HDF5TraceStore]
+
+    def __post_init__(self) -> None:
+        """Normalize one supported df trace reference."""
+
+        if isinstance(self.df, HDF5TraceStore):
+            return
+        if not isinstance(self.df, (str, Path)):
+            raise TypeError("df must be a path or HDF5TraceStore")
+        value = str(self.df).strip()
+        if not value:
+            raise ValueError("df trace reference must be non-empty")
+        object.__setattr__(self, "df", Path(value))
+
+    @classmethod
+    def packed(
+        cls,
+        trace_root: Union[str, Path],
+        *,
+        receiver_group: str,
+        source_basis: Literal["source_encoding", "source_geometry"] = "source_encoding",
+    ) -> "ObservedTraceDerivatives":
+        """Reference the first df channel for a packed FrequenSolve trace root."""
+
+        group = str(receiver_group).strip()
+        if not group:
+            raise ValueError("receiver_group must be non-empty")
+        trace_file = Path(trace_root)
+        if trace_file.suffix.lower() not in {".h5", ".hdf5"}:
+            trace_file = trace_file / "traces.h5"
+        return cls(
+            df=HDF5TraceStore(
+                file=trace_file,
+                dataset=f"{group}_df",
+                source_basis=source_basis,
+            )
+        )
+
+    @overload
+    @classmethod
+    def from_value(
+        cls, value: Union["ObservedTraceDerivatives", str, Path, Mapping[str, Any]]
+    ) -> "ObservedTraceDerivatives": ...
+
+    @overload
+    @classmethod
+    def from_value(cls, value: None) -> None: ...
+
+    @classmethod
+    def from_value(
+        cls,
+        value: Optional[
+            Union[
+                "ObservedTraceDerivatives",
+                str,
+                Path,
+                Mapping[str, Any],
+            ]
+        ],
+    ) -> Optional["ObservedTraceDerivatives"]:
+        """Normalize a public derivative reference or its serialized mapping."""
+
+        if value is None:
+            return None
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, (str, Path)):
+            return cls(df=value)
+        if not isinstance(value, Mapping):
+            raise TypeError("observed_derivatives must be a derivative reference")
+        if set(value) != {"df"}:
+            raise ValueError("observed_derivatives must contain only df")
+        df = value["df"]
+        if isinstance(df, Mapping):
+            df = HDF5TraceStore.from_fs(df)
+        return cls(df=df)
+
+    def to_fs(self) -> Dict[str, Any]:
+        """Serialize explicit observed derivatives for one receiver group."""
+
+        return {
+            "df": self.df.to_fs() if isinstance(self.df, HDF5TraceStore) else self.df
+        }
+
+    def resolved(
+        self, resolve_path: Callable[[Any], Any]
+    ) -> "ObservedTraceDerivatives":
+        """Return an equivalent derivative reference with local paths resolved."""
+
+        if isinstance(self.df, HDF5TraceStore):
+            return ObservedTraceDerivatives(
+                df=HDF5TraceStore(
+                    file=resolve_path(self.df.file),
+                    dataset=self.df.dataset,
+                    missing=self.df.missing,
+                    source_basis=self.df.source_basis,
+                )
+            )
+        return ObservedTraceDerivatives(df=resolve_path(self.df))
+
+
+def _derivative_input_fingerprint(
+    derivatives: ObservedTraceDerivatives,
+    fingerprint: Callable[[Any], Any],
+) -> Dict[str, Any]:
+    """Fingerprint the file that owns one observed df reference."""
+
+    df = derivatives.df
+    if hasattr(df, "file"):
+        return fingerprint(df.file)
+    return fingerprint(df)
+
+
 @dataclass(kw_only=True)
 class MisfitGroup:
     """Observed and simulated trace paths for one receiver group misfit.
@@ -219,18 +762,35 @@ class MisfitGroup:
         name: Receiver group name.
         observed: Trace-store root for observed receiver data, or
             ``None`` to request solver-side zero data.
+        observed_derivatives: Explicit observed derivative traces required by
+            spectral comparisons such as instantaneous travel-time FWI.
         simulated: Trace-store root for simulated receiver data.
     """
 
     name: str = ""
     observed: Optional[Union[str, Path]] = None
+    observed_derivatives: Optional[
+        Union[ObservedTraceDerivatives, str, Path, Mapping[str, Any]]
+    ] = None
     simulated: Union[str, Path] = ""
+    preprocess: List[Union[PreprocessHook, Mapping[str, Any]]] = field(
+        default_factory=list
+    )
 
     def __post_init__(self):
         self.observed = None if self.observed is None else Path(self.observed)
+        self.observed_derivatives = ObservedTraceDerivatives.from_value(
+            self.observed_derivatives
+        )
         self.simulated = Path(self.simulated)
 
-    def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
+    def to_fs(
+        self,
+        ctx: Optional[ExportContext] = None,
+        *,
+        project_relative: bool = False,
+        preprocess_scope: Optional[str] = None,
+    ) -> Dict:
         """Serialize the receiver-group misfit path mapping.
 
         Args:
@@ -245,8 +805,104 @@ class MisfitGroup:
         return {
             "name": self.name,
             "observed": self.observed,
+            **(
+                {
+                    "observed_derivatives": ObservedTraceDerivatives.from_value(
+                        self.observed_derivatives
+                    ).to_fs()
+                }
+                if self.observed_derivatives is not None
+                else {}
+            ),
             "simulated": self.simulated,
+            **(
+                {
+                    "preprocess": _preprocess_to_fs(
+                        self.preprocess,
+                        ctx,
+                        scope=preprocess_scope or f"receiver_groups/{self.name}",
+                    )
+                }
+                if self.preprocess
+                else {}
+            ),
         }
+
+    def add_trace_weights(
+        self,
+        weights: Any,
+        *,
+        layout: Optional[
+            Literal[
+                "receiver",
+                "component_receiver",
+                "source_component_receiver",
+                "sparse_trace",
+            ]
+        ] = None,
+        name: Optional[str] = None,
+    ) -> PreprocessHook:
+        """Append arbitrary residual weights for this receiver group."""
+
+        hook = PreprocessHook.trace_weight(weights, layout=layout, name=name)
+        self.preprocess.append(hook)
+        return hook
+
+    def add_receiver_ar1_whitening(
+        self,
+        correlation: float,
+        *,
+        name: Optional[str] = None,
+    ) -> PreprocessHook:
+        """Append stationary neighbor-covariance whitening for this group."""
+
+        hook = PreprocessHook.receiver_ar1_whiten(correlation, name=name)
+        self.preprocess.append(hook)
+        return hook
+
+    def add_scholte_notch(
+        self,
+        phase_velocity: Optional[Any] = None,
+        *,
+        wavenumber: Optional[Any] = None,
+        relative_half_width: float = 0.04,
+        relative_taper_width: float = 0.04,
+        spacing_tolerance: float = 1.0e-3,
+        name: Optional[str] = None,
+    ) -> PreprocessHook:
+        """Append a smooth Scholte-ridge notch for this receiver group."""
+
+        hook = PreprocessHook.scholte_notch(
+            phase_velocity,
+            wavenumber=wavenumber,
+            relative_half_width=relative_half_width,
+            relative_taper_width=relative_taper_width,
+            spacing_tolerance=spacing_tolerance,
+            name=name,
+        )
+        self.preprocess.append(hook)
+        return hook
+
+    def add_slow_velocity_mute(
+        self,
+        stop_velocity: Any,
+        pass_velocity: Any,
+        *,
+        mode: Literal["reject_slow", "keep_slow"] = "reject_slow",
+        spacing_tolerance: float = 1.0e-3,
+        name: Optional[str] = None,
+    ) -> PreprocessHook:
+        """Append a smooth apparent-velocity fan mute for this receiver group."""
+
+        hook = PreprocessHook.slow_velocity_mute(
+            stop_velocity,
+            pass_velocity,
+            mode=mode,
+            spacing_tolerance=spacing_tolerance,
+            name=name,
+        )
+        self.preprocess.append(hook)
+        return hook
 
     @classmethod
     def from_fs(cls, data: Dict) -> "MisfitGroup":
@@ -262,8 +918,112 @@ class MisfitGroup:
         return cls(
             name=data["name"],
             observed=data["observed"],
+            observed_derivatives=data.get("observed_derivatives"),
             simulated=data["simulated"],
+            preprocess=_preprocess_from_fs(data.get("preprocess", [])),
         )
+
+
+@dataclass(frozen=True, kw_only=True)
+class MisfitComparison:
+    """Receiver-data comparison operator used before the misfit norm.
+
+    ``phase_derivative`` compares the stabilized instantaneous phase-frequency
+    slope, which is the frequency-domain instantaneous travel-time attribute.
+    Sauce consumes base and first real-frequency-derivative trace stores for
+    that comparison.
+    """
+
+    kind: Literal["waveform", "phase_derivative"] = "waveform"
+    derivative_axis: Literal["frequency"] = "frequency"
+    source_derivative: Literal["frozen", "total"] = "frozen"
+    relative_amplitude_floor: float = 0.01
+
+    def __post_init__(self) -> None:
+        """Normalize and validate one solver comparison configuration."""
+
+        kind = str(self.kind).strip().lower()
+        if kind not in {"waveform", "phase_derivative"}:
+            raise ValueError("comparison kind must be 'waveform' or 'phase_derivative'")
+        axis = str(self.derivative_axis).strip().lower()
+        if axis != "frequency":
+            raise ValueError(
+                "phase-derivative comparison requires derivative_axis='frequency'"
+            )
+        source_derivative = str(self.source_derivative).strip().lower()
+        if source_derivative not in {"frozen", "total"}:
+            raise ValueError("source_derivative must be 'frozen' or 'total'")
+        try:
+            floor = float(self.relative_amplitude_floor)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("relative_amplitude_floor must be numeric") from exc
+        if not np.isfinite(floor) or floor <= 0.0:
+            raise ValueError("relative_amplitude_floor must be finite and positive")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "derivative_axis", axis)
+        object.__setattr__(self, "source_derivative", source_derivative)
+        object.__setattr__(self, "relative_amplitude_floor", floor)
+
+    @classmethod
+    def phase_derivative(
+        cls,
+        *,
+        source_derivative: Literal["frozen", "total"] = "frozen",
+        relative_amplitude_floor: float = 0.01,
+    ) -> "MisfitComparison":
+        """Create an instantaneous travel-time phase-derivative comparison."""
+
+        return cls(
+            kind="phase_derivative",
+            source_derivative=source_derivative,
+            relative_amplitude_floor=relative_amplitude_floor,
+        )
+
+    @overload
+    @classmethod
+    def from_value(
+        cls, value: Union["MisfitComparison", Mapping[str, Any]]
+    ) -> "MisfitComparison": ...
+
+    @overload
+    @classmethod
+    def from_value(cls, value: None) -> None: ...
+
+    @classmethod
+    def from_value(
+        cls,
+        value: Optional[Union["MisfitComparison", Mapping[str, Any]]],
+    ) -> Optional["MisfitComparison"]:
+        """Normalize a comparison object or its serialized mapping."""
+
+        if value is None:
+            return None
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise TypeError("comparison must be a MisfitComparison or mapping")
+        allowed = {
+            "kind",
+            "derivative_axis",
+            "source_derivative",
+            "relative_amplitude_floor",
+        }
+        unknown = sorted(set(value).difference(allowed))
+        if unknown:
+            raise ValueError(f"unsupported comparison option(s): {', '.join(unknown)}")
+        return cls(**dict(value))
+
+    def to_fs(self) -> Dict[str, Any]:
+        """Serialize the comparison using Sauce's imaging contract."""
+
+        if self.kind == "waveform":
+            return {"kind": "waveform"}
+        return {
+            "kind": self.kind,
+            "derivative_axis": self.derivative_axis,
+            "source_derivative": self.source_derivative,
+            "relative_amplitude_floor": self.relative_amplitude_floor,
+        }
 
 
 @dataclass(kw_only=True)
@@ -273,13 +1033,27 @@ class Misfit:
     Args:
         norm: Misfit norm name. Currently the solver-facing contract supports
             ``"L2"``.
+        comparison: Optional receiver-data comparison operator. The
+            ``phase_derivative`` operator is the instantaneous travel-time
+            comparison and requires first frequency-derivative trace stores.
         receiver_groups: Receiver-group misfit path mappings.
     """
 
     norm: Literal["L2"] = "L2"
+    comparison: Optional[Union[MisfitComparison, Mapping[str, Any]]] = None
     receiver_groups: List[MisfitGroup] = field(default_factory=list)
+    preprocess: List[Union[PreprocessHook, Mapping[str, Any]]] = field(
+        default_factory=list
+    )
 
-    def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
+    def __post_init__(self) -> None:
+        """Normalize the optional comparison operator."""
+
+        self.comparison = MisfitComparison.from_value(self.comparison)
+
+    def to_fs(
+        self, ctx: Optional[ExportContext] = None, *, project_relative: bool = False
+    ) -> Dict:
         """Serialize the imaging misfit configuration.
 
         Args:
@@ -293,7 +1067,29 @@ class Misfit:
 
         return {
             "norm": self.norm,
-            "receiver_groups": [group.to_fs(ctx) for group in self.receiver_groups],
+            **(
+                {"comparison": MisfitComparison.from_value(self.comparison).to_fs()}
+                if self.comparison is not None
+                else {}
+            ),
+            **(
+                {
+                    "preprocess": _preprocess_to_fs(
+                        self.preprocess,
+                        ctx,
+                        scope="misfit",
+                    )
+                }
+                if self.preprocess
+                else {}
+            ),
+            "receiver_groups": [
+                group.to_fs(
+                    ctx,
+                    preprocess_scope=f"receiver_groups/{index}",
+                )
+                for index, group in enumerate(self.receiver_groups)
+            ],
         }
 
     @classmethod
@@ -309,6 +1105,8 @@ class Misfit:
 
         return cls(
             norm=data["norm"],
+            comparison=data.get("comparison"),
+            preprocess=_preprocess_from_fs(data.get("preprocess", [])),
             receiver_groups=[
                 MisfitGroup.from_fs(group) for group in data["receiver_groups"]
             ],
@@ -334,6 +1132,13 @@ class ImagingJob(BaseJob):
         weights: Optional per-frequency weights.
         wavelet: Optional wavelet whose spectrum is sampled for weights.
         misfit_norm: Misfit norm name.
+        comparison: Optional receiver-data comparison operator. Use
+            :meth:`MisfitComparison.phase_derivative` for instantaneous
+            travel-time FWI. Supply ``observed_derivatives`` with base and
+            first ``df`` observed traces.
+        observed_derivatives: Explicit observed first frequency derivatives.
+            :meth:`ObservedTraceDerivatives.packed` references the ``_df``
+            channel of a packed FrequenSolve trace root.
         keep_forward: Keep forward wavefields after imaging.
         keep_adjoint: Keep adjoint wavefields after imaging.
         keep_unstacked: Keep per-source or per-frequency image contributions.
@@ -354,13 +1159,14 @@ class ImagingJob(BaseJob):
 
     misfit: Misfit = field(default_factory=Misfit)
     data_path: Optional[Union[str, Path]]
-    save_path: Union[str, Path]
+    save_path: Path
     grid: CartesianGrid = field(default_factory=CartesianGrid)
+    representation: CartesianGridRepresentation = field(init=False)
     keep_forward: bool = False
     keep_adjoint: bool = False
     keep_unstacked: bool = False
     images: dict = field(default_factory=dict)
-    weights: List[float] = field(default_factory=list)
+    weights: Optional[List[float]] = field(default_factory=list)
     reassemble_adjoint: bool = False
 
     def __init__(
@@ -371,14 +1177,19 @@ class ImagingJob(BaseJob):
         f_list: Optional[List[float]] = None,
         resolution: Optional[List[int]] = None,
         grid: Optional[CartesianGrid] = None,
+        representation: Optional[CartesianGridRepresentation] = None,
         images: Optional[dict] = None,
         weights: Optional[List[float]] = None,
         wavelet: Optional[Wavelet] = None,
         misfit_norm: Literal["L2"] = "L2",
+        comparison: Optional[Union[MisfitComparison, Mapping[str, Any]]] = None,
+        observed_derivatives: Optional[
+            Union[ObservedTraceDerivatives, str, Path, Mapping[str, Any]]
+        ] = None,
         keep_forward: bool = False,
         keep_adjoint: bool = False,
         keep_unstacked: bool = False,
-        regularization: Optional[dict] = None,
+        regularization: Optional[Union[VariationalSmoothing, Mapping[str, Any]]] = None,
         save_path: Optional[Union[str, Path]] = None,
         reassemble_adjoint: bool = False,
         outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
@@ -402,14 +1213,15 @@ class ImagingJob(BaseJob):
         super().__init__(
             name=name,
             simulation=simulation,
-            f_list=f_list,
+            f_list=list(f_list),
             workflow="RTM",
             outputs=JobOutputs(outputs),
-            k_list=k_list,
-            k_weights=k_weights,
+            k_list=None if k_list is None else list(k_list),
+            k_weights=None if k_weights is None else list(k_weights),
             k_units=k_units,
         )
 
+        self.regularization: Union[VariationalSmoothing, Dict[str, Any]]
         f_sim = self.trace_outputs.path
 
         self.data_path = None if data_path is None else Path(data_path)
@@ -441,8 +1253,18 @@ class ImagingJob(BaseJob):
         else:
             self.weights = None
 
-        if regularization is not None:
+        if isinstance(regularization, VariationalSmoothing):
+            if regularization.derivative_order != 1:
+                raise ValueError(
+                    "Cartesian image smoothing uses mixed first-order FEM fields"
+                )
+            if regularization.input_role != "primal":
+                raise ValueError(
+                    "Cartesian image samples require smoothing input_role='primal'"
+                )
             self.regularization = regularization
+        elif regularization is not None:
+            self.regularization = dict(regularization)
         else:
             self.regularization = {
                 "type": "TV",
@@ -456,17 +1278,39 @@ class ImagingJob(BaseJob):
         self.keep_forward = keep_forward
         self.keep_adjoint = keep_adjoint
         self.keep_unstacked = keep_unstacked
-        self.misfit = Misfit(norm=misfit_norm)
+        self.misfit = Misfit(norm=misfit_norm, comparison=comparison)
+        self.observed_derivatives = ObservedTraceDerivatives.from_value(
+            observed_derivatives
+        )
+        if (
+            self.misfit.comparison is not None
+            and MisfitComparison.from_value(self.misfit.comparison).kind
+            == "phase_derivative"
+            and self.observed_derivatives is None
+        ):
+            raise ValueError(
+                "phase-derivative comparison requires observed_derivatives; "
+                "use ObservedTraceDerivatives.packed(...) for packed traces"
+            )
         for receiver_group in simulation.acquisition.receiver_groups:
             self.misfit.receiver_groups.append(
                 MisfitGroup(
                     name=receiver_group.name,
                     observed=self.data_path,
+                    observed_derivatives=self.observed_derivatives,
                     simulated=f_sim,
                 )
             )
 
-        if grid is not None:
+        if grid is not None and representation is not None:
+            raise ValueError("provide either grid or representation, not both")
+        if representation is not None:
+            if not isinstance(representation, CartesianGridRepresentation):
+                raise TypeError(
+                    "Sauce imaging currently requires a CartesianGridRepresentation"
+                )
+            self.grid = representation.grid
+        elif grid is not None:
             self.grid = grid
         # TODO: this will only work for a layered model right now
         elif simulation.model.dimension == 2:
@@ -494,6 +1338,7 @@ class ImagingJob(BaseJob):
             self.grid = CartesianGrid(x0=x0, x1=x1, n=resolution)
         else:
             raise ValueError(f"Unknown model dimension: {simulation.model.dimension}")
+        self.representation = CartesianGridRepresentation(self.grid)
         self.reassemble_adjoint = reassemble_adjoint
 
     def image_file(self, part: Optional[int] = None) -> Path:
@@ -502,6 +1347,16 @@ class ImagingJob(BaseJob):
         if part is None:
             return self.save_path / "image.h5"
         return self.save_path / f"image_{part}.h5"
+
+    def requires_postprocess(self) -> bool:
+        """Return true because images are stacked and smoothed after tasks."""
+
+        return True
+
+    def postprocess_file(self, part: Optional[int] = None) -> Path:
+        """Return the aggregate or task-local image path."""
+
+        return self.image_file(part)
 
     def load_images(self) -> ImageDatabase:
         """Open imaging results that are already present locally.
@@ -529,6 +1384,11 @@ class ImagingJob(BaseJob):
 
         return self.image_file().is_file()
 
+    def postprocess_output_exists(self) -> bool:
+        """Return whether the final stacked image exists locally."""
+
+        return self.image_output_exists()
+
     def image_part_outputs_exist(self) -> bool:
         """Return whether every per-frequency image shard exists locally."""
 
@@ -536,17 +1396,24 @@ class ImagingJob(BaseJob):
             self.image_file(part).is_file() for part in range(1, self.n_tasks + 1)
         )
 
+    def postprocess_part_outputs_exist(self) -> bool:
+        """Return whether every per-frequency image shard exists locally."""
+
+        return self.image_part_outputs_exist()
+
     def needs_image_smoothing(self) -> bool:
         """Return whether local shards are present but ``image.h5`` is missing."""
 
-        return self.image_part_outputs_exist() and not self.image_output_exists()
+        return self.needs_postprocess()
 
     def is_run_current(self) -> bool:
         """Return whether the imaging run and aggregate image are current."""
 
         return super().is_run_current() and self.image_output_exists()
 
-    def to_fs(self, ctx=None, *, project_relative: bool = False) -> Dict:
+    def to_fs(
+        self, ctx: Optional[ExportContext] = None, *, project_relative: bool = False
+    ) -> Dict:
         """Serialize this imaging job to the solver job contract.
 
         Args:
@@ -583,20 +1450,58 @@ class ImagingJob(BaseJob):
                 self.save_path, project_relative=project_relative
             ),
             "misfit": self._misfit_to_fs(ctx, project_relative=project_relative),
-            "grid": self.grid.to_fs(ctx),
+            "grid": self.representation.to_fs(ctx),
             "keep_forward": self.keep_forward,
             "keep_adjoint": self.keep_adjoint,
             "keep_unstacked": self.keep_unstacked,
             "images": images,
             "weights": self.weights,
             "reassemble_adjoint": self.reassemble_adjoint,
-            "Smoothing": self.regularization,
+            "Smoothing": self._smoothing_to_fs(),
             **self.kwargs,
         }
         return {
-            **super().to_fs(project_relative=project_relative),
+            **super().to_fs(ctx, project_relative=project_relative),
             "Image": imaging,
         }
+
+    def _input_fingerprint_payload(self) -> Dict[str, Any]:
+        """Hash observed derivatives and any explicit Cartesian direction."""
+
+        derivatives = {
+            group.name: _derivative_input_fingerprint(
+                group.observed_derivatives, self._path_content_fingerprint
+            )
+            for group in self.misfit.receiver_groups
+            if group.observed_derivatives is not None
+        }
+        inputs = {"observed_derivatives": derivatives} if derivatives else {}
+        direction = self.kwargs.get("direction")
+        if direction is not None:
+            inputs["direction"] = self._path_content_fingerprint(direction)
+        return inputs
+
+    def _smoothing_to_fs(self) -> Dict[str, Any]:
+        """Serialize smoothing for the Cartesian-image FEM implementation."""
+
+        if not isinstance(self.regularization, VariationalSmoothing):
+            payload = dict(self.regularization)
+            if (
+                "illumination_normalization" not in payload
+                and "normalize_illumination" not in payload
+            ):
+                payload["illumination_normalization"] = "none"
+            return payload
+        config = self.regularization
+        payload = config.to_fs()
+        payload.pop("input_role")
+        if config.reference_wavelength is not None:
+            payload.pop("reference_wavelength")
+            if config.kind == "tgv":
+                payload["alpha1"], payload["alpha2"] = config.resolved_tgv_weights()
+            elif config.kind in {"tikhonov", "tv"}:
+                payload["alpha"] = config.resolved_alpha()
+        return payload
 
     @classmethod
     def from_fs(
@@ -670,6 +1575,22 @@ class ImagingJob(BaseJob):
                 base_path=base_path,
                 project_path=resolved_project_path,
             )
+            if group.observed_derivatives is not None:
+                group.observed_derivatives = ObservedTraceDerivatives.from_value(
+                    group.observed_derivatives
+                ).resolved(
+                    lambda path: cls._resolve_saved_path(
+                        path,
+                        base_path=base_path,
+                        project_path=resolved_project_path,
+                    )
+                )
+        if "direction" in image_data:
+            image_data["direction"] = cls._resolve_saved_path(
+                image_data["direction"],
+                base_path=base_path,
+                project_path=resolved_project_path,
+            )
 
         job = cls(
             name=data.pop("name", None),
@@ -732,6 +1653,15 @@ class ImagingJob(BaseJob):
             group["simulated"] = self._export_path(
                 group["simulated"], project_relative=True
             )
+            derivatives = group.get("observed_derivatives")
+            if derivatives is not None:
+                df = derivatives["df"]
+                if isinstance(df, Mapping):
+                    df = dict(df)
+                    derivatives["df"] = df
+                    df["file"] = self._export_path(df["file"], project_relative=True)
+                else:
+                    derivatives["df"] = self._export_path(df, project_relative=True)
         return payload
 
     @staticmethod
@@ -754,6 +1684,132 @@ class ImagingJob(BaseJob):
                 return project_root / path
             return Path(base_path).resolve() / path
         return path
+
+
+@register_class
+class LSRTMGradientJob(ImagingJob):
+    """One-call Cartesian LSRTM residual-gradient job.
+
+    Every Sauce frequency task solves the background and incremental forward
+    problems, forms ``F0 + Jm - d`` and its L2 objective in the executable,
+    and solves one incremental adjoint to write ``J.T @ (F0 + Jm - d)``.
+    The Cartesian model iterate is supplied through the ordinary image
+    direction buffer.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Create an LSRTM batch-gradient job."""
+
+        direction = kwargs.pop("direction", None)
+        zero_direction = bool(kwargs.pop("zero_direction", direction is None))
+        if direction is not None and zero_direction:
+            raise ValueError("direction and zero_direction are mutually exclusive")
+        if direction is None and not zero_direction:
+            raise ValueError(
+                "LSRTMGradientJob requires direction or zero_direction=True"
+            )
+        if direction is not None:
+            direction = Path(direction).resolve()
+            if not direction.is_file():
+                raise FileNotFoundError(f"LSRTM direction file not found: {direction}")
+        if kwargs.pop("born_traces_only", False):
+            raise ValueError("LSRTMGradientJob cannot be trace-only")
+        kwargs["born_traces_only"] = False
+        kwargs["gauss_newton"] = True
+        super().__init__(*args, **kwargs)
+        if any(group.observed is None for group in self.misfit.receiver_groups):
+            raise ValueError("LSRTMGradientJob requires observed data")
+        self.direction = direction
+        self.workflow = "lsrtm_gradient"
+
+    def to_fs(
+        self, ctx: Optional[ExportContext] = None, *, project_relative: bool = False
+    ) -> Dict:
+        """Serialize the explicit iterate consumed by the fused workflow."""
+
+        payload = super().to_fs(ctx, project_relative=project_relative)
+        image = payload["Image"]
+        if self.direction is None:
+            image["zero_direction"] = True
+        else:
+            image["direction"] = self._export_path(
+                self.direction, project_relative=project_relative
+            )
+        return payload
+
+    def _input_fingerprint_payload(self) -> Dict[str, Any]:
+        """Hash the Cartesian iterate consumed by the fused gradient."""
+
+        return {
+            **super()._input_fingerprint_payload(),
+            "direction": (
+                {"kind": "zero"}
+                if self.direction is None
+                else self._path_content_fingerprint(self.direction)
+            ),
+        }
+
+    @property
+    def trace_outputs(self) -> TraceOutputSpec:
+        """Return baseline and incremental receiver-trace products."""
+
+        baseline = super().trace_outputs
+        incremental_groups = [f"{group}_inc" for group in baseline.groups]
+        incremental_components = [
+            (
+                f"{component.partition(':')[0]}_inc:{component.partition(':')[2]}"
+                if ":" in component
+                else component
+            )
+            for component in baseline.components
+        ]
+        return replace(
+            baseline,
+            groups=[*baseline.groups, *incremental_groups],
+            components=[*baseline.components, *incremental_components],
+        )
+
+
+@register_class
+class LSRTMNormalJob(ImagingJob):
+    """Fused Cartesian Born and Gauss-Newton normal-operator job.
+
+    Each frequency task loads the reusable background forward state, solves
+    the incremental forward problem, forms the weighted ``-Jp`` receiver
+    residual in Sauce, solves the incremental adjoint problem, and writes the
+    ``J^T W Jp`` image. Incremental traces remain available for optimizer
+    diagnostics without materializing an intermediate residual trace store.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Create a fused LSRTM normal-operator job."""
+
+        if kwargs.pop("born_traces_only", False):
+            raise ValueError("LSRTMNormalJob cannot be trace-only")
+        if not kwargs.pop("gauss_newton", True):
+            raise ValueError("LSRTMNormalJob requires gauss_newton=True")
+        kwargs["born_traces_only"] = False
+        kwargs["gauss_newton"] = True
+        super().__init__(*args, **kwargs)
+        self.workflow = "born"
+
+    @property
+    def trace_outputs(self) -> TraceOutputSpec:
+        """Return the incremental receiver-trace output specification."""
+
+        baseline = super().trace_outputs
+        return replace(
+            baseline,
+            groups=[f"{group}_inc" for group in baseline.groups],
+            components=[
+                (
+                    f"{component.partition(':')[0]}_inc:{component.partition(':')[2]}"
+                    if ":" in component
+                    else component
+                )
+                for component in baseline.components
+            ],
+        )
 
 
 def extract_frequencies_for_job(job: ImagingJob, td):

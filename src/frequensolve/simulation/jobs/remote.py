@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, 
 
 from frequensolve.model.property import rsf_binary_path
 from frequensolve.simulation.simulation import CustomJSONEncoder
+from frequensolve.util.mixins import ExportContext
+from frequensolve.util.store import compact_hdf5_file
 
 if TYPE_CHECKING:
     from frequensolve.simulation.jobs.base import JobLayout
@@ -39,8 +41,12 @@ class JobRemoteMixin:
     local job definition.
     """
 
+    if TYPE_CHECKING:
+
+        def export_context(self) -> ExportContext: ...
+
     def save(self):
-        """Save the simulation and project-relative job JSON to disk.
+        """Save the project-relative job JSON and its simulation.
 
         Returns:
             Path to the saved local job JSON.
@@ -56,9 +62,14 @@ class JobRemoteMixin:
         self.simulation.save()
         file = self._local_path / f"{self.name}.json"
         self._file = file
-        data = self.to_fs(project_relative=True)
+        ctx = self.export_context()
+        data = self.to_fs(ctx, project_relative=True)
         data["result_path"] = str(self._result_path.relative_to(self.project_path))
         self._write_json_file(file, data)
+        assert ctx.store is not None
+        ctx.store.prune_unreferenced(data)
+        if ctx.store.path.exists():
+            compact_hdf5_file(ctx.store.path)
         return file
 
     def save_for_remote(self, site: str, remote_project: Union[Path, str]):
@@ -440,6 +451,21 @@ class JobRemoteMixin:
     @staticmethod
     def _iter_file_references(value: Any) -> Iterable[str]:
         if isinstance(value, Mapping):
+            for section, keys in (
+                ("control_sensitivities", ("direction", "current")),
+                ("Image", ("direction",)),
+            ):
+                config = value.get(section)
+                if isinstance(config, Mapping):
+                    for key in keys:
+                        path = config.get(key)
+                        if isinstance(path, (str, Path)):
+                            yield JobRemoteMixin._strip_file_locator(path)
+            derivatives = value.get("observed_derivatives")
+            if isinstance(derivatives, Mapping):
+                df = derivatives.get("df")
+                if isinstance(df, (str, Path)):
+                    yield JobRemoteMixin._strip_file_locator(df)
             for key, item in value.items():
                 if key in _PROJECT_FILE_REFERENCE_KEYS and isinstance(
                     item, (str, Path)

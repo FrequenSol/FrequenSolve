@@ -30,6 +30,7 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
+
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
@@ -48,7 +49,7 @@ from frequensolve.orchestrator.utils.environment import (
     validate_environment,
 )
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.jobs import BaseJob, SkipPolicy
+from frequensolve.simulation.jobs import BaseJob, OutputManifest, SkipPolicy
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
 from frequensolve.solver import (
     SolverCompatibility,
@@ -123,6 +124,35 @@ def _read_task_solver_convergence(
     except json.JSONDecodeError:
         return manifest_path, None
     return manifest_path, BaseJob.solver_convergence_summary(manifest)
+
+
+def _read_task_output_manifest(
+    job_file: Union[str, Path], task_id: int
+) -> OutputManifest:
+    """Read the producer-authored output inventory for one solver task."""
+
+    manifest_path = _task_run_manifest_path(job_file, task_id)
+    result_path = _job_result_path(job_file)
+    if manifest_path is None:
+        return OutputManifest(result_path=result_path)
+    return OutputManifest.read(
+        manifest_path.parent / "outputs.json",
+        result_path=result_path,
+    )
+
+
+def _attach_task_artifacts(
+    result: Dict[str, Any],
+    job_file: Union[str, Path],
+    task_id: int,
+) -> None:
+    """Attach exact Sauce artifact records to a serializable task result."""
+
+    outputs = _read_task_output_manifest(job_file, task_id)
+    if not outputs.valid:
+        return
+    result["outputs_manifest"] = str(outputs.path)
+    result["artifacts"] = outputs.records
 
 
 def _fallback_task_summary(records: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
@@ -213,6 +243,15 @@ def _local_task_state(status: Any) -> str:
 
 def _task_result_successful(result: Mapping[str, Any]) -> bool:
     return _local_task_state(result.get("status")) == "successful"
+
+
+def _job_requires_postprocess(job: Any) -> bool:
+    """Return a job's optional frequency-postprocess capability."""
+
+    requires = getattr(job, "requires_postprocess", None)
+    if callable(requires):
+        return bool(requires())
+    return isinstance(job, ImagingJob)
 
 
 def _collect_future_results(
@@ -415,6 +454,7 @@ def run_task(
             result["run_manifest"] = str(manifest_path)
         if solver_convergence is not None:
             result["solver"] = {"convergence": solver_convergence}
+        _attach_task_artifacts(result, job_file, task_id)
         if solver_failed:
             assert solver_convergence is not None
             residual = solver_convergence.get(
@@ -447,6 +487,7 @@ def run_task(
             result["run_manifest"] = str(manifest_path)
         if solver_convergence is not None:
             result["solver"] = {"convergence": solver_convergence}
+        _attach_task_artifacts(result, job_file, task_id)
         return result
 
 
@@ -510,7 +551,6 @@ class LocalSite(BaseSite):
         default=None, init=False
     )
     _solver_compatibility_policy: Optional[str] = field(default=None, init=False)
-
     # ----------------- lifecycle -----------------
 
     def __post_init__(self) -> None:
@@ -542,6 +582,7 @@ class LocalSite(BaseSite):
             RunHandle for the submitted tasks
         """
         check = bool(kwargs.pop("check", False))
+        postprocess_only = bool(kwargs.pop("postprocess_only", False))
         solver_policy = kwargs.pop("solver_policy", self.solver_policy)
         fresh_run = bool(
             kwargs.pop("force_run", False)
@@ -569,7 +610,9 @@ class LocalSite(BaseSite):
         )
         fresh_run = bool(fresh_run or skip_policy.force)
         validate = kwargs.pop("validate", True)
-        pack = bool(kwargs.pop("pack", True))
+        pack = bool(kwargs.pop("pack", True)) and bool(
+            getattr(job, "supports_trace_packing", True)
+        )
         tolerate_failures = _normalize_failure_tolerance(
             kwargs.pop("tolerate_failures", 4),
             default=4,
@@ -579,6 +622,48 @@ class LocalSite(BaseSite):
         )
         self.check_solver_compatibility(policy=solver_policy)
         self.prepare_job(job, validate=validate)
+        if postprocess_only:
+            if not _job_requires_postprocess(job):
+                raise ValueError(
+                    "postprocess_only requires a job with solver postprocessing"
+                )
+            if not job.postprocess_part_outputs_exist():
+                raise FileNotFoundError(
+                    "postprocess_only requires every task-local postprocess input"
+                )
+            if not fresh_run and not job.needs_postprocess():
+                job.write_run_state(status="skipped")
+                return RunHandle.skipped(
+                    self,
+                    job,
+                    "Solver postprocess output is already current",
+                )
+            handle = RunHandle(
+                site=self,
+                job=job,
+                id=f"local:{job.name}",
+                mode="local",
+                poll_interval=0.5,
+                check=check,
+                _status_fn=self._poll_local_run,
+                _wait_fn=self._wait_local_run,
+                _finalize_fn=self._finalize_local_run,
+                _timeout_fn=self._timeout_local_run,
+                _cancel_fn=self._cancel_local_run,
+            )
+            handle.backend["futures"] = []
+            handle.backend["task_plan"] = {
+                "pending_indices": [],
+                "current_tasks": [],
+                "reused_tasks": [],
+                "skipped_task_records": [],
+            }
+            handle.backend["pack_after_tasks"] = False
+            handle.backend["fresh"] = fresh_run
+            handle.backend["smooth_only"] = True
+            handle.backend["tolerate_failures"] = tolerate_failures
+            handle.backend["shutdown_on_completion"] = shutdown_on_completion
+            return handle
         if not fresh_run and job.is_run_current():
             logger.info(
                 "Skipping job %s; fingerprint matches and expected trace outputs exist.",
@@ -606,10 +691,10 @@ class LocalSite(BaseSite):
             futures = submission
             task_plan = {}
         smooth_only = (
-            isinstance(job, ImagingJob)
+            _job_requires_postprocess(job)
             and not futures
             and task_plan
-            and job.needs_image_smoothing()
+            and job.needs_postprocess()
         )
         if not futures and task_plan and not smooth_only:
             skipped = task_plan.get(
@@ -671,7 +756,7 @@ class LocalSite(BaseSite):
         run: RunHandle,
         all_futures: Optional[List[Future]] = None,
     ) -> Future:
-        """Submit the imaging smooth/stack task once and return its future."""
+        """Submit the solver postprocess task once and return its future."""
 
         smooth_future = run.backend.get("smooth_future")
         if smooth_future is not None:
@@ -707,7 +792,7 @@ class LocalSite(BaseSite):
         *,
         raw: Optional[Dict[str, Any]] = None,
     ) -> JobStatus:
-        """Poll an imaging smooth/stack task as part of local run status."""
+        """Poll a solver postprocess task as part of local run status."""
 
         raw = dict(raw or {})
         smooth_state = _local_task_state(getattr(smooth_future, "status", "unknown"))
@@ -724,14 +809,14 @@ class LocalSite(BaseSite):
                     state="failed",
                     return_code=1,
                     job_id=run.id,
-                    message="Image smoothing task failed",
+                    message="Solver postprocess task failed",
                     raw=raw,
                 )
             return JobStatus(
                 state="completed",
                 return_code=0,
                 job_id=run.id,
-                message="Image smoothing task completed",
+                message="Solver postprocess task completed",
                 raw=raw,
             )
         if smooth_state == "failed":
@@ -747,13 +832,13 @@ class LocalSite(BaseSite):
                 state="failed",
                 return_code=1,
                 job_id=run.id,
-                message="Image smoothing task failed",
+                message="Solver postprocess task failed",
                 raw=raw,
             )
         return JobStatus(
             state="running",
             job_id=run.id,
-            message="Image smoothing task running",
+            message="Solver postprocess task running",
             raw=raw,
         )
 
@@ -772,8 +857,8 @@ class LocalSite(BaseSite):
             job=run.job,
         )
         terminal = {"successful", "failed"}
-        if all(state in terminal for state in states) and isinstance(
-            run.job, ImagingJob
+        if all(state in terminal for state in states) and _job_requires_postprocess(
+            run.job
         ):
             task_results, task_result_errors = _collect_future_results(futures)
             run.backend["task_results"] = task_results
@@ -964,7 +1049,7 @@ class LocalSite(BaseSite):
             ]
 
             smooth_result = None
-            if isinstance(run.job, ImagingJob):
+            if _job_requires_postprocess(run.job):
                 smooth_future = self._submit_local_smooth_task(run, all_futures)
                 cached_smooth_result = run.backend.get("smooth_result")
                 if cached_smooth_result is None:
@@ -981,7 +1066,7 @@ class LocalSite(BaseSite):
                         state="failed",
                         return_code=1,
                         job_id=run.id,
-                        message="Image smoothing task failed",
+                        message="Solver postprocess task failed",
                         raw={"smooth": smooth_result, "tasks": task_results},
                     )
                     run.job.write_run_state(
@@ -1162,7 +1247,7 @@ class LocalSite(BaseSite):
                 self.close(wait=True, retire=True)
 
     def _wait_local_smooth_only(self, run: RunHandle) -> RunResult:
-        """Run only the imaging smooth/stack postprocess for current shards."""
+        """Run only the solver postprocess for current frequency shards."""
 
         all_futures: List[Future] = []
         try:
@@ -1186,7 +1271,7 @@ class LocalSite(BaseSite):
                     state="failed",
                     return_code=1,
                     job_id=run.id,
-                    message="Image smoothing task failed",
+                    message="Solver postprocess task failed",
                     raw={"smooth": smooth_result},
                 )
                 run.job.write_run_state(
@@ -1205,7 +1290,7 @@ class LocalSite(BaseSite):
                 state="completed",
                 return_code=0,
                 job_id=run.id,
-                message="Image smoothing task completed",
+                message="Solver postprocess task completed",
                 raw={"smooth": smooth_result},
             )
             return run._make_result(status)
