@@ -1,4 +1,4 @@
-"""Validate checksum-bound FrequenSolver identity release evidence."""
+"""Validate checksum-bound Solver identity release evidence."""
 
 from __future__ import annotations
 
@@ -8,14 +8,14 @@ import re
 from pathlib import Path
 from typing import Any
 
-SCHEMA = "frequensolver-identity-1"
-PRODUCT = "FrequenSolver"
+SCHEMA = "fs-solver-identity-1"
+PRODUCT = "FS_solver"
 EXPECTED_KEYS = {"schema", "product", "version", "build_id", "git_commit"}
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _is_nonempty_printable_single_line_ascii(value: Any) -> bool:
-    """Return whether ``value`` satisfies the FrequenSolver identity contract."""
+    """Return whether ``value`` satisfies the Solver identity contract."""
 
     return (
         isinstance(value, str)
@@ -81,7 +81,7 @@ def main() -> int:
         )
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         parser.error(str(exc))
-    print(f"FrequenSolver identity is valid for {args.version} at {args.commit}")
+    print(f"Solver identity is valid for {args.version} at {args.commit}")
     return 0
 
 

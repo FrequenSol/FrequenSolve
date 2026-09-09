@@ -1046,7 +1046,7 @@ def test_local_submit_postprocess_only_never_plans_frequency_tasks(
         def needs_postprocess(self):
             return True
 
-    monkeypatch.setattr(site, "check_frequensolver_compatibility", lambda **_: None)
+    monkeypatch.setattr(site, "check_solver_compatibility", lambda **_: None)
     monkeypatch.setattr(site, "prepare_job", lambda *_, **__: None)
     monkeypatch.setattr(
         site,
@@ -1088,7 +1088,7 @@ def test_local_submit_force_runs_current_postprocess(monkeypatch, tmp_path):
         def needs_postprocess(self):
             return False
 
-    monkeypatch.setattr(site, "check_frequensolver_compatibility", lambda **_: None)
+    monkeypatch.setattr(site, "check_solver_compatibility", lambda **_: None)
     monkeypatch.setattr(site, "prepare_job", lambda *_, **__: None)
 
     run = site.submit(

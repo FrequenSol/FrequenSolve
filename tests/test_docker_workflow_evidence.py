@@ -12,7 +12,7 @@ from scripts.select_docker_workflow_evidence import (
 )
 
 REQUEST_ID = "frequensolve-rc-123-1"
-ACTOR = "frequensolver-builder[bot]"
+ACTOR = "solver-builder[bot]"
 HEAD_SHA = "a" * 40
 CREATED_AFTER = "2026-07-21T05:00:00Z"
 
