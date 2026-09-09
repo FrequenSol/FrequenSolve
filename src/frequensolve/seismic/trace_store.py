@@ -1957,12 +1957,12 @@ class TraceStore:
         return fd * w
 
     @staticmethod
-    def _wavelet_value_and_derivative(
+    def _sample_wavelet_spectrum(
         wavelet: Wavelet,
         times: np.ndarray,
         frequencies: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Sample a wavelet spectrum and its physical-frequency derivative."""
+    ) -> np.ndarray:
+        """Sample a wavelet spectrum at the requested frequencies."""
 
         from scipy.interpolate import CubicSpline
 
@@ -1970,10 +1970,7 @@ class TraceStore:
         wavelet_frequencies = np.asarray(wavelet.frequencies, dtype=float)
         wavelet_spectrum = np.asarray(wavelet.spectrum, dtype=np.complex128)
         spline = CubicSpline(wavelet_frequencies, wavelet_spectrum, extrapolate=False)
-        return (
-            np.nan_to_num(spline(frequencies)),
-            np.nan_to_num(spline(frequencies, 1)),
-        )
+        return np.nan_to_num(spline(frequencies))
 
     def _read_raw_selected_fd(
         self,
@@ -2125,12 +2122,12 @@ class TraceStore:
             df=target_df,
             upscale=wavelet_upscale,
         )
-        base_wavelet_value, _ = self._wavelet_value_and_derivative(
+        base_wavelet_value = self._sample_wavelet_spectrum(
             wavelet,
             base_wavelet_sampling.T_list,
             sampling.F_list,
         )
-        oversampled_wavelet_value, _ = self._wavelet_value_and_derivative(
+        oversampled_wavelet_value = self._sample_wavelet_spectrum(
             wavelet,
             wavelet_sampling.T_list,
             sampling.F_list,

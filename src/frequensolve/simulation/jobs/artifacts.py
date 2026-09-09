@@ -1522,86 +1522,27 @@ class JobArtifactMixin:
                 wavefield outputs use more than one path.
         """
 
-        groups = []
-        components = []
-        sources = set()
-        wavefields = {}
-        output_paths = set()
-
-        self.outputs.ensure_unique_names()
-        for out in self.outputs.wavefields:
-            if out.grid is None:
-                raise ValueError("WavefieldOutput requires a grid")
-            output_paths.add(str(out.path))
-            fields = out.fields if out.fields is not None else ["primary"]
-            component_names = out.component_names
-            component_specs = out.component_payloads()
-            source_ids = (
-                [str(source) for source in out.sources]
-                if out.sources is not None
-                else [
-                    str(source_id)
-                    for source_id in self.simulation.acquisition.source_field_ids()
-                ]
-            )
-            sources.update(source_ids)
-            for variant_name, derivative_order in _spectral_derivative_variants(
-                self, out.name
-            ):
-                groups.append(variant_name)
-                components_for_group = [
-                    f"{variant_name}:{component_name}"
-                    for component_name in component_names
-                ]
-                components.extend(components_for_group)
-                wavefield = {
-                    "name": variant_name,
-                    "path": str(self._result_path / out.path),
-                    "fields": list(fields),
-                    "components": components_for_group,
-                    "component_names": component_names,
-                    "component_specs": component_specs,
-                    "sources": source_ids,
-                    "grid": copy.deepcopy(out.grid),
-                }
-                if derivative_order:
-                    wavefield["base_wavefield"] = out.name
-                    wavefield["phase_derivative_order"] = derivative_order
-                if out.properties:
-                    wavefield["requested_properties"] = list(out.properties)
-                    wavefield["property_output"] = "packed_static"
-                    wavefield["properties"] = {
-                        name: {
-                            "dataset": f"/properties/{name}",
-                            "static": True,
-                        }
-                        for name in out.properties
-                    }
-                if out.device is not None:
-                    wavefield["device"] = out.device.to_fs()
-                wavefields[variant_name] = wavefield
-
+        wavefields = self._wavefield_metadata()
+        output_paths = {str(out.path) for out in self.outputs.wavefields}
         if len(output_paths) > 1:
             raise ValueError(
                 "job.wavefields.open() requires all wavefield outputs to share one path"
             )
-        output_path = (
-            Path(next(iter(output_paths)))
-            if output_paths
-            else (
-                Path(self.outputs.wavefields[0].path)
-                if self.outputs.wavefields
-                else Path("wavefields")
-            )
-        )
-
+        output_path = Path(next(iter(output_paths), "wavefields"))
+        sources = {source for item in wavefields.values() for source in item["sources"]}
         return TraceOutputSpec(
             path=self._result_path / output_path,
             frequencies=self.f_list,
-            groups=groups,
-            components=components,
+            groups=list(wavefields),
+            components=[
+                component
+                for item in wavefields.values()
+                for component in item["components"]
+            ],
             sources=sorted(sources, key=lambda value: int(value)),
-            wavefields=wavefields,
+            wavefields={
+                name: {"name": name, **item} for name, item in wavefields.items()
+            },
         )
 
     @property
@@ -1625,6 +1566,17 @@ class JobArtifactMixin:
         Raises:
             ValueError: If any wavefield output is missing a grid.
         """
+        return {
+            name: {
+                "domain": (self.__class__.__name__,),
+                "frequencies": self.f_list,
+                **item,
+            }
+            for name, item in self._wavefield_metadata().items()
+        }
+
+    def _wavefield_metadata(self) -> dict:
+        """Build shared metadata for legacy and trace wavefield views."""
         wave_out = {}
         self.outputs.ensure_unique_names()
         for out in self.outputs.wavefields:
@@ -1649,9 +1601,7 @@ class JobArtifactMixin:
                     for component_name in component_names
                 ]
                 wave_out[variant_name] = {
-                    "domain": (self.__class__.__name__,),
                     "path": str(self._result_path / out.path),
-                    "frequencies": self.f_list,
                     "grid": copy.deepcopy(out.grid),
                     "fields": list(fields),
                     "components": components,
