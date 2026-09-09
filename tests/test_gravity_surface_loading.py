@@ -221,3 +221,67 @@ def test_gravity_surface_can_be_explicitly_unforced(tmp_path):
     payload = simulation.to_fs()
 
     assert "Acquisition" not in payload
+
+
+@pytest.mark.parametrize(
+    "conditions",
+    [
+        ["gravity_surface", "free"],
+        ["free", "gravity_surface"],
+        ["gravity_surface", "pml"],
+    ],
+)
+@pytest.mark.parametrize("name", [None, "ocean"])
+def test_combined_gravity_boundaries_preserve_complete_roundtrip(conditions, name):
+    from frequensolve.mesh.boundary_conditions import BoundaryCondition
+
+    boundary = BoundaryCondition(
+        name=name,
+        boundaries=["top"],
+        conditions=conditions,
+        pml_wavelengths=2.5,
+        pml_exponent=3.0,
+        pml_reflectivity=0.001,
+        extra={"custom_parameter": 2.0},
+    )
+    payload = boundary.to_fs()
+    restored = BoundaryCondition.from_fs(payload)
+    assert restored.to_fs() == payload
+    assert restored.conditions == conditions
+
+
+def test_unnamed_gravity_boundary_roundtrip_does_not_add_identity():
+    from frequensolve.mesh.boundary_conditions import BoundaryCondition
+
+    payload = {"boundaries": ["top"], "conditions": ["gravity_surface"]}
+    assert BoundaryCondition.from_fs(payload).to_fs() == payload
+
+
+@pytest.mark.parametrize(
+    "conditions", [["gravity_surface"], ["gravity_surface", "free"]]
+)
+def test_generic_gravity_boundary_loading_survives_simulation_reload(
+    tmp_path, conditions
+):
+    from frequensolve.mesh.boundary_conditions import BoundaryCondition
+
+    simulation = SeismicSimulation(
+        name="roundtrip",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+        BCs=[
+            BoundaryCondition(name="ocean", boundaries=["top"], conditions=conditions)
+        ],
+        acquisition=Acquisition(
+            boundary_loadings=SurfacePressureLoading(
+                _frequency_pressure(), boundary_condition="ocean"
+            )
+        ),
+    )
+    before = simulation.to_fs()
+    loaded = SeismicSimulation.load(simulation.save())
+    after = loaded.to_fs()
+    assert after["BCs"] == before["BCs"]
+    assert after["Acquisition"]["boundary_loadings"][0]["boundary_condition"] == "ocean"
+    assert loaded.BCs["ocean"].conditions == conditions

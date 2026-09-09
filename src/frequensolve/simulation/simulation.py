@@ -580,8 +580,8 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             payload["coordinate_systems"] = [
                 cs.to_fs() for cs in self.coordinate_systems
             ]
-        gravity_bcs = [bc for bc in self.BCs if isinstance(bc, GravitySurfaceBC)]
-        gravity_names = [bc.name for bc in gravity_bcs]
+        gravity_bcs = [bc for bc in self.BCs if bc.has_condition("gravity_surface")]
+        gravity_names = [bc.name for bc in gravity_bcs if bc.name is not None]
         if len(gravity_names) != len(set(gravity_names)):
             raise ValueError("GravitySurfaceBC assignments require unique names")
 
@@ -600,13 +600,15 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         if unknown_targets:
             unknown = ", ".join(repr(name) for name in unknown_targets)
             raise ValueError(
-                "Surface-pressure loading targets must name a GravitySurfaceBC; "
+                "Surface-pressure loading targets must name a boundary with gravity_surface; "
                 f"unknown target(s): {unknown}"
             )
         missing_loadings = [
             bc.name
             for bc in gravity_bcs
-            if not bc.unforced and bc.name not in loading_targets
+            if isinstance(bc, GravitySurfaceBC)
+            and not bc.unforced
+            and bc.name not in loading_targets
         ]
         if missing_loadings:
             missing = ", ".join(repr(name) for name in missing_loadings)

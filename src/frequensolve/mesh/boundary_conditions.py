@@ -142,9 +142,12 @@ class BoundaryCondition(ExtraFieldsMixin):
         serialized_conditions = data.get("conditions", [])
         if isinstance(serialized_conditions, str):
             serialized_conditions = [serialized_conditions]
-        if cls is BoundaryCondition and "gravity_surface" in {
-            _normalize_condition(value) for value in serialized_conditions
-        }:
+        if (
+            cls is BoundaryCondition
+            and data.get("name")
+            and [_normalize_condition(value) for value in serialized_conditions]
+            == ["gravity_surface"]
+        ):
             return GravitySurfaceBC._from_fs(data)
         data.pop("_type", None)
         _reject_removed_fields(data, "BoundaryCondition")
