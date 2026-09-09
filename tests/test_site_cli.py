@@ -124,6 +124,7 @@ def test_connect_creates_and_verifies_shared_ssh_connection(monkeypatch, tmp_pat
             subprocess.CompletedProcess([], 255),
             subprocess.CompletedProcess([], 0),
             subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0),
         ]
     )
 
@@ -178,7 +179,89 @@ def test_connect_reuses_existing_shared_connection(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "already available" in result.output
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[1][0][-1] == "true"
+    assert "BatchMode=yes" in calls[1][0]
+    assert calls[1][1]["timeout"] == site_commands.SSH_CONNECTION_PROBE_TIMEOUT_SECONDS
+
+
+def test_connect_replaces_master_when_remote_probe_times_out(monkeypatch, tmp_path):
+    storage_root = tmp_path / "config"
+    runner = CliRunner()
+    configured = _configure(runner, storage_root, "--username", "student")
+    assert configured.exit_code == 0, configured.output
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    control_path = site_commands._control_socket_path(
+        "student", "stampede3.tacc.utexas.edu"
+    )
+    control_path.parent.mkdir(parents=True)
+    control_path.touch()
+    calls = []
+    probe_timed_out = False
+
+    def fake_run(command, **kwargs):
+        nonlocal probe_timed_out
+        calls.append((command, kwargs))
+        if command[-1] == "true" and not probe_timed_out:
+            probe_timed_out = True
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(site_commands.shutil, "which", lambda command: "/usr/bin/ssh")
+    monkeypatch.setattr(site_commands.subprocess, "run", fake_run)
+
+    result = runner.invoke(
+        main,
+        ["site", "connect"],
+        env={"FREQUENSOLVE_HOME": str(storage_root)},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "already available" not in result.output
+    assert "Connected to stampede3.tacc.utexas.edu" in result.output
+    assert any("exit" in command for command, _ in calls)
+    assert not control_path.exists()
+
+
+def test_connect_removes_socket_when_new_connection_probe_times_out(
+    monkeypatch, tmp_path
+):
+    storage_root = tmp_path / "config"
+    runner = CliRunner()
+    configured = _configure(runner, storage_root, "--username", "student")
+    assert configured.exit_code == 0, configured.output
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    control_path = site_commands._control_socket_path(
+        "student", "stampede3.tacc.utexas.edu"
+    )
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(command, 255)
+        if command[0:2] == ["/usr/bin/ssh", "-MNf"]:
+            control_path.touch()
+            return subprocess.CompletedProcess(command, 0)
+        if command[-1] == "true":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(site_commands.shutil, "which", lambda command: "/usr/bin/ssh")
+    monkeypatch.setattr(site_commands.subprocess, "run", fake_run)
+
+    result = runner.invoke(
+        main,
+        ["site", "connect"],
+        env={"FREQUENSOLVE_HOME": str(storage_root)},
+    )
+
+    assert result.exit_code != 0
+    assert "shared connection could not be verified" in result.output
+    assert any("exit" in command for command, _ in calls)
+    assert not control_path.exists()
 
 
 def test_connect_restricts_existing_control_directory(monkeypatch, tmp_path):
@@ -242,6 +325,140 @@ solver = "/shared/FS_seismic"
     assert calls[0][0][-1] == "researcher@login.example.edu"
 
 
+def test_connections_lists_active_stale_and_closed_profiles(monkeypatch, tmp_path):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        """
+default = "active"
+
+[sites.active]
+type = "slurm"
+hostname = "active.example.edu"
+username = "researcher"
+
+[sites.stale]
+type = "slurm"
+hostname = "stale.example.edu"
+username = "researcher"
+
+[sites.closed]
+type = "slurm"
+hostname = "closed.example.edu"
+username = "researcher"
+
+[sites.local]
+type = "local"
+solver = "/usr/bin/true"
+""".strip()
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    active_path = site_commands._control_socket_path("researcher", "active.example.edu")
+    stale_path = site_commands._control_socket_path("researcher", "stale.example.edu")
+    active_path.parent.mkdir(parents=True)
+    active_path.touch()
+    stale_path.touch()
+    monkeypatch.setattr(site_commands.shutil, "which", lambda command: "/usr/bin/ssh")
+    monkeypatch.setattr(
+        site_commands,
+        "_connection_is_live",
+        lambda ssh, connection: connection.hostname == "active.example.edu",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["site", "connections", "--config", str(config_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = {line.split()[0]: line.split()[1] for line in result.output.splitlines()[1:]}
+    assert rows == {"active": "active", "stale": "stale", "closed": "closed"}
+    assert "local" not in result.output
+    assert str(active_path) in result.output
+
+
+def test_disconnect_closes_master_and_removes_socket(monkeypatch, tmp_path):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        """
+default = "research"
+
+[sites.research]
+type = "slurm"
+hostname = "login.example.edu"
+username = "researcher"
+""".strip()
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    control_path = site_commands._control_socket_path("researcher", "login.example.edu")
+    control_path.parent.mkdir(parents=True)
+    control_path.touch()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(site_commands.shutil, "which", lambda command: "/usr/bin/ssh")
+    monkeypatch.setattr(site_commands.subprocess, "run", fake_run)
+
+    result = CliRunner().invoke(
+        main,
+        ["site", "disconnect", "--config", str(config_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Closed SSH connection to login.example.edu" in result.output
+    assert calls[0][0][-2:] == ["exit", "researcher@login.example.edu"]
+    assert calls[0][1]["timeout"] > 0
+    assert not control_path.exists()
+
+
+def test_disconnect_all_closes_each_configured_connection(monkeypatch, tmp_path):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        """
+default = "first"
+
+[sites.first]
+type = "slurm"
+hostname = "first.example.edu"
+username = "researcher"
+
+[sites.second]
+type = "slurm"
+hostname = "second.example.edu"
+username = "researcher"
+""".strip()
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    paths = [
+        site_commands._control_socket_path("researcher", "first.example.edu"),
+        site_commands._control_socket_path("researcher", "second.example.edu"),
+    ]
+    paths[0].parent.mkdir(parents=True)
+    for path in paths:
+        path.touch()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(site_commands.shutil, "which", lambda command: "/usr/bin/ssh")
+    monkeypatch.setattr(site_commands.subprocess, "run", fake_run)
+
+    result = CliRunner().invoke(
+        main,
+        ["site", "disconnect", "--all", "--config", str(config_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "first.example.edu" in result.output
+    assert "second.example.edu" in result.output
+    assert len(calls) == 2
+    assert all(not path.exists() for path in paths)
+
+
 def test_check_reports_resolved_site_defaults_and_closes(monkeypatch):
     class FakeConfig:
         hostname = "stampede3.tacc.utexas.edu"
@@ -265,7 +482,7 @@ def test_check_reports_resolved_site_defaults_and_closes(monkeypatch):
             return SimpleNamespace(
                 confirmed=True,
                 status="compatible",
-                message=("FrequenSolve 0.3.0 matches preferred FrequenSolver v0.1.0."),
+                message=("FrequenSolve 0.3.0 matches preferred Solver v0.1.0."),
             )
 
         def close(self):
@@ -280,7 +497,7 @@ def test_check_reports_resolved_site_defaults_and_closes(monkeypatch):
     assert "Site profile is ready: stampede3.tacc.utexas.edu" in result.output
     assert "Remote work directory: /work/student/frequensolve" in result.output
     assert "intel/25.1, impi/21.15, petsc/3.23, phdf5" in result.output
-    assert "matches preferred FrequenSolver" in result.output
+    assert "matches preferred Solver" in result.output
     assert fake_site.closed is True
 
 

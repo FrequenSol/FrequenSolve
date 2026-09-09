@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import json
 import logging
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -512,9 +513,7 @@ def test_slurm_fetch_message_uses_multiline_from_to():
         Path("/local/job/logs"),
     )
 
-    assert message == (
-        "Fetching logs\n" "\tFrom: /remote/job/logs\n" "\tTo: /local/job/logs"
-    )
+    assert message == ("Fetching logs\n\tFrom: /remote/job/logs\n\tTo: /local/job/logs")
 
 
 def test_slurm_site_rejects_string_modules_and_secret_environment(monkeypatch):
@@ -894,6 +893,7 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
         duration="00-00:45:00",
         mpi_async_progress=False,
         scheduler_heartbeat_timeout=17,
+        mpi_health_check_timeout="00:03:00",
     )
 
     assert seen["config"].nodes == 3
@@ -902,6 +902,7 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
     assert seen["config"].duration == "00-00:45:00"
     assert seen["config"].mpi_async_progress is False
     assert seen["config"].scheduler_heartbeat_timeout == 17.0
+    assert seen["config"].mpi_health_check_timeout == "0-00:03:00"
     assert run.backend["mpi_async_progress"] is False
     assert run.backend["scheduler_heartbeat_timeout"] == 17.0
 
@@ -965,6 +966,7 @@ def test_existing_slurm_run_config_public_call_shape_is_unchanged():
         "notify_email",
         "poll_interval",
         "scheduler_heartbeat_timeout",
+        "mpi_health_check_timeout",
         "run_path",
         "slurm_args",
         "aliases",
@@ -981,6 +983,19 @@ def test_existing_slurm_run_config_public_call_shape_is_unchanged():
     assert config.queue == "existing-partition"
     assert config.account == "existing-account"
     assert config.slurm_args == ["--exclusive"]
+
+
+def test_slurm_run_config_validates_mpi_health_check_timeout():
+    assert SlurmRunConfig().mpi_health_check_timeout is None
+    assert (
+        SlurmRunConfig(mpi_health_check_timeout="00:02:00").mpi_health_check_timeout
+        == "0-00:02:00"
+    )
+
+    with pytest.raises(ValueError, match="mpi_health_check_timeout"):
+        SlurmRunConfig(mpi_health_check_timeout="invalid")
+    with pytest.raises(ValueError, match="greater than zero"):
+        SlurmRunConfig(mpi_health_check_timeout="00:00:00")
 
 
 def test_job_save_for_remote_writes_remote_absolute_result_path(tmp_path):
@@ -1425,6 +1440,69 @@ def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):
     assert "    4" in script
 
 
+def test_adaptive_slurm_mpi_health_failure_is_typed_and_stops_before_sizing(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    launcher = tmp_path / "fake-srun"
+    launcher_args = tmp_path / "launcher-args.txt"
+    launcher.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" > "$FAKE_SRUN_ARGS"\nexit 86\n',
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    monkeypatch.setenv("FAKE_SRUN_ARGS", str(launcher_args))
+    monkeypatch.setenv("SLURM_JOB_ID", "4815")
+    monkeypatch.setenv("SLURM_JOB_NODELIST", "hpcsr[0103,0120]")
+    config = SlurmSiteConfig(
+        hostname="login.example.edu",
+        queue="debug",
+        mpi_wrapper=str(launcher),
+        launcher_args=("--kill-on-bad-exit=1", "--wait=30"),
+        max_nodes=4,
+        cores_per_node=8,
+        memory_per_node=1024,
+    )
+    site = DummySlurmSite("project/run", config=config)
+    output = tmp_path / "logs"
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=2,
+        ranks_per_node=4,
+        stdout=str(output),
+        duration="00-00:10:00",
+        run_path=str(tmp_path),
+        mpi_health_check_timeout="0-00:02:00",
+    )
+    sweep = tmp_path / "sweep.sh"
+    sweep.write_text(script, encoding="utf-8")
+
+    completed = subprocess.run(
+        ["bash", str(sweep), str(tmp_path / "job.json")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 86
+    launched = launcher_args.read_text(encoding="utf-8")
+    assert "--kill-on-bad-exit=1 --wait=30" in launched
+    assert "--time=0-00:02:00" in launched
+    assert "-n 8" in launched
+    assert "--mpi-health-check" in launched
+    health = json.loads((output / "mpi_health_status.json").read_text())
+    assert health["state"] == "failed"
+    assert health["return_code"] == 86
+    assert health["job_id"] == "4815"
+    assert health["nodelist"] == "hpcsr[0103,0120]"
+    status = json.loads((output / "scheduler_status.json").read_text())
+    assert status["state"] == "failed"
+    assert status["phase"] == "mpi_startup"
+    assert status["mpi_health_check"] == health
+    assert not (output / "init.log").exists()
+
+
 def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
@@ -1440,9 +1518,9 @@ def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
         smooth_only=True,
     )
 
-    assert "Skipping frequency sweep; running imaging postprocess only." in script
+    assert "Skipping frequency sweep; running solver postprocess only." in script
     assert (
-        '$mpi_exec -n "$n_procs" "$executable" -nthreads "$n_threads" '
+        '"$mpi_exec" "${mpi_args[@]}" -n "$n_procs" "$executable" -nthreads "$n_threads" '
         '--job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1'
     ) in script
     assert "--init" not in script
@@ -2423,7 +2501,7 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     assert "-nthreads $n_threads" in batch_script
     assert "-nthreads $n_threads" in attached_script
     assert (
-        '$mpi_exec -n "$n_procs" "$executable" -nthreads "$n_threads" '
+        '"$mpi_exec" "${mpi_args[@]}" -n "$n_procs" "$executable" -nthreads "$n_threads" '
         '--job "$job_file" $fresh_flag --smooth'
     ) in batch_script
     assert (

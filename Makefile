@@ -7,7 +7,7 @@ test:
 	python -m pytest \
 	-ra \
 	-m "not integration and not cloud and not hpc and not interactive and not visual" \
-	--cov=src/ --cov-report=term --cov-report=xml --cov-report=json:tests/output/coverage.json \
+	--cov=src/ --cov-branch --cov-config="$(CURDIR)/pyproject.toml" --cov-report=term --cov-report=xml --cov-report=json:tests/output/coverage.json \
 	tests/
 	python scripts/check_coverage_thresholds.py tests/output/coverage.json
 

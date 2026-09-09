@@ -210,6 +210,24 @@ def test_local_poll_reports_finished_futures_without_failed_count(monkeypatch):
     }
 
 
+def test_ensure_dask_retains_finished_futures_until_run_finalization(monkeypatch):
+    site, _closed = make_site(monkeypatch)
+    site.n_workers = 1
+    site.threads_per_worker = 2
+    site.memory_per_worker = 4096
+    site._dask_client = object()
+    site._active_n_workers = 1
+    site._active_threads_per_worker = 2
+    site._active_memory_per_worker = 4096
+    future = DummyFuture()
+    site._futures = [future]
+
+    site._ensure_dask_for_tasks(1)
+
+    assert site._futures == [future]
+    assert not future.released
+
+
 def test_local_wait_releases_futures_and_closes_by_default(monkeypatch, capsys):
     site, closed = make_site(monkeypatch)
     job = DummyJob()
@@ -303,7 +321,7 @@ def test_run_task_supports_solver_pack_mode(monkeypatch, tmp_path):
     )
 
 
-def test_run_task_init_does_not_request_map(monkeypatch, tmp_path):
+def test_run_task_local_preparation_skips_sizing(monkeypatch, tmp_path):
     captured = {}
 
     class FakeProcess:
@@ -333,7 +351,7 @@ def test_run_task_init_does_not_request_map(monkeypatch, tmp_path):
         "1",
         "--job",
         str(job_file),
-        "--init",
+        "--init-no-size",
     ]
 
 
@@ -472,11 +490,13 @@ def test_submit_local_tasks_captures_init_log(monkeypatch, tmp_path):
     (tmp_path / "logs").mkdir()
     (tmp_path / "logs" / "init.log").write_text("stale init log")
     site._dask_client = FakeClient()
+    job = FakeJob()
 
-    submission = site._submit_local_tasks(FakeJob())
+    submission = site._submit_local_tasks(job)
 
     assert isinstance(submission, local_module.LocalTaskSubmission)
     assert submissions[0]["task_id"] == local_module.MESH_TASK_ID
+    assert submissions[0]["job_file"] == job._file
     assert submissions[0]["kwargs"]["n_threads"] == 2
     assert submissions[0]["kwargs"]["resources"] == {"CPU": 2}
     assert submissions[0]["kwargs"]["stdout_dir"] == str(tmp_path / "logs")
@@ -643,7 +663,8 @@ def test_submit_local_tasks_fresh_run_disables_reuse_and_passes_fresh(
 
     assert plan_calls == [{"reuse": False, "force": True}]
     assert [item["task_id"] for item in submissions] == [local_module.MESH_TASK_ID, 0]
-    assert all(item["kwargs"]["fresh"] is True for item in submissions)
+    assert submissions[0]["kwargs"]["fresh"] is True
+    assert submissions[1]["kwargs"]["fresh"] is True
 
 
 def test_auto_dask_sizing_refreshes_for_larger_later_job(monkeypatch):

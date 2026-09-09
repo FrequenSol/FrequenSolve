@@ -362,7 +362,7 @@ def run_task(
     elif task_id == SMOOTH_TASK_ID:
         args += ["--smooth"]
     elif task_id == MESH_TASK_ID:
-        args += ["--init"]
+        args += ["--init-no-size"]
     else:
         args += ["--task", f"{task_id + 1}"]
     command = shlex.join(args)
@@ -1279,7 +1279,11 @@ class LocalSite(BaseSite):
         """
         executable = self._solver_executable()
 
-        job_file = job.save()
+        job_file = getattr(job, "_file", None)
+        if job_file is None or not Path(job_file).is_file():
+            raise FileNotFoundError(
+                "Local job inputs were not persisted before submission"
+            )
         plan_kwargs = {}
         if skip_policy is not None:
             plan_kwargs["skip_policy"] = skip_policy
@@ -1296,18 +1300,23 @@ class LocalSite(BaseSite):
         if not pending_indices:
             return LocalTaskSubmission(futures=[], task_plan=task_plan)
 
+        n_ranks = kwargs.get("procs_per_job", 1)
+        max_ranks = getattr(job, "max_ranks_per_task", None)
+        if max_ranks is not None and n_ranks > max_ranks:
+            raise ValueError(
+                f"{type(job).__name__} supports at most {max_ranks} MPI rank "
+                f"per task; received {n_ranks}"
+            )
+
         self._ensure_dask_for_tasks(1)
         client = self._dask_client_or_raise()
 
-        n_ranks = kwargs.get("procs_per_job", 1)
-
         stdout_dir = str(job._stdout_path)
         os.makedirs(stdout_dir, exist_ok=True)
-        for log_name in [_task_log_name(MESH_TASK_ID)]:
-            try:
-                os.remove(os.path.join(stdout_dir, log_name))
-            except FileNotFoundError:
-                pass
+        try:
+            os.remove(os.path.join(stdout_dir, _task_log_name(MESH_TASK_ID)))
+        except FileNotFoundError:
+            pass
         for index in pending_indices:
             try:
                 os.remove(os.path.join(stdout_dir, f"task_{index + 1}.log"))
@@ -1316,7 +1325,7 @@ class LocalSite(BaseSite):
 
         futures = []
 
-        # Mesh and size first
+        # Initialize the exact persisted job once before its frequency tasks.
         init_threads = self._current_threads_per_worker()
         future = client.submit(
             run_task,
@@ -1707,7 +1716,6 @@ class LocalSite(BaseSite):
     def _ensure_dask_for_tasks(self, task_count: int) -> None:
         n_workers = self._worker_count_for_task_count(task_count)
         if self._dask_client is not None:
-            self._prune_futures()
             if self._active_cluster_matches(n_workers):
                 return
             if self._futures:
@@ -1906,20 +1914,6 @@ class LocalSite(BaseSite):
             self._futures = [
                 future for future in self._futures if future not in future_set
             ]
-        self._prune_futures()
-
-    def _prune_futures(self) -> None:
-        terminal = {"finished", "error", "cancelled", "lost"}
-        active = []
-        for future in self._futures:
-            if getattr(future, "status", None) in terminal:
-                try:
-                    future.release()
-                except Exception:
-                    logger.debug("Future release failed", exc_info=True)
-            else:
-                active.append(future)
-        self._futures = active
 
     def _get_solver_path(self) -> Optional[str]:
         """Get the solver path."""
