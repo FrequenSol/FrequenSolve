@@ -1224,6 +1224,10 @@ class AWSSite(BaseSite):
         if callable(details_getter):
             status_details = details_getter(str(run.id))
             for key in (
+                "creditSettlementMode",
+                "creditSettlementStatus",
+                "creditSettlementOperationId",
+                "creditSettlementAmount",
                 "executionBackend",
                 "executionTarget",
                 "slurmPartition",

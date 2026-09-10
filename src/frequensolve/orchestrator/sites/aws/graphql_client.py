@@ -777,6 +777,10 @@ class GraphQLClient:
                     status
                     failureCode
                     failureMessage
+                    creditSettlementMode
+                    creditSettlementStatus
+                    creditSettlementOperationId
+                    creditSettlementAmount
                     executionBackend
                     executionTarget
                     slurmPartition
@@ -798,6 +802,10 @@ class GraphQLClient:
                 for field in (
                     "failureCode",
                     "failureMessage",
+                    "creditSettlementMode",
+                    "creditSettlementStatus",
+                    "creditSettlementOperationId",
+                    "creditSettlementAmount",
                     "executionBackend",
                     "executionTarget",
                     "slurmPartition",
@@ -841,6 +849,10 @@ class GraphQLClient:
             **{
                 key: details[key]
                 for key in (
+                    "creditSettlementMode",
+                    "creditSettlementStatus",
+                    "creditSettlementOperationId",
+                    "creditSettlementAmount",
                     "executionBackend",
                     "executionTarget",
                     "slurmPartition",

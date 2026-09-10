@@ -188,6 +188,26 @@ def test_simulation_status_details_fall_back_for_older_cloud_schemas():
     assert len(client.queries) == 2
 
 
+def test_simulation_status_returns_exact_credit_decimal_without_changing_outcome():
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    billing = {
+        "creditSettlementMode": "END_OF_RUN_CAPTURE_V1",
+        "creditSettlementStatus": "CAPTURE_PENDING",
+        "creditSettlementOperationId": "synthetic-operation",
+        "creditSettlementAmount": "0.123456789012345678",
+    }
+    client.execute = lambda *_: {
+        "getSimulation": {
+            "id": "simulation-1",
+            "status": "SUCCEEDED",
+            **billing,
+        }
+    }
+    result = client.get_simulation_status_details("simulation-1")
+    assert result["status"] == "SUCCEEDED"
+    assert {key: result[key] for key in billing} == billing
+
+
 def test_cloud_log_queries_page_frequency_jobs_and_validate_events():
     responses = iter(
         [

@@ -270,6 +270,25 @@ def test_poll_run_preserves_customer_safe_cloud_failure_message():
     assert status.raw["failureCode"] == "SCU_BALANCE_INSUFFICIENT"
 
 
+@pytest.mark.parametrize(
+    "billing_status", ["CAPTURE_PENDING", "RECONCILIATION_REQUIRED", "CAPTURED"]
+)
+def test_poll_run_keeps_billing_separate_from_success(billing_status):
+    site = AWSSite.__new__(AWSSite)
+    billing = {
+        "creditSettlementMode": "END_OF_RUN_CAPTURE_V1",
+        "creditSettlementStatus": billing_status,
+        "creditSettlementOperationId": "synthetic-operation",
+        "creditSettlementAmount": "1.23",
+    }
+    site.graphql_client = SimpleNamespace(
+        get_simulation_status_details=lambda _: {"status": "SUCCEEDED", **billing}
+    )
+    run = SimpleNamespace(id="simulation-1", backend={})
+    assert site._poll_run(run).state == "completed"
+    assert run.backend == billing
+
+
 @pytest.mark.parametrize("status", ["SUCCEEDED", "FAILED", "CANCELED"])
 def test_cancel_job_treats_terminal_states_as_idempotent(status):
     site = AWSSite.__new__(AWSSite)
