@@ -13,6 +13,7 @@ import ast
 import hashlib
 import json
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,20 @@ EXPECTED_SUBMISSION_OVERRIDES = {
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _behavior_sha256(payload: str) -> str:
+    tree = ast.parse(payload)
+    if (
+        tree.body
+        and isinstance(tree.body[0], ast.Expr)
+        and isinstance(tree.body[0].value, ast.Constant)
+        and isinstance(tree.body[0].value.value, str)
+        and tree.body[0].value.value.startswith("Generated Cloud benchmark workload.")
+    ):
+        tree.body.pop(0)
+    canonical = ast.dump(tree, annotate_fields=True, include_attributes=False)
+    return _sha256(canonical.encode())
 
 
 class _Calls(ast.NodeVisitor):
@@ -163,6 +178,7 @@ def generate(source_root: Path, output_root: Path) -> dict[str, Any]:
                 "sourceSha256": _sha256(notebook_bytes),
                 "script": script_relative.as_posix(),
                 "scriptSha256": _sha256(payload.encode()),
+                "behaviorSha256": _behavior_sha256(payload),
                 "expectedSubmissions": EXPECTED_SUBMISSION_OVERRIDES.get(
                     case_id, _submission_count(notebook)
                 ),
@@ -171,6 +187,11 @@ def generate(source_root: Path, output_root: Path) -> dict[str, Any]:
     manifest = {
         "schema": CORPUS_SCHEMA,
         "generator": "scripts/generate_cloud_benchmark_workloads.py",
+        "generatorRuntime": {
+            "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+            "black": black.__version__,
+            "isort": isort.__version__,
+        },
         "cases": cases,
         "caseCount": len(cases),
         "submissionCount": sum(case["expectedSubmissions"] for case in cases),

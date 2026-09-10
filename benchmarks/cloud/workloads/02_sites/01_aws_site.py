@@ -80,7 +80,7 @@ def build_acoustic_tutorial_jobs(
 
 
 # %% source cell 9
-project, sim, trace_job, qc_job = build_acoustic_tutorial_jobs(
+(project, sim, trace_job, qc_job) = build_acoustic_tutorial_jobs(
     "./scratch/tutorials/aws_site",
     simulation_name="aws_site_acoustic",
     trace_job_name="time_aws_site",

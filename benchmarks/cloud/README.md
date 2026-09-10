@@ -90,16 +90,18 @@ contains:
 - `cases/<id>/result.json`: detailed result plus stdout/stderr and local work;
 - `summary.json` and `summary.md`: counts and p50/p95 performance aggregates.
 
-Top-level metrics include case duration, submission-to-acceptance latency, and
-wait-to-observed-terminal latency. Best-effort Cloud diagnostics retain planning,
-gateway, scheduler queue, solver-active, packing/projection, frequency, provider
-attempt, and independent billing-settlement fields. A missing field stays absent
-or null; the benchmark does not manufacture historical timing.
+Top-level metrics include case duration, submission-to-acceptance latency,
+wait-to-observed-terminal latency, and a single submit-to-observed-terminal
+duration that includes any client work between acceptance and waiting. Best-effort
+Cloud diagnostics retain planning, gateway, scheduler queue, solver-active,
+packing/projection, frequency, provider attempt, and independent
+billing-settlement fields. A missing field stays absent or null; the benchmark
+does not manufacture historical timing.
 
 ## Compare with history
 
 Compare a candidate with the most recent earlier successful run for the same
-backend and exact corpus fingerprint:
+named profile, backend, case selection, and exact corpus fingerprint:
 
 ```bash
 python -m benchmarks.cloud compare \
@@ -115,10 +117,12 @@ python -m benchmarks.cloud compare \
 ```
 
 This lets a Batch-only change compare with Batch history without paying to rerun
-Slurm, and vice versa. Comparisons refuse different backends or corpus
-fingerprints. The default regression marker requires both a 20% increase and at
-least five additional seconds; tune those values explicitly and add
-`--fail-on-regression` only for a true performance gate.
+Slurm, and vice versa. Comparisons refuse different profiles, backends, case
+selections, or corpus fingerprints so a similarly named provider on a different
+Cloud target cannot become an accidental baseline. The default regression marker
+requires both a 20% increase and at least five additional seconds; tune those
+values explicitly and add `--fail-on-regression` only for a true performance
+gate.
 
 ## Refresh from tutorials
 
@@ -129,5 +133,7 @@ python scripts/generate_cloud_benchmark_workloads.py
 git diff -- benchmarks/cloud/workloads
 ```
 
-The manifest binds every script to its source SHA-256 and expected dynamic
-submission count. Review generated behavioral changes like hand-written code.
+The manifest binds every script to its exact file SHA-256, semantic AST hash,
+generator runtime, and expected dynamic submission count. Historical corpus
+compatibility uses the semantic hash, so formatter-only refreshes do not discard
+valid timing history. Review generated behavioral changes like hand-written code.

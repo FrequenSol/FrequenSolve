@@ -83,7 +83,7 @@ def build_acoustic_tutorial_jobs(
 local_site = fs.Site(profile="local")
 
 # %% source cell 11
-project, sim, trace_job, qc_job = build_acoustic_tutorial_jobs(
+(project, sim, trace_job, qc_job) = build_acoustic_tutorial_jobs(
     "./scratch/tutorials/local_site",
     simulation_name="local_site_acoustic",
     trace_job_name="time_local_site",

@@ -104,7 +104,7 @@ def run_case(name, damping_factor):
 
 
 trace_sets = {
-    name: run_case(name, damping_factor) for name, damping_factor, _title in cases
+    name: run_case(name, damping_factor) for (name, damping_factor, _title) in cases
 }
 trace_sets["standard"].summary
 
@@ -127,7 +127,7 @@ def read_ld(traces):
     )
 
 
-gathers = {name: read_td(traces) for name, traces in trace_sets.items()}
+gathers = {name: read_td(traces) for (name, traces) in trace_sets.items()}
 laplace_gathers = {
     name: read_ld(trace_sets[name]) for name in ("damping_10", "damping_100")
 }
@@ -142,7 +142,7 @@ summary_keys = (
 )
 {
     name: {key: gather.attrs[key] for key in summary_keys}
-    for name, gather in gathers.items()
+    for (name, gather) in gathers.items()
 }
 
 # %% source cell 15

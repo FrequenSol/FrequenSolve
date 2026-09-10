@@ -14,15 +14,25 @@ TERMINAL_SUCCESS = {"SUCCEEDED", "COMPLETED", "COMPLETE", "SUCCESS"}
 
 
 def _iso_seconds(start: object, end: object) -> float | None:
+    import re
     from datetime import datetime
 
     if not isinstance(start, str) or not isinstance(end, str):
         return None
+
+    def parse(value: str) -> datetime:
+        normalized = value.strip()
+        match = re.match(
+            r"^(.*T\d{2}:\d{2}:\d{2})\.(\d+)(Z|[+-]\d{2}:\d{2})$",
+            normalized,
+        )
+        if match:
+            fraction = (match.group(2) + "000000")[:6]
+            normalized = f"{match.group(1)}.{fraction}{match.group(3)}"
+        return datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+
     try:
-        return (
-            datetime.fromisoformat(end.replace("Z", "+00:00"))
-            - datetime.fromisoformat(start.replace("Z", "+00:00"))
-        ).total_seconds()
+        return (parse(end) - parse(start)).total_seconds()
     except ValueError:
         return None
 
@@ -225,10 +235,12 @@ class Recorder:
                 record["waitStartedAt"] = utc_now()
                 wait_started = time.monotonic()
                 wait_seconds: float | None = None
+                user_observed_seconds: float | None = None
                 terminal_observed_at: str | None = None
                 try:
                     result = original_wait(*wait_args, **wait_kwargs)
                     wait_seconds = time.monotonic() - wait_started
+                    user_observed_seconds = time.monotonic() - started
                     terminal_observed_at = utc_now()
                     result.raise_for_status()
                     instrumentation_started = time.monotonic()
@@ -237,6 +249,7 @@ class Recorder:
                         {
                             "terminalObservedAt": terminal_observed_at,
                             "waitSeconds": wait_seconds,
+                            "userObservedSeconds": user_observed_seconds,
                             "instrumentationSeconds": time.monotonic()
                             - instrumentation_started,
                             "backend": sanitize(
@@ -251,6 +264,8 @@ class Recorder:
                 except Exception as error:
                     if wait_seconds is None:
                         wait_seconds = time.monotonic() - wait_started
+                    if user_observed_seconds is None:
+                        user_observed_seconds = time.monotonic() - started
                     if terminal_observed_at is None:
                         terminal_observed_at = utc_now()
                     instrumentation_started = time.monotonic()
@@ -261,6 +276,7 @@ class Recorder:
                         {
                             "terminalObservedAt": terminal_observed_at,
                             "waitSeconds": wait_seconds,
+                            "userObservedSeconds": user_observed_seconds,
                             "instrumentationSeconds": time.monotonic()
                             - instrumentation_started,
                             "backend": sanitize(
@@ -353,7 +369,7 @@ def execute(args: argparse.Namespace) -> int:
             for entry in recorder.submissions
         }
         actual_backends.discard("")
-        if actual_backends and actual_backends != {args.backend.lower()}:
+        if actual_backends != {args.backend.lower()}:
             raise RuntimeError(
                 f"Profile routed to {sorted(actual_backends)}, expected {args.backend}"
             )

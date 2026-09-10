@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
 import subprocess
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from ._shared import (
+    CASE_SCHEMA,
     COMPARISON_SCHEMA,
     RUN_SCHEMA,
     append_jsonl,
@@ -27,6 +29,26 @@ from ._shared import (
 PACKAGE_ROOT = Path(__file__).resolve().parent
 WORKLOAD_ROOT = PACKAGE_ROOT / "workloads"
 DEFAULT_HISTORY = Path(".benchmarks/cloud-history")
+WORKER_STATUSES = {"PASS", "FAIL"}
+
+
+def _validate_case_script(case: Mapping[str, Any], workload_root: Path) -> None:
+    script_value = case.get("script")
+    if not isinstance(script_value, str):
+        raise RuntimeError(f"Benchmark case {case.get('id')!r} has no script")
+    root = workload_root.resolve()
+    script = (root / script_value).resolve()
+    if not script.is_relative_to(root) or not script.is_file():
+        raise RuntimeError(
+            f"Benchmark case {case.get('id')!r} has an unsafe or missing script"
+        )
+    expected = case.get("scriptSha256")
+    actual = hashlib.sha256(script.read_bytes()).hexdigest()
+    if actual != expected:
+        raise RuntimeError(
+            f"Benchmark case {case.get('id')!r} does not match manifest.json; "
+            "regenerate the tutorial-derived corpus"
+        )
 
 
 def _load_corpus() -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
@@ -38,11 +60,15 @@ def _load_corpus() -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
         raise RuntimeError("Unsupported cloud benchmark corpus schema")
     if not isinstance(cases, list) or not isinstance(bugs, list):
         raise RuntimeError("Malformed cloud benchmark corpus")
+    for case in cases:
+        if not isinstance(case, Mapping):
+            raise RuntimeError("Malformed cloud benchmark case")
+        _validate_case_script(case, WORKLOAD_ROOT)
     fingerprint_input = {
         "cases": [
             {
                 "id": case["id"],
-                "scriptSha256": case["scriptSha256"],
+                "behaviorSha256": case["behaviorSha256"],
                 "expectedSubmissions": case["expectedSubmissions"],
             }
             for case in cases
@@ -143,6 +169,68 @@ def _identity() -> dict[str, Any]:
     }
 
 
+def _worker_failure(
+    *,
+    case: Mapping[str, Any],
+    profile: str,
+    backend: str,
+    failure_type: str,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "schema": CASE_SCHEMA,
+        "caseId": case["id"],
+        "profile": profile,
+        "declaredBackend": backend,
+        "status": "FAIL",
+        "failure": {
+            "phase": "worker",
+            "type": failure_type,
+            "message": message,
+        },
+        "expectedSubmissions": case["expectedSubmissions"],
+        "submissions": [],
+    }
+
+
+def _validated_worker_result(
+    value: Any,
+    *,
+    case: Mapping[str, Any],
+    profile: str,
+    backend: str,
+) -> dict[str, Any]:
+    expected = {
+        "schema": CASE_SCHEMA,
+        "caseId": case["id"],
+        "profile": profile,
+        "declaredBackend": backend,
+        "expectedSubmissions": case["expectedSubmissions"],
+    }
+    problems = []
+    if not isinstance(value, Mapping):
+        problems.append(f"result is {type(value).__name__}, not an object")
+    else:
+        for key, expected_value in expected.items():
+            if value.get(key) != expected_value:
+                problems.append(
+                    f"{key} is {value.get(key)!r}, expected {expected_value!r}"
+                )
+        if value.get("status") not in WORKER_STATUSES:
+            problems.append(f"unsupported status {value.get('status')!r}")
+        if not isinstance(value.get("submissions"), list):
+            problems.append("submissions is not a list")
+    if problems:
+        return _worker_failure(
+            case=case,
+            profile=profile,
+            backend=backend,
+            failure_type="MalformedWorkerResult",
+            message="; ".join(problems),
+        )
+    return dict(value)
+
+
 def _performance(cases: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     cases = list(cases)
     submissions = [
@@ -178,6 +266,9 @@ def _performance(cases: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         ),
         "submissionAcceptSeconds": summarize_metric(numbers("acceptSeconds")),
         "submissionWaitSeconds": summarize_metric(numbers("waitSeconds")),
+        "submissionUserObservedSeconds": summarize_metric(
+            numbers("userObservedSeconds")
+        ),
         "provider": {
             key: summarize_metric(value) for key, value in sorted(nested.items())
         },
@@ -335,25 +426,23 @@ def run_benchmarks(
                 )
                 result_path = case_root / "result.json"
                 if result_path.is_file():
-                    result = read_json(result_path)
+                    result = _validated_worker_result(
+                        read_json(result_path),
+                        case=case,
+                        profile=profile,
+                        backend=backend,
+                    )
                 else:
-                    result = {
-                        "schema": "frequensolve-cloud-benchmark-case/v1",
-                        "caseId": case["id"],
-                        "profile": profile,
-                        "declaredBackend": backend,
-                        "status": "FAIL",
-                        "failure": {
-                            "phase": "worker",
-                            "type": "MissingWorkerResult",
-                            "message": (
-                                "Benchmark worker exited without writing result.json "
-                                f"(exit {completed.returncode})"
-                            ),
-                        },
-                        "expectedSubmissions": case["expectedSubmissions"],
-                        "submissions": [],
-                    }
+                    result = _worker_failure(
+                        case=case,
+                        profile=profile,
+                        backend=backend,
+                        failure_type="MissingWorkerResult",
+                        message=(
+                            "Benchmark worker exited without writing result.json "
+                            f"(exit {completed.returncode})"
+                        ),
+                    )
                 if completed.returncode != 0 and result.get("status") == "PASS":
                     result["status"] = "FAIL"
                     result["failure"] = {
@@ -362,37 +451,25 @@ def run_benchmarks(
                         "message": f"Worker exited with {completed.returncode}",
                     }
             except subprocess.TimeoutExpired:
-                result = {
-                    "schema": "frequensolve-cloud-benchmark-case/v1",
-                    "caseId": case["id"],
-                    "profile": profile,
-                    "declaredBackend": backend,
-                    "status": "FAIL",
-                    "failure": {
-                        "phase": "timeout",
-                        "type": "TimeoutExpired",
-                        "message": f"Case exceeded {timeout_seconds} seconds",
-                    },
-                    "expectedSubmissions": case["expectedSubmissions"],
-                    "submissions": [],
-                }
+                result = _worker_failure(
+                    case=case,
+                    profile=profile,
+                    backend=backend,
+                    failure_type="TimeoutExpired",
+                    message=f"Case exceeded {timeout_seconds} seconds",
+                )
+                result["failure"]["phase"] = "timeout"
             except (OSError, json.JSONDecodeError) as error:
-                result = {
-                    "schema": "frequensolve-cloud-benchmark-case/v1",
-                    "caseId": case["id"],
-                    "profile": profile,
-                    "declaredBackend": backend,
-                    "status": "FAIL",
-                    "failure": {
-                        "phase": "worker",
-                        "type": type(error).__name__,
-                        "message": str(error),
-                    },
-                    "expectedSubmissions": case["expectedSubmissions"],
-                    "submissions": [],
-                }
+                result = _worker_failure(
+                    case=case,
+                    profile=profile,
+                    backend=backend,
+                    failure_type=type(error).__name__,
+                    message=str(error),
+                )
             if bug is not None:
                 _classify_known_bug_probe(result, bug)
+        result = sanitize(result)
         results.append(result)
         append_jsonl(run_root / "cases.jsonl", result)
         print(
@@ -452,6 +529,7 @@ def _auto_baseline(
         if (
             summary.get("schema") == RUN_SCHEMA
             and summary.get("backend") == candidate.get("backend")
+            and summary.get("profile") == candidate.get("profile")
             and summary.get("corpusFingerprint") == candidate.get("corpusFingerprint")
             and summary.get("selectionFingerprint")
             == candidate.get("selectionFingerprint")
@@ -462,7 +540,7 @@ def _auto_baseline(
             candidates.append((str(summary.get("finishedAt")), path))
     if not candidates:
         raise FileNotFoundError(
-            "No earlier successful baseline with the same backend and corpus fingerprint"
+            "No earlier successful baseline with the same profile, backend, and corpus fingerprint"
         )
     return max(candidates)[1]
 
@@ -496,6 +574,7 @@ def compare_runs(
     )
     baseline_summary = read_json(baseline_summary_path)
     compatibility = {
+        "profile": baseline_summary.get("profile") == candidate_summary.get("profile"),
         "backend": baseline_summary.get("backend") == candidate_summary.get("backend"),
         "corpusFingerprint": baseline_summary.get("corpusFingerprint")
         == candidate_summary.get("corpusFingerprint"),

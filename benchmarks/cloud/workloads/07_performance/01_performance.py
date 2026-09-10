@@ -79,7 +79,7 @@ def build_performance_simulation(*, name, path, n_sources=64, receiver_count=201
 
 # %% source cell 7
 project_path = Path("./scratch/tutorials/performance")
-project, sim = build_performance_simulation(
+(project, sim) = build_performance_simulation(
     name="performance_baseline", path=project_path, n_sources=64
 )
 model = sim.model
@@ -146,7 +146,7 @@ source_counts = [1, 8, 16, 32, 64, 96, 128]
 batch_site = fs.Site()
 batch_rows = []
 for n_source_case in source_counts:
-    _, batch_sim = build_performance_simulation(
+    (_, batch_sim) = build_performance_simulation(
         name=f"sources_{n_source_case:03d}",
         path=project_path,
         n_sources=n_source_case,
