@@ -1,0 +1,27 @@
+{
+  "schema": "frequensolve-cloud-benchmark-known-bugs/v1",
+  "knownBugs": [
+    {
+      "backends": [
+        "slurm"
+      ],
+      "caseId": "01_modeling_basics/05_acoustic_25d_3d_axisymmetric",
+      "expectedFailureCodes": [
+        "SLURM_PACKER_FAILED"
+      ],
+      "issueUrl": "https://github.com/FrequenSol/cloud-amplify/issues/1866",
+      "reason": "The pinned managed-Slurm native bundle predates the merged 2.5D trace namespace correction."
+    },
+    {
+      "backends": [
+        "slurm"
+      ],
+      "caseId": "03_velocity_model_building/02_coordinate_systems",
+      "expectedFailureCodes": [
+        "SLURM_PLANNING_FAILED"
+      ],
+      "issueUrl": "https://github.com/FrequenSol/cloud-amplify/issues/1866",
+      "reason": "The native resource planner fails on the tutorial's top_points coordinate system with Internal Error 002725."
+    }
+  ]
+}

@@ -1,0 +1,200 @@
+{
+  "caseCount": 24,
+  "cases": [
+    {
+      "expectedSubmissions": 2,
+      "id": "01_modeling_basics/01_acoustic",
+      "script": "01_modeling_basics/01_acoustic.py",
+      "scriptSha256": "33caf0926d46ae8b228c939b3427b25f9861c249655aa99426c7747a93e0b41c",
+      "source": "01_modeling_basics/01_acoustic.ipynb",
+      "sourceSha256": "de9e0bc6b8db64d5cfbfc809b9f1a6f6459e96d1c132db1f2e6175d838727792"
+    },
+    {
+      "expectedSubmissions": 3,
+      "id": "01_modeling_basics/02_elastic",
+      "script": "01_modeling_basics/02_elastic.py",
+      "scriptSha256": "9eff1f0678865680915a4d000ea6b3eb5f4fd1fd348fb6ab351e38d7b1ddda1e",
+      "source": "01_modeling_basics/02_elastic.ipynb",
+      "sourceSha256": "f1a04347a94621c215a9a792637f8fb987c2a43f117c37a4fc208de2be6082f1"
+    },
+    {
+      "expectedSubmissions": 2,
+      "id": "01_modeling_basics/03_poroelastic",
+      "script": "01_modeling_basics/03_poroelastic.py",
+      "scriptSha256": "74612afb64e288f73612d99dbd8c89466fd6a2ee32b7be52bde237238f8b910c",
+      "source": "01_modeling_basics/03_poroelastic.ipynb",
+      "sourceSha256": "d0c9488e77ab7ddc0a011134fe4c7de4e0687dbf69fa1f4edb7a64003790df68"
+    },
+    {
+      "expectedSubmissions": 2,
+      "id": "01_modeling_basics/04_coupled",
+      "script": "01_modeling_basics/04_coupled.py",
+      "scriptSha256": "8557e4d4d72a643e876e3f8d5a03e34bc26dce95946dc99a06704d6662d6bf36",
+      "source": "01_modeling_basics/04_coupled.ipynb",
+      "sourceSha256": "cc737a2c5f879d8ed8dfcaacb37c2571d48db11840720c7bbaae2ab0aba8bbe9"
+    },
+    {
+      "expectedSubmissions": 3,
+      "id": "01_modeling_basics/05_acoustic_25d_3d_axisymmetric",
+      "script": "01_modeling_basics/05_acoustic_25d_3d_axisymmetric.py",
+      "scriptSha256": "6b77da33980e26e684c014af45b2e2a828a4d87343561146b3f11fa86ac2abf8",
+      "source": "01_modeling_basics/05_acoustic_25d_3d_axisymmetric.ipynb",
+      "sourceSha256": "fa74337c5a47ba17d8d7abd7be5edcc227fefd289d3e9fc7c890f708a8bea863"
+    },
+    {
+      "expectedSubmissions": 3,
+      "id": "01_modeling_basics/06_laplace_time_domain",
+      "script": "01_modeling_basics/06_laplace_time_domain.py",
+      "scriptSha256": "2ef26bb5ba65ab198628aa199853a6ba54379607f904aa5bea4ac8ae0581ba53",
+      "source": "01_modeling_basics/06_laplace_time_domain.ipynb",
+      "sourceSha256": "1bc0cbe7736bb4fea15ddeccb6002c7f53ff6c447d094529b419b5232ac4eb5e"
+    },
+    {
+      "expectedSubmissions": 2,
+      "id": "02_sites/01_aws_site",
+      "script": "02_sites/01_aws_site.py",
+      "scriptSha256": "185be5127dfdfdd001522cfb6c41782a8c957635818738bd17766c04e2e11286",
+      "source": "02_sites/01_aws_site.ipynb",
+      "sourceSha256": "4e867d9a5f9b61636484e36c504db6e136217ee9c5042beca2a76f92f3d0a497"
+    },
+    {
+      "expectedSubmissions": 2,
+      "id": "02_sites/02_hpc_sites",
+      "script": "02_sites/02_hpc_sites.py",
+      "scriptSha256": "8657fc26f827285d2d1e835c3d6ca2b670ca26c2add6cffc434170d7fe65ea04",
+      "source": "02_sites/02_hpc_sites.ipynb",
+      "sourceSha256": "cf94da4bce07514c9c7d295a91acf3925f1966a2d4b19de2e7f6f754e2936a0f"
+    },
+    {
+      "expectedSubmissions": 2,
+      "id": "02_sites/03_local_site",
+      "script": "02_sites/03_local_site.py",
+      "scriptSha256": "7b8470c792177c69d89ee833f66e4224c059e9cf1f31faa1db61d6298fa935f3",
+      "source": "02_sites/03_local_site.ipynb",
+      "sourceSha256": "20b7fd7a607050df5814c7d21ca350663efba91804d2fac6df3dca4e09577ee1"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "02_sites/04_save_load_projects_jobs",
+      "script": "02_sites/04_save_load_projects_jobs.py",
+      "scriptSha256": "58d40c12d03b5e27cf8f77d2e012c660c3bbef4e71abbb759a3e1c8bf0c1eba9",
+      "source": "02_sites/04_save_load_projects_jobs.ipynb",
+      "sourceSha256": "8464814c780038496c15036777804a9becb9c866ec5d695e4fd2a0bca8249538"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "03_velocity_model_building/01_variable_properties_units",
+      "script": "03_velocity_model_building/01_variable_properties_units.py",
+      "scriptSha256": "78640803f19670052cd7b5c73779d2cf4424449d2df8587ecea2a2e74b1ba900",
+      "source": "03_velocity_model_building/01_variable_properties_units.ipynb",
+      "sourceSha256": "fd6793103f1963b05d5a5f71bf1d220ccaacc0d2441e2b9c0a3175d40bb469b6"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "03_velocity_model_building/02_coordinate_systems",
+      "script": "03_velocity_model_building/02_coordinate_systems.py",
+      "scriptSha256": "fbc6e38aa56ea0e50f82b80ac3536d6cbb9e53bc58ebc9703931b10daa42b0b4",
+      "source": "03_velocity_model_building/02_coordinate_systems.ipynb",
+      "sourceSha256": "45213a67713db784e3124aec182cf8a6d5e8c9c30ce0b437d471433de0597b1d"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "03_velocity_model_building/03_layered_models",
+      "script": "03_velocity_model_building/03_layered_models.py",
+      "scriptSha256": "e5202c2a10564c45bc7d093a64aa9921b72ba24ee0a2b9c9ef1cfa72c7fd7751",
+      "source": "03_velocity_model_building/03_layered_models.ipynb",
+      "sourceSha256": "152494c4c03fd652b0e3a7c6abba9539884a9185c2b02171a0e21f85d7929917"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "04_meshing/01_mesh_vs_generators",
+      "script": "04_meshing/01_mesh_vs_generators.py",
+      "scriptSha256": "abad57c0c8997a015b534340aa2d70d36f25abde5c20bc891f82eb9985790711",
+      "source": "04_meshing/01_mesh_vs_generators.ipynb",
+      "sourceSha256": "f0f303dfc6b89c277cca81523720bb99ba8a601cd4403a4780eccb11ada3cf83"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "04_meshing/02_adaptivity_fields",
+      "script": "04_meshing/02_adaptivity_fields.py",
+      "scriptSha256": "e39b587d4326ba46ac51d9d6b344993a54a1fd3514960d6cd8b84f697e539060",
+      "source": "04_meshing/02_adaptivity_fields.ipynb",
+      "sourceSha256": "f1fb8a8f03f146e79ad78e87f798e6475bede0ad59dd93abead258a88e012ec5"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "04_meshing/03_gradings",
+      "script": "04_meshing/03_gradings.py",
+      "scriptSha256": "d69d7bac5c5c13f992999ef485331369b7cdfb5f880ad71f8098a04845707731",
+      "source": "04_meshing/03_gradings.ipynb",
+      "sourceSha256": "d1cf5a2bb9fd4721b4ee7a8993de6b7886e126083adeab5c90efad17a3536b9b"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "05_surveys/01_receivers",
+      "script": "05_surveys/01_receivers.py",
+      "scriptSha256": "ca2b88c3381bffb2eab8ce25d4e02b2771b9441a53fd0ade77e58f77b5458fea",
+      "source": "05_surveys/01_receivers.ipynb",
+      "sourceSha256": "5b1f5a8d048594dc469a499dc0d9e5e06b4ba6afbb85b542162f1ba6460936f0"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "05_surveys/02_das",
+      "script": "05_surveys/02_das.py",
+      "scriptSha256": "ec9df13125bf90b95ec61143ddc62275dba44755d4a5c2be198dd78fdb578ff0",
+      "source": "05_surveys/02_das.ipynb",
+      "sourceSha256": "c416c8e537f5ce331438c7905273004e08f3b7803da635979981e383dc9ba391"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "05_surveys/03_sources",
+      "script": "05_surveys/03_sources.py",
+      "scriptSha256": "f9d2470a93a7324d3cf36a0dc5086de62c194a8be18500a3fb804689ad2d336b",
+      "source": "05_surveys/03_sources.ipynb",
+      "sourceSha256": "769daa6b1a86f4d17c39d98d4a27f559baf6b2e218a800a0d97eebd048ef21e3"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "05_surveys/04_sparse_surveys",
+      "script": "05_surveys/04_sparse_surveys.py",
+      "scriptSha256": "ce4c96383e8cb8c751e292a776e1c88739c1971ea30015d9fd2ed3974fd3bd36",
+      "source": "05_surveys/04_sparse_surveys.ipynb",
+      "sourceSha256": "c7fdd46c643a2432300216f6965cb76a810796bf1e723364aa424b44f14134af"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "06_outputs/01_traces",
+      "script": "06_outputs/01_traces.py",
+      "scriptSha256": "89c462e3023dc3aeab94c54fcfbc0764dd3354f182d6bbe3f10ff095bafcbbdd",
+      "source": "06_outputs/01_traces.ipynb",
+      "sourceSha256": "5ae164f19a946bf85cf11ab669a48ff881555e598101a9335b8daebef3297829"
+    },
+    {
+      "expectedSubmissions": 1,
+      "id": "06_outputs/02_paraview_vtk",
+      "script": "06_outputs/02_paraview_vtk.py",
+      "scriptSha256": "345478905383ed787c1a4a82068c503ca7c5c68172c000c0a2fddf96dbe4c2eb",
+      "source": "06_outputs/02_paraview_vtk.ipynb",
+      "sourceSha256": "018ae1445a1e56a81d0a58c27344af5bc7bf0c370fe467dec300eac7ada2610e"
+    },
+    {
+      "expectedSubmissions": 2,
+      "id": "06_outputs/03_imaging",
+      "script": "06_outputs/03_imaging.py",
+      "scriptSha256": "4fff1a29d85b920b470e455bfd9e2c253049dd404c30cab468304a133bfa99d2",
+      "source": "06_outputs/03_imaging.ipynb",
+      "sourceSha256": "b1dcf384350c83c4d01a689829fec57b55845d2ecc36b73e660b8515d5d496eb"
+    },
+    {
+      "expectedSubmissions": 9,
+      "id": "07_performance/01_performance",
+      "script": "07_performance/01_performance.py",
+      "scriptSha256": "3f1bb3097a9916e565a278bda56ebddb6297efb4993896875ea7a216279d7a95",
+      "source": "07_performance/01_performance.ipynb",
+      "sourceSha256": "eb56da13d5c8726d4b50691c14144eac2cda32ac600c46a48dedf187d3aaab70"
+    }
+  ],
+  "generator": "scripts/generate_cloud_benchmark_workloads.py",
+  "schema": "frequensolve-cloud-benchmark-corpus/v1",
+  "submissionCount": 45
+}
