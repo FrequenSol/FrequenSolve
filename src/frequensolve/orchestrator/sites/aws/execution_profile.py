@@ -95,14 +95,25 @@ class ManagedExecutionProfile:
                 "Slurm profiles must set: " + ", ".join(missing)
             )
         partition = slurm_values["slurm_partition"]
-        if partition != "cpu-efa":
+        if partition not in {"cpu-single", "cpu-efa"}:
             raise ManagedExecutionProfileError(
-                "unsupported Slurm resource shape: slurm_partition must be 'cpu-efa'"
+                "unsupported Slurm resource shape: slurm_partition must be "
+                "'cpu-single' or 'cpu-efa'"
             )
         nodes = _bounded_integer(slurm_values["slurm_nodes"], "slurm_nodes", 1, 2)
         ranks = _bounded_integer(
             slurm_values["slurm_ranks_per_node"], "slurm_ranks_per_node", 1, 4
         )
+        if partition == "cpu-single" and (nodes != 1 or ranks != 1):
+            raise ManagedExecutionProfileError(
+                "unsupported Slurm resource shape: cpu-single requires exactly "
+                "one node and one rank"
+            )
+        if partition == "cpu-efa" and nodes < 2:
+            raise ManagedExecutionProfileError(
+                "unsupported Slurm resource shape: cpu-efa requires an explicitly "
+                "distributed plan with at least two nodes"
+            )
         if nodes * ranks > 8:  # Defensive if the per-field bounds change later.
             raise ManagedExecutionProfileError(
                 "unsupported Slurm resource shape: total MPI ranks cannot exceed 8"

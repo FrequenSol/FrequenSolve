@@ -285,6 +285,31 @@ slurm_wall_time = "00-00:30:00"
     }
 
 
+def test_site_factory_validates_cpu_single_profile(monkeypatch, tmp_path):
+    config_path = tmp_path / "sites.toml"
+    config_path.write_text(
+        """
+default = "cloud-single"
+
+[sites.cloud-single]
+type = "aws"
+domain = "app.frequensol.com"
+execution_backend = "slurm"
+slurm_partition = "cpu-single"
+slurm_nodes = 1
+slurm_ranks_per_node = 1
+slurm_wall_time = "00-00:30:00"
+""".strip()
+    )
+    monkeypatch.setattr(sites, "AWSSite", FakeSite)
+
+    site = sites.Site(config_path=config_path)
+
+    assert site.kwargs["slurm_partition"] == "cpu-single"
+    assert site.kwargs["slurm_nodes"] == 1
+    assert site.kwargs["slurm_ranks_per_node"] == 1
+
+
 @pytest.mark.parametrize(
     ("profile_body", "message"),
     [
@@ -301,6 +326,18 @@ slurm_wall_time = "00-00:30:00"
             "slurm_nodes = 3\nslurm_ranks_per_node = 4\n"
             'slurm_wall_time = "00-00:30:00"',
             "slurm_nodes must be from 1 through 2",
+        ),
+        (
+            'execution_backend = "slurm"\nslurm_partition = "cpu-single"\n'
+            "slurm_nodes = 1\nslurm_ranks_per_node = 2\n"
+            'slurm_wall_time = "00-00:30:00"',
+            "cpu-single requires exactly one node and one rank",
+        ),
+        (
+            'execution_backend = "slurm"\nslurm_partition = "cpu-efa"\n'
+            "slurm_nodes = 1\nslurm_ranks_per_node = 4\n"
+            'slurm_wall_time = "00-00:30:00"',
+            "cpu-efa requires an explicitly distributed plan",
         ),
     ],
 )

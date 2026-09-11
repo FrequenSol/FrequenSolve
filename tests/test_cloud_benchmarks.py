@@ -186,6 +186,11 @@ class _FakeGraphQL:
                             "gatewayReceivedAt": "2026-09-10T00:00:00.5Z",
                             "queuedAt": "2026-09-10T00:00:03Z",
                             "solverStartedAt": "2026-09-10T00:00:04Z",
+                            "frequencyIndex": 0,
+                            "nodes": 1,
+                            "ranksPerNode": 1,
+                            "allocatedVcpus": 4,
+                            "allocatedMemoryMiB": 8192,
                         }
                     ],
                     "nextToken": None,
@@ -238,6 +243,15 @@ def test_recorder_captures_top_level_and_provider_metrics(monkeypatch):
         "frequencyActiveWorkSeconds": [4.0],
         "gatewaySeconds": [0.5],
         "schedulerQueueSeconds": [1.0],
+        "requestedResources": [
+            {
+                "frequencyIndex": 0,
+                "nodes": 1,
+                "ranksPerNode": 1,
+                "vcpus": 4,
+                "memoryMiB": 8192,
+            }
+        ],
     }
 
 
