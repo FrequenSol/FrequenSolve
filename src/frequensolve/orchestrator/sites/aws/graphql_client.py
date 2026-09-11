@@ -793,41 +793,61 @@ class GraphQLClient:
         """
 
         variables = {"id": simulation_id}
+
+        def is_unsupported_field_error(
+            error_message: str, fields: tuple[str, ...]
+        ) -> bool:
+            return any(field in error_message for field in fields) and (
+                "Cannot query field" in error_message or "is undefined" in error_message
+            )
+
         try:
             result = self.execute(query, variables)
         except RuntimeError as exc:
             error_message = str(exc)
-            unsupported_failure_fields = any(
-                field in error_message
-                for field in (
-                    "failureCode",
-                    "failureMessage",
-                    "creditSettlementMode",
-                    "creditSettlementStatus",
-                    "creditSettlementOperationId",
-                    "creditSettlementAmount",
-                    "executionBackend",
-                    "executionTarget",
-                    "slurmPartition",
-                    "slurmNodes",
-                    "slurmRanksPerNode",
-                    "slurmWallTimeSeconds",
-                    "providerAttemptId",
-                )
-            ) and (
-                "Cannot query field" in error_message or "is undefined" in error_message
+            all_optional_fields = (
+                "failureCode",
+                "failureMessage",
+                "creditSettlementMode",
+                "creditSettlementStatus",
+                "creditSettlementOperationId",
+                "creditSettlementAmount",
+                "executionBackend",
+                "executionTarget",
+                "slurmPartition",
+                "slurmNodes",
+                "slurmRanksPerNode",
+                "slurmWallTimeSeconds",
+                "providerAttemptId",
             )
-            if not unsupported_failure_fields:
+            if not is_unsupported_field_error(error_message, all_optional_fields):
                 raise
-            legacy_query = """
+            failure_details_query = """
                 query GetSimulation($id: ID!) {
                     getSimulation(id: $id) {
                         id
                         status
+                        failureCode
+                        failureMessage
                     }
                 }
             """
-            result = self.execute(legacy_query, variables)
+            try:
+                result = self.execute(failure_details_query, variables)
+            except RuntimeError as failure_details_exc:
+                if not is_unsupported_field_error(
+                    str(failure_details_exc), ("failureCode", "failureMessage")
+                ):
+                    raise
+                status_only_query = """
+                    query GetSimulation($id: ID!) {
+                        getSimulation(id: $id) {
+                            id
+                            status
+                        }
+                    }
+                """
+                result = self.execute(status_only_query, variables)
 
         if "getSimulation" not in result or not result["getSimulation"]:
             raise RuntimeError(
