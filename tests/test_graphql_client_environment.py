@@ -99,9 +99,10 @@ class CapabilityGraphQLClient(GraphQLClient):
 
 
 class SimulationStatusGraphQLClient(GraphQLClient):
-    def __init__(self, *, legacy=False):
+    def __init__(self, *, legacy=False, partial=False):
         super().__init__("https://example.invalid/graphql", auth=object())
         self.legacy = legacy
+        self.partial = partial
         self.queries = []
 
     def execute(self, query, variables=None):
@@ -109,6 +110,11 @@ class SimulationStatusGraphQLClient(GraphQLClient):
         if self.legacy and "failureMessage" in query:
             raise RuntimeError(
                 "GraphQL errors: Cannot query field 'failureMessage' on type 'Simulation'"
+            )
+        if self.partial and "creditSettlementMode" in query:
+            raise RuntimeError(
+                "GraphQL errors: Cannot query field 'creditSettlementMode' "
+                "on type 'Simulation'"
             )
         return {
             "getSimulation": {
@@ -185,7 +191,19 @@ def test_simulation_status_details_fall_back_for_older_cloud_schemas():
     client = SimulationStatusGraphQLClient(legacy=True)
 
     assert client.get_simulation_status("simulation-legacy") == "FAILED"
+    assert len(client.queries) == 3
+
+
+def test_simulation_status_details_preserve_failures_on_partial_cloud_schema():
+    client = SimulationStatusGraphQLClient(partial=True)
+
+    details = client.get_simulation_status_details("simulation-partial")
+
+    assert details["failureCode"] == "SCU_BALANCE_INSUFFICIENT"
+    assert details["failureMessage"] == "This simulation needs more SCUs."
     assert len(client.queries) == 2
+    assert "failureMessage" in client.queries[1]
+    assert "creditSettlementMode" not in client.queries[1]
 
 
 def test_simulation_status_returns_exact_credit_decimal_without_changing_outcome():
