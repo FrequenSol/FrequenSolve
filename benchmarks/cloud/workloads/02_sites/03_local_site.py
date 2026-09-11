@@ -115,10 +115,3 @@ group = traces.groups[0]
 component = traces.components(group)[0]
 source = traces.sources(group)[0]
 gather = traces.td(group, component, source, wavelet, upscale=4, T_max=0.9)
-fs.plot_gather(
-    gather,
-    A=2.0 * np.nanstd(np.real(gather.values)),
-    cmap="gray",
-    figsize=(9, 4),
-    title=f"{trace_job.name}: {group}/{component}/source {source}",
-)

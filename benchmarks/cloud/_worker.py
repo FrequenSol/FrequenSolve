@@ -192,6 +192,19 @@ class Recorder:
             {"requestedProfile": kwargs.get("profile"), "selectedProfile": self.profile}
         )
         site = self.original_site(**selected)
+        execution_profile = getattr(site, "execution_profile", None)
+        actual_backend = getattr(execution_profile, "backend", None)
+        if getattr(site, "graphql_client", None) is None or not isinstance(
+            actual_backend, str
+        ):
+            raise RuntimeError(
+                f"Benchmark profile {self.profile!r} is not an AWS Cloud profile"
+            )
+        if actual_backend.lower() != self.declared_backend.lower():
+            raise RuntimeError(
+                f"Benchmark profile {self.profile!r} selects {actual_backend!r}, "
+                f"not declared backend {self.declared_backend!r}"
+            )
         original_submit = site.submit
 
         def submit(job: Any, *submit_args: Any, **submit_kwargs: Any) -> Any:

@@ -479,7 +479,19 @@ def run_benchmarks(
                         "type": "WorkerExitError",
                         "message": f"Worker exited with {completed.returncode}",
                     }
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as error:
+                stdout = error.stdout if error.stdout is not None else error.output
+                stderr = error.stderr
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode(errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode(errors="replace")
+                (case_root / "stdout.log").write_text(
+                    sanitize_text(stdout or ""), encoding="utf-8"
+                )
+                (case_root / "stderr.log").write_text(
+                    sanitize_text(stderr or ""), encoding="utf-8"
+                )
                 result = _worker_failure(
                     case=case,
                     profile=profile,

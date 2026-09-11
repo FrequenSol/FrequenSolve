@@ -99,13 +99,6 @@ group = traces_25d.groups[0]
 component = traces_25d.components(group)[0]
 source = traces_25d.sources(group)[0]
 gather_25d = traces_25d.td(group, component, source, wavelet, upscale=4, T_max=0.9)
-fs.plot_gather(
-    gather_25d,
-    A=2.0 * np.nanstd(np.real(gather_25d.values)),
-    cmap="gray",
-    figsize=(9, 4),
-    title="2.5D acoustic pressure",
-)
 
 # %% source cell 12
 slice_project = fs.Project(
@@ -185,15 +178,6 @@ vtu_3d = result_3d.output_files(base="pv_3d", suffix=".vtu", existing=True)
 image_dir = Path("./assets")
 image_dir.mkdir(exist_ok=True)
 screenshot = image_dir / "acoustic_3d_vp.png"
-fs.plot_vtu(
-    vtu_3d[0],
-    field="vp",
-    show_edges=True,
-    scalar_bar=True,
-    show=False,
-    screenshot=screenshot,
-    window_size=(1100, 700),
-)
 
 # %% source cell 18
 project_axisym = fs.Project(
@@ -242,13 +226,6 @@ component = traces_axisym.components(group)[0]
 source = traces_axisym.sources(group)[0]
 gather_axisym = traces_axisym.td(
     group, component, source, wavelet, upscale=4, T_max=0.9
-)
-fs.plot_gather(
-    gather_axisym,
-    A=2.0 * np.nanstd(np.real(gather_axisym.values)),
-    cmap="gray",
-    figsize=(9, 4),
-    title="Axisymmetric acoustic pressure",
 )
 trace_25d = gather_25d.isel(receiver=len(gather_25d.receiver) // 2)
 trace_axisym = gather_axisym.isel(receiver=len(gather_axisym.receiver) // 2)

@@ -23,9 +23,21 @@ import isort
 CORPUS_SCHEMA = "frequensolve-cloud-benchmark-corpus/v1"
 GENERATED_MARKER = ".generated-cloud-benchmark-workloads"
 PRESENTATION_IMPORTS = {"IPython", "matplotlib", "pandas"}
-PRESENTATION_NAMES = {"Image", "display", "plt", "pd", "fig", "ax", "axes"}
+PRESENTATION_NAMES = {
+    "Image",
+    "display",
+    "plt",
+    "pd",
+    "fig",
+    "ax",
+    "axes",
+    "plot_gather",
+    "plot_vtu",
+}
 PRESENTATION_METHODS = {
     "plot",
+    "plot_gather",
+    "plot_vtu",
     "render",
     "render_paraview",
     "savefig",

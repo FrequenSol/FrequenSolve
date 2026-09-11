@@ -108,12 +108,3 @@ vtu_files = result.output_files(base="layered_model", suffix=".vtu", existing=Tr
 image_dir = Path("./assets")
 image_dir.mkdir(exist_ok=True)
 screenshot = image_dir / "layered_model_vp.png"
-fs.plot_vtu(
-    vtu_files[0],
-    field="vp",
-    show_edges=True,
-    scalar_bar=True,
-    show=False,
-    screenshot=screenshot,
-    window_size=(1100, 500),
-)

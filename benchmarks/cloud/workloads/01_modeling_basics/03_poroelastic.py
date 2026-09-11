@@ -125,15 +125,3 @@ poro_vtu_files = fd_result.output_files(
 image_dir = Path("./assets")
 image_dir.mkdir(exist_ok=True)
 screenshot = image_dir / "poroelastic_pressure.png"
-fs.plot_vtu(
-    poro_vtu_files[0],
-    field="pressure",
-    part="real",
-    show=False,
-    vmin=-10,
-    vmax=10,
-    cmap="RdGy",
-    zoom=1.5,
-    screenshot=screenshot,
-    window_size=(900, 500),
-)

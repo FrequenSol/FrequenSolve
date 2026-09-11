@@ -86,12 +86,3 @@ all_outputs = result.output_files(existing=True)
 image_dir = Path("./assets")
 image_dir.mkdir(exist_ok=True)
 screenshot = image_dir / "mesh_vs_generators_vp.png"
-plotter = fs.plot_vtu(
-    vtu_files[0],
-    field="vp",
-    show_edges=True,
-    scalar_bar=True,
-    show=False,
-    screenshot=screenshot,
-    window_size=(1100, 500),
-)

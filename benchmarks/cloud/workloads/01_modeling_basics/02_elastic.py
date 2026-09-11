@@ -121,15 +121,3 @@ elastic_vtu_files = fd_result.output_files(
 image_dir = Path("./assets")
 image_dir.mkdir(exist_ok=True)
 screenshot = image_dir / "elastic_paraview_vs.png"
-fs.plot_vtu(
-    elastic_vtu_files[0],
-    field="velocity_z",
-    part="imag",
-    vmin=-10,
-    vmax=10,
-    cmap="RdGy",
-    zoom=1.5,
-    show=False,
-    screenshot=screenshot,
-    window_size=(1100, 500),
-)

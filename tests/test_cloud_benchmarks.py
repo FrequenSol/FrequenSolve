@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from benchmarks.cloud import _worker
+from benchmarks.cloud import runner as cloud_runner
 from benchmarks.cloud._shared import (
     CASE_SCHEMA,
     RUN_SCHEMA,
@@ -75,6 +76,8 @@ def test_generator_emits_executable_python_without_notebook_presentation(tmp_pat
                     "site = fs.Site(profile='local')\n",
                     "result = site.submit(job).wait()\n",
                     "display(result)\n",
+                    "fs.plot_gather(result)\n",
+                    "plot_vtu(result)\n",
                     "result.status\n",
                 ],
             }
@@ -91,6 +94,8 @@ def test_generator_emits_executable_python_without_notebook_presentation(tmp_pat
     assert "IPython" not in generated
     assert "matplotlib" not in generated
     assert "display(" not in generated
+    assert "plot_gather(" not in generated
+    assert "plot_vtu(" not in generated
     compile(generated, "example.py", "exec")
 
 
@@ -193,6 +198,7 @@ class _FakeSite:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.graphql_client = _FakeGraphQL()
+        self.execution_profile = SimpleNamespace(backend="slurm")
 
     def submit(self, job, **kwargs):
         assert kwargs["force"] is True
@@ -233,6 +239,52 @@ def test_recorder_captures_top_level_and_provider_metrics(monkeypatch):
         "gatewaySeconds": [0.5],
         "schedulerQueueSeconds": [1.0],
     }
+
+
+def test_recorder_rejects_mismatched_backend_before_submission(monkeypatch):
+    fake_module = SimpleNamespace(Site=_FakeSite, Project=_FakeProject)
+    monkeypatch.setitem(sys.modules, "frequensolve", fake_module)
+    recorder = _worker.Recorder("sandbox-slurm", None, "batch", "run-1", "case-1")
+
+    with pytest.raises(RuntimeError, match="not declared backend"):
+        recorder.site_factory()
+
+
+def test_timeout_preserves_captured_worker_logs(monkeypatch, tmp_path):
+    case = {
+        "id": "synthetic/case",
+        "script": "synthetic.py",
+        "expectedSubmissions": 1,
+    }
+    monkeypatch.setattr(
+        cloud_runner,
+        "_load_corpus",
+        lambda: ([case], [], "synthetic-corpus"),
+    )
+    monkeypatch.setattr(
+        cloud_runner.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            cloud_runner.subprocess.TimeoutExpired(
+                cmd="worker",
+                timeout=1,
+                output="accepted simulation-1\n",
+                stderr=b"last known status\n",
+            )
+        ),
+    )
+
+    run_root, summary = run_benchmarks(
+        profile="synthetic-slurm",
+        backend="slurm",
+        history_root=tmp_path,
+        run_id="timeout",
+    )
+
+    case_root = next((run_root / "cases").iterdir())
+    assert (case_root / "stdout.log").read_text() == "accepted simulation-1\n"
+    assert (case_root / "stderr.log").read_text() == "last known status\n"
+    assert summary["successful"] is False
 
 
 def _write_run(root: Path, run_id: str, seconds: float, finished: str) -> Path:

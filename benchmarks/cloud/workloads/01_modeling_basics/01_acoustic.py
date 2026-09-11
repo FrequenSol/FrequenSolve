@@ -94,31 +94,6 @@ image_dir = Path("./assets")
 image_dir.mkdir(exist_ok=True)
 mesh_screenshot = image_dir / "acoustic_mesh.png"
 pressure_screenshot = image_dir / "acoustic_pressure.png"
-if vtu_files:
-    fs.plot_vtu(
-        vtu_files[0],
-        field="Vp",
-        show_edges=True,
-        scalar_bar=True,
-        show=False,
-        cmap=fs.BuGrOr,
-        zoom=1.5,
-        screenshot=mesh_screenshot,
-        window_size=(900, 500),
-    )
-    fs.plot_vtu(
-        vtu_files[1],
-        field="pressure",
-        part="im",
-        scalar_bar=True,
-        show=False,
-        vmin=-30.0,
-        vmax=30.0,
-        cmap="RdGy",
-        zoom=1.5,
-        screenshot=pressure_screenshot,
-        window_size=(900, 500),
-    )
 
 # %% source cell 23
 td_job = fs.TimeDomainJob(name="time", simulation=sim, f_min=0.0, f_max=45.0, T_max=2.0)

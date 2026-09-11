@@ -2,29 +2,29 @@
   "caseCount": 24,
   "cases": [
     {
-      "behaviorSha256": "5b922a54d163a8dc8b572b721ea0c2f835ac5e6a499a298cc3b17dc03db28b17",
+      "behaviorSha256": "3f5c2728243eaae6a31d58bcfbb0a7581dc1113d3d885648ccfdf4c31cfb0613",
       "expectedSubmissions": 2,
       "id": "01_modeling_basics/01_acoustic",
       "script": "01_modeling_basics/01_acoustic.py",
-      "scriptSha256": "33caf0926d46ae8b228c939b3427b25f9861c249655aa99426c7747a93e0b41c",
+      "scriptSha256": "1c32707948243ce506cd08c7deb162ef0fad5ea29b7f9a14dfa6ed86779f0e85",
       "source": "01_modeling_basics/01_acoustic.ipynb",
       "sourceSha256": "de9e0bc6b8db64d5cfbfc809b9f1a6f6459e96d1c132db1f2e6175d838727792"
     },
     {
-      "behaviorSha256": "49bd7aec79bb7c6bfedb78d41466591852700496e8687eb94af78e36aedbb43a",
+      "behaviorSha256": "2f4fbecf3030ccee356a6d5d1740e5baf7ba0796e88a4b8236c03c7f4f54a2da",
       "expectedSubmissions": 3,
       "id": "01_modeling_basics/02_elastic",
       "script": "01_modeling_basics/02_elastic.py",
-      "scriptSha256": "9eff1f0678865680915a4d000ea6b3eb5f4fd1fd348fb6ab351e38d7b1ddda1e",
+      "scriptSha256": "619d38835deb6678366f7a364a7549c2201a7c88ea2e37dc5a9b89b6d64ff32f",
       "source": "01_modeling_basics/02_elastic.ipynb",
       "sourceSha256": "f1a04347a94621c215a9a792637f8fb987c2a43f117c37a4fc208de2be6082f1"
     },
     {
-      "behaviorSha256": "73185acda341a4b7cc55da6cf910d9b7204bec89f3f88b799567ca0ac72e4c42",
+      "behaviorSha256": "a8fd24d96ece49c54af806ee193927615f6ef5ae6be2629cf9a60043c13e3061",
       "expectedSubmissions": 2,
       "id": "01_modeling_basics/03_poroelastic",
       "script": "01_modeling_basics/03_poroelastic.py",
-      "scriptSha256": "74612afb64e288f73612d99dbd8c89466fd6a2ee32b7be52bde237238f8b910c",
+      "scriptSha256": "c3c79e69c738ac0779974535ed2687a22acfba10c466cb6253960bddf369ca45",
       "source": "01_modeling_basics/03_poroelastic.ipynb",
       "sourceSha256": "d0c9488e77ab7ddc0a011134fe4c7de4e0687dbf69fa1f4edb7a64003790df68"
     },
@@ -38,11 +38,11 @@
       "sourceSha256": "cc737a2c5f879d8ed8dfcaacb37c2571d48db11840720c7bbaae2ab0aba8bbe9"
     },
     {
-      "behaviorSha256": "eab64ddeafd9455255c69c93c3023bc59a47b960c8c9d3b330c36f5681fa339f",
+      "behaviorSha256": "8c61eb82ddecd1525d27578a79202d6f4be26830c94c2f1f01a13a4a9ba25698",
       "expectedSubmissions": 3,
       "id": "01_modeling_basics/05_acoustic_25d_3d_axisymmetric",
       "script": "01_modeling_basics/05_acoustic_25d_3d_axisymmetric.py",
-      "scriptSha256": "6b77da33980e26e684c014af45b2e2a828a4d87343561146b3f11fa86ac2abf8",
+      "scriptSha256": "ee3da9aa4e5613a1a05677bbb208d1db492d128f889c0ad97ba66c4713391281",
       "source": "01_modeling_basics/05_acoustic_25d_3d_axisymmetric.ipynb",
       "sourceSha256": "fa74337c5a47ba17d8d7abd7be5edcc227fefd289d3e9fc7c890f708a8bea863"
     },
@@ -56,29 +56,29 @@
       "sourceSha256": "1bc0cbe7736bb4fea15ddeccb6002c7f53ff6c447d094529b419b5232ac4eb5e"
     },
     {
-      "behaviorSha256": "6df73c9bd6f69d9bf315d98f899f2d8272cf6a5552cdb9e8a0c9bc2b3f4dc3f3",
+      "behaviorSha256": "66beca295d0bb5794fc88582aaba19d903060149fd1b100f9543d3989b631df5",
       "expectedSubmissions": 2,
       "id": "02_sites/01_aws_site",
       "script": "02_sites/01_aws_site.py",
-      "scriptSha256": "0841905c3da0c6e74f6bf2ef7b42d0edc355b2cf44b024b56636fddaec693ef9",
+      "scriptSha256": "1c57192059f1754be8433edd62acc9a4ac482433f06a30a24cff0981d7069df4",
       "source": "02_sites/01_aws_site.ipynb",
       "sourceSha256": "4e867d9a5f9b61636484e36c504db6e136217ee9c5042beca2a76f92f3d0a497"
     },
     {
-      "behaviorSha256": "1ad6d52d4f15e44683280d4b7e074a83cf6056755efb32c168698ee5d2c4b018",
+      "behaviorSha256": "aee3d95e3436ad170d99ca2cdb505d156a6536ec1423d74f87a25ad68af63563",
       "expectedSubmissions": 2,
       "id": "02_sites/02_hpc_sites",
       "script": "02_sites/02_hpc_sites.py",
-      "scriptSha256": "49c46c8a8ac2d83b8ae9b06af270b09033515b6ce96e50ae4218175d1112093a",
+      "scriptSha256": "c432b8b53c9c30b4bb84ab0ffdefbe4a5bb9adaa411f49c9c8dd319f7a939646",
       "source": "02_sites/02_hpc_sites.ipynb",
       "sourceSha256": "cf94da4bce07514c9c7d295a91acf3925f1966a2d4b19de2e7f6f754e2936a0f"
     },
     {
-      "behaviorSha256": "e3c0103d1659a6818a93536848b692dcb33510e29ab29b3f5b92c1845fdf865b",
+      "behaviorSha256": "2bd11825096377ff2f06f64a1c3b4a12fb9dd81a7ed8e8c974b50c5045959ca5",
       "expectedSubmissions": 2,
       "id": "02_sites/03_local_site",
       "script": "02_sites/03_local_site.py",
-      "scriptSha256": "27e255eae71e4b7d49acf9fd800406983e4f42d476226f52f6fe9128d4a570ee",
+      "scriptSha256": "24032d4bcd58698def7ffbdf05d248644b39cf3568ebaff1c539d108e3281b0e",
       "source": "02_sites/03_local_site.ipynb",
       "sourceSha256": "20b7fd7a607050df5814c7d21ca350663efba91804d2fac6df3dca4e09577ee1"
     },
@@ -92,56 +92,56 @@
       "sourceSha256": "8464814c780038496c15036777804a9becb9c866ec5d695e4fd2a0bca8249538"
     },
     {
-      "behaviorSha256": "3c61d9c8d0205667a9ef26c4646dc153ab8a76cd2e7ac16e9d1b170904ad22a0",
+      "behaviorSha256": "555169806bc3592ebeae3a9881f4d110e63b230aee795f2f23f31ef05e08ab27",
       "expectedSubmissions": 1,
       "id": "03_velocity_model_building/01_variable_properties_units",
       "script": "03_velocity_model_building/01_variable_properties_units.py",
-      "scriptSha256": "78640803f19670052cd7b5c73779d2cf4424449d2df8587ecea2a2e74b1ba900",
+      "scriptSha256": "34704157d770240a17489b95e29a58fb553fa148150e50c67cb792d50d5f5467",
       "source": "03_velocity_model_building/01_variable_properties_units.ipynb",
       "sourceSha256": "fd6793103f1963b05d5a5f71bf1d220ccaacc0d2441e2b9c0a3175d40bb469b6"
     },
     {
-      "behaviorSha256": "2e4e5be7b762755b1c839d7f8cd2e7c94220eb638bcfd23b75908e81b8d0c01c",
+      "behaviorSha256": "d49a5efe67b239c6986e3e6ffde9d2c878bcf6494377c54e65ab44cf3236bd4a",
       "expectedSubmissions": 1,
       "id": "03_velocity_model_building/02_coordinate_systems",
       "script": "03_velocity_model_building/02_coordinate_systems.py",
-      "scriptSha256": "fbc6e38aa56ea0e50f82b80ac3536d6cbb9e53bc58ebc9703931b10daa42b0b4",
+      "scriptSha256": "53b95891a2702127a2cfb9a76f0bf757805df97adbe2b9816e737862ef2e74c2",
       "source": "03_velocity_model_building/02_coordinate_systems.ipynb",
       "sourceSha256": "45213a67713db784e3124aec182cf8a6d5e8c9c30ce0b437d471433de0597b1d"
     },
     {
-      "behaviorSha256": "1a7996929337dc89d059cbcace1d39b3697127ab9b9b01815a5f61c2b55e5058",
+      "behaviorSha256": "3da33b1b490360c2a596de45278671a29b21936780f70aab84a344ffa5c2a22c",
       "expectedSubmissions": 1,
       "id": "03_velocity_model_building/03_layered_models",
       "script": "03_velocity_model_building/03_layered_models.py",
-      "scriptSha256": "e5202c2a10564c45bc7d093a64aa9921b72ba24ee0a2b9c9ef1cfa72c7fd7751",
+      "scriptSha256": "3a74dfd387383f7a4b10b6f7d15e02344c1b70ba46a47ee94ae9827e7a0fe849",
       "source": "03_velocity_model_building/03_layered_models.ipynb",
       "sourceSha256": "152494c4c03fd652b0e3a7c6abba9539884a9185c2b02171a0e21f85d7929917"
     },
     {
-      "behaviorSha256": "e9354848ef906c770cce12fcf60aac3e14ed31f1643864947329aed63db1c27b",
+      "behaviorSha256": "6e56106612581f48c84aac2e1bf43357ca3dd7da2fe231aea4e7d95782b77983",
       "expectedSubmissions": 1,
       "id": "04_meshing/01_mesh_vs_generators",
       "script": "04_meshing/01_mesh_vs_generators.py",
-      "scriptSha256": "abad57c0c8997a015b534340aa2d70d36f25abde5c20bc891f82eb9985790711",
+      "scriptSha256": "d13796ee7bb7cf0576b9391b677ae7525e9c9f2c5169febe44bd782244a06f6f",
       "source": "04_meshing/01_mesh_vs_generators.ipynb",
       "sourceSha256": "f0f303dfc6b89c277cca81523720bb99ba8a601cd4403a4780eccb11ada3cf83"
     },
     {
-      "behaviorSha256": "01e2337ddbbe6675789fef648cc42a5be7fe9458e3c3e22acc8e6883b67a8f56",
+      "behaviorSha256": "230d4843d53ab60b6fbd534e86dc6180c7a60e90cc280f2ae287e62d9153e514",
       "expectedSubmissions": 1,
       "id": "04_meshing/02_adaptivity_fields",
       "script": "04_meshing/02_adaptivity_fields.py",
-      "scriptSha256": "e39b587d4326ba46ac51d9d6b344993a54a1fd3514960d6cd8b84f697e539060",
+      "scriptSha256": "de7e6ac93693d6cb60c2a5ddc7489f45ac18bf53aea08094bcc495a78be3a96d",
       "source": "04_meshing/02_adaptivity_fields.ipynb",
       "sourceSha256": "f1fb8a8f03f146e79ad78e87f798e6475bede0ad59dd93abead258a88e012ec5"
     },
     {
-      "behaviorSha256": "625d045326cdcfcaba48a980e860917ff43bd6675fd1030d403057337c38d22b",
+      "behaviorSha256": "9f41c7033b29b8ffec022d5afa4eb3e21af725a52ee0659ef218276990a5891a",
       "expectedSubmissions": 1,
       "id": "04_meshing/03_gradings",
       "script": "04_meshing/03_gradings.py",
-      "scriptSha256": "d69d7bac5c5c13f992999ef485331369b7cdfb5f880ad71f8098a04845707731",
+      "scriptSha256": "adf8f85b5e113264a7a0b3cb8533ca6515d75717e608ceb84db2a54471bb246a",
       "source": "04_meshing/03_gradings.ipynb",
       "sourceSha256": "d1cf5a2bb9fd4721b4ee7a8993de6b7886e126083adeab5c90efad17a3536b9b"
     },

@@ -84,18 +84,3 @@ vtu_files = result.output_files(base="gradings", suffix=".vtu", existing=True)
 image_dir = Path("./assets")
 image_dir.mkdir(exist_ok=True)
 rendered = []
-for field, filename in [
-    ("vp", "gradings_vp_edges.png"),
-    ("pressure", "gradings_pressure.png"),
-]:
-    screenshot = image_dir / filename
-    fs.plot_vtu(
-        vtu_files[0],
-        field=field,
-        show_edges=True,
-        scalar_bar=True,
-        show=False,
-        screenshot=screenshot,
-        window_size=(1100, 500),
-    )
-    rendered.append(screenshot)
