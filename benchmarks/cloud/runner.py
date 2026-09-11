@@ -137,13 +137,42 @@ def _classify_known_bug_probe(result: dict[str, Any], bug: Mapping[str, Any]) ->
         return
     expected_codes = set(bug.get("expectedFailureCodes", []))
     actual_codes = _failure_codes(result)
-    if expected_codes and expected_codes.intersection(actual_codes):
+    expected_failure = bug.get("expectedFailure")
+    actual_failure = result.get("failure")
+    structured_match = False
+    if isinstance(expected_failure, Mapping) and isinstance(actual_failure, Mapping):
+        expected_message = expected_failure.get("messageContains")
+        expected_fields = [
+            field for field in ("phase", "type") if field in expected_failure
+        ]
+        message_fragments = (
+            [expected_message]
+            if isinstance(expected_message, str)
+            else expected_message if isinstance(expected_message, list) else []
+        )
+        structured_match = (
+            bool(expected_fields or message_fragments)
+            and all(
+                actual_failure.get(field) == expected_failure[field]
+                for field in expected_fields
+            )
+            and all(
+                isinstance(fragment, str)
+                and fragment in str(actual_failure.get("message", ""))
+                for fragment in message_fragments
+            )
+        )
+    if (
+        expected_codes and expected_codes.intersection(actual_codes)
+    ) or structured_match:
         result["status"] = "XFAIL"
         return
     result["status"] = "FAIL"
     result["knownBugMismatch"] = {
         "expectedFailureCodes": sorted(expected_codes),
         "actualFailureCodes": sorted(actual_codes),
+        "expectedFailure": expected_failure,
+        "actualFailure": actual_failure,
     }
 
 

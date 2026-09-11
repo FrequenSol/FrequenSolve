@@ -34,6 +34,56 @@
       ],
       "issueUrl": "https://github.com/FrequenSol/cloud-amplify/issues/1866",
       "reason": "The native resource planner fails on the tutorial's top_points coordinate system with Internal Error 002725."
+    },
+    {
+      "backends": [
+        "batch",
+        "slurm"
+      ],
+      "caseId": "05_surveys/04_sparse_surveys",
+      "expectedFailureCodes": [],
+      "expectedFailure": {
+        "phase": "execution",
+        "type": "ValueError",
+        "messageContains": "Indexed packed trace datasets for group 'middle_offsets' do not have a common shape"
+      },
+      "issueUrl": "https://github.com/FrequenSol/Sauce/issues/92",
+      "reason": "The native sparse-survey writer applies frequency-dependent floating-point boundary membership, so successful frequency shards have incompatible trace extents."
+    },
+    {
+      "backends": [
+        "batch",
+        "slurm"
+      ],
+      "caseId": "06_outputs/02_paraview_vtk",
+      "expectedFailureCodes": [
+        "SLURM_EXECUTION_FAILED"
+      ],
+      "expectedFailure": {
+        "phase": "execution",
+        "type": "RunFailedError",
+        "messageContains": "job=freq_paraview; state=failed"
+      },
+      "issueUrl": "https://github.com/FrequenSol/Sauce/issues/92",
+      "reason": "The supported ParaView tutorial input reaches a native visualization failure before producing the requested output."
+    },
+    {
+      "backends": [
+        "batch",
+        "slurm"
+      ],
+      "caseId": "06_outputs/03_imaging",
+      "expectedFailureCodes": [
+        "SLURM_EXECUTION_FAILED",
+        "SLURM_PACKER_FAILED"
+      ],
+      "expectedFailure": {
+        "phase": "execution",
+        "type": "RunFailedError",
+        "messageContains": "job=rtm_from_true_data; state=failed"
+      },
+      "issueUrl": "https://github.com/FrequenSol/Sauce/issues/92",
+      "reason": "The supported RTM tutorial input reaches a native imaging failure after its observed-data dependency succeeds."
     }
   ]
 }

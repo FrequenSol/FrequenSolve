@@ -353,6 +353,58 @@ def test_known_bug_probe_only_xfails_for_the_registered_failure_code():
     assert passing["status"] == "XPASS"
 
 
+def test_known_bug_probe_can_match_a_structured_client_failure():
+    bug = {
+        "expectedFailureCodes": [],
+        "expectedFailure": {
+            "phase": "execution",
+            "type": "ValueError",
+            "messageContains": ["packed trace", "common shape"],
+        },
+        "reason": "known",
+    }
+    matching = {
+        "status": "FAIL",
+        "failure": {
+            "phase": "execution",
+            "type": "ValueError",
+            "message": "packed trace datasets do not have a common shape",
+        },
+        "submissions": [],
+    }
+    unrelated = {
+        "status": "FAIL",
+        "failure": {
+            "phase": "execution",
+            "type": "ValueError",
+            "message": "a different client error",
+        },
+        "submissions": [],
+    }
+
+    _classify_known_bug_probe(matching, bug)
+    _classify_known_bug_probe(unrelated, bug)
+
+    assert matching["status"] == "XFAIL"
+    assert unrelated["status"] == "FAIL"
+    assert unrelated["knownBugMismatch"]["actualFailure"]["message"] == (
+        "a different client error"
+    )
+
+    empty_signature = {
+        "expectedFailureCodes": [],
+        "expectedFailure": {},
+        "reason": "invalid empty signature",
+    }
+    empty_result = {
+        "status": "FAIL",
+        "failure": matching["failure"],
+        "submissions": [],
+    }
+    _classify_known_bug_probe(empty_result, empty_signature)
+    assert empty_result["status"] == "FAIL"
+
+
 def test_corpus_fingerprint_changes_with_behavioral_identity():
     original = {"cases": [{"id": "a", "behaviorSha256": "1"}]}
     changed = {"cases": [{"id": "a", "behaviorSha256": "2"}]}
