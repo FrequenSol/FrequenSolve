@@ -168,8 +168,8 @@ def _derived_metrics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
             }
             for item in attempts
             if isinstance(item, Mapping)
-            and isinstance(item.get("allocatedVcpus"), int)
-            and isinstance(item.get("allocatedMemoryMiB"), int)
+            and isinstance(item.get("nodes"), int)
+            and isinstance(item.get("ranksPerNode"), int)
         ]
     return metrics
 

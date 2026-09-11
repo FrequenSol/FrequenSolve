@@ -191,7 +191,14 @@ class _FakeGraphQL:
                             "ranksPerNode": 1,
                             "allocatedVcpus": 4,
                             "allocatedMemoryMiB": 8192,
-                        }
+                        },
+                        {
+                            "frequencyIndex": 1,
+                            "nodes": 2,
+                            "ranksPerNode": 4,
+                            "allocatedVcpus": None,
+                            "allocatedMemoryMiB": None,
+                        },
                     ],
                     "nextToken": None,
                 },
@@ -250,7 +257,14 @@ def test_recorder_captures_top_level_and_provider_metrics(monkeypatch):
                 "ranksPerNode": 1,
                 "vcpus": 4,
                 "memoryMiB": 8192,
-            }
+            },
+            {
+                "frequencyIndex": 1,
+                "nodes": 2,
+                "ranksPerNode": 4,
+                "vcpus": None,
+                "memoryMiB": None,
+            },
         ],
     }
 
