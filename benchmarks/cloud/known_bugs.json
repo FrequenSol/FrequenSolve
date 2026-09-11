@@ -5,6 +5,18 @@
       "backends": [
         "slurm"
       ],
+      "caseId": "01_modeling_basics/03_poroelastic",
+      "expectedFailureCodes": [
+        "SLURM_EXECUTION_FAILED",
+        "SLURM_PACKER_FAILED"
+      ],
+      "issueUrl": "https://github.com/FrequenSol/cloud-amplify/issues/1864",
+      "reason": "The PERMIT_V1 worker-control path cannot renew or durably acknowledge a 45-frequency managed-Slurm burst within the active permit deadline."
+    },
+    {
+      "backends": [
+        "slurm"
+      ],
       "caseId": "01_modeling_basics/05_acoustic_25d_3d_axisymmetric",
       "expectedFailureCodes": [
         "SLURM_PACKER_FAILED"
