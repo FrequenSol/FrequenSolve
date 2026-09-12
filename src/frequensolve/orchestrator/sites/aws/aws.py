@@ -1181,15 +1181,19 @@ class AWSSite(BaseSite):
                         "executionBackend": result.get(
                             "executionBackend", self.execution_profile.backend
                         ),
-                        "executionSiteId": result.get(
-                            "executionSiteId", self.execution_profile.execution_site_id
+                        "executionSiteId": result.get("executionSiteId")
+                        or self.execution_profile.execution_site_id
+                        or (
+                            "managed-slurm"
+                            if self.execution_profile.backend == "slurm"
+                            else "managed-batch"
                         ),
                         "logicalAttemptId": result.get(
                             "logicalAttemptId", f"{simulation_id}:1"
                         ),
-                        "providerJobId": result.get(
-                            "providerJobId", result.get("batchJobId")
-                        ),
+                        "providerJobId": result.get("providerJobId")
+                        or result.get("providerAttemptId")
+                        or result.get("batchJobId"),
                         "executionState": "queued",
                         "requestedResources": self.execution_profile.execution_resources,
                         "executionTarget": result.get("executionTarget"),
