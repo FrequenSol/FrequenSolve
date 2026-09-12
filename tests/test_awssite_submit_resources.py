@@ -313,7 +313,18 @@ def test_poll_run_keeps_billing_separate_from_success(billing_status):
     assert run.backend == billing
 
 
-@pytest.mark.parametrize("status", ["SUCCEEDED", "FAILED", "CANCELED"])
+@pytest.mark.parametrize(
+    "status",
+    [
+        "SUCCEEDED",
+        "COMPLETED",
+        "FAILED",
+        "CANCELED",
+        "CANCELLED",
+        "completed",
+        "cancelled",
+    ],
+)
 def test_cancel_job_treats_terminal_states_as_idempotent(status):
     site = AWSSite.__new__(AWSSite)
     site.graphql_client = SimpleNamespace(

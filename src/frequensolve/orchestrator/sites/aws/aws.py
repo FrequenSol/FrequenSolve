@@ -1703,7 +1703,13 @@ class AWSSite(BaseSite):
             ) from None
 
         # Check if simulation is in a cancellable state
-        if status in ["SUCCEEDED", "FAILED", "CANCELED"]:
+        if str(status).upper() in {
+            "SUCCEEDED",
+            "COMPLETED",
+            "FAILED",
+            "CANCELED",
+            "CANCELLED",
+        }:
             logger.warning(
                 f"Simulation {job_id} is already in terminal state: {status}. "
                 "Nothing to cancel."
