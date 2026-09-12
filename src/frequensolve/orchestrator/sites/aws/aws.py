@@ -1710,13 +1710,7 @@ class AWSSite(BaseSite):
             )
             return
 
-        # For now, raise an error indicating cancellation is not yet implemented
-        # This will be implemented when the cancelSimulation GraphQL mutation is available
-        raise NotImplementedError(
-            "Simulation cancellation is not yet implemented in this SDK. "
-            f"The simulation is currently in state {status}. "
-            "Cancel it through the Cloud application."
-        )
+        self.graphql_client.cancel_simulation(job_id)
 
     def put(
         self,
