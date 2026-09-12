@@ -1,0 +1,502 @@
+[
+  {
+    "expectedState": "queued",
+    "envelope": {
+      "version": "aws-execution-site-result.v1",
+      "event": {
+        "version": "execution-site-event.v1",
+        "executionSiteId": "managed-slurm",
+        "simulationId": "simulation-test-1",
+        "logicalAttemptId": "simulation-test-1:1",
+        "providerJobId": "123",
+        "state": "queued",
+        "failureReason": null,
+        "recordedAt": "2026-09-12T00:00:00.000Z",
+        "artifacts": [
+          {
+            "uri": "s3://test-artifacts/private/test/results/"
+          }
+        ],
+        "logs": [],
+        "usageEvidence": {
+          "reference": "simulation-test-1:1",
+          "version": "usage-evidence.v1"
+        }
+      },
+      "adapter": {
+        "command_id": "cmd-1",
+        "simulation_id": "simulation-test-1",
+        "action": "SUBMIT",
+        "disposition": "ACCEPTED",
+        "provider_attempt_id": "123",
+        "projected_status": "PENDING",
+        "recorded_at": "2026-09-12T00:00:00.000Z",
+        "failure_code": null,
+        "frequency_index": null,
+        "frequency_value": null,
+        "solver_started_at": null,
+        "solver_stopped_at": null,
+        "solver_active_milliseconds": null,
+        "gateway_received_at": null,
+        "planner_submitted_at": null,
+        "planner_completed_at": null,
+        "queued_at": null,
+        "allocated_vcpus": null,
+        "allocated_memory_mib": null,
+        "direct_execution_closure": null
+      }
+    }
+  },
+  {
+    "expectedState": "queued",
+    "envelope": {
+      "version": "aws-execution-site-result.v1",
+      "event": {
+        "version": "execution-site-event.v1",
+        "executionSiteId": "managed-slurm",
+        "simulationId": "simulation-test-1",
+        "logicalAttemptId": "simulation-test-1:1",
+        "providerJobId": "slurm:test-cluster:123_0",
+        "state": "queued",
+        "failureReason": null,
+        "recordedAt": "2026-09-12T00:00:00.000Z",
+        "artifacts": [
+          {
+            "uri": "s3://test-artifacts/private/test/results/"
+          }
+        ],
+        "logs": [
+          {
+            "uri": "s3://test-artifacts/private/test/logs/task_1.log"
+          }
+        ],
+        "usageEvidence": {
+          "reference": "simulation-test-1:1",
+          "version": "usage-evidence.v1"
+        }
+      },
+      "adapter": {
+        "command_id": "cmd-1",
+        "simulation_id": "simulation-test-1",
+        "action": "SUBMIT",
+        "disposition": "ACCEPTED",
+        "provider_attempt_id": "slurm:test-cluster:123_0",
+        "projected_status": "PENDING",
+        "recorded_at": "2026-09-12T00:00:00.000Z",
+        "failure_code": null,
+        "frequency_index": 0,
+        "frequency_value": null,
+        "solver_started_at": null,
+        "solver_stopped_at": null,
+        "solver_active_milliseconds": null,
+        "gateway_received_at": null,
+        "planner_submitted_at": null,
+        "planner_completed_at": null,
+        "queued_at": null,
+        "allocated_vcpus": null,
+        "allocated_memory_mib": null,
+        "direct_execution_closure": null
+      }
+    }
+  },
+  {
+    "expectedState": "running",
+    "envelope": {
+      "version": "aws-execution-site-result.v1",
+      "event": {
+        "version": "execution-site-event.v1",
+        "executionSiteId": "managed-slurm",
+        "simulationId": "simulation-test-1",
+        "logicalAttemptId": "simulation-test-1:1",
+        "providerJobId": "123",
+        "state": "running",
+        "failureReason": null,
+        "recordedAt": "2026-09-12T00:00:00.000Z",
+        "artifacts": [
+          {
+            "uri": "s3://test-artifacts/private/test/results/"
+          }
+        ],
+        "logs": [],
+        "usageEvidence": {
+          "reference": "simulation-test-1:1",
+          "version": "usage-evidence.v1"
+        }
+      },
+      "adapter": {
+        "command_id": "cmd-1",
+        "simulation_id": "simulation-test-1",
+        "action": "SUBMIT",
+        "disposition": "ACCEPTED",
+        "provider_attempt_id": "123",
+        "projected_status": "RUNNING",
+        "recorded_at": "2026-09-12T00:00:00.000Z",
+        "failure_code": null,
+        "frequency_index": null,
+        "frequency_value": null,
+        "solver_started_at": null,
+        "solver_stopped_at": null,
+        "solver_active_milliseconds": null,
+        "gateway_received_at": null,
+        "planner_submitted_at": null,
+        "planner_completed_at": null,
+        "queued_at": null,
+        "allocated_vcpus": null,
+        "allocated_memory_mib": null,
+        "direct_execution_closure": null
+      }
+    }
+  },
+  {
+    "expectedState": "running",
+    "envelope": {
+      "version": "aws-execution-site-result.v1",
+      "event": {
+        "version": "execution-site-event.v1",
+        "executionSiteId": "managed-slurm",
+        "simulationId": "simulation-test-1",
+        "logicalAttemptId": "simulation-test-1:1",
+        "providerJobId": "slurm:test-cluster:123_0",
+        "state": "running",
+        "failureReason": null,
+        "recordedAt": "2026-09-12T00:00:00.000Z",
+        "artifacts": [
+          {
+            "uri": "s3://test-artifacts/private/test/results/"
+          }
+        ],
+        "logs": [
+          {
+            "uri": "s3://test-artifacts/private/test/logs/task_1.log"
+          }
+        ],
+        "usageEvidence": {
+          "reference": "simulation-test-1:1",
+          "version": "usage-evidence.v1"
+        }
+      },
+      "adapter": {
+        "command_id": "cmd-1",
+        "simulation_id": "simulation-test-1",
+        "action": "SUBMIT",
+        "disposition": "ACCEPTED",
+        "provider_attempt_id": "slurm:test-cluster:123_0",
+        "projected_status": "RUNNING",
+        "recorded_at": "2026-09-12T00:00:00.000Z",
+        "failure_code": null,
+        "frequency_index": 0,
+        "frequency_value": null,
+        "solver_started_at": null,
+        "solver_stopped_at": null,
+        "solver_active_milliseconds": null,
+        "gateway_received_at": null,
+        "planner_submitted_at": null,
+        "planner_completed_at": null,
+        "queued_at": null,
+        "allocated_vcpus": null,
+        "allocated_memory_mib": null,
+        "direct_execution_closure": null
+      }
+    }
+  },
+  {
+    "expectedState": "succeeded",
+    "envelope": {
+      "version": "aws-execution-site-result.v1",
+      "event": {
+        "version": "execution-site-event.v1",
+        "executionSiteId": "managed-slurm",
+        "simulationId": "simulation-test-1",
+        "logicalAttemptId": "simulation-test-1:1",
+        "providerJobId": "123",
+        "state": "succeeded",
+        "failureReason": null,
+        "recordedAt": "2026-09-12T00:00:00.000Z",
+        "artifacts": [
+          {
+            "uri": "s3://test-artifacts/private/test/results/"
+          }
+        ],
+        "logs": [],
+        "usageEvidence": {
+          "reference": "simulation-test-1:1",
+          "version": "usage-evidence.v1"
+        }
+      },
+      "adapter": {
+        "command_id": "cmd-1",
+        "simulation_id": "simulation-test-1",
+        "action": "SUBMIT",
+        "disposition": "ACCEPTED",
+        "provider_attempt_id": "123",
+        "projected_status": "SUCCEEDED",
+        "recorded_at": "2026-09-12T00:00:00.000Z",
+        "failure_code": null,
+        "frequency_index": null,
+        "frequency_value": null,
+        "solver_started_at": null,
+        "solver_stopped_at": null,
+        "solver_active_milliseconds": null,
+        "gateway_received_at": null,
+        "planner_submitted_at": null,
+        "planner_completed_at": null,
+        "queued_at": null,
+        "allocated_vcpus": null,
+        "allocated_memory_mib": null,
+        "direct_execution_closure": null
+      }
+    }
+  },
+  {
+    "expectedState": "succeeded",
+    "envelope": {
+      "version": "aws-execution-site-result.v1",
+      "event": {
+        "version": "execution-site-event.v1",
+        "executionSiteId": "managed-slurm",
+        "simulationId": "simulation-test-1",
+        "logicalAttemptId": "simulation-test-1:1",
+        "providerJobId": "slurm:test-cluster:123_0",
+        "state": "succeeded",
+        "failureReason": null,
+        "recordedAt": "2026-09-12T00:00:00.000Z",
+        "artifacts": [
+          {
+            "uri": "s3://test-artifacts/private/test/results/"
+          }
+        ],
+        "logs": [
+          {
+            "uri": "s3://test-artifacts/private/test/logs/task_1.log"
+          }
+        ],
+        "usageEvidence": {
+          "reference": "simulation-test-1:1",
+          "version": "usage-evidence.v1"
+        }
+      },
+      "adapter": {
+        "command_id": "cmd-1",
+        "simulation_id": "simulation-test-1",
+        "action": "SUBMIT",
+        "disposition": "ACCEPTED",
+        "provider_attempt_id": "slurm:test-cluster:123_0",
+        "projected_status": "SUCCEEDED",
+        "recorded_at": "2026-09-12T00:00:00.000Z",
+        "failure_code": null,
+        "frequency_index": 0,
+        "frequency_value": null,
+        "solver_started_at": null,
+        "solver_stopped_at": null,
+        "solver_active_milliseconds": null,
+        "gateway_received_at": null,
+        "planner_submitted_at": null,
+        "planner_completed_at": null,
+        "queued_at": null,
+        "allocated_vcpus": null,
+        "allocated_memory_mib": null,
+        "direct_execution_closure": null
+      }
+    }
+  },
+  {
+    "expectedState": "failed",
+    "envelope": {
+      "version": "aws-execution-site-result.v1",
+      "event": {
+        "version": "execution-site-event.v1",
+        "executionSiteId": "managed-slurm",
+        "simulationId": "simulation-test-1",
+        "logicalAttemptId": "simulation-test-1:1",
+        "providerJobId": "123",
+        "state": "failed",
+        "failureReason": null,
+        "recordedAt": "2026-09-12T00:00:00.000Z",
+        "artifacts": [
+          {
+            "uri": "s3://test-artifacts/private/test/results/"
+          }
+        ],
+        "logs": [],
+        "usageEvidence": {
+          "reference": "simulation-test-1:1",
+          "version": "usage-evidence.v1"
+        }
+      },
+      "adapter": {
+        "command_id": "cmd-1",
+        "simulation_id": "simulation-test-1",
+        "action": "SUBMIT",
+        "disposition": "ACCEPTED",
+        "provider_attempt_id": "123",
+        "projected_status": "FAILED",
+        "recorded_at": "2026-09-12T00:00:00.000Z",
+        "failure_code": null,
+        "frequency_index": null,
+        "frequency_value": null,
+        "solver_started_at": null,
+        "solver_stopped_at": null,
+        "solver_active_milliseconds": null,
+        "gateway_received_at": null,
+        "planner_submitted_at": null,
+        "planner_completed_at": null,
+        "queued_at": null,
+        "allocated_vcpus": null,
+        "allocated_memory_mib": null,
+        "direct_execution_closure": null
+      }
+    }
+  },
+  {
+    "expectedState": "failed",
+    "envelope": {
+      "version": "aws-execution-site-result.v1",
+      "event": {
+        "version": "execution-site-event.v1",
+        "executionSiteId": "managed-slurm",
+        "simulationId": "simulation-test-1",
+        "logicalAttemptId": "simulation-test-1:1",
+        "providerJobId": "slurm:test-cluster:123_0",
+        "state": "failed",
+        "failureReason": null,
+        "recordedAt": "2026-09-12T00:00:00.000Z",
+        "artifacts": [
+          {
+            "uri": "s3://test-artifacts/private/test/results/"
+          }
+        ],
+        "logs": [
+          {
+            "uri": "s3://test-artifacts/private/test/logs/task_1.log"
+          }
+        ],
+        "usageEvidence": {
+          "reference": "simulation-test-1:1",
+          "version": "usage-evidence.v1"
+        }
+      },
+      "adapter": {
+        "command_id": "cmd-1",
+        "simulation_id": "simulation-test-1",
+        "action": "SUBMIT",
+        "disposition": "ACCEPTED",
+        "provider_attempt_id": "slurm:test-cluster:123_0",
+        "projected_status": "FAILED",
+        "recorded_at": "2026-09-12T00:00:00.000Z",
+        "failure_code": null,
+        "frequency_index": 0,
+        "frequency_value": null,
+        "solver_started_at": null,
+        "solver_stopped_at": null,
+        "solver_active_milliseconds": null,
+        "gateway_received_at": null,
+        "planner_submitted_at": null,
+        "planner_completed_at": null,
+        "queued_at": null,
+        "allocated_vcpus": null,
+        "allocated_memory_mib": null,
+        "direct_execution_closure": null
+      }
+    }
+  },
+  {
+    "expectedState": "canceled",
+    "envelope": {
+      "version": "aws-execution-site-result.v1",
+      "event": {
+        "version": "execution-site-event.v1",
+        "executionSiteId": "managed-slurm",
+        "simulationId": "simulation-test-1",
+        "logicalAttemptId": "simulation-test-1:1",
+        "providerJobId": "123",
+        "state": "canceled",
+        "failureReason": null,
+        "recordedAt": "2026-09-12T00:00:00.000Z",
+        "artifacts": [
+          {
+            "uri": "s3://test-artifacts/private/test/results/"
+          }
+        ],
+        "logs": [],
+        "usageEvidence": {
+          "reference": "simulation-test-1:1",
+          "version": "usage-evidence.v1"
+        }
+      },
+      "adapter": {
+        "command_id": "cmd-1",
+        "simulation_id": "simulation-test-1",
+        "action": "SUBMIT",
+        "disposition": "ACCEPTED",
+        "provider_attempt_id": "123",
+        "projected_status": "CANCELED",
+        "recorded_at": "2026-09-12T00:00:00.000Z",
+        "failure_code": null,
+        "frequency_index": null,
+        "frequency_value": null,
+        "solver_started_at": null,
+        "solver_stopped_at": null,
+        "solver_active_milliseconds": null,
+        "gateway_received_at": null,
+        "planner_submitted_at": null,
+        "planner_completed_at": null,
+        "queued_at": null,
+        "allocated_vcpus": null,
+        "allocated_memory_mib": null,
+        "direct_execution_closure": null
+      }
+    }
+  },
+  {
+    "expectedState": "canceled",
+    "envelope": {
+      "version": "aws-execution-site-result.v1",
+      "event": {
+        "version": "execution-site-event.v1",
+        "executionSiteId": "managed-slurm",
+        "simulationId": "simulation-test-1",
+        "logicalAttemptId": "simulation-test-1:1",
+        "providerJobId": "slurm:test-cluster:123_0",
+        "state": "canceled",
+        "failureReason": null,
+        "recordedAt": "2026-09-12T00:00:00.000Z",
+        "artifacts": [
+          {
+            "uri": "s3://test-artifacts/private/test/results/"
+          }
+        ],
+        "logs": [
+          {
+            "uri": "s3://test-artifacts/private/test/logs/task_1.log"
+          }
+        ],
+        "usageEvidence": {
+          "reference": "simulation-test-1:1",
+          "version": "usage-evidence.v1"
+        }
+      },
+      "adapter": {
+        "command_id": "cmd-1",
+        "simulation_id": "simulation-test-1",
+        "action": "SUBMIT",
+        "disposition": "ACCEPTED",
+        "provider_attempt_id": "slurm:test-cluster:123_0",
+        "projected_status": "CANCELED",
+        "recorded_at": "2026-09-12T00:00:00.000Z",
+        "failure_code": null,
+        "frequency_index": 0,
+        "frequency_value": null,
+        "solver_started_at": null,
+        "solver_stopped_at": null,
+        "solver_active_milliseconds": null,
+        "gateway_received_at": null,
+        "planner_submitted_at": null,
+        "planner_completed_at": null,
+        "queued_at": null,
+        "allocated_vcpus": null,
+        "allocated_memory_mib": null,
+        "direct_execution_closure": null
+      }
+    }
+  }
+]

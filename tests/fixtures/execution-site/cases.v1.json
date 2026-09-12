@@ -1,0 +1,148 @@
+{
+  "resources": [
+    {
+      "name": "serial-minimum",
+      "valid": true,
+      "value": {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 60
+      }
+    },
+    {
+      "name": "serial-ceilings",
+      "valid": true,
+      "value": {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 600,
+        "cpu": 8,
+        "memoryMiB": 16384
+      }
+    },
+    {
+      "name": "distributed-maximum",
+      "valid": true,
+      "value": {
+        "nodes": 2,
+        "mpiRanks": 8,
+        "wallTimeSeconds": 7200
+      }
+    },
+    {
+      "name": "boolean",
+      "valid": false,
+      "value": {
+        "nodes": true,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 600
+      }
+    },
+    {
+      "name": "fraction",
+      "valid": false,
+      "value": {
+        "nodes": 1,
+        "mpiRanks": 1.5,
+        "wallTimeSeconds": 600
+      }
+    },
+    {
+      "name": "too-long",
+      "valid": false,
+      "value": {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 7201
+      }
+    },
+    {
+      "name": "too-short",
+      "valid": false,
+      "value": {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 59
+      }
+    },
+    {
+      "name": "too-many-nodes",
+      "valid": false,
+      "value": {
+        "nodes": 3,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 600
+      }
+    },
+    {
+      "name": "unbalanced",
+      "valid": false,
+      "value": {
+        "nodes": 2,
+        "mpiRanks": 3,
+        "wallTimeSeconds": 600
+      }
+    },
+    {
+      "name": "serial-mpi",
+      "valid": false,
+      "value": {
+        "nodes": 1,
+        "mpiRanks": 2,
+        "wallTimeSeconds": 600
+      }
+    },
+    {
+      "name": "zero-cpu",
+      "valid": false,
+      "value": {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 600,
+        "cpu": 0
+      }
+    },
+    {
+      "name": "null-memory",
+      "valid": false,
+      "value": {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 600,
+        "memoryMiB": null
+      }
+    },
+    {
+      "name": "provider-field",
+      "valid": false,
+      "value": {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 600,
+        "partition": "cpu-single"
+      }
+    }
+  ],
+  "states": [
+    {
+      "status": "PENDING",
+      "state": "queued"
+    },
+    {
+      "status": "RUNNING",
+      "state": "running"
+    },
+    {
+      "status": "SUCCEEDED",
+      "state": "succeeded"
+    },
+    {
+      "status": "FAILED",
+      "state": "failed"
+    },
+    {
+      "status": "CANCELED",
+      "state": "canceled"
+    }
+  ]
+}

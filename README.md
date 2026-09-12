@@ -214,3 +214,12 @@ Fast solver contract updates are tracked in `docs/source/fast_solver_api_updates
 ## License And Support
 
 FrequenSolve Python API is open source under the MIT license. The fast solver is licensed separately; for solver access and support, contact support@frequensol.com.
+
+### Execution-site contract checks
+
+Install `python3 -m pip install -e ".[dev,cloud]"`, then run
+`make test-execution-site-contracts PYTHON=python3`. The Cloud extra supplies
+`boto3` and `requests`; these are needed even though provider calls are mocked. These checks are offline and use synthetic
+fixtures. The shared contracts and cross-repo exchange runner are owned by
+[Cloud](https://github.com/FrequenSol/cloud-amplify/tree/pre-dev/contracts/execution-site).
+They verify component agreement without claiming hosted Slurm acceptance.

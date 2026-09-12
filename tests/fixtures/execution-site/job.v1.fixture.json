@@ -1,0 +1,25 @@
+{
+  "version": "execution-site-job.v1",
+  "executionSiteId": "managed-slurm",
+  "simulationId": "simulation-test-1",
+  "logicalAttemptId": "simulation-test-1:1",
+  "requiredCapabilities": [
+    "frequency-jobs.v1",
+    "usage-evidence.v1"
+  ],
+  "runtime": {
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "input": {
+    "uri": "s3://test-artifacts/private/test/job.json",
+    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "output": {
+    "uri": "s3://test-artifacts/private/test/results/"
+  },
+  "resources": {
+    "nodes": 1,
+    "mpiRanks": 1,
+    "wallTimeSeconds": 600
+  }
+}

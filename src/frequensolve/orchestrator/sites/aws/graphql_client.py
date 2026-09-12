@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 from frequensolve._optional import optional_dependency_error
+from frequensolve.orchestrator.sites.execution import normalize_execution_state
 
 try:
     import requests
@@ -842,72 +843,47 @@ class GraphQLClient:
                 "Cannot query field" in error_message or "is undefined" in error_message
             )
 
-        try:
+        # Retry only fields explicitly rejected by this deployment. Keep every
+        # supported identity/resource field through partial schema upgrades.
+        optional_fields = {
+            "requestedResources",
+            "allocatedResources",
+            "executionSiteId",
+            "logicalAttemptId",
+            "providerJobId",
+            "executionState",
+            "failureReason",
+            "failureCode",
+            "failureMessage",
+            "creditSettlementMode",
+            "creditSettlementStatus",
+            "creditSettlementOperationId",
+            "creditSettlementAmount",
+            "executionBackend",
+            "executionTarget",
+            "slurmPartition",
+            "slurmNodes",
+            "slurmRanksPerNode",
+            "slurmWallTimeSeconds",
+            "providerAttemptId",
+            "batchJobId",
+        }
+        while True:
             try:
                 result = self.execute(query, variables)
-            except RuntimeError as site_exc:
-                site_fields = (
-                    "requestedResources",
-                    "allocatedResources",
-                    "executionSiteId",
-                    "logicalAttemptId",
-                    "providerJobId",
-                    "executionState",
-                    "failureReason",
-                )
-                if not is_unsupported_field_error(str(site_exc), site_fields):
-                    raise
-                legacy_query = query
-                for field in site_fields:
-                    legacy_query = legacy_query.replace(
-                        "                    " + field + "\n", ""
-                    )
-                result = self.execute(legacy_query, variables)
-        except RuntimeError as exc:
-            error_message = str(exc)
-            all_optional_fields = (
-                "failureCode",
-                "failureMessage",
-                "creditSettlementMode",
-                "creditSettlementStatus",
-                "creditSettlementOperationId",
-                "creditSettlementAmount",
-                "executionBackend",
-                "executionTarget",
-                "slurmPartition",
-                "slurmNodes",
-                "slurmRanksPerNode",
-                "slurmWallTimeSeconds",
-                "providerAttemptId",
-            )
-            if not is_unsupported_field_error(error_message, all_optional_fields):
-                raise
-            failure_details_query = """
-                query GetSimulation($id: ID!) {
-                    getSimulation(id: $id) {
-                        id
-                        status
-                        failureCode
-                        failureMessage
-                    }
+                break
+            except RuntimeError as exc:
+                rejected = {
+                    field
+                    for field in optional_fields
+                    if is_unsupported_field_error(str(exc), (field,))
                 }
-            """
-            try:
-                result = self.execute(failure_details_query, variables)
-            except RuntimeError as failure_details_exc:
-                if not is_unsupported_field_error(
-                    str(failure_details_exc), ("failureCode", "failureMessage")
-                ):
+                if not rejected:
                     raise
-                status_only_query = """
-                    query GetSimulation($id: ID!) {
-                        getSimulation(id: $id) {
-                            id
-                            status
-                        }
-                    }
-                """
-                result = self.execute(status_only_query, variables)
+                optional_fields -= rejected
+                query = "\n".join(
+                    line for line in query.split("\n") if line.strip() not in rejected
+                )
 
         if "getSimulation" not in result or not result["getSimulation"]:
             raise RuntimeError(
@@ -940,18 +916,9 @@ class GraphQLClient:
             "providerJobId": details.get("providerJobId")
             or details.get("providerAttemptId")
             or details.get("batchJobId"),
-            "executionState": details.get("executionState")
-            or {
-                "PENDING": "queued",
-                "SUBMITTED": "queued",
-                "RUNNING": "running",
-                "SUCCEEDED": "succeeded",
-                "COMPLETED": "succeeded",
-                "FAILED": "failed",
-                "CANCELED": "canceled",
-                "CANCELLED": "canceled",
-                "ABORTED": "canceled",
-            }.get(status, "queued"),
+            "executionState": normalize_execution_state(
+                details.get("executionState") or status
+            ),
             "failureReason": details.get("failureReason") or details.get("failureCode"),
         }
         return {

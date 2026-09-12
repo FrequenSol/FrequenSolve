@@ -1,0 +1,64 @@
+{
+  "version": "aws-execution-site-command.v1",
+  "action": "SUBMIT",
+  "commandId": "cmd-1",
+  "job": {
+    "version": "execution-site-job.v1",
+    "executionSiteId": "managed-slurm",
+    "simulationId": "simulation-test-1",
+    "logicalAttemptId": "simulation-test-1:1",
+    "requiredCapabilities": [
+      "frequency-jobs.v1",
+      "usage-evidence.v1"
+    ],
+    "runtime": {
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "input": {
+      "uri": "s3://test-artifacts/private/test/job.json",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "output": {
+      "uri": "s3://test-artifacts/private/test/results/"
+    },
+    "resources": {
+      "nodes": 1,
+      "mpiRanks": 1,
+      "wallTimeSeconds": 600
+    }
+  },
+  "adapter": {
+    "version": "managed-slurm-command.v3",
+    "commandId": "cmd-1",
+    "action": "SUBMIT",
+    "simulationId": "simulation-test-1",
+    "accountId": "account-1",
+    "userId": "user-1",
+    "executionTarget": "aws-parallelcluster-3.16.0/sandbox/managed-slurm",
+    "bucketName": "test-artifacts",
+    "jobFileS3Key": "private/test/job.json",
+    "resultS3Prefix": "private/test/results/",
+    "frequencyCount": 7,
+    "resourceShape": {
+      "partition": "cpu-single",
+      "nodes": 1,
+      "ranksPerNode": 1,
+      "wallTimeSeconds": 600
+    },
+    "billingAuthority": {
+      "authorityVersion": "billing_authority_v1",
+      "subscriptionId": "subscription-1",
+      "sourceItemPriceId": "credit-1",
+      "contractVersion": "chargebee_prepaid_credits_v1",
+      "catalogFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "rateCardFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "frozenAt": "2026-09-07T00:00:00.000Z",
+      "authorityFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "directUsage": {
+      "mode": "END_OF_RUN_CAPTURE_V1",
+      "contractFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "queueUrl": "https://sqs.us-east-1.amazonaws.com/123456789012/test"
+    }
+  }
+}
