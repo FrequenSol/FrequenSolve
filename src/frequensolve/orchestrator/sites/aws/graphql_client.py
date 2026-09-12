@@ -565,6 +565,8 @@ class GraphQLClient:
         project_display_name: Optional[str] = None,
         simulation_name: Optional[str] = None,
         simulation_job_name: Optional[str] = None,
+        execution_site_id: Optional[str] = None,
+        execution_resources: Optional[Dict[str, int]] = None,
         execution_backend: Optional[str] = None,
         compute_mode: Optional[str] = None,
         slurm_partition: Optional[str] = None,
@@ -657,6 +659,14 @@ class GraphQLClient:
                     slurmWallTimeSeconds
                     providerAttemptId
                 """
+            if execution_site_id is not None:
+                execution_variables = (
+                    "$executionSiteId: String $executionResources: AWSJSON"
+                )
+                execution_arguments = "executionSiteId: $executionSiteId executionResources: $executionResources"
+                execution_response = (
+                    "executionSiteId logicalAttemptId providerJobId executionState"
+                )
             return f"""
             mutation SubmitJob(
                 $jobFileS3Key: String!
@@ -712,6 +722,11 @@ class GraphQLClient:
                 }
             )
 
+        if execution_site_id is not None:
+            variables["executionSiteId"] = execution_site_id
+            if execution_resources is not None:
+                variables["executionResources"] = json.dumps(execution_resources)
+
         def execute_submission(include_metadata: bool) -> Dict[str, Any]:
             request_variables = dict(variables)
             if not include_metadata:
@@ -724,6 +739,24 @@ class GraphQLClient:
                 )
             except RuntimeError as exc:
                 error_message = str(exc)
+                if (
+                    execution_site_id is not None
+                    and any(
+                        field in error_message
+                        for field in (
+                            "executionSiteId",
+                            "executionResources",
+                            "logicalAttemptId",
+                        )
+                    )
+                    and any(
+                        marker in error_message
+                        for marker in ("Unknown", "Cannot query", "undefined")
+                    )
+                ):
+                    raise RuntimeError(
+                        "This Cloud deployment does not support named execution sites; upgrade it or explicitly select a legacy profile"
+                    ) from exc
                 unsupported_argument = (
                     "Unknown argument" in error_message
                     or "UnknownArgument" in error_message
@@ -788,6 +821,12 @@ class GraphQLClient:
                     slurmRanksPerNode
                     slurmWallTimeSeconds
                     providerAttemptId
+                    batchJobId
+                    executionSiteId
+                    logicalAttemptId
+                    providerJobId
+                    executionState
+                    failureReason
                 }
             }
         """
@@ -802,7 +841,24 @@ class GraphQLClient:
             )
 
         try:
-            result = self.execute(query, variables)
+            try:
+                result = self.execute(query, variables)
+            except RuntimeError as site_exc:
+                site_fields = (
+                    "executionSiteId",
+                    "logicalAttemptId",
+                    "providerJobId",
+                    "executionState",
+                    "failureReason",
+                )
+                if not is_unsupported_field_error(str(site_exc), site_fields):
+                    raise
+                legacy_query = query
+                for field in site_fields:
+                    legacy_query = legacy_query.replace(
+                        "                    " + field + "\n", ""
+                    )
+                result = self.execute(legacy_query, variables)
         except RuntimeError as exc:
             error_message = str(exc)
             all_optional_fields = (
@@ -861,7 +917,30 @@ class GraphQLClient:
                 f"Simulation status not found in response: {simulation_id}"
             )
 
+        normalized = {
+            "executionSiteId": details.get("executionSiteId")
+            or (
+                "managed-slurm"
+                if details.get("executionBackend", "").upper() == "SLURM"
+                else "managed-batch"
+            ),
+            "logicalAttemptId": details.get("logicalAttemptId") or f"{simulation_id}:1",
+            "providerJobId": details.get("providerJobId")
+            or details.get("providerAttemptId")
+            or details.get("batchJobId"),
+            "executionState": {
+                "PENDING": "queued",
+                "SUBMITTED": "queued",
+                "RUNNING": "running",
+                "SUCCEEDED": "succeeded",
+                "FAILED": "failed",
+                "CANCELED": "canceled",
+                "ABORTED": "canceled",
+            }.get(status, "queued"),
+            "failureReason": details.get("failureReason") or details.get("failureCode"),
+        }
         return {
+            **normalized,
             "id": details.get("id"),
             "status": status,
             "failureCode": details.get("failureCode"),

@@ -8,6 +8,8 @@ from typing import Any, Mapping
 
 MANAGED_EXECUTION_PROFILE_FIELDS = frozenset(
     {
+        "execution_site_id",
+        "execution_resources",
         "execution_backend",
         "compute_mode",
         "slurm_partition",
@@ -31,6 +33,8 @@ class ManagedExecutionProfileError(ValueError):
 class ManagedExecutionProfile:
     """Validated execution settings sourced only from one named site profile."""
 
+    execution_site_id: str | None = None
+    execution_resources: dict[str, int] | None = None
     backend: str = "batch"
     compute_mode: str | None = None
     slurm_partition: str | None = None
@@ -42,6 +46,74 @@ class ManagedExecutionProfile:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "ManagedExecutionProfile":
+        if not isinstance(values, Mapping):
+            raise ManagedExecutionProfileError("Execution profile must be a mapping")
+        site_id = values.get("execution_site_id")
+        if site_id is not None:
+            if not isinstance(site_id, str) or site_id not in {
+                "managed-slurm",
+                "managed-batch",
+            }:
+                raise ManagedExecutionProfileError(
+                    "execution_site_id must name managed-slurm or managed-batch"
+                )
+            legacy = MANAGED_EXECUTION_PROFILE_FIELDS - {
+                "execution_site_id",
+                "execution_resources",
+            }
+            if any(values.get(key) is not None for key in legacy):
+                raise ManagedExecutionProfileError(
+                    "Named execution sites cannot mix legacy backend/Slurm settings"
+                )
+            resources = values.get("execution_resources")
+            if site_id == "managed-batch":
+                if resources is not None:
+                    raise ManagedExecutionProfileError(
+                        "managed-batch does not yet accept execution_resources"
+                    )
+                return cls(execution_site_id=site_id)
+            resources = (
+                {"nodes": 1, "mpi_ranks": 1, "wall_time_seconds": 3600}
+                if resources is None
+                else resources
+            )
+            if not isinstance(resources, Mapping):
+                raise ManagedExecutionProfileError(
+                    "execution_resources must be a table"
+                )
+            required = {"nodes", "mpi_ranks", "wall_time_seconds"}
+            if not required <= resources.keys() or resources.keys() - required - {
+                "cpu",
+                "memory_mib",
+            }:
+                raise ManagedExecutionProfileError(
+                    "execution_resources needs nodes, mpi_ranks, wall_time_seconds; optional cpu and memory_mib"
+                )
+            limits = {
+                "nodes": (1, 2),
+                "mpi_ranks": (1, 8),
+                "wall_time_seconds": (60, 7200),
+                "cpu": (1, 128),
+                "memory_mib": (1, 262144),
+            }
+            validated = {
+                key: _bounded_integer(value, key, *limits[key])
+                for key, value in resources.items()
+            }
+            nodes, ranks = validated["nodes"], validated["mpi_ranks"]
+            if ranks % nodes or ranks // nodes > 4 or (nodes == 1 and ranks != 1):
+                raise ManagedExecutionProfileError(
+                    "Unsupported node/MPI-rank combination at managed-slurm"
+                )
+            return cls(
+                execution_site_id=site_id,
+                execution_resources=validated,
+                backend="slurm",
+            )
+        if values.get("execution_resources") is not None:
+            raise ManagedExecutionProfileError(
+                "execution_resources requires execution_site_id"
+            )
         backend = values.get("execution_backend", "batch")
         if not isinstance(backend, str) or backend not in {"batch", "slurm"}:
             raise ManagedExecutionProfileError(
@@ -139,6 +211,20 @@ class ManagedExecutionProfile:
     def graphql_arguments(self) -> dict[str, Any]:
         """Return the optional submitJob arguments for this profile."""
 
+        if self.execution_site_id is not None:
+            names = {
+                "mpi_ranks": "mpiRanks",
+                "wall_time_seconds": "wallTimeSeconds",
+                "memory_mib": "memoryMiB",
+            }
+            return {
+                "execution_site_id": self.execution_site_id,
+                "execution_resources": (
+                    {names.get(k, k): v for k, v in self.execution_resources.items()}
+                    if self.execution_resources is not None
+                    else None
+                ),
+            }
         if self.backend == "batch":
             if not self.emit_batch_fields:
                 return {}

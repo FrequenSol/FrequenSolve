@@ -24,6 +24,8 @@ from typing import (
 
 from frequensolve.simulation.jobs.run_state import SkipPolicy
 
+from .execution import ExecutionDetails
+
 TERMINAL_STATES = {
     "completed",
     "complete",
@@ -500,6 +502,7 @@ class RunResult:
     trace_manifest: Any = None
     logs_path: Optional[Path] = None
     run_metadata: Any = None
+    execution: Optional[ExecutionDetails] = None
 
     @property
     def successful(self) -> bool:
@@ -707,6 +710,11 @@ class RunHandle:
     _result: Optional[RunResult] = None
     _last_status: JobStatus = field(default_factory=JobStatus)
 
+    @property
+    def execution(self) -> ExecutionDetails:
+        """Return normalized execution details reported by the site."""
+        return ExecutionDetails.from_mapping(self.backend)
+
     @classmethod
     def skipped(
         cls, site: "BaseSite", job: Any, message: str = "Run is current"
@@ -754,6 +762,7 @@ class RunHandle:
                 else getattr(self.job, "_stdout_path", None)
             ),
             run_metadata=getattr(self.job, "run_metadata", None),
+            execution=ExecutionDetails.from_mapping(self.backend),
         )
 
     def status(self) -> JobStatus:
