@@ -127,3 +127,91 @@ def test_producer_consumer_exchange():
                 actual = client.get_simulation_status_details(response["record"]["id"])
                 for key, value in response["expected"].items():
                     assert actual[key] == value
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        'Cannot query field "failureMessage" on type "Simulation". Did you mean "failureCode"?',
+        "Cannot query field 'failureMessage' on type 'Simulation'. Did you mean 'failureCode'?",
+        "Cannot query field failureMessage on type Simulation. Did you mean failureCode?",
+        "Validation error of type FieldUndefined: Field 'failureMessage' in type 'Simulation' is undefined @ 'getSimulation/failureMessage'. Did you mean 'failureCode'?",
+    ],
+)
+def test_schema_suggestions_do_not_remove_supported_failure_diagnostics(message):
+    client = GraphQLClient.__new__(GraphQLClient)
+    client.execute = Mock(
+        side_effect=[
+            RuntimeError(message),
+            {
+                "getSimulation": {
+                    "id": "test",
+                    "status": "FAILED",
+                    "failureCode": "TEST_FAILURE",
+                }
+            },
+        ]
+    )
+    result = client.get_simulation_status_details("test")
+    assert result["failureCode"] == "TEST_FAILURE"
+    assert result["failureReason"] == "TEST_FAILURE"
+    query = client.execute.call_args.args[0]
+    assert "failureCode" in query
+    assert "failureMessage" not in query
+    assert client.execute.call_count == 2
+
+
+def test_multiple_rejections_preserve_suggested_execution_identity():
+    client = GraphQLClient.__new__(GraphQLClient)
+    client.execute = Mock(
+        side_effect=[
+            RuntimeError(
+                'Cannot query field "requestedResources" on type "Simulation". '
+                'Did you mean "executionSiteId"? '
+                "Validation error of type FieldUndefined: Field 'allocatedResources' "
+                "in type 'Simulation' is undefined @ 'getSimulation/allocatedResources'"
+            ),
+            {
+                "getSimulation": {
+                    "id": "test",
+                    "status": "RUNNING",
+                    "executionSiteId": "managed-slurm",
+                }
+            },
+        ]
+    )
+    assert (
+        client.get_simulation_status_details("test")["executionSiteId"]
+        == "managed-slurm"
+    )
+    query = client.execute.call_args.args[0]
+    assert "executionSiteId" in query
+    assert "requestedResources" not in query
+    assert "allocatedResources" not in query
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "authorization failed; failureCode is undefined",
+        "timeout reading requestedResources",
+        'Cannot query field "failureCodeExtra" on type "Simulation".',
+        'Cannot query field "status" on type "Simulation".',
+    ],
+)
+def test_unrecognized_or_required_field_errors_do_not_downgrade(message):
+    client = GraphQLClient.__new__(GraphQLClient)
+    client.execute = Mock(side_effect=RuntimeError(message))
+    with pytest.raises(RuntimeError):
+        client.get_simulation_status_details("test")
+    assert client.execute.call_count == 1
+
+
+def test_repeated_rejection_stops_after_the_field_was_removed():
+    client = GraphQLClient.__new__(GraphQLClient)
+    client.execute = Mock(
+        side_effect=RuntimeError('Cannot query field "requestedResources"')
+    )
+    with pytest.raises(RuntimeError):
+        client.get_simulation_status_details("test")
+    assert client.execute.call_count == 2
