@@ -174,13 +174,13 @@ terraform.rc
 tests/output/*
 !tests/output/.gitkeep
 
-# Solver and example run outputs
-examples/scratch/
+# Solver and tutorial run outputs
+tutorials/scratch/
 scratch/
-examples/fort.*
-examples/*.slurm
-examples/**/*.slurm
-examples/plots/
+tutorials/fort.*
+tutorials/*.slurm
+tutorials/**/*.slurm
+tutorials/plots/
 *.out
 *.err
 *.h5.tmp

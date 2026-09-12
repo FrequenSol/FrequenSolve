@@ -8,11 +8,11 @@ inputs auditable before a run.
 
 Related tutorials:
 
-- :download:`Variable properties and units <../../../examples/tutorials/03_velocity_model_building/01_variable_properties_units.ipynb>`
+- :download:`Variable properties and units <../../../tutorials/03_velocity_model_building/01_variable_properties_units.ipynb>`
   for :term:`Pint` quantities and sampled :term:`xarray` properties.
-- :download:`Coordinate systems <../../../examples/tutorials/03_velocity_model_building/02_coordinate_systems.ipynb>`
+- :download:`Coordinate systems <../../../tutorials/03_velocity_model_building/02_coordinate_systems.ipynb>`
   for topography and surface-relative coordinates.
-- :download:`Layered models <../../../examples/tutorials/03_velocity_model_building/03_layered_models.ipynb>`
+- :download:`Layered models <../../../tutorials/03_velocity_model_building/03_layered_models.ipynb>`
   for ordered surfaces, layers, local features, and sampled QC views.
 
 Property Forms

@@ -1,8 +1,8 @@
 Tutorials
 =========
 
-The tutorial notebooks live under `examples/tutorials
-<https://github.com/FrequenSol/FrequenSolve/tree/v2/examples/tutorials>`__
+The tutorial notebooks live under `tutorials
+<https://github.com/FrequenSol/FrequenSolve/tree/v2/tutorials>`__
 in the GitHub repository. They are linked from the documentation site as
 notebook files rather than rendered or executed during the Sphinx build. This
 keeps documentation builds independent of local solver, cloud, and :term:`HPC`
@@ -13,7 +13,7 @@ Running a Notebook
 
 1. Install the :term:`Python API` and any extras listed in the notebook table below.
 2. Download the notebook from this page or the `FrequenSolve repository
-   <https://github.com/FrequenSol/FrequenSolve/tree/v2/examples/tutorials>`__.
+   <https://github.com/FrequenSol/FrequenSolve/tree/v2/tutorials>`__.
 3. Open it in JupyterLab, Jupyter Notebook, VS Code, or another notebook
    environment.
 4. Configure a default :term:`site` before running solver cells. Ordinary
@@ -102,30 +102,30 @@ Modeling Basics
      - Project layout, layered models, mesh order, :term:`EPW`, traces, and
        :term:`ParaView`.
      - ``visual`` plus a configured site for solver cells.
-     - :download:`01_acoustic.ipynb <../../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>`
+     - :download:`01_acoustic.ipynb <../../../tutorials/01_modeling_basics/01_acoustic.ipynb>`
    * - Elastic
      - Elastic layers, receivers, :term:`attenuation` through ``Qp``/``Qs``,
        and :term:`VTK` QC.
      - ``visual`` plus a configured site.
-     - :download:`02_elastic.ipynb <../../../examples/tutorials/01_modeling_basics/02_elastic.ipynb>`
+     - :download:`02_elastic.ipynb <../../../tutorials/01_modeling_basics/02_elastic.ipynb>`
    * - Poroelastic
      - Elastic-frame properties plus pore-fluid properties, traces, and
        :term:`VTK` QC.
      - ``visual`` plus a configured site.
-     - :download:`03_poroelastic.ipynb <../../../examples/tutorials/01_modeling_basics/03_poroelastic.ipynb>`
+     - :download:`03_poroelastic.ipynb <../../../tutorials/01_modeling_basics/03_poroelastic.ipynb>`
    * - Coupled
      - Mixed material domains with domain-specific receivers and VTK QC.
      - ``visual`` plus a configured site.
-     - :download:`04_coupled.ipynb <../../../examples/tutorials/01_modeling_basics/04_coupled.ipynb>`
+     - :download:`04_coupled.ipynb <../../../tutorials/01_modeling_basics/04_coupled.ipynb>`
    * - 2.5D, 3D, Axisymmetric
      - Acoustic model dimensionality and cylindrical axisymmetric setup.
      - ``visual`` plus a configured site.
-     - :download:`05_acoustic_25d_3d_axisymmetric.ipynb <../../../examples/tutorials/01_modeling_basics/05_acoustic_25d_3d_axisymmetric.ipynb>`
+     - :download:`05_acoustic_25d_3d_axisymmetric.ipynb <../../../tutorials/01_modeling_basics/05_acoustic_25d_3d_axisymmetric.ipynb>`
    * - Laplace and Time-Domain
      - :term:`Laplace-domain` damping, compensated :term:`time-domain` reads,
        and wrap-around control.
      - ``visual`` plus a configured site.
-     - :download:`06_laplace_time_domain.ipynb <../../../examples/tutorials/01_modeling_basics/06_laplace_time_domain.ipynb>`
+     - :download:`06_laplace_time_domain.ipynb <../../../tutorials/01_modeling_basics/06_laplace_time_domain.ipynb>`
 
 Site Tutorials
 --------------
@@ -141,21 +141,21 @@ Site Tutorials
    * - AWS Site
      - Cloud authentication, separate trace/QC jobs, storage, and result fetching.
      - ``cloud``, account, license, and network access.
-     - :download:`01_aws_site.ipynb <../../../examples/tutorials/02_sites/01_aws_site.ipynb>`
+     - :download:`01_aws_site.ipynb <../../../tutorials/02_sites/01_aws_site.ipynb>`
    * - HPC Sites
      - :term:`SLURM` run configuration, remote paths, trace jobs, and QC output
        jobs.
      - ``hpc``, :term:`SSH`/:term:`SLURM` credentials, allocation, and cluster
        solver.
-     - :download:`02_hpc_sites.ipynb <../../../examples/tutorials/02_sites/02_hpc_sites.ipynb>`
+     - :download:`02_hpc_sites.ipynb <../../../tutorials/02_sites/02_hpc_sites.ipynb>`
    * - Local Site
      - Local :term:`Dask`-backed trace/QC execution with an installed solver.
      - ``parallel`` and a local solver configured in ``site.toml``.
-     - :download:`03_local_site.ipynb <../../../examples/tutorials/02_sites/03_local_site.ipynb>`
+     - :download:`03_local_site.ipynb <../../../tutorials/02_sites/03_local_site.ipynb>`
    * - Save and Load Projects
      - Persisting and reopening projects, simulations, and job JSON files.
      - Configured site only for rerun cells.
-     - :download:`04_save_load_projects_jobs.ipynb <../../../examples/tutorials/02_sites/04_save_load_projects_jobs.ipynb>`
+     - :download:`04_save_load_projects_jobs.ipynb <../../../tutorials/02_sites/04_save_load_projects_jobs.ipynb>`
 
 Velocity Model Building
 -----------------------
@@ -172,16 +172,16 @@ Velocity Model Building
      - :term:`xarray` material properties, :term:`Pint` quantities, and unit
        metadata.
      - ``visual`` plus a configured site.
-     - :download:`01_variable_properties_units.ipynb <../../../examples/tutorials/03_velocity_model_building/01_variable_properties_units.ipynb>`
+     - :download:`01_variable_properties_units.ipynb <../../../tutorials/03_velocity_model_building/01_variable_properties_units.ipynb>`
    * - Coordinate Systems
      - Topography, surface-relative properties, and ``surface.below()`` points.
      - ``visual`` plus a configured site.
-     - :download:`02_coordinate_systems.ipynb <../../../examples/tutorials/03_velocity_model_building/02_coordinate_systems.ipynb>`
+     - :download:`02_coordinate_systems.ipynb <../../../tutorials/03_velocity_model_building/02_coordinate_systems.ipynb>`
    * - Layered Models
      - Non-interface surfaces, :term:`borehole` subdomains, and uniform
        sampling.
      - ``visual`` plus a configured site.
-     - :download:`03_layered_models.ipynb <../../../examples/tutorials/03_velocity_model_building/03_layered_models.ipynb>`
+     - :download:`03_layered_models.ipynb <../../../tutorials/03_velocity_model_building/03_layered_models.ipynb>`
 
 Meshing
 -------
@@ -198,16 +198,16 @@ Meshing
      - Generated meshes, supplied meshes, :term:`GMP`, and :term:`PyVista`
        screenshots.
      - ``visual`` plus a configured site for solver cells.
-     - :download:`01_mesh_vs_generators.ipynb <../../../examples/tutorials/04_meshing/01_mesh_vs_generators.ipynb>`
+     - :download:`01_mesh_vs_generators.ipynb <../../../tutorials/04_meshing/01_mesh_vs_generators.ipynb>`
    * - Adaptivity Fields
      - ``vadapt``, ``epw_mult``, ``hmin``, and ``hmax``.
      - ``visual`` plus a configured site.
-     - :download:`02_adaptivity_fields.ipynb <../../../examples/tutorials/04_meshing/02_adaptivity_fields.ipynb>`
+     - :download:`02_adaptivity_fields.ipynb <../../../tutorials/04_meshing/02_adaptivity_fields.ipynb>`
    * - Gradings
      - :term:`Source <source grading>`, :term:`receiver <receiver grading>`,
        and model-:term:`surface grading` controls.
      - ``visual`` plus a configured site.
-     - :download:`03_gradings.ipynb <../../../examples/tutorials/04_meshing/03_gradings.ipynb>`
+     - :download:`03_gradings.ipynb <../../../tutorials/04_meshing/03_gradings.ipynb>`
 
 Survey Tutorials
 ----------------
@@ -223,20 +223,20 @@ Survey Tutorials
    * - Receivers
      - Multi-component devices and :term:`dense survey` receiver groups.
      - ``visual`` plus a configured site.
-     - :download:`01_receivers.ipynb <../../../examples/tutorials/05_surveys/01_receivers.ipynb>`
+     - :download:`01_receivers.ipynb <../../../tutorials/05_surveys/01_receivers.ipynb>`
    * - DAS
      - Straight and helical DAS plus pointwise strain.
      - ``visual`` plus a configured site.
-     - :download:`02_das.ipynb <../../../examples/tutorials/05_surveys/02_das.ipynb>`
+     - :download:`02_das.ipynb <../../../tutorials/05_surveys/02_das.ipynb>`
    * - Sources
      - Physical point geometry, named distributed :term:`source fields <source field>`, and :term:`source batching`.
      - ``visual`` plus a configured site.
-     - :download:`03_sources.ipynb <../../../examples/tutorials/05_surveys/03_sources.ipynb>`
+     - :download:`03_sources.ipynb <../../../tutorials/05_surveys/03_sources.ipynb>`
    * - Sparse Surveys
      - Offset-domain and explicit :term:`sparse survey` source-receiver
        layouts.
      - ``visual`` plus a configured site.
-     - :download:`04_sparse_surveys.ipynb <../../../examples/tutorials/05_surveys/04_sparse_surveys.ipynb>`
+     - :download:`04_sparse_surveys.ipynb <../../../tutorials/05_surveys/04_sparse_surveys.ipynb>`
 
 Output Tutorials
 ----------------
@@ -253,17 +253,17 @@ Output Tutorials
      - :term:`TraceDataset <trace dataset>`, :term:`HDF5` traces,
        :term:`xarray` reads, and :term:`SEG-Y` export.
      - ``seismic-io`` for :term:`SEG-Y` plus a configured site.
-     - :download:`01_traces.ipynb <../../../examples/tutorials/06_outputs/01_traces.ipynb>`
+     - :download:`01_traces.ipynb <../../../tutorials/06_outputs/01_traces.ipynb>`
    * - ParaView and VTK
      - Volume, surface, plane, field, property, source, and :term:`PML` output
        controls.
      - ``visual`` plus a configured site.
-     - :download:`02_paraview_vtk.ipynb <../../../examples/tutorials/06_outputs/02_paraview_vtk.ipynb>`
+     - :download:`02_paraview_vtk.ipynb <../../../tutorials/06_outputs/02_paraview_vtk.ipynb>`
    * - Imaging
      - :term:`RTM` imaging jobs, :term:`FWI`-gradient image requests, image
        grids, and ``ImageDatabase`` reads.
      - Configured site; cloud or HPC recommended for larger runs.
-     - :download:`03_imaging.ipynb <../../../examples/tutorials/06_outputs/03_imaging.ipynb>`
+     - :download:`03_imaging.ipynb <../../../tutorials/06_outputs/03_imaging.ipynb>`
 
 Performance Tutorials
 ---------------------
@@ -281,7 +281,7 @@ Performance Tutorials
        :term:`source batching`, receiver sampling cost, and imaging assembly
        reuse.
      - Configured site; cloud or HPC recommended.
-     - :download:`01_performance.ipynb <../../../examples/tutorials/07_performance/01_performance.ipynb>`
+     - :download:`01_performance.ipynb <../../../tutorials/07_performance/01_performance.ipynb>`
 
 Related User Guide Pages
 ------------------------

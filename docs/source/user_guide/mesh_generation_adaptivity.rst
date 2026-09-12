@@ -8,11 +8,11 @@ properties.
 
 Related tutorials:
 
-- :download:`Meshes versus generators <../../../examples/tutorials/04_meshing/01_mesh_vs_generators.ipynb>`
+- :download:`Meshes versus generators <../../../tutorials/04_meshing/01_mesh_vs_generators.ipynb>`
   for generated meshes, supplied meshes, and mesh QC screenshots.
-- :download:`Adaptivity fields <../../../examples/tutorials/04_meshing/02_adaptivity_fields.ipynb>`
+- :download:`Adaptivity fields <../../../tutorials/04_meshing/02_adaptivity_fields.ipynb>`
   for ``vadapt``, ``epw_mult``, ``hmin``, and ``hmax``.
-- :download:`Gradings <../../../examples/tutorials/04_meshing/03_gradings.ipynb>`
+- :download:`Gradings <../../../tutorials/04_meshing/03_gradings.ipynb>`
   for source, receiver, and surface refinement controls.
 
 Generators and Supplied Meshes

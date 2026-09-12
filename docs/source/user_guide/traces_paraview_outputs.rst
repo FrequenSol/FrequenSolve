@@ -6,14 +6,14 @@ and wavefield outputs are requested on jobs when needed.
 
 Related tutorials:
 
-- :download:`Traces <../../../examples/tutorials/06_outputs/01_traces.ipynb>`
+- :download:`Traces <../../../tutorials/06_outputs/01_traces.ipynb>`
   for :term:`TraceDataset <trace dataset>` reads, :term:`HDF5`-backed data, and
   :term:`SEG-Y` export.
-- :download:`ParaView and VTK <../../../examples/tutorials/06_outputs/02_paraview_vtk.ipynb>`
+- :download:`ParaView and VTK <../../../tutorials/06_outputs/02_paraview_vtk.ipynb>`
   for :term:`VTK`/:term:`VTU` field, surface, plane, and :term:`PML` output controls.
-- :download:`Imaging <../../../examples/tutorials/06_outputs/03_imaging.ipynb>`
+- :download:`Imaging <../../../tutorials/06_outputs/03_imaging.ipynb>`
   for :term:`RTM` and :term:`FWI`-gradient image requests.
-- :download:`Acoustic modeling output workflow <../../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>`
+- :download:`Acoustic modeling output workflow <../../../tutorials/01_modeling_basics/01_acoustic.ipynb>`
   for the first end-to-end trace and ParaView output workflow.
 
 TraceDataset

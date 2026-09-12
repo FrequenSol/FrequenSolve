@@ -123,7 +123,7 @@ Direct constructors such as `fs.LocalSite(...)` and `fs.AWSSite(...)` remain
 available for advanced cases. Scheduler templates and the adaptive runner are
 installed with FrequenSolve, so `PYTHONPATH` is not required for site setup.
 
-The tutorial notebooks live in `examples/tutorials`. The local documentation catalog is `docs/source/tutorials/index.rst`, with site-specific examples under `examples/tutorials/02_sites`.
+The tutorial notebooks live in `tutorials`. The local documentation catalog is `docs/source/tutorials/index.rst`, with site-specific examples under `tutorials/02_sites`.
 
 ## Development
 
