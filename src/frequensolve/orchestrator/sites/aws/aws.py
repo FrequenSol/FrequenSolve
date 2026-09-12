@@ -1188,9 +1188,8 @@ class AWSSite(BaseSite):
                             if self.execution_profile.backend == "slurm"
                             else "managed-batch"
                         ),
-                        "logicalAttemptId": result.get(
-                            "logicalAttemptId", f"{simulation_id}:1"
-                        ),
+                        "logicalAttemptId": result.get("logicalAttemptId")
+                        or f"{simulation_id}:1",
                         "providerJobId": result.get("providerJobId")
                         or result.get("providerAttemptId")
                         or result.get("batchJobId"),

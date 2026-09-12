@@ -87,3 +87,20 @@ def test_named_site_does_not_fall_back_to_another_backend():
             job_file_s3_key="private/test/job.json", execution_site_id="managed-slurm"
         )
     assert client.execute.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "status,expected", [("COMPLETED", "succeeded"), ("CANCELLED", "canceled")]
+)
+def test_normalized_state_covers_supported_status_aliases(status, expected):
+    from unittest.mock import Mock
+
+    from frequensolve.orchestrator.sites.aws.graphql_client import GraphQLClient
+
+    client = GraphQLClient.__new__(GraphQLClient)
+    client.execute = Mock(
+        return_value={"getSimulation": {"id": "test", "status": status}}
+    )
+    assert client.get_simulation_status_details("test")["executionState"] == expected
+    client.execute.return_value["getSimulation"]["executionState"] = "running"
+    assert client.get_simulation_status_details("test")["executionState"] == "running"

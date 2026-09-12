@@ -940,13 +940,16 @@ class GraphQLClient:
             "providerJobId": details.get("providerJobId")
             or details.get("providerAttemptId")
             or details.get("batchJobId"),
-            "executionState": {
+            "executionState": details.get("executionState")
+            or {
                 "PENDING": "queued",
                 "SUBMITTED": "queued",
                 "RUNNING": "running",
                 "SUCCEEDED": "succeeded",
+                "COMPLETED": "succeeded",
                 "FAILED": "failed",
                 "CANCELED": "canceled",
+                "CANCELLED": "canceled",
                 "ABORTED": "canceled",
             }.get(status, "queued"),
             "failureReason": details.get("failureReason") or details.get("failureCode"),
