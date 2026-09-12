@@ -683,3 +683,43 @@ simulation input store: datasets no longer referenced by that JSON are removed,
 and a store with substantial deleted-object space is atomically repacked. This
 prevents repeated authoring saves or a change from an in-memory property to a
 remote file reference from leaving obsolete arrays in the simulation HDF5 file.
+
+
+Named Cloud execution sites
+---------------------------
+
+A named profile can select the installed managed execution site without naming
+partitions, instance types, or cluster provisioning settings::
+
+    [sites.hosted]
+    type = "aws"
+    domain = "example.frequensol.com"
+    execution_site_id = "managed-slurm"
+
+    [sites.hosted.execution_resources]
+    nodes = 1
+    mpi_ranks = 1
+    wall_time_seconds = 600
+    cpu = 2
+    memory_mib = 3891
+
+Select it with ``fs.Site(profile="hosted")``. ``cpu`` and ``memory_mib`` are
+optional allocation ceilings; the site planner rejects a frequency plan that
+exceeds them. Omit ``execution_resources`` to use one node, one MPI rank, and a
+one-hour wall time, allowing the existing site planner to choose CPU and memory.
+``managed-batch`` selects the existing Batch route and currently accepts no
+portable resource table. Legacy Batch and managed-Slurm profiles remain valid.
+Do not combine ``execution_site_id`` with legacy backend/Slurm settings.
+
+``run.execution`` and ``result.execution`` expose the same portable identity and
+state fields, including ``execution_site_id``, ``logical_attempt_id``,
+``provider_job_id``, ``state``, and ``failure_reason``. Existing ``logs()`` and
+``output_files()`` APIs continue to work for either backend. The old provider
+metadata remains available for compatibility. Status reads retry the previous
+GraphQL schema when additive site fields are unavailable. Explicit named-site
+submission to an older deployment fails with an upgrade/legacy-profile message;
+it never silently changes the selected execution backend.
+
+Only the registered FrequenSol-managed sites are supported here. This does not
+discover, provision, or connect arbitrary external clusters. Site operations and
+advanced provider settings belong to the service deployment, outside job APIs.

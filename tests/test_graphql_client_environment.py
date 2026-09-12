@@ -183,6 +183,13 @@ def test_simulation_status_details_include_customer_safe_failure_message():
         "status": "FAILED",
         "failureCode": "SCU_BALANCE_INSUFFICIENT",
         "failureMessage": "This simulation needs more SCUs.",
+        "executionSiteId": "managed-batch",
+        "logicalAttemptId": "simulation-1:1",
+        "providerJobId": None,
+        "executionState": "failed",
+        "failureReason": "SCU_BALANCE_INSUFFICIENT",
+        "requestedResources": None,
+        "allocatedResources": None,
     }
     assert len(client.queries) == 1
 

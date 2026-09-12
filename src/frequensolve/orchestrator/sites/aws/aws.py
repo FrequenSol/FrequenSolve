@@ -255,6 +255,8 @@ class AWSSite(BaseSite):
         verbose: bool = False,
         force_login: bool = False,
         _credential_profile: Optional[str] = None,
+        execution_site_id: Optional[str] = None,
+        execution_resources: Optional[dict[str, int]] = None,
         execution_backend: Optional[str] = None,
         compute_mode: Optional[str] = None,
         slurm_partition: Optional[str] = None,
@@ -291,6 +293,8 @@ class AWSSite(BaseSite):
         profile_values = {
             name: value
             for name, value in {
+                "execution_site_id": execution_site_id,
+                "execution_resources": execution_resources,
                 "execution_backend": execution_backend,
                 "compute_mode": compute_mode,
                 "slurm_partition": slurm_partition,
@@ -1177,6 +1181,20 @@ class AWSSite(BaseSite):
                         "executionBackend": result.get(
                             "executionBackend", self.execution_profile.backend
                         ),
+                        "executionSiteId": result.get("executionSiteId")
+                        or self.execution_profile.execution_site_id
+                        or (
+                            "managed-slurm"
+                            if self.execution_profile.backend == "slurm"
+                            else "managed-batch"
+                        ),
+                        "logicalAttemptId": result.get("logicalAttemptId")
+                        or f"{simulation_id}:1",
+                        "providerJobId": result.get("providerJobId")
+                        or result.get("providerAttemptId")
+                        or result.get("batchJobId"),
+                        "executionState": "queued",
+                        "requestedResources": self.execution_profile.execution_resources,
                         "executionTarget": result.get("executionTarget"),
                         "slurmPartition": result.get("slurmPartition"),
                         "slurmNodes": result.get("slurmNodes"),
@@ -1224,6 +1242,13 @@ class AWSSite(BaseSite):
         if callable(details_getter):
             status_details = details_getter(str(run.id))
             for key in (
+                "requestedResources",
+                "allocatedResources",
+                "executionSiteId",
+                "logicalAttemptId",
+                "providerJobId",
+                "executionState",
+                "failureReason",
                 "creditSettlementMode",
                 "creditSettlementStatus",
                 "creditSettlementOperationId",
