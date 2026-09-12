@@ -122,6 +122,10 @@ rest of the profile. For example, this keeps the local profile's configured
 
    local = fs.Site(profile="local", n_workers=1, threads_per_worker=16)
 
+Managed Cloud execution selection and resource shape are the exception: they
+are accepted only from a named ``site.toml`` profile. They cannot be overridden
+on ``fs.Site(...)`` or ``submit(...)``.
+
 Set ``FREQUENSOLVE_SITE_CONFIG`` or pass ``fs.Site(config_path=...)`` when a
 test, notebook, or shared workstation should use a different config file:
 
@@ -211,6 +215,47 @@ Cloud profiles create ``AWSSite`` instances and require the ``cloud`` extra.
    interactive = true
    verbose = true
 
+Omitting ``execution_backend`` preserves the existing AWS Batch behavior. Keep
+separate named profiles when both Cloud execution models are available:
+
+.. code-block:: toml
+
+   [sites.cloud-batch]
+   type = "aws"
+   domain = "app.frequensol.com"
+   execution_backend = "batch"
+   compute_mode = "auto"
+
+   [sites.cloud-slurm-single]
+   type = "aws"
+   domain = "app.frequensol.com"
+   execution_backend = "slurm"
+   slurm_partition = "cpu-single"
+   slurm_nodes = 1
+   slurm_ranks_per_node = 1
+   slurm_wall_time = "00-00:30:00"
+
+   [sites.cloud-slurm-efa]
+   type = "aws"
+   domain = "app.frequensol.com"
+   execution_backend = "slurm"
+   slurm_partition = "cpu-efa"
+   slurm_nodes = 2
+   slurm_ranks_per_node = 4
+   slurm_wall_time = "00-00:30:00"
+
+Select the complete profile in Python:
+
+.. code-block:: python
+
+   batch = fs.Site(profile="cloud-batch")
+   single_node = fs.Site(profile="cloud-slurm-single")
+   distributed = fs.Site(profile="cloud-slurm-efa")
+
+The managed Slurm profile is distinct from ``type = "slurm"``. The former is
+FrequenSol Cloud running a private managed cluster and follows the Cloud and
+billing path. The latter remains direct customer-hosted SSH/Slurm execution.
+
 .. list-table::
    :header-rows: 1
    :widths: 28 72
@@ -228,6 +273,22 @@ Cloud profiles create ``AWSSite`` instances and require the ``cloud`` extra.
    * - ``email`` / ``password``
      - Accepted by ``AWSSite`` for non-interactive login, but should not be
        stored in ``site.toml``. Prefer cached login state or a secrets manager.
+   * - ``execution_backend``
+     - ``batch`` or ``slurm``. Omission means Batch. Managed Slurm availability
+       is controlled by the Cloud environment; an explicit request never falls
+       back to Batch.
+   * - ``compute_mode``
+     - Batch-only mode: ``auto``, ``spot_only``, or ``on_demand_only``.
+   * - ``slurm_partition``
+     - Managed Slurm partition: ``cpu-single`` for single-node work or
+       ``cpu-efa`` for explicitly distributed, EFA-enabled work.
+   * - ``slurm_nodes`` / ``slurm_ranks_per_node``
+     - Managed Slurm shape. ``cpu-single`` requires exactly one node and one
+       rank. ``cpu-efa`` requires exactly two nodes and accepts 1-4 MPI ranks
+       per node, with at most eight total ranks.
+   * - ``slurm_wall_time``
+     - Managed Slurm wall time in ``DD-HH:MM:SS`` form, from one minute through
+       two hours for the initial canary.
 
 Local Profiles
 ~~~~~~~~~~~~~~
@@ -333,6 +394,17 @@ extra.
    ranks_per_node = 4
    ranks_per_task = 1
    scheduler_heartbeat_timeout = 60
+
+An Enterprise HPC installation adds a closed, generated ``enterprise_hpc``
+table to the existing Slurm site configuration. It does not add constructor
+options for individual Enterprise HPC settings. Do not hand-author it: the
+Deployment installer records only a profile identifier, the installed bundle
+root, the bundle manifest digest, and its schema identifier. The digest-anchored
+bundle manifest binds the compatibility row, schemas, solver, and Python artifact. Host trust,
+paths, modules, partitions, launcher, and resource defaults remain ordinary
+Slurm profile settings. FrequenSolve verifies the combined profile before
+transfer or scheduler spend. When ``enterprise_hpc`` is absent, generic Slurm
+configuration and behavior are unchanged.
 
 Stampede3 profiles use the built-in preset and create generic ``SlurmSite``
 instances. The preferred setup command prompts for the username and writes the

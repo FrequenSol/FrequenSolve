@@ -35,10 +35,10 @@ job_file=$1
 {% endif %}
 
 {% if run_path %}
-cd {{run_path}}
+cd {{run_path_shell}}
 {% endif %}
 
-dir_out={{dir_out}}
+dir_out={{dir_out_shell}}
 mkdir -p "$dir_out/batch"
 find "$dir_out" -mindepth 1 -maxdepth 1 ! -name batch -exec rm -rf -- {} +
 scheduler_status="$dir_out/scheduler_status.json"
@@ -50,7 +50,7 @@ skip_sizing={{skip_sizing}}
 {{ line }}
 {% endfor %}
 
-mpi_exec={{mpi}}
+mpi_exec={{mpi_shell}}
 n_procs={{n_procs}}
 n_threads={{n_threads}}
 export OMP_NUM_THREADS=$n_threads
@@ -59,7 +59,7 @@ export OMP_NUM_THREADS=$n_threads
 {% endfor %}
 n_tasks={{n_tasks}}
 n_job_tasks={{n_job_tasks}}
-executable={{executable}}
+executable={{executable_shell}}
 fresh_flag=""
 {% if fresh %}
 fresh_flag="--fresh"

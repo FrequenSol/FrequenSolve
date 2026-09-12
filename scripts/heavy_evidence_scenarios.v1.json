@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "frequensolve-heavy-evidence-scenarios/v1",
+  "evidenceSchemaVersion": "frequensolve-heavy-test-evidence/v1",
+  "minimums": {
+    "tests": 538,
+    "lineRate": 0.7203,
+    "branchRate": 0.552
+  },
+  "requiredScenarios": [
+    {
+      "id": "local-2d-acoustic-solve",
+      "kind": "local-solve",
+      "junit": {
+        "classname": "tests.test_ex01_simple",
+        "name": "test_time_domain_simulation_basic"
+      }
+    },
+    {
+      "id": "acquisition-v2-init-sizing",
+      "kind": "solver-contract",
+      "junit": {
+        "classname": "tests.test_acquisition_v2_solver",
+        "name": "test_probe_passes_local_solver_init_and_sizing_unchanged"
+      }
+    },
+    {
+      "id": "local-2d-acoustic-common-frequency-visual",
+      "kind": "solver-backed-visual",
+      "junit": {
+        "classname": "tests.test_ex01_simple",
+        "name": "test_time_domain_common_frequency_plot"
+      }
+    },
+    {
+      "id": "local-2d-acoustic-gather-visual",
+      "kind": "solver-backed-visual",
+      "junit": {
+        "classname": "tests.test_ex01_simple",
+        "name": "test_time_domain_gather_plot"
+      }
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import getpass
 import json
 import os
 import subprocess
+import tempfile
 import uuid
 import warnings
 from dataclasses import dataclass
@@ -14,6 +15,9 @@ from frequensolve._optional import optional_dependency_error
 from frequensolve.orchestrator.sites.aws.cache_paths import (
     cloud_config_cache_path,
     legacy_config_cache_path,
+)
+from frequensolve.orchestrator.sites.aws.execution_profile import (
+    ManagedExecutionProfile,
 )
 
 try:
@@ -32,7 +36,7 @@ from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.jobs import BaseJob, SkipPolicy
+from frequensolve.simulation.jobs import BaseJob, ImagingJob, SkipPolicy
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
@@ -82,6 +86,12 @@ class AWSSiteConfig(BaseSiteConfig):
     region: str = "us-east-1"
     s3_prefix: str = ""
     max_duration: Optional[str] = None
+    execution_backend: str = "batch"
+    compute_mode: Optional[str] = "auto"
+    slurm_partition: Optional[str] = None
+    slurm_nodes: Optional[int] = None
+    slurm_ranks_per_node: Optional[int] = None
+    slurm_wall_time: Optional[str] = None
 
     @classmethod
     def from_domain(cls, domain: Optional[str] = None) -> "AWSSiteConfig":
@@ -245,6 +255,12 @@ class AWSSite(BaseSite):
         verbose: bool = False,
         force_login: bool = False,
         _credential_profile: Optional[str] = None,
+        execution_backend: Optional[str] = None,
+        compute_mode: Optional[str] = None,
+        slurm_partition: Optional[str] = None,
+        slurm_nodes: Optional[int] = None,
+        slurm_ranks_per_node: Optional[int] = None,
+        slurm_wall_time: Optional[str] = None,
     ):
         """Initialize AWS site with domain-based authentication.
 
@@ -272,12 +288,36 @@ class AWSSite(BaseSite):
 
         self.verbose = verbose
         self._site_profile = _credential_profile
+        profile_values = {
+            name: value
+            for name, value in {
+                "execution_backend": execution_backend,
+                "compute_mode": compute_mode,
+                "slurm_partition": slurm_partition,
+                "slurm_nodes": slurm_nodes,
+                "slurm_ranks_per_node": slurm_ranks_per_node,
+                "slurm_wall_time": slurm_wall_time,
+            }.items()
+            if value is not None
+        }
+        if profile_values and _credential_profile is None:
+            raise ValueError(
+                "Managed Cloud execution settings may only be loaded from a "
+                "named site.toml profile via fs.Site(profile=...)"
+            )
+        self.execution_profile = ManagedExecutionProfile.from_mapping(profile_values)
 
         # Load configuration from domain
         self._emit(
             f"Loading AWS configuration for {domain or os.getenv('FREQUENSOL_DOMAIN')}"
         )
         config = AWSSiteConfig.from_domain(domain)
+        config.execution_backend = self.execution_profile.backend
+        config.compute_mode = self.execution_profile.compute_mode
+        config.slurm_partition = self.execution_profile.slurm_partition
+        config.slurm_nodes = self.execution_profile.slurm_nodes
+        config.slurm_ranks_per_node = self.execution_profile.slurm_ranks_per_node
+        config.slurm_wall_time = self.execution_profile.slurm_wall_time
 
         # Store domain for potential config refresh
         if domain is None:
@@ -447,6 +487,14 @@ class AWSSite(BaseSite):
             logger.error(f"Failed to fetch stack info: {e}")
             raise RuntimeError(f"Failed to fetch stack information: {e}") from e
 
+        # A domain-config refresh replaces the dataclass instance, so reapply
+        # the immutable named-profile selection before exposing it.
+        config.execution_backend = self.execution_profile.backend
+        config.compute_mode = self.execution_profile.compute_mode
+        config.slurm_partition = self.execution_profile.slurm_partition
+        config.slurm_nodes = self.execution_profile.slurm_nodes
+        config.slurm_ranks_per_node = self.execution_profile.slurm_ranks_per_node
+        config.slurm_wall_time = self.execution_profile.slurm_wall_time
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
 
@@ -571,6 +619,20 @@ class AWSSite(BaseSite):
         self.s3_client = self.session.client("s3", region_name=self.config.region)
         logger.debug("Refreshed AWS session and S3 client from Identity Pool")
 
+    @staticmethod
+    def _s3_error_requires_credential_refresh(error: ClientError) -> bool:
+        """Return whether an S3 error can represent expired session credentials.
+
+        S3 ``HeadObject`` responses do not include an error body, so botocore
+        reports an expired or invalid session token as the generic code ``400``
+        instead of ``ExpiredToken`` or ``InvalidToken``. Treat that one
+        operation/code pair as refreshable; the caller still retries only once.
+        """
+        error_code = error.response.get("Error", {}).get("Code", "")
+        return error_code in ("ExpiredToken", "InvalidToken") or (
+            error_code == "400" and error.operation_name == "HeadObject"
+        )
+
     def _aws_cli_env(self) -> Dict[str, str]:
         """Build a process environment so the AWS CLI uses Cognito Identity Pool credentials.
 
@@ -664,11 +726,7 @@ class AWSSite(BaseSite):
             local_results_path = path / results_vtk_path
 
             try:
-                logger.info(
-                    "Fetching VTK outputs from %s to %s",
-                    s3_results_path,
-                    local_results_path,
-                )
+                logger.info("Fetching configured VTK outputs from AWS storage")
                 self.get(s3_results_path, local_results_path)
             except Exception as e:
                 logger.exception("Error downloading VTK outputs: %s", str(e))
@@ -955,8 +1013,7 @@ class AWSSite(BaseSite):
         Uses platform-managed shared compute when advertised by the Cloud API,
         while retaining legacy per-user compute-stack provisioning.
 
-        If using Cognito authentication, submits via GraphQL API.
-        Otherwise, uses the traditional REST API method.
+        Submits through the authenticated GraphQL API.
 
         Args:
             job: The task to submit.
@@ -971,6 +1028,28 @@ class AWSSite(BaseSite):
         Raises:
             RuntimeError: If job submission fails or stack creation fails.
         """
+        forbidden_execution_overrides = sorted(
+            {
+                "execution",
+                "execution_backend",
+                "compute_mode",
+                "nodes",
+                "ranks_per_node",
+                "partition",
+                "wall_time",
+                "slurm_partition",
+                "slurm_nodes",
+                "slurm_ranks_per_node",
+                "slurm_wall_time",
+            }
+            & kwargs.keys()
+        )
+        if forbidden_execution_overrides:
+            raise ValueError(
+                "Managed Cloud execution and resources may only be selected "
+                "through a named site.toml profile: "
+                + ", ".join(forbidden_execution_overrides)
+            )
         fresh_run = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
         skip_policy = SkipPolicy.from_value(
             kwargs.pop("skip", kwargs.pop("skip_policy", None))
@@ -982,11 +1061,25 @@ class AWSSite(BaseSite):
         poll_interval = kwargs.pop("poll_interval", 10)
         vcpu = kwargs.pop("vcpu", None)
         memory = kwargs.pop("memory", None)
+        if self.execution_profile.backend == "slurm" and (
+            vcpu is not None or memory is not None
+        ):
+            raise ValueError(
+                "Managed Slurm profiles cannot use Batch vcpu or memory overrides"
+            )
+        if self.graphql_client is None:
+            raise RuntimeError(
+                "FrequenSolve Cloud requires Cognito authentication and the "
+                "GraphQL API. Recreate this Site with a current Cloud profile."
+            )
         self.prepare_job(job, validate=validate)
         if not fresh_run and job.is_run_current():
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
-            return RunHandle.skipped(self, job)
+            handle = RunHandle.skipped(self, job)
+            if fetch:
+                handle._pending_fetch_fn = lambda run: self.fetch_outputs(run.job)
+            return handle
 
         self.prepare_job(job, sync_project=True, validate=False)
 
@@ -1046,117 +1139,54 @@ class AWSSite(BaseSite):
             self._emit(f"Synced job file to S3: {s3_job_key}")
 
             # Check if using Cognito/GraphQL authentication
-            if self.graphql_client is not None:
-                # New path: Submit via GraphQL API
-                self._emit(f"Submitting {job.name} via AWS GraphQL API")
-                (
-                    authored_project_name,
-                    authored_project_display_name,
-                ) = self._authored_project_metadata(job)
+            self._emit(f"Submitting {job.name} via AWS GraphQL API")
+            (
+                authored_project_name,
+                authored_project_display_name,
+            ) = self._authored_project_metadata(job)
 
-                result = self.graphql_client.submit_job(
-                    job_file_s3_key=str(s3_job_key),
-                    vcpu=vcpu,
-                    memory=memory,
-                    job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
-                    project_name=authored_project_name,
-                    project_display_name=authored_project_display_name,
-                    simulation_name=job.simulation.name,
-                    simulation_job_name=job.name,
-                    send_simulation_status_email=kwargs.get(
-                        "send_simulation_status_email"
-                    ),
-                    fresh=fresh_run,
-                )
+            result = self.graphql_client.submit_job(
+                job_file_s3_key=str(s3_job_key),
+                vcpu=vcpu,
+                memory=memory,
+                job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
+                project_name=authored_project_name,
+                project_display_name=authored_project_display_name,
+                simulation_name=job.simulation.name,
+                simulation_job_name=job.name,
+                send_simulation_status_email=kwargs.get("send_simulation_status_email"),
+                fresh=fresh_run,
+                **self.execution_profile.graphql_arguments(),
+            )
 
-                simulation_id = result["simulationId"]
-                self._emit(
-                    f"AWS simulation submitted: id={simulation_id}, status={result['status']}"
-                )
+            simulation_id = result["simulationId"]
+            self._emit(
+                f"AWS simulation submitted: id={simulation_id}, status={result['status']}"
+            )
 
-                job._job_id = simulation_id
-                return self._make_run_handle(
-                    job,
-                    simulation_id,
-                    poll_interval=poll_interval,
-                    fetch=fetch,
-                    check=check,
-                )
-
-            else:
-                # Old path: Submit via REST API (backwards compatibility)
-                self._emit(f"Submitting {job.name} via AWS REST API")
-
-                # Prepare the API request data
-                api_data = {
-                    "name": kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
-                    "description": kwargs.get("description", ""),
-                    "job_s3_key": str(s3_job_key),
-                }
-
-                if vcpu is not None:
-                    api_data["vcpu"] = vcpu
-                if memory is not None:
-                    api_data["memory"] = memory
-
-                # Make API request to submit the job
-                headers = {}
-                if self.config.api_token:
-                    headers["Authorization"] = f"Bearer {self.config.api_token}"
-
-                response = requests.post(
-                    f"{self.config.api_base_url}/api/simulation/run/",
-                    json=api_data,
-                    headers=headers,
-                    timeout=1800,
-                )
-
-                if response.status_code != 200:
-                    raise RuntimeError(
-                        f"API request failed with status {response.status_code}: {response.text}"
-                    )
-
-                response_data = response.json()
-                if response_data.get("status") != "success":
-                    raise RuntimeError(
-                        f"Job submission failed: {response_data.get('message', 'Unknown error')}"
-                    )
-
-                # Check if simulation_id is available in REST API response
-                simulation_id = response_data.get("simulation_id")
-                if simulation_id:
-                    self._emit(
-                        f"AWS simulation submitted via REST API: {simulation_id}"
-                    )
-                    job._job_id = simulation_id
-                    return self._make_run_handle(
-                        job,
-                        simulation_id,
-                        poll_interval=poll_interval,
-                        fetch=fetch,
-                        check=check,
-                    )
-
-                # Fallback to job_id for backwards compatibility
-                job_id = response_data.get("batch_job_id") or response_data.get(
-                    "job_id"
-                )
-                if not job_id:
-                    raise RuntimeError("No job ID or simulation ID returned from API")
-
-                logger.warning(
-                    "REST API did not return simulation_id, returning job_id. "
-                    "Consider using GraphQL API for full functionality."
-                )
-                job._job_id = job_id
-                self._emit(f"AWS batch job submitted: {job_id}")
-                return self._make_run_handle(
-                    job,
-                    job_id,
-                    poll_interval=poll_interval,
-                    fetch=fetch,
-                    check=check,
-                )
+            job._job_id = simulation_id
+            return self._make_run_handle(
+                job,
+                simulation_id,
+                poll_interval=poll_interval,
+                fetch=fetch,
+                check=check,
+                backend={
+                    key: value
+                    for key, value in {
+                        "executionBackend": result.get(
+                            "executionBackend", self.execution_profile.backend
+                        ),
+                        "executionTarget": result.get("executionTarget"),
+                        "slurmPartition": result.get("slurmPartition"),
+                        "slurmNodes": result.get("slurmNodes"),
+                        "slurmRanksPerNode": result.get("slurmRanksPerNode"),
+                        "slurmWallTimeSeconds": result.get("slurmWallTimeSeconds"),
+                        "providerAttemptId": result.get("providerAttemptId"),
+                    }.items()
+                    if value is not None
+                },
+            )
 
         except Exception as e:
             raise RuntimeError(f"Failed to submit job: {e}")
@@ -1168,6 +1198,7 @@ class AWSSite(BaseSite):
         poll_interval: float = 10,
         fetch: bool = False,
         check: bool = False,
+        backend: Optional[Dict[str, Any]] = None,
     ) -> RunHandle:
         return RunHandle(
             site=self,
@@ -1176,29 +1207,44 @@ class AWSSite(BaseSite):
             mode="aws",
             poll_interval=poll_interval,
             check=check,
+            backend=backend or {"executionBackend": "batch"},
             _status_fn=self._poll_run,
             _cancel_fn=lambda run: self.cancel_job(str(run.id)),
-            _fetch_fn=(lambda run: self.fetch_outputs(run.job)) if fetch else None,
+            _pending_fetch_fn=(
+                (lambda run: self.fetch_outputs(run.job)) if fetch else None
+            ),
         )
 
     def _poll_run(self, run: RunHandle) -> JobStatus:
-        if self.graphql_client is not None:
-            details_getter = getattr(
-                self.graphql_client, "get_simulation_status_details", None
-            )
-            if callable(details_getter):
-                status_details = details_getter(str(run.id))
-                raw_status = status_details["status"]
-                raw = {**status_details, "source": "graphql"}
-                message = str(status_details.get("failureMessage") or "")
-            else:
-                raw_status = self.graphql_client.get_simulation_status(str(run.id))
-                raw = {"status": raw_status, "source": "graphql"}
-                message = ""
+        if self.graphql_client is None:
+            raise RuntimeError("Authenticated GraphQL client is unavailable")
+        details_getter = getattr(
+            self.graphql_client, "get_simulation_status_details", None
+        )
+        if callable(details_getter):
+            status_details = details_getter(str(run.id))
+            for key in (
+                "creditSettlementMode",
+                "creditSettlementStatus",
+                "creditSettlementOperationId",
+                "creditSettlementAmount",
+                "executionBackend",
+                "executionTarget",
+                "slurmPartition",
+                "slurmNodes",
+                "slurmRanksPerNode",
+                "slurmWallTimeSeconds",
+                "providerAttemptId",
+            ):
+                if status_details.get(key) is not None:
+                    run.backend[key] = status_details[key]
+            raw_status = status_details["status"]
+            raw = {**status_details, "source": "graphql"}
+            message = str(status_details.get("failureMessage") or "")
         else:
-            raw = self.get_job_status_from_api(str(run.id))
-            raw_status = raw.get("status", "UNKNOWN")
-            message = str(raw.get("failureMessage") or "")
+            raw_status = self.graphql_client.get_simulation_status(str(run.id))
+            raw = {"status": raw_status, "source": "graphql"}
+            message = ""
         state = {
             "PENDING": "pending",
             "SUBMITTED": "pending",
@@ -1345,6 +1391,65 @@ class AWSSite(BaseSite):
             return db_map[jobs[0].name]
         return db_map
 
+    def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
+        """Fetch ``_fs_run`` metadata and aggregate task manifests locally."""
+
+        project_name = Path(job.project_path).name
+        simulation_name = job.simulation.name
+        job_name = job.name
+        results_run_path = f"jobs/{simulation_name}/{job_name}/results/_fs_run"
+        s3_results_path = (
+            f"s3://{self.config.s3_bucket}/{project_name}/{results_run_path}"
+        )
+        local_run_path = job._result_path / "_fs_run"
+        self.get(s3_results_path, local_run_path)
+        self._emit(f"Fetched AWS run metadata from {s3_results_path}")
+        return job.collect_task_run_manifests()
+
+    def fetch_image(self, job: ImagingJob) -> Any:
+        """Download and open the aggregate image for one imaging job."""
+
+        if not isinstance(job, ImagingJob):
+            raise TypeError("fetch_image expects an ImagingJob")
+
+        project_path = Path(job.project_path).resolve()
+        local_image_file = Path(job.image_file()).resolve()
+        try:
+            relative_image_file = local_image_file.relative_to(project_path)
+        except ValueError as exc:
+            raise ValueError(
+                f"Imaging output path {local_image_file} is outside project "
+                f"root {project_path}"
+            ) from exc
+
+        bucket = self.config.s3_bucket
+        key = f"{project_path.name}/{relative_image_file.as_posix()}"
+        local_image_file.parent.mkdir(parents=True, exist_ok=True)
+
+        refreshed_credentials = False
+        while True:
+            try:
+                self.s3_client.download_file(bucket, key, str(local_image_file))
+                break
+            except ClientError as exc:
+                if (
+                    self._s3_error_requires_credential_refresh(exc)
+                    and not refreshed_credentials
+                    and hasattr(self, "cognito_auth")
+                ):
+                    refreshed_credentials = True
+                    self._refresh_s3_credentials()
+                    continue
+                error_code = exc.response.get("Error", {}).get("Code", "")
+                if error_code in ("404", "NoSuchKey", "NotFound"):
+                    raise FileNotFoundError(
+                        f"AWS imaging output s3://{bucket}/{key} is missing"
+                    ) from exc
+                raise RuntimeError(f"S3 image download failed: {exc}") from exc
+
+        self._emit(f"Fetched AWS image from s3://{bucket}/{key}")
+        return job.load_images()
+
     def fetch_outputs(self, job: BaseJob):
         """Fetch common AWS result artifacts for a completed job.
 
@@ -1353,13 +1458,19 @@ class AWSSite(BaseSite):
 
         Returns:
             Trace dataset, or a mapping containing traces and wavefields when
-            wavefield outputs exist.
+            wavefield outputs exist. Run metadata and configured ParaView
+            outputs are downloaded as side effects.
         """
 
+        self.fetch_run_metadata(job)
         traces = self.fetch_traces(job)
         wavefields = None
         if getattr(job.outputs, "wavefields", None):
             wavefields = self.fetch_wavefields(job)
+        if getattr(job.outputs, "paraview", None):
+            self.fetch_paraview(job)
+        if isinstance(job, ImagingJob):
+            self.fetch_image(job)
         if wavefields is None:
             return traces
         return {"traces": traces, "wavefields": wavefields}
@@ -1407,7 +1518,18 @@ class AWSSite(BaseSite):
             else:
                 log_dir = requested_local_dir / item.name
 
-            self.get(remote_logs_path, log_dir)
+            try:
+                self.get(remote_logs_path, log_dir)
+            except FileNotFoundError:
+                self._fetch_cloudwatch_logs(
+                    item,
+                    log_dir,
+                    task=(
+                        self._frequency_task(item, frequency)
+                        if frequency is not None
+                        else task
+                    ),
+                )
             selected = self._select_log_path(
                 item,
                 log_dir,
@@ -1422,61 +1544,108 @@ class AWSSite(BaseSite):
             return result[jobs[0].name]
         return result
 
+    def _fetch_cloudwatch_logs(
+        self,
+        job: BaseJob,
+        log_dir: Path,
+        *,
+        task: Optional[int],
+    ) -> None:
+        """Materialize Cloud task logs when the runtime has no S3 log prefix."""
+
+        simulation_id = getattr(job, "_job_id", None)
+        if self.graphql_client is None or not simulation_id:
+            raise FileNotFoundError(
+                "Cloud task logs are unavailable from storage or the Cloud API"
+            )
+        rows = self.graphql_client.list_simulation_frequency_jobs(str(simulation_id))
+        indexed: dict[int, str] = {}
+        for row in rows:
+            frequency_index = row.get("frequencyIndex")
+            batch_job_id = row.get("batchJobId")
+            if not isinstance(frequency_index, int) or not isinstance(
+                batch_job_id, str
+            ):
+                continue
+            task_number = frequency_index + 1
+            if task_number in indexed:
+                raise RuntimeError(
+                    f"Cloud returned duplicate logs for task {task_number}"
+                )
+            indexed[task_number] = batch_job_id
+
+        requested_tasks = [task] if task is not None else sorted(indexed)
+        if not requested_tasks or any(
+            number not in indexed for number in requested_tasks
+        ):
+            raise FileNotFoundError("Cloud returned no Batch task logs for this run")
+
+        log_dir.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            dir=log_dir.parent,
+            prefix=f".{log_dir.name}-",
+        ) as staging_dir:
+            staged = Path(staging_dir)
+            for task_number in requested_tasks:
+                events = self.graphql_client.get_job_logs(indexed[task_number])
+                (staged / f"task_{task_number}.log").write_text(
+                    "".join(event["message"].rstrip("\n") + "\n" for event in events),
+                    encoding="utf-8",
+                )
+
+            log_dir.mkdir(parents=True, exist_ok=True)
+            staged_names = {path.name for path in staged.iterdir()}
+            for path in staged.iterdir():
+                path.replace(log_dir / path.name)
+            if task is None:
+                for pattern in ("task_*.log", "task_*.txt", "task_*.out"):
+                    for stale in log_dir.glob(pattern):
+                        if stale.name not in staged_names:
+                            stale.unlink()
+
     def test_api_connectivity(self) -> bool:
-        """Test connectivity to the FrequenSol API endpoint.
+        """Verify the authenticated GraphQL submission contract is reachable.
 
         Returns:
             True if API is accessible, False otherwise.
         """
+        if self.graphql_client is None:
+            return False
         try:
-            headers = {}
-            if self.config.api_token:
-                headers["Authorization"] = f"Token {self.config.api_token}"
-
-            response = requests.get(
-                f"{self.config.api_base_url}/api/simulation/",
-                headers=headers,
-                timeout=10,
-            )
-
-            return response.status_code in [
-                200,
-                401,
-                403,
-            ]  # 401/403 means endpoint exists but auth failed
-        except Exception as e:
-            warnings.warn(f"API connectivity test failed: {e}")
+            return self.graphql_client.get_compute_provisioning_mode() in {
+                "shared",
+                "per-user",
+            }
+        except Exception as exc:
+            logger.warning("GraphQL connectivity probe failed: %s", exc)
             return False
 
     def get_job_status_from_api(self, job_id: str) -> Dict[str, Any]:
-        """Get job status from the FrequenSol API.
+        """Return cloud job status through the authenticated GraphQL client.
 
-        Args:
-            job_id: The job ID to check.
-
-        Returns:
-            Dictionary containing job status information.
+        This compatibility method preserves the former public entry point while
+        the cloud transport moves from REST to GraphQL.
         """
+
+        warnings.warn(
+            "AWSSite.get_job_status_from_api() is deprecated; use RunHandle status APIs",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.graphql_client is None:
+            return {}
         try:
-            headers = {}
-            if self.config.api_token:
-                headers["Authorization"] = f"Token {self.config.api_token}"
-
-            response = requests.get(
-                f"{self.config.api_base_url}/api/simulation/jobs/{job_id}/",
-                headers=headers,
-                timeout=10,
+            details_getter = getattr(
+                self.graphql_client, "get_simulation_status_details", None
             )
-
-            if response.status_code == 200:
-                return response.json()
-            else:
-                warnings.warn(
-                    f"Failed to get job status from API: {response.status_code}"
-                )
-                return {}
-        except Exception as e:
-            warnings.warn(f"API request failed: {e}")
+            if callable(details_getter):
+                return dict(details_getter(job_id))
+            return {"status": self.graphql_client.get_simulation_status(job_id)}
+        except Exception as exc:
+            logger.warning(
+                "GraphQL status lookup failed (%s)",
+                type(exc).__name__,
+            )
             return {}
 
     def cancel_job(self, job_id: str) -> None:
@@ -1497,8 +1666,11 @@ class AWSSite(BaseSite):
         # Check simulation status
         try:
             status = self.graphql_client.get_simulation_status(job_id)
-        except RuntimeError as e:
-            raise RuntimeError(f"Failed to get simulation status: {e}") from e
+        except RuntimeError:
+            raise RuntimeError(
+                "Could not check the Cloud simulation status before cancellation; "
+                "retry after confirming Cloud connectivity"
+            ) from None
 
         # Check if simulation is in a cancellable state
         if status in ["SUCCEEDED", "FAILED", "CANCELED"]:
@@ -1511,9 +1683,9 @@ class AWSSite(BaseSite):
         # For now, raise an error indicating cancellation is not yet implemented
         # This will be implemented when the cancelSimulation GraphQL mutation is available
         raise NotImplementedError(
-            f"Simulation cancellation is not yet implemented. "
-            f"Simulation {job_id} is currently in state: {status}. "
-            f"Please cancel it manually through the web interface."
+            "Simulation cancellation is not yet implemented in this SDK. "
+            f"The simulation is currently in state {status}. "
+            "Cancel it through the Cloud application."
         )
 
     def put(
@@ -1573,7 +1745,7 @@ class AWSSite(BaseSite):
             local_path: Local path to transfer to
             overwrite: Overwrite existing files (not used; always overwrites)
         """
-        logger.debug("Attempting to transfer from %s to %s", s3_path, local_path)
+        logger.debug("Attempting an AWS S3 result transfer")
 
         local_path = Path(local_path)
         s3_path_str = str(s3_path)
@@ -1586,15 +1758,36 @@ class AWSSite(BaseSite):
             bucket = path_parts[0]
             key = path_parts[1] if len(path_parts) > 1 else ""
 
+            def _local_target(relative_key: str) -> Path:
+                relative = PurePosixPath(relative_key)
+                if (
+                    not relative_key
+                    or relative.is_absolute()
+                    or "\\" in relative_key
+                    or any(part in {"", ".", ".."} for part in relative.parts)
+                ):
+                    raise RuntimeError(
+                        "Cloud storage returned an unsafe result object path"
+                    )
+                root = local_path.resolve(strict=False)
+                candidate = local_path.joinpath(*relative.parts).resolve(strict=False)
+                try:
+                    candidate.relative_to(root)
+                except ValueError:
+                    raise RuntimeError(
+                        "Cloud storage returned an unsafe result object path"
+                    ) from None
+                return candidate
+
             def _download_object(object_key: str) -> int:
                 if local_path.exists() and local_path.is_dir():
-                    local_file = local_path / Path(object_key).name
+                    local_file = _local_target(PurePosixPath(object_key).name)
                 elif local_path.exists():
                     local_file = local_path
                 elif local_path.suffix:
                     local_file = local_path
                 else:
-                    local_file = local_path / Path(object_key).name
+                    local_file = _local_target(PurePosixPath(object_key).name)
                 local_file.parent.mkdir(parents=True, exist_ok=True)
                 self.s3_client.download_file(bucket, object_key, str(local_file))
                 return 1
@@ -1631,29 +1824,44 @@ class AWSSite(BaseSite):
                         continue
                     # Preserve relative path under prefix
                     rel_key = key[len(prefix) :] if prefix else key
-                    local_file = local_path / rel_key
+                    local_file = _local_target(rel_key)
                     local_file.parent.mkdir(parents=True, exist_ok=True)
                     self.s3_client.download_file(bucket, key, str(local_file))
                     downloaded += 1
 
+            if downloaded == 0:
+                raise FileNotFoundError(
+                    "No S3 objects matched the requested Cloud result path"
+                )
             logger.debug("Transfer completed successfully (%d files)", downloaded)
 
-        try:
-            _do_get()
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code in ("ExpiredToken", "InvalidToken") and hasattr(
-                self, "cognito_auth"
-            ):
-                logger.info("Credentials expired, refreshing from Identity Pool...")
-                self._refresh_s3_credentials()
+        refreshed = False
+        while True:
+            try:
                 _do_get()
-            else:
-                logger.error("S3 transfer failed: %s", e)
-                raise RuntimeError(f"S3 transfer failed: {e}") from e
-        except Exception as e:
-            logger.exception("Error during S3 file transfer: %s", str(e))
-            raise
+                return
+            except ClientError as exc:
+                if (
+                    self._s3_error_requires_credential_refresh(exc)
+                    and not refreshed
+                    and hasattr(self, "cognito_auth")
+                ):
+                    logger.info("Credentials expired, refreshing from Identity Pool...")
+                    self._refresh_s3_credentials()
+                    refreshed = True
+                    continue
+                error_code = exc.response.get("Error", {}).get("Code", "unknown")
+                logger.error("S3 transfer failed (AWS error code %s)", error_code)
+                raise RuntimeError(
+                    f"S3 transfer failed (AWS error code {error_code})"
+                ) from None
+            except FileNotFoundError:
+                raise
+            except Exception as exc:
+                logger.error("S3 transfer failed (%s)", type(exc).__name__)
+                raise RuntimeError(
+                    f"S3 transfer failed ({type(exc).__name__})"
+                ) from None
 
 
 # if __name__ == "__main__":

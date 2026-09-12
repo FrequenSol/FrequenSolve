@@ -15,7 +15,7 @@
 #SBATCH --mail-user={{ notify_email }}
 {% endif %}
 
-cd {{ work_dir }}
+cd {{ work_dir_shell }}
 
 # {{ mpi }} flux start --boot
 

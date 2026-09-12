@@ -319,11 +319,11 @@ class JobSerializationMixin:
             return np.asarray([f[0] - 1j * abs(f[1]) for f in array])
         raise ValueError("Job f_list must be a 1D real list or Nx2 complex list")
 
-    def _encoded_frequencies(self) -> np.ndarray:
+    def _encoded_frequencies(self) -> list[Any]:
         f_list = np.asarray(self.f_list)
         if np.iscomplexobj(f_list):
-            return np.asarray([[f.real, -abs(f.imag)] for f in f_list])
-        return np.asarray(f_list)
+            return [[float(f.real), -abs(float(f.imag))] for f in f_list]
+        return f_list.tolist()
 
     def _wavenumber_payload(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}

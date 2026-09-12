@@ -94,9 +94,10 @@ class BytesIO:
         initial_bytes: Initial byte payload.
     """
 
-    def __init__(self, initial_bytes: bytes):
+    def __init__(self, initial_bytes: bytes, *, channel: Any = None):
         self._bytes = initial_bytes
         self._pos = 0
+        self.channel = channel
 
     def read(self) -> bytes:
         """Return all remaining bytes and advance to end-of-stream."""
@@ -123,6 +124,18 @@ class BytesIO:
         """Decode the underlying bytes payload as text."""
 
         return self._bytes.decode()
+
+
+class _ExitStatusChannel:
+    """Expose a subprocess return code through Paramiko's channel contract."""
+
+    def __init__(self, returncode: int) -> None:
+        self._returncode = returncode
+
+    def recv_exit_status(self) -> int:
+        """Return the completed SSH subprocess status."""
+
+        return self._returncode
 
 
 class SSHProxy:
@@ -236,8 +249,13 @@ class SSHProxy:
             result = self._exec_on_login(command, timeout=timeout)
 
         stdout_bytes, stderr_bytes = self._filter_output(result)
+        channel = _ExitStatusChannel(result.returncode)
 
-        return (BytesIO(b""), BytesIO(stdout_bytes), BytesIO(stderr_bytes))
+        return (
+            BytesIO(b"", channel=channel),
+            BytesIO(stdout_bytes, channel=channel),
+            BytesIO(stderr_bytes, channel=channel),
+        )
 
     def exec_command_term(self, command: str) -> SSHCommandResult:
         """Execute a login-node command with a pseudo-terminal.
@@ -251,8 +269,13 @@ class SSHProxy:
 
         result = self._exec_on_login(command, term=True)
         stdout_bytes, stderr_bytes = self._filter_output(result)
+        channel = _ExitStatusChannel(result.returncode)
 
-        return (BytesIO(b""), BytesIO(stdout_bytes), BytesIO(stderr_bytes))
+        return (
+            BytesIO(b"", channel=channel),
+            BytesIO(stdout_bytes, channel=channel),
+            BytesIO(stderr_bytes, channel=channel),
+        )
 
     def _exec_on_login(
         self,
@@ -321,16 +344,20 @@ class SSHProxy:
                 capture_output=True,
                 timeout=effective_timeout,
             )
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             logger.error(
                 "SSH command timed out after %.1fs for target %s",
                 time.monotonic() - started,
                 target,
             )
             raise TimeoutError(
-                f"SSH command to {target} timed out after "
-                f"{effective_timeout} seconds"
-            ) from exc
+                f"SSH command to {target} timed out after {effective_timeout} seconds"
+            ) from None
+        except OSError as exc:
+            logger.error("SSH command could not start (%s)", type(exc).__name__)
+            raise RuntimeError(
+                f"SSH command could not start ({type(exc).__name__})"
+            ) from None
         logger.debug(
             "SSH command finished in %.3fs for target %s with return code %s",
             time.monotonic() - started,
@@ -338,9 +365,7 @@ class SSHProxy:
             result.returncode,
         )
         if result.returncode == 255:
-            stderr = result.stderr.decode(errors="replace").strip()
-            detail = stderr or "OpenSSH reported a connection or authentication error"
-            raise RuntimeError(f"SSH connection to {target} failed: {detail}")
+            raise RuntimeError(f"SSH connection to {target} failed with status 255")
         return result
 
     def close(self) -> None:
@@ -356,6 +381,127 @@ class SSHProxy:
         """Return ``None`` because subprocess SSH proxies expose no transport."""
 
         return None  # No transport for proxy
+
+    def open_sftp(self) -> "_OpenSSHControlSFTP":
+        """Open an SFTP adapter that reuses this verified control socket."""
+
+        return _OpenSSHControlSFTP(
+            control_path=self.control_path,
+            username=self.username,
+            host=self.host,
+            command_timeout=self.command_timeout,
+        )
+
+
+class _OpenSSHControlSFTP:
+    """Small Paramiko-compatible SFTP surface backed by OpenSSH batch mode."""
+
+    def __init__(
+        self,
+        *,
+        control_path: str,
+        username: str,
+        host: str,
+        command_timeout: float,
+    ) -> None:
+        self.control_path = control_path
+        self.username = username
+        self.host = host
+        self.command_timeout = command_timeout
+
+    @staticmethod
+    def _quote_path(value: str) -> str:
+        raw = str(value)
+        if not raw or any(character in raw for character in ("\x00", "\n", "\r")):
+            raise ValueError("SFTP path contains an invalid character")
+        return shlex.quote(raw)
+
+    def _run_batch(self, command: str) -> None:
+        result = subprocess.run(
+            [
+                "sftp",
+                "-q",
+                "-b",
+                "-",
+                *control_socket_ssh_options(self.control_path),
+                f"{self.username}@{self.host}",
+            ],
+            input=f"{command}\n",
+            capture_output=True,
+            text=True,
+            timeout=self.command_timeout,
+        )
+        if result.returncode != 0:
+            raise OSError("SFTP operation failed")
+
+    def _run_ssh(self, command: str) -> str:
+        result = subprocess.run(
+            [
+                "ssh",
+                *control_socket_ssh_options(self.control_path),
+                f"{self.username}@{self.host}",
+                command,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=self.command_timeout,
+        )
+        if result.returncode != 0:
+            raise OSError("SFTP metadata operation failed")
+        return result.stdout
+
+    def stat(self, path: str) -> Any:
+        """Return the remote mode and size needed by the transfer manager."""
+
+        output = self._run_ssh("stat -Lc '%f %s' -- " + self._quote_path(path)).strip()
+        try:
+            encoded_mode, encoded_size = output.split()
+            mode = int(encoded_mode, 16)
+            size = int(encoded_size)
+        except (TypeError, ValueError):
+            raise OSError("SFTP metadata response was invalid") from None
+        return type("SFTPAttributes", (), {"st_mode": mode, "st_size": size})()
+
+    def put(self, local_path: str, remote_path: str) -> None:
+        """Upload one file through OpenSSH SFTP."""
+
+        self._run_batch(
+            f"put {self._quote_path(local_path)} {self._quote_path(remote_path)}"
+        )
+
+    def get(self, remote_path: str, local_path: str) -> None:
+        """Download one file through OpenSSH SFTP."""
+
+        self._run_batch(
+            f"get {self._quote_path(remote_path)} {self._quote_path(local_path)}"
+        )
+
+    def chmod(self, path: str, mode: int) -> None:
+        """Set one remote file mode through OpenSSH SFTP."""
+
+        self._run_batch(f"chmod {mode:04o} {self._quote_path(path)}")
+
+    def posix_rename(self, old_path: str, new_path: str) -> None:
+        """Atomically rename one remote file when the server supports it."""
+
+        self._run_batch(
+            f"rename {self._quote_path(old_path)} {self._quote_path(new_path)}"
+        )
+
+    def rename(self, old_path: str, new_path: str) -> None:
+        """Rename one remote file."""
+
+        self.posix_rename(old_path, new_path)
+
+    def remove(self, path: str) -> None:
+        """Remove one remote file."""
+
+        self._run_batch(f"rm {self._quote_path(path)}")
+
+    def close(self) -> None:
+        """Close the stateless adapter."""
+
+        return None
 
 
 class SSHClientClass:

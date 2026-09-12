@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Type, Union
@@ -68,9 +69,22 @@ _OUTPUT_DIMENSIONS = {
 
 
 def _relative_output_path(path: Union[str, Path], field: str = "path") -> str:
-    value = Path(path)
-    if value.is_absolute():
-        raise ValueError(f"{field} must be relative to the job result directory")
+    if not isinstance(path, (str, os.PathLike)):
+        raise TypeError(f"{field} must be a string or path-like value")
+    raw = os.fspath(path)
+    if not isinstance(raw, str):
+        raise TypeError(f"{field} must be a string or path-like value")
+    value = Path(raw)
+    if (
+        not raw
+        or value.is_absolute()
+        or value == Path()
+        or ".." in value.parts
+        or any(character in raw for character in ("\\", "\x00", "\n", "\r"))
+    ):
+        raise ValueError(
+            f"{field} must be a safe relative path below the job result directory"
+        )
     return str(value)
 
 
@@ -876,6 +890,7 @@ class VtkOutput(Output):
 
         if "upscale" in kwargs:
             raise ValueError("ParaView grid targets do not support upscale")
+        kwargs.setdefault("format", "vtr")
         return cls(target="grid", grid=grid, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
@@ -890,6 +905,9 @@ class VtkOutput(Output):
         Raises:
             ValueError: If grid-target output is missing a grid.
         """
+
+        if self._inferred_target() == "grid" and self.format != "vtr":
+            raise ValueError("ParaView grid targets require format='vtr'")
 
         payload = {
             "_type": "ParaviewOutput",
@@ -1034,7 +1052,10 @@ class VtkOutput(Output):
 
     def _inferred_target(self) -> str:
         if self.target is not None:
-            return _choice(str(self.target), self._TARGETS, "VtkOutput.target")
+            target = (
+                self.target["kind"] if isinstance(self.target, Mapping) else self.target
+            )
+            return _choice(str(target), self._TARGETS, "VtkOutput.target")
         if self.grid_spec is not None:
             return "grid"
         if self.shell or self.surfaces or self.boundaries or self._planes:

@@ -38,10 +38,10 @@ procs_per_task=$2
 {% endif %}
 
 {% if run_path %}
-cd {{run_path}}
+cd {{run_path_shell}}
 {% endif %}
 
-dir_out={{dir_out}}
+dir_out={{dir_out_shell}}
 mkdir -p "$dir_out/batch"
 find "$dir_out" -mindepth 1 -maxdepth 1 ! -name batch -exec rm -rf -- {} +
 
@@ -49,8 +49,8 @@ find "$dir_out" -mindepth 1 -maxdepth 1 ! -name batch -exec rm -rf -- {} +
 {{ line }}
 {% endfor %}
 
-mpi_exec={{mpi}}
-executable={{executable}}
+mpi_exec={{mpi_shell}}
+executable={{executable_shell}}
 n_threads={{n_threads}}
 export OMP_NUM_THREADS=$n_threads
 {% for line in mpi_async_progress_setup %}

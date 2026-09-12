@@ -457,20 +457,20 @@ class TraceStore:
             ind = np.where(dims == "receiver")[0][0]
             return np.arange(1, dset.shape[ind] + 1)
 
+    @staticmethod
+    def _read_h5_group(group: h5py.Group) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for key, item in group.items():
+            if isinstance(item, h5py.Dataset):
+                out[key] = _decode_h5_strings(item[()]).tolist()
+            elif isinstance(item, h5py.Group):
+                out[key] = TraceStore._read_h5_group(item)
+        return out
+
     def survey_tables(self) -> Dict[str, Any]:
         """Return embedded survey metadata tables from the trace store."""
 
         self._ensure_consolidated()
-
-        def read_group(group):
-            out = {}
-            for key, item in group.items():
-                if isinstance(item, h5py.Dataset):
-                    value = item[()]
-                    out[key] = _decode_h5_strings(value).tolist()
-                elif isinstance(item, h5py.Group):
-                    out[key] = read_group(item)
-            return out
 
         if self._packed_group_files:
             tables: Dict[str, Any] = {}
@@ -478,12 +478,12 @@ class TraceStore:
                 with h5py.File(path, "r") as f:
                     if "survey" not in f:
                         continue
-                    tables.update(read_group(f["survey"]))
+                    tables.update(self._read_h5_group(f["survey"]))
             return tables
         with h5py.File(self._consolidated, "r") as f:
             if "survey" not in f:
                 return {}
-            return read_group(f["survey"])
+            return self._read_h5_group(f["survey"])
 
     def format_summary(self, colorize: bool = False) -> TraceSummary:
         """Return a human-readable summary of groups, sources, and frequencies."""
@@ -1497,6 +1497,111 @@ class TraceStore:
         self._consolidated = Path(new_file)
         return self._consolidated
 
+    def _select_gather(
+        self, dset: DataArray, group: str, component: str, source: int
+    ) -> DataArray:
+        if "trace" not in dset.dims:
+            return dset.sel(component=component, source=source)
+
+        with h5py.File(self._trace_file_for_group(group), "r") as h5:
+            survey = self._read_h5_group(h5["survey"]) if "survey" in h5 else {}
+        receiver_group = survey.get("receiver_groups", {}).get(group, {})
+        trace_table = receiver_group.get("traces", {})
+        trace_count = dset.sizes["trace"]
+
+        def column(name: str, default: Optional[Any] = None) -> np.ndarray:
+            values = trace_table.get(name, default)
+            if values is None:
+                raise ValueError(f"Sparse trace catalog is missing {name!r}")
+            values = np.asarray(values)
+            if len(values) != trace_count:
+                raise ValueError(
+                    f"Sparse trace catalog field {name!r} has {len(values)} rows; "
+                    f"expected {trace_count}"
+                )
+            return values
+
+        source_ids = column("source_id")
+        receiver_ids = column("receiver_id")
+        component_ids = column("component", trace_table.get("component_id"))
+        component_names = trace_table.get("component_name")
+        if component_names is None:
+            component_table = receiver_group.get("components", {})
+            if "component_name" not in component_table:
+                component_table = survey.get("components", {})
+            identifiers = component_table.get(
+                "component", component_table.get("component_id", [])
+            )
+            names = component_table.get("component_name", [])
+            component_map = dict(zip(map(int, identifiers), map(str, names)))
+            component_names = [
+                component_map.get(int(value), value) for value in component_ids
+            ]
+        component_names = np.asarray(component_names)
+        if len(component_names) != trace_count:
+            raise ValueError(
+                "Sparse trace component catalog does not match the trace axis"
+            )
+
+        selected = np.flatnonzero(
+            (component_names == component) & (source_ids == source)
+        )
+        if not len(selected):
+            raise KeyError(
+                f"No sparse traces found for component {component!r}, source {source!r}"
+            )
+        gather = dset.isel(trace=selected).rename({"trace": "receiver"})
+
+        receiver_catalog = receiver_group.get("receivers", {})
+        if "coordinates" not in receiver_catalog:
+            receiver_catalog = survey.get("receivers", {})
+        catalog_ids = np.asarray(receiver_catalog.get("receiver_id", []))
+        coordinates = np.asarray(receiver_catalog.get("coordinates", []), dtype=float)
+        if coordinates.ndim == 2 and coordinates.shape[1] == len(catalog_ids):
+            coordinates = coordinates.T
+        coordinate_values: Dict[str, Any] = {}
+        if coordinates.size:
+            if coordinates.ndim != 2 or coordinates.shape[0] != len(catalog_ids):
+                raise ValueError(
+                    "Sparse receiver coordinates do not match the receiver catalog"
+                )
+            rows = {
+                int(identifier): index for index, identifier in enumerate(catalog_ids)
+            }
+            if not all(int(receiver_ids[index]) in rows for index in selected):
+                raise ValueError(
+                    "Sparse trace receiver ids are missing from the receiver catalog"
+                )
+            names = ("x", "z") if coordinates.shape[1] == 2 else ("x", "y", "z")
+            coordinate_values = {
+                f"receiver_{name}": (
+                    "receiver",
+                    [
+                        coordinates[rows[int(receiver_ids[index])], axis]
+                        for index in selected
+                    ],
+                )
+                for axis, name in enumerate(names[: coordinates.shape[1]])
+            }
+
+        return gather.assign_coords(
+            {
+                "receiver": ("receiver", receiver_ids[selected]),
+                "trace_id": (
+                    "receiver",
+                    column("trace_id", np.arange(1, trace_count + 1))[selected],
+                ),
+                "receiver_id": ("receiver", receiver_ids[selected]),
+                "source_id": ("receiver", source_ids[selected]),
+                "component": ("receiver", component_names[selected]),
+                "weight": (
+                    "receiver",
+                    column("weight", np.ones(trace_count, dtype=float))[selected],
+                ),
+                **coordinate_values,
+            }
+        )
+
     def read_h5(self, group: str) -> DataArray:
         """Open a lazy frequency-domain xarray view for one trace group.
 
@@ -1646,41 +1751,29 @@ class TraceStore:
             Complex ``xarray.DataArray`` indexed by frequency and receiver axes.
         """
 
-        if wavelet is None:
-            dset = self.read_h5(group)
-            gather = dset.sel(component=component, source=source)
-            fd = gather.sel(complex="real") + 1j * gather.sel(complex="imag")
-            fd = fd.fillna(0)
-            fd.attrs.update(
-                self._trace_array_attrs(
-                    group,
-                    component=component,
-                    source=source,
-                    domain="frequency",
-                )
-            )
-            return fd
-        else:
+        if wavelet is not None:
             sampling = UniformSweepSampling(
                 f_min=0.0,
                 f_max=self.metadata["f_max"],
                 df=self.metadata["df"],
             )
             wavelet.times = sampling.T_list
-            dset = self.read_h5(group)
-            gather = dset.sel(component=component, source=source)
-            fd = gather.sel(complex="real") + 1j * gather.sel(complex="imag")
-            fd = fd.fillna(0)
+
+        dset = self.read_h5(group)
+        gather = self._select_gather(dset, group, component, source)
+        fd = gather.sel(complex="real") + 1j * gather.sel(complex="imag")
+        fd = fd.fillna(0)
+        if wavelet is not None:
             fd = self._apply_wavelet_to_fd(fd, wavelet, **kwargs)
-            fd.attrs.update(
-                self._trace_array_attrs(
-                    group,
-                    component=component,
-                    source=source,
-                    domain="frequency",
-                )
+        fd.attrs.update(
+            self._trace_array_attrs(
+                group,
+                component=component,
+                source=source,
+                domain="frequency",
             )
-            return fd
+        )
+        return fd
 
     def _trace_array_attrs(
         self,
@@ -1838,12 +1931,21 @@ class TraceStore:
         fft = get_fft_backend()
         td = fft.irfft(fd.data, axis=0)
         dims = ["time" if d == "frequency" else d for d in fd.dims]
-        coords = {}
-        for d in dims:
-            if d in fd.coords:
-                coords[d] = fd.coords[d]
-            else:
-                coords[d] = sampling.T_list[:-1] - wavelet.center
+        coords = {
+            d: (
+                fd.coords[d]
+                if d in fd.coords
+                else sampling.T_list[:-1] - wavelet.center
+            )
+            for d in dims
+        }
+        coords.update(
+            {
+                name: coordinate
+                for name, coordinate in fd.coords.items()
+                if name not in coords and coordinate.dims == ("receiver",)
+            }
+        )
 
         td = DataArray(data=td, dims=dims, coords=coords)
         compensated = compensation_mode == "on" or (

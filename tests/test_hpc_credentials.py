@@ -5,6 +5,8 @@ from frequensolve.orchestrator.sites.hpc.site import SlurmSite
 from frequensolve.orchestrator.sites.hpc.stampede3 import TACCLoginCredentials
 from frequensolve.orchestrator.utils.credentials import Credentials
 
+pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
+
 
 class MemoryCredentialStore:
     def __init__(self, values=None):
@@ -196,3 +198,36 @@ def test_host_key_verification_accepts_matching_known_host(monkeypatch):
     monkeypatch.setattr(auth, "HostKeys", FakeHostKeys)
 
     auth._verify_server_host_key(FakeTransport(), "login.example.edu")
+
+
+def test_host_key_verification_derives_nonstandard_port_lookup_name(
+    monkeypatch, tmp_path
+):
+    server_key = type("Key", (), {"get_name": lambda self: "ssh-ed25519"})()
+    loaded = []
+    lookups = []
+
+    class FakeHostKeys:
+        def load(self, path):
+            loaded.append(path)
+
+        def lookup(self, host):
+            lookups.append(host)
+            return {"ssh-ed25519": server_key}
+
+    class FakeTransport:
+        def get_remote_server_key(self):
+            return server_key
+
+    monkeypatch.setattr(auth, "HostKeys", FakeHostKeys)
+    known_hosts = tmp_path / "approved_known_hosts"
+
+    auth._verify_server_host_key(
+        FakeTransport(),
+        "127.0.0.1",
+        port=50222,
+        known_hosts_file=known_hosts,
+    )
+
+    assert loaded == [str(known_hosts)]
+    assert lookups == ["[127.0.0.1]:50222"]

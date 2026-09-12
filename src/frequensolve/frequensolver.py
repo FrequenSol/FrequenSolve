@@ -25,6 +25,12 @@ LEGACY_COMPATIBILITY_SCHEMA = "frequensolve-frequensolver-compatibility/v1"
 COMPATIBILITY_SCHEMA = "frequensolve-frequensolver-compatibility/v2"
 IDENTITY_SCHEMA = "frequensolver-identity-1"
 IDENTITY_PRODUCT = "FrequenSolver"
+_SUPPORTED_IDENTITY_PAIRS = frozenset(
+    {
+        (IDENTITY_SCHEMA, IDENTITY_PRODUCT),
+        ("fs-solver-identity-1", "FS_solver"),
+    }
+)
 IDENTITY_QUERY_TIMEOUT_SECONDS = 15.0
 POLICY_ENV_VAR = "FREQUENSOLVE_FREQUENSOLVER_POLICY"
 COMPATIBILITY_RESOURCE = "frequensolver_compatibility.json"
@@ -298,12 +304,15 @@ def _identity_from_output(output: str) -> FrequenSolverIdentity:
             details.append(f"unexpected keys: {', '.join(extra)}")
         raise ValueError("identity JSON has " + "; ".join(details))
     schema = payload.get("schema")
-    if schema != IDENTITY_SCHEMA:
-        raise ValueError(f"identity schema must be {IDENTITY_SCHEMA!r}, got {schema!r}")
     product = payload.get("product")
-    if product != IDENTITY_PRODUCT:
+    if (
+        not isinstance(schema, str)
+        or not isinstance(product, str)
+        or (schema, product) not in _SUPPORTED_IDENTITY_PAIRS
+    ):
         raise ValueError(
-            f"identity product must be {IDENTITY_PRODUCT!r}, got {product!r}"
+            "identity schema/product pair is unsupported: "
+            f"schema={schema!r}, product={product!r}"
         )
     return FrequenSolverIdentity(
         version=_required_string(
@@ -317,6 +326,8 @@ def _identity_from_output(output: str) -> FrequenSolverIdentity:
             "identity.git_commit",
             allow_unknown=True,
         ),
+        schema=str(schema),
+        product=str(product),
     )
 
 

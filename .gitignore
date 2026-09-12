@@ -189,3 +189,6 @@ run_logs/
 
 # Agent worklogs (local resume artifacts)
 .codex/worklogs/
+
+# Local cloud benchmark runs may contain private simulation identifiers and logs.
+.benchmarks/

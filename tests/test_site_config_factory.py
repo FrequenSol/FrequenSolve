@@ -19,6 +19,7 @@ class FakeSite:
 @dataclass
 class FakeSlurmSiteConfig:
     hostname: str
+    enterprise_hpc: dict | None = None
     queue: str = "normal"
     scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
@@ -178,6 +179,8 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
     starter_config = sites.load_site_config(config_path)
     assert set(starter_config["sites"]) == {
         "cloud",
+        "cloud-batch",
+        "cloud-slurm",
         "local",
         "hpc",
         "stampede3",
@@ -245,6 +248,133 @@ verbose = true
         "shutdown_on_completion": True,
         "verbose": False,
     }
+
+
+def test_site_factory_validates_managed_slurm_profile(monkeypatch, tmp_path):
+    config_path = tmp_path / "sites.toml"
+    config_path.write_text(
+        """
+default = "cloud"
+
+[sites.cloud]
+type = "aws"
+domain = "app.frequensol.com"
+
+[sites.cloud-slurm]
+type = "aws"
+domain = "app.frequensol.com"
+execution_backend = "slurm"
+slurm_partition = "cpu-efa"
+slurm_nodes = 2
+slurm_ranks_per_node = 4
+slurm_wall_time = "00-00:30:00"
+""".strip()
+    )
+    monkeypatch.setattr(sites, "AWSSite", FakeSite)
+
+    site = sites.Site(config_path=config_path, profile="cloud-slurm")
+
+    assert site.kwargs == {
+        "domain": "app.frequensol.com",
+        "execution_backend": "slurm",
+        "slurm_partition": "cpu-efa",
+        "slurm_nodes": 2,
+        "slurm_ranks_per_node": 4,
+        "slurm_wall_time": "00-00:30:00",
+        "_credential_profile": "cloud-slurm",
+    }
+
+
+def test_site_factory_validates_cpu_single_profile(monkeypatch, tmp_path):
+    config_path = tmp_path / "sites.toml"
+    config_path.write_text(
+        """
+default = "cloud-single"
+
+[sites.cloud-single]
+type = "aws"
+domain = "app.frequensol.com"
+execution_backend = "slurm"
+slurm_partition = "cpu-single"
+slurm_nodes = 1
+slurm_ranks_per_node = 1
+slurm_wall_time = "00-00:30:00"
+""".strip()
+    )
+    monkeypatch.setattr(sites, "AWSSite", FakeSite)
+
+    site = sites.Site(config_path=config_path)
+
+    assert site.kwargs["slurm_partition"] == "cpu-single"
+    assert site.kwargs["slurm_nodes"] == 1
+    assert site.kwargs["slurm_ranks_per_node"] == 1
+
+
+@pytest.mark.parametrize(
+    ("profile_body", "message"),
+    [
+        (
+            'execution_backend = "batch"\nslurm_nodes = 2',
+            "Batch profiles cannot set Slurm fields",
+        ),
+        (
+            'execution_backend = "slurm"\ncompute_mode = "auto"',
+            "Slurm profiles cannot set compute_mode",
+        ),
+        (
+            'execution_backend = "slurm"\nslurm_partition = "cpu-efa"\n'
+            "slurm_nodes = 3\nslurm_ranks_per_node = 4\n"
+            'slurm_wall_time = "00-00:30:00"',
+            "slurm_nodes must be from 1 through 2",
+        ),
+        (
+            'execution_backend = "slurm"\nslurm_partition = "cpu-single"\n'
+            "slurm_nodes = 1\nslurm_ranks_per_node = 2\n"
+            'slurm_wall_time = "00-00:30:00"',
+            "cpu-single requires exactly one node and one rank",
+        ),
+        (
+            'execution_backend = "slurm"\nslurm_partition = "cpu-efa"\n'
+            "slurm_nodes = 1\nslurm_ranks_per_node = 4\n"
+            'slurm_wall_time = "00-00:30:00"',
+            "cpu-efa requires an explicitly distributed plan",
+        ),
+        (
+            'execution_backend = "slurm"\nslurm_partition = ["cpu-efa"]\n'
+            "slurm_nodes = 2\nslurm_ranks_per_node = 4\n"
+            'slurm_wall_time = "00-00:30:00"',
+            "slurm_partition must be 'cpu-single' or 'cpu-efa'",
+        ),
+    ],
+)
+def test_site_factory_rejects_invalid_managed_profiles(
+    monkeypatch, tmp_path, profile_body, message
+):
+    config_path = tmp_path / "sites.toml"
+    config_path.write_text(
+        f'default = "cloud"\n[sites.cloud]\ntype = "aws"\n'
+        f'domain = "app.frequensol.com"\n{profile_body}\n'
+    )
+    monkeypatch.setattr(sites, "AWSSite", FakeSite)
+
+    with pytest.raises(ValueError, match=message):
+        sites.Site(config_path=config_path)
+
+
+def test_managed_cloud_resources_cannot_be_overridden_at_factory_call(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "sites.toml"
+    config_path.write_text(
+        'default = "cloud"\n[sites.cloud]\ntype = "aws"\n'
+        'domain = "app.frequensol.com"\n'
+    )
+    monkeypatch.setattr(sites, "AWSSite", FakeSite)
+
+    with pytest.raises(ValueError, match="only be selected through a named"):
+        sites.Site(config_path=config_path, execution_backend="slurm")
+    with pytest.raises(ValueError, match="direct Slurm-site overrides"):
+        sites.Site(config_path=config_path, nodes=2)
 
 
 def test_site_factory_rejects_single_site_table(tmp_path):
@@ -390,6 +520,12 @@ verbose = true
 [sites.cluster.environment]
 OMP_NUM_THREADS = "2"
 LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
+
+[sites.cluster.enterprise_hpc]
+schema = "frequensolve-enterprise-hpc-profile/v1"
+profile_id = "synthetic-private-slurm"
+bundle_root = "/opt/frequensolve"
+bundle_manifest_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 """.strip()
     )
     monkeypatch.setattr(sites, "SlurmSite", FakeSite)
@@ -411,6 +547,12 @@ LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
     }
     assert site.kwargs["config"] == FakeSlurmSiteConfig(
         hostname="login.example.edu",
+        enterprise_hpc={
+            "schema": "frequensolve-enterprise-hpc-profile/v1",
+            "profile_id": "synthetic-private-slurm",
+            "bundle_root": "/opt/frequensolve",
+            "bundle_manifest_sha256": "e" * 64,
+        },
         queue="debug",
         account="acct123",
         tmp_dir="/scratch/user/frequensolve-tmp",

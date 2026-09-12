@@ -40,9 +40,13 @@ Markers describe execution approval, not optional-package ownership. In
 particular, `cloud` means a test contacts a real cloud boundary and
 `interactive` means it needs input or an authenticated session. Credential-free
 AWS adapter behavior is selected by the `cloud` package contract without either
-approval marker. The currently unused `hpc` approval marker is reserved for the
-bounded real-cluster canary tracked by issue #83; hermetic SLURM and SSH behavior
-belongs in the required package contract without that marker.
+approval marker. The `hpc` approval marker is reserved for live scheduler
+checks. The thin real-cluster canary tracked by issue #83 is invoked manually
+with `python -m frequensolve.orchestrator.sites.hpc.live_canary`; it is never
+scheduled and is not part of required PR CI. It exercises public submission,
+observation, fetch/load, and cancellation using the Deployment-generated
+Enterprise profile. Deployment owns policy, cleanup, retention, performance,
+provenance aggregation, and certification evidence.
 
 ## Writing Tests
 
@@ -192,6 +196,44 @@ pushes, and can also be started manually. It includes:
 7. **Required CI Job**:
    - Aggregates every PR-safe lane under the stable `Required CI` name used by
      branch rules and release evidence
+
+## SDK Performance Evidence
+
+`scripts/run_sdk_performance.py` measures Python-side SDK behavior only. Its
+small/large scenarios cover acquisition serialization, job planning and
+packing, packed trace access, validation, and result metadata loading. It does
+not start the native solver, MPI, a cloud service, or a scheduler.
+
+Pull requests run every scenario once as a correctness smoke check. Wall-time
+thresholds are intentionally not enforced on that shared runner. The scheduled
+and manual `SDK Performance Evidence` workflow uses `ubuntu-24.04`, Python
+3.12, bounded warm-ups/samples, and a 15-minute job timeout. Every run retains
+raw samples, variance statistics, peak Python heap, the exact repository
+commit, dependency versions, CPU/architecture, and the complete runner image
+identity.
+
+To establish or replace `tests/performance/sdk-baseline.json`:
+
+1. Merge harness changes before collecting baseline evidence so the repository
+   identity is clean and exact.
+2. Run the manual workflow at least twice with the default two warm-ups and
+   seven samples. Confirm all ten scenarios ran, inspect raw values and
+   coefficients of variation, and reject evidence collected after runner or
+   dependency drift.
+3. Set reviewed median wall-time and peak-Python-heap ceilings for every
+   scenario. Record the ordered scenario names and the exact warm-up/sample
+   configuration alongside the thresholds. Keep the recorded comparison runner identity (all `runner` fields
+   except the ephemeral `runnerName`) and exact third-party `dependencies`
+   mapping. The measured FrequenSolve build remains bound by `repository.commit`
+   instead of forcing a rebaseline after every dynamic package-version change.
+4. Submit the baseline as a separate review. Scheduled/manual runs then pass it
+   through `--baseline` and fail on missing scenarios, empty measurements,
+   runner/dependency drift, or an exceeded ceiling.
+
+Rebaseline only after explaining the regression or intentional improvement in
+the reviewing pull request. Retain the old and new workflow artifact links,
+exact commits, raw samples, variance, dependency delta, and runner delta so a
+higher ceiling cannot be introduced silently.
 
 ## Important Notes
 

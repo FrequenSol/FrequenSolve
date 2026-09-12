@@ -113,3 +113,67 @@ def test_adaptive_scheduler_requires_one_task_when_sizing_is_skipped(tmp_path):
 
     with pytest.raises(SystemExit, match="requires exactly one submitted task"):
         instance.run()
+
+
+@pytest.mark.parametrize(
+    ("launcher", "expected_prefix"),
+    [
+        ("ibrun", ["ibrun", "-n", "4", "-o", "2", "task_affinity"]),
+        (
+            "srun",
+            ["srun", "--exclusive", "--ntasks", "4", "--cpus-per-task", "2"],
+        ),
+    ],
+)
+def test_adaptive_scheduler_builds_launcher_specific_task_commands(
+    tmp_path, launcher, expected_prefix
+):
+    scheduler = _load_scheduler_module()
+    instance = scheduler.AdaptiveScheduler(
+        {
+            "executable": "/remote/bin/solver",
+            "mpi": launcher,
+            "total_ranks": 8,
+            "omp_threads": 2,
+            "mem_per_rank_gib": 4,
+            "job_task_count": 1,
+            "task_indices": [1],
+            "sizing_json": str(tmp_path / "sizing.json"),
+        },
+        job_file="job.json",
+        output=str(tmp_path),
+        status=str(tmp_path / "status.json"),
+    )
+
+    command = instance._launch_command(task_id=1, offset=2, ranks=4)
+
+    assert command[: len(expected_prefix)] == expected_prefix
+    assert command[-2:] == ["--task", "1"]
+
+
+def test_adaptive_scheduler_mpirun_uses_full_allocation_without_ibrun_flags(tmp_path):
+    scheduler = _load_scheduler_module()
+    instance = scheduler.AdaptiveScheduler(
+        {
+            "executable": "/remote/bin/solver",
+            "mpi": "/usr/bin/mpirun",
+            "total_ranks": 4,
+            "omp_threads": 1,
+            "mem_per_rank_gib": 4,
+            "job_task_count": 1,
+            "task_indices": [1],
+            "sizing_json": str(tmp_path / "sizing.json"),
+        },
+        job_file="job.json",
+        output=str(tmp_path),
+        status=str(tmp_path / "status.json"),
+    )
+
+    assert instance._choose_base_ranks(0.25) == 4
+    command = instance._launch_command(task_id=1, offset=0, ranks=4)
+    assert command[:3] == ["/usr/bin/mpirun", "-n", "4"]
+    assert "-o" not in command
+    assert "task_affinity" not in command
+
+    with pytest.raises(SystemExit, match="requires the full allocation"):
+        instance._launch_command(task_id=1, offset=1, ranks=3)

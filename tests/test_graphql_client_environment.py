@@ -99,9 +99,10 @@ class CapabilityGraphQLClient(GraphQLClient):
 
 
 class SimulationStatusGraphQLClient(GraphQLClient):
-    def __init__(self, *, legacy=False):
+    def __init__(self, *, legacy=False, partial=False):
         super().__init__("https://example.invalid/graphql", auth=object())
         self.legacy = legacy
+        self.partial = partial
         self.queries = []
 
     def execute(self, query, variables=None):
@@ -109,6 +110,11 @@ class SimulationStatusGraphQLClient(GraphQLClient):
         if self.legacy and "failureMessage" in query:
             raise RuntimeError(
                 "GraphQL errors: Cannot query field 'failureMessage' on type 'Simulation'"
+            )
+        if self.partial and "creditSettlementMode" in query:
+            raise RuntimeError(
+                "GraphQL errors: Cannot query field 'creditSettlementMode' "
+                "on type 'Simulation'"
             )
         return {
             "getSimulation": {
@@ -185,7 +191,120 @@ def test_simulation_status_details_fall_back_for_older_cloud_schemas():
     client = SimulationStatusGraphQLClient(legacy=True)
 
     assert client.get_simulation_status("simulation-legacy") == "FAILED"
+    assert len(client.queries) == 3
+
+
+def test_simulation_status_details_preserve_failures_on_partial_cloud_schema():
+    client = SimulationStatusGraphQLClient(partial=True)
+
+    details = client.get_simulation_status_details("simulation-partial")
+
+    assert details["failureCode"] == "SCU_BALANCE_INSUFFICIENT"
+    assert details["failureMessage"] == "This simulation needs more SCUs."
     assert len(client.queries) == 2
+    assert "failureMessage" in client.queries[1]
+    assert "creditSettlementMode" not in client.queries[1]
+
+
+def test_simulation_status_returns_exact_credit_decimal_without_changing_outcome():
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    billing = {
+        "creditSettlementMode": "END_OF_RUN_CAPTURE_V1",
+        "creditSettlementStatus": "CAPTURE_PENDING",
+        "creditSettlementOperationId": "synthetic-operation",
+        "creditSettlementAmount": "0.123456789012345678",
+    }
+    client.execute = lambda *_: {
+        "getSimulation": {
+            "id": "simulation-1",
+            "status": "SUCCEEDED",
+            **billing,
+        }
+    }
+    result = client.get_simulation_status_details("simulation-1")
+    assert result["status"] == "SUCCEEDED"
+    assert {key: result[key] for key in billing} == billing
+
+
+def test_cloud_log_queries_page_frequency_jobs_and_validate_events():
+    responses = iter(
+        [
+            {
+                "getSimulation": {
+                    "frequencyJobs": {
+                        "items": [
+                            {
+                                "frequencyIndex": 0,
+                                "batchJobId": "batch-1",
+                            }
+                        ],
+                        "nextToken": "page-2",
+                    }
+                }
+            },
+            {
+                "getSimulation": {
+                    "frequencyJobs": {
+                        "items": [
+                            {
+                                "frequencyIndex": 1,
+                                "batchJobId": "batch-2",
+                            }
+                        ],
+                        "nextToken": None,
+                    }
+                }
+            },
+            {
+                "getJobLogs": {
+                    "logs": [
+                        {
+                            "timestamp": "2026-09-06T14:00:00.000Z",
+                            "message": "solver complete",
+                        }
+                    ]
+                }
+            },
+        ]
+    )
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    client.calls = []
+
+    def execute(query, variables=None):
+        client.calls.append((query, variables))
+        return next(responses)
+
+    client.execute = execute
+
+    assert client.list_simulation_frequency_jobs("simulation-1") == [
+        {
+            "frequencyIndex": 0,
+            "batchJobId": "batch-1",
+        },
+        {
+            "frequencyIndex": 1,
+            "batchJobId": "batch-2",
+        },
+    ]
+    assert client.get_job_logs("batch-2") == [
+        {
+            "timestamp": "2026-09-06T14:00:00.000Z",
+            "message": "solver complete",
+        }
+    ]
+    assert [variables for _, variables in client.calls] == [
+        {
+            "id": "simulation-1",
+            "limit": 100,
+            "nextToken": None,
+        },
+        {
+            "id": "simulation-1",
+            "limit": 100,
+            "nextToken": "page-2",
+        },
+        {"batchJobId": "batch-2"},
+    ]
 
 
 def test_deploy_storage_stack_does_not_send_environment_argument():
@@ -278,6 +397,33 @@ def test_submit_job_sends_optional_cloud_run_metadata():
         "simulationName": "model",
         "simulationJobName": "job",
     }
+
+
+def test_submit_job_sends_managed_slurm_contract_and_reads_target_details():
+    client = CapturingGraphQLClient()
+
+    result = client.submit_job(
+        "project/jobs/model/job/job.json",
+        execution_backend="slurm",
+        slurm_partition="cpu-efa",
+        slurm_nodes=2,
+        slurm_ranks_per_node=4,
+        slurm_wall_time_seconds=1800,
+    )
+
+    assert "executionBackend: $executionBackend" in client.last_query
+    assert "providerAttemptId" in client.last_query
+    assert client.last_variables == {
+        "jobFileS3Key": "project/jobs/model/job/job.json",
+        "sendSimulationStatusEmail": None,
+        "executionBackend": "slurm",
+        "computeMode": None,
+        "slurmPartition": "cpu-efa",
+        "slurmNodes": 2,
+        "slurmRanksPerNode": 4,
+        "slurmWallTimeSeconds": 1800,
+    }
+    assert result["simulationId"] == "simulation-1"
 
 
 def test_submit_job_retries_legacy_cloud_without_optional_metadata(monkeypatch):

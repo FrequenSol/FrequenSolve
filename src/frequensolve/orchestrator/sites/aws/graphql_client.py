@@ -8,6 +8,7 @@ the FrequenSol AppSync API using Cognito authentication.
 import json
 import logging
 import time
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 from frequensolve._optional import optional_dependency_error
@@ -25,6 +26,34 @@ except ModuleNotFoundError as exc:
 from .cognito import CognitoAuth
 
 logger = logging.getLogger(__name__)
+
+
+def _string_values(value: object) -> set[str]:
+    """Collect request strings that must be redacted from provider errors."""
+
+    if isinstance(value, str):
+        return {value} if value else set()
+    if isinstance(value, Mapping):
+        result: set[str] = set()
+        for item in value.values():
+            result.update(_string_values(item))
+        return result
+    if isinstance(value, (list, tuple)):
+        result = set()
+        for item in value:
+            result.update(_string_values(item))
+        return result
+    return set()
+
+
+def _redact_provider_message(message: object, secrets: set[str]) -> str:
+    """Return a bounded provider diagnostic without request-supplied values."""
+
+    safe = str(message).replace("\r", " ").replace("\n", " ")
+    for secret in sorted(secrets, key=len, reverse=True):
+        if len(secret) >= 3:
+            safe = safe.replace(secret, "<redacted>")
+    return safe[:500]
 
 
 class GraphQLClient:
@@ -137,25 +166,57 @@ class GraphQLClient:
         if variables:
             payload["variables"] = variables
 
+        headers = self._get_headers()
         try:
             response = requests.post(
-                self.api_url, headers=self._get_headers(), json=payload, timeout=30
+                self.api_url, headers=headers, json=payload, timeout=30
             )
             response.raise_for_status()
+        except requests.exceptions.Timeout:
+            raise RuntimeError("Cloud API request timed out after 30 seconds") from None
+        except requests.exceptions.RequestException as exc:
+            raise RuntimeError(
+                f"Cloud API request failed ({type(exc).__name__})"
+            ) from None
 
+        try:
             result = response.json()
+        except (TypeError, ValueError):
+            raise RuntimeError("Cloud API returned malformed JSON") from None
+        if not isinstance(result, Mapping):
+            raise RuntimeError("Cloud API returned a non-object response")
 
-            # Check for GraphQL errors
-            if "errors" in result:
-                error_messages = [
-                    err.get("message", str(err)) for err in result["errors"]
-                ]
-                raise RuntimeError(f"GraphQL errors: {'; '.join(error_messages)}")
+        # Check for GraphQL errors without echoing tokens or request identifiers.
+        errors = result.get("errors")
+        if errors:
+            if not isinstance(errors, list):
+                raise RuntimeError("GraphQL errors: malformed error envelope")
+            secrets = _string_values(variables)
+            secrets.add(str(headers.get("Authorization", "")))
+            account_getter = getattr(self.auth, "get_account_id", None)
+            if callable(account_getter):
+                try:
+                    account_id = account_getter()
+                except Exception:
+                    account_id = None
+                if isinstance(account_id, str) and account_id:
+                    secrets.add(account_id)
+            error_messages = [
+                _redact_provider_message(
+                    err.get("message", str(err)) if isinstance(err, Mapping) else err,
+                    secrets,
+                )
+                for err in errors[:10]
+            ]
+            raise RuntimeError(f"GraphQL errors: {'; '.join(error_messages)}")
 
-            return result.get("data", {})
+        data = result.get("data")
+        if not isinstance(data, Mapping):
+            raise RuntimeError(
+                "Cloud API response did not contain an object data field"
+            )
 
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"API request failed: {e}") from e
+        return dict(data)
 
     def _build_storage_stack_filter(self, account_id: Optional[str] = None) -> dict:
         """Build filter for storage stack queries.
@@ -504,7 +565,13 @@ class GraphQLClient:
         project_display_name: Optional[str] = None,
         simulation_name: Optional[str] = None,
         simulation_job_name: Optional[str] = None,
-    ) -> Dict[str, str]:
+        execution_backend: Optional[str] = None,
+        compute_mode: Optional[str] = None,
+        slurm_partition: Optional[str] = None,
+        slurm_nodes: Optional[int] = None,
+        slurm_ranks_per_node: Optional[int] = None,
+        slurm_wall_time_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Submit a simulation job.
 
         Args:
@@ -541,6 +608,7 @@ class GraphQLClient:
             "simulationJobName": simulation_job_name,
         }
         metadata = {key: value for key, value in metadata.items() if value is not None}
+        execution_fields = execution_backend is not None
 
         def build_mutation(include_metadata: bool) -> str:
             force_var = "$forceRun: Boolean" if fresh else ""
@@ -560,6 +628,35 @@ class GraphQLClient:
                     simulationName: $simulationName
                     simulationJobName: $simulationJobName
                 """
+            execution_variables = ""
+            execution_arguments = ""
+            execution_response = ""
+            if execution_fields:
+                execution_variables = """
+                $executionBackend: String
+                $computeMode: String
+                $slurmPartition: String
+                $slurmNodes: Int
+                $slurmRanksPerNode: Int
+                $slurmWallTimeSeconds: Int
+                """
+                execution_arguments = """
+                    executionBackend: $executionBackend
+                    computeMode: $computeMode
+                    slurmPartition: $slurmPartition
+                    slurmNodes: $slurmNodes
+                    slurmRanksPerNode: $slurmRanksPerNode
+                    slurmWallTimeSeconds: $slurmWallTimeSeconds
+                """
+                execution_response = """
+                    executionBackend
+                    executionTarget
+                    slurmPartition
+                    slurmNodes
+                    slurmRanksPerNode
+                    slurmWallTimeSeconds
+                    providerAttemptId
+                """
             return f"""
             mutation SubmitJob(
                 $jobFileS3Key: String!
@@ -568,6 +665,7 @@ class GraphQLClient:
                 $jobName: String
                 $sendSimulationStatusEmail: Boolean
                 {metadata_variables}
+                {execution_variables}
                 {force_var}
             ) {{
                 submitJob(
@@ -577,11 +675,13 @@ class GraphQLClient:
                     jobName: $jobName
                     sendSimulationStatusEmail: $sendSimulationStatusEmail
                     {metadata_arguments}
+                    {execution_arguments}
                     {force_arg}
                 ) {{
                     simulationId
                     batchJobId
                     status
+                    {execution_response}
                 }}
             }}
         """
@@ -600,6 +700,17 @@ class GraphQLClient:
         variables.update(metadata)
         if fresh:
             variables["forceRun"] = True
+        if execution_fields:
+            variables.update(
+                {
+                    "executionBackend": execution_backend,
+                    "computeMode": compute_mode,
+                    "slurmPartition": slurm_partition,
+                    "slurmNodes": slurm_nodes,
+                    "slurmRanksPerNode": slurm_ranks_per_node,
+                    "slurmWallTimeSeconds": slurm_wall_time_seconds,
+                }
+            )
 
         def execute_submission(include_metadata: bool) -> Dict[str, Any]:
             request_variables = dict(variables)
@@ -666,31 +777,77 @@ class GraphQLClient:
                     status
                     failureCode
                     failureMessage
+                    creditSettlementMode
+                    creditSettlementStatus
+                    creditSettlementOperationId
+                    creditSettlementAmount
+                    executionBackend
+                    executionTarget
+                    slurmPartition
+                    slurmNodes
+                    slurmRanksPerNode
+                    slurmWallTimeSeconds
+                    providerAttemptId
                 }
             }
         """
 
         variables = {"id": simulation_id}
+
+        def is_unsupported_field_error(
+            error_message: str, fields: tuple[str, ...]
+        ) -> bool:
+            return any(field in error_message for field in fields) and (
+                "Cannot query field" in error_message or "is undefined" in error_message
+            )
+
         try:
             result = self.execute(query, variables)
         except RuntimeError as exc:
             error_message = str(exc)
-            unsupported_failure_fields = (
-                "failureCode" in error_message or "failureMessage" in error_message
-            ) and (
-                "Cannot query field" in error_message or "is undefined" in error_message
+            all_optional_fields = (
+                "failureCode",
+                "failureMessage",
+                "creditSettlementMode",
+                "creditSettlementStatus",
+                "creditSettlementOperationId",
+                "creditSettlementAmount",
+                "executionBackend",
+                "executionTarget",
+                "slurmPartition",
+                "slurmNodes",
+                "slurmRanksPerNode",
+                "slurmWallTimeSeconds",
+                "providerAttemptId",
             )
-            if not unsupported_failure_fields:
+            if not is_unsupported_field_error(error_message, all_optional_fields):
                 raise
-            legacy_query = """
+            failure_details_query = """
                 query GetSimulation($id: ID!) {
                     getSimulation(id: $id) {
                         id
                         status
+                        failureCode
+                        failureMessage
                     }
                 }
             """
-            result = self.execute(legacy_query, variables)
+            try:
+                result = self.execute(failure_details_query, variables)
+            except RuntimeError as failure_details_exc:
+                if not is_unsupported_field_error(
+                    str(failure_details_exc), ("failureCode", "failureMessage")
+                ):
+                    raise
+                status_only_query = """
+                    query GetSimulation($id: ID!) {
+                        getSimulation(id: $id) {
+                            id
+                            status
+                        }
+                    }
+                """
+                result = self.execute(status_only_query, variables)
 
         if "getSimulation" not in result or not result["getSimulation"]:
             raise RuntimeError(
@@ -709,12 +866,110 @@ class GraphQLClient:
             "status": status,
             "failureCode": details.get("failureCode"),
             "failureMessage": details.get("failureMessage"),
+            **{
+                key: details[key]
+                for key in (
+                    "creditSettlementMode",
+                    "creditSettlementStatus",
+                    "creditSettlementOperationId",
+                    "creditSettlementAmount",
+                    "executionBackend",
+                    "executionTarget",
+                    "slurmPartition",
+                    "slurmNodes",
+                    "slurmRanksPerNode",
+                    "slurmWallTimeSeconds",
+                    "providerAttemptId",
+                )
+                if details.get(key) is not None
+            },
         }
 
     def get_simulation_status(self, simulation_id: str) -> str:
         """Get a simulation status string by ID."""
 
         return str(self.get_simulation_status_details(simulation_id)["status"])
+
+    def list_simulation_frequency_jobs(
+        self, simulation_id: str
+    ) -> list[Dict[str, Any]]:
+        """Return every frequency job owned by one Cloud simulation."""
+
+        query = """
+            query GetSimulationFrequencyJobs(
+                $id: ID!
+                $limit: Int
+                $nextToken: String
+            ) {
+                getSimulation(id: $id) {
+                    frequencyJobs(limit: $limit, nextToken: $nextToken) {
+                        items {
+                            frequencyIndex
+                            batchJobId
+                        }
+                        nextToken
+                    }
+                }
+            }
+        """
+        rows: list[Dict[str, Any]] = []
+        next_token: Optional[str] = None
+        while True:
+            result = self.execute(
+                query,
+                {
+                    "id": simulation_id,
+                    "limit": 100,
+                    "nextToken": next_token,
+                },
+            )
+            simulation = result.get("getSimulation")
+            if not isinstance(simulation, Mapping):
+                raise RuntimeError("Cloud simulation was not found")
+            page = simulation.get("frequencyJobs")
+            if not isinstance(page, Mapping):
+                raise RuntimeError("Cloud API returned no frequency-job page")
+            items = page.get("items")
+            if not isinstance(items, list):
+                raise RuntimeError("Cloud API returned malformed frequency jobs")
+            rows.extend(dict(item) for item in items if isinstance(item, Mapping))
+            token = page.get("nextToken")
+            if token is None:
+                return rows
+            if not isinstance(token, str) or not token:
+                raise RuntimeError("Cloud API returned an invalid frequency-job cursor")
+            next_token = token
+
+    def get_job_logs(self, batch_job_id: str) -> list[Dict[str, str]]:
+        """Return authenticated CloudWatch log events for one Batch job."""
+
+        query = """
+            query GetJobLogs($batchJobId: String!) {
+                getJobLogs(batchJobId: $batchJobId) {
+                    logs {
+                        timestamp
+                        message
+                    }
+                }
+            }
+        """
+        result = self.execute(query, {"batchJobId": batch_job_id})
+        payload = result.get("getJobLogs")
+        logs = payload.get("logs") if isinstance(payload, Mapping) else None
+        if not isinstance(logs, list):
+            raise RuntimeError("Cloud API returned malformed Batch job logs")
+        events: list[Dict[str, str]] = []
+        for event in logs:
+            if (
+                not isinstance(event, Mapping)
+                or not isinstance(event.get("timestamp"), str)
+                or not isinstance(event.get("message"), str)
+            ):
+                raise RuntimeError("Cloud API returned a malformed log event")
+            events.append(
+                {"timestamp": event["timestamp"], "message": event["message"]}
+            )
+        return events
 
     def deploy_storage_stack(self, environment: Optional[str] = None) -> Dict[str, Any]:
         """Deploy storage infrastructure stack.

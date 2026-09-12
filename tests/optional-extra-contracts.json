@@ -191,6 +191,11 @@
       "minimum_cases": 0,
       "role": "reserved for the opt-in real scheduler canary tracked by issue 83"
     },
+    "hpc_hermetic": {
+      "minimum_cases": 1,
+      "required_companion": "unit",
+      "role": "deterministic HPC adapter behavior with no SSH, scheduler, or credentials"
+    },
     "interactive": {
       "minimum_cases": 1,
       "role": "manual input or authenticated-session approval"
@@ -198,6 +203,11 @@
     "integration": {
       "minimum_cases": 1,
       "role": "solver binary or external service approval"
+    },
+    "property_contract": {
+      "minimum_cases": 1,
+      "required_companion": "unit",
+      "role": "bounded generated SDK contract tests with no external services"
     },
     "unit": {
       "minimum_cases": 1,

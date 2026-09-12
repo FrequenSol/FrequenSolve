@@ -11,6 +11,20 @@ test:
 	tests/
 	python scripts/check_coverage_thresholds.py tests/output/coverage.json
 
+.PHONY: test-property-contracts
+test-property-contracts:
+	PYTHONPATH="$(CURDIR)/src" \
+	FREQUENSOLVE_HYPOTHESIS_PROFILE=pr python -m pytest \
+		-ra \
+		-o addopts='' \
+		--strict-markers \
+		-m property_contract \
+		tests/
+
+.PHONY: test-property-campaign
+test-property-campaign:
+	python scripts/run_property_campaign.py
+
 .PHONY: test-optional-extras
 test-optional-extras:
 	python scripts/check_optional_extra_contracts.py \
@@ -31,6 +45,36 @@ test-optional-extra-contract:
 		--run "$(EXTRA)" \
 		--coverage-output "tests/output/optional-$(EXTRA)-coverage.json"
 
+.PHONY: test-hpc-hermetic
+test-hpc-hermetic:
+	python -m pytest \
+	-ra \
+	-o addopts='' \
+	--strict-markers \
+	-m hpc_hermetic \
+	--cov=src/frequensolve/orchestrator/sites/hpc \
+	--cov-config=tests/hpc.coveragerc \
+	--cov-branch \
+	--cov-report=term \
+	--cov-fail-under=67.5 \
+	tests/
+
 .PHONY: typecheck
 typecheck:
 	python scripts/check_mypy_baseline.py
+
+.PHONY: list-cloud-benchmarks
+list-cloud-benchmarks:
+	PYTHONPATH="$(CURDIR)/src:$(CURDIR)" python -m benchmarks.cloud list
+
+.PHONY: run-cloud-benchmarks
+run-cloud-benchmarks:
+	@test -n "$(PROFILE)" || (echo "PROFILE is required" >&2; exit 2)
+	@test -n "$(BACKEND)" || (echo "BACKEND is required (batch or slurm)" >&2; exit 2)
+	PYTHONPATH="$(CURDIR)/src:$(CURDIR)" python -m benchmarks.cloud run \
+		--profile "$(PROFILE)" \
+		--backend "$(BACKEND)"
+
+.PHONY: generate-cloud-benchmarks
+generate-cloud-benchmarks:
+	python scripts/generate_cloud_benchmark_workloads.py

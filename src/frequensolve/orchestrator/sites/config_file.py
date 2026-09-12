@@ -46,6 +46,25 @@ domain = "app.frequensol.com"
 interactive = true
 verbose = true
 
+[sites.cloud-batch]
+type = "aws"
+domain = "app.frequensol.com"
+execution_backend = "batch"
+compute_mode = "auto"
+interactive = true
+verbose = true
+
+[sites.cloud-slurm]
+type = "aws"
+domain = "app.frequensol.com"
+execution_backend = "slurm"
+slurm_partition = "cpu-efa"
+slurm_nodes = 2
+slurm_ranks_per_node = 4
+slurm_wall_time = "00-00:30:00"
+interactive = true
+verbose = true
+
 [sites.local]
 type = "local"
 solver = "/path/to/local/solver"
@@ -247,6 +266,24 @@ def Site(
     _host_tmp_path(config)
     site_config = dict(_site_config_table(config, profile=profile))
     selected_profile = profile or _default_profile(config)
+    raw_site_type = _site_type(site_config)
+    normalized_site_type = _normalize_site_type(raw_site_type)
+    is_aws_site = _SITE_TYPES.get(normalized_site_type) == "AWSSite"
+    if is_aws_site:
+        from frequensolve.orchestrator.sites.aws.execution_profile import (
+            MANAGED_EXECUTION_PROFILE_FIELDS,
+            ManagedExecutionProfile,
+        )
+
+        forbidden_overrides = sorted(
+            MANAGED_EXECUTION_PROFILE_FIELDS & overrides.keys()
+        )
+        if forbidden_overrides:
+            raise ValueError(
+                "Managed Cloud execution settings may only be selected through "
+                "a named site.toml profile: " + ", ".join(forbidden_overrides)
+            )
+        ManagedExecutionProfile.from_mapping(site_config)
     site_config.update(overrides)
     resource_overrides = {
         name: value
@@ -258,6 +295,12 @@ def Site(
         }.items()
         if value is not None
     }
+    if is_aws_site and resource_overrides:
+        raise ValueError(
+            "Managed Cloud resources may only be selected through a named "
+            "site.toml profile; queue, nodes, ranks_per_node, and duration "
+            "are direct Slurm-site overrides"
+        )
     site_config = _apply_direct_slurm_resources(site_config, resource_overrides)
     site_config = _resolve_site_preset(site_config)
     site_type = _site_type(site_config)

@@ -579,7 +579,8 @@ class Project:
             self._rewrite_transfer_simulations(temp_dir, remote)
             self._copy_transfer_mesh_files(temp_dir)
             self._compact_transfer_hdf5_files(temp_dir)
-            site.put(temp_dir, remote)
+            for staged_path in sorted(temp_dir.iterdir()):
+                site.put(staged_path, remote / staged_path.name)
 
     @staticmethod
     def _transfer_host_tmp_dir(site: BaseSite) -> Path:

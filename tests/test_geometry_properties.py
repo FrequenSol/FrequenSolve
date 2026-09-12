@@ -1,7 +1,10 @@
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from frequensolve.geometry.frame import Axis, Direction
+
+pytestmark = [pytest.mark.unit, pytest.mark.property_contract]
 
 SAFE_TEXT = st.text(
     alphabet=st.characters(

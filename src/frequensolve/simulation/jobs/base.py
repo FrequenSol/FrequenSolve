@@ -96,7 +96,10 @@ class JobLayout:
         project = Path(payload["project_path"])
         job_name = str(payload["name"])
         simulation_relpath = cls._project_relative(payload["simulation"], project)
-        simulation_name = Path(payload["simulation"]).stem
+        simulation_name = cls._layout_name(
+            Path(payload["simulation"]).stem,
+            field="simulation",
+        )
         result_path = payload.get("result_path")
         result_relpath = (
             cls._project_relative(result_path, project)
@@ -205,13 +208,29 @@ class JobLayout:
 
     @staticmethod
     def _project_relative(value: Union[str, Path], project: Path) -> Path:
-        path = Path(value)
+        raw = str(value)
+        if not raw or any(character in raw for character in ("\\", "\x00", "\n", "\r")):
+            raise ValueError("Job layout path contains an unsafe character")
+        path = Path(raw)
         if path.is_absolute():
             try:
                 return path.relative_to(project)
             except ValueError:
                 return path
+        if path == Path() or ".." in path.parts:
+            raise ValueError("Job layout relative path must not escape the project")
         return path
+
+    @staticmethod
+    def _layout_name(value: Any, *, field: str) -> str:
+        name = str(value)
+        if (
+            not name
+            or name in {".", ".."}
+            or any(character in name for character in ("/", "\\", "\x00", "\n", "\r"))
+        ):
+            raise ValueError(f"Job layout {field} contains an unsafe path character")
+        return name
 
 
 @dataclass(frozen=True)

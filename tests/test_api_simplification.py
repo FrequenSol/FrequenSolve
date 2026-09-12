@@ -2627,7 +2627,24 @@ def test_paraview_grid_and_plane_selection_serialize_with_units():
     grid_payload = grid_output.to_fs()
     assert grid_payload["target"] == {"kind": "grid", "grid": grid}
     assert "source" not in grid_payload
-    assert grid_payload["writer"] == {"format": "vtu", "encoding": "appended"}
+    assert grid_payload["writer"] == {"format": "vtr", "encoding": "appended"}
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        VtkOutput.grid({"axes": []}, fields=["pressure"], format="vtu"),
+        VtkOutput(
+            target="grid",
+            grid={"axes": []},
+            fields=["pressure"],
+            format="xdmf",
+        ),
+    ],
+)
+def test_paraview_grid_targets_reject_non_vtr_writers(output):
+    with pytest.raises(ValueError, match="grid targets require format='vtr'"):
+        output.to_fs()
 
 
 def test_paraview_from_fs_preserves_new_blocks_and_extra():
@@ -3900,6 +3917,35 @@ def test_remote_input_files_include_simulation_hdf5_store(tmp_path):
     ) in files
 
 
+def test_remote_input_files_include_project_observed_trace_directory(tmp_path):
+    observed = tmp_path / "jobs" / "observed" / "results" / "traces"
+    observed.mkdir(parents=True)
+    (observed / "manifest.json").write_text('{"schema":"synthetic-traces-v1"}\n')
+
+    sim = SeismicSimulation(
+        name="simple",
+        physics="acoustic",
+        dimension=2,
+        project_path=tmp_path,
+    )
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="image", simulation=sim, f_list=[10.0])
+    job_file = job.save()
+    payload = json.loads(job_file.read_text())
+    payload["Image"] = {
+        "data_path": str(observed),
+        "misfit": {"receiver_groups": [{"observed": str(observed)}]},
+    }
+    job_file.write_text(json.dumps(payload))
+
+    files = job.remote_input_files(Path("/remote/project"))
+
+    assert (
+        observed,
+        Path("/remote/project/jobs/observed/results/traces"),
+    ) in files
+
+
 def test_remote_input_files_skip_remote_property_refs(tmp_path):
     model = ModelBase(name="model", dimension=2)
     model += ModelSubdomain(
@@ -4579,6 +4625,125 @@ def _write_indexed_packed_trace_product(
             dset.attrs["receiver"] = np.array([101], dtype=np.int32)
             dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
             dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+
+def _write_indexed_sparse_trace_product(path, group="middle_offsets"):
+    _write_indexed_packed_trace_product(
+        path,
+        group,
+        frequencies=[10.0, 20.0],
+        values=[0.0, 0.0],
+    )
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(path, "r+") as h5:
+        catalog = h5["survey/receiver_groups/_catalog"]
+        catalog["layout_kind"][...] = np.array(["sparse_trace_v1"], dtype=string_dtype)
+
+        traces = h5[f"survey/receiver_groups/{group}/traces"]
+        for name in list(traces):
+            del traces[name]
+        traces.create_dataset("trace_id", data=np.array([11, 12, 13, 14]))
+        traces.create_dataset("source_id", data=np.array([1, 2, 1, 1]))
+        traces.create_dataset("receiver_id", data=np.array([101, 102, 103, 104]))
+        traces.create_dataset("component", data=np.array([1, 1, 2, 1]))
+        traces.create_dataset("weight", data=np.array([0.25, 0.5, 0.75, 1.0]))
+
+        components = h5.require_group("survey/components")
+        components.create_dataset("component", data=np.array([1, 2]))
+        components.create_dataset(
+            "component_name", data=np.array(["p", "v_z"], dtype=string_dtype)
+        )
+        receivers = h5.require_group("survey/receivers")
+        receivers.create_dataset("receiver_id", data=np.array([101, 102, 103, 104]))
+        coordinates = receivers.create_dataset(
+            "coordinates",
+            data=np.array([[0.1, 0.2, 0.3, 0.4], [0.05, 0.05, 0.05, 0.05]]),
+        )
+        coordinates.attrs["dims"] = np.array(["receiver", "coord"], dtype=string_dtype)
+        coordinates.attrs["coord"] = np.array(["x", "z"], dtype=string_dtype)
+        coordinates.attrs["units"] = np.array(["km"], dtype=string_dtype)
+
+        payloads = [
+            np.array([[1, 10], [2, 20], [3, 30], [4, 40]], dtype=np.float32),
+            np.array([[5, 50], [6, 60], [7, 70], [8, 80]], dtype=np.float32),
+        ]
+        for number, payload in enumerate(payloads, start=1):
+            path = f"trace_data/{group}/{number:06d}"
+            del h5[path]
+            dset = h5.create_dataset(path, data=payload)
+            dset.attrs["dims"] = np.array(["trace"], dtype=string_dtype)
+            dset.attrs["layout_kind"] = np.array(
+                ["sparse_trace_v1"], dtype=string_dtype
+            )
+
+
+def test_trace_dataset_reads_indexed_sparse_gathers_with_catalog_metadata(tmp_path):
+    packed = tmp_path / "traces.h5"
+    _write_indexed_sparse_trace_product(packed)
+    traces = TraceDataset.open(packed)
+
+    raw = traces.fd("middle_offsets", "p", source=1)
+
+    assert raw.dims == ("frequency", "receiver")
+    assert raw.coords["frequency"].values.tolist() == [10.0, 20.0]
+    assert raw.coords["receiver"].values.tolist() == [101, 104]
+    assert raw.coords["trace_id"].values.tolist() == [11, 14]
+    assert raw.coords["source_id"].values.tolist() == [1, 1]
+    assert raw.coords["component"].values.tolist() == ["p", "p"]
+    assert raw.coords["weight"].values.tolist() == pytest.approx([0.25, 1.0])
+    assert raw.coords["receiver_x"].values.tolist() == pytest.approx([0.1, 0.4])
+    assert raw.coords["receiver_z"].values.tolist() == pytest.approx([0.05, 0.05])
+    np.testing.assert_array_equal(
+        raw.values,
+        np.array([[1 + 10j, 4 + 40j], [5 + 50j, 8 + 80j]]),
+    )
+    source_two = traces.fd("middle_offsets", "p", source=2)
+    assert source_two.coords["receiver"].values.tolist() == [102]
+    np.testing.assert_array_equal(source_two.values[:, 0], [2 + 20j, 6 + 60j])
+    second_component = traces.fd("middle_offsets", "v_z", source=1)
+    assert second_component.coords["receiver"].values.tolist() == [103]
+    np.testing.assert_array_equal(second_component.values[:, 0], [3 + 30j, 7 + 70j])
+
+    wavelet = RickerWavelet(f=10.0, center=0.0)
+    shaped = traces.fd("middle_offsets", "p", source=1, wavelet=wavelet)
+    expected_scale = np.interp(
+        raw.coords["frequency"], wavelet.frequencies, wavelet.spectrum
+    )
+    np.testing.assert_allclose(shaped.values, raw.values * expected_scale[:, None])
+    for name in ("receiver", "trace_id", "weight", "receiver_x", "receiver_z"):
+        np.testing.assert_array_equal(shaped.coords[name], raw.coords[name])
+
+    td = traces.td(
+        "middle_offsets",
+        "p",
+        source=1,
+        wavelet=RickerWavelet(f=10.0, center=0.0),
+        upscale=2,
+    )
+    assert td.dims == ("time", "receiver")
+    for name in ("receiver", "trace_id", "weight", "receiver_x", "receiver_z"):
+        np.testing.assert_array_equal(td.coords[name], raw.coords[name])
+
+
+def test_sparse_gather_reads_catalog_from_its_own_packed_group_file(tmp_path):
+    first = tmp_path / "first.h5"
+    second = tmp_path / "second.h5"
+    _write_indexed_sparse_trace_product(first, "first")
+    _write_indexed_sparse_trace_product(second, "second")
+    traces = TraceDataset.from_manifest(
+        TraceManifest(
+            files=[first, second],
+            frequencies={1: 10.0, 2: 20.0},
+            groups=["first", "second"],
+            simulation=tmp_path / "simulation.json",
+            result_path=tmp_path / "results",
+            output_path=tmp_path / "results" / "traces",
+            project_path=tmp_path,
+        )
+    )
+
+    assert traces.fd("first", "p", source=1).sizes["receiver"] == 2
+    assert traces.fd("second", "p", source=1).sizes["receiver"] == 2
 
 
 def test_trace_dataset_filters_indexed_packed_rows_by_frequency_and_laplace(tmp_path):
