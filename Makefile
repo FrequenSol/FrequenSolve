@@ -83,4 +83,5 @@ PYTHON ?= python3
 
 .PHONY: test-execution-site-contracts
 test-execution-site-contracts:
-	PYTHONPATH="$(CURDIR)/src" $(PYTHON) -m pytest -q tests/test_execution_site_contracts.py tests/test_execution_site_profiles.py tests/test_awssite_submit_resources.py
+	$(PYTHON) -c "import boto3, requests"
+	PYTHONPATH="$(CURDIR)/src" $(PYTHON) -m pytest -q tests/test_execution_site_contracts.py tests/test_execution_site_profiles.py tests/test_awssite_submit_resources.py tests/test_graphql_client_environment.py tests/test_graphql_client_transport.py tests/test_awssite_auth_retry.py

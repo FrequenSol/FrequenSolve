@@ -198,7 +198,9 @@ def test_simulation_status_details_fall_back_for_older_cloud_schemas():
     client = SimulationStatusGraphQLClient(legacy=True)
 
     assert client.get_simulation_status("simulation-legacy") == "FAILED"
-    assert len(client.queries) == 3
+    assert len(client.queries) == 2
+    assert "failureMessage" not in client.queries[-1]
+    assert "executionSiteId" in client.queries[-1]
 
 
 def test_simulation_status_details_preserve_failures_on_partial_cloud_schema():
