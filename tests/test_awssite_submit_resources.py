@@ -68,13 +68,17 @@ def make_graphql_site():
     site.prepare_job = lambda job, sync_project=False, validate=True: None
     site.sync_s3 = lambda local, remote: remote
     site._emit = lambda message: None
-    site._make_run_handle = lambda job, simulation_id, poll_interval, fetch, check=False, backend=None: SimpleNamespace(
-        job=job,
-        simulation_id=simulation_id,
-        poll_interval=poll_interval,
-        fetch=fetch,
-        check=check,
-        backend=backend,
+    site._make_run_handle = (
+        lambda job, simulation_id, poll_interval, fetch, check=False, backend=None: (
+            SimpleNamespace(
+                job=job,
+                simulation_id=simulation_id,
+                poll_interval=poll_interval,
+                fetch=fetch,
+                check=check,
+                backend=backend,
+            )
+        )
     )
     return site
 
@@ -157,6 +161,26 @@ def test_graphql_submit_uses_only_the_named_managed_slurm_shape():
         "slurm_wall_time_seconds": 1800,
     }
     assert run.backend["executionBackend"] == "slurm"
+
+
+def test_graphql_submit_supports_right_sized_single_node_profile():
+    site = make_graphql_site()
+    site.execution_profile = ManagedExecutionProfile.from_mapping(
+        {
+            "execution_backend": "slurm",
+            "slurm_partition": "cpu-single",
+            "slurm_nodes": 1,
+            "slurm_ranks_per_node": 1,
+            "slurm_wall_time": "00-00:30:00",
+        }
+    )
+
+    site.submit(FakeJob())
+
+    submitted = site.graphql_client.submit_calls[0]
+    assert submitted["slurm_partition"] == "cpu-single"
+    assert submitted["slurm_nodes"] == 1
+    assert submitted["slurm_ranks_per_node"] == 1
 
 
 def test_submit_rejects_managed_execution_overrides():

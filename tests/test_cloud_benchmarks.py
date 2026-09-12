@@ -186,12 +186,35 @@ class _FakeGraphQL:
                             "gatewayReceivedAt": "2026-09-10T00:00:00.5Z",
                             "queuedAt": "2026-09-10T00:00:03Z",
                             "solverStartedAt": "2026-09-10T00:00:04Z",
-                        }
+                            "frequencyIndex": 0,
+                            "nodes": 1,
+                            "ranksPerNode": 1,
+                            "allocatedVcpus": 4,
+                            "allocatedMemoryMiB": 8192,
+                        },
+                        {
+                            "frequencyIndex": 1,
+                            "nodes": 2,
+                            "ranksPerNode": 4,
+                            "allocatedVcpus": None,
+                            "allocatedMemoryMiB": None,
+                        },
                     ],
                     "nextToken": None,
                 },
             }
         }
+
+
+class _LegacyFakeGraphQL(_FakeGraphQL):
+    def __init__(self):
+        self.queries = []
+
+    def execute(self, query, variables):
+        self.queries.append(query)
+        if "allocatedVcpus" in query:
+            raise RuntimeError("Cannot query field 'allocatedVcpus'")
+        return super().execute(query, variables)
 
 
 class _FakeSite:
@@ -238,7 +261,37 @@ def test_recorder_captures_top_level_and_provider_metrics(monkeypatch):
         "frequencyActiveWorkSeconds": [4.0],
         "gatewaySeconds": [0.5],
         "schedulerQueueSeconds": [1.0],
+        "requestedResources": [
+            {
+                "frequencyIndex": 0,
+                "nodes": 1,
+                "ranksPerNode": 1,
+                "vcpus": 4,
+                "memoryMiB": 8192,
+            },
+            {
+                "frequencyIndex": 1,
+                "nodes": 2,
+                "ranksPerNode": 4,
+                "vcpus": None,
+                "memoryMiB": None,
+            },
+        ],
     }
+
+
+def test_cloud_diagnostics_falls_back_when_allocation_fields_are_unavailable():
+    client = _LegacyFakeGraphQL()
+    diagnostics = _worker._cloud_diagnostics(
+        SimpleNamespace(graphql_client=client), "simulation-1"
+    )
+
+    assert len(client.queries) == 2
+    assert "allocatedVcpus" in client.queries[0]
+    assert "allocatedVcpus" not in client.queries[1]
+    assert diagnostics["provider"]["status"] == "SUCCEEDED"
+    assert diagnostics["executionAttempts"][0]["frequencyIndex"] == 0
+    assert diagnostics["instrumentationErrors"] == []
 
 
 def test_recorder_rejects_mismatched_backend_before_submission(monkeypatch):

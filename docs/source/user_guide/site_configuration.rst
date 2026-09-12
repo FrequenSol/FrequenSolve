@@ -226,7 +226,16 @@ separate named profiles when both Cloud execution models are available:
    execution_backend = "batch"
    compute_mode = "auto"
 
-   [sites.cloud-slurm]
+   [sites.cloud-slurm-single]
+   type = "aws"
+   domain = "app.frequensol.com"
+   execution_backend = "slurm"
+   slurm_partition = "cpu-single"
+   slurm_nodes = 1
+   slurm_ranks_per_node = 1
+   slurm_wall_time = "00-00:30:00"
+
+   [sites.cloud-slurm-efa]
    type = "aws"
    domain = "app.frequensol.com"
    execution_backend = "slurm"
@@ -240,7 +249,8 @@ Select the complete profile in Python:
 .. code-block:: python
 
    batch = fs.Site(profile="cloud-batch")
-   slurm = fs.Site(profile="cloud-slurm")
+   single_node = fs.Site(profile="cloud-slurm-single")
+   distributed = fs.Site(profile="cloud-slurm-efa")
 
 The managed Slurm profile is distinct from ``type = "slurm"``. The former is
 FrequenSol Cloud running a private managed cluster and follows the Cloud and
@@ -270,10 +280,12 @@ billing path. The latter remains direct customer-hosted SSH/Slurm execution.
    * - ``compute_mode``
      - Batch-only mode: ``auto``, ``spot_only``, or ``on_demand_only``.
    * - ``slurm_partition``
-     - Managed Slurm partition. The initial canary supports only ``cpu-efa``.
+     - Managed Slurm partition: ``cpu-single`` for single-node work or
+       ``cpu-efa`` for explicitly distributed, EFA-enabled work.
    * - ``slurm_nodes`` / ``slurm_ranks_per_node``
-     - Managed Slurm shape. The initial canary supports 1-2 nodes and 1-4 MPI
-       ranks per node, with at most eight total ranks.
+     - Managed Slurm shape. ``cpu-single`` requires exactly one node and one
+       rank. ``cpu-efa`` requires exactly two nodes and accepts 1-4 MPI ranks
+       per node, with at most eight total ranks.
    * - ``slurm_wall_time``
      - Managed Slurm wall time in ``DD-HH:MM:SS`` form, from one minute through
        two hours for the initial canary.

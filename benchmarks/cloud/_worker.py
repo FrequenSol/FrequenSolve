@@ -70,7 +70,8 @@ def _cloud_diagnostics(site: Any, simulation_id: str) -> dict[str, Any]:
           } nextToken }
           executionAttempts(limit: 100) { items {
             executionBackend providerAttemptId frequencyIndex attemptNumber status statusReason
-            nodes ranksPerNode submittedAt gatewayReceivedAt plannerSubmittedAt plannerCompletedAt
+            nodes ranksPerNode allocatedVcpus allocatedMemoryMiB
+            submittedAt gatewayReceivedAt plannerSubmittedAt plannerCompletedAt
             creditAuthorizedAt queuedAt solverStartedAt solverStoppedAt terminalAt
             activeWorkMilliseconds
           } nextToken }
@@ -78,7 +79,15 @@ def _cloud_diagnostics(site: Any, simulation_id: str) -> dict[str, Any]:
       }
     """
     try:
-        payload = client.execute(query, {"id": simulation_id}).get("getSimulation")
+        try:
+            response = client.execute(query, {"id": simulation_id})
+        except Exception:
+            legacy_query = query.replace(
+                " nodes ranksPerNode allocatedVcpus allocatedMemoryMiB",
+                " nodes ranksPerNode",
+            )
+            response = client.execute(legacy_query, {"id": simulation_id})
+        payload = response.get("getSimulation")
         if isinstance(payload, Mapping):
             diagnostics["provider"] = dict(payload)
             if isinstance(payload.get("frequencyJobs"), Mapping):
@@ -156,6 +165,19 @@ def _derived_metrics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
                 _iso_seconds(item.get("queuedAt"), item.get("solverStartedAt"))
             ]
             if value is not None
+        ]
+        metrics["requestedResources"] = [
+            {
+                "frequencyIndex": item.get("frequencyIndex"),
+                "nodes": item.get("nodes"),
+                "ranksPerNode": item.get("ranksPerNode"),
+                "vcpus": item.get("allocatedVcpus"),
+                "memoryMiB": item.get("allocatedMemoryMiB"),
+            }
+            for item in attempts
+            if isinstance(item, Mapping)
+            and isinstance(item.get("nodes"), int)
+            and isinstance(item.get("ranksPerNode"), int)
         ]
     return metrics
 
