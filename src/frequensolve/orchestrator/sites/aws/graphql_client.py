@@ -822,6 +822,8 @@ class GraphQLClient:
                     slurmWallTimeSeconds
                     providerAttemptId
                     batchJobId
+                    requestedResources
+                    allocatedResources
                     executionSiteId
                     logicalAttemptId
                     providerJobId
@@ -845,6 +847,8 @@ class GraphQLClient:
                 result = self.execute(query, variables)
             except RuntimeError as site_exc:
                 site_fields = (
+                    "requestedResources",
+                    "allocatedResources",
                     "executionSiteId",
                     "logicalAttemptId",
                     "providerJobId",
@@ -917,7 +921,15 @@ class GraphQLClient:
                 f"Simulation status not found in response: {simulation_id}"
             )
 
+        def resources(name):
+            value = details.get(name)
+            if isinstance(value, str):
+                value = json.loads(value)
+            return value if isinstance(value, dict) else None
+
         normalized = {
+            "requestedResources": resources("requestedResources"),
+            "allocatedResources": resources("allocatedResources"),
             "executionSiteId": details.get("executionSiteId")
             or (
                 "managed-slurm"

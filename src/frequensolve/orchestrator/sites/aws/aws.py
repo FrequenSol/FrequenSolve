@@ -1239,6 +1239,8 @@ class AWSSite(BaseSite):
         if callable(details_getter):
             status_details = details_getter(str(run.id))
             for key in (
+                "requestedResources",
+                "allocatedResources",
                 "executionSiteId",
                 "logicalAttemptId",
                 "providerJobId",
