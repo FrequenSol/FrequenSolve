@@ -95,7 +95,10 @@ class ManagedExecutionProfile:
                 "Slurm profiles must set: " + ", ".join(missing)
             )
         partition = slurm_values["slurm_partition"]
-        if partition not in {"cpu-single", "cpu-efa"}:
+        if not isinstance(partition, str) or partition not in {
+            "cpu-single",
+            "cpu-efa",
+        }:
             raise ManagedExecutionProfileError(
                 "unsupported Slurm resource shape: slurm_partition must be "
                 "'cpu-single' or 'cpu-efa'"

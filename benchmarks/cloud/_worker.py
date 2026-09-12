@@ -79,7 +79,15 @@ def _cloud_diagnostics(site: Any, simulation_id: str) -> dict[str, Any]:
       }
     """
     try:
-        payload = client.execute(query, {"id": simulation_id}).get("getSimulation")
+        try:
+            response = client.execute(query, {"id": simulation_id})
+        except Exception:
+            legacy_query = query.replace(
+                " nodes ranksPerNode allocatedVcpus allocatedMemoryMiB",
+                " nodes ranksPerNode",
+            )
+            response = client.execute(legacy_query, {"id": simulation_id})
+        payload = response.get("getSimulation")
         if isinstance(payload, Mapping):
             diagnostics["provider"] = dict(payload)
             if isinstance(payload.get("frequencyJobs"), Mapping):

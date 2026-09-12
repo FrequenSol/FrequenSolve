@@ -339,6 +339,12 @@ slurm_wall_time = "00-00:30:00"
             'slurm_wall_time = "00-00:30:00"',
             "cpu-efa requires an explicitly distributed plan",
         ),
+        (
+            'execution_backend = "slurm"\nslurm_partition = ["cpu-efa"]\n'
+            "slurm_nodes = 2\nslurm_ranks_per_node = 4\n"
+            'slurm_wall_time = "00-00:30:00"',
+            "slurm_partition must be 'cpu-single' or 'cpu-efa'",
+        ),
     ],
 )
 def test_site_factory_rejects_invalid_managed_profiles(
