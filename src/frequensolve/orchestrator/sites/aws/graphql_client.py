@@ -7,6 +7,7 @@ the FrequenSol AppSync API using Cognito authentication.
 
 import json
 import logging
+import re
 import time
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
@@ -836,12 +837,19 @@ class GraphQLClient:
 
         variables = {"id": simulation_id}
 
-        def is_unsupported_field_error(
-            error_message: str, fields: tuple[str, ...]
-        ) -> bool:
-            return any(field in error_message for field in fields) and (
-                "Cannot query field" in error_message or "is undefined" in error_message
+        def unsupported_fields(error_message: str) -> set[str]:
+            # Read only the rejected name, never suggestion text or a similarly
+            # named field. Support GraphQL and AppSync validation diagnostics.
+            patterns = (
+                r"\bCannot query field ['\"]?([_A-Za-z][_0-9A-Za-z]*)['\"]?(?=\s|[.,:]|$)",
+                r"\bField ['\"]([_A-Za-z][_0-9A-Za-z]*)['\"]\s+in type "
+                r"['\"][_A-Za-z][_0-9A-Za-z]*['\"]\s+is undefined\b",
             )
+            return {
+                name
+                for pattern in patterns
+                for name in re.findall(pattern, error_message)
+            }
 
         # Retry only fields explicitly rejected by this deployment. Keep every
         # supported identity/resource field through partial schema upgrades.
@@ -873,11 +881,7 @@ class GraphQLClient:
                 result = self.execute(query, variables)
                 break
             except RuntimeError as exc:
-                rejected = {
-                    field
-                    for field in optional_fields
-                    if is_unsupported_field_error(str(exc), (field,))
-                }
+                rejected = unsupported_fields(str(exc)) & optional_fields
                 if not rejected:
                     raise
                 optional_fields -= rejected
