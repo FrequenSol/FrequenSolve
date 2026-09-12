@@ -25,3 +25,21 @@ class ExecutionDetails:
             value.get("requestedResources"),
             value.get("allocatedResources"),
         )
+
+
+def normalize_execution_state(value: str | None) -> str:
+    """Use the same execution vocabulary for submission and status reads."""
+    return {
+        "PENDING": "queued",
+        "SUBMITTED": "queued",
+        "QUEUED": "queued",
+        "RUNNABLE": "queued",
+        "STARTING": "queued",
+        "RUNNING": "running",
+        "SUCCEEDED": "succeeded",
+        "COMPLETED": "succeeded",
+        "FAILED": "failed",
+        "CANCELED": "canceled",
+        "CANCELLED": "canceled",
+        "ABORTED": "canceled",
+    }.get((value or "").upper(), "queued")

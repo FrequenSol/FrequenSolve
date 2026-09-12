@@ -78,3 +78,9 @@ run-cloud-benchmarks:
 .PHONY: generate-cloud-benchmarks
 generate-cloud-benchmarks:
 	python scripts/generate_cloud_benchmark_workloads.py
+
+PYTHON ?= python3
+
+.PHONY: test-execution-site-contracts
+test-execution-site-contracts:
+	PYTHONPATH="$(CURDIR)/src" $(PYTHON) -m pytest -q tests/test_execution_site_contracts.py tests/test_execution_site_profiles.py tests/test_awssite_submit_resources.py

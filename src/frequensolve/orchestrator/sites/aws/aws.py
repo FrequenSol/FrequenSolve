@@ -19,6 +19,7 @@ from frequensolve.orchestrator.sites.aws.cache_paths import (
 from frequensolve.orchestrator.sites.aws.execution_profile import (
     ManagedExecutionProfile,
 )
+from frequensolve.orchestrator.sites.execution import normalize_execution_state
 
 try:
     import boto3
@@ -1193,8 +1194,12 @@ class AWSSite(BaseSite):
                         "providerJobId": result.get("providerJobId")
                         or result.get("providerAttemptId")
                         or result.get("batchJobId"),
-                        "executionState": "queued",
-                        "requestedResources": self.execution_profile.execution_resources,
+                        "executionState": normalize_execution_state(
+                            result.get("executionState") or result.get("status")
+                        ),
+                        "requestedResources": self.execution_profile.graphql_arguments().get(
+                            "execution_resources"
+                        ),
                         "executionTarget": result.get("executionTarget"),
                         "slurmPartition": result.get("slurmPartition"),
                         "slurmNodes": result.get("slurmNodes"),
