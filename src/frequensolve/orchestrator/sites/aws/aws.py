@@ -1699,24 +1699,30 @@ class AWSSite(BaseSite):
         except RuntimeError:
             raise RuntimeError(
                 "Could not check the Cloud simulation status before cancellation; "
-                "retry after confirming Cloud connectivity"
+                "check Cloud access and configuration before retrying"
             ) from None
 
         # Check if simulation is in a cancellable state
-        if str(status).upper() in {
-            "SUCCEEDED",
-            "COMPLETED",
-            "FAILED",
-            "CANCELED",
-            "CANCELLED",
-        }:
+        terminal_states = {"SUCCEEDED", "COMPLETED", "FAILED", "CANCELED", "CANCELLED"}
+        if str(status).upper() in terminal_states:
             logger.warning(
                 f"Simulation {job_id} is already in terminal state: {status}. "
                 "Nothing to cancel."
             )
             return
 
-        self.graphql_client.cancel_simulation(job_id)
+        try:
+            self.graphql_client.cancel_simulation(job_id)
+        except RuntimeError:
+            # Completion can win the race with cancellation. Reconcile once,
+            # without repeating a mutation whose outcome may be uncertain.
+            try:
+                current_status = self.graphql_client.get_simulation_status(job_id)
+            except RuntimeError:
+                current_status = None
+            if str(current_status).upper() in terminal_states:
+                return
+            raise
 
     def put(
         self,

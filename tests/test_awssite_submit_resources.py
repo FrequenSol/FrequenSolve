@@ -357,7 +357,9 @@ def test_cancel_job_sanitizes_status_lookup_failure():
 
     site.graphql_client = SimpleNamespace(get_simulation_status=fail_status)
 
-    with pytest.raises(RuntimeError, match="confirming Cloud connectivity") as exc_info:
+    with pytest.raises(
+        RuntimeError, match="Cloud access and configuration"
+    ) as exc_info:
         site.cancel_job("private-simulation-id")
 
     diagnostic = str(exc_info.value)
@@ -465,3 +467,43 @@ def test_legacy_status_entry_point_uses_graphql_details():
         status = site.get_job_status_from_api("simulation-1")
 
     assert status == {"id": "simulation-1", "status": "RUNNING"}
+
+
+@pytest.mark.parametrize("initial_status", ["PENDING", "RUNNING"])
+@pytest.mark.parametrize(
+    "final_status",
+    ["SUCCEEDED", "completed", "FAILED", "CANCELED", "cancelled", "RUNNING", None],
+)
+def test_cancel_job_reconciles_race_once(initial_status, final_status):
+    from frequensolve.orchestrator.sites.aws.graphql_client import CloudAPIError
+
+    calls = []
+    statuses = iter([initial_status, final_status])
+    rejection = CloudAPIError("Cloud rejected cancellation")
+
+    def status(simulation_id):
+        calls.append(("status", simulation_id))
+        value = next(statuses)
+        if value is None:
+            raise RuntimeError("private-status-error")
+        return value
+
+    def cancel(simulation_id):
+        calls.append(("cancel", simulation_id))
+        raise rejection
+
+    site = AWSSite.__new__(AWSSite)
+    site.graphql_client = SimpleNamespace(
+        get_simulation_status=status, cancel_simulation=cancel
+    )
+    if final_status in {"RUNNING", None}:
+        with pytest.raises(CloudAPIError) as error:
+            site.cancel_job("simulation-1")
+        assert error.value is rejection
+    else:
+        assert site.cancel_job("simulation-1") is None
+    assert calls == [
+        ("status", "simulation-1"),
+        ("cancel", "simulation-1"),
+        ("status", "simulation-1"),
+    ]

@@ -4,7 +4,11 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from frequensolve.orchestrator.sites.aws.graphql_client import GraphQLClient
+from frequensolve.orchestrator.sites.aws.graphql_client import (
+    CloudAPIError,
+    CloudTransportError,
+    GraphQLClient,
+)
 
 
 class CapturingGraphQLClient(GraphQLClient):
@@ -556,10 +560,67 @@ def test_cancel_simulation_sanitizes_transport_failure(monkeypatch):
     client = GraphQLClient("https://example.invalid/graphql", auth=object())
 
     def execute(*args):
-        raise RuntimeError("private-token private-account")
+        raise CloudTransportError("private-token private-account")
 
     monkeypatch.setattr(client, "execute", execute)
     with pytest.raises(RuntimeError, match="connectivity") as error:
         client.cancel_simulation("simulation-1")
     assert "private-token" not in str(error.value)
     assert error.value.__suppress_context__
+
+
+@pytest.mark.parametrize("failure", [CloudAPIError, RuntimeError])
+def test_cancel_simulation_preserves_sanitized_failure_category(monkeypatch, failure):
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+
+    def execute(*args):
+        raise failure("private-token private-account")
+
+    monkeypatch.setattr(client, "execute", execute)
+    with pytest.raises(failure) as error:
+        client.cancel_simulation("simulation-1")
+    assert "private-token" not in str(error.value)
+    assert "connectivity" not in str(error.value)
+    assert error.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    "kind", ["timeout", "connection", "http", "graphql", "resolver"]
+)
+def test_cancel_simulation_classifies_real_request_failures(monkeypatch, kind):
+    from types import SimpleNamespace
+
+    import requests
+
+    auth = SimpleNamespace(get_id_token=lambda: "private-token")
+    client = GraphQLClient("https://example.invalid/graphql", auth=auth)
+
+    def post(*args, **kwargs):
+        if kind == "timeout":
+            raise requests.exceptions.Timeout("private-token")
+        if kind == "connection":
+            raise requests.exceptions.ConnectionError("private-token")
+
+        def check_status():
+            if kind == "http":
+                raise requests.exceptions.HTTPError("private-token")
+
+        body = (
+            {"errors": [{"message": "private-token"}]}
+            if kind == "graphql"
+            else {
+                "data": {
+                    "cancelSimulation": {"success": False, "error": "private-token"}
+                }
+            }
+        )
+        return SimpleNamespace(raise_for_status=check_status, json=lambda: body)
+
+    monkeypatch.setattr(requests, "post", post)
+    expected = (
+        CloudTransportError if kind in {"timeout", "connection"} else CloudAPIError
+    )
+    with pytest.raises(expected) as error:
+        client.cancel_simulation("simulation-1")
+    assert "private-token" not in str(error.value)
+    assert ("connectivity" in str(error.value)) == (expected is CloudTransportError)
