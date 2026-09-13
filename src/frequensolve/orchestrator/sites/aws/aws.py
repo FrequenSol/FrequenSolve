@@ -1703,20 +1703,20 @@ class AWSSite(BaseSite):
             ) from None
 
         # Check if simulation is in a cancellable state
-        if status in ["SUCCEEDED", "FAILED", "CANCELED"]:
+        if str(status).upper() in {
+            "SUCCEEDED",
+            "COMPLETED",
+            "FAILED",
+            "CANCELED",
+            "CANCELLED",
+        }:
             logger.warning(
                 f"Simulation {job_id} is already in terminal state: {status}. "
                 "Nothing to cancel."
             )
             return
 
-        # For now, raise an error indicating cancellation is not yet implemented
-        # This will be implemented when the cancelSimulation GraphQL mutation is available
-        raise NotImplementedError(
-            "Simulation cancellation is not yet implemented in this SDK. "
-            f"The simulation is currently in state {status}. "
-            "Cancel it through the Cloud application."
-        )
+        self.graphql_client.cancel_simulation(job_id)
 
     def put(
         self,

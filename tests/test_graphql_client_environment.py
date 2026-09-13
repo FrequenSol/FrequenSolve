@@ -518,3 +518,48 @@ def test_submit_job_explains_when_cloud_does_not_support_fresh_runs(monkeypatch)
 
     with pytest.raises(RuntimeError, match="Submit without force=True"):
         client.submit_job("project/jobs/job.json", fresh=True)
+
+
+def test_cancel_simulation_passes_id_and_requires_api_acceptance(monkeypatch):
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    calls = []
+
+    def execute(query, variables):
+        calls.append(variables)
+        return {"cancelSimulation": {"success": True, "error": None}}
+
+    monkeypatch.setattr(client, "execute", execute)
+    assert client.cancel_simulation("simulation-1") is None
+    assert calls == [{"simulationId": "simulation-1"}]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        {},
+        {"cancelSimulation": None},
+        {"cancelSimulation": {"success": False, "error": "private-token"}},
+        {"cancelSimulation": {"success": "true"}},
+        {"cancelSimulation": {"success": True, "error": "private-token"}},
+    ],
+)
+def test_cancel_simulation_rejects_unconfirmed_response(monkeypatch, response):
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    monkeypatch.setattr(client, "execute", lambda *args: response)
+    with pytest.raises(RuntimeError) as error:
+        client.cancel_simulation("simulation-1")
+    assert "private-token" not in str(error.value)
+
+
+def test_cancel_simulation_sanitizes_transport_failure(monkeypatch):
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+
+    def execute(*args):
+        raise RuntimeError("private-token private-account")
+
+    monkeypatch.setattr(client, "execute", execute)
+    with pytest.raises(RuntimeError, match="connectivity") as error:
+        client.cancel_simulation("simulation-1")
+    assert "private-token" not in str(error.value)
+    assert error.value.__suppress_context__

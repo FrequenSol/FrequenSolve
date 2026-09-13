@@ -313,7 +313,18 @@ def test_poll_run_keeps_billing_separate_from_success(billing_status):
     assert run.backend == billing
 
 
-@pytest.mark.parametrize("status", ["SUCCEEDED", "FAILED", "CANCELED"])
+@pytest.mark.parametrize(
+    "status",
+    [
+        "SUCCEEDED",
+        "COMPLETED",
+        "FAILED",
+        "CANCELED",
+        "CANCELLED",
+        "completed",
+        "cancelled",
+    ],
+)
 def test_cancel_job_treats_terminal_states_as_idempotent(status):
     site = AWSSite.__new__(AWSSite)
     site.graphql_client = SimpleNamespace(
@@ -323,18 +334,17 @@ def test_cancel_job_treats_terminal_states_as_idempotent(status):
     assert site.cancel_job("private-simulation-id") is None
 
 
-def test_cancel_job_running_state_has_actionable_sdk_boundary_without_id():
+@pytest.mark.parametrize("status", ["PENDING", "RUNNING"])
+def test_cancel_job_requests_cloud_cancellation(status):
+    calls = []
     site = AWSSite.__new__(AWSSite)
     site.graphql_client = SimpleNamespace(
-        get_simulation_status=lambda simulation_id: "RUNNING"
+        get_simulation_status=lambda simulation_id: status,
+        cancel_simulation=calls.append,
     )
 
-    with pytest.raises(NotImplementedError) as exc_info:
-        site.cancel_job("private-simulation-id")
-
-    diagnostic = str(exc_info.value)
-    assert "Cancel it through the Cloud application" in diagnostic
-    assert "private-simulation-id" not in diagnostic
+    assert site.cancel_job("simulation-1") is None
+    assert calls == ["simulation-1"]
 
 
 def test_cancel_job_sanitizes_status_lookup_failure():

@@ -792,6 +792,31 @@ class GraphQLClient:
 
         return result["submitJob"]
 
+    def cancel_simulation(self, simulation_id: str) -> None:
+        """Request cancellation; terminal state remains authoritative in Cloud."""
+        query = """
+            mutation CancelSimulation($simulationId: String!) {
+                cancelSimulation(simulationId: $simulationId) {
+                    success
+                    error
+                }
+            }
+        """
+        try:
+            result = self.execute(query, {"simulationId": simulation_id})
+        except RuntimeError:
+            raise RuntimeError(
+                "Cloud cancellation request failed; check connectivity and retry"
+            ) from None
+        response = result.get("cancelSimulation") if isinstance(result, dict) else None
+        if not isinstance(response, dict) or response.get("success") is not True:
+            raise RuntimeError(
+                "Cloud did not accept cancellation; refresh the simulation status "
+                "and retry once an execution attempt is assigned"
+            )
+        if response.get("error"):
+            raise RuntimeError("Cloud returned an inconsistent cancellation response")
+
     def get_simulation_status_details(self, simulation_id: str) -> Dict[str, Any]:
         """Get simulation status and customer-safe failure details by ID.
 
@@ -901,7 +926,7 @@ class GraphQLClient:
                 f"Simulation status not found in response: {simulation_id}"
             )
 
-        def resources(name):
+        def resources(name: str) -> Optional[Dict[str, Any]]:
             value = details.get(name)
             if isinstance(value, str):
                 value = json.loads(value)
