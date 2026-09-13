@@ -10,15 +10,6 @@
         "subscriptionActive": true,
         "subscriptionStatus": "active"
       },
-      "scu": {
-        "meterVersion": "scu-v1",
-        "available": "42",
-        "reserved": "2",
-        "pending": "1",
-        "finalized": "8",
-        "credited": "0",
-        "reviewRequired": "0"
-      },
       "infrastructure": {
         "storage": "READY",
         "compute": "READY"
@@ -45,9 +36,12 @@
           "completedFrequencies": 2,
           "failedFrequencies": 0,
           "abortedFrequencies": 0,
-          "requestedComputeMode": "AUTO",
-          "effectiveComputeMode": "SPOT",
-          "batchStatus": "RUNNING"
+          "executionBackend": "SLURM",
+          "executionSiteId": "managed-slurm",
+          "slurmPartition": "cpu-single",
+          "slurmNodes": 1,
+          "slurmRanksPerNode": 1,
+          "slurmWallTimeSeconds": 600
         }
       ]
     }
@@ -62,20 +56,20 @@
       "projectName": "Acoustic Demo",
       "simulationName": "Layered Model",
       "jobName": "Forward",
-      "status": "FAILED",
+      "status": "RUNNING",
       "startTime": "2026-07-24T12:00:00.000Z",
       "progress": {
         "total": 4,
-        "completed": 3,
+        "completed": 2,
         "failed": 0,
-        "aborted": 1
+        "aborted": 0
       },
-      "requestedComputeMode": "AUTO",
-      "effectiveComputeMode": "SPOT",
-      "autoEscalationEnabled": true,
-      "batchStatus": "FAILED",
-      "failureCode": "SCU_BALANCE_EXHAUSTED",
-      "failureMessage": "This simulation stopped because the account ran out of SCUs. Completed results remain available."
+      "executionBackend": "SLURM",
+      "executionSiteId": "managed-slurm",
+      "slurmPartition": "cpu-single",
+      "slurmNodes": 1,
+      "slurmRanksPerNode": 1,
+      "slurmWallTimeSeconds": 600
     }
   },
   {
@@ -94,11 +88,7 @@
           "status": "FAILED",
           "reasonCategory": "APPLICATION_FAILURE",
           "message": "The frequency job did not complete (APPLICATION_FAILURE).",
-          "batchStatus": "FAILED",
-          "attemptNumber": 1,
-          "requestedComputeMode": "AUTO",
-          "effectiveComputeMode": "SPOT",
-          "autoEscalated": false
+          "attemptNumber": 1
         }
       ]
     }

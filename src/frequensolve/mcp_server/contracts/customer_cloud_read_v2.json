@@ -82,21 +82,17 @@
   "operations": [
     {
       "name": "getCloudReadiness",
-      "description": "Return the signed-in user's seat, subscription, Solver Compute Unit entitlement, and coarse storage and compute readiness.",
+      "description": "Return the signed-in user's seat, subscription, and coarse storage and compute readiness.",
       "classification": "read-only",
       "source": {
         "kind": "fixed-graphql-query",
         "operationName": "GetCloudReadiness",
         "rootFields": [
           "getMyAccountSummary",
-          "getScuUsage",
           "getMyCloudInfrastructureReadiness"
         ],
-        "document": "query GetCloudReadiness { membership: getMyAccountSummary { seatLimit hasSeat role subscriptionActive: hasActiveSubscription subscriptionStatus: primarySubscriptionStatus } scu: getScuUsage { meterVersion available: availableScu reserved: reservedScu pending: pendingScu finalized: finalizedScu credited: creditedScu reviewRequired: reviewRequiredScu } infrastructure: getMyCloudInfrastructureReadiness { storage compute } }",
-        "responseProjection": {
-          "source": "graphql-data",
-          "path": []
-        },
+        "document": "query GetCloudReadiness { membership: getMyAccountSummary { seatLimit hasSeat role subscriptionActive: hasActiveSubscription subscriptionStatus: primarySubscriptionStatus } infrastructure: getMyCloudInfrastructureReadiness { storage compute } }",
+        "responseProjection": { "source": "graphql-data", "path": [] },
         "variables": {},
         "sourceOnlyFields": []
       },
@@ -126,52 +122,6 @@
             "required": ["hasSeat", "subscriptionActive"],
             "additionalProperties": false
           },
-          "scu": {
-            "type": "object",
-            "properties": {
-              "meterVersion": { "type": "string", "enum": ["scu-v1"] },
-              "available": {
-                "type": "string",
-                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
-                "maxLength": 64
-              },
-              "reserved": {
-                "type": "string",
-                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
-                "maxLength": 64
-              },
-              "pending": {
-                "type": "string",
-                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
-                "maxLength": 64
-              },
-              "finalized": {
-                "type": "string",
-                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
-                "maxLength": 64
-              },
-              "credited": {
-                "type": "string",
-                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
-                "maxLength": 64
-              },
-              "reviewRequired": {
-                "type": "string",
-                "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
-                "maxLength": 64
-              }
-            },
-            "required": [
-              "meterVersion",
-              "available",
-              "reserved",
-              "pending",
-              "finalized",
-              "credited",
-              "reviewRequired"
-            ],
-            "additionalProperties": false
-          },
           "infrastructure": {
             "type": "object",
             "properties": {
@@ -188,7 +138,7 @@
             "additionalProperties": false
           }
         },
-        "required": ["membership", "scu", "infrastructure"],
+        "required": ["membership", "infrastructure"],
         "additionalProperties": false
       },
       "limits": {
@@ -217,7 +167,7 @@
         "kind": "fixed-graphql-query",
         "operationName": "ListMySimulations",
         "rootFields": ["listMySimulations"],
-        "document": "query ListMySimulations($status: String, $projectName: String, $limit: Int, $cursor: String) { listMySimulations(status: $status, projectName: $projectName, limit: $limit, cursor: $cursor) { items { simulationId projectName simulationName jobName status startTime durationSeconds totalFrequencies completedFrequencies failedFrequencies abortedFrequencies requestedComputeMode effectiveComputeMode batchStatus batchStatusEnteredAt } cursor } }",
+        "document": "query ListMySimulations($status: String, $projectName: String, $limit: Int, $cursor: String) {\n  listMySimulations(\n    status: $status\n    projectName: $projectName\n    limit: $limit\n    cursor: $cursor\n  ) {\n    items {\n      simulationId\n      projectName\n      simulationName\n      jobName\n      status\n      startTime\n      durationSeconds\n      totalFrequencies\n      completedFrequencies\n      failedFrequencies\n      abortedFrequencies\n      executionBackend\n      executionSiteId\n      stopRequestedAt\n      slurmPartition\n      slurmNodes\n      slurmRanksPerNode\n      slurmWallTimeSeconds\n    }\n    cursor\n  }\n}\n",
         "responseProjection": {
           "source": "graphql-data",
           "path": ["listMySimulations"]
@@ -242,22 +192,14 @@
             "type": "string",
             "enum": ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED"]
           },
-          "projectName": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
+          "projectName": { "type": "string", "minLength": 1, "maxLength": 128 },
           "limit": {
             "type": "integer",
             "minimum": 1,
             "maximum": 25,
             "default": 10
           },
-          "cursor": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4096
-          }
+          "cursor": { "type": "string", "minLength": 1, "maxLength": 4096 }
         },
         "required": [],
         "additionalProperties": false
@@ -271,10 +213,26 @@
             "items": {
               "type": "object",
               "properties": {
-                "simulationId": { "type": "string", "minLength": 1, "maxLength": 256 },
-                "projectName": { "type": "string", "minLength": 1, "maxLength": 128 },
-                "simulationName": { "type": "string", "minLength": 1, "maxLength": 128 },
-                "jobName": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "simulationId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "projectName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "simulationName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "jobName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
                 "status": { "type": "string", "minLength": 1, "maxLength": 64 },
                 "startTime": { "type": "string", "format": "date-time" },
                 "durationSeconds": { "type": "number", "minimum": 0 },
@@ -282,10 +240,21 @@
                 "completedFrequencies": { "type": "integer", "minimum": 0 },
                 "failedFrequencies": { "type": "integer", "minimum": 0 },
                 "abortedFrequencies": { "type": "integer", "minimum": 0 },
-                "requestedComputeMode": { "type": "string", "maxLength": 32 },
-                "effectiveComputeMode": { "type": "string", "maxLength": 32 },
-                "batchStatus": { "type": "string", "maxLength": 64 },
-                "batchStatusEnteredAt": { "type": "string", "format": "date-time" }
+                "executionBackend": { "type": "string", "enum": ["SLURM"] },
+                "executionSiteId": { "type": "string", "maxLength": 256 },
+                "stopRequestedAt": { "type": "string", "format": "date-time" },
+                "slurmPartition": { "type": "string", "maxLength": 64 },
+                "slurmNodes": { "type": "integer", "minimum": 1, "maximum": 2 },
+                "slurmRanksPerNode": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 64
+                },
+                "slurmWallTimeSeconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 7200
+                }
               },
               "required": [
                 "simulationId",
@@ -298,11 +267,7 @@
               "additionalProperties": false
             }
           },
-          "cursor": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4096
-          }
+          "cursor": { "type": "string", "minLength": 1, "maxLength": 4096 }
         },
         "required": ["items"],
         "additionalProperties": false
@@ -328,20 +293,18 @@
     },
     {
       "name": "getMySimulation",
-      "description": "Return safe status, progress, timing, compute-mode, run-summary, and terminal-failure fields for one owned simulation.",
+      "description": "Return safe status, progress, timing, managed Slurm resources, and run-summary fields for one owned simulation.",
       "classification": "read-only",
       "source": {
         "kind": "fixed-graphql-query",
         "operationName": "GetMySimulation",
         "rootFields": ["getMySimulationRead"],
-        "document": "query GetMySimulation($simulationId: String!) { getMySimulationRead(simulationId: $simulationId, includeDiagnostics: false) { simulation { simulationId projectName simulationName jobName status startTime durationSeconds progress { total completed failed aborted } requestedComputeMode effectiveComputeMode autoEscalationEnabled escalatedAt batchStatus batchStatusEnteredAt failureCode failureMessage guardrail { maxRuntimeMinutes } } } }",
+        "document": "query GetMySimulation($simulationId: String!) {\n  getMySimulationRead(simulationId: $simulationId, includeDiagnostics: false) {\n    simulation {\n      simulationId\n      projectName\n      simulationName\n      jobName\n      status\n      startTime\n      durationSeconds\n      progress {\n        total\n        completed\n        failed\n        aborted\n      }\n      executionBackend\n      executionSiteId\n      stopRequestedAt\n      slurmPartition\n      slurmNodes\n      slurmRanksPerNode\n      slurmWallTimeSeconds\n      failureCode\n      failureMessage\n    }\n  }\n}\n",
         "responseProjection": {
           "source": "graphql-data",
           "path": ["getMySimulationRead", "simulation"]
         },
-        "variables": {
-          "simulationId": { "source": "input.simulationId" }
-        },
+        "variables": { "simulationId": { "source": "input.simulationId" } },
         "sourceOnlyFields": []
       },
       "ownership": {
@@ -352,11 +315,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "simulationId": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 256
-          }
+          "simulationId": { "type": "string", "minLength": 1, "maxLength": 256 }
         },
         "required": ["simulationId"],
         "additionalProperties": false
@@ -364,9 +323,17 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "simulationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "simulationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
           "projectName": { "type": "string", "minLength": 1, "maxLength": 128 },
-          "simulationName": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "simulationName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
           "jobName": { "type": "string", "minLength": 1, "maxLength": 128 },
           "status": { "type": "string", "minLength": 1, "maxLength": 64 },
           "startTime": { "type": "string", "format": "date-time" },
@@ -382,23 +349,24 @@
             "required": ["total", "completed", "failed", "aborted"],
             "additionalProperties": false
           },
-          "requestedComputeMode": { "type": "string", "maxLength": 32 },
-          "effectiveComputeMode": { "type": "string", "maxLength": 32 },
-          "autoEscalationEnabled": { "type": "boolean" },
-          "escalatedAt": { "type": "string", "format": "date-time" },
-          "batchStatus": { "type": "string", "maxLength": 64 },
-          "batchStatusEnteredAt": { "type": "string", "format": "date-time" },
-          "failureCode": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "failureMessage": { "type": "string", "minLength": 1, "maxLength": 1000 },
           "statusMessage": { "type": "string", "maxLength": 1000 },
-          "guardrail": {
-            "type": "object",
-            "properties": {
-              "maxRuntimeMinutes": { "type": "integer", "minimum": 0 },
-              "message": { "type": "string", "maxLength": 1000 }
-            },
-            "additionalProperties": false
-          }
+          "executionBackend": { "type": "string", "enum": ["SLURM"] },
+          "executionSiteId": { "type": "string", "maxLength": 256 },
+          "stopRequestedAt": { "type": "string", "format": "date-time" },
+          "slurmPartition": { "type": "string", "maxLength": 64 },
+          "slurmNodes": { "type": "integer", "minimum": 1, "maximum": 2 },
+          "slurmRanksPerNode": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64
+          },
+          "slurmWallTimeSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 7200
+          },
+          "failureCode": { "type": "string", "maxLength": 64 },
+          "failureMessage": { "type": "string", "maxLength": 1000 }
         },
         "required": [
           "simulationId",
@@ -441,7 +409,7 @@
         "kind": "fixed-graphql-query",
         "operationName": "ListMySimulationDiagnostics",
         "rootFields": ["getMySimulationRead"],
-        "document": "query ListMySimulationDiagnostics($simulationId: String!, $limit: Int, $cursor: String) { getMySimulationRead(simulationId: $simulationId, includeDiagnostics: true, limit: $limit, cursor: $cursor) { diagnostics { simulationId simulationStatus items { frequencyIndex frequencyHz frequencyImagHz status reasonCategory message batchStatus startTime endTime durationSeconds queueWaitSeconds runSeconds attemptNumber requestedComputeMode effectiveComputeMode autoEscalated } cursor } } }",
+        "document": "query ListMySimulationDiagnostics($simulationId: String!, $limit: Int, $cursor: String) {\n  getMySimulationRead(\n    simulationId: $simulationId\n    includeDiagnostics: true\n    limit: $limit\n    cursor: $cursor\n  ) {\n    diagnostics {\n      simulationId\n      simulationStatus\n      items {\n        frequencyIndex\n        frequencyHz\n        frequencyImagHz\n        status\n        reasonCategory\n        message\n        startTime\n        endTime\n        durationSeconds\n        attemptNumber\n      }\n      cursor\n    }\n  }\n}\n",
         "responseProjection": {
           "source": "graphql-data",
           "path": ["getMySimulationRead", "diagnostics"]
@@ -472,11 +440,7 @@
             "maximum": 50,
             "default": 25
           },
-          "cursor": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4096
-          }
+          "cursor": { "type": "string", "minLength": 1, "maxLength": 4096 }
         },
         "required": ["simulationId"],
         "additionalProperties": false
@@ -484,8 +448,16 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "simulationId": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "simulationStatus": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "simulationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "simulationStatus": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
           "items": {
             "type": "array",
             "maxItems": 50,
@@ -508,26 +480,16 @@
                   ]
                 },
                 "message": { "type": "string", "maxLength": 1000 },
-                "batchStatus": { "type": "string", "maxLength": 64 },
                 "startTime": { "type": "string", "format": "date-time" },
                 "endTime": { "type": "string", "format": "date-time" },
                 "durationSeconds": { "type": "number", "minimum": 0 },
-                "queueWaitSeconds": { "type": "number", "minimum": 0 },
-                "runSeconds": { "type": "number", "minimum": 0 },
-                "attemptNumber": { "type": "integer", "minimum": 0 },
-                "requestedComputeMode": { "type": "string", "maxLength": 32 },
-                "effectiveComputeMode": { "type": "string", "maxLength": 32 },
-                "autoEscalated": { "type": "boolean" }
+                "attemptNumber": { "type": "integer", "minimum": 0 }
               },
               "required": ["frequencyIndex", "status"],
               "additionalProperties": false
             }
           },
-          "cursor": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4096
-          }
+          "cursor": { "type": "string", "minLength": 1, "maxLength": 4096 }
         },
         "required": ["simulationId", "simulationStatus", "items"],
         "additionalProperties": false
@@ -618,14 +580,8 @@
                   "minLength": 1,
                   "maxLength": 768
                 },
-                "sizeBytes": {
-                  "type": "number",
-                  "minimum": 0
-                },
-                "lastModified": {
-                  "type": "string",
-                  "format": "date-time"
-                },
+                "sizeBytes": { "type": "number", "minimum": 0 },
+                "lastModified": { "type": "string", "format": "date-time" },
                 "storageClass": {
                   "type": "string",
                   "minLength": 1,
@@ -636,11 +592,7 @@
               "additionalProperties": false
             }
           },
-          "nextAfter": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 768
-          }
+          "nextAfter": { "type": "string", "minLength": 1, "maxLength": 768 }
         },
         "required": ["items"],
         "additionalProperties": false
@@ -662,7 +614,13 @@
       "redaction": {
         "neverReturn": [],
         "textMaxChars": 768,
-        "textCategories": ["token", "email", "arn", "bucket", "absolute-object-key"]
+        "textCategories": [
+          "token",
+          "email",
+          "arn",
+          "bucket",
+          "absolute-object-key"
+        ]
       }
     }
   ]
