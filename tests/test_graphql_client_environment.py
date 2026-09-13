@@ -370,21 +370,17 @@ def test_submit_job_can_send_status_email_override_and_fresh_run():
         "jobFileS3Key": "project/jobs/job.json",
         "sendSimulationStatusEmail": True,
         "forceRun": True,
+        "executionSiteId": "managed-slurm",
     }
 
 
-def test_submit_job_preserves_legacy_positional_argument_order():
+def test_submit_job_rejects_removed_batch_arguments():
     client = CapturingGraphQLClient()
-
-    client.submit_job("project/jobs/job.json", 2, 4096, "run-name", True, False)
-
-    assert client.last_variables == {
-        "jobFileS3Key": "project/jobs/job.json",
-        "sendSimulationStatusEmail": True,
-        "vcpu": 2,
-        "memory": 4096,
-        "jobName": "run-name",
-    }
+    with pytest.raises(TypeError):
+        client.submit_job("project/job.json", 2, 4096)
+    with pytest.raises(TypeError):
+        client.submit_job("project/job.json", compute_mode="auto")
+    assert not client.last_query
 
 
 def test_submit_job_sends_optional_cloud_run_metadata():
@@ -404,7 +400,8 @@ def test_submit_job_sends_optional_cloud_run_metadata():
     assert "simulationJobName: $simulationJobName" in client.last_query
     assert client.last_variables == {
         "jobFileS3Key": "project/jobs/model/job/job.json",
-        "sendSimulationStatusEmail": None,
+        "forceRun": False,
+        "executionSiteId": "managed-slurm",
         "projectName": "project",
         "projectDisplayName": "Project Alpha",
         "simulationName": "model",
@@ -412,116 +409,44 @@ def test_submit_job_sends_optional_cloud_run_metadata():
     }
 
 
-def test_submit_job_sends_managed_slurm_contract_and_reads_target_details():
-    client = CapturingGraphQLClient()
+def test_submit_job_sends_managed_site_contract():
+    import json
 
+    client = CapturingGraphQLClient()
+    resources = {"nodes": 2, "mpiRanks": 8, "wallTimeSeconds": 1800}
     result = client.submit_job(
         "project/jobs/model/job/job.json",
-        execution_backend="slurm",
-        slurm_partition="cpu-efa",
-        slurm_nodes=2,
-        slurm_ranks_per_node=4,
-        slurm_wall_time_seconds=1800,
+        execution_site_id="managed-slurm",
+        execution_resources=resources,
     )
-
-    assert "executionBackend: $executionBackend" in client.last_query
-    assert "providerAttemptId" in client.last_query
+    assert "executionSiteId: $executionSiteId" in client.last_query
+    assert "providerJobId" in client.last_query
     assert client.last_variables == {
         "jobFileS3Key": "project/jobs/model/job/job.json",
-        "sendSimulationStatusEmail": None,
-        "executionBackend": "slurm",
-        "computeMode": None,
-        "slurmPartition": "cpu-efa",
-        "slurmNodes": 2,
-        "slurmRanksPerNode": 4,
-        "slurmWallTimeSeconds": 1800,
+        "executionSiteId": "managed-slurm",
+        "executionResources": json.dumps(resources),
+        "forceRun": False,
     }
     assert result["simulationId"] == "simulation-1"
 
 
-def test_submit_job_retries_legacy_cloud_without_optional_metadata(monkeypatch):
+@pytest.mark.parametrize(
+    "field", ["projectName", "simulationJobName", "forceRun", "executionSiteId"]
+)
+def test_submit_job_never_retries_a_different_contract(monkeypatch, field):
+    from unittest.mock import Mock
+
     client = CapturingGraphQLClient()
-    calls = []
-
-    def execute(query, variables=None):
-        calls.append((query, variables))
-        if len(calls) == 1:
-            raise RuntimeError(
-                "GraphQL errors: Unknown argument 'projectName' on field "
-                "'Mutation.submitJob'."
-            )
-        return {
-            "submitJob": {
-                "simulationId": "simulation-legacy",
-                "batchJobId": "",
-                "status": "PENDING",
-            }
-        }
-
+    execute = Mock(side_effect=RuntimeError(f"Unknown argument {field}"))
     monkeypatch.setattr(client, "execute", execute)
-
-    result = client.submit_job(
-        "project/jobs/model/job/job.json",
-        project_name="project",
-        simulation_name="model",
-        simulation_job_name="job",
-    )
-
-    assert result["simulationId"] == "simulation-legacy"
-    assert len(calls) == 2
-    assert "projectName" in calls[0][0]
-    assert "projectName" not in calls[1][0]
-    assert "projectName" in calls[0][1]
-    assert "projectName" not in calls[1][1]
-
-
-def test_submit_job_retries_legacy_cloud_when_only_later_metadata_is_set(
-    monkeypatch,
-):
-    client = CapturingGraphQLClient()
-    calls = []
-
-    def execute(query, variables=None):
-        calls.append((query, variables))
-        if len(calls) == 1:
-            raise RuntimeError(
-                "GraphQL errors: Unknown argument 'projectName' on field "
-                "'Mutation.submitJob'."
-            )
-        return {
-            "submitJob": {
-                "simulationId": "simulation-legacy",
-                "batchJobId": "",
-                "status": "PENDING",
-            }
-        }
-
-    monkeypatch.setattr(client, "execute", execute)
-
-    result = client.submit_job(
-        "project/jobs/model/job/job.json",
-        simulation_name="model",
-    )
-
-    assert result["simulationId"] == "simulation-legacy"
-    assert len(calls) == 2
-    assert calls[0][1]["simulationName"] == "model"
-    assert "simulationName" not in calls[1][1]
-
-
-def test_submit_job_explains_when_cloud_does_not_support_fresh_runs(monkeypatch):
-    client = CapturingGraphQLClient()
-
-    def reject_force_run(query, variables=None):
-        raise RuntimeError(
-            "GraphQL errors: Unknown argument 'forceRun' on field "
-            "'Mutation.submitJob'."
+    with pytest.raises(RuntimeError, match=field):
+        client.submit_job(
+            "project/job.json",
+            project_name="project",
+            simulation_job_name="job",
+            fresh=True,
         )
-
-    monkeypatch.setattr(client, "execute", reject_force_run)
-
-    with pytest.raises(RuntimeError, match="Submit without force=True"):
-        client.submit_job("project/jobs/job.json", fresh=True)
+    execute.assert_called_once()
 
 
 def test_cancel_simulation_passes_id_and_requires_api_acceptance(monkeypatch):

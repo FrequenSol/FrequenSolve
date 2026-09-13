@@ -112,75 +112,68 @@ def test_aws_cli_environment_replaces_credentials_and_removes_profiles(
     assert "HPC_PASSWORD" not in environment
 
 
-def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
+def test_graphql_submit_defaults_to_the_managed_site():
     site = make_graphql_site()
-    job = FakeJob()
-
-    site.submit(job)
-
-    assert site.graphql_client.submit_calls[0]["vcpu"] is None
-    assert site.graphql_client.submit_calls[0]["memory"] is None
-    assert site.graphql_client.submit_calls[0]["project_name"] == "project-a"
-    assert site.graphql_client.submit_calls[0]["project_display_name"] == "Project A"
-    assert site.graphql_client.submit_calls[0]["simulation_name"] == "model"
-    assert site.graphql_client.submit_calls[0]["simulation_job_name"] == "demo-job"
-    assert site.graphql_client.compute_stack_checks == 0
-    assert "execution_backend" not in site.graphql_client.submit_calls[0]
+    site.submit(FakeJob())
+    submitted = site.graphql_client.submit_calls[0]
+    assert submitted["execution_site_id"] == "managed-slurm"
+    assert submitted["execution_resources"] == {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 3600,
+    }
+    assert "vcpu" not in submitted and "memory" not in submitted
+    assert submitted["project_name"] == "project-a"
+    assert submitted["project_display_name"] == "Project A"
+    assert submitted["simulation_name"] == "model"
+    assert submitted["simulation_job_name"] == "demo-job"
 
 
 def test_graphql_submit_uses_only_the_named_managed_slurm_shape():
     site = make_graphql_site()
     site.execution_profile = ManagedExecutionProfile.from_mapping(
         {
-            "execution_backend": "slurm",
-            "slurm_partition": "cpu-efa",
-            "slurm_nodes": 2,
-            "slurm_ranks_per_node": 4,
-            "slurm_wall_time": "00-00:30:00",
+            "execution_site_id": "managed-slurm",
+            "execution_resources": {
+                "nodes": 2,
+                "mpi_ranks": 8,
+                "wall_time_seconds": 1800,
+            },
         }
     )
-    job = FakeJob()
-
-    run = site.submit(job)
-
-    assert site.graphql_client.submit_calls[0] == {
-        "job_file_s3_key": "project-a/jobs/job.json",
-        "vcpu": None,
-        "memory": None,
-        "job_name": site.graphql_client.submit_calls[0]["job_name"],
-        "project_name": "project-a",
-        "project_display_name": "Project A",
-        "simulation_name": "model",
-        "simulation_job_name": "demo-job",
-        "send_simulation_status_email": None,
-        "fresh": False,
-        "execution_backend": "slurm",
-        "slurm_partition": "cpu-efa",
-        "slurm_nodes": 2,
-        "slurm_ranks_per_node": 4,
-        "slurm_wall_time_seconds": 1800,
+    run = site.submit(FakeJob())
+    submitted = site.graphql_client.submit_calls[0]
+    assert submitted["execution_resources"] == {
+        "nodes": 2,
+        "mpiRanks": 8,
+        "wallTimeSeconds": 1800,
     }
-    assert run.backend["executionBackend"] == "slurm"
+    assert submitted["execution_site_id"] == "managed-slurm"
+    assert run.backend["executionSiteId"] == "managed-slurm"
+    assert run.backend["requestedResources"] == submitted["execution_resources"]
 
 
 def test_graphql_submit_supports_right_sized_single_node_profile():
     site = make_graphql_site()
     site.execution_profile = ManagedExecutionProfile.from_mapping(
         {
-            "execution_backend": "slurm",
-            "slurm_partition": "cpu-single",
-            "slurm_nodes": 1,
-            "slurm_ranks_per_node": 1,
-            "slurm_wall_time": "00-00:30:00",
+            "execution_resources": {
+                "nodes": 1,
+                "mpi_ranks": 1,
+                "wall_time_seconds": 1800,
+                "cpu": 8,
+                "memory_mib": 16384,
+            }
         }
     )
-
     site.submit(FakeJob())
-
-    submitted = site.graphql_client.submit_calls[0]
-    assert submitted["slurm_partition"] == "cpu-single"
-    assert submitted["slurm_nodes"] == 1
-    assert submitted["slurm_ranks_per_node"] == 1
+    assert site.graphql_client.submit_calls[0]["execution_resources"] == {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 1800,
+        "cpu": 8,
+        "memoryMiB": 16384,
+    }
 
 
 def test_submit_rejects_managed_execution_overrides():
@@ -367,50 +360,33 @@ def test_cancel_job_sanitizes_status_lookup_failure():
         assert secret not in diagnostic
 
 
-def test_graphql_submit_checks_legacy_per_user_compute_stack():
+def test_graphql_submit_never_checks_or_provisions_compute():
     site = make_graphql_site()
-    site.graphql_client.compute_mode = "per-user"
 
+    def unexpected(*args, **kwargs):
+        pytest.fail("Submission must not inspect or provision compute")
+
+    site.graphql_client.get_compute_provisioning_mode = unexpected
+    site.graphql_client._check_compute_stack_exists = unexpected
+    site.graphql_client.deploy_compute_stack = unexpected
     site.submit(FakeJob())
-
-    assert site.graphql_client.compute_stack_checks == 1
-
-
-def test_graphql_submit_provisions_missing_legacy_per_user_compute_stack():
-    site = make_graphql_site()
-    site.graphql_client.compute_mode = "per-user"
-    site.graphql_client.compute_stack_exists = False
-
-    site.submit(FakeJob())
-
-    assert site.graphql_client.compute_deployments == 1
-    assert site.graphql_client.compute_waits == [("compute", "legacy-compute-stack")]
     assert len(site.graphql_client.submit_calls) == 1
 
 
-def test_graphql_submit_fails_closed_when_compute_capability_is_unknown():
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"vcpu": 8},
+        {"memory": 16384},
+        {"execution_site_id": "managed-batch"},
+        {"execution_backend": "batch"},
+    ],
+)
+def test_graphql_submit_rejects_resource_overrides(options):
     site = make_graphql_site()
-
-    def fail_capability_probe():
-        raise RuntimeError("introspection unavailable")
-
-    site.graphql_client.get_compute_provisioning_mode = fail_capability_probe
-
-    with pytest.raises(RuntimeError, match="Failed to determine whether"):
-        site.submit(FakeJob())
-
+    with pytest.raises(ValueError, match="named site.toml profile"):
+        site.submit(FakeJob(), **options)
     assert site.graphql_client.submit_calls == []
-    assert site.graphql_client.compute_stack_checks == 0
-
-
-def test_graphql_submit_sends_explicit_resource_overrides():
-    site = make_graphql_site()
-    job = FakeJob()
-
-    site.submit(job, vcpu=8, memory=16384)
-
-    assert site.graphql_client.submit_calls[0]["vcpu"] == 8
-    assert site.graphql_client.submit_calls[0]["memory"] == 16384
 
 
 @pytest.mark.parametrize("skip", [False, "false"])

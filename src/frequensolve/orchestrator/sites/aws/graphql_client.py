@@ -569,239 +569,59 @@ class GraphQLClient:
     def submit_job(
         self,
         job_file_s3_key: str,
-        vcpu: Optional[int] = None,
-        memory: Optional[int] = None,
+        *,
         job_name: Optional[str] = None,
         send_simulation_status_email: Optional[bool] = None,
         fresh: bool = False,
-        *,
         project_name: Optional[str] = None,
         project_display_name: Optional[str] = None,
         simulation_name: Optional[str] = None,
         simulation_job_name: Optional[str] = None,
-        execution_site_id: Optional[str] = None,
+        execution_site_id: str = "managed-slurm",
         execution_resources: Optional[Dict[str, int]] = None,
-        execution_backend: Optional[str] = None,
-        compute_mode: Optional[str] = None,
-        slurm_partition: Optional[str] = None,
-        slurm_nodes: Optional[int] = None,
-        slurm_ranks_per_node: Optional[int] = None,
-        slurm_wall_time_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Submit a simulation job.
-
-        Args:
-            job_file_s3_key: S3 key of the job configuration file
-            vcpu: Number of vCPUs for the job (optional)
-            memory: Memory in MB for the job (optional)
-            job_name: Custom name for the job (optional)
-            send_simulation_status_email: If True/False, overrides cloud communication preferences for this run only
-            fresh: Force a fresh solver run when the backend supports it
-            project_name: Authored project name for Cloud display metadata
-            project_display_name: Optional authored project display name
-            simulation_name: Authored simulation name for Cloud display metadata
-            simulation_job_name: Authored FrequenSolve job name for Cloud display metadata
-
-        Returns:
-            Dict containing:
-                - simulationId: Database simulation record ID
-                - batchJobId: Internal job ID (for backwards compatibility)
-                - status: Initial job status (typically 'PENDING')
-
-        Raises:
-            RuntimeError: If job submission fails
+        """Submit through the current managed execution-site contract."""
+        if execution_site_id != "managed-slurm":
+            raise ValueError("execution_site_id must be managed-slurm")
+        mutation = """
+            mutation SubmitJob(
+                $jobFileS3Key: String!, $jobName: String, $sendSimulationStatusEmail: Boolean,
+                $projectName: String, $projectDisplayName: String, $simulationName: String,
+                $simulationJobName: String, $executionSiteId: String, $executionResources: AWSJSON,
+                $forceRun: Boolean
+            ) {
+                submitJob(jobFileS3Key: $jobFileS3Key, jobName: $jobName,
+                    sendSimulationStatusEmail: $sendSimulationStatusEmail,
+                    projectName: $projectName, projectDisplayName: $projectDisplayName,
+                    simulationName: $simulationName, simulationJobName: $simulationJobName,
+                    executionSiteId: $executionSiteId, executionResources: $executionResources,
+                    forceRun: $forceRun) {
+                    simulationId status executionSiteId logicalAttemptId providerJobId executionState
+                }
+            }
         """
-        metadata_fields = (
-            "projectName",
-            "projectDisplayName",
-            "simulationName",
-            "simulationJobName",
-        )
-        metadata = {
+        variables = {
+            "jobFileS3Key": job_file_s3_key,
+            "jobName": job_name,
+            "sendSimulationStatusEmail": send_simulation_status_email,
             "projectName": project_name,
             "projectDisplayName": project_display_name,
             "simulationName": simulation_name,
             "simulationJobName": simulation_job_name,
+            "executionSiteId": execution_site_id,
+            "executionResources": (
+                json.dumps(execution_resources)
+                if execution_resources is not None
+                else None
+            ),
+            "forceRun": fresh,
         }
-        metadata = {key: value for key, value in metadata.items() if value is not None}
-        execution_fields = execution_backend is not None
-
-        def build_mutation(include_metadata: bool) -> str:
-            force_var = "$forceRun: Boolean" if fresh else ""
-            force_arg = "forceRun: $forceRun" if fresh else ""
-            metadata_variables = ""
-            metadata_arguments = ""
-            if include_metadata:
-                metadata_variables = """
-                $projectName: String
-                $projectDisplayName: String
-                $simulationName: String
-                $simulationJobName: String
-                """
-                metadata_arguments = """
-                    projectName: $projectName
-                    projectDisplayName: $projectDisplayName
-                    simulationName: $simulationName
-                    simulationJobName: $simulationJobName
-                """
-            execution_variables = ""
-            execution_arguments = ""
-            execution_response = ""
-            if execution_fields:
-                execution_variables = """
-                $executionBackend: String
-                $computeMode: String
-                $slurmPartition: String
-                $slurmNodes: Int
-                $slurmRanksPerNode: Int
-                $slurmWallTimeSeconds: Int
-                """
-                execution_arguments = """
-                    executionBackend: $executionBackend
-                    computeMode: $computeMode
-                    slurmPartition: $slurmPartition
-                    slurmNodes: $slurmNodes
-                    slurmRanksPerNode: $slurmRanksPerNode
-                    slurmWallTimeSeconds: $slurmWallTimeSeconds
-                """
-                execution_response = """
-                    executionBackend
-                    executionTarget
-                    slurmPartition
-                    slurmNodes
-                    slurmRanksPerNode
-                    slurmWallTimeSeconds
-                    providerAttemptId
-                """
-            if execution_site_id is not None:
-                execution_variables = (
-                    "$executionSiteId: String $executionResources: AWSJSON"
-                )
-                execution_arguments = "executionSiteId: $executionSiteId executionResources: $executionResources"
-                execution_response = (
-                    "executionSiteId logicalAttemptId providerJobId executionState"
-                )
-            return f"""
-            mutation SubmitJob(
-                $jobFileS3Key: String!
-                $vcpu: Int
-                $memory: Int
-                $jobName: String
-                $sendSimulationStatusEmail: Boolean
-                {metadata_variables}
-                {execution_variables}
-                {force_var}
-            ) {{
-                submitJob(
-                    jobFileS3Key: $jobFileS3Key
-                    vcpu: $vcpu
-                    memory: $memory
-                    jobName: $jobName
-                    sendSimulationStatusEmail: $sendSimulationStatusEmail
-                    {metadata_arguments}
-                    {execution_arguments}
-                    {force_arg}
-                ) {{
-                    simulationId
-                    batchJobId
-                    status
-                    {execution_response}
-                }}
-            }}
-        """
-
-        variables: Dict[str, Any] = {
-            "jobFileS3Key": job_file_s3_key,
-            "sendSimulationStatusEmail": send_simulation_status_email,
-        }
-
-        if vcpu is not None:
-            variables["vcpu"] = vcpu
-        if memory is not None:
-            variables["memory"] = memory
-        if job_name is not None:
-            variables["jobName"] = job_name
-        variables.update(metadata)
-        if fresh:
-            variables["forceRun"] = True
-        if execution_fields:
-            variables.update(
-                {
-                    "executionBackend": execution_backend,
-                    "computeMode": compute_mode,
-                    "slurmPartition": slurm_partition,
-                    "slurmNodes": slurm_nodes,
-                    "slurmRanksPerNode": slurm_ranks_per_node,
-                    "slurmWallTimeSeconds": slurm_wall_time_seconds,
-                }
-            )
-
-        if execution_site_id is not None:
-            variables["executionSiteId"] = execution_site_id
-            if execution_resources is not None:
-                variables["executionResources"] = json.dumps(execution_resources)
-
-        def execute_submission(include_metadata: bool) -> Dict[str, Any]:
-            request_variables = dict(variables)
-            if not include_metadata:
-                for key in metadata:
-                    request_variables.pop(key, None)
-            try:
-                return self.execute(
-                    build_mutation(include_metadata),
-                    request_variables,
-                )
-            except RuntimeError as exc:
-                error_message = str(exc)
-                if (
-                    execution_site_id is not None
-                    and any(
-                        field in error_message
-                        for field in (
-                            "executionSiteId",
-                            "executionResources",
-                            "logicalAttemptId",
-                        )
-                    )
-                    and any(
-                        marker in error_message
-                        for marker in ("Unknown", "Cannot query", "undefined")
-                    )
-                ):
-                    raise RuntimeError(
-                        "This Cloud deployment does not support named execution sites; upgrade it or explicitly select a legacy profile"
-                    ) from exc
-                unsupported_argument = (
-                    "Unknown argument" in error_message
-                    or "UnknownArgument" in error_message
-                )
-                unsupported_metadata = (
-                    include_metadata
-                    and unsupported_argument
-                    and any(key in error_message for key in metadata_fields)
-                )
-                if unsupported_metadata:
-                    logger.info(
-                        "Cloud run metadata is not supported by this environment; "
-                        "retrying the submission with the legacy mutation contract."
-                    )
-                    return execute_submission(False)
-                unsupported_force_run = (
-                    fresh and "forceRun" in error_message and unsupported_argument
-                )
-                if unsupported_force_run:
-                    raise RuntimeError(
-                        "Fresh Cloud reruns are not supported by this environment. "
-                        "Submit without force=True, rerun=True, or skip=False, or "
-                        "update the Cloud backend before retrying."
-                    ) from exc
-                raise
-
-        result = execute_submission(bool(metadata))
-
-        if "submitJob" not in result or not result["submitJob"]:
+        result = self.execute(
+            mutation,
+            {key: value for key, value in variables.items() if value is not None},
+        )
+        if not result.get("submitJob"):
             raise RuntimeError("Job submission failed: No response from API")
-
         return result["submitJob"]
 
     def cancel_simulation(self, simulation_id: str) -> None:

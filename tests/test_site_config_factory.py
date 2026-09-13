@@ -179,7 +179,6 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
     starter_config = sites.load_site_config(config_path)
     assert set(starter_config["sites"]) == {
         "cloud",
-        "cloud-batch",
         "cloud-slurm",
         "local",
         "hpc",
@@ -263,11 +262,11 @@ domain = "app.frequensol.com"
 [sites.cloud-slurm]
 type = "aws"
 domain = "app.frequensol.com"
-execution_backend = "slurm"
-slurm_partition = "cpu-efa"
-slurm_nodes = 2
-slurm_ranks_per_node = 4
-slurm_wall_time = "00-00:30:00"
+execution_site_id = "managed-slurm"
+[sites.cloud-slurm.execution_resources]
+nodes = 2
+mpi_ranks = 8
+wall_time_seconds = 1800
 """.strip()
     )
     monkeypatch.setattr(sites, "AWSSite", FakeSite)
@@ -276,11 +275,8 @@ slurm_wall_time = "00-00:30:00"
 
     assert site.kwargs == {
         "domain": "app.frequensol.com",
-        "execution_backend": "slurm",
-        "slurm_partition": "cpu-efa",
-        "slurm_nodes": 2,
-        "slurm_ranks_per_node": 4,
-        "slurm_wall_time": "00-00:30:00",
+        "execution_site_id": "managed-slurm",
+        "execution_resources": {"nodes": 2, "mpi_ranks": 8, "wall_time_seconds": 1800},
         "_credential_profile": "cloud-slurm",
     }
 
@@ -294,56 +290,42 @@ default = "cloud-single"
 [sites.cloud-single]
 type = "aws"
 domain = "app.frequensol.com"
-execution_backend = "slurm"
-slurm_partition = "cpu-single"
-slurm_nodes = 1
-slurm_ranks_per_node = 1
-slurm_wall_time = "00-00:30:00"
+execution_site_id = "managed-slurm"
+[sites.cloud-single.execution_resources]
+nodes = 1
+mpi_ranks = 1
+wall_time_seconds = 1800
 """.strip()
     )
     monkeypatch.setattr(sites, "AWSSite", FakeSite)
 
     site = sites.Site(config_path=config_path)
 
-    assert site.kwargs["slurm_partition"] == "cpu-single"
-    assert site.kwargs["slurm_nodes"] == 1
-    assert site.kwargs["slurm_ranks_per_node"] == 1
+    assert site.kwargs["execution_site_id"] == "managed-slurm"
+    assert site.kwargs["execution_resources"] == {
+        "nodes": 1,
+        "mpi_ranks": 1,
+        "wall_time_seconds": 1800,
+    }
 
 
 @pytest.mark.parametrize(
-    ("profile_body", "message"),
+    "profile_body,message",
     [
+        ('execution_site_id = "managed-batch"', "must be managed-slurm"),
+        ('execution_backend = "batch"', "Unsupported managed Cloud profile settings"),
+        ('compute_mode = "auto"', "Unsupported managed Cloud profile settings"),
         (
-            'execution_backend = "batch"\nslurm_nodes = 2',
-            "Batch profiles cannot set Slurm fields",
+            "[sites.cloud.execution_resources]\nnodes = 3\nmpi_ranks = 3\nwall_time_seconds = 1800",
+            "nodes must be from 1 through 2",
         ),
         (
-            'execution_backend = "slurm"\ncompute_mode = "auto"',
-            "Slurm profiles cannot set compute_mode",
+            "[sites.cloud.execution_resources]\nnodes = 1\nmpi_ranks = 2\nwall_time_seconds = 1800",
+            "Unsupported node/MPI-rank combination",
         ),
         (
-            'execution_backend = "slurm"\nslurm_partition = "cpu-efa"\n'
-            "slurm_nodes = 3\nslurm_ranks_per_node = 4\n"
-            'slurm_wall_time = "00-00:30:00"',
-            "slurm_nodes must be from 1 through 2",
-        ),
-        (
-            'execution_backend = "slurm"\nslurm_partition = "cpu-single"\n'
-            "slurm_nodes = 1\nslurm_ranks_per_node = 2\n"
-            'slurm_wall_time = "00-00:30:00"',
-            "cpu-single requires exactly one node and one rank",
-        ),
-        (
-            'execution_backend = "slurm"\nslurm_partition = "cpu-efa"\n'
-            "slurm_nodes = 1\nslurm_ranks_per_node = 4\n"
-            'slurm_wall_time = "00-00:30:00"',
-            "cpu-efa requires an explicitly distributed plan",
-        ),
-        (
-            'execution_backend = "slurm"\nslurm_partition = ["cpu-efa"]\n'
-            "slurm_nodes = 2\nslurm_ranks_per_node = 4\n"
-            'slurm_wall_time = "00-00:30:00"',
-            "slurm_partition must be 'cpu-single' or 'cpu-efa'",
+            "[sites.cloud.execution_resources]\nnodes = 2\nmpi_ranks = 3\nwall_time_seconds = 1800",
+            "Unsupported node/MPI-rank combination",
         ),
     ],
 )
@@ -372,7 +354,7 @@ def test_managed_cloud_resources_cannot_be_overridden_at_factory_call(
     monkeypatch.setattr(sites, "AWSSite", FakeSite)
 
     with pytest.raises(ValueError, match="only be selected through a named"):
-        sites.Site(config_path=config_path, execution_backend="slurm")
+        sites.Site(config_path=config_path, execution_site_id="managed-slurm")
     with pytest.raises(ValueError, match="direct Slurm-site overrides"):
         sites.Site(config_path=config_path, nodes=2)
 

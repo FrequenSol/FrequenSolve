@@ -87,12 +87,8 @@ class AWSSiteConfig(BaseSiteConfig):
     region: str = "us-east-1"
     s3_prefix: str = ""
     max_duration: Optional[str] = None
-    execution_backend: str = "batch"
-    compute_mode: Optional[str] = "auto"
-    slurm_partition: Optional[str] = None
-    slurm_nodes: Optional[int] = None
-    slurm_ranks_per_node: Optional[int] = None
-    slurm_wall_time: Optional[str] = None
+    execution_site_id: str = "managed-slurm"
+    execution_resources: Optional[dict[str, int]] = None
 
     @classmethod
     def from_domain(cls, domain: Optional[str] = None) -> "AWSSiteConfig":
@@ -258,12 +254,6 @@ class AWSSite(BaseSite):
         _credential_profile: Optional[str] = None,
         execution_site_id: Optional[str] = None,
         execution_resources: Optional[dict[str, int]] = None,
-        execution_backend: Optional[str] = None,
-        compute_mode: Optional[str] = None,
-        slurm_partition: Optional[str] = None,
-        slurm_nodes: Optional[int] = None,
-        slurm_ranks_per_node: Optional[int] = None,
-        slurm_wall_time: Optional[str] = None,
     ):
         """Initialize AWS site with domain-based authentication.
 
@@ -296,12 +286,6 @@ class AWSSite(BaseSite):
             for name, value in {
                 "execution_site_id": execution_site_id,
                 "execution_resources": execution_resources,
-                "execution_backend": execution_backend,
-                "compute_mode": compute_mode,
-                "slurm_partition": slurm_partition,
-                "slurm_nodes": slurm_nodes,
-                "slurm_ranks_per_node": slurm_ranks_per_node,
-                "slurm_wall_time": slurm_wall_time,
             }.items()
             if value is not None
         }
@@ -317,12 +301,8 @@ class AWSSite(BaseSite):
             f"Loading AWS configuration for {domain or os.getenv('FREQUENSOL_DOMAIN')}"
         )
         config = AWSSiteConfig.from_domain(domain)
-        config.execution_backend = self.execution_profile.backend
-        config.compute_mode = self.execution_profile.compute_mode
-        config.slurm_partition = self.execution_profile.slurm_partition
-        config.slurm_nodes = self.execution_profile.slurm_nodes
-        config.slurm_ranks_per_node = self.execution_profile.slurm_ranks_per_node
-        config.slurm_wall_time = self.execution_profile.slurm_wall_time
+        config.execution_site_id = self.execution_profile.execution_site_id
+        config.execution_resources = dict(self.execution_profile.execution_resources)
 
         # Store domain for potential config refresh
         if domain is None:
@@ -494,12 +474,8 @@ class AWSSite(BaseSite):
 
         # A domain-config refresh replaces the dataclass instance, so reapply
         # the immutable named-profile selection before exposing it.
-        config.execution_backend = self.execution_profile.backend
-        config.compute_mode = self.execution_profile.compute_mode
-        config.slurm_partition = self.execution_profile.slurm_partition
-        config.slurm_nodes = self.execution_profile.slurm_nodes
-        config.slurm_ranks_per_node = self.execution_profile.slurm_ranks_per_node
-        config.slurm_wall_time = self.execution_profile.slurm_wall_time
+        config.execution_site_id = self.execution_profile.execution_site_id
+        config.execution_resources = dict(self.execution_profile.execution_resources)
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
 
@@ -1015,15 +991,14 @@ class AWSSite(BaseSite):
     def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit a simulation job.
 
-        Uses platform-managed shared compute when advertised by the Cloud API,
-        while retaining legacy per-user compute-stack provisioning.
+        Uses the registered managed Slurm execution site.
 
         Submits through the authenticated GraphQL API.
 
         Args:
             job: The task to submit.
-            **kwargs: Additional job parameters (vcpu, memory, name,
-                description). Pass ``check=True`` to make ``wait()`` raise by
+            **kwargs: Run options, including name and status email preferences.
+                Pass ``check=True`` to make ``wait()`` raise by
                 default for failed runs, or ``validate=False`` to skip SDK
                 pre-run validation.
 
@@ -1031,29 +1006,25 @@ class AWSSite(BaseSite):
             Awaitable run handle.
 
         Raises:
-            RuntimeError: If job submission fails or stack creation fails.
+            RuntimeError: If job submission fails.
         """
-        forbidden_execution_overrides = sorted(
-            {
-                "execution",
-                "execution_backend",
-                "compute_mode",
-                "nodes",
-                "ranks_per_node",
-                "partition",
-                "wall_time",
-                "slurm_partition",
-                "slurm_nodes",
-                "slurm_ranks_per_node",
-                "slurm_wall_time",
-            }
-            & kwargs.keys()
-        )
-        if forbidden_execution_overrides:
+        unsupported = kwargs.keys() - {
+            "name",
+            "send_simulation_status_email",
+            "force",
+            "rerun",
+            "skip",
+            "skip_policy",
+            "check",
+            "validate",
+            "fetch",
+            "poll_interval",
+        }
+        if unsupported:
             raise ValueError(
-                "Managed Cloud execution and resources may only be selected "
-                "through a named site.toml profile: "
-                + ", ".join(forbidden_execution_overrides)
+                "Unsupported managed submission options: "
+                + ", ".join(sorted(unsupported))
+                + ". Select execution resources through a named site.toml profile."
             )
         fresh_run = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
         skip_policy = SkipPolicy.from_value(
@@ -1064,14 +1035,6 @@ class AWSSite(BaseSite):
         validate = kwargs.pop("validate", True)
         fetch = kwargs.pop("fetch", False)
         poll_interval = kwargs.pop("poll_interval", 10)
-        vcpu = kwargs.pop("vcpu", None)
-        memory = kwargs.pop("memory", None)
-        if self.execution_profile.backend == "slurm" and (
-            vcpu is not None or memory is not None
-        ):
-            raise ValueError(
-                "Managed Slurm profiles cannot use Batch vcpu or memory overrides"
-            )
         if self.graphql_client is None:
             raise RuntimeError(
                 "FrequenSolve Cloud requires Cognito authentication and the "
@@ -1092,49 +1055,6 @@ class AWSSite(BaseSite):
         if getattr(job.simulation, "_project", None) is None:
             self._sync_loaded_job_inputs(job, project)
 
-        # Current Cloud deployments use platform-managed shared compute. Older
-        # deployments require a per-user compute stack. Discover the contract
-        # before invoking any deployment mutation so a removed legacy field is
-        # never called speculatively.
-        if self.graphql_client is not None:
-            try:
-                compute_mode = self.graphql_client.get_compute_provisioning_mode()
-            except Exception as capability_error:
-                raise RuntimeError(
-                    "Failed to determine whether this FrequenSolve Cloud "
-                    "environment uses shared or per-user compute. No compute "
-                    "infrastructure was changed. Update FrequenSolve or contact "
-                    f"the Cloud environment owner. Details: {capability_error}"
-                ) from capability_error
-
-            if (
-                compute_mode == "per-user"
-                and not self.graphql_client._check_compute_stack_exists()
-            ):
-                # Compute stack doesn't exist, create it
-                self._emit(
-                    "AWS compute stack not found; creating compute infrastructure."
-                )
-                try:
-                    # Deploy compute stack - backend will automatically fetch and use user's compute settings
-                    # (userId extracted automatically from auth context)
-                    deploy_result = self.graphql_client.deploy_compute_stack()
-
-                    # Wait for stack to be ready, passing the stackId from deployment for accurate matching
-                    self._emit("Waiting for AWS compute stack to be ready")
-                    expected_stack_id = deploy_result.get("stackId")
-                    stack_info = self.graphql_client.wait_for_stack_ready(
-                        "compute", expected_stack_id=expected_stack_id
-                    )
-
-                    self._emit(
-                        f"AWS compute stack ready: {stack_info.get('stackId', 'unknown')}"
-                    )
-                except Exception as create_error:
-                    raise RuntimeError(
-                        f"Failed to create compute stack: {create_error}"
-                    ) from create_error
-
         try:
             # Sync job file to S3
             local_job, remote_job = job.save_for_remote(
@@ -1152,8 +1072,6 @@ class AWSSite(BaseSite):
 
             result = self.graphql_client.submit_job(
                 job_file_s3_key=str(s3_job_key),
-                vcpu=vcpu,
-                memory=memory,
                 job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
                 project_name=authored_project_name,
                 project_display_name=authored_project_display_name,
@@ -1179,33 +1097,16 @@ class AWSSite(BaseSite):
                 backend={
                     key: value
                     for key, value in {
-                        "executionBackend": result.get(
-                            "executionBackend", self.execution_profile.backend
-                        ),
-                        "executionSiteId": result.get("executionSiteId")
-                        or self.execution_profile.execution_site_id
-                        or (
-                            "managed-slurm"
-                            if self.execution_profile.backend == "slurm"
-                            else "managed-batch"
-                        ),
+                        "executionSiteId": self.execution_profile.execution_site_id,
                         "logicalAttemptId": result.get("logicalAttemptId")
                         or f"{simulation_id}:1",
-                        "providerJobId": result.get("providerJobId")
-                        or result.get("providerAttemptId")
-                        or result.get("batchJobId"),
+                        "providerJobId": result.get("providerJobId"),
                         "executionState": normalize_execution_state(
                             result.get("executionState") or result.get("status")
                         ),
                         "requestedResources": self.execution_profile.graphql_arguments().get(
                             "execution_resources"
                         ),
-                        "executionTarget": result.get("executionTarget"),
-                        "slurmPartition": result.get("slurmPartition"),
-                        "slurmNodes": result.get("slurmNodes"),
-                        "slurmRanksPerNode": result.get("slurmRanksPerNode"),
-                        "slurmWallTimeSeconds": result.get("slurmWallTimeSeconds"),
-                        "providerAttemptId": result.get("providerAttemptId"),
                     }.items()
                     if value is not None
                 },

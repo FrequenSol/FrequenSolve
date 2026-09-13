@@ -34,19 +34,23 @@ def test_invalid_profiles_have_actionable_errors(value):
         ManagedExecutionProfile.from_mapping(value)
 
 
-def test_legacy_batch_profile_and_neutral_result():
-    assert ManagedExecutionProfile.from_mapping({}).graphql_arguments() == {}
-    for site in ["managed-batch", "managed-slurm"]:
-        details = ExecutionDetails.from_mapping(
-            {
-                "executionSiteId": site,
-                "providerJobId": "opaque-id",
-                "executionState": "succeeded",
-            }
-        )
-        assert details.execution_site_id == site
-        assert details.provider_job_id == "opaque-id"
-        assert details.state == "succeeded"
+def test_default_profile_is_managed_slurm():
+    assert ManagedExecutionProfile.from_mapping({}).graphql_arguments() == {
+        "execution_site_id": "managed-slurm",
+        "execution_resources": {"nodes": 1, "mpiRanks": 1, "wallTimeSeconds": 3600},
+    }
+    with pytest.raises(ManagedExecutionProfileError):
+        ManagedExecutionProfile.from_mapping({"execution_site_id": "managed-batch"})
+    details = ExecutionDetails.from_mapping(
+        {
+            "executionSiteId": "managed-slurm",
+            "providerJobId": "opaque-id",
+            "executionState": "succeeded",
+        }
+    )
+    assert details.execution_site_id == "managed-slurm"
+    assert details.provider_job_id == "opaque-id"
+    assert details.state == "succeeded"
 
 
 def test_old_graphql_deployment_retains_slurm_identity_on_site_field_fallback():
@@ -82,7 +86,7 @@ def test_named_site_does_not_fall_back_to_another_backend():
 
     client = GraphQLClient.__new__(GraphQLClient)
     client.execute = Mock(side_effect=RuntimeError("Unknown argument executionSiteId"))
-    with pytest.raises(RuntimeError, match="does not support named execution sites"):
+    with pytest.raises(RuntimeError, match="Unknown argument executionSiteId"):
         client.submit_job(
             job_file_s3_key="private/test/job.json", execution_site_id="managed-slurm"
         )
