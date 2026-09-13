@@ -410,6 +410,7 @@ class GraphQLClient:
                 getSimulation(id: $id) {
                     id
                     status
+                    outputIdentity
                     failureCode
                     failureMessage
                     creditSettlementMode
@@ -464,6 +465,7 @@ class GraphQLClient:
             **normalized,
             "id": details.get("id"),
             "status": status,
+            "outputIdentity": details.get("outputIdentity"),
             "failureCode": details.get("failureCode"),
             "failureMessage": details.get("failureMessage"),
             **{

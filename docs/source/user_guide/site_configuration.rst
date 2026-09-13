@@ -695,6 +695,23 @@ site and its resource table; remove old backend and partition settings.
 Provider identity comes from the current Cloud record. Status requests require
 the current GraphQL schema and report incompatible deployments directly.
 
+Cloud results belong to a submission. Keep the returned run handle when running
+the same job again::
+
+    first = site.submit(job)
+    first_result = first.wait()
+    second = site.submit(job, rerun=True)
+    first_result.traces()
+    files = first_result.output_files(kind="vtu", existing=True)
+
+The first result continues to fetch the first submission. Cloud downloads check
+that submission's authenticated result location and save beneath
+``jobs/<simulation>/<job>/results/runs/<simulation-id>/``. Each run handle owns a
+copy of the job's result layout; downloads do not replace the authored job's
+results. Calling a fetch method directly with the authored job selects its latest
+submission. Results require the matching Slurm Cloud and runtime deployment;
+unscoped historical result directories are not used as a fallback.
+
 Only the registered FrequenSol-managed sites are supported here. This does not
 discover, provision, or connect arbitrary external clusters. Site operations and
 advanced provider settings belong to the service deployment, outside job APIs.

@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 import uuid
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Union
@@ -677,32 +678,30 @@ class AWSSite(BaseSite):
             path: Optional local path to save results. If None, uses
                 job.project_path.
         """
+        job = self._result_job(job)
         if path is None:
             path = job.project_path
         else:
             path = Path(path)
 
-        project_name = Path(job.simulation.project_path).name
-        simulation_name = job.simulation.name
-        job_name = job.name
         vtk_paths: List[str] = []
         outputs = getattr(getattr(job, "outputs", None), "paraview", None) or []
         for output in outputs:
             output_path = getattr(output, "path", None)
             if output_path is None:
                 continue
-            normalized = PurePosixPath(str(output_path)).as_posix().strip("/")
+            normalized = self._output_relative_path(str(output_path))
             if normalized and normalized != "." and normalized not in vtk_paths:
                 vtk_paths.append(normalized)
         if not vtk_paths:
             vtk_paths.append("ParaView")
 
         for vtk_path in vtk_paths:
-            results_vtk_path = f"jobs/{simulation_name}/{job_name}/results/{vtk_path}"
-            s3_results_path = (
-                f"s3://{self.config.s3_bucket}/{project_name}/{results_vtk_path}"
+            relative = self._output_relative_path(vtk_path)
+            s3_results_path = f"{job._cloud_output_identity}{relative}"
+            local_results_path = (
+                path / job._result_path.relative_to(job.project_path) / relative
             )
-            local_results_path = path / results_vtk_path
 
             try:
                 logger.info("Fetching configured VTK outputs from AWS storage")
@@ -726,6 +725,8 @@ class AWSSite(BaseSite):
         suffix: Optional[Union[str, tuple[str, ...]]] = None,
     ) -> Path:
         """Fetch supported filesystem-backed AWS outputs used by discovery."""
+
+        job = self._result_job(job)
 
         paraview_kinds = {"vtk", "vtu", "vtr", "vtp", "vts", "xmf", "xdmf"}
         normalized_kind = str(kind).strip().lower() if kind is not None else None
@@ -1042,7 +1043,10 @@ class AWSSite(BaseSite):
         if not fresh_run and job.is_run_current():
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
-            handle = RunHandle.skipped(self, job)
+            result_job = (
+                self._snapshot_run_job(job, job._job_id) if job._job_id else job
+            )
+            handle = RunHandle.skipped(self, result_job)
             if fetch:
                 handle._pending_fetch_fn = lambda run: self.fetch_outputs(run.job)
             return handle
@@ -1122,6 +1126,7 @@ class AWSSite(BaseSite):
         check: bool = False,
         backend: Optional[Dict[str, Any]] = None,
     ) -> RunHandle:
+        job = self._snapshot_run_job(job, str(job_id))
         return RunHandle(
             site=self,
             job=job,
@@ -1140,6 +1145,71 @@ class AWSSite(BaseSite):
                 (lambda run: self.fetch_outputs(run.job)) if fetch else None
             ),
         )
+
+    @staticmethod
+    def _output_relative_path(value: Union[str, Path]) -> str:
+        text = str(value)
+        path = PurePosixPath(text)
+        if (
+            path.is_absolute()
+            or "\\" in text
+            or any(part in {"", ".", ".."} for part in text.split("/"))
+        ):
+            raise ValueError("Cloud output paths must remain inside the run results")
+        return path.as_posix()
+
+    @staticmethod
+    def _snapshot_run_job(job: BaseJob, simulation_id: str) -> BaseJob:
+        """Capture the submitted job's result layout without mutating its authoring state."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,199}", simulation_id):
+            raise ValueError(
+                "Cloud results require a valid simulation id from submission"
+            )
+        if getattr(job, "_cloud_result_run_id", None) == simulation_id:
+            return job
+        if getattr(job, "_cloud_result_run_id", None) is not None:
+            raise ValueError(
+                "Use the authored job to submit or select another Cloud run"
+            )
+        result = copy(job)
+        result.simulation = copy(job.simulation)
+        result.outputs = deepcopy(job.outputs)
+        result.f_list = list(job.f_list)
+        authored = Path(job._result_path).resolve()
+        authored.relative_to(Path(job.project_path).resolve())
+        result._result_path_override = authored / "runs" / simulation_id
+        result._job_id = simulation_id
+        result._cloud_result_run_id = simulation_id
+        if isinstance(job, ImagingJob):
+            relative = Path(job.save_path).resolve().relative_to(authored)
+            result.save_path = result._result_path / relative
+        return result
+
+    def _result_job(self, job: BaseJob) -> BaseJob:
+        """Resolve an owned run's frozen S3 location before downloading any artifacts."""
+        simulation_id = getattr(job, "_job_id", None)
+        if not isinstance(simulation_id, str):
+            raise ValueError(
+                "Cloud results require a valid simulation id from submission"
+            )
+        result = self._snapshot_run_job(job, simulation_id)
+        if getattr(result, "_cloud_output_identity", None) is not None:
+            return result
+        if self.graphql_client is None:
+            raise RuntimeError("Authenticated GraphQL client is unavailable")
+        details = self.graphql_client.get_simulation_status_details(simulation_id)
+        project = Path(result.project_path).resolve()
+        prefix = (
+            f"{project.name}/{result._result_path.relative_to(project).as_posix()}/"
+        )
+        expected = f"s3://{self.config.s3_bucket}/{prefix}"
+        if (
+            details.get("id") != simulation_id
+            or details.get("outputIdentity") != expected
+        ):
+            raise RuntimeError("Cloud result location does not match the requested run")
+        result._cloud_output_identity = expected
+        return result
 
     def _poll_run(self, run: RunHandle) -> JobStatus:
         if self.graphql_client is None:
@@ -1192,17 +1262,16 @@ class AWSSite(BaseSite):
         path: Optional[Union[str, Path]] = None,
         upscale: int = 1,
     ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
-        """Get results from Stampede3.
+        """Download the selected Cloud run's receiver traces.
 
         Args:
             job: A BaseJob object.
             path: The path to save the results to.
         """
 
-        if isinstance(job, BaseJob):
-            jobs = [job]
-        else:
-            jobs = job
+        jobs = [
+            self._result_job(item) for item in (job if isinstance(job, list) else [job])
+        ]
 
         if path is None:
             path = jobs[0].project_path
@@ -1213,21 +1282,13 @@ class AWSSite(BaseSite):
 
         for job in jobs:
             try:
-                # Build the path for the s3 results directory and the local results directory.
-                # The job results are stored in the job's result_path, not the simulation path
-                # Format: ex_01/jobs/simulation_name/job_name/results/traces/
-                project_name = job.project_path.name  # e.g., "ex_01"
-                simulation_name = job.simulation.name  # e.g., "simple_acoustic"
-                job_name = job.name  # e.g., "time"
-                trace_dir_name = Path(job.trace_outputs.path).name
-
-                results_traces_path = (
-                    f"jobs/{simulation_name}/{job_name}/results/{trace_dir_name}"
+                relative = self._output_relative_path(
+                    Path(job.trace_outputs.path).relative_to(job._result_path)
                 )
-                s3_results_path = (
-                    f"s3://{self.config.s3_bucket}/{project_name}/{results_traces_path}"
+                s3_results_path = f"{job._cloud_output_identity}{relative}"
+                local_results_path = (
+                    path / job._result_path.relative_to(job.project_path) / relative
                 )
-                local_results_path = path / results_traces_path
                 self.get(s3_results_path, local_results_path)
                 self._emit(f"Fetched AWS traces from {s3_results_path}")
 
@@ -1262,10 +1323,9 @@ class AWSSite(BaseSite):
             Wavefield dataset for one job, or a mapping keyed by job name.
         """
 
-        if isinstance(job, BaseJob):
-            jobs = [job]
-        else:
-            jobs = job
+        jobs = [
+            self._result_job(item) for item in (job if isinstance(job, list) else [job])
+        ]
 
         if path is None:
             path = jobs[0].project_path
@@ -1280,19 +1340,13 @@ class AWSSite(BaseSite):
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")
 
-                project_name = item.project_path.name
-                simulation_name = item.simulation.name
-                job_name = item.name
-                wavefield_dir_name = Path(wavefield_outputs.path).name
-
-                results_wavefields_path = (
-                    f"jobs/{simulation_name}/{job_name}/results/{wavefield_dir_name}"
+                relative = self._output_relative_path(
+                    Path(wavefield_outputs.path).relative_to(item._result_path)
                 )
-                s3_results_path = (
-                    f"s3://{self.config.s3_bucket}/{project_name}/"
-                    f"{results_wavefields_path}"
+                s3_results_path = f"{item._cloud_output_identity}{relative}"
+                local_results_path = (
+                    path / item._result_path.relative_to(item.project_path) / relative
                 )
-                local_results_path = path / results_wavefields_path
                 self.get(s3_results_path, local_results_path)
                 self._emit(f"Fetched AWS wavefields from {s3_results_path}")
 
@@ -1312,13 +1366,8 @@ class AWSSite(BaseSite):
     def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
         """Fetch ``_fs_run`` metadata and aggregate task manifests locally."""
 
-        project_name = Path(job.project_path).name
-        simulation_name = job.simulation.name
-        job_name = job.name
-        results_run_path = f"jobs/{simulation_name}/{job_name}/results/_fs_run"
-        s3_results_path = (
-            f"s3://{self.config.s3_bucket}/{project_name}/{results_run_path}"
-        )
+        job = self._result_job(job)
+        s3_results_path = f"{job._cloud_output_identity}_fs_run"
         local_run_path = job._result_path / "_fs_run"
         self.get(s3_results_path, local_run_path)
         self._emit(f"Fetched AWS run metadata from {s3_results_path}")
@@ -1330,18 +1379,20 @@ class AWSSite(BaseSite):
         if not isinstance(job, ImagingJob):
             raise TypeError("fetch_image expects an ImagingJob")
 
-        project_path = Path(job.project_path).resolve()
+        job = self._result_job(job)
         local_image_file = Path(job.image_file()).resolve()
         try:
-            relative_image_file = local_image_file.relative_to(project_path)
+            relative_image_file = local_image_file.relative_to(job._result_path)
         except ValueError as exc:
             raise ValueError(
-                f"Imaging output path {local_image_file} is outside project "
-                f"root {project_path}"
+                "Imaging output path is outside the run result directory"
             ) from exc
 
         bucket = self.config.s3_bucket
-        key = f"{project_path.name}/{relative_image_file.as_posix()}"
+        key = (
+            job._cloud_output_identity.removeprefix(f"s3://{bucket}/")
+            + relative_image_file.as_posix()
+        )
         local_image_file.parent.mkdir(parents=True, exist_ok=True)
 
         refreshed_credentials = False
@@ -1380,6 +1431,7 @@ class AWSSite(BaseSite):
             outputs are downloaded as side effects.
         """
 
+        job = self._result_job(job)
         self.fetch_run_metadata(job)
         traces = self.fetch_traces(job)
         wavefields = None

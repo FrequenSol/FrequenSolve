@@ -394,6 +394,7 @@ class BaseJob(
     k_units: Optional[str] = None
     _file: Optional[Path] = None
     _job_id: Optional[str] = None
+    _result_path_override: Optional[Path] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -624,6 +625,8 @@ class BaseJob(
     @property
     def _result_path(self):
         """Path where solver results will be stored."""
+        if self._result_path_override is not None:
+            return self._result_path_override
         if self._file is None:
             return self._local_path / "results"
         return self._file.parent / "results"
