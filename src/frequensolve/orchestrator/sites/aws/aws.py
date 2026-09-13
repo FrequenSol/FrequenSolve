@@ -3,6 +3,7 @@
 import getpass
 import json
 import os
+import re
 import subprocess
 import tempfile
 import uuid
@@ -1130,6 +1131,9 @@ class AWSSite(BaseSite):
             check=check,
             backend=backend
             or {"executionSiteId": "managed-slurm", "logicalAttemptId": f"{job_id}:1"},
+            _logs_fn=lambda run, **options: self.fetch_logs(
+                run.job, simulation_id=str(run.id), **options
+            ),
             _status_fn=self._poll_run,
             _cancel_fn=lambda run: self.cancel_job(str(run.id)),
             _pending_fetch_fn=(
@@ -1140,40 +1144,25 @@ class AWSSite(BaseSite):
     def _poll_run(self, run: RunHandle) -> JobStatus:
         if self.graphql_client is None:
             raise RuntimeError("Authenticated GraphQL client is unavailable")
-        details_getter = getattr(
-            self.graphql_client, "get_simulation_status_details", None
-        )
-        if callable(details_getter):
-            status_details = details_getter(str(run.id))
-            for key in (
-                "requestedResources",
-                "allocatedResources",
-                "executionSiteId",
-                "logicalAttemptId",
-                "providerJobId",
-                "executionState",
-                "failureReason",
-                "creditSettlementMode",
-                "creditSettlementStatus",
-                "creditSettlementOperationId",
-                "creditSettlementAmount",
-                "executionBackend",
-                "executionTarget",
-                "slurmPartition",
-                "slurmNodes",
-                "slurmRanksPerNode",
-                "slurmWallTimeSeconds",
-                "providerAttemptId",
-            ):
-                if status_details.get(key) is not None:
-                    run.backend[key] = status_details[key]
-            raw_status = status_details["status"]
-            raw = {**status_details, "source": "graphql"}
-            message = str(status_details.get("failureMessage") or "")
-        else:
-            raw_status = self.graphql_client.get_simulation_status(str(run.id))
-            raw = {"status": raw_status, "source": "graphql"}
-            message = ""
+        status_details = self.graphql_client.get_simulation_status_details(str(run.id))
+        for key in (
+            "requestedResources",
+            "allocatedResources",
+            "executionSiteId",
+            "logicalAttemptId",
+            "providerJobId",
+            "executionState",
+            "failureReason",
+            "creditSettlementMode",
+            "creditSettlementStatus",
+            "creditSettlementOperationId",
+            "creditSettlementAmount",
+        ):
+            if status_details.get(key) is not None:
+                run.backend[key] = status_details[key]
+        raw_status = status_details["status"]
+        raw = {**status_details, "source": "graphql"}
+        message = str(status_details.get("failureMessage") or "")
         state = {
             "PENDING": "pending",
             "SUBMITTED": "pending",
@@ -1412,125 +1401,89 @@ class AWSSite(BaseSite):
         task: Optional[int] = None,
         frequency: Optional[Union[float, complex]] = None,
         show: bool = False,
+        simulation_id: Optional[str] = None,
     ) -> Union[Path, Dict[str, Path]]:
-        """Fetch AWS task logs and optionally return one task log file.
+        """Download authenticated Slurm logs for one simulation per job.
 
-        ``task`` is one-based. ``frequency`` selects the matching frequency in
-        ``job.f_list``. Without either selector, the local log directory is
-        returned.
-
-        Args:
-            job: Single job or list of jobs.
-            local_dir: Optional local destination for downloaded logs.
-            task: Optional one-based task number to select.
-            frequency: Optional frequency used to select a task log.
-            show: Whether to print the selected log contents.
-
-        Returns:
-            Log path for one job, or a mapping keyed by job name.
+        Task numbers are one-based. By default use the job's latest submission;
+        run handles bind ``simulation_id`` to their own submission. Logs are
+        staged before updating the local cache, with separate directories for
+        each simulation so reruns cannot reuse an earlier run's cached logs.
         """
-
+        if task is not None and frequency is not None:
+            raise ValueError("Pass either `task` or `frequency`, not both")
+        if task is not None and (
+            isinstance(task, bool) or not isinstance(task, int) or task < 1
+        ):
+            raise ValueError("Log task numbers must be positive integers")
         jobs, single = self._as_jobs(job)
+        if simulation_id is not None and not single:
+            raise ValueError("An explicit simulation id requires a single job")
         requested_local_dir = Path(local_dir) if local_dir is not None else None
         result: Dict[str, Path] = {}
-
         for item in jobs:
-            project_name = item.project_path.name
-            remote_logs_path = (
-                f"s3://{self.config.s3_bucket}/"
-                f"{project_name}/jobs/{item.simulation.name}/{item.name}/logs"
+            run_id = (
+                simulation_id
+                if simulation_id is not None
+                else getattr(item, "_job_id", None)
+            )
+            if not isinstance(run_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,199}", run_id
+            ):
+                raise ValueError(
+                    "Cloud logs require a valid simulation id from submission"
+                )
+            selected_task = (
+                self._frequency_task(item, frequency) if frequency is not None else task
+            )
+            remote = (
+                f"s3://{self.config.s3_bucket}/{item.project_path.name}/jobs/"
+                f"{item.simulation.name}/{item.name}/logs/{run_id}/"
             )
             if requested_local_dir is None:
-                log_dir = item._stdout_path
+                log_dir = Path(item._stdout_path) / run_id
             elif single:
                 log_dir = requested_local_dir
             else:
-                log_dir = requested_local_dir / item.name
-
-            try:
-                self.get(remote_logs_path, log_dir)
-            except FileNotFoundError:
-                self._fetch_cloudwatch_logs(
-                    item,
-                    log_dir,
-                    task=(
-                        self._frequency_task(item, frequency)
-                        if frequency is not None
-                        else task
-                    ),
-                )
-            selected = self._select_log_path(
-                item,
-                log_dir,
-                task=task,
-                frequency=frequency,
+                log_dir = requested_local_dir / item.name / run_id
+            # Staging beside the destination keeps file replacement on one filesystem.
+            log_dir.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                prefix=".slurm-logs-", dir=log_dir.parent
+            ) as folder:
+                staged = Path(folder)
+                if selected_task is None:
+                    self.get(remote, staged)
+                else:
+                    name = f"task_{selected_task}.log"
+                    self.get(remote + name, staged / name)
+                files = [
+                    path
+                    for path in staged.iterdir()
+                    if path.is_file()
+                    and re.fullmatch(r"task_[1-9][0-9]*\.log", path.name)
+                ]
+                if not files:
+                    raise FileNotFoundError(
+                        "Slurm logs are not available for this simulation yet"
+                    )
+                log_dir.mkdir(parents=True, exist_ok=True)
+                names = {path.name for path in files}
+                for path in files:
+                    path.replace(log_dir / path.name)
+                if selected_task is None:
+                    for stale in log_dir.glob("task_*.log"):
+                        if stale.name not in names:
+                            stale.unlink()
+            selected = (
+                log_dir / f"task_{selected_task}.log"
+                if selected_task is not None
+                else log_dir
             )
             if show:
                 self._show_logs(selected, job_name=item.name)
             result[item.name] = selected
-
-        if single:
-            return result[jobs[0].name]
-        return result
-
-    def _fetch_cloudwatch_logs(
-        self,
-        job: BaseJob,
-        log_dir: Path,
-        *,
-        task: Optional[int],
-    ) -> None:
-        """Materialize Cloud task logs when the runtime has no S3 log prefix."""
-
-        simulation_id = getattr(job, "_job_id", None)
-        if self.graphql_client is None or not simulation_id:
-            raise FileNotFoundError(
-                "Cloud task logs are unavailable from storage or the Cloud API"
-            )
-        rows = self.graphql_client.list_simulation_frequency_jobs(str(simulation_id))
-        indexed: dict[int, str] = {}
-        for row in rows:
-            frequency_index = row.get("frequencyIndex")
-            batch_job_id = row.get("batchJobId")
-            if not isinstance(frequency_index, int) or not isinstance(
-                batch_job_id, str
-            ):
-                continue
-            task_number = frequency_index + 1
-            if task_number in indexed:
-                raise RuntimeError(
-                    f"Cloud returned duplicate logs for task {task_number}"
-                )
-            indexed[task_number] = batch_job_id
-
-        requested_tasks = [task] if task is not None else sorted(indexed)
-        if not requested_tasks or any(
-            number not in indexed for number in requested_tasks
-        ):
-            raise FileNotFoundError("Cloud returned no Batch task logs for this run")
-
-        log_dir.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            dir=log_dir.parent,
-            prefix=f".{log_dir.name}-",
-        ) as staging_dir:
-            staged = Path(staging_dir)
-            for task_number in requested_tasks:
-                events = self.graphql_client.get_job_logs(indexed[task_number])
-                (staged / f"task_{task_number}.log").write_text(
-                    "".join(event["message"].rstrip("\n") + "\n" for event in events),
-                    encoding="utf-8",
-                )
-
-            log_dir.mkdir(parents=True, exist_ok=True)
-            staged_names = {path.name for path in staged.iterdir()}
-            for path in staged.iterdir():
-                path.replace(log_dir / path.name)
-            if task is None:
-                for pattern in ("task_*.log", "task_*.txt", "task_*.out"):
-                    for stale in log_dir.glob(pattern):
-                        if stale.name not in staged_names:
-                            stale.unlink()
+        return result[jobs[0].name] if single else result
 
     def test_api_connectivity(self) -> bool:
         """Verify the authenticated GraphQL API is reachable.

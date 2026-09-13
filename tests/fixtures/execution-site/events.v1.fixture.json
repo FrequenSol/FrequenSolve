@@ -67,7 +67,7 @@
         ],
         "logs": [
           {
-            "uri": "s3://test-artifacts/private/test/logs/task_1.log"
+            "uri": "s3://test-artifacts/private/test/logs/simulation-test-1/task_1.log"
           }
         ],
         "usageEvidence": {
@@ -167,7 +167,7 @@
         ],
         "logs": [
           {
-            "uri": "s3://test-artifacts/private/test/logs/task_1.log"
+            "uri": "s3://test-artifacts/private/test/logs/simulation-test-1/task_1.log"
           }
         ],
         "usageEvidence": {
@@ -267,7 +267,7 @@
         ],
         "logs": [
           {
-            "uri": "s3://test-artifacts/private/test/logs/task_1.log"
+            "uri": "s3://test-artifacts/private/test/logs/simulation-test-1/task_1.log"
           }
         ],
         "usageEvidence": {
@@ -367,7 +367,7 @@
         ],
         "logs": [
           {
-            "uri": "s3://test-artifacts/private/test/logs/task_1.log"
+            "uri": "s3://test-artifacts/private/test/logs/simulation-test-1/task_1.log"
           }
         ],
         "usageEvidence": {
@@ -467,7 +467,7 @@
         ],
         "logs": [
           {
-            "uri": "s3://test-artifacts/private/test/logs/task_1.log"
+            "uri": "s3://test-artifacts/private/test/logs/simulation-test-1/task_1.log"
           }
         ],
         "usageEvidence": {

@@ -410,117 +410,6 @@ def test_fetch_run_metadata_downloads_job_run_directory(tmp_path):
     ]
 
 
-def test_fetch_logs_falls_back_to_authenticated_cloudwatch_events(tmp_path):
-    class CloudLogs:
-        def __init__(self):
-            self.requested = []
-
-        def list_simulation_frequency_jobs(self, simulation_id):
-            assert simulation_id == "simulation-1"
-            return [
-                {"frequencyIndex": 0, "batchJobId": "batch-1"},
-                {"frequencyIndex": 1, "batchJobId": "batch-2"},
-            ]
-
-        def get_job_logs(self, batch_job_id):
-            self.requested.append(batch_job_id)
-            return [
-                {
-                    "timestamp": "2026-09-06T14:00:00.000Z",
-                    "message": f"{batch_job_id} complete\n",
-                }
-            ]
-
-    site = AWSSite.__new__(AWSSite)
-    site.config = SimpleNamespace(s3_bucket="bucket")
-    site.graphql_client = CloudLogs()
-    site.get = lambda remote, local: (_ for _ in ()).throw(FileNotFoundError())
-    job = SimpleNamespace(
-        project_path=tmp_path / "project-a",
-        _stdout_path=tmp_path / "project-a/logs",
-        _job_id="simulation-1",
-        f_list=[10.0, 20.0],
-        name="job-a",
-        simulation=SimpleNamespace(name="simulation-a"),
-    )
-    job._stdout_path.mkdir(parents=True)
-    (job._stdout_path / "task_99.log").write_text("stale\n")
-
-    assert site.fetch_logs(job) == job._stdout_path
-    assert site.graphql_client.requested == ["batch-1", "batch-2"]
-    assert not (job._stdout_path / "task_99.log").exists()
-    assert (job._stdout_path / "task_1.log").read_text() == "batch-1 complete\n"
-    assert (job._stdout_path / "task_2.log").read_text() == "batch-2 complete\n"
-
-
-def test_fetch_logs_cloudwatch_fallback_honors_frequency_selector(tmp_path):
-    class CloudLogs:
-        def list_simulation_frequency_jobs(self, simulation_id):
-            return [
-                {"frequencyIndex": 0, "batchJobId": "batch-1"},
-                {"frequencyIndex": 1, "batchJobId": "batch-2"},
-            ]
-
-        def get_job_logs(self, batch_job_id):
-            assert batch_job_id == "batch-2"
-            return [{"timestamp": "now", "message": "selected"}]
-
-    site = AWSSite.__new__(AWSSite)
-    site.config = SimpleNamespace(s3_bucket="bucket")
-    site.graphql_client = CloudLogs()
-    site.get = lambda remote, local: (_ for _ in ()).throw(FileNotFoundError())
-    job = SimpleNamespace(
-        project_path=tmp_path / "project-a",
-        _stdout_path=tmp_path / "project-a/logs",
-        _job_id="simulation-1",
-        f_list=[10.0, 20.0],
-        name="job-a",
-        simulation=SimpleNamespace(name="simulation-a"),
-    )
-
-    selected = site.fetch_logs(job, frequency=20.0)
-
-    assert selected == job._stdout_path / "task_2.log"
-    assert selected.read_text() == "selected\n"
-    assert not (job._stdout_path / "task_1.log").exists()
-
-
-def test_fetch_logs_cloudwatch_failure_preserves_existing_cache(tmp_path):
-    class CloudLogs:
-        def list_simulation_frequency_jobs(self, simulation_id):
-            return [
-                {"frequencyIndex": 0, "batchJobId": "batch-1"},
-                {"frequencyIndex": 1, "batchJobId": "batch-2"},
-            ]
-
-        def get_job_logs(self, batch_job_id):
-            if batch_job_id == "batch-2":
-                raise RuntimeError("CloudWatch unavailable")
-            return [{"timestamp": "now", "message": "replacement"}]
-
-    site = AWSSite.__new__(AWSSite)
-    site.config = SimpleNamespace(s3_bucket="bucket")
-    site.graphql_client = CloudLogs()
-    site.get = lambda remote, local: (_ for _ in ()).throw(FileNotFoundError())
-    job = SimpleNamespace(
-        project_path=tmp_path / "project-a",
-        _stdout_path=tmp_path / "project-a/logs",
-        _job_id="simulation-1",
-        f_list=[10.0, 20.0],
-        name="job-a",
-        simulation=SimpleNamespace(name="simulation-a"),
-    )
-    job._stdout_path.mkdir(parents=True)
-    (job._stdout_path / "task_1.log").write_text("cached one\n")
-    (job._stdout_path / "task_2.log").write_text("cached two\n")
-
-    with pytest.raises(RuntimeError, match="CloudWatch unavailable"):
-        site.fetch_logs(job)
-
-    assert (job._stdout_path / "task_1.log").read_text() == "cached one\n"
-    assert (job._stdout_path / "task_2.log").read_text() == "cached two\n"
-
-
 def test_fetch_outputs_downloads_complete_configured_artifact_set():
     site = AWSSite.__new__(AWSSite)
     calls = []
@@ -580,3 +469,91 @@ def test_aws_run_handle_honors_submit_time_fetch_after_success():
 
     assert result.successful
     assert fetch_calls == [job]
+
+
+def log_job(tmp_path):
+    return SimpleNamespace(
+        project_path=tmp_path / "project-a",
+        _stdout_path=tmp_path / "logs",
+        _job_id="simulation-1",
+        f_list=[10.0, 20.0],
+        name="job-a",
+        simulation=SimpleNamespace(name="simulation-a"),
+    )
+
+
+def test_slurm_logs_read_only_the_requested_simulation_and_replace_stale_tasks(
+    tmp_path,
+):
+    prefix = "project-a/jobs/simulation-a/job-a/logs/"
+    client = FakeS3Client(
+        {
+            prefix + "simulation-1/task_1.log": "current run",
+            prefix + "simulation-1/task_2.log": "current second task",
+            prefix + "simulation-2/task_1.log": "another run",
+            prefix + "task_1.log": "old unscoped log",
+        }
+    )
+    site = make_site(client)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    job = log_job(tmp_path)
+    cache = job._stdout_path / job._job_id
+    cache.mkdir(parents=True)
+    (cache / "task_99.log").write_text("obsolete task")
+    assert site.fetch_logs(job) == cache
+    assert sorted(p.name for p in cache.iterdir()) == ["task_1.log", "task_2.log"]
+    assert (cache / "task_1.log").read_text() == "current run"
+    assert len(client.downloads) == 2
+
+
+def test_slurm_logs_download_only_the_selected_frequency(tmp_path):
+    key = "project-a/jobs/simulation-a/job-a/logs/simulation-1/task_2.log"
+    client = FakeS3Client({key: "selected frequency"})
+    site = make_site(client)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    job = log_job(tmp_path)
+    selected = site.fetch_logs(job, frequency=20.0)
+    assert selected == job._stdout_path / "simulation-1/task_2.log"
+    assert selected.read_text() == "selected frequency"
+    assert [row["Key"] for row in client.downloads] == [key]
+
+
+def test_slurm_log_download_failure_preserves_cache(tmp_path):
+    site = AWSSite.__new__(AWSSite)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    job = log_job(tmp_path)
+    cache = job._stdout_path / job._job_id
+    cache.mkdir(parents=True)
+    (cache / "task_1.log").write_text("cached")
+
+    def fail(remote, local):
+        (local / "task_1.log").write_text("incomplete refresh")
+        raise RuntimeError("S3 unavailable")
+
+    site.get = fail
+    with pytest.raises(RuntimeError, match="S3 unavailable"):
+        site.fetch_logs(job)
+    assert (cache / "task_1.log").read_text() == "cached"
+
+
+@pytest.mark.parametrize("run_id", [None, "", "../other", "run/other", True])
+def test_slurm_log_identity_is_required_before_storage_access(tmp_path, run_id):
+    site = AWSSite.__new__(AWSSite)
+    job = log_job(tmp_path)
+    job._job_id = run_id
+    with pytest.raises(ValueError, match="simulation id"):
+        site.fetch_logs(job)
+
+
+def test_run_and_result_logs_remain_bound_when_the_job_is_resubmitted(tmp_path):
+    prefix = "project-a/jobs/simulation-a/job-a/logs/"
+    site = make_site(FakeS3Client({prefix + "simulation-1/task_1.log": "original"}))
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    job = log_job(tmp_path)
+    run = site._make_run_handle(job, "simulation-1")
+    result = run._make_result(JobStatus(state="completed", return_code=0))
+    job._job_id = "simulation-2"
+    for value in (run, result):
+        selected = value.logs(task=1)
+        assert selected == job._stdout_path / "simulation-1/task_1.log"
+        assert selected.read_text() == "original"
