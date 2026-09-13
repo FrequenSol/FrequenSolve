@@ -926,7 +926,7 @@ class GraphQLClient:
                 f"Simulation status not found in response: {simulation_id}"
             )
 
-        def resources(name):
+        def resources(name: str) -> Optional[Dict[str, Any]]:
             value = details.get(name)
             if isinstance(value, str):
                 value = json.loads(value)
