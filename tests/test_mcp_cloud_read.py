@@ -1521,3 +1521,31 @@ def test_slurm_read_rejects_retired_batch_output(retired_field):
     client = cloud.CloudReadClient(_transport_factory=lambda _: lambda *args: response)
     with pytest.raises(cloud.CloudReadError):
         client.get_simulation(simulation_id="sim-example-001")
+
+
+@pytest.mark.parametrize("state", ["READY", "UNAVAILABLE"])
+def test_managed_slurm_readiness_is_preserved_through_fixed_cloud_read(state):
+    fixture = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )
+    output = json.loads(json.dumps(fixture["output"]))
+    output["infrastructure"]["compute"] = state
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
+    )
+    assert client.check_readiness()["infrastructure"]["compute"] == state
+
+
+@pytest.mark.parametrize("state", ["MISSING", "IN_PROGRESS", "FAILED", "UNKNOWN"])
+def test_retired_batch_compute_readiness_states_are_rejected(state):
+    fixture = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )
+    output = json.loads(json.dumps(fixture["output"]))
+    output["infrastructure"]["compute"] = state
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
+    )
+    with pytest.raises(cloud.CloudReadError) as exc_info:
+        client.check_readiness()
+    assert exc_info.value.code == "UPSTREAM_UNAVAILABLE"
