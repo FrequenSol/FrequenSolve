@@ -200,7 +200,7 @@ class PollingGraphQLClient(graphql_client.GraphQLClient):
         return value
 
 
-def test_wait_for_stack_ready_retries_transient_error_then_maps_success(
+def test_wait_for_storage_ready_retries_transient_error_then_maps_success(
     monkeypatch,
 ):
     client = PollingGraphQLClient(
@@ -225,8 +225,7 @@ def test_wait_for_stack_ready_retries_transient_error_then_maps_success(
     sleeps = []
     monkeypatch.setattr(graphql_client.time, "sleep", sleeps.append)
 
-    assert client.wait_for_stack_ready(
-        "storage",
+    assert client.wait_for_storage_ready(
         timeout=60,
         poll_interval=2,
         expected_stack_id="stack-1",
@@ -239,12 +238,12 @@ def test_wait_for_stack_ready_retries_transient_error_then_maps_success(
     assert len(client.calls) == 2
 
 
-def test_wait_for_stack_ready_propagates_timeout_at_bound(monkeypatch):
+def test_wait_for_storage_ready_propagates_timeout_at_bound(monkeypatch):
     client = PollingGraphQLClient([])
     clock = iter([100, 105])
     monkeypatch.setattr(graphql_client.time, "time", lambda: next(clock))
 
     with pytest.raises(RuntimeError, match="timeout: 5s"):
-        client.wait_for_stack_ready("compute", timeout=5, poll_interval=0)
+        client.wait_for_storage_ready(timeout=5, poll_interval=0)
 
     assert client.calls == []

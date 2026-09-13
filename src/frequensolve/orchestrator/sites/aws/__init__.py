@@ -1,4 +1,4 @@
-"""AWS Batch site backend.
+"""FrequenSol Cloud managed Slurm site backend.
 
 Importing this module requires the cloud optional dependencies.
 """

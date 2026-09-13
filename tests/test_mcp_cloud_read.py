@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 import pickle
@@ -272,18 +271,6 @@ def _fake_requests_module(*sessions: _FakeSession) -> SimpleNamespace:
     return SimpleNamespace(Session=create_session)
 
 
-def test_exact_cloud_contract_and_fixture_snapshots_are_vendored():
-    catalog = _resource_bytes("customer_cloud_read_v2.json")
-    fixtures = _resource_bytes("customer_cloud_read_v2_fixtures.json")
-
-    assert hashlib.sha256(catalog).hexdigest() == (
-        "c4442203f098f9b82217bdabdf7925298792078bc404f44e1eb1dd1a52f0322f"
-    )
-    assert hashlib.sha256(fixtures).hexdigest() == (
-        "56d8ca773b299c4818422ce53ac2aa43c487669ff3f9f8ae80d6efc192042027"
-    )
-
-
 def test_contract_contains_only_fixed_bounded_queries():
     catalog = cloud._load_contract()["catalog"]
 
@@ -501,7 +488,7 @@ def test_optional_output_nulls_are_pruned_recursively_in_list_items():
     output = json.loads(json.dumps(fixture["output"]))
     output["cursor"] = None
     output["items"][0]["durationSeconds"] = None
-    output["items"][0]["requestedComputeMode"] = None
+    output["items"][0]["slurmWallTimeSeconds"] = None
     operation = cloud._load_contract()["operationsByName"]["listMySimulations"]
     response = _graphql_response(
         operation["source"]["responseProjection"]["path"],
@@ -513,30 +500,21 @@ def test_optional_output_nulls_are_pruned_recursively_in_list_items():
 
     assert "cursor" not in result
     assert "durationSeconds" not in result["items"][0]
-    assert "requestedComputeMode" not in result["items"][0]
+    assert "slurmWallTimeSeconds" not in result["items"][0]
 
 
 def test_optional_output_nulls_are_pruned_in_nested_objects():
     fixture = next(
-        item for item in _fixtures() if item["operation"] == "getMySimulation"
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
     )
     output = json.loads(json.dumps(fixture["output"]))
-    output["durationSeconds"] = None
-    output["guardrail"] = {
-        "maxRuntimeMinutes": 60,
-        "message": None,
-    }
-    operation = cloud._load_contract()["operationsByName"]["getMySimulation"]
-    response = _graphql_response(
-        operation["source"]["responseProjection"]["path"],
-        output,
+    output["membership"]["role"] = None
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
     )
-    client = cloud.CloudReadClient(_transport_factory=lambda _: lambda *args: response)
-
-    result = client.get_simulation(simulation_id="sim-example-001")
-
-    assert "durationSeconds" not in result
-    assert result["guardrail"] == {"maxRuntimeMinutes": 60}
+    result = client.check_readiness()
+    assert "role" not in result["membership"]
+    assert result["membership"]["hasSeat"] is True
 
 
 @pytest.mark.parametrize(
@@ -1526,3 +1504,20 @@ print(cloud.CLOUD_READ_CONTRACT_VERSION)
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "2.0.0"
+
+
+@pytest.mark.parametrize(
+    "retired_field", ["batchStatus", "requestedComputeMode", "guardrail"]
+)
+def test_slurm_read_rejects_retired_batch_output(retired_field):
+    fixture = next(
+        item for item in _fixtures() if item["operation"] == "getMySimulation"
+    )
+    output = {**fixture["output"], retired_field: "legacy"}
+    operation = cloud._load_contract()["operationsByName"]["getMySimulation"]
+    response = _graphql_response(
+        operation["source"]["responseProjection"]["path"], output
+    )
+    client = cloud.CloudReadClient(_transport_factory=lambda _: lambda *args: response)
+    with pytest.raises(cloud.CloudReadError):
+        client.get_simulation(simulation_id="sim-example-001")

@@ -246,11 +246,6 @@
       "file": "src/frequensolve/orchestrator/sites/aws/aws.py"
     },
     {
-      "code": "no-untyped-def",
-      "count": 1,
-      "file": "src/frequensolve/orchestrator/sites/aws/batch_worker.py"
-    },
-    {
       "code": "assignment",
       "count": 1,
       "file": "src/frequensolve/orchestrator/sites/aws/cognito.py"

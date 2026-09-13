@@ -215,46 +215,32 @@ Cloud profiles create ``AWSSite`` instances and require the ``cloud`` extra.
    interactive = true
    verbose = true
 
-Omitting ``execution_backend`` preserves the existing AWS Batch behavior. Keep
-separate named profiles when both Cloud execution models are available:
+Cloud execution uses the registered ``managed-slurm`` site. Select the resources
+in the profile, then submit jobs without resource overrides:
 
 .. code-block:: toml
 
-   [sites.cloud-batch]
+   [sites.cloud-slurm]
    type = "aws"
    domain = "app.frequensol.com"
-   execution_backend = "batch"
-   compute_mode = "auto"
+   execution_site_id = "managed-slurm"
 
-   [sites.cloud-slurm-single]
-   type = "aws"
-   domain = "app.frequensol.com"
-   execution_backend = "slurm"
-   slurm_partition = "cpu-single"
-   slurm_nodes = 1
-   slurm_ranks_per_node = 1
-   slurm_wall_time = "00-00:30:00"
-
-   [sites.cloud-slurm-efa]
-   type = "aws"
-   domain = "app.frequensol.com"
-   execution_backend = "slurm"
-   slurm_partition = "cpu-efa"
-   slurm_nodes = 2
-   slurm_ranks_per_node = 4
-   slurm_wall_time = "00-00:30:00"
-
-Select the complete profile in Python:
+   [sites.cloud-slurm.execution_resources]
+   nodes = 1
+   mpi_ranks = 1
+   wall_time_seconds = 1800
 
 .. code-block:: python
 
-   batch = fs.Site(profile="cloud-batch")
-   single_node = fs.Site(profile="cloud-slurm-single")
-   distributed = fs.Site(profile="cloud-slurm-efa")
+   site = fs.Site(profile="cloud-slurm")
+   run = site.submit(job)
 
-The managed Slurm profile is distinct from ``type = "slurm"``. The former is
-FrequenSol Cloud running a private managed cluster and follows the Cloud and
-billing path. The latter remains direct customer-hosted SSH/Slurm execution.
+Omitting the execution settings selects ``managed-slurm`` with one node, one MPI
+rank, and a one-hour wall time. The environment must have an available registered
+site before submission. The SDK never creates a cluster.
+
+``type = "aws"`` uses FrequenSol Cloud authentication, storage, and billing.
+``type = "slurm"`` uses direct SSH access to a customer-managed cluster.
 
 .. list-table::
    :header-rows: 1
@@ -263,32 +249,26 @@ billing path. The latter remains direct customer-hosted SSH/Slurm execution.
    * - Key
      - Meaning
    * - ``domain``
-     - FrequenSol app domain used to fetch public cloud configuration. If
-       omitted, ``AWSSite`` tries ``FREQUENSOL_DOMAIN``.
+     - App domain used to fetch public Cloud configuration. Defaults to
+       ``FREQUENSOL_DOMAIN`` when omitted.
    * - ``interactive``
-     - When ``true``, prompt for missing login credentials. Defaults to
-       non-interactive behavior.
+     - Prompt for missing login credentials. Defaults to false.
    * - ``verbose``
      - Print user-facing status messages in addition to logging.
    * - ``email`` / ``password``
-     - Accepted by ``AWSSite`` for non-interactive login, but should not be
-       stored in ``site.toml``. Prefer cached login state or a secrets manager.
-   * - ``execution_backend``
-     - ``batch`` or ``slurm``. Omission means Batch. Managed Slurm availability
-       is controlled by the Cloud environment; an explicit request never falls
-       back to Batch.
-   * - ``compute_mode``
-     - Batch-only mode: ``auto``, ``spot_only``, or ``on_demand_only``.
-   * - ``slurm_partition``
-     - Managed Slurm partition: ``cpu-single`` for single-node work or
-       ``cpu-efa`` for explicitly distributed, EFA-enabled work.
-   * - ``slurm_nodes`` / ``slurm_ranks_per_node``
-     - Managed Slurm shape. ``cpu-single`` requires exactly one node and one
-       rank. ``cpu-efa`` requires exactly two nodes and accepts 1-4 MPI ranks
-       per node, with at most eight total ranks.
-   * - ``slurm_wall_time``
-     - Managed Slurm wall time in ``DD-HH:MM:SS`` form, from one minute through
-       two hours for the initial canary.
+     - Accepted for non-interactive login. Prefer cached login state or a secrets
+       manager instead of storing credentials in ``site.toml``.
+   * - ``execution_site_id``
+     - ``managed-slurm``, the supported hosted execution site.
+   * - ``execution_resources``
+     - ``nodes``, ``mpi_ranks``, and ``wall_time_seconds`` are required together.
+       The managed site supports one node with one MPI rank, or two nodes with
+       1-4 ranks per node, and a wall time of 60-7200 seconds. Optional ``cpu``
+       and ``memory_mib`` constrain the allocation.
+
+Batch profiles and the old ``execution_backend``, ``compute_mode``, and
+``slurm_*`` Cloud settings are rejected. The service owns partition and cluster
+configuration.
 
 Local Profiles
 ~~~~~~~~~~~~~~
@@ -707,18 +687,36 @@ Select it with ``fs.Site(profile="hosted")``. ``cpu`` and ``memory_mib`` are
 optional allocation ceilings; the site planner rejects a frequency plan that
 exceeds them. Omit ``execution_resources`` to use one node, one MPI rank, and a
 one-hour wall time, allowing the existing site planner to choose CPU and memory.
-``managed-batch`` selects the existing Batch route and currently accepts no
-portable resource table. Legacy Batch and managed-Slurm profiles remain valid.
-Do not combine ``execution_site_id`` with legacy backend/Slurm settings.
+Batch and legacy managed-Slurm profiles are no longer supported. Use the named
+site and its resource table; remove old backend and partition settings.
 
-``run.execution`` and ``result.execution`` expose the same portable identity and
-state fields, including ``execution_site_id``, ``logical_attempt_id``,
-``provider_job_id``, ``state``, and ``failure_reason``. Existing ``logs()`` and
-``output_files()`` APIs continue to work for either backend. The old provider
-metadata remains available for compatibility. Status reads retry the previous
-GraphQL schema when additive site fields are unavailable. Explicit named-site
-submission to an older deployment fails with an upgrade/legacy-profile message;
-it never silently changes the selected execution backend.
+``run.execution`` and ``result.execution`` expose ``execution_site_id``,
+``logical_attempt_id``, ``provider_job_id``, ``state``, and ``failure_reason``.
+Provider identity comes from the current Cloud record. Status requests require
+the current GraphQL schema and report incompatible deployments directly.
+
+Cloud results belong to a submission. Keep the returned run handle when running
+the same job again::
+
+    first = site.submit(job)
+    first_result = first.wait()
+    second = site.submit(job, rerun=True)
+    first_result.traces()
+    files = first_result.output_files(kind="vtu", existing=True)
+
+The first result continues to fetch the first submission. Cloud downloads check
+that submission's authenticated result location and save beneath
+``jobs/<simulation>/<job>/results/runs/<simulation-id>/``. Each run handle owns a
+copy of the job's result layout and nested simulation metadata, including receiver
+groups and components. Later edits to the authored simulation do not reinterpret
+earlier results. Downloads do not replace the authored job's results. Calling a fetch method directly with the authored job selects its latest
+submission. Results require the matching Slurm Cloud and runtime deployment;
+unscoped historical result directories are not used as a fallback.
+
+For Cloud imaging runs, ``save_path`` must be inside the job's result directory.
+Invalid imaging paths and snapshot preparation failures are rejected before the
+submission API is called, so they cannot leave a running job without a handle.
+Local and SSH imaging paths are unaffected.
 
 Only the registered FrequenSol-managed sites are supported here. This does not
 discover, provision, or connect arbitrary external clusters. Site operations and

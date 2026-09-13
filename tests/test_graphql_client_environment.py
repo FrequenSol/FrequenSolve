@@ -32,74 +32,14 @@ class CapturingGraphQLClient(GraphQLClient):
                     "error": None,
                 }
             }
-        if "deployComputeInfrastructure" in query:
-            return {
-                "deployComputeInfrastructure": {
-                    "stackId": "stack-2",
-                    "stackName": "compute-stack",
-                    "status": "CREATE_IN_PROGRESS",
-                    "outputs": {},
-                    "error": None,
-                }
-            }
         if "submitJob" in query:
             return {
                 "submitJob": {
                     "simulationId": "simulation-1",
-                    "batchJobId": "batch-1",
                     "status": "PENDING",
                 }
             }
         raise AssertionError(f"unexpected query: {query}")
-
-
-class AccountAuth:
-    def get_account_id(self):
-        return "account-123"
-
-
-class StackQueryCapturingGraphQLClient(GraphQLClient):
-    def __init__(self):
-        super().__init__("https://example.invalid/graphql", auth=AccountAuth())
-        self.last_query = ""
-        self.last_variables: Optional[Dict[str, Any]] = None
-
-    def execute(
-        self, query: str, variables: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        self.last_query = query
-        self.last_variables = variables
-        return {
-            "listStacks": {
-                "items": [
-                    {
-                        "stackId": "compute-stack",
-                        "outputs": "{}",
-                        "status": "CREATE_COMPLETE",
-                        "createdAt": "2026-05-24T00:00:00Z",
-                    }
-                ]
-            }
-        }
-
-
-class CapabilityGraphQLClient(GraphQLClient):
-    def __init__(self, query_fields=(), mutation_fields=()):
-        super().__init__("https://example.invalid/graphql", auth=object())
-        self.query_fields = query_fields
-        self.mutation_fields = mutation_fields
-
-    def execute(
-        self, query: str, variables: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        assert "__type" in query
-        assert variables is None
-        return {
-            "queryType": {"fields": [{"name": name} for name in self.query_fields]},
-            "mutationType": {
-                "fields": [{"name": name} for name in self.mutation_fields]
-            },
-        }
 
 
 class SimulationStatusGraphQLClient(GraphQLClient):
@@ -136,59 +76,17 @@ class SimulationStatusGraphQLClient(GraphQLClient):
         }
 
 
-def test_check_compute_stack_exists_filters_by_account_id():
-    client = StackQueryCapturingGraphQLClient()
-
-    assert client._check_compute_stack_exists() is True
-
-    assert "listStacks(filter: $filter)" in client.last_query
-    assert client.last_variables == {
-        "filter": {
-            "stackType": {"eq": "compute"},
-            "accountId": {"eq": "account-123"},
-            "or": [
-                {"status": {"eq": "CREATE_COMPLETE"}},
-                {"status": {"eq": "UPDATE_COMPLETE"}},
-                {"status": {"eq": "UPDATE_ROLLBACK_COMPLETE"}},
-            ],
-        }
-    }
-
-
-def test_compute_provisioning_mode_detects_shared_runtime_catalog():
-    client = CapabilityGraphQLClient(
-        query_fields=("fetchAvailableComputeRuntimes",),
-        mutation_fields=("deployComputeInfrastructure",),
-    )
-
-    assert client.get_compute_provisioning_mode() == "shared"
-
-
-def test_compute_provisioning_mode_detects_legacy_per_user_mutation():
-    client = CapabilityGraphQLClient(
-        mutation_fields=("deployComputeInfrastructure",),
-    )
-
-    assert client.get_compute_provisioning_mode() == "per-user"
-
-
-def test_compute_provisioning_mode_rejects_unknown_contract():
-    client = CapabilityGraphQLClient(query_fields=("listStacks",))
-
-    with pytest.raises(RuntimeError, match="does not expose a supported compute"):
-        client.get_compute_provisioning_mode()
-
-
 def test_simulation_status_details_include_customer_safe_failure_message():
     client = SimulationStatusGraphQLClient()
 
     assert client.get_simulation_status_details("simulation-1") == {
         "id": "simulation-1",
+        "outputIdentity": None,
         "status": "FAILED",
         "failureCode": "SCU_BALANCE_INSUFFICIENT",
         "failureMessage": "This simulation needs more SCUs.",
-        "executionSiteId": "managed-batch",
-        "logicalAttemptId": "simulation-1:1",
+        "executionSiteId": None,
+        "logicalAttemptId": None,
         "providerJobId": None,
         "executionState": "failed",
         "failureReason": "SCU_BALANCE_INSUFFICIENT",
@@ -196,27 +94,6 @@ def test_simulation_status_details_include_customer_safe_failure_message():
         "allocatedResources": None,
     }
     assert len(client.queries) == 1
-
-
-def test_simulation_status_details_fall_back_for_older_cloud_schemas():
-    client = SimulationStatusGraphQLClient(legacy=True)
-
-    assert client.get_simulation_status("simulation-legacy") == "FAILED"
-    assert len(client.queries) == 2
-    assert "failureMessage" not in client.queries[-1]
-    assert "executionSiteId" in client.queries[-1]
-
-
-def test_simulation_status_details_preserve_failures_on_partial_cloud_schema():
-    client = SimulationStatusGraphQLClient(partial=True)
-
-    details = client.get_simulation_status_details("simulation-partial")
-
-    assert details["failureCode"] == "SCU_BALANCE_INSUFFICIENT"
-    assert details["failureMessage"] == "This simulation needs more SCUs."
-    assert len(client.queries) == 2
-    assert "failureMessage" in client.queries[1]
-    assert "creditSettlementMode" not in client.queries[1]
 
 
 def test_simulation_status_returns_exact_credit_decimal_without_changing_outcome():
@@ -239,116 +116,11 @@ def test_simulation_status_returns_exact_credit_decimal_without_changing_outcome
     assert {key: result[key] for key in billing} == billing
 
 
-def test_cloud_log_queries_page_frequency_jobs_and_validate_events():
-    responses = iter(
-        [
-            {
-                "getSimulation": {
-                    "frequencyJobs": {
-                        "items": [
-                            {
-                                "frequencyIndex": 0,
-                                "batchJobId": "batch-1",
-                            }
-                        ],
-                        "nextToken": "page-2",
-                    }
-                }
-            },
-            {
-                "getSimulation": {
-                    "frequencyJobs": {
-                        "items": [
-                            {
-                                "frequencyIndex": 1,
-                                "batchJobId": "batch-2",
-                            }
-                        ],
-                        "nextToken": None,
-                    }
-                }
-            },
-            {
-                "getJobLogs": {
-                    "logs": [
-                        {
-                            "timestamp": "2026-09-06T14:00:00.000Z",
-                            "message": "solver complete",
-                        }
-                    ]
-                }
-            },
-        ]
-    )
-    client = GraphQLClient("https://example.invalid/graphql", auth=object())
-    client.calls = []
-
-    def execute(query, variables=None):
-        client.calls.append((query, variables))
-        return next(responses)
-
-    client.execute = execute
-
-    assert client.list_simulation_frequency_jobs("simulation-1") == [
-        {
-            "frequencyIndex": 0,
-            "batchJobId": "batch-1",
-        },
-        {
-            "frequencyIndex": 1,
-            "batchJobId": "batch-2",
-        },
-    ]
-    assert client.get_job_logs("batch-2") == [
-        {
-            "timestamp": "2026-09-06T14:00:00.000Z",
-            "message": "solver complete",
-        }
-    ]
-    assert [variables for _, variables in client.calls] == [
-        {
-            "id": "simulation-1",
-            "limit": 100,
-            "nextToken": None,
-        },
-        {
-            "id": "simulation-1",
-            "limit": 100,
-            "nextToken": "page-2",
-        },
-        {"batchJobId": "batch-2"},
-    ]
-
-
 def test_deploy_storage_stack_does_not_send_environment_argument():
     client = CapturingGraphQLClient()
 
     client.deploy_storage_stack()
 
-    assert "$environment" not in client.last_query
-    assert "environment:" not in client.last_query
-    assert client.last_variables in (None, {})
-
-
-def test_deploy_compute_stack_does_not_send_environment_argument():
-    client = CapturingGraphQLClient()
-
-    client.deploy_compute_stack()
-
-    assert "$environment" not in client.last_query
-    assert "environment:" not in client.last_query
-    assert client.last_variables in (None, {})
-
-
-def test_legacy_environment_argument_is_accepted_but_not_sent():
-    client = CapturingGraphQLClient()
-
-    client.deploy_storage_stack("staging")
-    assert "$environment" not in client.last_query
-    assert "environment:" not in client.last_query
-    assert client.last_variables in (None, {})
-
-    client.deploy_compute_stack("staging")
     assert "$environment" not in client.last_query
     assert "environment:" not in client.last_query
     assert client.last_variables in (None, {})
@@ -370,21 +142,17 @@ def test_submit_job_can_send_status_email_override_and_fresh_run():
         "jobFileS3Key": "project/jobs/job.json",
         "sendSimulationStatusEmail": True,
         "forceRun": True,
+        "executionSiteId": "managed-slurm",
     }
 
 
-def test_submit_job_preserves_legacy_positional_argument_order():
+def test_submit_job_rejects_removed_batch_arguments():
     client = CapturingGraphQLClient()
-
-    client.submit_job("project/jobs/job.json", 2, 4096, "run-name", True, False)
-
-    assert client.last_variables == {
-        "jobFileS3Key": "project/jobs/job.json",
-        "sendSimulationStatusEmail": True,
-        "vcpu": 2,
-        "memory": 4096,
-        "jobName": "run-name",
-    }
+    with pytest.raises(TypeError):
+        client.submit_job("project/job.json", 2, 4096)
+    with pytest.raises(TypeError):
+        client.submit_job("project/job.json", compute_mode="auto")
+    assert not client.last_query
 
 
 def test_submit_job_sends_optional_cloud_run_metadata():
@@ -404,7 +172,8 @@ def test_submit_job_sends_optional_cloud_run_metadata():
     assert "simulationJobName: $simulationJobName" in client.last_query
     assert client.last_variables == {
         "jobFileS3Key": "project/jobs/model/job/job.json",
-        "sendSimulationStatusEmail": None,
+        "forceRun": False,
+        "executionSiteId": "managed-slurm",
         "projectName": "project",
         "projectDisplayName": "Project Alpha",
         "simulationName": "model",
@@ -412,116 +181,44 @@ def test_submit_job_sends_optional_cloud_run_metadata():
     }
 
 
-def test_submit_job_sends_managed_slurm_contract_and_reads_target_details():
-    client = CapturingGraphQLClient()
+def test_submit_job_sends_managed_site_contract():
+    import json
 
+    client = CapturingGraphQLClient()
+    resources = {"nodes": 2, "mpiRanks": 8, "wallTimeSeconds": 1800}
     result = client.submit_job(
         "project/jobs/model/job/job.json",
-        execution_backend="slurm",
-        slurm_partition="cpu-efa",
-        slurm_nodes=2,
-        slurm_ranks_per_node=4,
-        slurm_wall_time_seconds=1800,
+        execution_site_id="managed-slurm",
+        execution_resources=resources,
     )
-
-    assert "executionBackend: $executionBackend" in client.last_query
-    assert "providerAttemptId" in client.last_query
+    assert "executionSiteId: $executionSiteId" in client.last_query
+    assert "providerJobId" in client.last_query
     assert client.last_variables == {
         "jobFileS3Key": "project/jobs/model/job/job.json",
-        "sendSimulationStatusEmail": None,
-        "executionBackend": "slurm",
-        "computeMode": None,
-        "slurmPartition": "cpu-efa",
-        "slurmNodes": 2,
-        "slurmRanksPerNode": 4,
-        "slurmWallTimeSeconds": 1800,
+        "executionSiteId": "managed-slurm",
+        "executionResources": json.dumps(resources),
+        "forceRun": False,
     }
     assert result["simulationId"] == "simulation-1"
 
 
-def test_submit_job_retries_legacy_cloud_without_optional_metadata(monkeypatch):
+@pytest.mark.parametrize(
+    "field", ["projectName", "simulationJobName", "forceRun", "executionSiteId"]
+)
+def test_submit_job_never_retries_a_different_contract(monkeypatch, field):
+    from unittest.mock import Mock
+
     client = CapturingGraphQLClient()
-    calls = []
-
-    def execute(query, variables=None):
-        calls.append((query, variables))
-        if len(calls) == 1:
-            raise RuntimeError(
-                "GraphQL errors: Unknown argument 'projectName' on field "
-                "'Mutation.submitJob'."
-            )
-        return {
-            "submitJob": {
-                "simulationId": "simulation-legacy",
-                "batchJobId": "",
-                "status": "PENDING",
-            }
-        }
-
+    execute = Mock(side_effect=RuntimeError(f"Unknown argument {field}"))
     monkeypatch.setattr(client, "execute", execute)
-
-    result = client.submit_job(
-        "project/jobs/model/job/job.json",
-        project_name="project",
-        simulation_name="model",
-        simulation_job_name="job",
-    )
-
-    assert result["simulationId"] == "simulation-legacy"
-    assert len(calls) == 2
-    assert "projectName" in calls[0][0]
-    assert "projectName" not in calls[1][0]
-    assert "projectName" in calls[0][1]
-    assert "projectName" not in calls[1][1]
-
-
-def test_submit_job_retries_legacy_cloud_when_only_later_metadata_is_set(
-    monkeypatch,
-):
-    client = CapturingGraphQLClient()
-    calls = []
-
-    def execute(query, variables=None):
-        calls.append((query, variables))
-        if len(calls) == 1:
-            raise RuntimeError(
-                "GraphQL errors: Unknown argument 'projectName' on field "
-                "'Mutation.submitJob'."
-            )
-        return {
-            "submitJob": {
-                "simulationId": "simulation-legacy",
-                "batchJobId": "",
-                "status": "PENDING",
-            }
-        }
-
-    monkeypatch.setattr(client, "execute", execute)
-
-    result = client.submit_job(
-        "project/jobs/model/job/job.json",
-        simulation_name="model",
-    )
-
-    assert result["simulationId"] == "simulation-legacy"
-    assert len(calls) == 2
-    assert calls[0][1]["simulationName"] == "model"
-    assert "simulationName" not in calls[1][1]
-
-
-def test_submit_job_explains_when_cloud_does_not_support_fresh_runs(monkeypatch):
-    client = CapturingGraphQLClient()
-
-    def reject_force_run(query, variables=None):
-        raise RuntimeError(
-            "GraphQL errors: Unknown argument 'forceRun' on field "
-            "'Mutation.submitJob'."
+    with pytest.raises(RuntimeError, match=field):
+        client.submit_job(
+            "project/job.json",
+            project_name="project",
+            simulation_job_name="job",
+            fresh=True,
         )
-
-    monkeypatch.setattr(client, "execute", reject_force_run)
-
-    with pytest.raises(RuntimeError, match="Submit without force=True"):
-        client.submit_job("project/jobs/job.json", fresh=True)
+    execute.assert_called_once()
 
 
 def test_cancel_simulation_passes_id_and_requires_api_acceptance(monkeypatch):
@@ -624,3 +321,11 @@ def test_cancel_simulation_classifies_real_request_failures(monkeypatch, kind):
         client.cancel_simulation("simulation-1")
     assert "private-token" not in str(error.value)
     assert ("connectivity" in str(error.value)) == (expected is CloudTransportError)
+
+
+@pytest.mark.parametrize("options", [{"legacy": True}, {"partial": True}])
+def test_status_rejects_incompatible_schema_without_retry(options):
+    client = SimulationStatusGraphQLClient(**options)
+    with pytest.raises(RuntimeError, match="Cannot query field"):
+        client.get_simulation_status_details("simulation-1")
+    assert len(client.queries) == 1

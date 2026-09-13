@@ -120,19 +120,15 @@ def test_s3_upload(domain="localhost:5173"):
     print("\n[4/6] Querying stack info via GraphQL...")
     try:
         gql_client = GraphQLClient(config.api_url, auth)
-        stack_info = gql_client.get_my_stack()
+        stack_info = gql_client.get_storage_stack_info()
         bucket_name = stack_info["bucketName"]
         print("  ✓ Stack info retrieved")
         print(f"  ✓ Bucket: {bucket_name}")
-        print(f"  ✓ Job Queue: {stack_info['jobQueue']}")
-        print(f"  ✓ Job Definition: {stack_info['jobDefinition']}")
         print(f"  ✓ Status: {stack_info['status']}")
     except Exception as e:
         print(f"❌ Failed to get stack info: {e}")
         print("\n  Possible causes:")
-        print(
-            "  - No storage or compute infrastructure deployed (deploy both via web UI)"
-        )
+        print("  - No storage infrastructure deployed (create storage via the web UI)")
         print("  - GraphQL API not deployed")
         print("  - Lambda function errors")
         return False

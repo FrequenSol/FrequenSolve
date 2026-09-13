@@ -46,24 +46,17 @@ domain = "app.frequensol.com"
 interactive = true
 verbose = true
 
-[sites.cloud-batch]
-type = "aws"
-domain = "app.frequensol.com"
-execution_backend = "batch"
-compute_mode = "auto"
-interactive = true
-verbose = true
-
 [sites.cloud-slurm]
 type = "aws"
 domain = "app.frequensol.com"
-execution_backend = "slurm"
-slurm_partition = "cpu-efa"
-slurm_nodes = 2
-slurm_ranks_per_node = 4
-slurm_wall_time = "00-00:30:00"
+execution_site_id = "managed-slurm"
 interactive = true
 verbose = true
+
+[sites.cloud-slurm.execution_resources]
+nodes = 1
+mpi_ranks = 1
+wall_time_seconds = 1800
 
 [sites.local]
 type = "local"
@@ -283,7 +276,32 @@ def Site(
                 "Managed Cloud execution settings may only be selected through "
                 "a named site.toml profile: " + ", ".join(forbidden_overrides)
             )
-        ManagedExecutionProfile.from_mapping(site_config)
+        connection_fields = {
+            "domain",
+            "email",
+            "password",
+            "interactive",
+            "verbose",
+            "force_login",
+        }
+        profile_kwargs = _site_kwargs(site_config, raw_site_type)
+        unknown = (
+            (profile_kwargs.keys() | overrides.keys())
+            - connection_fields
+            - MANAGED_EXECUTION_PROFILE_FIELDS
+        )
+        if unknown:
+            raise ValueError(
+                "Unsupported managed Cloud profile settings: "
+                + ", ".join(sorted(unknown))
+            )
+        ManagedExecutionProfile.from_mapping(
+            {
+                key: value
+                for key, value in profile_kwargs.items()
+                if key in MANAGED_EXECUTION_PROFILE_FIELDS
+            }
+        )
     site_config.update(overrides)
     resource_overrides = {
         name: value

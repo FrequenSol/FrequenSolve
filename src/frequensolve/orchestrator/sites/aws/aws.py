@@ -1,15 +1,16 @@
-"""FrequenSol cloud execution site backed by Cognito, AppSync, S3, and Batch."""
+"""FrequenSol cloud execution site backed by Cognito, AppSync, S3, and managed Slurm."""
 
 import getpass
 import json
 import os
+import re
 import subprocess
 import tempfile
 import uuid
-import warnings
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, TypeVar, Union
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.orchestrator.sites.aws.cache_paths import (
@@ -42,6 +43,8 @@ from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
 
+_JobT = TypeVar("_JobT", bound=BaseJob)
+
 # Initialize the logger
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/aws.log")
 
@@ -68,7 +71,7 @@ class AWSSiteConfig(BaseSiteConfig):
         api_url: GraphQL API endpoint URL.
         domain: Frontend domain used to discover public configuration.
         s3_bucket: S3 bucket for simulation data, populated after authentication.
-        region: AWS region used for Cognito, S3, and Batch resources.
+        region: AWS region used for Cognito and S3 resources.
         s3_prefix: Prefix for organizing simulation data inside the S3 bucket.
         max_duration: Maximum duration users may request for cloud resources.
     """
@@ -87,12 +90,8 @@ class AWSSiteConfig(BaseSiteConfig):
     region: str = "us-east-1"
     s3_prefix: str = ""
     max_duration: Optional[str] = None
-    execution_backend: str = "batch"
-    compute_mode: Optional[str] = "auto"
-    slurm_partition: Optional[str] = None
-    slurm_nodes: Optional[int] = None
-    slurm_ranks_per_node: Optional[int] = None
-    slurm_wall_time: Optional[str] = None
+    execution_site_id: str = "managed-slurm"
+    execution_resources: Optional[dict[str, int]] = None
 
     @classmethod
     def from_domain(cls, domain: Optional[str] = None) -> "AWSSiteConfig":
@@ -258,12 +257,6 @@ class AWSSite(BaseSite):
         _credential_profile: Optional[str] = None,
         execution_site_id: Optional[str] = None,
         execution_resources: Optional[dict[str, int]] = None,
-        execution_backend: Optional[str] = None,
-        compute_mode: Optional[str] = None,
-        slurm_partition: Optional[str] = None,
-        slurm_nodes: Optional[int] = None,
-        slurm_ranks_per_node: Optional[int] = None,
-        slurm_wall_time: Optional[str] = None,
     ):
         """Initialize AWS site with domain-based authentication.
 
@@ -296,12 +289,6 @@ class AWSSite(BaseSite):
             for name, value in {
                 "execution_site_id": execution_site_id,
                 "execution_resources": execution_resources,
-                "execution_backend": execution_backend,
-                "compute_mode": compute_mode,
-                "slurm_partition": slurm_partition,
-                "slurm_nodes": slurm_nodes,
-                "slurm_ranks_per_node": slurm_ranks_per_node,
-                "slurm_wall_time": slurm_wall_time,
             }.items()
             if value is not None
         }
@@ -317,12 +304,8 @@ class AWSSite(BaseSite):
             f"Loading AWS configuration for {domain or os.getenv('FREQUENSOL_DOMAIN')}"
         )
         config = AWSSiteConfig.from_domain(domain)
-        config.execution_backend = self.execution_profile.backend
-        config.compute_mode = self.execution_profile.compute_mode
-        config.slurm_partition = self.execution_profile.slurm_partition
-        config.slurm_nodes = self.execution_profile.slurm_nodes
-        config.slurm_ranks_per_node = self.execution_profile.slurm_ranks_per_node
-        config.slurm_wall_time = self.execution_profile.slurm_wall_time
+        config.execution_site_id = self.execution_profile.execution_site_id
+        config.execution_resources = dict(self.execution_profile.execution_resources)
 
         # Store domain for potential config refresh
         if domain is None:
@@ -467,7 +450,7 @@ class AWSSite(BaseSite):
         self.graphql_client = GraphQLClient(config.api_url, auth)
 
         # Fetch storage stack info from API to populate config
-        # Storage stack is required for S3 operations; compute stack will be created on-demand
+        # Storage is independent of the registered managed execution site.
         try:
             # Try to get storage stack info
             storage_info = self.graphql_client.get_storage_stack_info()
@@ -494,12 +477,8 @@ class AWSSite(BaseSite):
 
         # A domain-config refresh replaces the dataclass instance, so reapply
         # the immutable named-profile selection before exposing it.
-        config.execution_backend = self.execution_profile.backend
-        config.compute_mode = self.execution_profile.compute_mode
-        config.slurm_partition = self.execution_profile.slurm_partition
-        config.slurm_nodes = self.execution_profile.slurm_nodes
-        config.slurm_ranks_per_node = self.execution_profile.slurm_ranks_per_node
-        config.slurm_wall_time = self.execution_profile.slurm_wall_time
+        config.execution_site_id = self.execution_profile.execution_site_id
+        config.execution_resources = dict(self.execution_profile.execution_resources)
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
 
@@ -685,10 +664,8 @@ class AWSSite(BaseSite):
     def provisioned(self) -> bool:
         """Check if the site is provisioned.
 
-        AWS provisions compute resources automatically on demand when jobs are
-        submitted. This property always returns True to maintain interface
-        compatibility with other sites (e.g. HPC sites that require explicit
-        provisioning before job submission).
+        The service owns the registered managed Slurm site; SDK callers do not
+        provision a cluster. Submission checks site availability on the server.
         """
         return True
 
@@ -703,32 +680,30 @@ class AWSSite(BaseSite):
             path: Optional local path to save results. If None, uses
                 job.project_path.
         """
+        job = self._result_job(job)
         if path is None:
             path = job.project_path
         else:
             path = Path(path)
 
-        project_name = Path(job.simulation.project_path).name
-        simulation_name = job.simulation.name
-        job_name = job.name
         vtk_paths: List[str] = []
         outputs = getattr(getattr(job, "outputs", None), "paraview", None) or []
         for output in outputs:
             output_path = getattr(output, "path", None)
             if output_path is None:
                 continue
-            normalized = PurePosixPath(str(output_path)).as_posix().strip("/")
+            normalized = self._output_relative_path(str(output_path))
             if normalized and normalized != "." and normalized not in vtk_paths:
                 vtk_paths.append(normalized)
         if not vtk_paths:
             vtk_paths.append("ParaView")
 
         for vtk_path in vtk_paths:
-            results_vtk_path = f"jobs/{simulation_name}/{job_name}/results/{vtk_path}"
-            s3_results_path = (
-                f"s3://{self.config.s3_bucket}/{project_name}/{results_vtk_path}"
+            relative = self._output_relative_path(vtk_path)
+            s3_results_path = f"{job._cloud_output_identity}{relative}"
+            local_results_path = (
+                path / job._result_path.relative_to(job.project_path) / relative
             )
-            local_results_path = path / results_vtk_path
 
             try:
                 logger.info("Fetching configured VTK outputs from AWS storage")
@@ -752,6 +727,8 @@ class AWSSite(BaseSite):
         suffix: Optional[Union[str, tuple[str, ...]]] = None,
     ) -> Path:
         """Fetch supported filesystem-backed AWS outputs used by discovery."""
+
+        job = self._result_job(job)
 
         paraview_kinds = {"vtk", "vtu", "vtr", "vtp", "vts", "xmf", "xdmf"}
         normalized_kind = str(kind).strip().lower() if kind is not None else None
@@ -904,8 +881,8 @@ class AWSSite(BaseSite):
                         # Wait for stack to be ready (pass stackId so we wait for the one we just created)
                         logger.debug("Waiting for storage stack to be ready...")
                         expected_stack_id = deploy_result.get("stackId")
-                        self.graphql_client.wait_for_stack_ready(
-                            "storage", expected_stack_id=expected_stack_id
+                        self.graphql_client.wait_for_storage_ready(
+                            expected_stack_id=expected_stack_id
                         )
 
                         # Get storage stack info to update bucket name
@@ -1015,15 +992,14 @@ class AWSSite(BaseSite):
     def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit a simulation job.
 
-        Uses platform-managed shared compute when advertised by the Cloud API,
-        while retaining legacy per-user compute-stack provisioning.
+        Uses the registered managed Slurm execution site.
 
         Submits through the authenticated GraphQL API.
 
         Args:
             job: The task to submit.
-            **kwargs: Additional job parameters (vcpu, memory, name,
-                description). Pass ``check=True`` to make ``wait()`` raise by
+            **kwargs: Run options, including name and status email preferences.
+                Pass ``check=True`` to make ``wait()`` raise by
                 default for failed runs, or ``validate=False`` to skip SDK
                 pre-run validation.
 
@@ -1031,29 +1007,25 @@ class AWSSite(BaseSite):
             Awaitable run handle.
 
         Raises:
-            RuntimeError: If job submission fails or stack creation fails.
+            RuntimeError: If job submission fails.
         """
-        forbidden_execution_overrides = sorted(
-            {
-                "execution",
-                "execution_backend",
-                "compute_mode",
-                "nodes",
-                "ranks_per_node",
-                "partition",
-                "wall_time",
-                "slurm_partition",
-                "slurm_nodes",
-                "slurm_ranks_per_node",
-                "slurm_wall_time",
-            }
-            & kwargs.keys()
-        )
-        if forbidden_execution_overrides:
+        unsupported = kwargs.keys() - {
+            "name",
+            "send_simulation_status_email",
+            "force",
+            "rerun",
+            "skip",
+            "skip_policy",
+            "check",
+            "validate",
+            "fetch",
+            "poll_interval",
+        }
+        if unsupported:
             raise ValueError(
-                "Managed Cloud execution and resources may only be selected "
-                "through a named site.toml profile: "
-                + ", ".join(forbidden_execution_overrides)
+                "Unsupported managed submission options: "
+                + ", ".join(sorted(unsupported))
+                + ". Select execution resources through a named site.toml profile."
             )
         fresh_run = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
         skip_policy = SkipPolicy.from_value(
@@ -1064,14 +1036,6 @@ class AWSSite(BaseSite):
         validate = kwargs.pop("validate", True)
         fetch = kwargs.pop("fetch", False)
         poll_interval = kwargs.pop("poll_interval", 10)
-        vcpu = kwargs.pop("vcpu", None)
-        memory = kwargs.pop("memory", None)
-        if self.execution_profile.backend == "slurm" and (
-            vcpu is not None or memory is not None
-        ):
-            raise ValueError(
-                "Managed Slurm profiles cannot use Batch vcpu or memory overrides"
-            )
         if self.graphql_client is None:
             raise RuntimeError(
                 "FrequenSolve Cloud requires Cognito authentication and the "
@@ -1081,7 +1045,10 @@ class AWSSite(BaseSite):
         if not fresh_run and job.is_run_current():
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
-            handle = RunHandle.skipped(self, job)
+            result_job = (
+                self._snapshot_run_job(job, job._job_id) if job._job_id else job
+            )
+            handle = RunHandle.skipped(self, result_job)
             if fetch:
                 handle._pending_fetch_fn = lambda run: self.fetch_outputs(run.job)
             return handle
@@ -1091,49 +1058,6 @@ class AWSSite(BaseSite):
         project = job.project_path.name
         if getattr(job.simulation, "_project", None) is None:
             self._sync_loaded_job_inputs(job, project)
-
-        # Current Cloud deployments use platform-managed shared compute. Older
-        # deployments require a per-user compute stack. Discover the contract
-        # before invoking any deployment mutation so a removed legacy field is
-        # never called speculatively.
-        if self.graphql_client is not None:
-            try:
-                compute_mode = self.graphql_client.get_compute_provisioning_mode()
-            except Exception as capability_error:
-                raise RuntimeError(
-                    "Failed to determine whether this FrequenSolve Cloud "
-                    "environment uses shared or per-user compute. No compute "
-                    "infrastructure was changed. Update FrequenSolve or contact "
-                    f"the Cloud environment owner. Details: {capability_error}"
-                ) from capability_error
-
-            if (
-                compute_mode == "per-user"
-                and not self.graphql_client._check_compute_stack_exists()
-            ):
-                # Compute stack doesn't exist, create it
-                self._emit(
-                    "AWS compute stack not found; creating compute infrastructure."
-                )
-                try:
-                    # Deploy compute stack - backend will automatically fetch and use user's compute settings
-                    # (userId extracted automatically from auth context)
-                    deploy_result = self.graphql_client.deploy_compute_stack()
-
-                    # Wait for stack to be ready, passing the stackId from deployment for accurate matching
-                    self._emit("Waiting for AWS compute stack to be ready")
-                    expected_stack_id = deploy_result.get("stackId")
-                    stack_info = self.graphql_client.wait_for_stack_ready(
-                        "compute", expected_stack_id=expected_stack_id
-                    )
-
-                    self._emit(
-                        f"AWS compute stack ready: {stack_info.get('stackId', 'unknown')}"
-                    )
-                except Exception as create_error:
-                    raise RuntimeError(
-                        f"Failed to create compute stack: {create_error}"
-                    ) from create_error
 
         try:
             # Sync job file to S3
@@ -1150,10 +1074,10 @@ class AWSSite(BaseSite):
                 authored_project_display_name,
             ) = self._authored_project_metadata(job)
 
+            # Freeze and validate the result layout before admitting remote work.
+            run_job = self._prepare_run_snapshot(job)
             result = self.graphql_client.submit_job(
                 job_file_s3_key=str(s3_job_key),
-                vcpu=vcpu,
-                memory=memory,
                 job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
                 project_name=authored_project_name,
                 project_display_name=authored_project_display_name,
@@ -1171,7 +1095,7 @@ class AWSSite(BaseSite):
 
             job._job_id = simulation_id
             return self._make_run_handle(
-                job,
+                self._bind_run_snapshot(run_job, simulation_id),
                 simulation_id,
                 poll_interval=poll_interval,
                 fetch=fetch,
@@ -1179,33 +1103,16 @@ class AWSSite(BaseSite):
                 backend={
                     key: value
                     for key, value in {
-                        "executionBackend": result.get(
-                            "executionBackend", self.execution_profile.backend
-                        ),
-                        "executionSiteId": result.get("executionSiteId")
-                        or self.execution_profile.execution_site_id
-                        or (
-                            "managed-slurm"
-                            if self.execution_profile.backend == "slurm"
-                            else "managed-batch"
-                        ),
+                        "executionSiteId": self.execution_profile.execution_site_id,
                         "logicalAttemptId": result.get("logicalAttemptId")
                         or f"{simulation_id}:1",
-                        "providerJobId": result.get("providerJobId")
-                        or result.get("providerAttemptId")
-                        or result.get("batchJobId"),
+                        "providerJobId": result.get("providerJobId"),
                         "executionState": normalize_execution_state(
                             result.get("executionState") or result.get("status")
                         ),
                         "requestedResources": self.execution_profile.graphql_arguments().get(
                             "execution_resources"
                         ),
-                        "executionTarget": result.get("executionTarget"),
-                        "slurmPartition": result.get("slurmPartition"),
-                        "slurmNodes": result.get("slurmNodes"),
-                        "slurmRanksPerNode": result.get("slurmRanksPerNode"),
-                        "slurmWallTimeSeconds": result.get("slurmWallTimeSeconds"),
-                        "providerAttemptId": result.get("providerAttemptId"),
                     }.items()
                     if value is not None
                 },
@@ -1223,6 +1130,7 @@ class AWSSite(BaseSite):
         check: bool = False,
         backend: Optional[Dict[str, Any]] = None,
     ) -> RunHandle:
+        job = self._snapshot_run_job(job, str(job_id))
         return RunHandle(
             site=self,
             job=job,
@@ -1230,7 +1138,11 @@ class AWSSite(BaseSite):
             mode="aws",
             poll_interval=poll_interval,
             check=check,
-            backend=backend or {"executionBackend": "batch"},
+            backend=backend
+            or {"executionSiteId": "managed-slurm", "logicalAttemptId": f"{job_id}:1"},
+            _logs_fn=lambda run, **options: self.fetch_logs(
+                run.job, simulation_id=str(run.id), **options
+            ),
             _status_fn=self._poll_run,
             _cancel_fn=lambda run: self.cancel_job(str(run.id)),
             _pending_fetch_fn=(
@@ -1238,43 +1150,115 @@ class AWSSite(BaseSite):
             ),
         )
 
+    @staticmethod
+    def _output_relative_path(value: Union[str, Path]) -> str:
+        text = str(value)
+        path = PurePosixPath(text)
+        if (
+            path.is_absolute()
+            or "\\" in text
+            or any(part in {"", ".", ".."} for part in text.split("/"))
+        ):
+            raise ValueError("Cloud output paths must remain inside the run results")
+        return path.as_posix()
+
+    @staticmethod
+    def _prepare_run_snapshot(job: _JobT) -> _JobT:
+        """Freeze result interpretation and validate paths before remote submission."""
+        if getattr(job, "_cloud_result_run_id", None) is not None:
+            raise ValueError("Use the authored job to submit another Cloud run")
+        authored = Path(job._result_path).resolve()
+        authored.relative_to(Path(job.project_path).resolve())
+        if isinstance(job, ImagingJob):
+            try:
+                Path(job.save_path).resolve().relative_to(authored)
+            except ValueError as exc:
+                raise ValueError(
+                    "Cloud imaging output path must be inside the job result directory"
+                ) from exc
+        result = copy(job)
+        # Project ownership is navigation, not result interpretation. Avoid
+        # copying every simulation in the project through this back-reference.
+        project = getattr(job.simulation, "_project", None)
+        memo = {id(project): project} if project is not None else {}
+        result.simulation = deepcopy(job.simulation, memo)
+        result.outputs = deepcopy(job.outputs)
+        result.f_list = list(job.f_list)
+        result.k_list = deepcopy(getattr(job, "k_list", None))
+        result.k_weights = deepcopy(getattr(job, "k_weights", None))
+        return result
+
+    @staticmethod
+    def _bind_run_snapshot(result: _JobT, simulation_id: str) -> _JobT:
+        """Bind a private, prepared snapshot to the accepted run's output directory."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,199}", simulation_id):
+            raise ValueError(
+                "Cloud results require a valid simulation id from submission"
+            )
+        authored = Path(result._result_path).resolve()
+        result._result_path_override = authored / "runs" / simulation_id
+        result._job_id = simulation_id
+        result._cloud_result_run_id = simulation_id
+        if isinstance(result, ImagingJob):
+            relative = Path(result.save_path).resolve().relative_to(authored)
+            result.save_path = result._result_path / relative
+        return result
+
+    @classmethod
+    def _snapshot_run_job(cls, job: _JobT, simulation_id: str) -> _JobT:
+        """Capture the submitted job's result layout without mutating its authoring state."""
+        if getattr(job, "_cloud_result_run_id", None) == simulation_id:
+            return job
+        return cls._bind_run_snapshot(cls._prepare_run_snapshot(job), simulation_id)
+
+    def _result_job(self, job: _JobT) -> _JobT:
+        """Resolve an owned run's frozen S3 location before downloading any artifacts."""
+        simulation_id = getattr(job, "_job_id", None)
+        if not isinstance(simulation_id, str):
+            raise ValueError(
+                "Cloud results require a valid simulation id from submission"
+            )
+        result = self._snapshot_run_job(job, simulation_id)
+        if getattr(result, "_cloud_output_identity", None) is not None:
+            return result
+        if self.graphql_client is None:
+            raise RuntimeError("Authenticated GraphQL client is unavailable")
+        details = self.graphql_client.get_simulation_status_details(simulation_id)
+        project = Path(result.project_path).resolve()
+        prefix = (
+            f"{project.name}/{result._result_path.relative_to(project).as_posix()}/"
+        )
+        expected = f"s3://{self.config.s3_bucket}/{prefix}"
+        if (
+            details.get("id") != simulation_id
+            or details.get("outputIdentity") != expected
+        ):
+            raise RuntimeError("Cloud result location does not match the requested run")
+        result._cloud_output_identity = expected
+        return result
+
     def _poll_run(self, run: RunHandle) -> JobStatus:
         if self.graphql_client is None:
             raise RuntimeError("Authenticated GraphQL client is unavailable")
-        details_getter = getattr(
-            self.graphql_client, "get_simulation_status_details", None
-        )
-        if callable(details_getter):
-            status_details = details_getter(str(run.id))
-            for key in (
-                "requestedResources",
-                "allocatedResources",
-                "executionSiteId",
-                "logicalAttemptId",
-                "providerJobId",
-                "executionState",
-                "failureReason",
-                "creditSettlementMode",
-                "creditSettlementStatus",
-                "creditSettlementOperationId",
-                "creditSettlementAmount",
-                "executionBackend",
-                "executionTarget",
-                "slurmPartition",
-                "slurmNodes",
-                "slurmRanksPerNode",
-                "slurmWallTimeSeconds",
-                "providerAttemptId",
-            ):
-                if status_details.get(key) is not None:
-                    run.backend[key] = status_details[key]
-            raw_status = status_details["status"]
-            raw = {**status_details, "source": "graphql"}
-            message = str(status_details.get("failureMessage") or "")
-        else:
-            raw_status = self.graphql_client.get_simulation_status(str(run.id))
-            raw = {"status": raw_status, "source": "graphql"}
-            message = ""
+        status_details = self.graphql_client.get_simulation_status_details(str(run.id))
+        for key in (
+            "requestedResources",
+            "allocatedResources",
+            "executionSiteId",
+            "logicalAttemptId",
+            "providerJobId",
+            "executionState",
+            "failureReason",
+            "creditSettlementMode",
+            "creditSettlementStatus",
+            "creditSettlementOperationId",
+            "creditSettlementAmount",
+        ):
+            if status_details.get(key) is not None:
+                run.backend[key] = status_details[key]
+        raw_status = status_details["status"]
+        raw = {**status_details, "source": "graphql"}
+        message = str(status_details.get("failureMessage") or "")
         state = {
             "PENDING": "pending",
             "SUBMITTED": "pending",
@@ -1304,17 +1288,16 @@ class AWSSite(BaseSite):
         path: Optional[Union[str, Path]] = None,
         upscale: int = 1,
     ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
-        """Get results from Stampede3.
+        """Download the selected Cloud run's receiver traces.
 
         Args:
             job: A BaseJob object.
             path: The path to save the results to.
         """
 
-        if isinstance(job, BaseJob):
-            jobs = [job]
-        else:
-            jobs = job
+        jobs = [
+            self._result_job(item) for item in (job if isinstance(job, list) else [job])
+        ]
 
         if path is None:
             path = jobs[0].project_path
@@ -1325,21 +1308,13 @@ class AWSSite(BaseSite):
 
         for job in jobs:
             try:
-                # Build the path for the s3 results directory and the local results directory.
-                # The job results are stored in the job's result_path, not the simulation path
-                # Format: ex_01/jobs/simulation_name/job_name/results/traces/
-                project_name = job.project_path.name  # e.g., "ex_01"
-                simulation_name = job.simulation.name  # e.g., "simple_acoustic"
-                job_name = job.name  # e.g., "time"
-                trace_dir_name = Path(job.trace_outputs.path).name
-
-                results_traces_path = (
-                    f"jobs/{simulation_name}/{job_name}/results/{trace_dir_name}"
+                relative = self._output_relative_path(
+                    Path(job.trace_outputs.path).relative_to(job._result_path)
                 )
-                s3_results_path = (
-                    f"s3://{self.config.s3_bucket}/{project_name}/{results_traces_path}"
+                s3_results_path = f"{job._cloud_output_identity}{relative}"
+                local_results_path = (
+                    path / job._result_path.relative_to(job.project_path) / relative
                 )
-                local_results_path = path / results_traces_path
                 self.get(s3_results_path, local_results_path)
                 self._emit(f"Fetched AWS traces from {s3_results_path}")
 
@@ -1374,10 +1349,9 @@ class AWSSite(BaseSite):
             Wavefield dataset for one job, or a mapping keyed by job name.
         """
 
-        if isinstance(job, BaseJob):
-            jobs = [job]
-        else:
-            jobs = job
+        jobs = [
+            self._result_job(item) for item in (job if isinstance(job, list) else [job])
+        ]
 
         if path is None:
             path = jobs[0].project_path
@@ -1392,19 +1366,13 @@ class AWSSite(BaseSite):
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")
 
-                project_name = item.project_path.name
-                simulation_name = item.simulation.name
-                job_name = item.name
-                wavefield_dir_name = Path(wavefield_outputs.path).name
-
-                results_wavefields_path = (
-                    f"jobs/{simulation_name}/{job_name}/results/{wavefield_dir_name}"
+                relative = self._output_relative_path(
+                    Path(wavefield_outputs.path).relative_to(item._result_path)
                 )
-                s3_results_path = (
-                    f"s3://{self.config.s3_bucket}/{project_name}/"
-                    f"{results_wavefields_path}"
+                s3_results_path = f"{item._cloud_output_identity}{relative}"
+                local_results_path = (
+                    path / item._result_path.relative_to(item.project_path) / relative
                 )
-                local_results_path = path / results_wavefields_path
                 self.get(s3_results_path, local_results_path)
                 self._emit(f"Fetched AWS wavefields from {s3_results_path}")
 
@@ -1424,13 +1392,8 @@ class AWSSite(BaseSite):
     def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
         """Fetch ``_fs_run`` metadata and aggregate task manifests locally."""
 
-        project_name = Path(job.project_path).name
-        simulation_name = job.simulation.name
-        job_name = job.name
-        results_run_path = f"jobs/{simulation_name}/{job_name}/results/_fs_run"
-        s3_results_path = (
-            f"s3://{self.config.s3_bucket}/{project_name}/{results_run_path}"
-        )
+        job = self._result_job(job)
+        s3_results_path = f"{job._cloud_output_identity}_fs_run"
         local_run_path = job._result_path / "_fs_run"
         self.get(s3_results_path, local_run_path)
         self._emit(f"Fetched AWS run metadata from {s3_results_path}")
@@ -1442,18 +1405,20 @@ class AWSSite(BaseSite):
         if not isinstance(job, ImagingJob):
             raise TypeError("fetch_image expects an ImagingJob")
 
-        project_path = Path(job.project_path).resolve()
+        job = self._result_job(job)
         local_image_file = Path(job.image_file()).resolve()
         try:
-            relative_image_file = local_image_file.relative_to(project_path)
+            relative_image_file = local_image_file.relative_to(job._result_path)
         except ValueError as exc:
             raise ValueError(
-                f"Imaging output path {local_image_file} is outside project "
-                f"root {project_path}"
+                "Imaging output path is outside the run result directory"
             ) from exc
 
         bucket = self.config.s3_bucket
-        key = f"{project_path.name}/{relative_image_file.as_posix()}"
+        key = (
+            job._cloud_output_identity.removeprefix(f"s3://{bucket}/")
+            + relative_image_file.as_posix()
+        )
         local_image_file.parent.mkdir(parents=True, exist_ok=True)
 
         refreshed_credentials = False
@@ -1492,6 +1457,7 @@ class AWSSite(BaseSite):
             outputs are downloaded as side effects.
         """
 
+        job = self._result_job(job)
         self.fetch_run_metadata(job)
         traces = self.fetch_traces(job)
         wavefields = None
@@ -1513,128 +1479,92 @@ class AWSSite(BaseSite):
         task: Optional[int] = None,
         frequency: Optional[Union[float, complex]] = None,
         show: bool = False,
+        simulation_id: Optional[str] = None,
     ) -> Union[Path, Dict[str, Path]]:
-        """Fetch AWS task logs and optionally return one task log file.
+        """Download authenticated Slurm logs for one simulation per job.
 
-        ``task`` is one-based. ``frequency`` selects the matching frequency in
-        ``job.f_list``. Without either selector, the local log directory is
-        returned.
-
-        Args:
-            job: Single job or list of jobs.
-            local_dir: Optional local destination for downloaded logs.
-            task: Optional one-based task number to select.
-            frequency: Optional frequency used to select a task log.
-            show: Whether to print the selected log contents.
-
-        Returns:
-            Log path for one job, or a mapping keyed by job name.
+        Task numbers are one-based. By default use the job's latest submission;
+        run handles bind ``simulation_id`` to their own submission. Logs are
+        staged before updating the local cache, with separate directories for
+        each simulation so reruns cannot reuse an earlier run's cached logs.
         """
-
+        if task is not None and frequency is not None:
+            raise ValueError("Pass either `task` or `frequency`, not both")
+        if task is not None and (
+            isinstance(task, bool) or not isinstance(task, int) or task < 1
+        ):
+            raise ValueError("Log task numbers must be positive integers")
         jobs, single = self._as_jobs(job)
+        if simulation_id is not None and not single:
+            raise ValueError("An explicit simulation id requires a single job")
         requested_local_dir = Path(local_dir) if local_dir is not None else None
         result: Dict[str, Path] = {}
-
         for item in jobs:
-            project_name = item.project_path.name
-            remote_logs_path = (
-                f"s3://{self.config.s3_bucket}/"
-                f"{project_name}/jobs/{item.simulation.name}/{item.name}/logs"
+            run_id = (
+                simulation_id
+                if simulation_id is not None
+                else getattr(item, "_job_id", None)
+            )
+            if not isinstance(run_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,199}", run_id
+            ):
+                raise ValueError(
+                    "Cloud logs require a valid simulation id from submission"
+                )
+            selected_task = (
+                self._frequency_task(item, frequency) if frequency is not None else task
+            )
+            remote = (
+                f"s3://{self.config.s3_bucket}/{item.project_path.name}/jobs/"
+                f"{item.simulation.name}/{item.name}/logs/{run_id}/"
             )
             if requested_local_dir is None:
-                log_dir = item._stdout_path
+                log_dir = Path(item._stdout_path) / run_id
             elif single:
                 log_dir = requested_local_dir
             else:
-                log_dir = requested_local_dir / item.name
-
-            try:
-                self.get(remote_logs_path, log_dir)
-            except FileNotFoundError:
-                self._fetch_cloudwatch_logs(
-                    item,
-                    log_dir,
-                    task=(
-                        self._frequency_task(item, frequency)
-                        if frequency is not None
-                        else task
-                    ),
-                )
-            selected = self._select_log_path(
-                item,
-                log_dir,
-                task=task,
-                frequency=frequency,
+                log_dir = requested_local_dir / item.name / run_id
+            # Staging beside the destination keeps file replacement on one filesystem.
+            log_dir.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                prefix=".slurm-logs-", dir=log_dir.parent
+            ) as folder:
+                staged = Path(folder)
+                if selected_task is None:
+                    self.get(remote, staged)
+                else:
+                    name = f"task_{selected_task}.log"
+                    self.get(remote + name, staged / name)
+                files = [
+                    path
+                    for path in staged.iterdir()
+                    if path.is_file()
+                    and re.fullmatch(r"task_[1-9][0-9]*\.log", path.name)
+                ]
+                if not files:
+                    raise FileNotFoundError(
+                        "Slurm logs are not available for this simulation yet"
+                    )
+                log_dir.mkdir(parents=True, exist_ok=True)
+                names = {path.name for path in files}
+                for path in files:
+                    path.replace(log_dir / path.name)
+                if selected_task is None:
+                    for stale in log_dir.glob("task_*.log"):
+                        if stale.name not in names:
+                            stale.unlink()
+            selected = (
+                log_dir / f"task_{selected_task}.log"
+                if selected_task is not None
+                else log_dir
             )
             if show:
                 self._show_logs(selected, job_name=item.name)
             result[item.name] = selected
-
-        if single:
-            return result[jobs[0].name]
-        return result
-
-    def _fetch_cloudwatch_logs(
-        self,
-        job: BaseJob,
-        log_dir: Path,
-        *,
-        task: Optional[int],
-    ) -> None:
-        """Materialize Cloud task logs when the runtime has no S3 log prefix."""
-
-        simulation_id = getattr(job, "_job_id", None)
-        if self.graphql_client is None or not simulation_id:
-            raise FileNotFoundError(
-                "Cloud task logs are unavailable from storage or the Cloud API"
-            )
-        rows = self.graphql_client.list_simulation_frequency_jobs(str(simulation_id))
-        indexed: dict[int, str] = {}
-        for row in rows:
-            frequency_index = row.get("frequencyIndex")
-            batch_job_id = row.get("batchJobId")
-            if not isinstance(frequency_index, int) or not isinstance(
-                batch_job_id, str
-            ):
-                continue
-            task_number = frequency_index + 1
-            if task_number in indexed:
-                raise RuntimeError(
-                    f"Cloud returned duplicate logs for task {task_number}"
-                )
-            indexed[task_number] = batch_job_id
-
-        requested_tasks = [task] if task is not None else sorted(indexed)
-        if not requested_tasks or any(
-            number not in indexed for number in requested_tasks
-        ):
-            raise FileNotFoundError("Cloud returned no Batch task logs for this run")
-
-        log_dir.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            dir=log_dir.parent,
-            prefix=f".{log_dir.name}-",
-        ) as staging_dir:
-            staged = Path(staging_dir)
-            for task_number in requested_tasks:
-                events = self.graphql_client.get_job_logs(indexed[task_number])
-                (staged / f"task_{task_number}.log").write_text(
-                    "".join(event["message"].rstrip("\n") + "\n" for event in events),
-                    encoding="utf-8",
-                )
-
-            log_dir.mkdir(parents=True, exist_ok=True)
-            staged_names = {path.name for path in staged.iterdir()}
-            for path in staged.iterdir():
-                path.replace(log_dir / path.name)
-            if task is None:
-                for pattern in ("task_*.log", "task_*.txt", "task_*.out"):
-                    for stale in log_dir.glob(pattern):
-                        if stale.name not in staged_names:
-                            stale.unlink()
+        return result[jobs[0].name] if single else result
 
     def test_api_connectivity(self) -> bool:
-        """Verify the authenticated GraphQL submission contract is reachable.
+        """Verify the authenticated GraphQL API is reachable.
 
         Returns:
             True if API is accessible, False otherwise.
@@ -1642,41 +1572,15 @@ class AWSSite(BaseSite):
         if self.graphql_client is None:
             return False
         try:
-            return self.graphql_client.get_compute_provisioning_mode() in {
-                "shared",
-                "per-user",
-            }
+            return (
+                self.graphql_client.execute(
+                    "query CloudConnectivity { __typename }"
+                ).get("__typename")
+                == "Query"
+            )
         except Exception as exc:
             logger.warning("GraphQL connectivity probe failed: %s", exc)
             return False
-
-    def get_job_status_from_api(self, job_id: str) -> Dict[str, Any]:
-        """Return cloud job status through the authenticated GraphQL client.
-
-        This compatibility method preserves the former public entry point while
-        the cloud transport moves from REST to GraphQL.
-        """
-
-        warnings.warn(
-            "AWSSite.get_job_status_from_api() is deprecated; use RunHandle status APIs",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if self.graphql_client is None:
-            return {}
-        try:
-            details_getter = getattr(
-                self.graphql_client, "get_simulation_status_details", None
-            )
-            if callable(details_getter):
-                return dict(details_getter(job_id))
-            return {"status": self.graphql_client.get_simulation_status(job_id)}
-        except Exception as exc:
-            logger.warning(
-                "GraphQL status lookup failed (%s)",
-                type(exc).__name__,
-            )
-            return {}
 
     def cancel_job(self, job_id: str) -> None:
         """Cancel a running simulation.
