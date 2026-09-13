@@ -82,7 +82,7 @@
   "operations": [
     {
       "name": "getCloudReadiness",
-      "description": "Return the signed-in user's seat, subscription, and coarse storage and compute readiness.",
+      "description": "Return the signed-in user's seat, subscription, and storage readiness and configured managed Slurm admission availability. This does not probe scheduler health or guarantee admission.",
       "classification": "read-only",
       "source": {
         "kind": "fixed-graphql-query",
@@ -131,7 +131,7 @@
               },
               "compute": {
                 "type": "string",
-                "enum": ["READY", "MISSING", "IN_PROGRESS", "FAILED", "UNKNOWN"]
+                "enum": ["READY", "UNAVAILABLE"]
               }
             },
             "required": ["storage", "compute"],
