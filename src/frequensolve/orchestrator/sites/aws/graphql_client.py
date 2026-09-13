@@ -58,6 +58,14 @@ def _redact_provider_message(message: object, secrets: set[str]) -> str:
     return safe[:500]
 
 
+class CloudTransportError(RuntimeError):
+    """The Cloud request could not obtain a response."""
+
+
+class CloudAPIError(RuntimeError):
+    """Cloud rejected the request at the HTTP, GraphQL, or resolver level."""
+
+
 class GraphQLClient:
     """GraphQL client for FrequenSol Cloud API.
 
@@ -175,9 +183,13 @@ class GraphQLClient:
             )
             response.raise_for_status()
         except requests.exceptions.Timeout:
-            raise RuntimeError("Cloud API request timed out after 30 seconds") from None
+            raise CloudTransportError(
+                "Cloud API request timed out after 30 seconds"
+            ) from None
+        except requests.exceptions.HTTPError:
+            raise CloudAPIError("Cloud API rejected the HTTP request") from None
         except requests.exceptions.RequestException as exc:
-            raise RuntimeError(
+            raise CloudTransportError(
                 f"Cloud API request failed ({type(exc).__name__})"
             ) from None
 
@@ -210,7 +222,7 @@ class GraphQLClient:
                 )
                 for err in errors[:10]
             ]
-            raise RuntimeError(f"GraphQL errors: {'; '.join(error_messages)}")
+            raise CloudAPIError(f"GraphQL errors: {'; '.join(error_messages)}")
 
         data = result.get("data")
         if not isinstance(data, Mapping):
@@ -804,13 +816,24 @@ class GraphQLClient:
         """
         try:
             result = self.execute(query, {"simulationId": simulation_id})
+        except CloudTransportError:
+            raise CloudTransportError(
+                "Cloud cancellation request failed; check connectivity and refresh "
+                "the simulation status before retrying"
+            ) from None
+        except CloudAPIError:
+            raise CloudAPIError(
+                "Cloud rejected cancellation; check API compatibility, access, "
+                "and the simulation status"
+            ) from None
         except RuntimeError:
             raise RuntimeError(
-                "Cloud cancellation request failed; check connectivity and retry"
+                "Cloud cancellation request failed; refresh the simulation status "
+                "and check the Cloud configuration"
             ) from None
         response = result.get("cancelSimulation") if isinstance(result, dict) else None
         if not isinstance(response, dict) or response.get("success") is not True:
-            raise RuntimeError(
+            raise CloudAPIError(
                 "Cloud did not accept cancellation; refresh the simulation status "
                 "and retry once an execution attempt is assigned"
             )

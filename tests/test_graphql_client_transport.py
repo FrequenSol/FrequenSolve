@@ -176,7 +176,7 @@ def test_execute_maps_http_failure_without_provider_body(monkeypatch):
     )
 
     with pytest.raises(
-        RuntimeError, match=r"Cloud API request failed \(HTTPError\)"
+        graphql_client.CloudAPIError, match="Cloud API rejected the HTTP request"
     ) as exc_info:
         _client().execute("query { value }")
 
