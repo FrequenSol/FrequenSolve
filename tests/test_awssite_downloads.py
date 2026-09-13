@@ -821,3 +821,55 @@ def test_snapshot_copies_real_simulation_without_copying_its_project(tmp_path):
     assert snapshot.simulation.mesh is not job.simulation.mesh
     assert snapshot.simulation._project is project
     assert snapshot.simulation.extra["geometry"]["origin"] == [1.0, 2.0, 3.0]
+
+
+def test_real_imaging_run_preserves_grid_and_fwi_metadata(tmp_path):
+    import h5py
+    import numpy as np
+
+    from frequensolve.geometry.grids import CartesianGrid
+    from frequensolve.simulation.jobs.fwi import build_imaging_job
+    from frequensolve.simulation.simulation import SeismicSimulation
+
+    simulation = SeismicSimulation(
+        name="model", physics="elastic", dimension=2, project_path=tmp_path
+    )
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[2.0, 1.0])
+    job = build_imaging_job(
+        simulation,
+        frequencies=[5.0],
+        grid=grid,
+        parameters=["Vp"],
+        weights=[1.0],
+        regularization={"type": "TV", "schedule": [0.1]},
+        interpretation={"units": ["m/s"]},
+    )
+    site = make_site(FakeS3Client({}))
+    first = site._make_run_handle(job, "simulation-1")
+    first_result = first._make_result(JobStatus(state="completed", return_code=0))
+    first_image = first.job.image_file()
+    first_image.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(first_image, "w") as image:
+        image.create_dataset("vp", data=np.arange(6).reshape(2, 3))
+
+    job.grid.n[0] = 4
+    job.grid.x1[0] = 3.0
+    job.weights[0] = 2.0
+    job.regularization["schedule"][0] = 0.9
+    job.kwargs["interpretation"]["units"][0] = "km/s"
+    job.images.clear()
+    second = site._make_run_handle(job, "simulation-2")
+
+    for run in (first, first_result):
+        assert run.job.grid.shape == (2, 3)
+        assert run.job.grid.x1 == [2.0, 1.0]
+        assert run.job.weights == [1.0]
+        assert run.job.regularization["schedule"] == [0.1]
+        assert run.job.kwargs["interpretation"]["units"] == ["m/s"]
+        assert run.job.images
+        assert run.job.load_images().shape == (2, 3)
+    assert second.job.grid.shape == (2, 4)
+    assert second.job.regularization["schedule"] == [0.9]
+    assert second.job.images == {}
+    assert first.job.grid is not second.job.grid
+    assert job.save_path == job._result_path / "imaging"

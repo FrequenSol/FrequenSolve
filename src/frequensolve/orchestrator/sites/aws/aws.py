@@ -7,7 +7,7 @@ import re
 import subprocess
 import tempfile
 import uuid
-from copy import copy, deepcopy
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, TypeVar, Union
@@ -1176,17 +1176,14 @@ class AWSSite(BaseSite):
                 raise ValueError(
                     "Cloud imaging output path must be inside the job result directory"
                 ) from exc
-        result = copy(job)
         # Project ownership is navigation, not result interpretation. Avoid
         # copying every simulation in the project through this back-reference.
         project = getattr(job.simulation, "_project", None)
         memo = {id(project): project} if project is not None else {}
-        result.simulation = deepcopy(job.simulation, memo)
-        result.outputs = deepcopy(job.outputs)
-        result.f_list = list(job.f_list)
-        result.k_list = deepcopy(getattr(job, "k_list", None))
-        result.k_weights = deepcopy(getattr(job, "k_weights", None))
-        return result
+        # Subclasses carry result metadata too (for example imaging grids,
+        # weights and regularization). Copy the complete job graph with one
+        # memo so later authoring edits cannot alter an earlier run's reader.
+        return deepcopy(job, memo)
 
     @staticmethod
     def _bind_run_snapshot(result: _JobT, simulation_id: str) -> _JobT:
