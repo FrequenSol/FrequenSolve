@@ -7,6 +7,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import (
     Any,
@@ -637,18 +638,17 @@ class RunResult:
                 local_logs.is_dir() and next(local_logs.iterdir(), None) is not None
             ):
                 return self.logs_path
-        if self._logs_fn is not None or self.site is not None:
-            fetched = (
-                self._logs_fn(**kwargs)
-                if self._logs_fn is not None
-                else self.site.fetch_logs(self.job, **kwargs)
-            )
-            if not kwargs and isinstance(fetched, (str, Path)):
-                self.logs_path = Path(fetched)
-            return fetched
-        if hasattr(self.job, "_stdout_path"):
+        if self._logs_fn is not None:
+            fetched = self._logs_fn(**kwargs)
+        elif self.site is not None:
+            fetched = self.site.fetch_logs(self.job, **kwargs)
+        elif hasattr(self.job, "_stdout_path"):
             return self.job._stdout_path
-        return None
+        else:
+            return None
+        if not kwargs and isinstance(fetched, (str, Path)):
+            self.logs_path = Path(fetched)
+        return fetched
 
 
 class RunFailedError(RuntimeError):
@@ -770,9 +770,7 @@ class RunHandle:
             run_metadata=getattr(self.job, "run_metadata", None),
             execution=ExecutionDetails.from_mapping(self.backend),
             _logs_fn=(
-                (lambda **options: self._logs_fn(self, **options))
-                if self._logs_fn is not None
-                else None
+                partial(self._logs_fn, self) if self._logs_fn is not None else None
             ),
         )
 

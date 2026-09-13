@@ -10,7 +10,7 @@ import uuid
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, TypeVar, Union
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.orchestrator.sites.aws.cache_paths import (
@@ -42,6 +42,8 @@ from frequensolve.simulation.jobs import BaseJob, ImagingJob, SkipPolicy
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
+
+_JobT = TypeVar("_JobT", bound=BaseJob)
 
 # Initialize the logger
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/aws.log")
@@ -1159,7 +1161,7 @@ class AWSSite(BaseSite):
         return path.as_posix()
 
     @staticmethod
-    def _snapshot_run_job(job: BaseJob, simulation_id: str) -> BaseJob:
+    def _snapshot_run_job(job: _JobT, simulation_id: str) -> _JobT:
         """Capture the submitted job's result layout without mutating its authoring state."""
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,199}", simulation_id):
             raise ValueError(
@@ -1180,12 +1182,12 @@ class AWSSite(BaseSite):
         result._result_path_override = authored / "runs" / simulation_id
         result._job_id = simulation_id
         result._cloud_result_run_id = simulation_id
-        if isinstance(job, ImagingJob):
-            relative = Path(job.save_path).resolve().relative_to(authored)
+        if isinstance(result, ImagingJob):
+            relative = Path(result.save_path).resolve().relative_to(authored)
             result.save_path = result._result_path / relative
         return result
 
-    def _result_job(self, job: BaseJob) -> BaseJob:
+    def _result_job(self, job: _JobT) -> _JobT:
         """Resolve an owned run's frozen S3 location before downloading any artifacts."""
         simulation_id = getattr(job, "_job_id", None)
         if not isinstance(simulation_id, str):
