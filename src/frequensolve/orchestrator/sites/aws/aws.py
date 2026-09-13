@@ -1074,6 +1074,8 @@ class AWSSite(BaseSite):
                 authored_project_display_name,
             ) = self._authored_project_metadata(job)
 
+            # Freeze and validate the result layout before admitting remote work.
+            run_job = self._prepare_run_snapshot(job)
             result = self.graphql_client.submit_job(
                 job_file_s3_key=str(s3_job_key),
                 job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
@@ -1093,7 +1095,7 @@ class AWSSite(BaseSite):
 
             job._job_id = simulation_id
             return self._make_run_handle(
-                job,
+                self._bind_run_snapshot(run_job, simulation_id),
                 simulation_id,
                 poll_interval=poll_interval,
                 fetch=fetch,
@@ -1161,24 +1163,39 @@ class AWSSite(BaseSite):
         return path.as_posix()
 
     @staticmethod
-    def _snapshot_run_job(job: _JobT, simulation_id: str) -> _JobT:
-        """Capture the submitted job's result layout without mutating its authoring state."""
+    def _prepare_run_snapshot(job: _JobT) -> _JobT:
+        """Freeze result interpretation and validate paths before remote submission."""
+        if getattr(job, "_cloud_result_run_id", None) is not None:
+            raise ValueError("Use the authored job to submit another Cloud run")
+        authored = Path(job._result_path).resolve()
+        authored.relative_to(Path(job.project_path).resolve())
+        if isinstance(job, ImagingJob):
+            try:
+                Path(job.save_path).resolve().relative_to(authored)
+            except ValueError as exc:
+                raise ValueError(
+                    "Cloud imaging output path must be inside the job result directory"
+                ) from exc
+        result = copy(job)
+        # Project ownership is navigation, not result interpretation. Avoid
+        # copying every simulation in the project through this back-reference.
+        project = getattr(job.simulation, "_project", None)
+        memo = {id(project): project} if project is not None else {}
+        result.simulation = deepcopy(job.simulation, memo)
+        result.outputs = deepcopy(job.outputs)
+        result.f_list = list(job.f_list)
+        result.k_list = deepcopy(getattr(job, "k_list", None))
+        result.k_weights = deepcopy(getattr(job, "k_weights", None))
+        return result
+
+    @staticmethod
+    def _bind_run_snapshot(result: _JobT, simulation_id: str) -> _JobT:
+        """Bind a private, prepared snapshot to the accepted run's output directory."""
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,199}", simulation_id):
             raise ValueError(
                 "Cloud results require a valid simulation id from submission"
             )
-        if getattr(job, "_cloud_result_run_id", None) == simulation_id:
-            return job
-        if getattr(job, "_cloud_result_run_id", None) is not None:
-            raise ValueError(
-                "Use the authored job to submit or select another Cloud run"
-            )
-        result = copy(job)
-        result.simulation = copy(job.simulation)
-        result.outputs = deepcopy(job.outputs)
-        result.f_list = list(job.f_list)
-        authored = Path(job._result_path).resolve()
-        authored.relative_to(Path(job.project_path).resolve())
+        authored = Path(result._result_path).resolve()
         result._result_path_override = authored / "runs" / simulation_id
         result._job_id = simulation_id
         result._cloud_result_run_id = simulation_id
@@ -1186,6 +1203,13 @@ class AWSSite(BaseSite):
             relative = Path(result.save_path).resolve().relative_to(authored)
             result.save_path = result._result_path / relative
         return result
+
+    @classmethod
+    def _snapshot_run_job(cls, job: _JobT, simulation_id: str) -> _JobT:
+        """Capture the submitted job's result layout without mutating its authoring state."""
+        if getattr(job, "_cloud_result_run_id", None) == simulation_id:
+            return job
+        return cls._bind_run_snapshot(cls._prepare_run_snapshot(job), simulation_id)
 
     def _result_job(self, job: _JobT) -> _JobT:
         """Resolve an owned run's frozen S3 location before downloading any artifacts."""

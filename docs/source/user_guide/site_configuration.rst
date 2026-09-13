@@ -707,10 +707,16 @@ the same job again::
 The first result continues to fetch the first submission. Cloud downloads check
 that submission's authenticated result location and save beneath
 ``jobs/<simulation>/<job>/results/runs/<simulation-id>/``. Each run handle owns a
-copy of the job's result layout; downloads do not replace the authored job's
-results. Calling a fetch method directly with the authored job selects its latest
+copy of the job's result layout and nested simulation metadata, including receiver
+groups and components. Later edits to the authored simulation do not reinterpret
+earlier results. Downloads do not replace the authored job's results. Calling a fetch method directly with the authored job selects its latest
 submission. Results require the matching Slurm Cloud and runtime deployment;
 unscoped historical result directories are not used as a fallback.
+
+For Cloud imaging runs, ``save_path`` must be inside the job's result directory.
+Invalid imaging paths and snapshot preparation failures are rejected before the
+submission API is called, so they cannot leave a running job without a handle.
+Local and SSH imaging paths are unaffected.
 
 Only the registered FrequenSol-managed sites are supported here. This does not
 discover, provision, or connect arbitrary external clusters. Site operations and

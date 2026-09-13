@@ -756,3 +756,68 @@ def test_imaging_results_keep_each_run_separate(tmp_path, monkeypatch):
     assert second.job.image_file().read_text() == "second image"
     assert first.job.image_file().read_text() == "first image"
     assert not job.image_file().exists()
+
+
+def test_old_run_keeps_nested_receiver_and_simulation_metadata(tmp_path):
+    site = make_site(FakeS3Client({}))
+    job = result_job(tmp_path / "project-a")
+    group = SimpleNamespace(
+        name="line-a",
+        device=SimpleNamespace(components=[SimpleNamespace(name="pressure")]),
+    )
+    job.simulation.acquisition.receiver_groups = [group]
+    job.simulation.units = {"pressure": "Pa"}
+    job.simulation.extra = {"coordinates": [1.0, 2.0]}
+    job.k_list = [1.0]
+    job.k_weights = [0.5]
+    first = site._make_run_handle(job, "simulation-1")
+    first_result = first._make_result(JobStatus(state="completed", return_code=0))
+
+    group.name = "changed-line"
+    group.device.components[0].name = "velocity"
+    job.simulation.acquisition.receiver_groups.append(
+        SimpleNamespace(name="line-b", device=SimpleNamespace(components=[]))
+    )
+    job.simulation.units["pressure"] = "kPa"
+    job.simulation.extra["coordinates"][0] = 99.0
+    job.k_list[0] = 2.0
+    job.k_weights[0] = 0.25
+    second = site._make_run_handle(job, "simulation-2")
+
+    for run in (first, first_result):
+        assert run.job.trace_outputs.groups == ["line-a"]
+        assert run.job.trace_outputs.components == ["line-a:pressure"]
+        assert run.job.simulation.units == {"pressure": "Pa"}
+        assert run.job.simulation.extra == {"coordinates": [1.0, 2.0]}
+        assert run.job.k_list == [1.0]
+        assert run.job.k_weights == [0.5]
+    assert second.job.trace_outputs.groups == ["changed-line", "line-b"]
+    assert second.job.trace_outputs.components == ["changed-line:velocity"]
+
+
+def test_snapshot_copies_real_simulation_without_copying_its_project(tmp_path):
+    from frequensolve.simulation.simulation import SeismicSimulation
+
+    class ProjectReference:
+        def __deepcopy__(self, memo):
+            raise AssertionError("A run must not recursively copy its owning project")
+
+    job = result_job(tmp_path / "project-a")
+    job.simulation = SeismicSimulation(
+        name="simulation-a",
+        physics="acoustic",
+        dimension=3,
+        project_path=job.project_path,
+    )
+    project = ProjectReference()
+    job.simulation._project = project
+    job.simulation.extra = {"geometry": {"origin": [1.0, 2.0, 3.0]}}
+    snapshot = AWSSite._snapshot_run_job(job, "simulation-1")
+    job.simulation.extra["geometry"]["origin"][0] = 99.0
+
+    assert snapshot.simulation is not job.simulation
+    assert snapshot.simulation.acquisition is not job.simulation.acquisition
+    assert snapshot.simulation.model is not job.simulation.model
+    assert snapshot.simulation.mesh is not job.simulation.mesh
+    assert snapshot.simulation._project is project
+    assert snapshot.simulation.extra["geometry"]["origin"] == [1.0, 2.0, 3.0]

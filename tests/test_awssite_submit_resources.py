@@ -36,6 +36,12 @@ class FakeJob:
             _project=SimpleNamespace(name="project-a", pretty_name="Project A"),
         )
         self._job_id = None
+        self.outputs = SimpleNamespace()
+        self.f_list = [10.0]
+
+    @property
+    def _result_path(self):
+        return self.project_path / "jobs" / self.name / "results"
 
     def is_run_current(self):
         return False
@@ -455,3 +461,43 @@ def test_cancel_job_reconciles_race_once(initial_status, final_status):
         ("cancel", "simulation-1"),
         ("status", "simulation-1"),
     ]
+
+
+@pytest.mark.parametrize("location", ["project-images", "outside-project"])
+def test_invalid_imaging_path_is_rejected_before_remote_admission(tmp_path, location):
+    from frequensolve.simulation.jobs import ImagingJob
+
+    site = make_graphql_site()
+    job = object.__new__(ImagingJob)
+    job.__dict__.update(FakeJob().__dict__)
+    job.name = "demo-job"
+    job.simulation.project_path = tmp_path / "project-a"
+    job.save_path = (
+        job.project_path / "images"
+        if location == "project-images"
+        else tmp_path / "elsewhere"
+    )
+    job.is_run_current = lambda: False
+    job.save_for_remote = lambda *_: ("local-job.json", "project-a/jobs/job.json")
+
+    with pytest.raises(RuntimeError, match="imaging output path.*inside"):
+        site.submit(job, validate=False)
+    assert site.graphql_client.submit_calls == []
+    assert job._job_id is None
+
+
+def test_submission_freezes_result_state_before_the_remote_call():
+    site = make_graphql_site()
+    job = FakeJob()
+    job.simulation.extra = {"coordinates": [1.0, 2.0]}
+    submit = site.graphql_client.submit_job
+
+    def mutate_after_admission(**kwargs):
+        job.simulation.extra["coordinates"][0] = 99.0
+        return submit(**kwargs)
+
+    site.graphql_client.submit_job = mutate_after_admission
+    run = site.submit(job)
+    assert run.job.simulation.extra == {"coordinates": [1.0, 2.0]}
+    assert job.simulation.extra == {"coordinates": [99.0, 2.0]}
+    assert run.job.simulation._project is job.simulation._project
