@@ -32,74 +32,14 @@ class CapturingGraphQLClient(GraphQLClient):
                     "error": None,
                 }
             }
-        if "deployComputeInfrastructure" in query:
-            return {
-                "deployComputeInfrastructure": {
-                    "stackId": "stack-2",
-                    "stackName": "compute-stack",
-                    "status": "CREATE_IN_PROGRESS",
-                    "outputs": {},
-                    "error": None,
-                }
-            }
         if "submitJob" in query:
             return {
                 "submitJob": {
                     "simulationId": "simulation-1",
-                    "batchJobId": "batch-1",
                     "status": "PENDING",
                 }
             }
         raise AssertionError(f"unexpected query: {query}")
-
-
-class AccountAuth:
-    def get_account_id(self):
-        return "account-123"
-
-
-class StackQueryCapturingGraphQLClient(GraphQLClient):
-    def __init__(self):
-        super().__init__("https://example.invalid/graphql", auth=AccountAuth())
-        self.last_query = ""
-        self.last_variables: Optional[Dict[str, Any]] = None
-
-    def execute(
-        self, query: str, variables: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        self.last_query = query
-        self.last_variables = variables
-        return {
-            "listStacks": {
-                "items": [
-                    {
-                        "stackId": "compute-stack",
-                        "outputs": "{}",
-                        "status": "CREATE_COMPLETE",
-                        "createdAt": "2026-05-24T00:00:00Z",
-                    }
-                ]
-            }
-        }
-
-
-class CapabilityGraphQLClient(GraphQLClient):
-    def __init__(self, query_fields=(), mutation_fields=()):
-        super().__init__("https://example.invalid/graphql", auth=object())
-        self.query_fields = query_fields
-        self.mutation_fields = mutation_fields
-
-    def execute(
-        self, query: str, variables: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        assert "__type" in query
-        assert variables is None
-        return {
-            "queryType": {"fields": [{"name": name} for name in self.query_fields]},
-            "mutationType": {
-                "fields": [{"name": name} for name in self.mutation_fields]
-            },
-        }
 
 
 class SimulationStatusGraphQLClient(GraphQLClient):
@@ -136,49 +76,6 @@ class SimulationStatusGraphQLClient(GraphQLClient):
         }
 
 
-def test_check_compute_stack_exists_filters_by_account_id():
-    client = StackQueryCapturingGraphQLClient()
-
-    assert client._check_compute_stack_exists() is True
-
-    assert "listStacks(filter: $filter)" in client.last_query
-    assert client.last_variables == {
-        "filter": {
-            "stackType": {"eq": "compute"},
-            "accountId": {"eq": "account-123"},
-            "or": [
-                {"status": {"eq": "CREATE_COMPLETE"}},
-                {"status": {"eq": "UPDATE_COMPLETE"}},
-                {"status": {"eq": "UPDATE_ROLLBACK_COMPLETE"}},
-            ],
-        }
-    }
-
-
-def test_compute_provisioning_mode_detects_shared_runtime_catalog():
-    client = CapabilityGraphQLClient(
-        query_fields=("fetchAvailableComputeRuntimes",),
-        mutation_fields=("deployComputeInfrastructure",),
-    )
-
-    assert client.get_compute_provisioning_mode() == "shared"
-
-
-def test_compute_provisioning_mode_detects_legacy_per_user_mutation():
-    client = CapabilityGraphQLClient(
-        mutation_fields=("deployComputeInfrastructure",),
-    )
-
-    assert client.get_compute_provisioning_mode() == "per-user"
-
-
-def test_compute_provisioning_mode_rejects_unknown_contract():
-    client = CapabilityGraphQLClient(query_fields=("listStacks",))
-
-    with pytest.raises(RuntimeError, match="does not expose a supported compute"):
-        client.get_compute_provisioning_mode()
-
-
 def test_simulation_status_details_include_customer_safe_failure_message():
     client = SimulationStatusGraphQLClient()
 
@@ -187,8 +84,8 @@ def test_simulation_status_details_include_customer_safe_failure_message():
         "status": "FAILED",
         "failureCode": "SCU_BALANCE_INSUFFICIENT",
         "failureMessage": "This simulation needs more SCUs.",
-        "executionSiteId": "managed-batch",
-        "logicalAttemptId": "simulation-1:1",
+        "executionSiteId": None,
+        "logicalAttemptId": None,
         "providerJobId": None,
         "executionState": "failed",
         "failureReason": "SCU_BALANCE_INSUFFICIENT",
@@ -196,27 +93,6 @@ def test_simulation_status_details_include_customer_safe_failure_message():
         "allocatedResources": None,
     }
     assert len(client.queries) == 1
-
-
-def test_simulation_status_details_fall_back_for_older_cloud_schemas():
-    client = SimulationStatusGraphQLClient(legacy=True)
-
-    assert client.get_simulation_status("simulation-legacy") == "FAILED"
-    assert len(client.queries) == 2
-    assert "failureMessage" not in client.queries[-1]
-    assert "executionSiteId" in client.queries[-1]
-
-
-def test_simulation_status_details_preserve_failures_on_partial_cloud_schema():
-    client = SimulationStatusGraphQLClient(partial=True)
-
-    details = client.get_simulation_status_details("simulation-partial")
-
-    assert details["failureCode"] == "SCU_BALANCE_INSUFFICIENT"
-    assert details["failureMessage"] == "This simulation needs more SCUs."
-    assert len(client.queries) == 2
-    assert "failureMessage" in client.queries[1]
-    assert "creditSettlementMode" not in client.queries[1]
 
 
 def test_simulation_status_returns_exact_credit_decimal_without_changing_outcome():
@@ -325,30 +201,6 @@ def test_deploy_storage_stack_does_not_send_environment_argument():
 
     client.deploy_storage_stack()
 
-    assert "$environment" not in client.last_query
-    assert "environment:" not in client.last_query
-    assert client.last_variables in (None, {})
-
-
-def test_deploy_compute_stack_does_not_send_environment_argument():
-    client = CapturingGraphQLClient()
-
-    client.deploy_compute_stack()
-
-    assert "$environment" not in client.last_query
-    assert "environment:" not in client.last_query
-    assert client.last_variables in (None, {})
-
-
-def test_legacy_environment_argument_is_accepted_but_not_sent():
-    client = CapturingGraphQLClient()
-
-    client.deploy_storage_stack("staging")
-    assert "$environment" not in client.last_query
-    assert "environment:" not in client.last_query
-    assert client.last_variables in (None, {})
-
-    client.deploy_compute_stack("staging")
     assert "$environment" not in client.last_query
     assert "environment:" not in client.last_query
     assert client.last_variables in (None, {})
@@ -549,3 +401,11 @@ def test_cancel_simulation_classifies_real_request_failures(monkeypatch, kind):
         client.cancel_simulation("simulation-1")
     assert "private-token" not in str(error.value)
     assert ("connectivity" in str(error.value)) == (expected is CloudTransportError)
+
+
+@pytest.mark.parametrize("options", [{"legacy": True}, {"partial": True}])
+def test_status_rejects_incompatible_schema_without_retry(options):
+    client = SimulationStatusGraphQLClient(**options)
+    with pytest.raises(RuntimeError, match="Cannot query field"):
+        client.get_simulation_status_details("simulation-1")
+    assert len(client.queries) == 1

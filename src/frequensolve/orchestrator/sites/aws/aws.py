@@ -1,4 +1,4 @@
-"""FrequenSol cloud execution site backed by Cognito, AppSync, S3, and Batch."""
+"""FrequenSol cloud execution site backed by Cognito, AppSync, S3, and managed Slurm."""
 
 import getpass
 import json
@@ -6,7 +6,6 @@ import os
 import subprocess
 import tempfile
 import uuid
-import warnings
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Union
@@ -68,7 +67,7 @@ class AWSSiteConfig(BaseSiteConfig):
         api_url: GraphQL API endpoint URL.
         domain: Frontend domain used to discover public configuration.
         s3_bucket: S3 bucket for simulation data, populated after authentication.
-        region: AWS region used for Cognito, S3, and Batch resources.
+        region: AWS region used for Cognito and S3 resources.
         s3_prefix: Prefix for organizing simulation data inside the S3 bucket.
         max_duration: Maximum duration users may request for cloud resources.
     """
@@ -447,7 +446,7 @@ class AWSSite(BaseSite):
         self.graphql_client = GraphQLClient(config.api_url, auth)
 
         # Fetch storage stack info from API to populate config
-        # Storage stack is required for S3 operations; compute stack will be created on-demand
+        # Storage is independent of the registered managed execution site.
         try:
             # Try to get storage stack info
             storage_info = self.graphql_client.get_storage_stack_info()
@@ -661,10 +660,8 @@ class AWSSite(BaseSite):
     def provisioned(self) -> bool:
         """Check if the site is provisioned.
 
-        AWS provisions compute resources automatically on demand when jobs are
-        submitted. This property always returns True to maintain interface
-        compatibility with other sites (e.g. HPC sites that require explicit
-        provisioning before job submission).
+        The service owns the registered managed Slurm site; SDK callers do not
+        provision a cluster. Submission checks site availability on the server.
         """
         return True
 
@@ -880,8 +877,8 @@ class AWSSite(BaseSite):
                         # Wait for stack to be ready (pass stackId so we wait for the one we just created)
                         logger.debug("Waiting for storage stack to be ready...")
                         expected_stack_id = deploy_result.get("stackId")
-                        self.graphql_client.wait_for_stack_ready(
-                            "storage", expected_stack_id=expected_stack_id
+                        self.graphql_client.wait_for_storage_ready(
+                            expected_stack_id=expected_stack_id
                         )
 
                         # Get storage stack info to update bucket name
@@ -1131,7 +1128,8 @@ class AWSSite(BaseSite):
             mode="aws",
             poll_interval=poll_interval,
             check=check,
-            backend=backend or {"executionBackend": "batch"},
+            backend=backend
+            or {"executionSiteId": "managed-slurm", "logicalAttemptId": f"{job_id}:1"},
             _status_fn=self._poll_run,
             _cancel_fn=lambda run: self.cancel_job(str(run.id)),
             _pending_fetch_fn=(
@@ -1535,7 +1533,7 @@ class AWSSite(BaseSite):
                             stale.unlink()
 
     def test_api_connectivity(self) -> bool:
-        """Verify the authenticated GraphQL submission contract is reachable.
+        """Verify the authenticated GraphQL API is reachable.
 
         Returns:
             True if API is accessible, False otherwise.
@@ -1543,41 +1541,15 @@ class AWSSite(BaseSite):
         if self.graphql_client is None:
             return False
         try:
-            return self.graphql_client.get_compute_provisioning_mode() in {
-                "shared",
-                "per-user",
-            }
+            return (
+                self.graphql_client.execute(
+                    "query CloudConnectivity { __typename }"
+                ).get("__typename")
+                == "Query"
+            )
         except Exception as exc:
             logger.warning("GraphQL connectivity probe failed: %s", exc)
             return False
-
-    def get_job_status_from_api(self, job_id: str) -> Dict[str, Any]:
-        """Return cloud job status through the authenticated GraphQL client.
-
-        This compatibility method preserves the former public entry point while
-        the cloud transport moves from REST to GraphQL.
-        """
-
-        warnings.warn(
-            "AWSSite.get_job_status_from_api() is deprecated; use RunHandle status APIs",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if self.graphql_client is None:
-            return {}
-        try:
-            details_getter = getattr(
-                self.graphql_client, "get_simulation_status_details", None
-            )
-            if callable(details_getter):
-                return dict(details_getter(job_id))
-            return {"status": self.graphql_client.get_simulation_status(job_id)}
-        except Exception as exc:
-            logger.warning(
-                "GraphQL status lookup failed (%s)",
-                type(exc).__name__,
-            )
-            return {}
 
     def cancel_job(self, job_id: str) -> None:
         """Cancel a running simulation.

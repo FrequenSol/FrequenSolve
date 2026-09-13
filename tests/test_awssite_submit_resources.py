@@ -14,26 +14,11 @@ from frequensolve.orchestrator.sites.aws.execution_profile import (
 class FakeGraphQLClient:
     def __init__(self):
         self.submit_calls = []
-        self.compute_stack_checks = 0
-        self.compute_mode = "shared"
-        self.compute_stack_exists = True
-        self.compute_deployments = 0
-        self.compute_waits = []
 
-    def get_compute_provisioning_mode(self):
-        return self.compute_mode
-
-    def _check_compute_stack_exists(self):
-        self.compute_stack_checks += 1
-        return self.compute_stack_exists
-
-    def deploy_compute_stack(self):
-        self.compute_deployments += 1
-        return {"stackId": "legacy-compute-stack"}
-
-    def wait_for_stack_ready(self, stack_type, expected_stack_id=None):
-        self.compute_waits.append((stack_type, expected_stack_id))
-        return {"stackId": expected_stack_id, "status": "CREATE_COMPLETE"}
+    def execute(self, query, variables=None):
+        assert query == "query CloudConnectivity { __typename }"
+        assert variables is None
+        return {"__typename": "Query"}
 
     def submit_job(self, **kwargs):
         self.submit_calls.append(kwargs)
@@ -408,7 +393,7 @@ def test_submit_requires_the_current_authenticated_graphql_contract():
         site.submit(job)
 
 
-def test_connectivity_uses_the_same_graphql_capability_probe_as_submission():
+def test_connectivity_queries_authenticated_api():
     site = make_graphql_site()
 
     assert site.test_api_connectivity() is True
@@ -421,28 +406,15 @@ def test_connectivity_returns_false_without_graphql_authentication():
     assert site.test_api_connectivity() is False
 
 
-def test_connectivity_returns_false_when_capability_probe_fails():
+def test_connectivity_returns_false_when_api_probe_fails():
     site = make_graphql_site()
 
-    def fail_capability_probe():
+    def fail_api_probe(*args):
         raise RuntimeError("request timed out")
 
-    site.graphql_client.get_compute_provisioning_mode = fail_capability_probe
+    site.graphql_client.execute = fail_api_probe
 
     assert site.test_api_connectivity() is False
-
-
-def test_legacy_status_entry_point_uses_graphql_details():
-    site = make_graphql_site()
-    site.graphql_client.get_simulation_status_details = lambda simulation_id: {
-        "id": simulation_id,
-        "status": "RUNNING",
-    }
-
-    with pytest.deprecated_call(match="get_job_status_from_api"):
-        status = site.get_job_status_from_api("simulation-1")
-
-    assert status == {"id": "simulation-1", "status": "RUNNING"}
 
 
 @pytest.mark.parametrize("initial_status", ["PENDING", "RUNNING"])

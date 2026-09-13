@@ -53,32 +53,6 @@ def test_default_profile_is_managed_slurm():
     assert details.state == "succeeded"
 
 
-def test_old_graphql_deployment_retains_slurm_identity_on_site_field_fallback():
-    from unittest.mock import Mock
-
-    from frequensolve.orchestrator.sites.aws.graphql_client import GraphQLClient
-
-    client = GraphQLClient.__new__(GraphQLClient)
-    client.execute = Mock(
-        side_effect=[
-            RuntimeError("Cannot query field executionSiteId"),
-            {
-                "getSimulation": {
-                    "id": "test",
-                    "status": "SUCCEEDED",
-                    "executionBackend": "SLURM",
-                    "providerAttemptId": "123",
-                }
-            },
-        ]
-    )
-    details = client.get_simulation_status_details("test")
-    assert details["executionSiteId"] == "managed-slurm"
-    assert details["providerJobId"] == "123"
-    assert details["executionState"] == "succeeded"
-    assert client.execute.call_count == 2
-
-
 def test_named_site_does_not_fall_back_to_another_backend():
     from unittest.mock import Mock
 
@@ -108,3 +82,36 @@ def test_normalized_state_covers_supported_status_aliases(status, expected):
     assert client.get_simulation_status_details("test")["executionState"] == expected
     client.execute.return_value["getSimulation"]["executionState"] = "running"
     assert client.get_simulation_status_details("test")["executionState"] == "running"
+
+
+def test_status_uses_current_identity_without_historical_provider_fallbacks():
+    from unittest.mock import Mock
+
+    from frequensolve.orchestrator.sites.aws.graphql_client import GraphQLClient
+
+    client = GraphQLClient.__new__(GraphQLClient)
+    client.execute = Mock(
+        return_value={
+            "getSimulation": {
+                "id": "test",
+                "status": "RUNNING",
+                "executionSiteId": "managed-slurm",
+                "logicalAttemptId": "test:1",
+                "providerJobId": "current",
+                "providerAttemptId": "stale",
+                "batchJobId": "obsolete",
+                "requestedResources": '{"nodes":1,"mpiRanks":2,"wallTimeSeconds":600}',
+            }
+        }
+    )
+    details = client.get_simulation_status_details("test")
+    assert details["executionSiteId"] == "managed-slurm"
+    assert details["logicalAttemptId"] == "test:1"
+    assert details["providerJobId"] == "current"
+    assert details["requestedResources"] == {
+        "nodes": 1,
+        "mpiRanks": 2,
+        "wallTimeSeconds": 600,
+    }
+    client.execute.return_value["getSimulation"]["providerJobId"] = None
+    assert client.get_simulation_status_details("test")["providerJobId"] is None
