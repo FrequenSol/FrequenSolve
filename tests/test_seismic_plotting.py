@@ -92,6 +92,64 @@ def test_plot_gather_returns_figure_and_axis():
     assert len(ax.images) == 1
 
 
+@pytest.mark.parametrize("supplied_axes", [False, True])
+def test_plot_gather_preserves_all_wavenumbers_and_shared_scale(
+    tmp_path, supplied_axes
+):
+    base = _time_trace()
+    trace = xr.concat([base, -2 * base, 3 * base], dim="wavenumber")
+    trace = trace.assign_coords(wavenumber=[-0.01, 0.0, 0.01])
+    trace.coords["wavenumber"].attrs["units"] = "1/km"
+    original = trace.copy(deep=True)
+    fig, supplied = plt.subplots(1, 3) if supplied_axes else (None, None)
+    target = tmp_path / "wavenumber-gathers.png"
+    try:
+        fig, axes = plot_gather(
+            trace,
+            ax=supplied,
+            title="2.5D pressure",
+            T_max=0.4,
+            interpolation="nearest",
+            grid=True,
+            save=target,
+        )
+        assert len(axes) == 3
+        assert fig._suptitle.get_text() == "2.5D pressure"
+        assert target.is_file() and target.stat().st_size > 0
+        xr.testing.assert_identical(trace, original)
+        expected = trace.sel(time=slice(None, 0.4))
+        limit = float(np.abs(expected).max())
+        for i, axis in enumerate(axes):
+            assert axis.figure is fig
+            if supplied_axes:
+                assert axis is supplied[i]
+            np.testing.assert_array_equal(
+                axis.images[0].get_array(), expected.isel(wavenumber=i).values
+            )
+            assert axis.images[0].get_clim() == (-limit, limit)
+            assert axis.images[0].get_interpolation() == "nearest"
+            assert (
+                axis.get_title()
+                == f"Wavenumber [1/km] = {trace.wavenumber[i].item():g}"
+            )
+            assert any(line.get_visible() for line in axis.get_xgridlines())
+    finally:
+        plt.close(fig)
+
+
+def test_plot_gather_rejects_ambiguous_wavenumber_axes():
+    trace = xr.concat([_time_trace(), _time_trace()], dim="wavenumber")
+    with pytest.raises(ValueError, match="explicit wavenumber coordinates"):
+        plot_gather(trace)
+    trace = trace.assign_coords(wavenumber=[-1.0, 1.0])
+    fig, axis = plt.subplots()
+    try:
+        with pytest.raises(ValueError, match="one axis per wavenumber"):
+            plot_gather(trace, ax=axis)
+    finally:
+        plt.close(fig)
+
+
 def test_diff_gathers_returns_three_axes():
     trace = _time_trace()
     fig, axes = diff_gathers(trace, 0.8 * trace)

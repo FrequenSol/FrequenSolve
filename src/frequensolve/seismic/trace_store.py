@@ -1694,6 +1694,17 @@ class TraceStore:
                 coords[dim] = np.asarray(indexed_frequencies, dtype=float)
             elif dim == "frequency" and "frequency" in h5:
                 coords[dim] = h5["frequency"][()]
+            elif dim == "wavenumber" and "wavenumber" in h5:
+                values = np.asarray(h5["wavenumber"][()], dtype=float)
+                if (
+                    values.ndim != 1
+                    or len(values) != data_shape[axis]
+                    or not np.all(np.isfinite(values))
+                ):
+                    raise ValueError(
+                        "Wavenumber coordinates do not match the trace axis"
+                    )
+                coords[dim] = values
             elif attr_dim in dset.attrs:
                 coords[dim] = dset.attrs[attr_dim]
             else:
@@ -1716,6 +1727,11 @@ class TraceStore:
             chunks = (dset.shape[0], 1, 1, *dset.shape[3:])
             data = da.from_array(dset, chunks=chunks)
         fd = DataArray(data, dims=dims, coords=coords)
+        if "wavenumber" in fd.coords and "wavenumber" in h5:
+            for name in ("units", "long_name"):
+                values = _attr_strings(h5["wavenumber"].attrs.get(name, []))
+                if len(values) == 1:
+                    fd.coords["wavenumber"].attrs[name] = values[0]
         if "frequency" in fd.dims:
             if indexed_laplace:
                 laplace = np.asarray(indexed_laplace, dtype=float)
