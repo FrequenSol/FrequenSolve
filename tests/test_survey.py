@@ -7,7 +7,23 @@ import pytest
 from frequensolve.orchestrator.sites.base import JobStatus, RunResult
 from frequensolve.seismic import ReceiverNode, Survey
 from frequensolve.seismic.sparse_survey import SparseSurvey
+from frequensolve.simulation.artifact_contract import ArtifactRecord
 from frequensolve.simulation.jobs.artifacts import RunMetadata
+
+
+def _trace_artifact(root, path):
+    return ArtifactRecord.from_fs(
+        {
+            "id": "traces",
+            "role": "simulated_traces",
+            "representation": "hdf5_shard",
+            "schema": "fs_seismic_trace_store_v1",
+            "path": str(path),
+            "retention": "durable",
+            "bytes": 0,
+        },
+        result_path=root,
+    )
 
 
 def _field(line, i1, i2, value):
@@ -479,16 +495,8 @@ def test_survey_loads_trace_store_from_run_result_metadata(tmp_path):
         job=None,
         status=JobStatus(state="completed", return_code=0),
         run_metadata=RunMetadata(
-            outputs={
-                "files": [
-                    {
-                        "relative_path": trace_file.name,
-                        "kind": "hdf5",
-                        "schema": "fs_seismic_trace_store_v1",
-                    }
-                ]
-            },
             result_path=tmp_path,
+            artifacts=(_trace_artifact(tmp_path, trace_file.name),),
         ),
     )
 
@@ -505,16 +513,8 @@ def test_survey_load_dispatches_supported_inputs(tmp_path):
         job=None,
         status=JobStatus(state="completed", return_code=0),
         run_metadata=RunMetadata(
-            outputs={
-                "files": [
-                    {
-                        "relative_path": trace_file.name,
-                        "kind": "hdf5",
-                        "schema": "fs_seismic_trace_store_v1",
-                    }
-                ]
-            },
             result_path=tmp_path,
+            artifacts=(_trace_artifact(tmp_path, trace_file.name),),
         ),
     )
 

@@ -5,20 +5,31 @@ fingerprints, summarizes convergence failures, and writes the Python-side
 ``_fs_python_run.json`` state used by status displays and incremental reruns.
 """
 
-import hashlib
 import json
-import os
-import shlex
 import shutil
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from frequensolve.simulation.jobs.artifacts import OutputManifest
+from frequensolve.simulation.artifact_contract import (
+    ArtifactCatalog,
+    ArtifactContractError,
+    ArtifactRecord,
+    ArtifactRequest,
+    TaskResult,
+    task_result_path,
+)
 from frequensolve.simulation.simulation import CustomJSONEncoder
+from frequensolve.simulation.task_index import TaskCatalog, TaskIndex, load_task_catalog
 
 SOLVER_RESIDUAL_FAILURE_THRESHOLD = 1.0e-3
+_RECEIVER_TRACE_REQUEST = ArtifactRequest(
+    id="traces",
+    role="simulated_traces",
+    representations=("hdf5_shard", "packed_trace"),
+    retention="durable",
+)
 
 
 @dataclass(frozen=True)
@@ -283,25 +294,42 @@ class JobRunStateMixin:
             current-output flag, duration, and raw metadata.
         """
 
-        manifest = self.trace_manifest
-        state = self.run_state()
+        fingerprints = self._artifact_contract_fingerprints()
         rows: Dict[int, Dict[str, Any]] = {}
-        ordered_files = list(manifest.files)
-        for task, file in enumerate(ordered_files, start=1):
-            trace_file, trace_exists = self._trace_output_path_for_task(
+        for task in range(1, self.n_tasks + 1):
+            result = self._committed_task_result(task)
+            artifact = self._current_task_artifact(
                 task,
-                manifest=manifest,
+                fingerprints=fingerprints,
+                result=result,
             )
-            current = self.is_task_current(task, state=state, manifest=manifest)
+            current = artifact is not None
+            trace_file = artifact.path if artifact is not None else None
+            status = "succeeded" if current else "not_run"
+            if result is not None and not result.successful:
+                status = "failed"
             rows[task] = {
                 "task": task,
-                "frequency": manifest.frequencies.get(task),
-                "status": "succeeded" if current else "not_run",
-                "trace_file": trace_file if trace_exists else file,
-                "trace_exists": trace_exists,
+                "frequency": self._canonical_frequency_value(self.f_list[task - 1]),
+                "status": status,
+                "trace_file": trace_file,
+                "trace_exists": current,
                 "current": current,
                 "duration_seconds": None,
-                "metadata": {},
+                "metadata": (
+                    {}
+                    if result is None
+                    else {
+                        "task_result": str(result.path),
+                        "status": result.state,
+                        "returncode": result.code,
+                        "solver": dict(result.solver),
+                        "timings": dict(result.timings),
+                        "resources": dict(result.resources),
+                        "timestamps": dict(result.timestamps),
+                        "duration_seconds": sum(result.timings.values()),
+                    }
+                ),
             }
 
         for record in self._task_records():
@@ -469,6 +497,216 @@ class JobRunStateMixin:
         except json.JSONDecodeError:
             return {}
 
+    def _artifact_contract_fingerprints(self) -> Optional[Dict[str, str]]:
+        """Return the three Sauce input digests used by task-result v2.
+
+        The job and simulation digests intentionally cover the exact staged
+        JSON documents. The output digest matches Sauce's effective per-task
+        output-request digest. Callers that inspect multiple tasks compute
+        this mapping once and pass it through the batch.
+        """
+
+        job_file = getattr(self, "_file", None)
+        simulation_file = getattr(self.simulation, "_file", None)
+        if job_file is None or simulation_file is None:
+            return None
+        job_file = Path(job_file)
+        simulation_file = Path(simulation_file)
+        if not job_file.is_file() or not simulation_file.is_file():
+            return None
+        output_fingerprint = self.effective_output_request_fingerprint()
+        try:
+            artifact_metadata = json.loads(job_file.read_text(encoding="utf-8")).get(
+                "artifact_contract",
+                {},
+            )
+        except (OSError, json.JSONDecodeError):
+            return None
+        saved_output_fingerprint = artifact_metadata.get("output_request", {}).get(
+            "digest"
+        )
+        if (
+            saved_output_fingerprint is not None
+            and saved_output_fingerprint != output_fingerprint
+        ):
+            return None
+        job_fingerprint = self._sha256_file(job_file)
+        return {
+            "job": job_fingerprint,
+            "simulation": self._sha256_file(simulation_file),
+            # Directly authored solver jobs predate the persisted request
+            # digest. Sauce conservatively records the exact job-file digest
+            # for those inputs, so the consumer must make the same fallback.
+            "outputs": (
+                output_fingerprint
+                if saved_output_fingerprint is not None
+                else job_fingerprint
+            ),
+        }
+
+    def _committed_task_result(self, task: int) -> Optional[TaskResult]:
+        """Read one known task-result path without discovering payload files."""
+
+        if task < 1 or task > self.n_tasks:
+            return None
+        path = task_result_path(self._result_path, task)
+        if not path.is_file():
+            return None
+        try:
+            result = TaskResult.read(path, result_path=self._result_path)
+        except (ArtifactContractError, OSError):
+            return None
+        if result.partition.task != task:
+            return None
+        return result
+
+    def _load_task_catalog(self, tasks: Iterable[int]) -> TaskCatalog:
+        """Load the consolidated index, conservatively rejecting bad metadata."""
+
+        try:
+            return load_task_catalog(self._result_path, tasks=tasks)
+        except (ArtifactContractError, OSError):
+            return ArtifactCatalog(
+                result_path=Path(self._result_path).resolve(strict=False),
+                results={},
+            )
+
+    def _retry_compatibility_hash(self):
+        """Match Sauce's retry identity while retaining full producer hashes."""
+
+        try:
+            job = json.loads(self.job_file.read_text())
+            simulation = json.loads(self.simulation._file.read_text())
+        except (OSError, AttributeError, TypeError):
+            return None
+        return self._compatibility_hash_payloads(job, simulation)
+
+    @staticmethod
+    def _compatibility_hash_payloads(job, simulation):
+        """Hash solver-independent inputs using the native canonical JSON form."""
+        import copy
+        import hashlib
+
+        job, simulation = copy.deepcopy(job), copy.deepcopy(simulation)
+        job["simulation"] = None
+        job["preserve_task_outputs"] = None
+        job.setdefault("artifact_contract", {})["output_request"] = None
+        identity = {"job": job, "simulation": simulation}
+        protected = (
+            "grids",
+            "refinements",
+            "refinement_flags",
+            "hp",
+            "galerkin_multigrid",
+            "relaxed_assembly",
+            "mode",
+        )
+        structure = {
+            key: value
+            for key, value in simulation.get("Solver", {}).items()
+            if key in protected
+        }
+        if structure:
+            identity["solver_structure"] = structure
+        simulation["Solver"] = None
+        encoded = json.dumps(
+            identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+    def _task_reuse_fingerprints(self):
+        """Select the explicitly requested retry policy for task consumers."""
+        if self.preserve_task_outputs:
+            digest = self._retry_compatibility_hash()
+            if digest is not None:
+                return {"compatibility": digest}
+        return self._artifact_contract_fingerprints()
+
+    def _current_task_artifact(
+        self,
+        task: int,
+        *,
+        fingerprints: Optional[Mapping[str, str]] = None,
+        result: Optional[TaskResult] = None,
+        catalog: Optional[TaskCatalog] = None,
+    ) -> Optional[ArtifactRecord]:
+        """Return a verified durable receiver artifact for one current task.
+
+        Validation is control-plane only: the fixed JSON commit record is
+        checked against exact task identity and input fingerprints, then the
+        declared payload is checked with one stat call. HDF5 payloads are never
+        opened and no filename or directory scan participates in currentness.
+        """
+
+        if self.preserve_task_outputs:
+            compatibility = self._retry_compatibility_hash()
+            if compatibility is not None:
+                fingerprints = {"compatibility": compatibility}
+                if result is None:
+                    result = self._committed_task_result(task)
+                catalog = None
+        if task < 1 or task > self.n_tasks:
+            return None
+        fingerprints = (
+            self._artifact_contract_fingerprints()
+            if fingerprints is None
+            else fingerprints
+        )
+        if fingerprints is None:
+            return None
+        if catalog is None and result is None:
+            catalog = self._load_task_catalog((task,))
+        if catalog is None:
+            if result is None or not result.successful:
+                return None
+            if result.partition.task != task:
+                return None
+            if result.partition.task_count is not None and (
+                result.partition.task_count != self.n_tasks
+            ):
+                return None
+            if result.partition.frequency != complex(self.f_list[task - 1]):
+                return None
+            if any(
+                result.fingerprints.get(name) != digest
+                for name, digest in fingerprints.items()
+            ):
+                return None
+            catalog = ArtifactCatalog(
+                result_path=Path(self._result_path).resolve(strict=False),
+                results={task: result},
+            )
+        elif isinstance(catalog, TaskIndex):
+            if not catalog.is_task_current(
+                task,
+                frequency=complex(self.f_list[task - 1]),
+                fingerprints=fingerprints,
+            ):
+                return None
+        else:
+            result = catalog.results.get(task)
+            if result is None or not result.successful:
+                return None
+            if result.partition.task_count is not None and (
+                result.partition.task_count != self.n_tasks
+            ):
+                return None
+            if result.partition.frequency != complex(self.f_list[task - 1]):
+                return None
+            if any(
+                result.fingerprints.get(name) != digest
+                for name, digest in fingerprints.items()
+            ):
+                return None
+        try:
+            artifact = catalog.require_one(_RECEIVER_TRACE_REQUEST, task=task)
+            stat = artifact.path.stat()
+        except (ArtifactContractError, OSError):
+            return None
+        if not artifact.path.is_file() or stat.st_size != artifact.bytes:
+            return None
+        return artifact
+
     def is_task_current(
         self,
         task: int,
@@ -488,72 +726,10 @@ class JobRunStateMixin:
             fingerprint; otherwise ``False``.
         """
 
-        manifest = self.trace_manifest if manifest is None else manifest
-        files = list(manifest.files)
-        if task < 1 or task > len(files):
-            return False
-        state = self.run_state() if state is None else state
-        expected_fingerprint = self.task_fingerprint(task)
-        full_run_matches = (
-            state.get("fingerprint") == self.fingerprint()
-            and state.get("status") in {"completed", "skipped"}
-            and self._task_summary_successful(
-                state.get("task_summary"),
-                expected_total=len(files),
-            )
-        )
-        trace_file, expected_exists = self._trace_output_path_for_task(
-            task,
-            manifest=manifest,
-        )
-        packed_task_exists = self._packed_trace_has_current_task(
-            task,
-            manifest=manifest,
-        )
-        packed_task_reusable = packed_task_exists and manifest.packed_complete
-        if not expected_exists:
-            if not packed_task_reusable:
-                return False
-        records = self._state_task_records(state)
-        for record in records:
-            if self._task_number_from_record(record) != task:
-                continue
-            record_fingerprint = record.get("fingerprint")
-            if (
-                record_fingerprint is not None
-                and record_fingerprint != expected_fingerprint
-            ):
-                continue
-            if record_fingerprint is None and not full_run_matches:
-                continue
-            status = self._normalized_task_status(record.get("status"))
-            if status != "succeeded":
-                continue
-            if self._record_solver_not_run(record):
-                continue
-            stored_path = self._resolve_stored_trace_path(
-                record.get("path") or record.get("trace_file")
-            )
-            if stored_path is None:
-                return expected_exists or packed_task_reusable
-            stored_matches_trace = (
-                Path(stored_path).resolve(strict=False)
-                == trace_file.resolve(strict=False)
-                and trace_file.exists()
-            )
-            return (
-                self._trace_file_exists(stored_path)
-                or stored_matches_trace
-                or packed_task_reusable
-            )
-        if self._task_run_manifest_is_current(
-            task,
-            trace_file=trace_file,
-            trace_exists=expected_exists or packed_task_reusable,
-            state=state,
-        ):
-            return True
-        return packed_task_reusable and full_run_matches
+        # ``state`` and ``manifest`` remain accepted for API compatibility but
+        # are deliberately not authoritative in task-result v2.
+        del state, manifest
+        return self._current_task_artifact(task) is not None
 
     def current_tasks(self) -> List[int]:
         """Return one-based frequency tasks that are current for this job.
@@ -562,12 +738,17 @@ class JobRunStateMixin:
             Sorted task numbers whose outputs can be reused.
         """
 
-        state = self.run_state()
-        manifest = self.trace_manifest
+        fingerprints = self._artifact_contract_fingerprints()
+        catalog = self._load_task_catalog(range(1, self.n_tasks + 1))
         return [
             task
             for task in range(1, self.n_tasks + 1)
-            if self.is_task_current(task, state=state, manifest=manifest)
+            if self._current_task_artifact(
+                task,
+                fingerprints=fingerprints,
+                catalog=catalog,
+            )
+            is not None
         ]
 
     def _simulation_hash_for_policy(self, policy: SkipPolicy) -> str:
@@ -701,145 +882,6 @@ class JobRunStateMixin:
             "path": self._stored_trace_path(path),
         }
 
-    def _planned_reusable_task_outputs_from_state(
-        self,
-        state: Mapping[str, Any],
-        policy: SkipPolicy,
-        *,
-        reuse: bool,
-        skip_tasks: Iterable[int] = (),
-    ) -> List[Dict[str, Any]]:
-        records = self._state_task_records(state)
-        source_by_key: Dict[str, Dict[str, Any]] = {}
-        for record in records:
-            accepted, accepted_failed = self._record_policy_acceptance(record, policy)
-            if not accepted:
-                continue
-            source = self._record_trace_source(record)
-            if source is None:
-                continue
-            keys = self._record_policy_fingerprint_keys(record, policy)
-            if not keys:
-                continue
-            entry = {
-                "record": record,
-                "source": source,
-                "task": self._task_number_from_record(record),
-                "accepted_failed": accepted_failed,
-            }
-            for key in keys:
-                existing = source_by_key.get(key)
-                if existing is None or (
-                    existing.get("accepted_failed") and not accepted_failed
-                ):
-                    source_by_key[key] = entry
-
-        if not source_by_key:
-            return []
-
-        files = self.expected_trace_files()
-        manifest = self.trace_manifest
-        skipped = {int(task) for task in skip_tasks}
-        planned = []
-        for task in range(1, self.n_tasks + 1):
-            if task in skipped:
-                continue
-            entry = None
-            for key in self._task_policy_fingerprint_keys(task, policy):
-                entry = source_by_key.get(key)
-                if entry is not None:
-                    break
-            if entry is None:
-                continue
-
-            source = Path(entry["source"])
-            source_task = entry.get("task")
-            trace_path, trace_exists = self._trace_output_path_for_task(
-                task,
-                manifest=manifest,
-            )
-            target = Path(files[task - 1])
-            if trace_exists and source.resolve(strict=False) == Path(
-                trace_path
-            ).resolve(strict=False):
-                target = Path(trace_path)
-            source_matches_target = source.resolve(strict=False) == target.resolve(
-                strict=False
-            )
-            if not source_matches_target and not reuse:
-                continue
-
-            accepted_failed = bool(entry.get("accepted_failed"))
-            if accepted_failed:
-                status = "accepted_failed"
-            elif source_matches_target:
-                status = "accepted"
-            else:
-                status = "reused"
-            planned.append(
-                {
-                    "task": task,
-                    "status": status,
-                    "duration_seconds": 0.0,
-                    "fingerprint": self.task_fingerprint(task),
-                    "compatibility_fingerprint": self.task_policy_fingerprint(
-                        task,
-                        SkipPolicy.compatible(),
-                    ),
-                    "path": self._stored_trace_path(target),
-                    "source_path": str(source),
-                    "target_path": str(target),
-                    "source_task": source_task,
-                    **({"accepted_failed": True} if accepted_failed else {}),
-                    **(
-                        {"accepted": True}
-                        if status in {"accepted", "accepted_failed"}
-                        else {}
-                    ),
-                }
-            )
-        return planned
-
-    def _apply_planned_task_records(
-        self,
-        records: Iterable[Mapping[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        pending = []
-        applied = []
-        stage_dir = self._result_path / "_fs_run" / "reuse"
-        for record in records:
-            out = dict(record)
-            source = out.pop("source_path", None)
-            target = out.pop("target_path", None)
-            if source is not None and target is not None:
-                source_path = Path(source)
-                target_path = Path(target)
-                if source_path.resolve(strict=False) != target_path.resolve(
-                    strict=False
-                ):
-                    pending.append((source_path, target_path))
-            applied.append(out)
-        if not pending:
-            return applied
-
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        staged = []
-        try:
-            for index, (source_path, target_path) in enumerate(pending, start=1):
-                stage = stage_dir / f"planned_{index}{source_path.suffix}"
-                shutil.copy2(source_path, stage)
-                staged.append((stage, target_path))
-            for stage, target_path in staged:
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(stage, target_path)
-        finally:
-            for stage, _target_path in staged:
-                try:
-                    stage.unlink()
-                except FileNotFoundError:
-                    pass
-        return applied
-
     def plan_tasks(
         self,
         *,
@@ -875,20 +917,6 @@ class JobRunStateMixin:
         force = bool(force or policy.force)
         if force:
             pending = list(range(self.n_tasks))
-            if apply:
-                removed_stale_outputs = self._remove_all_trace_shards()
-                removed_stale_outputs = (
-                    self._remove_trace_outputs_for_tasks(
-                        range(1, self.n_tasks + 1),
-                        remove_matching_shards=True,
-                    )
-                    or removed_stale_outputs
-                )
-                removed_stale_outputs = (
-                    self.remove_packed_trace_products() or removed_stale_outputs
-                )
-                if removed_stale_outputs:
-                    self.invalidate_trace_cache()
             return TaskRunPlan(
                 {
                     "pending_indices": pending,
@@ -903,63 +931,39 @@ class JobRunStateMixin:
                 }
             )
 
-        state = self.run_state()
+        fingerprints = self._artifact_contract_fingerprints()
+        catalog = self._load_task_catalog(range(1, self.n_tasks + 1))
         current_records = []
-        manifest = self.trace_manifest
-        for task, _path in enumerate(manifest.files, start=1):
-            if not self.is_task_current(task, state=state, manifest=manifest):
-                continue
-            file_path, _exists = self._trace_output_path_for_task(
+        for task in range(1, self.n_tasks + 1):
+            artifact = self._current_task_artifact(
                 task,
-                manifest=manifest,
+                fingerprints=fingerprints,
+                catalog=catalog,
             )
-            current_records.append(self._current_task_record(task, file_path))
+            if artifact is not None:
+                current_records.append(self._current_task_record(task, artifact.path))
 
         current_task_numbers = {
             int(record["task"])
             for record in current_records
             if record.get("task") is not None
         }
-        planned_records = (
-            self._planned_reusable_task_outputs_from_state(
-                state,
-                policy,
-                reuse=policy.reuse,
-                skip_tasks=current_task_numbers,
-            )
-            if state
-            else []
-        )
-        applied_records = (
-            self._apply_planned_task_records(planned_records)
-            if apply
-            else [dict(record) for record in planned_records]
-        )
-
-        skipped_tasks = {
-            *current_task_numbers,
-            *(
-                int(record["task"])
-                for record in planned_records
-                if record.get("task") is not None
-            ),
-        }
+        # Generation-scoped v2 task results are authoritative for their exact
+        # partition. Relabelling or copying an opaque payload into another
+        # task slot would sever that commit record from its producer metadata,
+        # so cross-slot filename reuse is intentionally not part of planning.
+        applied_records: List[Dict[str, Any]] = []
+        skipped_tasks = set(current_task_numbers)
         pending = [
             task - 1 for task in range(1, self.n_tasks + 1) if task not in skipped_tasks
         ]
 
-        if apply and applied_records:
+        if apply and current_records:
             self.write_run_state(
                 status="partial",
-                tasks=[*current_records, *applied_records],
+                tasks=current_records,
             )
         removed_stale_outputs = False
-        if apply:
-            removed_stale_outputs = self._remove_trace_outputs_for_tasks(
-                index + 1 for index in pending
-            )
-            if applied_records or removed_stale_outputs:
-                self.invalidate_trace_cache()
 
         reused_records = [
             record for record in applied_records if record.get("status") == "reused"
@@ -974,7 +978,7 @@ class JobRunStateMixin:
             for record in applied_records
             if record.get("status") == "accepted"
         ]
-        skipped_records = [*current_records, *applied_records]
+        skipped_records = list(current_records)
         return TaskRunPlan(
             {
                 "pending_indices": pending,
@@ -1000,13 +1004,12 @@ class JobRunStateMixin:
     ) -> Dict[str, Any]:
         """Plan which zero-based solver task indices still need to run.
 
-        When ``reuse`` is true, matching trace files from an earlier frequency
-        layout are copied into their current task-numbered locations and the
-        run state is updated to record those reused tasks.
+        ``reuse`` is retained as a policy input, but task reuse is limited to
+        exact authoritative task results. Opaque generation payloads are never
+        copied or relabelled across task partitions.
 
         Args:
-            reuse: Attempt to reuse matching trace outputs from a previous
-                frequency layout.
+            reuse: Permit exact committed-task reuse under the selected policy.
             force: Ignore reusable outputs and rerun all tasks.
 
         Returns:
@@ -1031,42 +1034,6 @@ class JobRunStateMixin:
             that every task is current.
         """
 
-        if not self.trace_outputs_exist():
-            return False
-
-        metadata = self.run_metadata
-        if metadata.manifest:
-            if not metadata.successful:
-                return False
-            task_summary = metadata.manifest.get("task_summary")
-            if task_summary is not None:
-                if not self._task_summary_successful(
-                    task_summary,
-                    expected_total=self.n_tasks,
-                ):
-                    return False
-            if metadata.job_file_hash and self._file is not None:
-                if metadata.job_file_hash != self._sha256_file(self._file):
-                    return False
-            if metadata.simulation_file_hash and self.simulation._file is not None:
-                if metadata.simulation_file_hash != self._sha256_file(
-                    self.simulation._file
-                ):
-                    return False
-            return True
-
-        state = self.run_state()
-        if not state:
-            return False
-        if state.get("fingerprint") != self.fingerprint():
-            return False
-        if state.get("status") not in {"completed", "skipped"}:
-            return False
-        if not self._task_summary_successful(
-            state.get("task_summary"),
-            expected_total=self.n_tasks,
-        ):
-            return False
         return len(self.current_tasks()) == self.n_tasks
 
     def write_run_state(self, status: str = "completed", **extra) -> Path:
@@ -1089,31 +1056,45 @@ class JobRunStateMixin:
         previous_by_task = self._task_record_by_task(
             self._state_task_records(previous_state)
         )
-        bootstrap_existing_outputs = not task_results and status in {
-            "completed",
-            "skipped",
-        }
-
         files = []
         task_rows = []
-        manifest = self.trace_manifest
-        for task, path in enumerate(manifest.files, start=1):
-            file_path, exists = self._trace_output_path_for_task(
+        fingerprints = self._artifact_contract_fingerprints()
+        for task in range(1, self.n_tasks + 1):
+            committed = self._committed_task_result(task)
+            current_artifact = self._current_task_artifact(
                 task,
-                manifest=manifest,
+                fingerprints=fingerprints,
+                result=committed,
             )
-            stored_path = self._stored_trace_path(file_path)
+            reported_artifact = None
+            if committed is not None:
+                catalog = ArtifactCatalog(
+                    result_path=Path(self._result_path).resolve(strict=False),
+                    results={task: committed},
+                )
+                try:
+                    reported_artifact = catalog.require_one(
+                        _RECEIVER_TRACE_REQUEST,
+                        task=task,
+                    )
+                except ArtifactContractError:
+                    pass
+            file_path = (
+                current_artifact.path
+                if current_artifact is not None
+                else (reported_artifact.path if reported_artifact is not None else None)
+            )
+            exists = bool(file_path is not None and file_path.is_file())
+            stored_path = (
+                None if file_path is None else self._stored_trace_path(file_path)
+            )
             files.append({"path": stored_path, "exists": exists})
 
             result = dict(result_by_task.get(task, {}))
             raw_status = str(result.get("status", "")).strip().lower().replace(" ", "_")
             accepted_by_policy = raw_status in {"accepted", "accepted_failed"}
             task_status = self._normalized_task_status(result.get("status"))
-            previously_current = self.is_task_current(
-                task,
-                state=previous_state,
-                manifest=manifest,
-            )
+            previously_current = current_artifact is not None
             if not result and previously_current:
                 result = dict(previous_by_task.get(task, {}))
                 raw_status = (
@@ -1123,8 +1104,8 @@ class JobRunStateMixin:
                 task_status = self._normalized_task_status(result.get("status"))
             if task_status is None and previously_current:
                 task_status = "current"
-            elif task_status is None and exists and bootstrap_existing_outputs:
-                task_status = "succeeded"
+            elif task_status is None and committed is not None:
+                task_status = "succeeded" if committed.successful else "failed"
             if task_status is None:
                 task_status = "not_run"
             solver_convergence = self._record_solver_convergence(result)
@@ -1169,8 +1150,6 @@ class JobRunStateMixin:
                 "threads_per_rank",
                 "n_threads",
                 "threads",
-                "outputs_manifest",
-                "artifacts",
             ):
                 if key in result:
                     row[key] = result[key]
@@ -1236,240 +1215,60 @@ class JobRunStateMixin:
             payload["task_results"] = task_results
         payload.update(extra)
         self._write_json_file(self.run_state_file, payload)
-        self._write_solver_run_manifest_summary(payload)
         return self.run_state_file
 
-    def task_run_manifest_path(self, task: int) -> Path:
-        """Return the local solver run manifest path for one task.
-
-        Args:
-            task: One-based solver task number.
-
-        Returns:
-            Path where the task-level solver ``run_manifest.json`` is expected.
-
-        Raises:
-            ValueError: If ``task`` is less than one.
-        """
-
-        if task < 1:
-            raise ValueError("Task numbers are one-based and must be >= 1")
-        return (
-            self._result_path
-            / "_fs_run"
-            / "tasks"
-            / f"task_{task:06d}"
-            / "run_manifest.json"
-        )
-
-    def collect_task_run_manifests(
+    def collect_task_results(
         self,
         *,
         status: str = "completed",
     ) -> Optional[Path]:
-        """Aggregate fetched task run manifests into the job run manifests.
-
-        Remote sites can fetch ``results/_fs_run`` and then call this method on
-        the host.  The method scans task-level solver manifests, converts their
-        solver convergence blocks into the same task records used by local runs,
-        writes ``_fs_python_run.json``, and mirrors the task/convergence summary
-        into ``results/_fs_run/run_manifest.json``.
+        """Aggregate committed task results into Python diagnostic state.
 
         Args:
             status: Overall status to use when writing the aggregated
                 Python-side run state.
 
         Returns:
-            Path to the written run-state file, or ``None`` if no task
-            manifests were found.
+            Path to the written run-state file, or ``None`` if no task results
+            were found.
         """
 
         task_records = []
         for task in range(1, self.n_tasks + 1):
-            manifest_path = self.task_run_manifest_path(task)
-            if not manifest_path.exists():
+            result = self._committed_task_result(task)
+            if result is None:
                 continue
-            try:
-                manifest = json.loads(manifest_path.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not self._run_manifest_represents_task(manifest, task):
-                continue
-            convergence = self.solver_convergence_summary(manifest)
-            solver_failed = bool(convergence and convergence.get("failed"))
-            exit_status = manifest.get("exit_status")
-            returncode = None
-            exit_failed = False
-            raw_exit_status = ""
-            if isinstance(exit_status, Mapping):
-                try:
-                    returncode = int(exit_status.get("code", 0))
-                except (TypeError, ValueError):
-                    returncode = None
-                raw_exit_status = str(exit_status.get("status", "")).lower()
-                exit_failed = bool(
-                    (returncode is not None and returncode != 0)
-                    or raw_exit_status in {"failed", "failure", "error"}
-                )
-            elif exit_status is not None:
-                raw_exit_status = str(exit_status).lower()
-                exit_failed = raw_exit_status in {"failed", "failure", "error"}
-            execution = manifest.get("execution")
-            skipped = bool(raw_exit_status == "skipped")
-            if isinstance(execution, Mapping):
-                skipped = skipped or bool(execution.get("skipped"))
-            if skipped:
-                solver_failed = False
-                exit_failed = False
-                convergence = None
             record: Dict[str, Any] = {
                 "task_id": task - 1,
-                "status": (
-                    "skipped"
-                    if skipped
-                    else ("error" if solver_failed or exit_failed else "success")
-                ),
+                "status": result.state if result.successful else "error",
                 "complete": True,
                 "fingerprint": self.task_fingerprint(task),
                 "compatibility_fingerprint": self.task_policy_fingerprint(
                     task,
                     SkipPolicy.compatible(),
                 ),
-                "run_manifest": str(manifest_path),
+                "task_result": str(result.path),
+                "returncode": result.code,
+                "artifacts": [artifact.to_fs() for artifact in result.artifacts],
             }
-            if returncode is not None:
-                record["returncode"] = returncode
-            if convergence is not None:
-                record["solver"] = {"convergence": convergence}
-            if isinstance(execution, Mapping):
-                mpi = execution.get("mpi")
-                if isinstance(mpi, Mapping) and "ranks" in mpi:
-                    record["n_ranks"] = mpi["ranks"]
-                openmp = execution.get("openmp")
-                if isinstance(openmp, Mapping) and "threads" in openmp:
-                    record["threads_per_rank"] = openmp["threads"]
-            outputs = OutputManifest.read(
-                manifest_path.parent / "outputs.json",
-                result_path=self._result_path,
-            )
-            if outputs.valid:
-                record["outputs_manifest"] = str(outputs.path)
-                record["artifacts"] = outputs.records
+            if result.solver:
+                record["solver"] = dict(result.solver)
+            if result.resources:
+                record["resources"] = dict(result.resources)
+            if result.timings:
+                record["timings"] = dict(result.timings)
             task_records.append(record)
 
         if not task_records:
             return None
         return self.write_run_state(status=status, tasks=task_records)
 
-    def _task_run_manifest_is_current(
-        self,
-        task: int,
-        *,
-        trace_file: Path,
-        trace_exists: bool,
-        state: Optional[Mapping[str, Any]] = None,
-    ) -> bool:
-        if not trace_exists:
-            return False
-        if isinstance(state, Mapping) and state:
-            state_fingerprint = state.get("fingerprint")
-            if (
-                state_fingerprint is not None
-                and state_fingerprint != self.fingerprint()
-            ):
-                return False
-
-        manifest_path = self.task_run_manifest_path(task)
-        if not manifest_path.exists():
-            return False
-        try:
-            manifest = json.loads(manifest_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return False
-        if not self._run_manifest_represents_task(manifest, task):
-            return False
-        if not self._run_manifest_successful(manifest):
-            return False
-        if not self._run_manifest_outputs_match_task(manifest, task):
-            return False
-        return self._run_manifest_outputs_include_trace(manifest_path, trace_file)
-
-    def _run_manifest_represents_task(
-        self,
-        manifest: Mapping[str, Any],
-        task: int,
-    ) -> bool:
-        execution = manifest.get("execution")
-        if isinstance(execution, Mapping):
-            args = self._run_manifest_command_line(execution)
-            if "--init" in args:
-                return False
-            command_task = self._command_line_task_number(args)
-            if command_task is not None and command_task != task:
-                return False
-        return self._run_manifest_frequency_matches_task(manifest, task)
-
-    @staticmethod
-    def _run_manifest_command_line(execution: Mapping[str, Any]) -> List[str]:
-        command_line = execution.get("command_line")
-        if isinstance(command_line, str):
-            try:
-                return shlex.split(command_line)
-            except ValueError:
-                return command_line.split()
-        if isinstance(command_line, Sequence) and not isinstance(
-            command_line, (bytes, bytearray)
-        ):
-            return [str(part) for part in command_line]
-        return []
-
-    @classmethod
-    def _command_line_task_number(cls, args: Sequence[str]) -> Optional[int]:
-        for index, arg in enumerate(args):
-            if arg in {"-i", "--task"}:
-                if index + 1 >= len(args):
-                    return None
-                return cls._task_number_from_value(args[index + 1], zero_based=False)
-        return None
-
-    def _run_manifest_frequency_matches_task(
-        self,
-        manifest: Mapping[str, Any],
-        task: int,
-    ) -> bool:
-        inputs = manifest.get("inputs")
-        task_inputs = inputs.get("task") if isinstance(inputs, Mapping) else None
-        if not isinstance(task_inputs, Mapping) or "frequency" not in task_inputs:
-            return True
-        frequency = self._frequency_parts(task_inputs.get("frequency"))
-        if frequency is None:
-            return True
-        expected = self._frequency_parts(self.f_list[task - 1])
-        if expected is None:
-            return False
-        return (
-            abs(frequency[0] - expected[0]) <= 1.0e-9
-            and abs(frequency[1] - expected[1]) <= 1.0e-9
-        )
-
-    def _run_manifest_outputs_match_task(
-        self,
-        manifest: Mapping[str, Any],
-        task: int,
-    ) -> bool:
-        inputs = manifest.get("inputs")
-        task_inputs = inputs.get("task") if isinstance(inputs, Mapping) else None
-        if not isinstance(task_inputs, Mapping):
-            return True
-        outputs_hash = task_inputs.get("outputs_hash")
-        if outputs_hash is None:
-            return True
-        return str(outputs_hash) == self._task_outputs_hash(task)
-
     def _task_outputs_hash(self, task: int) -> str:
-        payload = self.task_fingerprint_payload(task)["job"]["Outputs"]
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+        """Compatibility alias for the v2 effective output-request digest."""
+
+        if task < 1 or task > self.n_tasks:
+            raise IndexError(f"Task {task} is outside 1..{self.n_tasks}")
+        return self.effective_output_request_fingerprint()
 
     @staticmethod
     def _frequency_parts(value: Any) -> Optional[tuple[float, float]]:
@@ -1486,87 +1285,6 @@ class JobRunStateMixin:
             return float(real), float(imag)
         except (TypeError, ValueError):
             return None
-
-    @classmethod
-    def _run_manifest_successful(cls, manifest: Mapping[str, Any]) -> bool:
-        execution = manifest.get("execution")
-        skipped = False
-        if isinstance(execution, Mapping):
-            skipped = bool(execution.get("skipped"))
-
-        exit_status = manifest.get("exit_status")
-        if isinstance(exit_status, Mapping):
-            try:
-                code = int(exit_status.get("code", 0))
-            except (TypeError, ValueError):
-                code = None
-            status = str(exit_status.get("status", "")).lower()
-            skipped = skipped or status == "skipped"
-            if (code is not None and code != 0) or status in {
-                "failed",
-                "failure",
-                "error",
-                "timeout",
-                "cancelled",
-                "killed",
-            }:
-                return False
-        elif exit_status is not None:
-            status = str(exit_status).lower()
-            skipped = skipped or status == "skipped"
-            if status in {
-                "failed",
-                "failure",
-                "error",
-                "timeout",
-                "cancelled",
-                "killed",
-            }:
-                return False
-
-        if skipped:
-            return True
-        convergence = cls.solver_convergence_summary(manifest)
-        return not bool(convergence and convergence.get("failed"))
-
-    def _run_manifest_outputs_include_trace(
-        self,
-        manifest_path: Path,
-        trace_file: Path,
-    ) -> bool:
-        outputs_path = manifest_path.parent / "outputs.json"
-        outputs = OutputManifest.read(
-            outputs_path,
-            result_path=self._result_path,
-        )
-        if not outputs.valid:
-            return self._is_modern_frequency_trace_shard(trace_file) or not (
-                outputs_path.exists()
-            )
-        trace_key = str(Path(trace_file).resolve(strict=False))
-        for artifact in outputs.artifacts:
-            if str(artifact.path.resolve(strict=False)) == trace_key:
-                return True
-        # Early fs-run-1 producers omitted modern frequency shards from the
-        # inventory. Retain that compatibility only when another trace-family
-        # payload was not authoritatively reported for this task.
-        has_trace_payload = any(
-            artifact.kind in {"traces", "receiver", "wavefield", "wavefields"}
-            or (
-                artifact.schema is not None
-                and "trace" in str(artifact.schema).lower()
-                and "metadata" not in str(artifact.schema).lower()
-            )
-            for artifact in outputs.artifacts
-        )
-        return self._is_modern_frequency_trace_shard(trace_file) and not (
-            has_trace_payload
-        )
-
-    @staticmethod
-    def _is_modern_frequency_trace_shard(path: Path) -> bool:
-        path = Path(path)
-        return path.parent.name == "shards" and path.name.startswith("f_")
 
     def _task_record_by_task(
         self, records: Iterable[Mapping[str, Any]]
@@ -1684,15 +1402,6 @@ class JobRunStateMixin:
             summary = cls.solver_convergence_summary({"solver": solver})
             if summary is not None:
                 return summary
-        manifest = record.get("run_manifest")
-        if isinstance(manifest, Mapping):
-            return cls.solver_convergence_summary(manifest)
-        if isinstance(manifest, (str, os.PathLike)):
-            try:
-                manifest_data = json.loads(Path(manifest).read_text())
-            except (OSError, json.JSONDecodeError):
-                return None
-            return cls.solver_convergence_summary(manifest_data)
         return None
 
     @classmethod
@@ -1991,19 +1700,16 @@ class JobRunStateMixin:
         return None
 
     def _default_core_count(self) -> Optional[float]:
-        metadata = self.run_metadata
-        for source in (metadata.manifest, metadata.timings):
-            if isinstance(source, Mapping):
-                cores = self._record_core_count(source)
-                if cores is not None:
-                    return cores
+        for record in self._task_records():
+            cores = self._record_core_count(record)
+            if cores is not None:
+                return cores
         return None
 
     def _task_records(self) -> List[Mapping[str, Any]]:
-        metadata = self.run_metadata
         state = self.run_state()
         records: List[Mapping[str, Any]] = []
-        for source in (state or metadata.state, metadata.timings, metadata.manifest):
+        for source in (state,):
             if not isinstance(source, Mapping):
                 continue
             records.extend(self._as_records(source.get("tasks")))
@@ -2011,11 +1717,26 @@ class JobRunStateMixin:
             records.extend(self._as_records(source.get("task_timings")))
             records.extend(self._as_records(source.get("frequencies")))
             records.extend(self._as_records(source.get("errors")))
-        if metadata.error:
-            records.extend(self._as_records(metadata.error.get("tasks")))
-            records.extend(self._as_records(metadata.error.get("errors")))
-            if not records:
-                records.append(metadata.error)
+        for task in range(1, self.n_tasks + 1):
+            result = self._committed_task_result(task)
+            if result is None:
+                continue
+            records.append(
+                {
+                    "task": task,
+                    "frequency": self._canonical_frequency_value(
+                        result.partition.frequency
+                    ),
+                    "status": result.state,
+                    "returncode": result.code,
+                    "solver": dict(result.solver),
+                    "timings": dict(result.timings),
+                    "phases": dict(result.timings),
+                    "resources": dict(result.resources),
+                    "timestamps": dict(result.timestamps),
+                    "duration_seconds": sum(result.timings.values()),
+                }
+            )
         return records
 
     def _reuse_task_outputs_from_state(
@@ -2109,87 +1830,6 @@ class JobRunStateMixin:
         state = self.run_state()
         return self._reusable_task_outputs_from_state(state) if state else []
 
-    def _remove_trace_outputs_for_tasks(
-        self,
-        tasks: Iterable[int],
-        *,
-        remove_matching_shards: bool = False,
-    ) -> bool:
-        removed = False
-        task_files = [
-            self.trace_outputs.path / f"traces_{task}.h5"
-            for task in range(1, self.n_tasks + 1)
-        ]
-        for task in tasks:
-            if task < 1 or task > len(task_files):
-                continue
-            paths = {
-                task_files[task - 1],
-                self._legacy_trace_file(task_files[task - 1]),
-            }
-            shard = (
-                self._matching_frequency_trace_file(task)
-                if remove_matching_shards
-                else None
-            )
-            if shard is not None:
-                paths.add(shard)
-            for path in paths:
-                try:
-                    path.unlink()
-                    removed = True
-                except FileNotFoundError:
-                    pass
-        return removed
-
-    def _remove_all_trace_shards(self) -> bool:
-        """Remove every task shard owned by this job before a forced rerun."""
-
-        manifests = [self.trace_manifest]
-        try:
-            wavefield_manifest = self.wavefield_manifest
-        except Exception:
-            wavefield_manifest = None
-        if wavefield_manifest is not None and wavefield_manifest.groups:
-            manifests.append(wavefield_manifest)
-
-        patterns = (
-            "f_*.h5",
-            "traces_*.h5",
-            "receivers_*.h5",
-            "trace_frequency_*.h5",
-        )
-        candidates = set()
-        for manifest in manifests:
-            roots = (manifest.output_path, manifest.result_path)
-            for root in roots:
-                directories = (
-                    root,
-                    root / "shards",
-                    root / "traces" / "shards",
-                    root / "wavefields" / "shards",
-                )
-                for directory in directories:
-                    if not directory.exists():
-                        continue
-                    for pattern in patterns:
-                        candidates.update(directory.glob(pattern))
-            for group in [*manifest.groups, *manifest.wavefields]:
-                directory = manifest.output_path / str(group)
-                if not directory.exists():
-                    continue
-                for pattern in patterns:
-                    candidates.update(directory.glob(pattern))
-
-        removed = False
-        for path in candidates:
-            try:
-                path.unlink()
-                removed = True
-            except FileNotFoundError:
-                pass
-        return removed
-
     @staticmethod
     def _task_summary_successful(
         summary: Any,
@@ -2213,41 +1853,3 @@ class JobRunStateMixin:
             and failed == 0
             and not_run == 0
         )
-
-    def _write_solver_run_manifest_summary(self, payload: Mapping[str, Any]) -> None:
-        """Mirror Python job-level task/convergence summaries into solver metadata."""
-
-        manifest_path = self._result_path / "_fs_run" / "run_manifest.json"
-        if not manifest_path.exists():
-            return
-        try:
-            manifest = json.loads(manifest_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return
-        if not isinstance(manifest, dict):
-            return
-
-        task_summary = payload.get("task_summary")
-        if isinstance(task_summary, Mapping):
-            manifest["task_summary"] = dict(task_summary)
-
-        tasks = payload.get("tasks")
-        if isinstance(tasks, list):
-            manifest["tasks"] = [
-                dict(task) for task in tasks if isinstance(task, Mapping)
-            ]
-
-        solver_payload = payload.get("solver")
-        convergence = (
-            solver_payload.get("convergence")
-            if isinstance(solver_payload, Mapping)
-            else None
-        )
-        if isinstance(convergence, Mapping):
-            solver = manifest.get("solver")
-            if not isinstance(solver, dict):
-                solver = {}
-            solver["convergence"] = dict(convergence)
-            manifest["solver"] = solver
-
-        self._write_json_file(manifest_path, manifest)

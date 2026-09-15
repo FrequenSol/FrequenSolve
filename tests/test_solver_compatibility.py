@@ -536,6 +536,7 @@ def _bare_slurm_site():
     site._solver_compatibility_result = None
     site._solver_compatibility_policy = None
     site._executable = "/remote/solver"
+    site.solver = "/remote/solver"
     site.modules = []
     site.environment = {}
     site.run_login = lambda command, **kwargs: (

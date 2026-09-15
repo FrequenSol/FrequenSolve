@@ -464,6 +464,9 @@ class EikonalJob(BaseJob):
             simulation=simulation,
             config=EikonalConfig.from_fs(data["Eikonal"]),
         )
+        job.preserve_task_outputs = data.get("preserve_task_outputs", False)
+        if not isinstance(job.preserve_task_outputs, bool):
+            raise TypeError("preserve_task_outputs must be a boolean")
         job._job_id = data.get("job_id")
         return job
 
@@ -695,7 +698,6 @@ class EikonalJob(BaseJob):
             payload["task_results"] = task_results
         payload.update(extra)
         self._write_json_file(self.run_state_file, payload)
-        self._write_solver_run_manifest_summary(payload)
         return self.run_state_file
 
     def frequency_status(self):

@@ -367,6 +367,9 @@ class BaseJob(
     workflow: str
     f_list: List[Union[float, complex]]
     outputs: JobOutputs = field(default_factory=JobOutputs)
+    preserve_task_outputs: bool = field(default=False, kw_only=True)
+    """Retain raw task outputs and reuse converged tasks across numerical solver changes."""
+
     _file: Optional[Path] = None
     _job_id: Optional[str] = None
 
@@ -380,6 +383,8 @@ class BaseJob(
     """Optional solver limit on MPI ranks used by one task."""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.preserve_task_outputs, bool):
+            raise TypeError("preserve_task_outputs must be a boolean")
         if not self.name:
             raise ValueError("BaseJob requires a non-empty name")
         if self.simulation is None:

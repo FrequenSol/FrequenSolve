@@ -30,12 +30,6 @@ _ROOT_TRACE_METADATA_DATASETS = {
     "trace_index",
 }
 _TRACE_METADATA_FILE = "trace_metadata.h5"
-_MODERN_TRACE_SHARD_GLOB = "f_*.h5"
-_LEGACY_TRACE_SHARD_GLOBS = (
-    "traces_*.h5",
-    "receivers_*.h5",
-    "trace_frequency_*.h5",
-)
 _TD_EAGER_MAX_BYTES = 64 * 1024**2
 _TD_LAZY_CHUNK_BYTES = 16 * 1024**2
 
@@ -174,6 +168,7 @@ class TraceStore:
     _cache_dir: Optional[Path] = None
     _open_files: List[h5py.File]
     _packed_group_files: Dict[str, Path]
+    _packed_segment_entries: List[Dict[str, Any]]
 
     def __init__(
         self,
@@ -192,6 +187,7 @@ class TraceStore:
         self._consolidated = None
         self._open_files = []
         self._packed_group_files = {}
+        self._packed_segment_entries = []
 
     @classmethod
     def from_job(cls, job, upscale: int = 1):
@@ -299,6 +295,16 @@ class TraceStore:
         """Return receiver or wavefield groups available in the trace store."""
 
         self._ensure_consolidated()
+        if self._packed_segment_entries:
+            groups = []
+            for path in dict.fromkeys(
+                entry["path"] for entry in self._packed_segment_entries
+            ):
+                with h5py.File(path, "r") as h5:
+                    groups.extend(
+                        self._h5_trace_groups(h5, self.metadata.get("groups"))
+                    )
+            return list(dict.fromkeys(groups))
         if self._packed_group_files:
             configured = [str(group) for group in self.metadata.get("groups", [])]
             if configured:
@@ -368,6 +374,15 @@ class TraceStore:
     def frequencies(self, group) -> list[str]:
         """Return frequencies available in a trace group."""
 
+        if self._packed_segment_entries:
+            return np.asarray(
+                [
+                    entry["frequency"]
+                    for entry in self._segment_entries_for_group(group)
+                ],
+                dtype=float,
+            )
+
         with h5py.File(self._trace_file_for_group(group), "r") as f:
             if self._is_indexed_packed_h5(f) and group not in f:
                 values = [
@@ -399,6 +414,12 @@ class TraceStore:
 
     def laplace(self, group: Optional[str] = None) -> np.ndarray:
         """Return Laplace offsets for all traces or a specific group."""
+
+        if self._packed_segment_entries:
+            return np.asarray(
+                [entry["laplace"] for entry in self._segment_entries_for_group(group)],
+                dtype=float,
+            )
 
         if group is None and self._packed_group_files:
             return self._metadata_laplace_values(self._expected_frequencies())
@@ -613,6 +634,10 @@ class TraceStore:
         return str(self.summary)
 
     def _ensure_consolidated(self) -> None:
+        if self._packed_segment_entries and all(
+            Path(entry["path"]).exists() for entry in self._packed_segment_entries
+        ):
+            return
         if self._packed_group_files and all(
             path.exists() for path in self._packed_group_files.values()
         ):
@@ -622,6 +647,8 @@ class TraceStore:
 
     def _trace_file_for_group(self, group: str) -> Path:
         self._ensure_consolidated()
+        if self._packed_segment_entries:
+            return Path(self._segment_entries_for_group(group)[0]["path"])
         if group in self._packed_group_files:
             return self._packed_group_files[group]
         if self._consolidated is None:
@@ -965,26 +992,6 @@ class TraceStore:
         except OSError:
             return False
 
-    @staticmethod
-    def _candidate_packed_trace_files(records: Iterable[Path]) -> list[Path]:
-        candidates: list[Path] = []
-        seen = set()
-        for record in records:
-            stem = record.stem
-            prefix = stem.rsplit("_", 1)[0] if "_" in stem else stem
-            for candidate in (
-                record.parent / f"{prefix}.h5",
-                record.parent / "traces.h5",
-                record.parent.parent / f"{prefix}.h5",
-                record.parent.parent / "traces.h5",
-            ):
-                key = str(candidate.resolve(strict=False))
-                if key in seen:
-                    continue
-                seen.add(key)
-                candidates.append(candidate)
-        return candidates
-
     def _expected_frequencies(self) -> list[float]:
         f_map = self.metadata.get("f_map", {})
         if not isinstance(f_map, dict):
@@ -1212,16 +1219,6 @@ class TraceStore:
             return False
         return all(group in available for group in requested)
 
-    def _packed_trace_file_for_records(self, records: Iterable[Path]) -> Optional[Path]:
-        expected = self._expected_frequencies()
-        groups = [str(group) for group in self.metadata.get("groups", [])]
-        for candidate in self._candidate_packed_trace_files(records):
-            if self._packed_trace_covers_frequencies(
-                candidate, expected
-            ) and self._packed_trace_contains_groups(candidate, groups):
-                return candidate
-        return None
-
     def _packed_group_file_map(self, records: Iterable[Path]) -> Dict[str, Path]:
         expected = self._expected_frequencies()
         configured = [str(group) for group in self.metadata.get("groups", [])]
@@ -1241,154 +1238,6 @@ class TraceStore:
             return {}
         return group_files
 
-    def _candidate_frequency_shard_files(self, records: Iterable[Path]) -> list[Path]:
-        records = [Path(record) for record in records]
-        candidates: list[Path] = []
-        seen: set[str] = set()
-        record_keys = {str(path.resolve(strict=False)) for path in records}
-
-        def add_file(path: Path) -> None:
-            key = str(path.resolve(strict=False))
-            if key in seen:
-                return
-            seen.add(key)
-            candidates.append(path)
-
-        def add_shard_dir(shard_dir: Path) -> None:
-            if not shard_dir.exists():
-                return
-            modern = sorted(shard_dir.glob(_MODERN_TRACE_SHARD_GLOB))
-            files = modern
-            if not files:
-                files = [
-                    path
-                    for pattern in _LEGACY_TRACE_SHARD_GLOBS
-                    for path in sorted(shard_dir.glob(pattern))
-                ]
-            for path in files:
-                add_file(path)
-
-        def add_root(root: Optional[Union[str, Path]]) -> None:
-            if root is None:
-                return
-            root = Path(root)
-            for shard_dir in (
-                root / "shards",
-                root / "traces" / "shards",
-                root / "wavefields" / "shards",
-            ):
-                add_shard_dir(shard_dir)
-            if root.exists():
-                for pattern in (_MODERN_TRACE_SHARD_GLOB, *_LEGACY_TRACE_SHARD_GLOBS):
-                    for path in sorted(root.glob(pattern)):
-                        add_file(path)
-
-        add_root(self.metadata.get("output_path"))
-        add_root(self.metadata.get("result_path"))
-        for record in records:
-            add_root(record.parent)
-            add_root(record.parent.parent)
-
-        configured_groups = [str(group) for group in self.metadata.get("groups", [])]
-        expected = self._expected_frequencies()
-        if expected:
-            files_by_frequency: dict[int, Path] = {}
-        else:
-            files = []
-
-        for candidate in candidates:
-            key = str(candidate.resolve(strict=False))
-            if (
-                key in record_keys
-                or not candidate.exists()
-                or self._is_packed_trace_file(candidate)
-            ):
-                continue
-            try:
-                frequencies = self._read_trace_frequencies(candidate)
-            except (OSError, KeyError, ValueError):
-                continue
-            if len(frequencies) != 1:
-                continue
-            if configured_groups:
-                try:
-                    available_groups = set(
-                        self.discover_trace_groups(candidate, configured_groups)
-                    )
-                except (OSError, KeyError, ValueError):
-                    available_groups = set()
-                if not all(group in available_groups for group in configured_groups):
-                    metadata_file = self._trace_metadata_file_for_records(
-                        [candidate, *records]
-                    )
-                    if metadata_file is not None:
-                        try:
-                            available_groups = set(
-                                self.discover_trace_groups(
-                                    metadata_file,
-                                    configured_groups,
-                                )
-                            )
-                        except (OSError, KeyError, ValueError):
-                            available_groups = set()
-                if not all(group in available_groups for group in configured_groups):
-                    continue
-            if not expected:
-                files.append(candidate)
-                continue
-            for index, frequency in enumerate(expected):
-                if index in files_by_frequency:
-                    continue
-                if np.isclose(
-                    float(frequencies[0]),
-                    float(frequency),
-                    rtol=0.0,
-                    atol=1.0e-9,
-                ):
-                    files_by_frequency[index] = candidate
-                    break
-
-        if not expected:
-            return files
-        files = [files_by_frequency[index] for index in sorted(files_by_frequency)]
-        if files and len(files) < len(expected):
-            warnings.warn(
-                "Trace shards are missing "
-                f"{len(expected) - len(files)} of {len(expected)} expected "
-                "frequencies; building a VDS from the available shards.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        return files
-
-    def _order_frequency_files(self, files: Iterable[Path]) -> list[Path]:
-        expected = self._expected_frequencies()
-        files = list(files)
-        if not expected:
-            return files
-
-        files_by_frequency: dict[int, Path] = {}
-        for path in files:
-            try:
-                frequencies = self._read_trace_frequencies(path)
-            except (OSError, KeyError, ValueError):
-                continue
-            if len(frequencies) != 1:
-                continue
-            for index, frequency in enumerate(expected):
-                if index in files_by_frequency:
-                    continue
-                if np.isclose(
-                    float(frequencies[0]),
-                    float(frequency),
-                    rtol=0.0,
-                    atol=1.0e-9,
-                ):
-                    files_by_frequency[index] = path
-                    break
-        ordered = [files_by_frequency[index] for index in sorted(files_by_frequency)]
-        return ordered or files
-
     def consolidate(self, cache_dir: Optional[Union[str, Path]] = None) -> Path:
         """Create or select a packed trace file with frequency as leading axis.
 
@@ -1403,12 +1252,34 @@ class TraceStore:
         if not records:
             raise FileNotFoundError("No trace files were provided")
         self._packed_group_files = {}
-
-        packed = self._packed_trace_file_for_records(records)
-        if packed is not None:
+        packed_entries = self.metadata.get("packed_entries", [])
+        if packed_entries:
+            normalized = []
+            record_keys = {str(record.resolve(strict=False)) for record in records}
+            for entry in packed_entries:
+                if not isinstance(entry, dict):
+                    raise ValueError("packed trace entries must be mappings")
+                path = Path(entry["path"])
+                if str(path.resolve(strict=False)) not in record_keys:
+                    raise ValueError(
+                        f"packed trace entry references undeclared segment {path}"
+                    )
+                if not path.is_file():
+                    raise FileNotFoundError(f"Packed trace segment is missing: {path}")
+                normalized.append(
+                    {
+                        "path": path,
+                        "family": entry.get("family", "traces"),
+                        "dataset_number": int(entry["dataset_number"]),
+                        "frequency": float(entry["frequency"]),
+                        "laplace": float(entry.get("laplace", 0.0)),
+                    }
+                )
             self.close()
-            self._consolidated = packed
+            self._packed_segment_entries = normalized
+            self._consolidated = Path(normalized[0]["path"])
             return self._consolidated
+        self._packed_segment_entries = []
 
         group_files = self._packed_group_file_map(records)
         if group_files:
@@ -1428,42 +1299,25 @@ class TraceStore:
 
         available = []
         missing = []
-        shard_files: list[Path] = []
         for record in records:
             if record.exists():
                 available.append(record)
             else:
                 missing.append(record)
 
-        if missing:
-            shard_files = self._candidate_frequency_shard_files(records)
-            if shard_files:
-                available = self._order_frequency_files([*available, *shard_files])
-                message = (
-                    "Trace files are missing; creating a VDS from "
-                    f"{len(available)} matching frequency shard(s)."
-                    if not any(record.exists() for record in records)
-                    else "Trace files are missing; filling the VDS from matching "
-                    "frequency shard(s)."
-                )
+        if missing and not available:
+            for record in missing:
                 warnings.warn(
-                    message,
+                    "Trace file is missing and will be omitted from the VDS: "
+                    f"{record}",
                     RuntimeWarning,
                     stacklevel=2,
                 )
-            elif not available:
-                for record in missing:
-                    warnings.warn(
-                        "Trace file is missing and will be omitted from the VDS: "
-                        f"{record}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
 
         if not available:
             raise FileNotFoundError("No trace files exist")
 
-        if missing and any(record.exists() for record in records) and not shard_files:
+        if missing and any(record.exists() for record in records):
             for record in missing:
                 warnings.warn(
                     f"Trace file is missing and will be omitted from the VDS: {record}",
@@ -1568,6 +1422,10 @@ class TraceStore:
                 dependencies=("dask",),
                 error=exc,
             ) from exc
+
+        self._ensure_consolidated()
+        if self._packed_segment_entries:
+            return self._read_segmented_h5(group, da)
 
         h5 = h5py.File(self._trace_file_for_group(group), "r")
         self._open_files.append(h5)
@@ -1843,6 +1701,129 @@ class TraceStore:
             per_receiver = max(1, fd.sizes["frequency"] * itemsize)
             chunks["receiver"] = max(1, _TD_LAZY_CHUNK_BYTES // per_receiver)
         return fd.chunk(chunks)
+
+    def _segment_entries_for_group(self, group):
+        """Select a sampled family from payload metadata, without filename discovery."""
+        if group is None:
+            family = self._packed_segment_entries[0].get("family", "traces")
+            return [
+                entry
+                for entry in self._packed_segment_entries
+                if entry.get("family", "traces") == family
+            ]
+        selected = []
+        families = {}
+        for entry in self._packed_segment_entries:
+            family = entry.get("family", "traces")
+            if family not in families:
+                with h5py.File(entry["path"], "r") as h5:
+                    families[family] = group in self._h5_trace_groups(h5)
+            if families[family]:
+                selected.append(entry)
+        if not selected:
+            raise KeyError(f"No packed family contains group {group!r}")
+        return selected
+
+    def _read_segmented_h5(self, group: str, da) -> DataArray:
+        """Build one lazy array from explicitly indexed immutable segments."""
+
+        handles: Dict[Path, h5py.File] = {}
+        arrays = []
+        frequencies = []
+        laplace = []
+        template = None
+        template_h5 = None
+        template_shape = None
+        for entry in self._segment_entries_for_group(group):
+            path = Path(entry["path"])
+            h5 = handles.get(path)
+            if h5 is None:
+                h5 = h5py.File(path, "r")
+                handles[path] = h5
+                self._open_files.append(h5)
+            rows = [
+                row
+                for row in self._indexed_trace_rows(h5, group)
+                if row["dataset_number"] == entry["dataset_number"]
+            ]
+            if len(rows) != 1:
+                raise ValueError(
+                    f"Packed trace segment {path} contains {len(rows)} datasets "
+                    f"for declared dataset number {entry['dataset_number']}"
+                )
+            item = h5[rows[0]["packed_path"]]
+            if template is None:
+                template = item
+                template_h5 = h5
+                template_shape = item.shape
+            elif item.shape != template_shape:
+                raise ValueError(
+                    "Packed trace segment datasets do not have a common shape"
+                )
+            arrays.append(da.from_array(item, chunks=item.shape))
+            frequencies.append(float(entry["frequency"]))
+            laplace.append(float(entry["laplace"]))
+
+        if template is None or template_h5 is None:
+            raise FileNotFoundError("No packed trace segment entries are available")
+        data = da.stack(arrays, axis=0)
+        dims = _trace_data_dims(template)
+        if data.ndim == len(dims) + 1:
+            dims.append("complex")
+        dims = ["source" if dim == "shot" else dim for dim in dims]
+        coords: Dict[str, Any] = {}
+        for axis, dim in enumerate(dims):
+            if dim == "frequency":
+                coords[dim] = np.asarray(frequencies, dtype=float)
+                continue
+            if dim == "complex":
+                coords[dim] = (
+                    ["real", "imag"]
+                    if data.shape[axis] == 2
+                    else np.arange(1, data.shape[axis] + 1)
+                )
+                continue
+            attr_dim = "shot" if dim == "source" and "shot" in template.attrs else dim
+            if dim == "receiver":
+                survey_paths = (
+                    f"survey/receiver_groups/{group}/traces/receiver_id",
+                    f"survey/receiver_groups/{group}/receivers/receiver_id",
+                    "survey/receivers/receiver_id",
+                )
+            elif dim == "source":
+                survey_paths = (
+                    f"survey/receiver_groups/{group}/traces/source_id",
+                    "survey/sources/source_id",
+                )
+            elif dim == "component":
+                survey_paths = (
+                    f"survey/receiver_groups/{group}/traces/component_name",
+                    f"survey/receiver_groups/{group}/components/component_name",
+                    "survey/components/component_name",
+                )
+            else:
+                survey_paths = ()
+            survey_path = next(
+                (path for path in survey_paths if path in template_h5), None
+            )
+            if survey_path is not None:
+                values = _unique_preserve_order(
+                    _decode_h5_strings(template_h5[survey_path][()])
+                )
+                coords[dim] = (
+                    values
+                    if len(values) == data.shape[axis]
+                    else np.arange(1, data.shape[axis] + 1)
+                )
+            elif attr_dim in template.attrs:
+                coords[dim] = template.attrs[attr_dim]
+            else:
+                coords[dim] = np.arange(1, data.shape[axis] + 1)
+        result = DataArray(data, dims=dims, coords=coords)
+        result = result.assign_coords(
+            laplace=("frequency", np.asarray(laplace, dtype=float))
+        )
+        return self._filter_expected_frequency_data(result)
 
     def read_FD(
         self,

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -14,6 +12,8 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Union
 
 import h5py
 import numpy as np
+
+from frequensolve.util.atomic import atomic_output_path, atomic_write_json
 
 __all__ = [
     "LossTerms",
@@ -85,30 +85,6 @@ def _scalar_metrics(values: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         else:
             raise TypeError(f"optimization metric {key!r} must be a scalar")
     return out
-
-
-def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> Path:
-    """Replace a JSON record atomically after writing it in the same directory."""
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, indent=2, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-    return path
 
 
 @dataclass(frozen=True)
@@ -421,7 +397,13 @@ class OptimizationHistory:
         if self.path is None:
             raise ValueError("optimization history has no output path")
         self.updated_at = _utc_now()
-        return _write_json_atomic(self.path, self.to_fs())
+        return atomic_write_json(
+            self.path,
+            self.to_fs(),
+            indent=2,
+            sort_keys=True,
+            trailing_newline=True,
+        )
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "OptimizationHistory":
@@ -506,12 +488,7 @@ class OptimizationCheckpoint:
         """Atomically write the restart checkpoint as portable float64 HDF5."""
 
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp.h5", dir=path.parent
-        )
-        os.close(descriptor)
-        try:
+        with atomic_output_path(path) as temporary:
             with h5py.File(temporary, "w") as h5:
                 h5.attrs["schema"] = _CHECKPOINT_SCHEMA
                 h5.attrs["iteration"] = self.iteration
@@ -521,13 +498,6 @@ class OptimizationCheckpoint:
                 loss = h5.create_group("loss")
                 for key, value in self.loss.to_fs().items():
                     loss.attrs[key] = value
-            os.replace(temporary, path)
-        except BaseException:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-            raise
         return path
 
     @classmethod
@@ -597,7 +567,13 @@ class OptimizationResult:
     def save(self, path: Union[str, Path]) -> Path:
         """Atomically write the terminal JSON summary."""
 
-        return _write_json_atomic(Path(path), self.to_fs())
+        return atomic_write_json(
+            path,
+            self.to_fs(),
+            indent=2,
+            sort_keys=True,
+            trailing_newline=True,
+        )
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "OptimizationResult":

@@ -3,8 +3,6 @@
 import copy
 import json
 import logging
-import os
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
@@ -26,6 +24,7 @@ from frequensolve.simulation.config import SimulationConfig
 from frequensolve.simulation.discretization import Discretization
 from frequensolve.simulation.solver import SolverConfig
 from frequensolve.units import UnitConfig
+from frequensolve.util.atomic import atomic_write_json
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.encoders import CustomJSONEncoder
 from frequensolve.util.mixins import (
@@ -713,27 +712,13 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         indent = json_kwargs.pop("indent", 3)
         ctx = self.export_context()
         payload = self.to_fs(ctx)
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f".{file.name}.", suffix=".tmp", dir=file.parent
+        atomic_write_json(
+            file,
+            payload,
+            cls=CustomJSONEncoder,
+            indent=indent,
+            **json_kwargs,
         )
-        try:
-            with os.fdopen(descriptor, "w") as stream:
-                json.dump(
-                    payload,
-                    stream,
-                    cls=CustomJSONEncoder,
-                    indent=indent,
-                    **json_kwargs,
-                )
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, file)
-        except BaseException:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-            raise
         removed = ctx.store.prune_unreferenced(payload)
         if removed:
             logging.getLogger(__name__).debug(
