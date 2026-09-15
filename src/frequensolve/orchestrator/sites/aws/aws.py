@@ -1001,7 +1001,9 @@ class AWSSite(BaseSite):
             **kwargs: Run options, including name and status email preferences.
                 Pass ``check=True`` to make ``wait()`` raise by
                 default for failed runs, or ``validate=False`` to skip SDK
-                pre-run validation.
+                pre-run validation. Pass ``allow_cpu_sharing=True`` to allow up to
+                two eligible single-CPU frequency jobs per vCPU; defaults to False.
+                Memory reservations remain unchanged.
 
         Returns:
             Awaitable run handle.
@@ -1012,6 +1014,7 @@ class AWSSite(BaseSite):
         unsupported = kwargs.keys() - {
             "name",
             "send_simulation_status_email",
+            "allow_cpu_sharing",
             "force",
             "rerun",
             "skip",
@@ -1027,6 +1030,17 @@ class AWSSite(BaseSite):
                 + ", ".join(sorted(unsupported))
                 + ". Select execution resources through a named site.toml profile."
             )
+        allow_cpu_sharing = kwargs.pop("allow_cpu_sharing", False)
+        if type(allow_cpu_sharing) is not bool:
+            raise ValueError("allow_cpu_sharing must be a boolean")
+        execution_arguments = self.execution_profile.graphql_arguments()
+        resources = execution_arguments["execution_resources"]
+        if allow_cpu_sharing and (
+            resources["nodes"] != 1 or resources["mpiRanks"] != 1
+        ):
+            raise ValueError("CPU sharing requires a single-node, single-rank profile")
+        if allow_cpu_sharing:
+            resources["allowCpuSharing"] = True
         fresh_run = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
         skip_policy = SkipPolicy.from_value(
             kwargs.pop("skip", kwargs.pop("skip_policy", None))
@@ -1085,7 +1099,7 @@ class AWSSite(BaseSite):
                 simulation_job_name=job.name,
                 send_simulation_status_email=kwargs.get("send_simulation_status_email"),
                 fresh=fresh_run,
-                **self.execution_profile.graphql_arguments(),
+                **execution_arguments,
             )
 
             simulation_id = result["simulationId"]
@@ -1110,7 +1124,7 @@ class AWSSite(BaseSite):
                         "executionState": normalize_execution_state(
                             result.get("executionState") or result.get("status")
                         ),
-                        "requestedResources": self.execution_profile.graphql_arguments().get(
+                        "requestedResources": execution_arguments.get(
                             "execution_resources"
                         ),
                     }.items()

@@ -115,6 +115,10 @@
           "type": "integer",
           "minimum": 60,
           "maximum": 7200
+        },
+        "allowCpuSharing": {
+          "type": "boolean",
+          "default": false
         }
       },
       "allOf": [

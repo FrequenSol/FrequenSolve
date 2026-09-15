@@ -501,3 +501,38 @@ def test_submission_freezes_result_state_before_the_remote_call():
     assert run.job.simulation.extra == {"coordinates": [1.0, 2.0]}
     assert job.simulation.extra == {"coordinates": [99.0, 2.0]}
     assert run.job.simulation._project is job.simulation._project
+
+
+def test_cpu_sharing_is_per_submission_and_does_not_mutate_site():
+    site = make_graphql_site()
+    enabled = site.submit(FakeJob(), allow_cpu_sharing=True)
+    site.submit(FakeJob())
+    site.submit(FakeJob(), allow_cpu_sharing=False)
+    calls = site.graphql_client.submit_calls
+    assert calls[0]["execution_resources"]["allowCpuSharing"] is True
+    assert enabled.backend["requestedResources"]["allowCpuSharing"] is True
+    assert all(
+        "allowCpuSharing" not in call["execution_resources"] for call in calls[1:]
+    )
+    assert (
+        "allowCpuSharing"
+        not in site.execution_profile.graphql_arguments()["execution_resources"]
+    )
+
+
+@pytest.mark.parametrize("value", [1, 2, "true", None])
+def test_cpu_sharing_rejects_nonboolean_before_submission(value):
+    site = make_graphql_site()
+    with pytest.raises(ValueError, match="boolean"):
+        site.submit(FakeJob(), allow_cpu_sharing=value)
+    assert not site.graphql_client.submit_calls
+
+
+def test_cpu_sharing_rejects_distributed_profile():
+    site = make_graphql_site()
+    site.execution_profile = ManagedExecutionProfile.from_mapping(
+        {"execution_resources": {"nodes": 2, "mpi_ranks": 2, "wall_time_seconds": 600}}
+    )
+    with pytest.raises(ValueError, match="single-node"):
+        site.submit(FakeJob(), allow_cpu_sharing=True)
+    assert not site.graphql_client.submit_calls
