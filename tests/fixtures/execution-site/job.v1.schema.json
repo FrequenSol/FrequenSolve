@@ -115,6 +115,10 @@
           "type": "integer",
           "minimum": 60,
           "maximum": 7200
+        },
+        "allowCpuSharing": {
+          "type": "boolean",
+          "default": false
         }
       },
       "allOf": [
@@ -142,6 +146,28 @@
                   6,
                   8
                 ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "allowCpuSharing"
+            ],
+            "properties": {
+              "allowCpuSharing": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "nodes": {
+                "const": 1
+              },
+              "mpiRanks": {
+                "const": 1
               }
             }
           }

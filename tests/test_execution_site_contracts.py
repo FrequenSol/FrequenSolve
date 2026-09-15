@@ -85,6 +85,17 @@ def test_producer_consumer_exchange():
         variables = client.execute.call_args.args[1]
         assert json.loads(variables["executionResources"]) == case["value"]
         requests.append({"name": case["name"], "variables": variables})
+    site = make_graphql_site()
+    site.submit(FakeJob(), allow_cpu_sharing=True)
+    selected = site.graphql_client.submit_calls[0]
+    client = GraphQLClient.__new__(GraphQLClient)
+    client.execute = Mock(
+        return_value={"submitJob": {"simulationId": "test", "status": "PENDING"}}
+    )
+    client.submit_job(**selected)
+    variables = client.execute.call_args.args[1]
+    assert json.loads(variables["executionResources"])["allowCpuSharing"] is True
+    requests.append({"name": "opt-in-cpu-sharing", "variables": variables})
     exchange = os.environ.get("EXECUTION_CONTRACT_EXCHANGE")
     if exchange:
         directory = Path(exchange)

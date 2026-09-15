@@ -223,3 +223,32 @@ Install `python3 -m pip install -e ".[dev,cloud]"`, then run
 fixtures. The shared contracts and cross-repo exchange runner are owned by
 [Cloud](https://github.com/FrequenSol/cloud-amplify/tree/pre-dev/contracts/execution-site).
 They verify component agreement without claiming hosted Slurm acceptance.
+
+## Opt-in CPU sharing
+
+Managed cloud submissions default to CPU sharing off. Use
+`site.submit(job, allow_cpu_sharing=True)` to allow up to two eligible
+single-CPU frequency jobs per vCPU. The setting applies only to that submission;
+omit it or pass `False` for ordinary CPU allocation. Memory reservations are
+unchanged. Single-node, single-rank submissions are supported; frequencies that
+need more than one CPU remain unshared. This can improve throughput for small
+jobs but does not guarantee a speedup.
+
+Cloud freezes `resources.allowCpuSharing` and requires the registered capability
+`cpu-sharing-2x.v1` for opt-in requests. Register that capability only after the
+new runtime is installed and the existing `cpu-single` partition is verified as
+`OverSubscribe=YES:2` with consumable memory scheduling. The frequency manifest
+records each job's effective `allow_cpu_sharing`; eligible scripts request
+`--oversubscribe`. No additional sharing partition is used. Deploy runtime and
+partition support before advertising the capability. Older submissions remain
+compatible and do not request sharing. Run details display the saved preference.
+
+Mixed-mode scheduling can depend on arrival order. In the Slurm 25.11.6
+`select/cons_tres` live probe, enabled jobs waited behind a running disabled job
+even with another CPU idle. In the reverse order, a disabled job could run on
+the other CPU alongside an enabled job. Disabled jobs retained unshared CPU
+allocations; enabled-only jobs reached two jobs per CPU, subject to memory.
+Mixed submissions or mixed eligible/ineligible frequencies can therefore
+experience additional queue time. This option is intended for batches of small
+single-CPU frequency jobs; it is not a guarantee of faster execution for every
+simulation.
