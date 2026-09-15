@@ -243,11 +243,12 @@ records each job's effective `allow_cpu_sharing`; eligible scripts request
 partition support before advertising the capability. Older submissions remain
 compatible and do not request sharing. Run details display the saved preference.
 
-On the verified Slurm 25.11.6 `select/cons_tres` configuration, sharing and
-non-sharing jobs do not run on the same node at the same time, even when that
-node has an idle CPU. Jobs using the other setting wait until the node becomes
-available. Off still allows multiple non-sharing jobs on distinct CPUs. On
-allows up to two sharing jobs per CPU, subject to memory. Mixed submissions or
-mixed eligible/ineligible frequencies can therefore experience additional queue
-time. This option is intended for batches of small single-CPU frequency jobs;
-it is not a guarantee of faster execution for every simulation.
+Mixed-mode scheduling can depend on arrival order. In the Slurm 25.11.6
+`select/cons_tres` live probe, enabled jobs waited behind a running disabled job
+even with another CPU idle. In the reverse order, a disabled job could run on
+the other CPU alongside an enabled job. Disabled jobs retained unshared CPU
+allocations; enabled-only jobs reached two jobs per CPU, subject to memory.
+Mixed submissions or mixed eligible/ineligible frequencies can therefore
+experience additional queue time. This option is intended for batches of small
+single-CPU frequency jobs; it is not a guarantee of faster execution for every
+simulation.
