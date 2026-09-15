@@ -640,3 +640,19 @@ simulation input store: datasets no longer referenced by that JSON are removed,
 and a store with substantial deleted-object space is atomically repacked. This
 prevents repeated authoring saves or a change from an in-memory property to a
 remote file reference from leaving obsolete arrays in the simulation HDF5 file.
+
+Dispatcher installation selection
+---------------------------------
+
+When ``solver`` selects ``FS_seismic`` by a directory-qualified path, local and
+SLURM sites set ``FS_SOLVER_PATH`` to that directory for execution. An inherited
+shell setting or a loaded module therefore cannot redirect the dispatcher to an
+older installation. An explicit ``environment.FS_SOLVER_PATH`` still overrides
+this default for installations that intentionally separate the dispatcher and
+backend executables. A bare ``FS_seismic`` command retains normal site lookup.
+
+HPC launch scripts are stored under each remote job's ``logs/batch`` directory
+with a unique name for every submission. Concurrent submissions no longer share
+an overwriteable ``sweep.slurm`` or ``sweep.sh`` file. This isolates launch
+scripts; concurrent runs writing the same job's simulation or result files still
+require separate job/output directories.

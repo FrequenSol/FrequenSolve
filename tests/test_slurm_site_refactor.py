@@ -2813,3 +2813,67 @@ def test_eikonal_batch_caps_initialization_and_task_launches(monkeypatch, tmp_pa
     config = json.loads((tmp_path / "logs/scheduler_config.json").read_text())
     assert config["total_ranks"] == 8
     assert config["max_ranks_per_task"] == 1
+
+
+def test_selected_dispatcher_exports_its_installation_after_modules(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite(
+        "project/run",
+        solver="/work/new install/FS_seismic",
+        modules=["old/solver"],
+    )
+
+    lines = site._runtime_setup_lines()
+
+    export = "export FS_SOLVER_PATH='/work/new install'"
+    assert export in lines
+    assert lines.index(export) > lines.index("module load old/solver")
+
+
+def test_dispatcher_backend_override_remains_explicit(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite(
+        "project/run",
+        solver="/work/new/FS_seismic",
+        environment={"FS_SOLVER_PATH": "/work/custom"},
+    )
+    assert "export FS_SOLVER_PATH=/work/custom" in site._runtime_setup_lines()
+
+
+@pytest.mark.parametrize("batch", [True, False])
+def test_launch_scripts_survive_interleaved_submissions(monkeypatch, tmp_path, batch):
+    """Uploading the next launch must not alter a script awaiting submission."""
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    site._compute_client = object()
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="acoustic", physics="acoustic", dimension=2)
+    jobs = [
+        FrequencyDomainJob(name=name, simulation=sim, f_list=[10.0])
+        for name in ("first", "second")
+    ]
+    remote_files = {}
+    monkeypatch.setattr(
+        site,
+        "put",
+        lambda local, remote: remote_files.__setitem__(
+            Path(remote), Path(local).read_bytes()
+        ),
+    )
+    monkeypatch.setattr(site, "run_login", lambda command: "")
+    monkeypatch.setattr(site, "_transfer_remote_simulation_inputs", lambda job: None)
+    monkeypatch.setattr(site, "_sweep_script", lambda job, **kwargs: job.name)
+    paths = []
+    for job in jobs + jobs[:1]:
+        if batch:
+            script, remote_job = site._transfer_SLURM_job(job.name, job)
+        else:
+            script, remote_job = site._transfer_job(job)
+        assert script.parent == Path(remote_job).parent / "logs" / "batch"
+        paths.append(script)
+    assert len(set(paths)) == 3
+    assert [remote_files[path].decode() for path in paths] == [
+        "first",
+        "second",
+        "first",
+    ]

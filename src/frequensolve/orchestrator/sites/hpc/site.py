@@ -35,6 +35,7 @@ from typing import (
     Union,
     cast,
 )
+from uuid import uuid4
 
 from frequensolve import __version__ as frequensolve_version
 from frequensolve._optional import optional_dependency_error
@@ -106,6 +107,7 @@ from frequensolve.orchestrator.utils.credential_store import CredentialStore
 from frequensolve.orchestrator.utils.credentials import Credentials
 from frequensolve.orchestrator.utils.environment import (
     NUMERIC_RUNTIME_DEFAULTS,
+    solver_environment,
     validate_environment,
 )
 from frequensolve.orchestrator.utils.pool import PoolInfo
@@ -2918,7 +2920,7 @@ class SlurmSite(BaseSite):
             lines.append("module list")
         runtime_environment = {
             **_HPC_RUNTIME_DEFAULTS,
-            **self.environment,
+            **solver_environment(self._get_solver_path(), self.environment),
         }
         lines.extend(
             f"export {name}={_quote_runtime_environment_value(value)}"
@@ -3035,7 +3037,12 @@ class SlurmSite(BaseSite):
 
     def _transfer_SLURM_job(self, script: str, job: BaseJob):
         """Transfer a SLURM job to the remote site."""
-        remote_script = (self.work_dir / "sweep").with_suffix(".slurm")
+        local_job, remote_job = job.save_for_remote(
+            self.__class__.__name__, self.work_dir
+        )
+        remote_script = (
+            Path(remote_job).parent / "logs" / "batch" / f"sweep-{uuid4().hex}.slurm"
+        )
         remote_runner = self._adaptive_scheduler_remote_path()
         with _temporary_text_file(
             script,
@@ -3047,10 +3054,6 @@ class SlurmSite(BaseSite):
         ) as script_path:
             logger.debug("Temporary sweep script created at %s", script_path)
             self.put(script_path, remote_script)
-
-        local_job, remote_job = job.save_for_remote(
-            self.__class__.__name__, self.work_dir
-        )
 
         self._transfer_remote_simulation_inputs(job)
         logger.debug("Transferring job file to remote path: %s", remote_job)
@@ -3128,7 +3131,9 @@ class SlurmSite(BaseSite):
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(local_job), Path(remote_job))
 
-        remote_script = (self.work_dir / "sweep").with_suffix(".sh")
+        remote_script = (
+            Path(remote_job).parent / "logs" / "batch" / f"sweep-{uuid4().hex}.sh"
+        )
         with _temporary_text_file(
             script,
             suffix=".sh",

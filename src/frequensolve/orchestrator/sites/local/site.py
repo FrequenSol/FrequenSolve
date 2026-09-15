@@ -47,6 +47,7 @@ from frequensolve.orchestrator.sites.local.dask_logging import (
 from frequensolve.orchestrator.utils.environment import (
     NUMERIC_RUNTIME_DEFAULTS,
     build_subprocess_environment,
+    solver_environment,
     validate_environment,
 )
 from frequensolve.seismic.traces import TraceDataset
@@ -554,10 +555,13 @@ class LocalSite(BaseSite):
     def __post_init__(self):
         self.config = LocalSiteConfig()
         self.executable = self._get_solver_path()
-        explicit_environment = {
-            **self.env,
-            **validate_environment(self.environment),
-        }
+        explicit_environment = solver_environment(
+            self.executable,
+            {
+                **self.env,
+                **validate_environment(self.environment),
+            },
+        )
         self.env = build_subprocess_environment(
             overrides={
                 **NUMERIC_RUNTIME_DEFAULTS,

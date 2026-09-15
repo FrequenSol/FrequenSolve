@@ -2,6 +2,7 @@ import pytest
 
 from frequensolve.orchestrator.utils.environment import (
     build_subprocess_environment,
+    solver_environment,
     validate_environment,
 )
 
@@ -58,3 +59,8 @@ def test_profile_environment_rejects_credentials_and_invalid_names():
         validate_environment({"NOT-A-NAME": "value"})
     with pytest.raises(ValueError, match="must be a mapping"):
         validate_environment(["VALUE"])
+
+
+@pytest.mark.parametrize("solver", [None, "FS_seismic", "/work/bin/fs2d_s"])
+def test_solver_environment_preserves_path_lookup_and_direct_executables(solver):
+    assert solver_environment(solver) == {}

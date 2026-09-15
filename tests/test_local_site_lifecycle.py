@@ -1613,3 +1613,24 @@ def test_dask_logging_preload_quiets_distributed_core_connection_noise():
         logger.handlers = old_handlers
         logger.propagate = old_propagate
         logger.setLevel(old_level)
+
+
+def test_selected_dispatcher_overrides_inherited_installation(monkeypatch, tmp_path):
+    selected = tmp_path / "selected" / "FS_seismic"
+    selected.parent.mkdir()
+    selected.touch()
+    monkeypatch.setenv("FS_SOLVER_PATH", "/old/install")
+
+    site = LocalSite(solver=selected)
+
+    assert site.env["FS_SOLVER_PATH"] == str(selected.parent)
+
+
+def test_selected_dispatcher_allows_explicit_backend_directory(tmp_path):
+    selected = tmp_path / "FS_seismic"
+    selected.touch()
+    site = LocalSite(
+        solver=selected, environment={"FS_SOLVER_PATH": "/custom/backends"}
+    )
+
+    assert site.env["FS_SOLVER_PATH"] == "/custom/backends"
