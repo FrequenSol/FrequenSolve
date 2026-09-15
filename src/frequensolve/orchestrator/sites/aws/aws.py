@@ -3,11 +3,14 @@
 import getpass
 import json
 import os
+import re
+import shutil
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.orchestrator.sites.aws.cache_paths import (
@@ -31,7 +34,18 @@ from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
+from frequensolve.simulation.artifact_catalog import CombinedArtifactCatalog
+from frequensolve.simulation.artifact_contract import (
+    ArtifactCatalog,
+    ArtifactContractError,
+    ArtifactRequest,
+    OperationResult,
+    operation_result_path,
+)
+from frequensolve.simulation.artifact_transfer import fetch_artifact_payloads
 from frequensolve.simulation.jobs import BaseJob, ImagingJob, SkipPolicy
+from frequensolve.simulation.task_index import TaskIndex
+from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
@@ -596,54 +610,313 @@ class AWSSite(BaseSite):
         """
         return True
 
-    def fetch_vtk(self, job: BaseJob, path: Optional[Union[str, Path]] = None) -> None:
-        """Get VTK/visualization files from S3.
+    @staticmethod
+    def _exact_s3_paths(values: Iterable[Union[str, Path]]) -> tuple[str, ...]:
+        """Validate and deduplicate portable result-relative object paths."""
 
-        Downloads the results/ParaView/ directory for the job from the
-        project's S3 bucket to the local project path.
+        result = []
+        seen = set()
+        for value in values:
+            raw = str(value)
+            path = PurePosixPath(raw)
+            if (
+                not raw
+                or "\\" in raw
+                or "\0" in raw
+                or re.match(r"^[A-Za-z]:", raw)
+                or path.is_absolute()
+                or "." in path.parts
+                or ".." in path.parts
+                or path.as_posix() != raw
+            ):
+                raise ValueError("S3 artifact paths must be normalized relative paths")
+            if raw not in seen:
+                seen.add(raw)
+                result.append(raw)
+        return tuple(result)
 
-        Args:
-            job: A BaseJob object.
-            path: Optional local path to save results. If None, uses
-                job.project_path.
-        """
-        if path is None:
-            path = job.project_path
-        else:
-            path = Path(path)
+    def _s3_result_prefix(self, job: BaseJob) -> str:
+        """Return the exact object prefix containing one job's result tree."""
 
-        project_name = Path(job.simulation.project_path).name
-        simulation_name = job.simulation.name
-        job_name = job.name
-        vtk_paths: List[str] = []
-        outputs = getattr(getattr(job, "outputs", None), "paraview", None) or []
-        for output in outputs:
-            output_path = getattr(output, "path", None)
-            if output_path is None:
+        return PurePosixPath(
+            Path(job.project_path).name,
+            "jobs",
+            job.simulation.name,
+            job.name,
+            "results",
+        ).as_posix()
+
+    @staticmethod
+    def _local_result_path(
+        job: BaseJob,
+        project_path: Optional[Union[str, Path]] = None,
+    ) -> Path:
+        """Map a job result directory beneath an optional relocated project."""
+
+        if project_path is None:
+            return job._result_path
+        relative = job._result_path.resolve().relative_to(
+            Path(job.project_path).resolve()
+        )
+        return Path(project_path).resolve() / relative
+
+    def _download_s3_files(
+        self,
+        prefix: str,
+        local_root: Path,
+        relative_paths: Iterable[Union[str, Path]],
+        *,
+        missing_ok: bool = False,
+    ) -> list[Path]:
+        """Download only explicit S3 keys; never list an object prefix."""
+
+        paths = self._exact_s3_paths(relative_paths)
+        local_root.mkdir(parents=True, exist_ok=True)
+        fetched = []
+        for relative in paths:
+            key = f"{prefix.rstrip('/')}/{relative}"
+            local = local_root / Path(*PurePosixPath(relative).parts)
+
+            def download() -> None:
+                with atomic_output_path(local) as temporary:
+                    self.s3_client.download_file(
+                        self.config.s3_bucket,
+                        key,
+                        str(temporary),
+                    )
+
+            downloaded = False
+            for attempt in range(2):
+                try:
+                    download()
+                    downloaded = True
+                    break
+                except ClientError as exc:
+                    code = str(exc.response.get("Error", {}).get("Code", ""))
+                    if (
+                        attempt == 0
+                        and code in {"ExpiredToken", "InvalidToken"}
+                        and hasattr(self, "cognito_auth")
+                    ):
+                        self._refresh_s3_credentials()
+                        continue
+                    if code in {"404", "NoSuchKey", "NotFound"}:
+                        if missing_ok:
+                            break
+                        raise FileNotFoundError(
+                            f"S3 artifact is missing: {key}"
+                        ) from exc
+                    raise
+            if not downloaded:
                 continue
-            normalized = PurePosixPath(str(output_path)).as_posix().strip("/")
-            if normalized and normalized != "." and normalized not in vtk_paths:
-                vtk_paths.append(normalized)
-        if not vtk_paths:
-            vtk_paths.append("ParaView")
+            fetched.append(local)
+        return fetched
 
-        for vtk_path in vtk_paths:
-            results_vtk_path = f"jobs/{simulation_name}/{job_name}/results/{vtk_path}"
-            s3_results_path = (
-                f"s3://{self.config.s3_bucket}/{project_name}/{results_vtk_path}"
+    def fetch_artifact_catalog(
+        self,
+        job: BaseJob,
+        *,
+        project_path: Optional[Union[str, Path]] = None,
+        operations: Sequence[str] = (),
+    ):
+        """Fetch authoritative task metadata and named operation results."""
+
+        tasks = tuple(range(1, job.n_tasks + 1))
+        requested_operations = tuple(dict.fromkeys(operations))
+        local_root = self._local_result_path(job, project_path)
+        prefix = self._s3_result_prefix(job)
+        local_root.parent.mkdir(parents=True, exist_ok=True)
+        if job.staged_artifact_fingerprints(self.__class__.__name__) is None:
+            raise RuntimeError(
+                "Remote staged provenance is missing; restage the job before fetching"
             )
-            local_results_path = path / results_vtk_path
-
+        index_path = "_fs_run/tasks.h5"
+        result_paths = tuple(
+            f"_fs_run/tasks/task_{task:06d}/result.json" for task in tasks
+        )
+        operation_paths = {
+            operation: operation_result_path(Path(), operation).as_posix()
+            for operation in requested_operations
+        }
+        with tempfile.TemporaryDirectory(
+            prefix=".fs-catalog-", dir=local_root.parent
+        ) as temporary:
+            stage = Path(temporary)
+            self._download_s3_files(
+                prefix,
+                stage,
+                (index_path,),
+                missing_ok=True,
+            )
+            use_index = False
             try:
-                logger.info(
-                    "Fetching VTK outputs from %s to %s",
-                    s3_results_path,
-                    local_results_path,
+                catalog = TaskIndex.read(stage)
+                self._validate_remote_catalog(job, catalog, tasks)
+                use_index = True
+            except (ArtifactContractError, OSError, RuntimeError):
+                self._download_s3_files(
+                    prefix,
+                    stage,
+                    result_paths,
+                    missing_ok=True,
                 )
-                self.get(s3_results_path, local_results_path)
-            except Exception as e:
-                logger.exception("Error downloading VTK outputs: %s", str(e))
-                raise
+                catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
+                self._validate_remote_catalog(job, catalog, tasks)
+
+            if operation_paths:
+                self._download_s3_files(
+                    prefix,
+                    stage,
+                    tuple(operation_paths.values()),
+                    missing_ok=True,
+                )
+            operation_results = {}
+            for operation, relative in operation_paths.items():
+                path = stage / relative
+                if not path.is_file():
+                    continue
+                result = OperationResult.read(
+                    path,
+                    result_path=stage,
+                    workflow=operation,
+                )
+                self._validate_remote_operation(job, result)
+                operation_results[operation] = result
+
+            candidates = (index_path,) if use_index else result_paths
+            publish = [path for path in candidates if (stage / path).is_file()]
+            publish.extend(
+                relative
+                for operation, relative in operation_paths.items()
+                if operation in operation_results
+            )
+            for relative in publish:
+                target = local_root / relative
+                with atomic_output_path(target) as temporary_path:
+                    shutil.copyfile(stage / relative, temporary_path)
+            if not use_index:
+                (local_root / index_path).unlink(missing_ok=True)
+            for operation, relative in operation_paths.items():
+                if operation not in operation_results:
+                    (local_root / relative).unlink(missing_ok=True)
+
+        task_catalog = (
+            TaskIndex.read(local_root)
+            if use_index
+            else ArtifactCatalog.read_task_results(local_root, tasks=tasks)
+        )
+        if not requested_operations:
+            return task_catalog
+        return CombinedArtifactCatalog(
+            result_path=local_root.resolve(strict=False),
+            task_catalog=task_catalog,
+            operations={
+                operation: OperationResult.read(
+                    local_root / relative,
+                    result_path=local_root,
+                    workflow=operation,
+                )
+                for operation, relative in operation_paths.items()
+                if (local_root / relative).is_file()
+            },
+        )
+
+    def _validate_remote_catalog(self, job, catalog, tasks) -> None:
+        """Require exact task partitions and current staged provenance."""
+
+        fingerprints = getattr(
+            job, "staged_task_fingerprints", job.staged_artifact_fingerprints
+        )(self.__class__.__name__)
+        if fingerprints is None:
+            raise RuntimeError(
+                "Remote staged provenance is missing; restage the job before fetching"
+            )
+        for task in tasks:
+            frequency = complex(job.f_list[task - 1])
+            if isinstance(catalog, TaskIndex):
+                current = catalog.is_task_current(
+                    task,
+                    frequency=frequency,
+                    fingerprints=fingerprints,
+                )
+            else:
+                result = catalog.results.get(task)
+                current = bool(
+                    result is not None
+                    and result.successful
+                    and result.partition.frequency == frequency
+                    and all(
+                        result.fingerprints.get(key) == value
+                        for key, value in fingerprints.items()
+                    )
+                )
+            if not current:
+                raise RuntimeError(
+                    f"Remote task {task} does not match the current staged job"
+                )
+
+    def _validate_remote_operation(self, job, result: OperationResult) -> None:
+        """Require a successful operation from the current staged generation."""
+
+        fingerprints = job.staged_artifact_fingerprints(self.__class__.__name__)
+        if (
+            fingerprints is None
+            or not result.successful
+            or any(
+                result.fingerprints.get(key) != value
+                for key, value in fingerprints.items()
+            )
+        ):
+            raise RuntimeError(
+                f"Remote operation {result.name!r} does not match the current "
+                "staged job"
+            )
+
+    def fetch_artifacts(
+        self,
+        job: BaseJob,
+        *,
+        requests: Sequence[ArtifactRequest] = (),
+        include_defaults: bool = True,
+        project_path: Optional[Union[str, Path]] = None,
+        operations: Sequence[str] = (),
+    ) -> list[Path]:
+        """Fetch exact catalog-selected S3 objects and collection parts."""
+
+        local_root = self._local_result_path(job, project_path)
+        prefix = self._s3_result_prefix(job)
+        catalog = (
+            self.fetch_artifact_catalog(
+                job,
+                project_path=project_path,
+                operations=operations,
+            )
+            if operations
+            else self.fetch_artifact_catalog(job, project_path=project_path)
+        )
+        return fetch_artifact_payloads(
+            catalog,
+            fetch_files=lambda paths: self._download_s3_files(
+                prefix,
+                local_root,
+                paths,
+            ),
+            requests=requests,
+            include_defaults=include_defaults,
+        )
+
+    def fetch_vtk(self, job: BaseJob, path: Optional[Union[str, Path]] = None) -> None:
+        """Fetch exact visualization and companion-data artifacts from S3."""
+
+        self.fetch_artifacts(
+            job,
+            requests=(
+                ArtifactRequest(role="visualization"),
+                ArtifactRequest(role="visualization_data"),
+            ),
+            include_defaults=False,
+            project_path=path,
+        )
 
     def fetch_paraview(
         self, job: BaseJob, path: Optional[Union[str, Path]] = None
@@ -912,6 +1185,14 @@ class AWSSite(BaseSite):
             )
             s3_job_key = self.sync_s3(local_job, remote_job)
             self._emit(f"Synced job file to S3: {s3_job_key}")
+            local_simulation, remote_simulation = job.save_simulation_for_remote(
+                self.__class__.__name__, project
+            )
+            s3_simulation_key = self.sync_s3(
+                local_simulation,
+                remote_simulation,
+            )
+            self._emit(f"Synced simulation file to S3: {s3_simulation_key}")
 
             # Check if using Cognito/GraphQL authentication
             # New path: Submit via GraphQL API
@@ -1009,7 +1290,7 @@ class AWSSite(BaseSite):
         path: Optional[Union[str, Path]] = None,
         upscale: int = 1,
     ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
-        """Get results from Stampede3.
+        """Fetch exact durable trace artifacts from AWS storage.
 
         Args:
             job: A BaseJob object.
@@ -1021,36 +1302,31 @@ class AWSSite(BaseSite):
         else:
             jobs = job
 
-        if path is None:
-            path = jobs[0].project_path
-        else:
-            path = Path(path)
-
         db_map = {}
 
         for job in jobs:
             try:
-                # Build the path for the s3 results directory and the local results directory.
-                # The job results are stored in the job's result_path, not the simulation path
-                # Format: ex_01/jobs/simulation_name/job_name/results/traces/
-                project_name = job.project_path.name  # e.g., "ex_01"
-                simulation_name = job.simulation.name  # e.g., "simple_acoustic"
-                job_name = job.name  # e.g., "time"
-                trace_dir_name = Path(job.trace_outputs.path).name
-
-                results_traces_path = (
-                    f"jobs/{simulation_name}/{job_name}/results/{trace_dir_name}"
+                self.fetch_artifacts(
+                    job,
+                    requests=(
+                        ArtifactRequest(
+                            role="simulated_traces",
+                            representations=(
+                                "hdf5_shard",
+                                "packed_trace",
+                                "packed_manifest",
+                                "packed_hdf5",
+                                "collection_manifest",
+                            ),
+                            retention="durable",
+                        ),
+                    ),
+                    include_defaults=False,
+                    project_path=path,
+                    operations=("pack",),
                 )
-                s3_results_path = (
-                    f"s3://{self.config.s3_bucket}/{project_name}/{results_traces_path}"
-                )
-                local_results_path = path / results_traces_path
-                self.get(s3_results_path, local_results_path)
-                self._emit(f"Fetched AWS traces from {s3_results_path}")
-
-                # TODO: Copy job, simulation file to database so that it can be read independently.
-
-                db = TraceDataset.from_job(job, upscale, project_path=path.resolve())
+                project = Path(path).resolve() if path is not None else job.project_path
+                db = TraceDataset.from_job(job, upscale, project_path=project)
                 db_map[job.name] = db
 
             except Exception as e:
@@ -1084,11 +1360,6 @@ class AWSSite(BaseSite):
         else:
             jobs = job
 
-        if path is None:
-            path = jobs[0].project_path
-        else:
-            path = Path(path)
-
         db_map = {}
 
         for item in jobs:
@@ -1097,25 +1368,25 @@ class AWSSite(BaseSite):
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")
 
-                project_name = item.project_path.name
-                simulation_name = item.simulation.name
-                job_name = item.name
-                wavefield_dir_name = Path(wavefield_outputs.path).name
-
-                results_wavefields_path = (
-                    f"jobs/{simulation_name}/{job_name}/results/{wavefield_dir_name}"
+                fetched = self.fetch_artifacts(
+                    item,
+                    requests=tuple(
+                        ArtifactRequest(role=role)
+                        for role in ("wavefield", "wavefields")
+                    ),
+                    include_defaults=False,
+                    project_path=path,
                 )
-                s3_results_path = (
-                    f"s3://{self.config.s3_bucket}/{project_name}/"
-                    f"{results_wavefields_path}"
-                )
-                local_results_path = path / results_wavefields_path
-                self.get(s3_results_path, local_results_path)
-                self._emit(f"Fetched AWS wavefields from {s3_results_path}")
+                if not fetched:
+                    raise FileNotFoundError(
+                        "No retained wavefield artifact was published for this job"
+                    )
 
                 db_map[item.name] = item.wavefields.open(
                     upscale=upscale,
-                    project_path=path.resolve(),
+                    project_path=(
+                        Path(path).resolve() if path is not None else item.project_path
+                    ),
                 )
 
             except Exception as e:
@@ -1127,101 +1398,48 @@ class AWSSite(BaseSite):
         return db_map
 
     def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
-        """Fetch ``_fs_run`` metadata and aggregate task manifests locally."""
-
-        project_name = Path(job.project_path).name
-        simulation_name = job.simulation.name
-        job_name = job.name
-        results_run_path = f"jobs/{simulation_name}/{job_name}/results/_fs_run"
-        s3_results_path = (
-            f"s3://{self.config.s3_bucket}/{project_name}/{results_run_path}"
-        )
-        local_run_path = job._result_path / "_fs_run"
-        self.get(s3_results_path, local_run_path)
-        self._emit(f"Fetched AWS run metadata from {s3_results_path}")
-        return job.collect_task_run_manifests()
+        """Fetch and validate the authoritative result catalog."""
+        self.fetch_artifact_catalog(job)
+        return job._result_path / "_fs_run"
 
     def fetch_image(self, job: ImagingJob) -> Any:
-        """Download and open the aggregate image for one imaging job."""
-
+        """Fetch the declared aggregate image and its exact dependencies."""
         if not isinstance(job, ImagingJob):
             raise TypeError("fetch_image expects an ImagingJob")
-
-        project_path = Path(job.project_path).resolve()
-        local_image_file = Path(job.image_file()).resolve()
         try:
-            relative_image_file = local_image_file.relative_to(project_path)
+            job.save_path.resolve().relative_to(job.project_path.resolve())
         except ValueError as exc:
-            raise ValueError(
-                f"Imaging output path {local_image_file} is outside project "
-                f"root {project_path}"
-            ) from exc
-
-        bucket = self.config.s3_bucket
-        key = f"{project_path.name}/{relative_image_file.as_posix()}"
-        local_image_file.parent.mkdir(parents=True, exist_ok=True)
-
-        refreshed_credentials = False
-        while True:
-            try:
-                self.s3_client.download_file(bucket, key, str(local_image_file))
-                break
-            except ClientError as exc:
-                error_code = exc.response.get("Error", {}).get("Code", "")
-                if (
-                    error_code in ("ExpiredToken", "InvalidToken")
-                    and not refreshed_credentials
-                    and hasattr(self, "cognito_auth")
-                ):
-                    refreshed_credentials = True
-                    self._refresh_s3_credentials()
-                    continue
-                if error_code in ("404", "NoSuchKey", "NotFound"):
-                    raise FileNotFoundError(
-                        f"AWS imaging output s3://{bucket}/{key} is missing"
-                    ) from exc
-                raise RuntimeError(f"S3 image download failed: {exc}") from exc
-
-        self._emit(f"Fetched AWS image from s3://{bucket}/{key}")
+            raise ValueError("Image output is outside project root") from exc
+        self.fetch_artifacts(
+            job,
+            requests=(ArtifactRequest(role="image"),),
+            include_defaults=False,
+            operations=("smooth",),
+        )
         return job.load_images()
 
-    def fetch_outputs(self, job: BaseJob):
-        """Fetch common AWS result artifacts for a completed job.
+    def fetch_outputs(
+        self,
+        job: BaseJob,
+        *,
+        requests: Sequence[ArtifactRequest] = (),
+    ) -> Path:
+        """Fetch durable final products, plus explicit auxiliary selectors."""
 
-        Args:
-            job: Completed job whose S3 artifacts should be downloaded.
-
-        Returns:
-            A typed frequency-independent product, a trace dataset, or a
-            mapping containing traces and wavefields when those outputs exist.
-        """
-
-        self.fetch_run_metadata(job)
+        self.fetch_artifacts(
+            job,
+            requests=requests,
+            include_defaults=True,
+            operations=("smooth",) if isinstance(job, ImagingJob) else (),
+        )
         if hasattr(job, "result_manifest_file"):
-            project_name = job.project_path.name
-            output_dir = job.output_directory.relative_to(job._result_path)
-            results_path = (
-                Path("jobs") / job.simulation.name / job.name / "results" / output_dir
-            )
-            s3_results_path = (
-                f"s3://{self.config.s3_bucket}/{project_name}/{results_path.as_posix()}"
-            )
-            job.output_directory.mkdir(parents=True, exist_ok=True)
-            self.get(s3_results_path, job.output_directory, overwrite=True)
-            self._emit(f"Fetched AWS {job.workflow} results from {s3_results_path}")
             return job.results
-
-        traces = self.fetch_traces(job)
-        wavefields = None
-        if getattr(job.outputs, "wavefields", None):
-            wavefields = self.fetch_wavefields(job)
-        if getattr(job.outputs, "paraview", None):
-            self.fetch_paraview(job)
+        traces = job.traces.open()
         if isinstance(job, ImagingJob):
-            self.fetch_image(job)
-        if wavefields is None:
-            return traces
-        return {"traces": traces, "wavefields": wavefields}
+            job.load_images()
+        if getattr(job.outputs, "wavefields", None):
+            return {"traces": traces, "wavefields": job.wavefields.open()}
+        return traces
 
     def fetch_logs(
         self,

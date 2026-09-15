@@ -53,6 +53,11 @@ class FakeJob:
         assert project == "project-a"
         return "local-job.json", "project-a/jobs/job.json"
 
+    def save_simulation_for_remote(self, site_name, project):
+        assert site_name == "AWSSite"
+        assert project == "project-a"
+        return "local-simulation.json", "project-a/simulations/simulation.json"
+
 
 def make_graphql_site():
     site = AWSSite.__new__(AWSSite)

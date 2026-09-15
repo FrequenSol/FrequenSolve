@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ from botocore.exceptions import ClientError
 
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
 from frequensolve.orchestrator.sites.base import JobStatus
+from frequensolve.simulation.artifact_contract import ArtifactRecord, ArtifactRequest
 from frequensolve.simulation.jobs import ImagingJob
 
 
@@ -47,6 +49,11 @@ class FakeS3Client:
 
     def download_file(self, bucket, key, filename):
         self.downloads.append({"Bucket": bucket, "Key": key, "Filename": filename})
+        if key not in self.objects:
+            raise ClientError(
+                {"Error": {"Code": "404", "Message": "Not found"}},
+                "GetObject",
+            )
         Path(filename).parent.mkdir(parents=True, exist_ok=True)
         Path(filename).write_text(self.objects[key])
 
@@ -54,6 +61,7 @@ class FakeS3Client:
 def make_site(s3_client):
     site = AWSSite.__new__(AWSSite)
     site.s3_client = s3_client
+    site.config = SimpleNamespace(s3_bucket="bucket")
     return site
 
 
@@ -96,10 +104,10 @@ def test_fetch_vtk_reraises_download_failures(tmp_path):
     site = AWSSite.__new__(AWSSite)
     site.config = SimpleNamespace(s3_bucket="bucket")
 
-    def fail_get(*args, **kwargs):
+    def fail_fetch(*args, **kwargs):
         raise RuntimeError("download failed")
 
-    site.get = fail_get
+    site.fetch_artifacts = fail_fetch
     job = SimpleNamespace(
         project_path=tmp_path,
         name="job-a",
@@ -114,36 +122,29 @@ def test_fetch_vtk_reraises_download_failures(tmp_path):
 
 
 def test_fetch_image_downloads_only_the_aggregate_image(tmp_path):
-    project_path = tmp_path / "imaging-project"
-    image_path = project_path / "jobs" / "model" / "rtm" / "results" / "imaging"
-    image_key = "imaging-project/jobs/model/rtm/results/imaging/image.h5"
-    s3_client = FakeS3Client(
-        {
-            image_key: "image payload",
-            f"{image_key.removesuffix('image.h5')}image_1.h5": "shard payload",
-        }
-    )
-    site = make_site(s3_client)
-    site.config = SimpleNamespace(s3_bucket="bucket")
-    site._emit = lambda message: None
-
+    project = tmp_path / "project"
+    image = project / "results/opaque-generation/image.h5"
+    key = "project/results/opaque-generation/image.h5"
+    client = FakeS3Client({key: "image payload", "project/results/unused.h5": "old"})
+    site = make_site(client)
     job = object.__new__(ImagingJob)
-    job.name = "rtm"
-    job.simulation = SimpleNamespace(project_path=project_path, name="model")
-    job.save_path = image_path
-    expected = object()
-    job.load_images = lambda: expected
+    job.simulation = SimpleNamespace(project_path=project)
+    job.save_path = image.parent
+    job.load_images = lambda: "image reader"
 
-    assert site.fetch_image(job) is expected
-    assert (image_path / "image.h5").read_text() == "image payload"
-    assert s3_client.downloads == [
-        {
-            "Bucket": "bucket",
-            "Key": image_key,
-            "Filename": str(image_path / "image.h5"),
-        }
-    ]
-    assert s3_client.paginate_calls == []
+    def fetch(job, **kwargs):
+        assert kwargs["operations"] == ("smooth",)
+        assert kwargs["requests"] == (ArtifactRequest(role="image"),)
+        assert not kwargs["include_defaults"]
+        return site._download_s3_files(
+            "project/results", project / "results", ("opaque-generation/image.h5",)
+        )
+
+    site.fetch_artifacts = fetch
+    assert site.fetch_image(job) == "image reader"
+    assert image.read_text() == "image payload"
+    assert [row["Key"] for row in client.downloads] == [key]
+    assert not client.paginate_calls
 
 
 def test_fetch_image_rejects_paths_outside_the_project(tmp_path):
@@ -186,72 +187,57 @@ def test_fetch_image_normalizes_missing_output_after_credential_refresh(tmp_path
     job.simulation = SimpleNamespace(project_path=project_path, name="model")
     job.save_path = project_path / "jobs" / "model" / "rtm" / "results" / "imaging"
 
-    with pytest.raises(FileNotFoundError, match="AWS imaging output .* is missing"):
+    site.fetch_artifacts = lambda *_args, **_kwargs: site._download_s3_files(
+        "project/results", tmp_path / "downloads", ("opaque/image.h5",)
+    )
+    with pytest.raises(FileNotFoundError, match="S3 artifact is missing"):
         site.fetch_image(job)
 
     assert s3_client.attempts == 2
 
 
 def test_fetch_run_metadata_downloads_job_run_directory(tmp_path):
-    site = AWSSite.__new__(AWSSite)
-    site.config = SimpleNamespace(s3_bucket="bucket")
-    downloads = []
-    messages = []
-    site.get = lambda remote, local: downloads.append((remote, local))
-    site._emit = messages.append
-    manifest_path = (
-        tmp_path / "project-a/jobs/simulation-a/job-a/results/_fs_run/run_manifest.json"
-    )
-    job = SimpleNamespace(
-        project_path=tmp_path / "project-a",
-        _result_path=tmp_path / "project-a/jobs/simulation-a/job-a/results",
-        simulation=SimpleNamespace(name="simulation-a"),
-        name="job-a",
-        collect_task_run_manifests=lambda: manifest_path,
-    )
-
-    assert site.fetch_run_metadata(job) == manifest_path
-    assert downloads == [
-        (
-            "s3://bucket/project-a/jobs/simulation-a/job-a/results/_fs_run",
-            job._result_path / "_fs_run",
-        )
-    ]
-    assert messages == [
-        "Fetched AWS run metadata from "
-        "s3://bucket/project-a/jobs/simulation-a/job-a/results/_fs_run"
-    ]
+    site = make_site(FakeS3Client({}))
+    job = SimpleNamespace(_result_path=tmp_path / "results")
+    calls = []
+    site.fetch_artifact_catalog = lambda item: calls.append(item)
+    assert site.fetch_run_metadata(job) == job._result_path / "_fs_run"
+    assert calls == [job]
 
 
 def test_fetch_outputs_downloads_complete_configured_artifact_set():
-    site = AWSSite.__new__(AWSSite)
+    site = object.__new__(AWSSite)
     calls = []
-    site.fetch_run_metadata = lambda job: calls.append("metadata")
-    site.fetch_traces = lambda job: calls.append("traces") or "trace-data"
-    site.fetch_wavefields = lambda job: calls.append("wavefields") or "wave-data"
-    site.fetch_paraview = lambda job: calls.append("paraview")
+    site.fetch_artifacts = lambda job, **kwargs: calls.append(kwargs)
     job = SimpleNamespace(
-        outputs=SimpleNamespace(wavefields=[object()], paraview=[object()])
+        outputs=SimpleNamespace(wavefields=[object()]),
+        traces=SimpleNamespace(open=lambda: "trace-data"),
+        wavefields=SimpleNamespace(open=lambda: "wave-data"),
     )
-
     assert site.fetch_outputs(job) == {
         "traces": "trace-data",
         "wavefields": "wave-data",
     }
-    assert calls == ["metadata", "traces", "wavefields", "paraview"]
+    assert calls == [{"requests": (), "include_defaults": True, "operations": ()}]
 
 
-def test_fetch_outputs_downloads_aggregate_image_for_imaging_job():
-    site = AWSSite.__new__(AWSSite)
+def test_fetch_outputs_downloads_aggregate_image_for_imaging_job(monkeypatch):
+    site = object.__new__(AWSSite)
     calls = []
-    site.fetch_run_metadata = lambda job: calls.append("metadata")
-    site.fetch_traces = lambda job: calls.append("traces") or "trace-data"
-    site.fetch_image = lambda job: calls.append("image")
+    site.fetch_artifacts = lambda job, **kwargs: calls.append(kwargs)
     job = object.__new__(ImagingJob)
-    job.outputs = SimpleNamespace(wavefields=[], paraview=[])
-
+    job.outputs = SimpleNamespace(wavefields=[])
+    job.load_images = lambda: calls.append("image")
+    monkeypatch.setattr(
+        ImagingJob,
+        "traces",
+        property(lambda self: SimpleNamespace(open=lambda: "trace-data")),
+    )
     assert site.fetch_outputs(job) == "trace-data"
-    assert calls == ["metadata", "traces", "image"]
+    assert calls == [
+        {"requests": (), "include_defaults": True, "operations": ("smooth",)},
+        "image",
+    ]
 
 
 def test_aws_run_handle_honors_submit_time_fetch_after_success():
@@ -285,30 +271,235 @@ def test_aws_run_handle_honors_submit_time_fetch_after_success():
 
 
 def test_fetch_vtk_downloads_only_configured_output_paths(tmp_path):
-    key = "project-a/jobs/simulation-a/job-a/results/paraview/pv_00000.vtu"
-    s3_client = FakeS3Client({key: "mesh"})
-    site = make_site(s3_client)
-    site.config = SimpleNamespace(s3_bucket="bucket")
-    job = SimpleNamespace(
-        project_path=tmp_path,
-        name="job-a",
-        outputs=SimpleNamespace(paraview=[SimpleNamespace(path="paraview")]),
-        simulation=SimpleNamespace(
-            name="simulation-a",
-            project_path=tmp_path / "project-a",
+    site = make_site(FakeS3Client({"project/results/pv/opaque.vtu": "mesh"}))
+    calls = []
+
+    def fetch(job, **kwargs):
+        calls.append(kwargs)
+        return site._download_s3_files("project/results", tmp_path, ("pv/opaque.vtu",))
+
+    site.fetch_artifacts = fetch
+    site.fetch_vtk(SimpleNamespace())
+    assert (tmp_path / "pv/opaque.vtu").read_text() == "mesh"
+    assert {request.role for request in calls[0]["requests"]} == {
+        "visualization",
+        "visualization_data",
+    }
+    assert not site.s3_client.paginate_calls
+
+
+def test_exact_s3_transfer_downloads_direct_keys_without_listing(tmp_path):
+    client = FakeS3Client(
+        {
+            "project/jobs/simulation/job/results/traces/data.h5": "trace",
+            "project/jobs/simulation/job/results/fields/forward.h5": "wave",
+        }
+    )
+    site = make_site(client)
+
+    fetched = site._download_s3_files(
+        "project/jobs/simulation/job/results",
+        tmp_path,
+        ("traces/data.h5",),
+    )
+
+    assert fetched == [tmp_path / "traces/data.h5"]
+    assert [item["Key"] for item in client.downloads] == [
+        "project/jobs/simulation/job/results/traces/data.h5"
+    ]
+    assert client.paginate_calls == []
+
+
+def test_exact_s3_artifact_fetch_excludes_unrelated_wavefields(tmp_path):
+    result_path = tmp_path / "project/jobs/simulation/job/results"
+    records = (
+        ArtifactRecord.from_fs(
+            {
+                "id": "traces",
+                "role": "simulated_traces",
+                "representation": "hdf5_shard",
+                "schema": "trace-1",
+                "path": "traces/data.h5",
+                "retention": "durable",
+                "bytes": 5,
+            },
+            result_path=result_path,
+        ),
+        ArtifactRecord.from_fs(
+            {
+                "id": "forward-wavefield",
+                "role": "wavefield",
+                "representation": "hdf5",
+                "schema": "field-1",
+                "path": "fields/forward.h5",
+                "retention": "durable",
+                "bytes": 4,
+            },
+            result_path=result_path,
         ),
     )
 
-    site.fetch_vtk(job)
+    class Catalog:
+        def query(self, **filters):
+            return [
+                record
+                for record in records
+                if all(
+                    value is None or getattr(record, name) == value
+                    for name, value in filters.items()
+                )
+            ]
 
-    assert (
-        tmp_path / "jobs/simulation-a/job-a/results/paraview/pv_00000.vtu"
-    ).read_text() == "mesh"
-    assert {
-        "Bucket": "bucket",
-        "Prefix": "project-a/jobs/simulation-a/job-a/results/paraview/",
-    } in s3_client.paginate_calls
-    assert {
-        "Bucket": "bucket",
-        "Prefix": "project-a/jobs/simulation-a/job-a/results/ParaView/",
-    } not in s3_client.paginate_calls
+        def select(self, request, *, task=None):
+            del task
+            return self.query(
+                id=request.id,
+                role=request.role,
+                retention=request.retention,
+            )
+
+    client = FakeS3Client(
+        {
+            "project/jobs/simulation/job/results/traces/data.h5": "trace",
+            "project/jobs/simulation/job/results/fields/forward.h5": "wave",
+        }
+    )
+    site = make_site(client)
+    site.fetch_artifact_catalog = lambda job, project_path=None: Catalog()
+    job = SimpleNamespace(
+        project_path=tmp_path / "project",
+        _result_path=result_path,
+        name="job",
+        simulation=SimpleNamespace(name="simulation"),
+    )
+
+    fetched = site.fetch_artifacts(job)
+
+    assert fetched == [result_path / "traces/data.h5"]
+    assert [item["Key"] for item in client.downloads] == [
+        "project/jobs/simulation/job/results/traces/data.h5"
+    ]
+    assert client.paginate_calls == []
+
+
+def test_s3_json_catalog_fallback_removes_stale_local_index(tmp_path):
+    fingerprint = "sha256:" + "a" * 64
+    result_path = tmp_path / "project/jobs/simulation/job/results"
+    stale_index = result_path / "_fs_run/tasks.h5"
+    stale_index.parent.mkdir(parents=True)
+    stale_index.write_bytes(b"stale-index")
+    task_result = json.dumps(
+        {
+            "schema": "fs-task-result-2",
+            "partition": {
+                "task": 1,
+                "task_count": 1,
+                "frequency": {"real": 2.0, "imag": 0.1},
+            },
+            "fingerprints": {
+                "job": fingerprint,
+                "simulation": fingerprint,
+                "outputs": fingerprint,
+            },
+            "status": {"state": "success", "code": 0},
+            "artifacts": [],
+        }
+    )
+    result_key = (
+        "project/jobs/simulation/job/results/" "_fs_run/tasks/task_000001/result.json"
+    )
+    client = FakeS3Client({result_key: task_result})
+    site = make_site(client)
+    job = SimpleNamespace(
+        n_tasks=1,
+        f_list=(complex(2.0, 0.1),),
+        project_path=tmp_path / "project",
+        _result_path=result_path,
+        name="job",
+        simulation=SimpleNamespace(name="simulation"),
+        staged_artifact_fingerprints=lambda site_name: {
+            "job": fingerprint,
+            "simulation": fingerprint,
+            "outputs": fingerprint,
+        },
+    )
+
+    catalog = site.fetch_artifact_catalog(job)
+
+    assert tuple(catalog.results) == (1,)
+    assert not stale_index.exists()
+    assert client.paginate_calls == []
+
+
+def test_s3_fetches_explicit_operation_catalog_and_payload_without_listing(tmp_path):
+    fingerprint = "sha256:" + "a" * 64
+    result_path = tmp_path / "project/jobs/simulation/job/results"
+    fingerprints = {
+        "job": fingerprint,
+        "simulation": fingerprint,
+        "outputs": fingerprint,
+    }
+    task_result = {
+        "schema": "fs-task-result-2",
+        "partition": {
+            "task": 1,
+            "frequency": {"real": 2.0, "imag": 0.1},
+        },
+        "fingerprints": fingerprints,
+        "status": {"state": "success", "code": 0},
+        "artifacts": [],
+    }
+    operation_result = {
+        "schema": "fs-operation-result-1",
+        "operation": {"name": "smooth", "generation": "smooth-1"},
+        "fingerprints": fingerprints,
+        "status": {"state": "success", "code": 0},
+        "artifacts": [
+            {
+                "id": "smooth-image",
+                "role": "image",
+                "representation": "hdf5",
+                "schema": "image-1",
+                "path": "images/smooth.h5",
+                "retention": "durable",
+                "bytes": 5,
+            }
+        ],
+    }
+    prefix = "project/jobs/simulation/job/results"
+    client = FakeS3Client(
+        {
+            f"{prefix}/_fs_run/tasks/task_000001/result.json": json.dumps(task_result),
+            f"{prefix}/_fs_run/operations/smooth/result.json": json.dumps(
+                operation_result
+            ),
+            f"{prefix}/images/smooth.h5": "image",
+        }
+    )
+    site = make_site(client)
+    job = SimpleNamespace(
+        n_tasks=1,
+        f_list=(complex(2.0, 0.1),),
+        project_path=tmp_path / "project",
+        _result_path=result_path,
+        name="job",
+        simulation=SimpleNamespace(name="simulation"),
+        staged_artifact_fingerprints=lambda site_name: fingerprints,
+    )
+
+    fetched = site.fetch_artifacts(
+        job,
+        requests=(ArtifactRequest(role="image"),),
+        include_defaults=False,
+        operations=("smooth",),
+    )
+
+    assert fetched == [result_path / "images/smooth.h5"]
+    assert result_path.joinpath("images/smooth.h5").read_text() == "image"
+    assert client.paginate_calls == []
+    assert [item["Key"] for item in client.downloads] == [
+        f"{prefix}/_fs_run/tasks.h5",
+        f"{prefix}/_fs_run/tasks/task_000001/result.json",
+        f"{prefix}/_fs_run/operations/smooth/result.json",
+        f"{prefix}/images/smooth.h5",
+    ]

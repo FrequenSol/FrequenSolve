@@ -13,7 +13,7 @@ import tarfile
 import tempfile
 import uuid
 from pathlib import Path, PurePosixPath
-from typing import Any, Union
+from typing import Any, Iterable, Sequence, Union
 
 from frequensolve.orchestrator.sites.base import _wait_for_path
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
@@ -163,6 +163,59 @@ class SlurmTransferManager:
             logger.error("HPC download failed (%s)", type(exc).__name__)
             raise RuntimeError(f"HPC download failed ({type(exc).__name__})") from None
 
+    def get_files(
+        self,
+        remote_root: Union[str, Path],
+        local_root: Union[str, Path],
+        relative_paths: Iterable[Union[str, Path]],
+        *,
+        missing_ok: bool = False,
+    ) -> list[Path]:
+        """Transfer an exact relative file set without traversing a directory."""
+
+        remote_root = Path(remote_root)
+        local_root = Path(local_root)
+        paths = self._relative_files(relative_paths)
+        if not paths:
+            return []
+        local_root.mkdir(parents=True, exist_ok=True)
+
+        if self._uses_sftp():
+            if missing_ok:
+                self._get_files_sftp(remote_root, local_root, paths)
+            else:
+                self._get_files_tar(remote_root, local_root, paths)
+        else:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=self._local_tmp_parent(),
+            ) as file_list:
+                for path in paths:
+                    file_list.write(path.as_posix().encode("utf-8") + b"\0")
+                file_list.flush()
+                options = [
+                    "--relative",
+                    "--from0",
+                    f"--files-from={file_list.name}",
+                ]
+                if missing_ok:
+                    options.append("--ignore-missing-args")
+                self._run_rsync(
+                    self._remote_spec(f"{remote_root}/"),
+                    f"{local_root}/",
+                    options=options,
+                )
+
+        local_paths = [local_root / Path(*path.parts) for path in paths]
+        if not missing_ok:
+            missing = [path for path in local_paths if not path.is_file()]
+            if missing:
+                names = ", ".join(str(path) for path in missing[:5])
+                raise FileNotFoundError(
+                    f"Exact remote transfer missed file(s): {names}"
+                )
+        return [path for path in local_paths if path.is_file()]
+
     def _remote_spec(self, remote_path: Union[str, Path, PurePosixPath]) -> str:
         username = str(self.site.credentials.username)
         hostname = str(self.site.config.hostname)
@@ -176,12 +229,19 @@ class SlurmTransferManager:
         rendered_path = str(path) + ("/" if trailing_slash else "")
         return f"{username}@{hostname}:{shlex.quote(rendered_path)}"
 
-    def _run_rsync(self, source: str, target: str) -> None:
+    def _run_rsync(
+        self,
+        source: str,
+        target: str,
+        *,
+        options: Sequence[str] = (),
+    ) -> None:
         debug_output = logger.isEnabledFor(logging.DEBUG)
         rsync_flags = "-avzP" if debug_output else "-az"
         rsync_cmd = ["rsync", rsync_flags]
         if not debug_output:
             rsync_cmd.append("--partial")
+        rsync_cmd.extend(options)
         rsync_cmd.extend([source, target])
         if self.site._login_client.is_proxy():
             control_path, _ = self.site._login_client.get_proxy_details()
@@ -274,6 +334,126 @@ class SlurmTransferManager:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+    @staticmethod
+    def _relative_files(
+        values: Iterable[Union[str, Path]],
+    ) -> tuple[PurePosixPath, ...]:
+        """Validate and deduplicate portable root-relative file paths."""
+
+        result = []
+        seen = set()
+        for value in values:
+            raw = str(value)
+            if "\\" in raw or "\0" in raw or re.match(r"^[A-Za-z]:", raw):
+                raise ValueError("Exact transfer paths must use '/' separators")
+            path = PurePosixPath(raw)
+            if (
+                not raw
+                or path.is_absolute()
+                or "." in path.parts
+                or ".." in path.parts
+                or path.as_posix() != raw
+            ):
+                raise ValueError(
+                    "Exact transfer paths must be normalized relative paths"
+                )
+            if path in seen:
+                continue
+            seen.add(path)
+            result.append(path)
+        return tuple(result)
+
+    def _get_files_sftp(
+        self,
+        remote_root: Path,
+        local_root: Path,
+        paths: Sequence[PurePosixPath],
+    ) -> None:
+        """Fetch a small optional set through exact SFTP requests."""
+
+        sftp = self.site.login_client.open_sftp()
+        try:
+            for path in paths:
+                local = local_root / Path(*path.parts)
+                local.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    sftp.get(str(remote_root / Path(*path.parts)), str(local))
+                except OSError:
+                    continue
+        finally:
+            sftp.close()
+
+    def _get_files_tar(
+        self,
+        remote_root: Path,
+        local_root: Path,
+        paths: Sequence[PurePosixPath],
+    ) -> None:
+        """Fetch required SFTP files as explicit, validated tar members."""
+
+        remote_list = self._remote_tmp_file(".files")
+        remote_tar = self._remote_tmp_file(".tar.gz")
+        local_parent = self._local_tmp_parent()
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=local_parent, delete=False
+        ) as list_file:
+            local_list = Path(list_file.name)
+            for path in paths:
+                list_file.write(path.as_posix().encode("utf-8") + b"\0")
+        with tempfile.NamedTemporaryFile(
+            suffix=".tar.gz", dir=local_parent, delete=False
+        ) as tar_file:
+            local_tar = Path(tar_file.name)
+
+        sftp = self.site.login_client.open_sftp()
+        try:
+            self.site.run_login(f"mkdir -p {shlex.quote(str(remote_tar.parent))}")
+            sftp.put(str(local_list), str(remote_list))
+            command = (
+                f"tar -C {shlex.quote(str(remote_root))} --null "
+                f"--verbatim-files-from --files-from={shlex.quote(str(remote_list))} "
+                f"-czf {shlex.quote(str(remote_tar))}"
+            )
+            _, stdout, stderr = self.site.run_login_cmd(command)
+            error = stderr.read().decode().strip()
+            channel = getattr(stdout, "channel", None)
+            if channel is None:
+                channel = getattr(stderr, "channel", None)
+            receive_status = getattr(channel, "recv_exit_status", None)
+            status = receive_status() if callable(receive_status) else None
+            if status not in (None, 0) or (status is None and error):
+                detail = error or f"tar exited with status {status}"
+                raise RuntimeError(f"Failed to create exact remote tar: {detail}")
+            if error:
+                logger.warning("Remote tar warning: %s", error)
+            sftp.get(str(remote_tar), str(local_tar))
+            expected = {path.as_posix() for path in paths}
+            with tarfile.open(local_tar, "r:gz") as archive:
+                members = archive.getmembers()
+                raw_names = [member.name for member in members]
+                names = set(raw_names)
+                if (
+                    names != expected
+                    or len(members) != len(expected)
+                    or any(PurePosixPath(name).as_posix() != name for name in raw_names)
+                    or any(not member.isfile() for member in members)
+                ):
+                    raise RuntimeError(
+                        "Exact remote tar contains unexpected or non-file members"
+                    )
+                archive.extractall(path=local_root, filter="data")
+        finally:
+            sftp.close()
+            for local in (local_list, local_tar):
+                try:
+                    local.unlink()
+                except FileNotFoundError:
+                    pass
+            self.site.run_login(
+                f"rm -f {shlex.quote(str(remote_list))} "
+                f"{shlex.quote(str(remote_tar))}"
+            )
 
     def _uses_sftp(self) -> bool:
         """Return whether transfers should use the authenticated SFTP channel."""

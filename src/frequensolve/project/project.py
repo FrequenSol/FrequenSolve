@@ -22,6 +22,7 @@ from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
 from frequensolve.units import UnitConfig
+from frequensolve.util.atomic import atomic_write_json
 from frequensolve.util.encoders import CustomJSONEncoder
 from frequensolve.util.named_list import NamedList
 from frequensolve.util.setup_logger import (
@@ -945,42 +946,40 @@ class Project:
             pass
 
         metadata = job.run_metadata
-        if any(
-            (
-                metadata.manifest,
-                metadata.outputs,
-                metadata.timings,
-                metadata.error,
-                metadata.state,
-            )
-        ):
-            return True
-
-        try:
-            return any(path.is_file() for path in result_path.rglob("*"))
-        except OSError:
-            return False
+        return bool(metadata.state or metadata.artifacts or metadata.task_status)
 
     @staticmethod
     def _job_run_status(state: Any, metadata: Any, current: bool) -> Any:
         if isinstance(state, Mapping) and state.get("status") is not None:
             return state["status"]
-        if isinstance(metadata.manifest, Mapping):
-            exit_status = metadata.manifest.get("exit_status")
-            if isinstance(exit_status, Mapping):
-                return exit_status.get("status")
-            if exit_status is not None:
-                return exit_status
+        if metadata.task_status:
+            if any(status == "failed" for status in metadata.task_status.values()):
+                return "failed"
+            if all(
+                status in {"success", "skipped"}
+                for status in metadata.task_status.values()
+            ):
+                return "completed"
         return "current" if current else "not_run"
 
     @staticmethod
     def _job_task_summary(state: Any, metadata: Any) -> Dict[str, Any]:
-        for source in (state, metadata.manifest):
-            if isinstance(source, Mapping) and isinstance(
-                source.get("task_summary"), Mapping
-            ):
-                return dict(source["task_summary"])
-        return {}
+        if isinstance(state, Mapping) and isinstance(
+            state.get("task_summary"), Mapping
+        ):
+            return dict(state["task_summary"])
+        statuses = tuple(metadata.task_status.values())
+        if not statuses:
+            return {}
+        succeeded = sum(status in {"success", "skipped"} for status in statuses)
+        failed = sum(status == "failed" for status in statuses)
+        return {
+            "total": len(statuses),
+            "complete": succeeded + failed,
+            "succeeded": succeeded,
+            "failed": failed,
+            "not_run": 0,
+        }
 
     @staticmethod
     def _simulation_name(simulation: Union[str, BaseSimulation]) -> str:
@@ -1017,18 +1016,14 @@ class Project:
         **json_kwargs,
     ) -> None:
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
         indent = json_kwargs.pop("indent", 3)
-        tmp_file = path.with_name(f".{path.name}.tmp")
-        tmp_file.write_text(
-            json.dumps(
-                payload,
-                cls=CustomJSONEncoder,
-                indent=indent,
-                **json_kwargs,
-            )
+        atomic_write_json(
+            path,
+            payload,
+            cls=CustomJSONEncoder,
+            indent=indent,
+            **json_kwargs,
         )
-        tmp_file.replace(path)
 
     @staticmethod
     def _simulation_options(kwargs: Dict[str, Any]) -> Dict[str, Any]:

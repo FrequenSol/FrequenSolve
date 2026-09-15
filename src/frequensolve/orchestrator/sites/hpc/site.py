@@ -12,9 +12,11 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import time
 from asyncio import Future
 from dataclasses import dataclass, field
@@ -113,8 +115,20 @@ from frequensolve.orchestrator.utils.environment import (
 from frequensolve.orchestrator.utils.pool import PoolInfo
 from frequensolve.orchestrator.utils.ssh import SSHClientClass
 from frequensolve.seismic.traces import TraceDataset
+from frequensolve.simulation.artifact_catalog import CombinedArtifactCatalog
+from frequensolve.simulation.artifact_contract import (
+    ArtifactCatalog,
+    ArtifactContractError,
+    ArtifactRequest,
+    OperationResult,
+    operation_result_path,
+)
+from frequensolve.simulation.artifact_transfer import (
+    fetch_artifact_payloads,
+)
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.simulation.jobs.imaging import ImagingJob
+from frequensolve.simulation.task_index import TaskIndex
 from frequensolve.solver import (
     IDENTITY_QUERY_TIMEOUT_SECONDS,
     SolverCompatibility,
@@ -122,6 +136,7 @@ from frequensolve.solver import (
     query_remote_solver_identity,
     resolve_solver_policy,
 )
+from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = [
@@ -1754,11 +1769,22 @@ class SlurmSite(BaseSite):
 
         for j in jobs:
             try:
-                trace_dir_name = Path(j.trace_outputs.path).name
-                remote_dir = self._remote_result_dir(j) / trace_dir_name
-                local_dir = j._local_path / "results" / trace_dir_name
-                local_dir.mkdir(parents=True, exist_ok=True)
-                self.get(remote_dir, local_dir)
+                self.fetch_artifacts(
+                    j,
+                    requests=(
+                        ArtifactRequest(
+                            role="simulated_traces",
+                            representations=(
+                                "hdf5_shard",
+                                "packed_hdf5",
+                                "collection_manifest",
+                            ),
+                            retention="durable",
+                        ),
+                    ),
+                    include_defaults=False,
+                    operations=("pack",),
+                )
 
                 db = TraceDataset.from_job(j, upscale)
                 db_map[j.name] = db
@@ -1787,11 +1813,18 @@ class SlurmSite(BaseSite):
                 wavefield_outputs = j.wavefield_trace_outputs
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")
-                wavefield_dir_name = Path(wavefield_outputs.path).name
-                remote_dir = self._remote_result_dir(j) / wavefield_dir_name
-                local_dir = j._local_path / "results" / wavefield_dir_name
-                local_dir.mkdir(parents=True, exist_ok=True)
-                self.get(remote_dir, local_dir)
+                fetched = self.fetch_artifacts(
+                    j,
+                    requests=tuple(
+                        ArtifactRequest(role=role)
+                        for role in ("wavefield", "wavefields")
+                    ),
+                    include_defaults=False,
+                )
+                if not fetched:
+                    raise FileNotFoundError(
+                        "No retained wavefield artifact was published for this job"
+                    )
 
                 db_map[j.name] = j.wavefields.open(upscale=upscale)
 
@@ -1803,74 +1836,220 @@ class SlurmSite(BaseSite):
             return db_map[jobs[0].name]
         return db_map
 
-    def fetch_outputs(self, job: BaseJob):
-        """Fetch typed products or common traces for a completed job."""
+    def fetch_outputs(
+        self,
+        job: BaseJob,
+        *,
+        requests: tuple[ArtifactRequest, ...] = (),
+    ):
+        """Fetch durable final artifacts, plus any explicit typed requests."""
 
         local_results = job._local_path / "results"
         local_results.mkdir(parents=True, exist_ok=True)
-
-        self.fetch_run_metadata(job)
-        try:
-            self.get(
-                self._remote_logs_dir(job),
-                job._local_path / "logs",
-            )
-        except Exception as exc:
-            logger.debug("Could not fetch logs for job %s: %s", job.name, exc)
-
-        if hasattr(job, "result_manifest_file"):
-            relative_output = job.output_directory.relative_to(job._result_path)
-            remote_dir = self._remote_result_dir(job) / relative_output
-            local_dir = job.output_directory
-            local_dir.mkdir(parents=True, exist_ok=True)
-            self.get(remote_dir, local_dir, overwrite=True)
-            return local_results
-
-        try:
-            self.fetch_traces(job)
-        except Exception as exc:
-            logger.debug("Could not fetch traces for job %s: %s", job.name, exc)
-
-        if getattr(job.outputs, "wavefields", None):
-            try:
-                self.fetch_wavefields(job)
-            except Exception as exc:
-                logger.debug(
-                    "Could not fetch wavefields for job %s: %s",
-                    job.name,
-                    exc,
-                )
-
-        if getattr(job.outputs, "vtk", None):
-            try:
-                self.fetch_vtk(job)
-            except Exception as exc:
-                logger.debug(
-                    "Could not fetch VTK outputs for job %s: %s",
-                    job.name,
-                    exc,
-                )
-
-        if _job_requires_postprocess(job) and not isinstance(job, ImagingJob):
-            # Control gradients/objectives are required results, not optional
-            # diagnostics. A failed transfer must be visible to the caller.
-            self.fetch_postprocess(job)
-
+        self.fetch_artifacts(job, requests=requests, include_defaults=True)
         return local_results
 
-    def fetch_postprocess(self, job: BaseJob) -> list[Path]:
-        """Fetch finalized generic postprocess products into the local project."""
+    def fetch_artifacts(
+        self,
+        job: BaseJob,
+        *,
+        requests: tuple[ArtifactRequest, ...] = (),
+        include_defaults: bool = True,
+        operations: tuple[str, ...] = (),
+    ) -> list[Path]:
+        """Fetch an exact catalog-selected artifact closure."""
 
-        fetched = []
-        for local in job.postprocess_fetch_files():
-            local = Path(local).resolve()
-            remote = self._remote_project_artifact_file(job, local)
-            local.parent.mkdir(parents=True, exist_ok=True)
-            self._emit(
-                self._fetch_message("Fetching solver postprocess output", remote, local)
+        catalog = (
+            self.fetch_artifact_catalog(job, operations=operations)
+            if operations
+            else self.fetch_artifact_catalog(job)
+        )
+        remote_root = self._remote_result_dir(job)
+        return fetch_artifact_payloads(
+            catalog,
+            fetch_files=lambda paths: self._transfer.get_files(
+                remote_root,
+                job._result_path,
+                paths,
+            ),
+            requests=requests,
+            include_defaults=include_defaults,
+        )
+
+    def fetch_artifact_catalog(
+        self,
+        job: BaseJob,
+        *,
+        operations: tuple[str, ...] = (),
+    ):
+        """Fetch authoritative task metadata and named operation results."""
+
+        tasks = tuple(range(1, job.n_tasks + 1))
+        requested_operations = tuple(dict.fromkeys(operations))
+        remote_root = self._remote_result_dir(job)
+        local_root = job._result_path
+        local_root.parent.mkdir(parents=True, exist_ok=True)
+        if job.staged_artifact_fingerprints(self.__class__.__name__) is None:
+            raise RuntimeError(
+                "Remote staged provenance is missing; restage the job before fetching"
             )
-            self.get(remote, local, overwrite=True)
-            fetched.append(local)
+        index_path = "_fs_run/tasks.h5"
+        result_paths = tuple(
+            f"_fs_run/tasks/task_{task:06d}/result.json" for task in tasks
+        )
+        operation_paths = {
+            operation: operation_result_path(Path(), operation).as_posix()
+            for operation in requested_operations
+        }
+        with tempfile.TemporaryDirectory(
+            prefix=".fs-catalog-", dir=local_root.parent
+        ) as temporary:
+            stage = Path(temporary)
+            self._transfer.get_files(
+                remote_root,
+                stage,
+                (index_path,),
+                missing_ok=True,
+            )
+            use_index = False
+            try:
+                catalog = TaskIndex.read(stage)
+                self._validate_remote_catalog(job, catalog, tasks)
+                use_index = True
+            except (ArtifactContractError, OSError, RuntimeError):
+                self._transfer.get_files(
+                    remote_root,
+                    stage,
+                    result_paths,
+                    missing_ok=True,
+                )
+                catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
+                self._validate_remote_catalog(job, catalog, tasks)
+
+            if operation_paths:
+                self._transfer.get_files(
+                    remote_root,
+                    stage,
+                    tuple(operation_paths.values()),
+                    missing_ok=True,
+                )
+            operation_results = {}
+            for operation, relative in operation_paths.items():
+                path = stage / relative
+                if not path.is_file():
+                    continue
+                result = OperationResult.read(
+                    path,
+                    result_path=stage,
+                    workflow=operation,
+                )
+                self._validate_remote_operation(job, result)
+                operation_results[operation] = result
+
+            candidates = (index_path,) if use_index else result_paths
+            publish = [path for path in candidates if (stage / path).is_file()]
+            publish.extend(
+                relative
+                for operation, relative in operation_paths.items()
+                if operation in operation_results
+            )
+            for relative in publish:
+                source = stage / relative
+                target = local_root / relative
+                with atomic_output_path(target) as temporary_path:
+                    shutil.copyfile(source, temporary_path)
+            if not use_index:
+                (local_root / index_path).unlink(missing_ok=True)
+            for operation, relative in operation_paths.items():
+                if operation not in operation_results:
+                    (local_root / relative).unlink(missing_ok=True)
+
+        task_catalog = (
+            TaskIndex.read(local_root)
+            if use_index
+            else ArtifactCatalog.read_task_results(local_root, tasks=tasks)
+        )
+        if not requested_operations:
+            return task_catalog
+        return CombinedArtifactCatalog(
+            result_path=local_root.resolve(strict=False),
+            task_catalog=task_catalog,
+            operations={
+                operation: OperationResult.read(
+                    local_root / relative,
+                    result_path=local_root,
+                    workflow=operation,
+                )
+                for operation, relative in operation_paths.items()
+                if (local_root / relative).is_file()
+            },
+        )
+
+    def _validate_remote_catalog(self, job, catalog, tasks) -> None:
+        """Require exact task partitions and current staged provenance."""
+
+        expected_fingerprints = getattr(
+            job, "staged_task_fingerprints", job.staged_artifact_fingerprints
+        )(self.__class__.__name__)
+        if expected_fingerprints is None:
+            raise RuntimeError(
+                "Remote staged provenance is missing; restage the job before fetching"
+            )
+        for task in tasks:
+            expected_frequency = complex(job.f_list[task - 1])
+            if isinstance(catalog, TaskIndex):
+                current = catalog.is_task_current(
+                    task,
+                    frequency=expected_frequency,
+                    fingerprints=expected_fingerprints,
+                )
+            else:
+                result = catalog.results.get(task)
+                current = bool(
+                    result is not None
+                    and result.successful
+                    and result.partition.frequency == expected_frequency
+                    and all(
+                        result.fingerprints.get(key) == value
+                        for key, value in expected_fingerprints.items()
+                    )
+                )
+            if not current:
+                raise RuntimeError(
+                    f"Remote task {task} does not match the current staged job"
+                )
+
+    def _validate_remote_operation(self, job, result: OperationResult) -> None:
+        """Require a successful operation from the current staged generation."""
+
+        fingerprints = job.staged_artifact_fingerprints(self.__class__.__name__)
+        if (
+            fingerprints is None
+            or not result.successful
+            or any(
+                result.fingerprints.get(key) != value
+                for key, value in fingerprints.items()
+            )
+        ):
+            raise RuntimeError(
+                f"Remote operation {result.name!r} does not match the current "
+                "staged job"
+            )
+
+    def fetch_postprocess(self, job: BaseJob) -> list[Path]:
+        """Fetch typed gradient and objective postprocess products."""
+
+        fetched = self.fetch_artifacts(
+            job,
+            requests=tuple(
+                ArtifactRequest(role=role)
+                for role in ("gradient", "objective", "focus_objective")
+            ),
+            include_defaults=False,
+            operations=("smooth",),
+        )
+        if not fetched:
+            raise FileNotFoundError("No postprocess artifact was published")
         return fetched
 
     @staticmethod
@@ -1882,16 +2061,14 @@ class SlurmSite(BaseSite):
         return f"{label}\n\tFrom: {remote}\n\tTo: {local}"
 
     def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
-        """Fetch ``_fs_run`` metadata and aggregate task manifests locally."""
+        """Fetch the exact catalog metadata without directory traversal."""
 
-        remote_run_dir = self._remote_result_dir(job) / "_fs_run"
-        local_run_dir = job._result_path / "_fs_run"
         try:
-            self.get(remote_run_dir, local_run_dir)
+            self.fetch_artifact_catalog(job)
         except Exception as exc:
             logger.debug("Could not fetch _fs_run for job %s: %s", job.name, exc)
             return None
-        return job.collect_task_run_manifests()
+        return job._result_path / "_fs_run"
 
     def fetch_vtk(self, job: BaseJob):
         """Get configured VTK/visualization files from the remote site.
@@ -1900,22 +2077,16 @@ class SlurmSite(BaseSite):
             job: A BaseJob object.
         """
 
-        self.fetch_run_metadata(job)
-        job.outputs.ensure_unique_names()
-        seen = set()
-        for output in job.outputs.vtk:
-            path = Path(output.path)
-            key = str(path)
-            if key in seen:
-                continue
-            seen.add(key)
-            remote_dir = self._remote_result_dir(job) / path
-            local_dir = job._local_path / "results" / path
-            local_dir.mkdir(parents=True, exist_ok=True)
-            self._emit(
-                self._fetch_message("Fetching VTK outputs", remote_dir, local_dir)
-            )
-            self.get(remote_dir, local_dir)
+        fetched = self.fetch_artifacts(
+            job,
+            requests=(
+                ArtifactRequest(role="visualization"),
+                ArtifactRequest(role="visualization_data"),
+            ),
+            include_defaults=False,
+        )
+        if not fetched:
+            raise FileNotFoundError("No visualization artifact was published")
         return job.vtk_outputs
 
     def fetch_paraview(self, job: BaseJob):
@@ -1937,9 +2108,14 @@ class SlurmSite(BaseSite):
         images = {}
         for job in jobs:
             try:
-                remote = job._remote_image_path(self.work_dir)
-                local = job._local_image_path
-                self.get(remote, local)
+                fetched = self.fetch_artifacts(
+                    job,
+                    requests=(ArtifactRequest(role="image"),),
+                    include_defaults=False,
+                    operations=("smooth",),
+                )
+                if not fetched:
+                    raise FileNotFoundError("No image artifact was published")
 
                 images[job.name] = job.load_images()
 
@@ -2231,30 +2407,29 @@ class SlurmSite(BaseSite):
         if not self._record_status_successful(record.status):
             return False
 
-        manifest = self._read_remote_json(
-            record.result_dir / "_fs_run" / "run_manifest.json"
-        )
-        if not isinstance(manifest, dict):
-            return False
-
-        task_summary = manifest.get("task_summary")
-        if not isinstance(task_summary, dict):
-            return False
-        try:
-            failed = int(task_summary.get("failed") or 0)
-            complete = int(task_summary.get("complete") or 0)
-            total = int(task_summary.get("total") or 0)
-        except (TypeError, ValueError):
-            return False
         expected_total = self._record_expected_task_count(record)
-        if expected_total is not None and total != expected_total:
+        if expected_total is None or expected_total <= 0:
             return False
-        if failed != 0 or total <= 0 or complete != total:
-            return False
-        succeeded = task_summary.get("succeeded", task_summary.get("successful"))
-        if succeeded is not None:
+        for task in range(1, expected_total + 1):
+            result = self._read_remote_json(
+                record.result_dir
+                / "_fs_run"
+                / "tasks"
+                / f"task_{task:06d}"
+                / "result.json"
+            )
+            if (
+                not isinstance(result, dict)
+                or result.get("schema") != "fs-task-result-2"
+            ):
+                return False
+            status = result.get("status")
+            if not isinstance(status, Mapping):
+                return False
+            if status.get("state") not in {"success", "skipped"}:
+                return False
             try:
-                if int(succeeded) != total:
+                if int(status.get("code")) != 0:
                     return False
             except (TypeError, ValueError):
                 return False
