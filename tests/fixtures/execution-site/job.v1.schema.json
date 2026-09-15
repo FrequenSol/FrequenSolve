@@ -149,6 +149,28 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "required": [
+              "allowCpuSharing"
+            ],
+            "properties": {
+              "allowCpuSharing": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "nodes": {
+                "const": 1
+              },
+              "mpiRanks": {
+                "const": 1
+              }
+            }
+          }
         }
       ]
     }
