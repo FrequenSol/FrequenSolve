@@ -23,6 +23,24 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def parse_timestamp(value: Any) -> datetime | None:
+    """Parse a provider timestamp to UTC; missing/invalid zones are not evidence."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    # Python 3.10 accepts only three/six fractional digits; providers vary.
+    normalized = re.sub(
+        r"\.(\d+)(Z|[+-]\d{2}:\d{2})$",
+        lambda match: "." + (match[1] + "000000")[:6] + match[2],
+        normalized,
+    )
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+    except ValueError:
+        return None
+
+
 def json_bytes(value: Any) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
 

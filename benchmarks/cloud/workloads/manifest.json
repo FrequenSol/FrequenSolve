@@ -209,13 +209,13 @@
       "sourceSha256": "b1dcf384350c83c4d01a689829fec57b55845d2ecc36b73e660b8515d5d496eb"
     },
     {
-      "behaviorSha256": "943bc24327579982c01ae00315e3be54bf4390439172eb6d8d5156eddff9632b",
+      "behaviorSha256": "1c4935c03853b2a0f8711efda47e2118d24e5c16e192a1e0b2ef4c045f07b515",
       "expectedSubmissions": 9,
       "id": "07_performance/01_performance",
       "script": "07_performance/01_performance.py",
-      "scriptSha256": "1ac0fab5c574ef4b9c00b360b09e3664783929947f7cf9c810043ff566e685d0",
+      "scriptSha256": "431e266544fb243e1d9c8f335b3ed8b5489a6f3565ca44b8024b2841fed89c1c",
       "source": "07_performance/01_performance.ipynb",
-      "sourceSha256": "eb56da13d5c8726d4b50691c14144eac2cda32ac600c46a48dedf187d3aaab70"
+      "sourceSha256": "d01d231b1c49372d1c06511cc5bf100f04fa9ec5d62a1f50bc684ddfcfe5ca66"
     }
   ],
   "generator": "scripts/generate_cloud_benchmark_workloads.py",

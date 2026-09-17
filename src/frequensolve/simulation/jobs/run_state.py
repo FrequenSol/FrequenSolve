@@ -13,7 +13,7 @@ import shutil
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from frequensolve.simulation.simulation import CustomJSONEncoder
 
@@ -169,6 +169,11 @@ class JobRunStateMixin:
     against trace outputs, aggregates solver manifests, and writes the
     Python-side run-state summary used by local status widgets and rerun logic.
     """
+
+    if TYPE_CHECKING:
+
+        @property
+        def n_tasks(self) -> int: ...
 
     @classmethod
     def solver_convergence_summary(
@@ -1995,6 +2000,37 @@ class JobRunStateMixin:
             records.extend(self._as_records(metadata.error.get("errors")))
             if not records:
                 records.append(metadata.error)
+        # Native Slurm tasks retain their own fs-timings-1 files even when no
+        # aggregate timings.json was produced. Stay inside this job/run's
+        # directory; never search sibling runs or infer a latest submission.
+        for task in range(1, self.n_tasks + 1):
+            manifest_path = self.task_run_manifest_path(task)
+            try:
+                manifest = json.loads(manifest_path.read_text())
+                timing = json.loads(manifest_path.with_name("timings.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(manifest, Mapping):
+                continue
+            execution = manifest.get("execution")
+            command_task = (
+                self._command_line_task_number(
+                    self._run_manifest_command_line(execution)
+                )
+                if isinstance(execution, Mapping)
+                else None
+            )
+            # The first native task may retain the planner's --init command.
+            # Its task inputs still identify the frequency and output contract.
+            if (
+                command_task in (None, task)
+                and self._run_manifest_frequency_matches_task(manifest, task)
+                and self._run_manifest_outputs_match_task(manifest, task)
+                and isinstance(timing, Mapping)
+                and timing.get("schema") == "fs-timings-1"
+                and timing.get("task") == task
+            ):
+                records.append(timing)
         return records
 
     def _reuse_task_outputs_from_state(

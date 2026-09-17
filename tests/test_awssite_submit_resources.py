@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("boto3")
 
-from frequensolve.orchestrator.sites.aws.aws import AWSSite
+from frequensolve.orchestrator.sites.aws.aws import AWSSite, AWSSiteConfig
 from frequensolve.orchestrator.sites.aws.execution_profile import (
     ManagedExecutionProfile,
 )
@@ -54,6 +54,7 @@ class FakeJob:
 
 def make_graphql_site():
     site = AWSSite.__new__(AWSSite)
+    site.config = AWSSiteConfig(api_url="https://synthetic.invalid/graphql")
     site.graphql_client = FakeGraphQLClient()
     site.execution_profile = ManagedExecutionProfile.from_mapping({})
     site.prepare_job = lambda job, sync_project=False, validate=True: None
