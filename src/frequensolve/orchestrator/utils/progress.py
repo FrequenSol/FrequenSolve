@@ -13,6 +13,7 @@ from frequensolve.orchestrator.sites.base import (
     RunResult,
     _check_if_notebook,
 )
+from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
 
 __all__ = ["RunMonitor", "status_table_html", "status_text", "wait", "wait_all"]
 
@@ -124,6 +125,7 @@ class RunMonitor:
         start = time.monotonic()
         completed: set[int] = set()
         statuses: Dict[int, JobStatus] = {}
+        read_failures: Dict[int, int] = {}
 
         while len(completed) < len(handles):
             for index, run in enumerate(handles):
@@ -140,7 +142,24 @@ class RunMonitor:
                     completed.add(index)
                     continue
 
-                status = self._poll(run)
+                # Retry only an explicitly transient status read. Other runs still
+                # advance, and the original monitor timeout remains in force.
+                if (
+                    read_failures.get(index, 0)
+                    and timeout is not None
+                    and time.monotonic() - start >= timeout
+                ):
+                    statuses[index] = run._last_status
+                    continue
+                try:
+                    status = self._poll(run)
+                except TransientStatusReadError:
+                    read_failures[index] = read_failures.get(index, 0) + 1
+                    if read_failures[index] >= 3:
+                        raise
+                    statuses[index] = run._last_status
+                    continue
+                read_failures.pop(index, None)
                 run._last_status = status
                 statuses[index] = status
 
@@ -153,7 +172,7 @@ class RunMonitor:
             if len(completed) == len(handles):
                 break
 
-            if timeout is not None and time.monotonic() - start > timeout:
+            if timeout is not None and time.monotonic() - start >= timeout:
                 for index, run in enumerate(handles):
                     if index in completed:
                         continue

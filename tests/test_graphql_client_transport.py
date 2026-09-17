@@ -247,3 +247,42 @@ def test_wait_for_storage_ready_propagates_timeout_at_bound(monkeypatch):
         client.wait_for_storage_ready(timeout=5, poll_interval=0)
 
     assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    ("error", "retryable"),
+    [
+        (requests.exceptions.Timeout("private"), True),
+        (requests.exceptions.ConnectionError("private"), True),
+        (requests.exceptions.SSLError("private"), False),
+        (requests.exceptions.InvalidURL("private"), False),
+        (requests.exceptions.RequestException("private"), False),
+    ],
+)
+def test_only_transient_status_reads_signal_monitor_recovery(
+    monkeypatch, error, retryable
+):
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    calls = []
+
+    def post(*args, **kwargs):
+        calls.append(kwargs["json"]["query"])
+        raise error
+
+    monkeypatch.setattr(graphql_client.requests, "post", post)
+    expected = (
+        TransientStatusReadError if retryable else graphql_client.CloudTransportError
+    )
+    with pytest.raises(expected) as raised:
+        _client().get_simulation_status_details("synthetic-run-1")
+    assert len(calls) == 1
+    assert "private" not in str(raised.value)
+    if retryable:
+        assert "synthetic-run-1" in str(raised.value)
+        assert "do not resubmit" in str(raised.value)
+
+    # The shared executor never retries a mutation or turns it into a status signal.
+    with pytest.raises(graphql_client.CloudTransportError):
+        _client().execute("mutation Submit { submitJob }")
+    assert len(calls) == 2

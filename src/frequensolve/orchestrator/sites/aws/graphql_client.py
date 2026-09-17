@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.orchestrator.sites.execution import normalize_execution_state
+from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
 
 try:
     import requests
@@ -59,6 +60,10 @@ def _redact_provider_message(message: object, secrets: set[str]) -> str:
 
 class CloudTransportError(RuntimeError):
     """The Cloud request could not obtain a response."""
+
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class CloudAPIError(RuntimeError):
@@ -124,13 +129,15 @@ class GraphQLClient:
             response.raise_for_status()
         except requests.exceptions.Timeout:
             raise CloudTransportError(
-                "Cloud API request timed out after 30 seconds"
+                "Cloud API request timed out after 30 seconds", retryable=True
             ) from None
         except requests.exceptions.HTTPError:
             raise CloudAPIError("Cloud API rejected the HTTP request") from None
         except requests.exceptions.RequestException as exc:
             raise CloudTransportError(
-                f"Cloud API request failed ({type(exc).__name__})"
+                f"Cloud API request failed ({type(exc).__name__})",
+                retryable=isinstance(exc, requests.exceptions.ConnectionError)
+                and not isinstance(exc, requests.exceptions.SSLError),
             ) from None
 
         try:
@@ -430,7 +437,17 @@ class GraphQLClient:
 
         variables = {"id": simulation_id}
 
-        result = self.execute(query, variables)
+        try:
+            result = self.execute(query, variables)
+        except CloudTransportError as exc:
+            if not exc.retryable:
+                raise
+            raise TransientStatusReadError(
+                f"Could not read status for submitted simulation {simulation_id}. "
+                "The simulation may still be running. Observe this existing run "
+                "in Cloud or call wait() again on the retained run handle; "
+                "do not resubmit the job."
+            ) from None
 
         if "getSimulation" not in result or not result["getSimulation"]:
             raise RuntimeError(
