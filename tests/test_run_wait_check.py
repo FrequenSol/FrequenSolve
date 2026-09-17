@@ -332,3 +332,93 @@ def test_failed_run_result_traces_raise_before_fetching_outputs():
         result.traces(upscale=4)
 
     assert site.fetch_traces_called is False
+
+
+def polling_run(outcomes):
+    run = successful_run()
+    values = iter(outcomes)
+    calls = []
+
+    def poll(handle):
+        calls.append(handle.id)
+        value = next(values)
+        if isinstance(value, Exception):
+            raise value
+        return JobStatus(state=value, job_id=handle.id, return_code=0)
+
+    run._status_fn = poll
+    return run, calls
+
+
+def test_wait_recovers_transient_reads_and_resets_consecutive_failure_bound():
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    transient = TransientStatusReadError("observe existing run-1; do not resubmit")
+    run, calls = polling_run(
+        ["running", transient, transient, "running", transient, transient, "completed"]
+    )
+    fetched = []
+    run._pending_fetch_fn = lambda handle: fetched.append(handle.id)
+    assert run.wait().successful
+    assert calls == ["run-1"] * 7
+    assert fetched == ["run-1"]
+
+
+def test_wait_exhaustion_preserves_handle_for_later_recovery():
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    transient = TransientStatusReadError("observe existing run-1; do not resubmit")
+    run, calls = polling_run([transient] * 3 + ["completed"])
+    with pytest.raises(TransientStatusReadError, match="existing run-1"):
+        run.wait()
+    assert len(calls) == 3
+    assert run._result is None
+    assert run.wait().successful
+    assert len(calls) == 4
+
+
+def test_transient_read_does_not_restart_timeout_or_poll_after_deadline(monkeypatch):
+    from frequensolve.orchestrator.utils import progress
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    now = [0.0]
+    monkeypatch.setattr(progress.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        progress.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds)
+    )
+    run, calls = polling_run([TransientStatusReadError("temporary"), "completed"])
+    run.poll_interval = 2
+    result = run.wait(timeout=1, check=False)
+    assert result.status.state == "timeout"
+    assert len(calls) == 1
+
+
+def test_transient_read_does_not_block_other_runs():
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    first, first_calls = polling_run(
+        [TransientStatusReadError("temporary"), "completed"]
+    )
+    second, second_calls = polling_run(["completed"])
+    assert all(result.successful for result in wait_all([first, second]))
+    assert len(first_calls) == 2
+    assert len(second_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("access denied"), ValueError("malformed")]
+)
+def test_wait_does_not_retry_permanent_status_errors(error):
+    run, calls = polling_run([error, "completed"])
+    with pytest.raises(type(error), match=str(error)):
+        run.wait()
+    assert len(calls) == 1
+
+
+def test_terminal_failure_after_transient_read_still_raises():
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    run, calls = polling_run([TransientStatusReadError("temporary"), "failed"])
+    with pytest.raises(RunFailedError):
+        run.wait()
+    assert len(calls) == 2
