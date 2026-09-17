@@ -2004,13 +2004,29 @@ class JobRunStateMixin:
         # aggregate timings.json was produced. Stay inside this job/run's
         # directory; never search sibling runs or infer a latest submission.
         for task in range(1, self.n_tasks + 1):
-            path = self.task_run_manifest_path(task).with_name("timings.json")
+            manifest_path = self.task_run_manifest_path(task)
             try:
-                timing = json.loads(path.read_text())
+                manifest = json.loads(manifest_path.read_text())
+                timing = json.loads(manifest_path.with_name("timings.json").read_text())
             except (OSError, json.JSONDecodeError):
                 continue
+            if not isinstance(manifest, Mapping):
+                continue
+            execution = manifest.get("execution")
+            command_task = (
+                self._command_line_task_number(
+                    self._run_manifest_command_line(execution)
+                )
+                if isinstance(execution, Mapping)
+                else None
+            )
+            # The first native task may retain the planner's --init command.
+            # Its task inputs still identify the frequency and output contract.
             if (
-                isinstance(timing, Mapping)
+                command_task in (None, task)
+                and self._run_manifest_frequency_matches_task(manifest, task)
+                and self._run_manifest_outputs_match_task(manifest, task)
+                and isinstance(timing, Mapping)
                 and timing.get("schema") == "fs-timings-1"
                 and timing.get("task") == task
             ):

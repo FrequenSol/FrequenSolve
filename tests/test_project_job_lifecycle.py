@@ -2481,4 +2481,92 @@ def test_per_task_timing_reader_does_not_invent_or_misattribute_durations(
     path = job.task_run_manifest_path(1).with_name("timings.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload))
+    job.task_run_manifest_path(1).write_text(
+        json.dumps({"inputs": {"task": {"frequency": 5.0}}})
+    )
     assert job.task_timings() == []
+
+
+def test_per_task_timings_reject_stale_metadata_after_job_frequency_edit(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0])
+    job.save()
+    manifest = job.task_run_manifest_path(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({"inputs": {"task": {"frequency": 5.0}}}))
+    manifest.with_name("timings.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-timings-1",
+                "task": 1,
+                "elapsed_s": 2.0,
+                "phases": {"solve_forward": 2.0},
+            }
+        )
+    )
+    assert job.task_timings()[0]["duration_seconds"] == 2.0
+    job.f_list = [10.0]
+    job.plan_tasks(apply=True)
+    assert manifest.exists()  # Planning preserves the old native metadata.
+    assert job.task_timings() == []
+    assert job.phase_timings() == []
+
+
+@pytest.mark.parametrize(
+    "manifest_payload",
+    [
+        None,
+        [],
+        {"execution": {"command_line": ["solver", "--task", "2"]}},
+        {"inputs": {"task": {"frequency": 5.0, "outputs_hash": "stale"}}},
+    ],
+)
+def test_per_task_timings_require_a_matching_task_manifest(tmp_path, manifest_payload):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0])
+    job.save()
+    manifest = job.task_run_manifest_path(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    if manifest_payload is not None:
+        manifest.write_text(json.dumps(manifest_payload))
+    manifest.with_name("timings.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-timings-1",
+                "task": 1,
+                "elapsed_s": 2.0,
+                "phases": {"solve_forward": 2.0},
+            }
+        )
+    )
+    assert job.task_timings() == []
+    assert job.phase_timings() == []
+
+
+def test_per_task_timings_accept_matching_first_task_planner_metadata(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0])
+    job.save()
+    manifest = job.task_run_manifest_path(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "execution": {"command_line": ["solver", "--init"]},
+                "inputs": {"task": {"frequency": 5.0}},
+            }
+        )
+    )
+    manifest.with_name("timings.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-timings-1",
+                "task": 1,
+                "elapsed_s": 2.0,
+                "phases": {"solve_forward": 2.0},
+            }
+        )
+    )
+    assert job.task_timings()[0]["duration_seconds"] == 2.0
+    assert job.phase_timings()[0]["total_seconds"] == 2.0
+    assert job.frequency_summary()["succeeded"] == 0
