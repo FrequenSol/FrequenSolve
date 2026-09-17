@@ -7,6 +7,40 @@ inspect exported solver inputs, load :term:`trace` outputs, and configure
 execution :term:`sites <site>`. Running a :term:`job` also requires access to a
 licensed :term:`fast solver` through a local, cloud, or :term:`HPC` site.
 
+Supported Platforms
+-------------------
+
+The Python API supports Python 3.10 through 3.14 on Linux and macOS.
+Native Windows is unsupported for the current release, including a native
+Windows client that submits work to Cloud or an HPC cluster. On a Windows
+computer, install and run Python, the notebook kernel and FrequenSolve inside
+WSL2, a Linux container, or a remote Linux/macOS host. Run the installation
+commands below in that environment. This does not promise that every solver,
+optional dependency or hardware accelerator is available on every supported
+host; the selected execution site must supply its supported solver build.
+
+A successful native Windows import or installation is not a support claim.
+The package remains importable where its dependencies allow it; the CLI and
+optional-dependency diagnostics explain the supported alternatives rather than
+adding an unconditional import failure.
+
+Platform-sensitive behavior
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Keep local workspace paths and configured remote POSIX paths distinct. Prefer
+a workspace inside the Linux environment rather than assuming that Windows
+mounted-drive paths, permissions or symlinks behave identically. Local solver
+launching, process signals and executable discovery require the selected host's
+supported binary and subprocess behavior. SSH connection sharing uses OpenSSH
+control sockets; use it from the supported Python host. Temporary files,
+credential stores and optional binary wheels must also belong to that host.
+Installing a missing extra alone does not establish native Windows support.
+
+Required SDK checks exercise supported Python versions; the native platform
+workflow covers Linux and macOS. A native Windows import smoke must not be
+advertised as supported execution. Deterministic tests simulate the support
+message only; they do not claim live Windows, WSL2, container or solver coverage.
+
 Basic Install
 -------------
 
