@@ -6,6 +6,8 @@ import importlib
 from types import TracebackType
 from typing import Any, Iterable, NoReturn, Type, cast
 
+from frequensolve._platform import platform_support_guidance
+
 
 def _dependency_list(dependencies: Iterable[str] | None) -> str:
     values = list(dependencies or [])
@@ -34,10 +36,12 @@ def optional_dependency_error(
         ``ImportError`` with an install hint and original error context.
     """
 
+    guidance = platform_support_guidance()
+    platform_hint = f" {guidance}" if guidance else ""
     return ImportError(
         f"{symbol} requires optional FrequenSolve dependencies that are not installed. "
         f"Install them with `pip install frequensolve[{extra}]`."
-        f"{_dependency_list(dependencies)} Original import error: {error}"
+        f"{_dependency_list(dependencies)} Original import error: {error}{platform_hint}"
     )
 
 

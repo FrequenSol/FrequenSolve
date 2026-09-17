@@ -10,6 +10,10 @@ The commercial solver binaries and backend services are licensed separately. Thi
 ## Installation
 
 FrequenSolve supports Python 3.10 through 3.14 on macOS and Linux.
+Native Windows is unsupported for this release. On a Windows computer, run
+Python and your notebook kernel inside WSL2, a Linux container, or a remote
+Linux/macOS host. A remote solver does not make a native Windows client
+supported. See the [platform support boundary](docs/source/installation.rst).
 
 Create an isolated environment and install the released FrequenSolve Python
 API with:
