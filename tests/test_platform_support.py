@@ -33,7 +33,7 @@ def test_cli_guidance_does_not_block_command_execution(host, monkeypatch):
     # Replace only the policy provider; changing sys.platform while Click imports
     # terminal helpers would test this host's unavailable Windows libraries.
     monkeypatch.setattr(
-        "frequensolve.commands.cli.platform_support_guidance",
+        "frequensolve._cli_support.platform_support_guidance",
         lambda: _platform.WINDOWS_GUIDANCE if host == "win32" else "",
     )
     ran = []
@@ -57,7 +57,7 @@ def test_windows_guidance_precedes_eager_options_and_parse_errors(
     args, exit_code, monkeypatch
 ):
     monkeypatch.setattr(
-        "frequensolve.commands.cli.platform_support_guidance",
+        "frequensolve._cli_support.platform_support_guidance",
         lambda: _platform.WINDOWS_GUIDANCE,
     )
     result = CliRunner().invoke(main, args)
