@@ -514,3 +514,71 @@ def test_corpus_fingerprint_changes_with_behavioral_identity():
     original = {"cases": [{"id": "a", "behaviorSha256": "1"}]}
     changed = {"cases": [{"id": "a", "behaviorSha256": "2"}]}
     assert stable_fingerprint(original) != stable_fingerprint(changed)
+
+
+def test_behavior_hash_preserves_original_corpus_across_python_ast_versions():
+    # This exercises the actual generator over every checked-in workload. The
+    # recorded hashes were produced on Python 3.10, before type_params/show_empty.
+    for case in list_cases():
+        payload = (Path("benchmarks/cloud/workloads") / case["script"]).read_text()
+        assert _behavior_sha256(payload) == case["behaviorSha256"], case["id"]
+
+
+def test_behavior_hash_keeps_nonempty_type_parameters_and_constants():
+    import ast
+
+    from scripts.generate_cloud_benchmark_workloads import _canonical_ast
+
+    tree = ast.parse("def f(x): return None")
+    original = _canonical_ast(tree)
+    # Model the extra empty field supplied by newer interpreters.
+    function = tree.body[0]
+    function._fields = tuple(dict.fromkeys((*function._fields, "type_params")))
+    function.type_params = []
+    assert _canonical_ast(tree) == original
+    function.type_params = [ast.Name(id="T", ctx=ast.Load())]
+    assert _canonical_ast(tree) != original
+    assert _behavior_sha256("x = None") != _behavior_sha256("x = False")
+    assert _behavior_sha256("x = 1") != _behavior_sha256("x = 2")
+
+
+@pytest.mark.parametrize(
+    "end_times",
+    [
+        ["2026-09-10T00:00:01Z", "2026-09-10T00:00:01.900Z"],
+        ["2026-09-10T01:00:01+01:00", "2026-09-09T20:00:01.900-04:00"],
+    ],
+)
+def test_packing_metrics_select_latest_instant_not_timestamp_spelling(end_times):
+    metrics = _worker._derived_metrics(
+        {
+            "provider": {"terminalAt": "2026-09-10T00:00:02Z"},
+            "frequencyJobs": [{"endTime": value} for value in end_times],
+        }
+    )
+    assert metrics["packingAndProjectionSeconds"] == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("bad", [None, "", "invalid", "2026-09-10T00:00:00"])
+def test_invalid_timestamp_does_not_break_diagnostics_or_invent_duration(bad):
+    assert _worker._iso_seconds(bad, "2026-09-10T00:00:02Z") is None
+    metrics = _worker._derived_metrics(
+        {
+            "provider": {"terminalAt": "2026-09-10T00:00:02Z"},
+            "frequencyJobs": [{"endTime": bad}],
+        }
+    )
+    assert metrics.get("packingAndProjectionSeconds") is None
+
+
+def test_baseline_selection_orders_offsets_and_fractional_seconds(tmp_path):
+    candidate = _write_run(tmp_path, "candidate", 2, "2026-09-10T00:00:02Z")
+    _write_run(tmp_path, "earlier", 3, "2026-09-10T01:00:01+01:00")
+    latest = _write_run(tmp_path, "latest", 3, "2026-09-10T00:00:01.900Z")
+    _write_run(tmp_path, "future", 3, "2026-09-09T20:00:03-04:00")
+    _write_run(tmp_path, "invalid", 3, "invalid")
+    summary = json.loads((candidate / "summary.json").read_text())
+    assert (
+        cloud_runner._auto_baseline(summary, tmp_path, candidate / "summary.json")
+        == latest / "summary.json"
+    )

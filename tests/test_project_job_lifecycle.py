@@ -2407,3 +2407,78 @@ def test_job_task_plan_stages_reused_traces_and_removes_stale_pending_slots(tmp_
         "failed": 0,
         "not_run": 1,
     }
+
+
+def test_native_task_timings_stay_bound_to_the_completed_cloud_run(tmp_path):
+    from frequensolve.orchestrator.sites.aws.aws import AWSSite
+
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg", force=True)
+    _, sim = _project_with_trace_simulation(tmp_path)
+    authored = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0, 10.0])
+    authored.save()
+    first = AWSSite._snapshot_run_job(authored, "synthetic-first-run")
+    second = AWSSite._snapshot_run_job(authored, "synthetic-second-run")
+    for run, durations in [(first, [0.5, 1.25]), (second, [7.0, 9.0])]:
+        for task, elapsed in enumerate(durations, 1):
+            manifest = run.task_run_manifest_path(task)
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "exit_status": {"code": 0, "status": "success"},
+                        "inputs": {"task": {"frequency": run.f_list[task - 1]}},
+                    }
+                )
+            )
+            manifest.with_name("timings.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "fs-timings-1",
+                        "task": task,
+                        "elapsed_s": elapsed,
+                        "phases": {
+                            "setup": elapsed / 4,
+                            "solve_forward": elapsed * 3 / 4,
+                        },
+                    }
+                )
+            )
+        run.collect_task_run_manifests()
+    assert authored.task_timings() == []  # Authored jobs never select a sibling run.
+    assert [r["duration_seconds"] for r in first.task_timings()] == [0.5, 1.25]
+    assert [r["duration_seconds"] for r in second.task_timings()] == [7.0, 9.0]
+    assert first.frequency_summary() == {
+        "total": 2,
+        "succeeded": 2,
+        "failed": 0,
+        "not_run": 0,
+    }
+    assert [r["total_seconds"] for r in first.phase_timings()] == [0.5, 1.25]
+    assert [p.get_height() for p in first.plot_task_timings().patches] == [0.5, 1.25]
+    assert len(first.plot_phase_timings().patches) == 4
+    import matplotlib.pyplot as plt
+
+    plt.close("all")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schema": "fs-timings-1", "task": 2, "elapsed_s": 50},
+        {"schema": "unknown", "task": 1, "elapsed_s": 50},
+        {"schema": "fs-timings-1", "task": 1},
+        [],
+        None,
+    ],
+)
+def test_per_task_timing_reader_does_not_invent_or_misattribute_durations(
+    tmp_path, payload
+):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0])
+    job.save()
+    path = job.task_run_manifest_path(1).with_name("timings.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+    assert job.task_timings() == []

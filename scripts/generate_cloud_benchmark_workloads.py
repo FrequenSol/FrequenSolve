@@ -63,8 +63,27 @@ def _behavior_sha256(payload: str) -> str:
         and tree.body[0].value.value.startswith("Generated Cloud benchmark workload.")
     ):
         tree.body.pop(0)
-    canonical = ast.dump(tree, annotate_fields=True, include_attributes=False)
+    canonical = _canonical_ast(tree)
     return _sha256(canonical.encode())
+
+
+def _canonical_ast(value: Any) -> str:
+    """Keep the original Python 3.10 AST spelling across interpreter versions.
+
+    Newer Python versions add empty type parameters and omit empty lists in
+    ast.dump. Neither changes a workload. Nonempty new syntax remains hashed.
+    """
+    if isinstance(value, ast.AST):
+        fields = [
+            f"{name}={_canonical_ast(child)}"
+            for name, child in ast.iter_fields(value)
+            if not (child is None and getattr(type(value), name, ...) is None)
+            and not (name == "type_params" and child == [])
+        ]
+        return f"{type(value).__name__}({', '.join(fields)})"
+    if isinstance(value, list):
+        return f"[{', '.join(_canonical_ast(child) for child in value)}]"
+    return repr(value)
 
 
 class _Calls(ast.NodeVisitor):

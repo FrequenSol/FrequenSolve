@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 07_performance/01_performance.ipynb
-Source SHA-256: eb56da13d5c8726d4b50691c14144eac2cda32ac600c46a48dedf187d3aaab70
+Source SHA-256: d01d231b1c49372d1c06511cc5bf100f04fa9ec5d62a1f50bc684ddfcfe5ca66
 """
 
 # %% source cell 3
@@ -15,10 +15,12 @@ import frequensolve as fs
 u = fs.ureg
 
 
-def _fetch_timing_metadata(site, job):
+def _fetch_timing_metadata(site, result):
+    job = result.job
     fetch = getattr(site, "fetch_run_metadata", None)
     if callable(fetch):
         fetch(job)
+    return job
 
 
 # %% source cell 5
@@ -103,9 +105,9 @@ fd_job += fs.VtkOutput.domain(
     show_pml=True,
 )
 fd_result = site.submit(fd_job).wait()
-_fetch_timing_metadata(site, fd_job)
-fd_job.print_frequency_summary()
-fd_job.task_timings()
+fd_timing_job = _fetch_timing_metadata(site, fd_result)
+fd_timing_job.print_frequency_summary()
+fd_timing_job.task_timings()
 
 # %% source cell 11
 vtu_files = fd_result.output_files(base="qc", suffix=".vtu", existing=True)
@@ -120,15 +122,15 @@ time_job = fs.TimeDomainJob(
     name="time_sweep", simulation=sim, f_min=0.0, f_max=28.0, T_max=0.9
 )
 time_result = site.submit(time_job).wait()
-_fetch_timing_metadata(site, time_job)
-time_job.print_frequency_summary()
+time_timing_job = _fetch_timing_metadata(site, time_result)
+time_timing_job.print_frequency_summary()
 
 # %% source cell 15
-timing_rows = time_job.task_timings()
+timing_rows = time_timing_job.task_timings()
 
 # %% source cell 17
 phase_order = ["setup", "mesh", "assembly", "solve_forward", "solve_adjoint", "imaging"]
-phase_rows = time_job.phase_timings(phases=phase_order)
+phase_rows = time_timing_job.phase_timings(phases=phase_order)
 
 
 # %% source cell 19
@@ -156,9 +158,9 @@ for n_source_case in source_counts:
         name=f"sources_{n_source_case:03d}", simulation=batch_sim, f_list=[12.0]
     )
     batch_result = batch_site.submit(batch_job).wait()
-    _fetch_timing_metadata(batch_site, batch_job)
-    summary = batch_job.print_frequency_summary()
-    timings = batch_job.task_timings()
+    batch_timing_job = _fetch_timing_metadata(batch_site, batch_result)
+    summary = batch_timing_job.print_frequency_summary()
+    timings = batch_timing_job.task_timings()
     elapsed = timings[0]["duration_seconds"] if timings else np.nan
     batch_rows.append(
         {
