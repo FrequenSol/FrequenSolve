@@ -47,3 +47,20 @@ def test_cli_guidance_does_not_block_command_execution(host, monkeypatch):
     assert result.exit_code == 0, result.output
     assert ran == [True]
     assert ("Native Windows is unsupported" in result.output) == (host == "win32")
+
+
+@pytest.mark.parametrize(
+    ("args", "exit_code"),
+    [(["--help"], 0), (["--version"], 0), ([], 2), (["unknown-command"], 2)],
+)
+def test_windows_guidance_precedes_eager_options_and_parse_errors(
+    args, exit_code, monkeypatch
+):
+    monkeypatch.setattr(
+        "frequensolve.commands.cli.platform_support_guidance",
+        lambda: _platform.WINDOWS_GUIDANCE,
+    )
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == exit_code, result.output
+    assert result.output.startswith(_platform.WINDOWS_GUIDANCE)
+    assert result.output.count(_platform.WINDOWS_GUIDANCE) == 1
