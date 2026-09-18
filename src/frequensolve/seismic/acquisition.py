@@ -1194,16 +1194,40 @@ class Acquisition(ExtraFieldsMixin):
             return coords
         return coords[int(src) - 1]
 
-    def offsets(self, src: int, group: str) -> Dict:
-        """Return horizontal source-field/receiver offsets.
+    def offsets(self, src: int, group: str) -> np.ndarray:
+        """Return unsigned horizontal source-field/receiver offsets.
+
+        Coordinates must already share Cartesian axes and numeric length units;
+        this helper does not convert units or transform coordinate systems.
+        The final coordinate is depth: ``[x, z]`` in 2D, ``[x, y, z]`` in 3D.
+        Encoded sources use their source-field reference coordinate.
 
         Args:
             src: One-based source index.
             group: Receiver group name.
+
+        Returns:
+            One distance per receiver, in the input coordinate units.
+
+        Raises:
+            ValueError: If source and receiver dimensions do not match or are
+                neither two nor three.
         """
-        diff = self.receiver_coords(group) - self.source_coords(src)
-        offsets = np.hypot(diff[:, 0], diff[:, 1])
-        return offsets
+        receivers = self.receiver_coords(group)
+        source = self.source_coords(src)
+        if (
+            receivers.ndim != 2
+            or source.ndim != 1
+            or source.size not in (2, 3)
+            or receivers.shape[1] != source.size
+        ):
+            raise ValueError(
+                "Offsets require matching 2D or 3D source/receiver coordinates"
+            )
+        diff = receivers - source
+        if source.size == 2:
+            return np.abs(diff[:, 0])
+        return np.hypot(diff[:, 0], diff[:, 1])
 
     def _survey_component_maps(self) -> Dict[str, Dict[str, int]]:
         maps: Dict[str, Dict[str, int]] = {}
