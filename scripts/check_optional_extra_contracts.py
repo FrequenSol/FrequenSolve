@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-SCHEMA = "frequensolve-optional-extra-contracts-1"
+SCHEMA = "frequensolve-optional-extra-contracts-2"
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests/optional-extra-contracts.json"
 DEFAULT_PYPROJECT = ROOT / "pyproject.toml"
@@ -30,6 +30,7 @@ class Contract:
     pytest_args: tuple[str, ...]
     coverage_prefixes: tuple[str, ...]
     coverage_floor: float
+    coverage_branch_floor: float
     environment: Mapping[str, str]
 
 
@@ -81,6 +82,11 @@ def contracts_from_manifest(payload: Mapping[str, Any]) -> tuple[Contract, ...]:
         floor = float(row.get("coverage_floor", -1))
         if not 0 <= floor <= 100:
             raise ValueError(f"Contract {name!r} has invalid coverage floor {floor}")
+        branch_floor = row.get("coverage_branch_floor")
+        if type(branch_floor) not in (int, float) or not 0 < branch_floor <= 100:
+            raise ValueError(
+                f"Contract {name!r} requires a positive branch coverage floor"
+            )
         contracts.append(
             Contract(
                 name=name,
@@ -90,6 +96,7 @@ def contracts_from_manifest(payload: Mapping[str, Any]) -> tuple[Contract, ...]:
                 pytest_args=tuple(str(value) for value in row.get("pytest_args", [])),
                 coverage_prefixes=prefixes,
                 coverage_floor=floor,
+                coverage_branch_floor=float(branch_floor),
                 environment={
                     str(key): str(value)
                     for key, value in row.get("environment", {}).items()
@@ -263,15 +270,49 @@ def _coverage_percent(report: Mapping[str, Any], prefixes: Sequence[str]) -> flo
         if package_index >= 0:
             normalized = normalized[package_index:]
         if not any(
-            normalized == prefix or normalized.startswith(prefix) for prefix in prefixes
+            normalized == prefix
+            or (prefix.endswith("/") and normalized.startswith(prefix))
+            for prefix in prefixes
         ):
             continue
         summary = entry["summary"]
-        statements += int(summary["num_statements"])
-        covered += int(summary["covered_lines"])
+        count, hits = summary.get("num_statements"), summary.get("covered_lines")
+        if type(count) is not int or type(hits) is not int or not 0 <= hits <= count:
+            raise ValueError("Optional contract has invalid line counts")
+        statements += count
+        covered += hits
     if statements == 0:
         raise ValueError(f"Coverage report contains no files for prefixes {prefixes}")
     return 100.0 * covered / statements
+
+
+def _branch_coverage_percent(
+    report: Mapping[str, Any], prefixes: Sequence[str]
+) -> float:
+    if report.get("meta", {}).get("branch_coverage") is not True:
+        raise ValueError("Optional contracts require branch-enabled coverage")
+    branches = covered = matched = 0
+    for file_name, entry in report.get("files", {}).items():
+        normalized = Path(file_name).as_posix()
+        package_index = normalized.rfind("frequensolve/")
+        if package_index >= 0:
+            normalized = normalized[package_index:]
+        if not any(
+            normalized == prefix
+            or (prefix.endswith("/") and normalized.startswith(prefix))
+            for prefix in prefixes
+        ):
+            continue
+        matched += 1
+        summary = entry["summary"]
+        count, hits = summary.get("num_branches"), summary.get("covered_branches")
+        if type(count) is not int or type(hits) is not int or not 0 <= hits <= count:
+            raise ValueError("Optional contract has invalid branch counts")
+        branches += count
+        covered += hits
+    if not matched:
+        raise ValueError(f"Coverage report contains no files for prefixes {prefixes}")
+    return 100.0 * covered / branches if branches else 100.0
 
 
 def run_contract(contract: Contract, coverage_output: Path) -> int:
@@ -304,6 +345,7 @@ def run_contract(contract: Contract, coverage_output: Path) -> int:
             *common,
             "-q",
             "--cov=frequensolve",
+            "--cov-branch",
             f"--cov-report=json:{coverage_output}",
             "--cov-fail-under=0",
         ],
@@ -315,11 +357,20 @@ def run_contract(contract: Contract, coverage_output: Path) -> int:
         return run.returncode
     report = json.loads(coverage_output.read_text(encoding="utf-8"))
     percent = _coverage_percent(report, contract.coverage_prefixes)
+    branches = _branch_coverage_percent(report, contract.coverage_prefixes)
     print(
         f"{contract.name} optional-extra coverage: {percent:.2f}% "
-        f"(floor {contract.coverage_floor:.2f}%)"
+        f"(line floor {contract.coverage_floor:.2f}%), "
+        f"branches {branches:.2f}% (floor {contract.coverage_branch_floor:.2f}%)"
     )
-    return 0 if percent >= contract.coverage_floor else 1
+    return (
+        0
+        if (
+            percent >= contract.coverage_floor
+            and branches >= contract.coverage_branch_floor
+        )
+        else 1
+    )
 
 
 def run(argv: Optional[Sequence[str]] = None) -> int:

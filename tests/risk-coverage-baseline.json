@@ -1,0 +1,193 @@
+{
+  "schema": "frequensolve-risk-coverage-1",
+  "baseline": {
+    "source": "899e0b8",
+    "python": "3.10.17",
+    "platform": "macOS arm64",
+    "dependency_extras": [
+      "dev",
+      "parallel",
+      "cloud"
+    ],
+    "note": "Measured deterministic source coverage before adding this gate. Floors retain at least five percentage points of margin; these are regression floors, not sufficiency claims. Optional scientific coverage is separate."
+  },
+  "areas": [
+    {
+      "name": "validation",
+      "prefixes": [
+        "src/frequensolve/validation/"
+      ],
+      "required_modules": [
+        "src/frequensolve/validation/api.py",
+        "src/frequensolve/validation/geometry.py",
+        "src/frequensolve/validation/outputs.py",
+        "src/frequensolve/validation/simulation.py"
+      ],
+      "baseline": {
+        "lines": 70.105,
+        "branches": 58.357
+      },
+      "floors": {
+        "lines": 65,
+        "branches": 50
+      },
+      "module_floors": {
+        "lines": 20,
+        "branches": 10
+      }
+    },
+    {
+      "name": "solver-contracts",
+      "prefixes": [
+        "src/frequensolve/simulation/"
+      ],
+      "required_modules": [
+        "src/frequensolve/simulation/jobs/base.py",
+        "src/frequensolve/simulation/jobs/serialization.py",
+        "src/frequensolve/simulation/jobs/run_state.py",
+        "src/frequensolve/simulation/outputs.py"
+      ],
+      "baseline": {
+        "lines": 82.928,
+        "branches": 69.956
+      },
+      "floors": {
+        "lines": 75,
+        "branches": 60
+      },
+      "module_floors": {
+        "lines": 20,
+        "branches": 10
+      }
+    },
+    {
+      "name": "orchestration",
+      "prefixes": [
+        "src/frequensolve/orchestrator/sites/base.py",
+        "src/frequensolve/orchestrator/sites/execution.py",
+        "src/frequensolve/orchestrator/utils/"
+      ],
+      "required_modules": [
+        "src/frequensolve/orchestrator/sites/base.py",
+        "src/frequensolve/orchestrator/sites/execution.py",
+        "src/frequensolve/orchestrator/utils/ssh.py",
+        "src/frequensolve/orchestrator/utils/progress.py"
+      ],
+      "baseline": {
+        "lines": 76.596,
+        "branches": 62.953
+      },
+      "floors": {
+        "lines": 70,
+        "branches": 55
+      },
+      "module_floors": {
+        "lines": 20,
+        "branches": 10
+      }
+    },
+    {
+      "name": "cloud",
+      "prefixes": [
+        "src/frequensolve/orchestrator/sites/aws/"
+      ],
+      "required_modules": [
+        "src/frequensolve/orchestrator/sites/aws/aws.py",
+        "src/frequensolve/orchestrator/sites/aws/cognito.py",
+        "src/frequensolve/orchestrator/sites/aws/graphql_client.py",
+        "src/frequensolve/orchestrator/sites/aws/execution_profile.py"
+      ],
+      "baseline": {
+        "lines": 74.08,
+        "branches": 62.983
+      },
+      "floors": {
+        "lines": 65,
+        "branches": 55
+      },
+      "module_floors": {
+        "lines": 20,
+        "branches": 10
+      }
+    },
+    {
+      "name": "hpc",
+      "prefixes": [
+        "src/frequensolve/orchestrator/sites/hpc/"
+      ],
+      "required_modules": [
+        "src/frequensolve/orchestrator/sites/hpc/site.py",
+        "src/frequensolve/orchestrator/sites/hpc/auth.py",
+        "src/frequensolve/orchestrator/sites/hpc/enterprise.py",
+        "src/frequensolve/orchestrator/sites/hpc/transfer.py"
+      ],
+      "baseline": {
+        "lines": 73.619,
+        "branches": 60.457
+      },
+      "floors": {
+        "lines": 65,
+        "branches": 55
+      },
+      "module_floors": {
+        "lines": 20,
+        "branches": 10
+      }
+    },
+    {
+      "name": "geometry-and-mesh",
+      "prefixes": [
+        "src/frequensolve/geometry/",
+        "src/frequensolve/mesh/"
+      ],
+      "required_modules": [
+        "src/frequensolve/geometry/frame.py",
+        "src/frequensolve/geometry/grids.py",
+        "src/frequensolve/mesh/mesh_manager.py"
+      ],
+      "baseline": {
+        "lines": 81.534,
+        "branches": 61.574
+      },
+      "floors": {
+        "lines": 75,
+        "branches": 55
+      },
+      "module_floors": {
+        "lines": 20,
+        "branches": 10
+      }
+    },
+    {
+      "name": "seismic-core",
+      "prefixes": [
+        "src/frequensolve/seismic/acquisition.py",
+        "src/frequensolve/seismic/receivers.py",
+        "src/frequensolve/seismic/sources.py",
+        "src/frequensolve/seismic/sparse_survey.py",
+        "src/frequensolve/seismic/survey.py",
+        "src/frequensolve/seismic/trace_geometry.py",
+        "src/frequensolve/seismic/trace_store.py",
+        "src/frequensolve/seismic/traces.py",
+        "src/frequensolve/seismic/wavelet.py"
+      ],
+      "required_modules": [
+        "src/frequensolve/seismic/trace_store.py",
+        "src/frequensolve/seismic/traces.py",
+        "src/frequensolve/seismic/acquisition.py"
+      ],
+      "baseline": {
+        "lines": 76.835,
+        "branches": 59.547
+      },
+      "floors": {
+        "lines": 70,
+        "branches": 50
+      },
+      "module_floors": {
+        "lines": 20,
+        "branches": 10
+      }
+    }
+  ]
+}

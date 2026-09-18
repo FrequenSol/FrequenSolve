@@ -1,7 +1,7 @@
-import builtins
 import copy
 import json
-import runpy
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +9,7 @@ import pytest
 from scripts.check_optional_extra_contracts import (
     DEFAULT_MANIFEST,
     DEFAULT_PYPROJECT,
+    _branch_coverage_percent,
     _coverage_percent,
     _load_toml,
     contracts_from_manifest,
@@ -117,7 +118,7 @@ def test_import_verification_does_not_require_package_metadata(tmp_path):
     manifest.write_text(
         json.dumps(
             {
-                "schema": "frequensolve-optional-extra-contracts-1",
+                "schema": "frequensolve-optional-extra-contracts-2",
                 "contracts": [
                     {
                         "name": "base",
@@ -126,6 +127,7 @@ def test_import_verification_does_not_require_package_metadata(tmp_path):
                         "selectors": ["tests/test_placeholder.py"],
                         "coverage_prefixes": ["frequensolve/example.py"],
                         "coverage_floor": 0,
+                        "coverage_branch_floor": 1,
                     }
                 ],
             }
@@ -148,14 +150,62 @@ def test_import_verification_does_not_require_package_metadata(tmp_path):
     )
 
 
-def test_installed_package_contracts_do_not_require_hypothesis(monkeypatch):
-    original_import = builtins.__import__
+def test_installed_package_contracts_do_not_require_hypothesis():
+    # Use a fresh process: an already-loaded Hypothesis pytest plugin wraps
+    # fixture registration and would invalidate an in-process missing-extra test.
+    script = """
+import builtins, runpy, sys
+original_import = builtins.__import__
+def import_without_hypothesis(name, *args, **kwargs):
+    if name == "hypothesis":
+        raise ModuleNotFoundError("No module named 'hypothesis'", name=name)
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = import_without_hypothesis
+runpy.run_path(sys.argv[1])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(Path(__file__).with_name("conftest.py"))],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
-    def import_without_hypothesis(name, *args, **kwargs):
-        if name == "hypothesis":
-            raise ModuleNotFoundError("No module named 'hypothesis'", name=name)
-        return original_import(name, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "__import__", import_without_hypothesis)
+@pytest.mark.parametrize("floor", [None, 0, -1, float("nan"), 101, True])
+def test_optional_contract_rejects_missing_or_disabled_branch_floor(floor):
+    payload = load_manifest(DEFAULT_MANIFEST)
+    payload["contracts"][0]["coverage_branch_floor"] = floor
+    with pytest.raises(ValueError, match="positive branch"):
+        contracts_from_manifest(payload)
 
-    runpy.run_path(Path(__file__).with_name("conftest.py"))
+
+def test_optional_branch_floor_uses_only_selected_package_and_rejects_line_only_report():
+    report = {
+        "meta": {"branch_coverage": True},
+        "files": {
+            "/tmp/site-packages/frequensolve/example/a.py": {
+                "summary": {"num_branches": 10, "covered_branches": 4}
+            },
+            "src/frequensolve/example/b.py": {
+                "summary": {"num_branches": 10, "covered_branches": 8}
+            },
+            "src/frequensolve/example_other.py": {
+                "summary": {"num_branches": 100, "covered_branches": 0}
+            },
+        },
+    }
+    assert _branch_coverage_percent(report, ("frequensolve/example/",)) == 60
+    report["meta"]["branch_coverage"] = False
+    with pytest.raises(ValueError, match="branch-enabled"):
+        _branch_coverage_percent(report, ("frequensolve/example/",))
+
+
+def test_optional_branch_floor_fails_on_missing_or_corrupt_evidence():
+    report = {"meta": {"branch_coverage": True}, "files": {}}
+    with pytest.raises(ValueError, match="no files"):
+        _branch_coverage_percent(report, ("frequensolve/example.py",))
+    report["files"]["src/frequensolve/example.py"] = {
+        "summary": {"num_branches": 2, "covered_branches": 3}
+    }
+    with pytest.raises(ValueError, match="invalid branch"):
+        _branch_coverage_percent(report, ("frequensolve/example.py",))

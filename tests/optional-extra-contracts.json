@@ -1,5 +1,5 @@
 {
-  "schema": "frequensolve-optional-extra-contracts-1",
+  "schema": "frequensolve-optional-extra-contracts-2",
   "excluded_project_extras": [
     "dev",
     "docs"
@@ -26,7 +26,8 @@
         "frequensolve/_loading.py",
         "frequensolve/units.py"
       ],
-      "coverage_floor": 25.0
+      "coverage_floor": 25.0,
+      "coverage_branch_floor": 3
     },
     {
       "name": "fast-fft",
@@ -40,7 +41,8 @@
       "coverage_prefixes": [
         "frequensolve/util/fft.py"
       ],
-      "coverage_floor": 80.0
+      "coverage_floor": 80.0,
+      "coverage_branch_floor": 65
     },
     {
       "name": "cloud",
@@ -56,7 +58,8 @@
       "coverage_prefixes": [
         "frequensolve/orchestrator/sites/aws/"
       ],
-      "coverage_floor": 18.0
+      "coverage_floor": 18.0,
+      "coverage_branch_floor": 5
     },
     {
       "name": "mcp",
@@ -71,7 +74,8 @@
       "coverage_prefixes": [
         "frequensolve/mcp_server/"
       ],
-      "coverage_floor": 20.0
+      "coverage_floor": 20.0,
+      "coverage_branch_floor": 3
     },
     {
       "name": "hpc",
@@ -94,7 +98,8 @@
       "coverage_prefixes": [
         "frequensolve/orchestrator/sites/hpc/"
       ],
-      "coverage_floor": 20.0
+      "coverage_floor": 20.0,
+      "coverage_branch_floor": 2
     },
     {
       "name": "parallel",
@@ -117,7 +122,8 @@
       "coverage_prefixes": [
         "frequensolve/orchestrator/sites/local/"
       ],
-      "coverage_floor": 22.0
+      "coverage_floor": 22.0,
+      "coverage_branch_floor": 8
     },
     {
       "name": "inversion",
@@ -126,12 +132,14 @@
         "pylops"
       ],
       "selectors": [
-        "tests/test_fwi_optional.py"
+        "tests/test_fwi_optional.py",
+        "tests/test_fwi_operators.py"
       ],
       "coverage_prefixes": [
         "frequensolve/simulation/jobs/fwi.py"
       ],
-      "coverage_floor": 22.0
+      "coverage_floor": 60,
+      "coverage_branch_floor": 35
     },
     {
       "name": "seismic-io",
@@ -149,7 +157,8 @@
       "coverage_prefixes": [
         "frequensolve/seismic/trace_record.py"
       ],
-      "coverage_floor": 55.0
+      "coverage_floor": 55.0,
+      "coverage_branch_floor": 30
     },
     {
       "name": "visual",
@@ -179,7 +188,8 @@
       "environment": {
         "MPLBACKEND": "Agg",
         "PYVISTA_OFF_SCREEN": "true"
-      }
+      },
+      "coverage_branch_floor": 45
     }
   ],
   "approval_markers": {
