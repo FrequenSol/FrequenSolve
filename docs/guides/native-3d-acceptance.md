@@ -75,3 +75,23 @@ heavy-test evidence manifest before treating this as release acceptance.
 The local run is not a substitute for Sauce #45 or SDK #70. No additional CI
 trigger or recurring schedule is enabled here; agree a manual release run and
 Actions-minute cap before scheduling the full chain.
+
+## Supported dependency boundary
+
+The SDK keeps NumPy below 2.5 while xarray remains in the 2025 family. NumPy
+2.5 deprecates generic timedelta units, which xarray 2025.12 constructs during
+import; strict acceptance fails before any solve. See the
+[NumPy release note](https://numpy.org/devdocs/release/2.5.0-notes.html).
+Both parallel and HPC extras keep Bokeh below 3.10 while Dask/distributed remain
+in the 2025 family. In the tested Bokeh 3.10.0 runtime, Dask scheduler teardown
+calls synchronous Bokeh stop from a running event loop, leaving a closing cluster
+and a ResourceWarning. Neither issue is handled by suppressing warnings.
+
+An installed-wheel Linux arm64 diagnostic with NumPy 2.4.6, Bokeh 3.9.2,
+xarray 2025.12.0 and dask/distributed 2025.12.0 completes the native case,
+including shutdown, with the strict warning policy and an overall zero exit.
+This narrows package compatibility; it does not rebuild already published images.
+Widen these bounds only after updating the associated xarray/Dask family and
+rerunning import, numerical and shutdown acceptance on the resulting wheel.
+The full FS_MUMPS/DockerImage provenance and release evidence requirements above
+remain open in #79.
