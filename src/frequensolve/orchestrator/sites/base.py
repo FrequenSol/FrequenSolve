@@ -899,6 +899,10 @@ class RunHandle:
 
         Yields:
             ``JobStatus`` objects whenever the public state changes.
+
+        Successful completion consumes any submit-time output fetch before the
+        terminal status is yielded. A download failure can be retried by calling
+        ``watch()`` or ``wait()`` again on the same handle.
         """
 
         interval = self.poll_interval if poll_interval is None else poll_interval
@@ -908,6 +912,7 @@ class RunHandle:
             status = self.status()
             if status.is_complete:
                 status = self._complete_from_status(status).status
+                self._fetch_pending_outputs()
             if status.state != last_state:
                 yield status
                 last_state = status.state
