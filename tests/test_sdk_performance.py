@@ -69,6 +69,64 @@ def _baseline(evidence: dict) -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), -1, 0, True, "0.5", None]
+)
+def test_baseline_rejects_invalid_wall_time_budgets(value):
+    evidence = _evidence()
+    baseline = _baseline(evidence)
+    baseline["thresholds"]["representative-scenario"][
+        "maxMedianWallTimeSeconds"
+    ] = value
+    evidence["scenarios"][0]["wallTimeSeconds"]["median"] = 1_000_000
+    with pytest.raises(ValueError, match="wall-time budget"):
+        compare_to_baseline(evidence, baseline)
+
+
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), -1, 0, True, "2048", 2048.5, None]
+)
+def test_baseline_rejects_invalid_heap_budgets(value):
+    evidence = _evidence()
+    baseline = _baseline(evidence)
+    baseline["thresholds"]["representative-scenario"][
+        "maxMedianPythonHeapBytes"
+    ] = value
+    with pytest.raises(ValueError, match="Python-heap budget"):
+        compare_to_baseline(evidence, baseline)
+
+
+@pytest.mark.parametrize("metric", ["wallTimeSeconds", "pythonHeapPeakBytes"])
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), -1, True, "0.25", None, 10**400]
+)
+def test_baseline_rejects_invalid_measured_medians(metric, value):
+    evidence = _evidence()
+    baseline = _baseline(evidence)
+    evidence["scenarios"][0][metric]["median"] = value
+    with pytest.raises(ValueError, match="measured"):
+        compare_to_baseline(evidence, baseline)
+
+
+def test_baseline_preserves_fractional_heap_medians_and_zero_measurements():
+    evidence = _evidence()
+    baseline = _baseline(evidence)
+    evidence["scenarios"][0]["pythonHeapPeakBytes"]["median"] = 2048.5
+    assert len(compare_to_baseline(evidence, baseline)) == 1
+    evidence["scenarios"][0]["wallTimeSeconds"]["median"] = 0
+    evidence["scenarios"][0]["pythonHeapPeakBytes"]["median"] = 0
+    assert compare_to_baseline(evidence, baseline) == []
+
+
+@pytest.mark.parametrize("metric", ["wallTimeSeconds", "pythonHeapPeakBytes"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1, 0, True, "1", None])
+def test_evidence_rejects_invalid_raw_samples(metric, value):
+    evidence = _evidence()
+    evidence["scenarios"][0]["samples"][0][metric] = value
+    with pytest.raises(ValueError):
+        validate_evidence(evidence, ["representative-scenario"])
+
+
 def test_measurement_retains_raw_samples_and_variance_statistics():
     calls = 0
 
