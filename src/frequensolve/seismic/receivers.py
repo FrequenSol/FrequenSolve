@@ -800,61 +800,59 @@ class CoordsGrid(ReceiverCoords):
 
         return self.grid.x0, self.grid.x1
 
+    def _flat_index_coords(self, index: int) -> np.ndarray:
+        size = int(self.size)
+        if index < 0:
+            index += size
+        if index < 0 or index >= size:
+            raise IndexError(
+                f"Grid receiver index {index} is out of range for {size} receivers"
+            )
+        tensor_indices = []
+        remaining = index
+        # CartesianGrid.get_coords varies its first authored axis fastest.
+        for n in self.grid.n:
+            axis_index = remaining % n
+            tensor_indices.append(slice(axis_index, axis_index + 1))
+            remaining //= n
+        return self.grid.get_coords(tensor_indices)
+
     def get(
-        self, indices: Optional[Union[int, slice, List[int], List[slice]]] = None
+        self,
+        indices: Optional[Union[int, np.integer, slice, List[int], List[slice]]] = None,
     ) -> np.ndarray:
-        """Get coordinates for specified indices.
+        """Return all coordinates or a flat/tensor selection.
 
-        Args:
-           indices: Can be:
-              - None:        Return all coordinates
-              - int:         Single flat index into the coordinate array
-              - slice:       Slice of flat indices
-              - List[int]:   List of flat indices
-              - List[slice]: Tensor indices directly into the grid dimensions
+        Flat integer indices follow the row order of ``get()`` and support
+        Python-style negative indices. A scalar retains the historical
+        one-row shape. Lists preserve their order and duplicates; an empty
+        list returns a zero-row array with the grid's coordinate dimension.
+        A list of slices is passed through as a tensor selection.
 
-        Returns:
-           np.ndarray: Array of coordinates for requested indices
+        Raises:
+            IndexError: If a flat integer index is outside the grid.
+            ValueError: If a list mixes flat integers and tensor slices.
         """
-        # Return all coordinates if indices is None
         if indices is None:
             return self.grid.get_coords()
-
-        # List[slice] case - pass directly to grid
-        elif isinstance(indices, list) and isinstance(indices[0], slice):
-            return self.grid.get_coords(indices)
-
-        # List[int] case - convert each index to tensor indices
-        elif isinstance(indices, list) and isinstance(indices[0], int):
-            coords = []
-            for idx in indices:
-                tensor_indices = []
-                remaining = idx
-                for n in reversed(self.grid.n):
-                    tensor_indices.insert(0, slice(remaining % n, (remaining % n) + 1))
-                    remaining //= n
-                coords.append(self.grid.get_coords(tensor_indices)[0])
-            return np.array(coords)
-
-        # Single int case - convert to tensor indices
-        elif isinstance(indices, int):
-            tensor_indices = []
-            remaining = indices
-            for n in reversed(self.grid.n):
-                tensor_indices.insert(0, slice(remaining % n, (remaining % n) + 1))
-                remaining //= n
-            return self.grid.get_coords(tensor_indices)
-
-        # For slice, get all coords and then slice
-        elif (
-            isinstance(indices, list)
-            and isinstance(indices[0], int)
-            or isinstance(indices, slice)
-        ):
-            coords = self.grid.get_coords()
-            return coords[indices]
-        else:
-            raise ValueError("Invalid indices type")
+        if isinstance(indices, (int, np.integer)):
+            return self._flat_index_coords(int(indices))
+        if isinstance(indices, slice):
+            return self.grid.get_coords()[indices]
+        if isinstance(indices, list):
+            if not indices:
+                return np.empty((0, len(self.grid.n)), dtype=np.float64)
+            slices = [index for index in indices if isinstance(index, slice)]
+            if len(slices) == len(indices):
+                return self.grid.get_coords(slices)
+            flat_indices = [
+                int(index) for index in indices if isinstance(index, (int, np.integer))
+            ]
+            if len(flat_indices) == len(indices):
+                return np.concatenate(
+                    [self._flat_index_coords(index) for index in flat_indices], axis=0
+                )
+        raise ValueError("Selection must contain integer indices or tensor slices")
 
     def to_fs(self, ctx=None) -> Dict:
         """Serialize grid receiver coordinates for solver input."""
