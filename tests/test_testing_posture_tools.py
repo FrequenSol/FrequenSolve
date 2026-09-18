@@ -801,6 +801,26 @@ def test_heavy_test_evidence_requires_each_manifest_scenario_once_and_passed(
         validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
 
 
+@pytest.mark.parametrize(
+    "scenario", ["local-3d-acoustic-reciprocity", "local-2d-elastic-reciprocity"]
+)
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "renamed", "skipped"])
+def test_heavy_evidence_requires_native_physics_acceptance(
+    tmp_path, scenario, mutation
+):
+    evidence = _heavy_evidence()
+    if mutation == "skipped":
+        changes = {"scenario_outcome": (scenario, "skipped")}
+        expected = f"{scenario}.*must pass"
+    else:
+        changes = {f"{mutation}_scenario": scenario}
+        expected = f"{scenario}.*found {2 if mutation == 'duplicate' else 0}"
+    _write_heavy_test_artifacts(tmp_path, evidence, **changes)
+
+    with pytest.raises(ValueError, match=expected):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
 def test_heavy_test_evidence_rejects_inconsistent_junit_summary(tmp_path):
     evidence = _heavy_evidence()
     _write_heavy_test_artifacts(tmp_path, evidence)
