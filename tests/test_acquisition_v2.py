@@ -838,3 +838,76 @@ def test_deprecated_helpers_preserve_zero_based_logical_source_names():
             "source_2",
             "source_3",
         ]
+
+
+def test_list_fields_reads_device_components_for_named_and_all_groups():
+    from frequensolve.seismic.receivers import ReceiverNode
+
+    acquisition = Acquisition()
+    pressure = ReceiverNode(name="hydrophone")
+    pressure.add_component(name="p", field="pressure")
+    velocity = ReceiverNode(name="geophone")
+    velocity.add_component(name="vz", field="velocity", direction=[0.0, 1.0])
+    acquisition.add_receiver_group("pressure", pressure, [[0.25, 0.1]])
+    acquisition.add_receiver_group("velocity", velocity, [[0.75, 0.2]])
+    assert acquisition.list_fields() == ["pressure:p", "velocity:vz"]
+    assert acquisition.list_fields("velocity") == ["velocity:vz"]
+    assert Acquisition().list_fields() == []
+    with pytest.raises(ValueError, match="not found"):
+        acquisition.list_fields("absent")
+    coordinates = acquisition.receiver_coords()
+    np.testing.assert_allclose(coordinates["pressure"], [[0.25, 0.1]])
+    np.testing.assert_allclose(acquisition.receiver_coords("velocity"), [[0.75, 0.2]])
+
+
+@pytest.mark.parametrize("index", [0, -1, 3])
+def test_one_based_source_lookups_reject_out_of_range_indices(index):
+    acquisition = Acquisition()
+    acquisition.add_sources(kind="scalar", coords=[[0.25, 0.1], [0.75, 0.2]])
+    with pytest.raises(IndexError, match="out of range"):
+        acquisition.source(index)
+    with pytest.raises(IndexError, match="out of range"):
+        acquisition.source_coords(index)
+    with pytest.raises(IndexError, match="out of range"):
+        acquisition.source_coords(index, preserve_metadata=True)
+    np.testing.assert_allclose(acquisition.source_coords(1), [0.25, 0.1])
+    np.testing.assert_allclose(acquisition.source_coords(2), [0.75, 0.2])
+
+
+@pytest.mark.parametrize("use_context", [False, True])
+@pytest.mark.parametrize("kind", ["hdf5_geometry", "sps_geometry", "hdf5_encoding"])
+def test_mutated_file_backed_sources_cannot_export_missing_paths(
+    tmp_path, use_context, kind
+):
+    from frequensolve.util.mixins import ExportContext
+
+    if kind == "hdf5_geometry":
+        source = SourceGeometry.hdf5("sources.h5", dataset="sources", kind="scalar")
+        source.file = None
+    elif kind == "sps_geometry":
+        source = SourceGeometry.sps("sources.sps", kind="scalar")
+        source.source_file = None
+    else:
+        source = SourceEncoding.hdf5("encoding.h5", dataset="coefficients")
+        source.file = None
+    context = ExportContext(project_path=tmp_path) if use_context else None
+    with pytest.raises(ValueError, match="require a path before export"):
+        source.to_fs(context)
+
+
+def test_dense_reference_coordinates_reject_removed_coefficients():
+    geometry = SourceGeometry.inline(
+        kind="scalar", sources=[PointSource(coordinates=[0.25, 0.1], kind="scalar")]
+    )
+    field = DistributedSource.dense([1.0], name="one")
+    encoding = SourceEncoding(encoding_type="JsonDense", fields=[field])
+    field.coefficients = None
+    with pytest.raises(ValueError, match="requires coefficients"):
+        encoding.reference_coordinates(geometry)
+
+
+def test_legacy_source_group_reports_unconfigured_path():
+    group = SourceGroup(source=PointSource(coordinates=[0.25, 0.1], kind="scalar"))
+    with pytest.warns(DeprecationWarning, match="_path"):
+        with pytest.raises(ValueError, match="path has not been configured"):
+            _ = group._path

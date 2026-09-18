@@ -5,7 +5,19 @@ from __future__ import annotations
 import copy
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    NoReturn,
+    Optional,
+    Sequence,
+    Union,
+    overload,
+)
 
 import numpy as np
 
@@ -25,7 +37,11 @@ from frequensolve.seismic.sources import (
     SourceGeometry,
     SourceGroup,
 )
-from frequensolve.seismic.sparse_survey import ReceiverSampling, SparseSurvey
+from frequensolve.seismic.sparse_survey import (
+    ReceiverSampling,
+    SparseSurvey,
+    SparseTrace,
+)
 from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
@@ -84,7 +100,7 @@ class _SourceGroupCompatibilityView(NamedList):
     """Read-only list returned by the deprecated ``source_groups`` property."""
 
     @staticmethod
-    def _reject_mutation(*_args: Any, **_kwargs: Any) -> None:
+    def _reject_mutation(*_args: Any, **_kwargs: Any) -> NoReturn:
         raise TypeError(
             "Acquisition.source_groups is a read-only compatibility view; "
             "use add_sources(), set_sources(), or set_source_encoding()"
@@ -286,7 +302,7 @@ class Acquisition(ExtraFieldsMixin):
             extra=payload,
         )
 
-    def to_fs(self, ctx=None) -> Dict:
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
         """Serialize acquisition geometry for solver input.
 
         Args:
@@ -768,6 +784,8 @@ class Acquisition(ExtraFieldsMixin):
                 terms[point_name] = 1.0
             fields.append(DistributedSource.named(field_name, terms))
 
+        if source_kind is None:
+            raise ValueError("Legacy source groups require at least one source kind")
         self.source_geometry = SourceGeometry.inline(
             kind=source_kind,
             domain=source_domain,
@@ -810,11 +828,7 @@ class Acquisition(ExtraFieldsMixin):
                         if source.mechanism is not None
                         else defaults.get("mechanism")
                     ),
-                    **(
-                        {"domain": geometry.domain}
-                        if geometry.domain is not None
-                        else {}
-                    ),
+                    domain=geometry.domain,
                 )
             )
 
@@ -942,8 +956,8 @@ class Acquisition(ExtraFieldsMixin):
         device: ReceiverDevice,
         coords: np.ndarray,
         domain: Optional[int] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> ReceiverGroup:
         """Add a receiver group with common device and coordinates.
 
         Args:
@@ -1027,7 +1041,12 @@ class Acquisition(ExtraFieldsMixin):
             self.surveys.append(survey)
         return survey
 
-    def add_sparse_survey(self, name: str, traces=None, **kwargs) -> SparseSurvey:
+    def add_sparse_survey(
+        self,
+        name: str,
+        traces: Optional[Iterable[Union[SparseTrace, Mapping[str, Any]]]] = None,
+        **kwargs: Any,
+    ) -> SparseSurvey:
         """Create and add a named inline sparse survey.
 
         Args:
@@ -1048,7 +1067,7 @@ class Acquisition(ExtraFieldsMixin):
         coords: np.ndarray,
         survey: Optional[Union[str, SparseSurvey, Dict]] = None,
         domain: Optional[int] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> ReceiverGroup:
         """Add a receiver group that samples traces from a named sparse survey.
 
@@ -1112,12 +1131,12 @@ class Acquisition(ExtraFieldsMixin):
 
         if recv_name:
             group = self.receiver_group(recv_name)
-            for field in group.components:
+            for field in group.device.components:
                 file = f"{group.name}:{field.name}"
                 field_list.append(file)
         else:
             for group in self.receiver_groups:
-                for field in group.components:
+                for field in group.device.components:
                     file = f"{group.name}:{field.name}"
                     field_list.append(file)
         return field_list
@@ -1137,6 +1156,8 @@ class Acquisition(ExtraFieldsMixin):
             Matching ``SourceGroup``.
         """
         groups = self._compat_source_groups()
+        if isrc < 1:
+            raise IndexError(f"Source index {isrc} is out of range.")
         try:
             return groups[isrc - 1]
         except IndexError:
@@ -1147,7 +1168,15 @@ class Acquisition(ExtraFieldsMixin):
 
         return self.receiver_groups[name]
 
-    def receiver_coords(self, group: Optional[str] = None):
+    @overload
+    def receiver_coords(self, group: None = None) -> Dict[str, np.ndarray]: ...
+
+    @overload
+    def receiver_coords(self, group: str) -> np.ndarray: ...
+
+    def receiver_coords(
+        self, group: Optional[str] = None
+    ) -> Union[Dict[str, np.ndarray], np.ndarray]:
         """Return receiver coordinates.
 
         Args:
@@ -1156,18 +1185,28 @@ class Acquisition(ExtraFieldsMixin):
         """
         if group is None:
             group_locations = {}
-            for group in self.receiver_groups:
-                group_locations[group.name] = group.coordinates.get()
+            for receiver in self.receiver_groups:
+                group_locations[receiver.name] = receiver.coordinates.get()
             return group_locations
         else:
             return self.receiver_groups[group].coordinates.get()
+
+    @overload
+    def source_coords(
+        self, src: Optional[int] = None, *, preserve_metadata: Literal[False] = False
+    ) -> np.ndarray: ...
+
+    @overload
+    def source_coords(
+        self, src: Optional[int] = None, *, preserve_metadata: bool
+    ) -> object: ...
 
     def source_coords(
         self,
         src: Optional[int] = None,
         *,
         preserve_metadata: bool = False,
-    ):
+    ) -> object:
         """Return source-field reference coordinates.
 
         Args:
@@ -1176,6 +1215,7 @@ class Acquisition(ExtraFieldsMixin):
                 metadata instead of only numeric values. When all coordinates
                 are requested, this returns a list of coordinate values.
         """
+        coords: Union[np.ndarray, List[Any]]
         if self.source_geometry is None:
             coords = [] if preserve_metadata else np.empty((0, 0), dtype=float)
         elif self.source_encoding is None:
@@ -1192,9 +1232,12 @@ class Acquisition(ExtraFieldsMixin):
             )
         if src is None:
             return coords
-        return coords[int(src) - 1]
+        index = int(src)
+        if index < 1 or index > len(coords):
+            raise IndexError(f"Source index {src} is out of range.")
+        return coords[index - 1]
 
-    def offsets(self, src: int, group: str) -> Dict:
+    def offsets(self, src: int, group: str) -> np.ndarray:
         """Return horizontal source-field/receiver offsets.
 
         Args:
@@ -1254,7 +1297,7 @@ def _carpet_coordinates(
     )
 
 
-def _source_coordinate_rows(coords):
+def _source_coordinate_rows(coords: Any) -> Union[np.ndarray, List[CoordinateValue]]:
     extra = {}
     if isinstance(coords, CoordinateValue):
         extra = copy.deepcopy(coords.extra)
