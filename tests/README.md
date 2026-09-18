@@ -306,3 +306,27 @@ lane; native execution is explicitly opt-in. See
 [the physics evidence matrix and run instructions](../docs/source/user_guide/native_physics_acceptance.rst)
 for source/dimension limits, numerical calibration, resource bounds and the
 remaining release provenance/physics gaps.
+
+## Required native cases in release evidence
+
+The versioned [`heavy_evidence_scenarios.v1.json`](../scripts/heavy_evidence_scenarios.v1.json)
+now requires the named 3D acoustic and 2D elastic reciprocity cases in addition
+to the original 2D acoustic, acquisition initialization/sizing and solver-backed
+visual cases. The validator reads retained JUnit XML and requires each identity
+exactly once with no skipped or failed outcome. Renaming a test requires an
+explicit manifest update. The existing count and coverage floors are unchanged.
+
+Both new cases already belong to the manual heavy profile's `integration`
+selection; this requirement adds no scheduled workflow or PR-native execution.
+Each has a 420-second test timeout, a 300-second job wait, one worker/thread,
+and a 512-MB worker budget. The sequential two-case timeout envelope is 14
+minutes; this is a bound, not measured performance or a whole-workflow budget.
+The full image workflow still needs its independently approved runner/minute
+cap before dispatch. Do not relax this requirement to accommodate an unsupported
+solver/image; repair and validate that release pair first.
+
+Local installed-wheel Linux acceptance verifies these two cases on a development
+solver pair. It does not replace the new immutable no-push production-image run
+required by #70, complete cross-repository provenance, the other required cases,
+or full retained coverage/visual evidence. No workflow is dispatched by updating
+this manifest.
