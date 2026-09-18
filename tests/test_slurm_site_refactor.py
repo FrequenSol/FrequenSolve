@@ -105,6 +105,12 @@ class DummySlurmSite(SlurmSite):
     default_queue = "debug"
     default_solver_executable = "/remote/bin/FS_seismic"
 
+    def __init__(self, *args, **kwargs):
+        # This transport fake has no solver. Compatibility policies are tested
+        # separately against explicit version/identity fixtures.
+        kwargs.setdefault("frequensolver_policy", "off")
+        super().__init__(*args, **kwargs)
+
     def authenticate(self, host=None):
         return DummyRawClient()
 

@@ -161,8 +161,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 timeout = 300
 filterwarnings = [
-    "error::DeprecationWarning:frequensolve(\\.|$)",
-    "error::UserWarning:frequensolve(\\.|$)",
+    "error:::frequensolve(\\.|$)",
 ]
 markers = [
     "cloud: requires AWS/Cognito/S3 or the FrequenSol cloud control plane",
