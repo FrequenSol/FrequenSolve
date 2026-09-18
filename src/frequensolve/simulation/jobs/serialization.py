@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from os import PathLike
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Protocol, Union
 
 import blake3
 import numpy as np
@@ -20,6 +21,14 @@ from frequensolve.util.class_registry import class_registry
 
 if TYPE_CHECKING:
     from frequensolve.simulation.jobs.base import BaseJob
+    from frequensolve.simulation.outputs import JobOutputs
+
+
+class JobFileSource(Protocol):
+    """A saved job-like object accepted by the public loader."""
+
+    @property
+    def job_file(self) -> Path: ...
 
 
 class JobSerializationMixin:
@@ -30,13 +39,36 @@ class JobSerializationMixin:
     from ``BaseJob``.
     """
 
+    # Concrete jobs supply these members. These declarations describe the
+    # existing mixin contract without adding runtime properties or defaults.
+    if TYPE_CHECKING:
+        name: str
+        simulation: BaseSimulation
+        workflow: str
+        f_list: list[Union[float, complex]]
+        outputs: JobOutputs
+        k_list: Optional[list[float]]
+        k_weights: Optional[list[float]]
+        k_units: Optional[str]
+        _job_id: Optional[str]
+
+        @property
+        def job_file(self) -> Path: ...
+
+        @property
+        def n_tasks(self) -> int: ...
+
+        def validate_outputs(self) -> None: ...
+
+        def _project_path(self) -> Path: ...
+
     @classmethod
     def load(
         cls,
-        path: Union[Path, str, "BaseJob"],
+        path: Union[PathLike[str], str, JobFileSource],
         *,
         project_path: Optional[Union[str, Path]] = None,
-    ):
+    ) -> "BaseJob":
         """Load a job from a JSON file, job directory, or existing job object.
 
         Args:
@@ -54,9 +86,8 @@ class JobSerializationMixin:
                 multiple ambiguous job JSON files.
         """
 
-        if not isinstance(path, (str, Path)) and hasattr(path, "job_file"):
-            path = path.job_file
-        path = cls._job_file_from_path(path)
+        source_path = path if isinstance(path, (str, PathLike)) else path.job_file
+        path = cls._job_file_from_path(source_path)
         try:
             with open(path, "r") as f:
                 data = json.load(f)
@@ -233,7 +264,7 @@ class JobSerializationMixin:
         return self._hash_payload(self.task_fingerprint_payload(task))
 
     @staticmethod
-    def _job_file_from_path(path: Union[Path, str]) -> Path:
+    def _job_file_from_path(path: Union[PathLike[str], str]) -> Path:
         path = Path(path).expanduser().resolve()
         if path.is_file():
             return path

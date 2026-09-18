@@ -9,10 +9,21 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Union,
+    runtime_checkable,
+)
 
 from frequensolve.model.property import rsf_binary_path
-from frequensolve.simulation.simulation import CustomJSONEncoder
+from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
 
 if TYPE_CHECKING:
     from frequensolve.simulation.jobs.base import JobLayout
@@ -31,6 +42,13 @@ _PROJECT_FILE_REFERENCE_KEYS = frozenset(
 )
 
 
+@runtime_checkable
+class _SaveableSimulation(Protocol):
+    """Concrete simulations must support saving before a job can be staged."""
+
+    def save(self) -> Path: ...
+
+
 class JobRemoteMixin:
     """Save and stage job inputs for local and remote execution.
 
@@ -39,7 +57,26 @@ class JobRemoteMixin:
     local job definition.
     """
 
-    def save(self):
+    if TYPE_CHECKING:
+        name: str
+        simulation: BaseSimulation
+        _file: Optional[Path]
+
+        @property
+        def _local_path(self) -> Path: ...
+
+        @property
+        def _result_path(self) -> Path: ...
+
+        @property
+        def project_path(self) -> Path: ...
+
+        def to_fs(self, *, project_relative: bool = False) -> Dict[str, Any]: ...
+
+        @staticmethod
+        def _write_json_file(path: Path, payload: Dict[str, Any]) -> None: ...
+
+    def save(self) -> Path:
         """Save the simulation and project-relative job JSON to disk.
 
         Returns:
@@ -53,6 +90,8 @@ class JobRemoteMixin:
         from frequensolve.simulation.jobs.base import JobLayout
 
         JobLayout._layout_name(getattr(self, "name"), field="name")
+        if not isinstance(self.simulation, _SaveableSimulation):
+            raise TypeError("Job simulation must support saving before staging")
         self.simulation.save()
         file = self._local_path / f"{self.name}.json"
         self._file = file
@@ -61,7 +100,9 @@ class JobRemoteMixin:
         self._write_json_file(file, data)
         return file
 
-    def save_for_remote(self, site: str, remote_project: Union[Path, str]):
+    def save_for_remote(
+        self, site: str, remote_project: Union[Path, str]
+    ) -> tuple[Path, Path]:
         """Stage a remote job JSON without replacing the local definition.
 
         Args:
@@ -103,7 +144,9 @@ class JobRemoteMixin:
         self._write_json_file(staged_file, data)
         return staged_file, remote_layout.job_file
 
-    def save_simulation_for_remote(self, site: str, remote_project: Union[Path, str]):
+    def save_simulation_for_remote(
+        self, site: str, remote_project: Union[Path, str]
+    ) -> tuple[Path, Path]:
         """Stage this job's simulation JSON for a remote project layout.
 
         Args:
@@ -149,7 +192,9 @@ class JobRemoteMixin:
         self._write_json_file(staged_file, data)
         return staged_file, remote_layout.simulation_file
 
-    def remote_input_files(self, remote_project: Union[Path, str]) -> List[tuple]:
+    def remote_input_files(
+        self, remote_project: Union[Path, str]
+    ) -> List[tuple[Path, Path]]:
         """Return local input files that must accompany remote job inputs.
 
         Args:
@@ -166,7 +211,7 @@ class JobRemoteMixin:
         local_layout = self._saved_layout()
         payloads = []
 
-        def add_pair(pair: Optional[tuple]) -> None:
+        def add_pair(pair: Optional[tuple[Path, Path]]) -> None:
             if pair is None:
                 return
             local, remote = pair
@@ -431,11 +476,10 @@ class JobRemoteMixin:
     def _saved_layout(self) -> JobLayout:
         from frequensolve.simulation.jobs.base import JobLayout
 
-        if self._file is None:
-            self.save()
-        with open(self._file, "r") as f:
+        job_file = self._file if self._file is not None else self.save()
+        with open(job_file, "r") as f:
             payload = json.load(f)
-        return JobLayout.from_payload(payload, job_file=self._file)
+        return JobLayout.from_payload(payload, job_file=job_file)
 
     @staticmethod
     def _iter_file_references(value: Any) -> Iterable[str]:
@@ -461,7 +505,7 @@ class JobRemoteMixin:
         return text
 
     @staticmethod
-    def _rsf_sidecar_references(pair: Optional[tuple]) -> Iterable[Path]:
+    def _rsf_sidecar_references(pair: Optional[tuple[Path, Path]]) -> Iterable[Path]:
         if pair is None:
             return []
         local, _remote = pair
@@ -480,7 +524,7 @@ class JobRemoteMixin:
         source_project: Path,
         remote_project: Path,
         source_projects: Iterable[Path] = (),
-    ) -> Optional[tuple]:
+    ) -> Optional[tuple[Path, Path]]:
         path = Path(value)
         source_roots = self._unique_paths([source_project, *source_projects])
         relative: Optional[Path] = None

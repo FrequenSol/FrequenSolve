@@ -585,7 +585,7 @@ class BaseJob(
         return (self._local_path / f"{self.name}.json").resolve()
 
     @property
-    def project_path(self):
+    def project_path(self) -> Path:
         """Return the absolute project path that owns this job.
 
         Raises:
@@ -595,7 +595,7 @@ class BaseJob(
         return self._project_path()
 
     @property
-    def n_tasks(self):
+    def n_tasks(self) -> int:
         """Return the number of one-frequency solver tasks in this job.
 
         Returns:
@@ -611,19 +611,19 @@ class BaseJob(
         return Path(project_path).resolve()
 
     @property
-    def _local_path(self):
+    def _local_path(self) -> Path:
         project_path = Path(self.project_path)
         return project_path / "jobs" / self.simulation.name / self.name
 
     @property
-    def _stdout_path(self):
+    def _stdout_path(self) -> Path:
         """Path where solver stdout is stored."""
         if self._file is None:
             return self._local_path / "logs"
         return self._file.parent / "logs"
 
     @property
-    def _result_path(self):
+    def _result_path(self) -> Path:
         """Path where solver results will be stored."""
         if self._result_path_override is not None:
             return self._result_path_override
@@ -631,7 +631,7 @@ class BaseJob(
             return self._local_path / "results"
         return self._file.parent / "results"
 
-    def _remote_path(self, work_dir: Union[Path, str]):
+    def _remote_path(self, work_dir: Union[Path, str]) -> Path:
         """Get remote job path."""
         work_dir = Path(work_dir)
         return work_dir / "jobs" / self.simulation.name / self.name

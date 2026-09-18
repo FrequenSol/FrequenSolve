@@ -811,16 +811,6 @@
       "file": "src/frequensolve/simulation/jobs/records.py"
     },
     {
-      "code": "attr-defined",
-      "count": 13,
-      "file": "src/frequensolve/simulation/jobs/remote.py"
-    },
-    {
-      "code": "no-untyped-def",
-      "count": 3,
-      "file": "src/frequensolve/simulation/jobs/remote.py"
-    },
-    {
       "code": "arg-type",
       "count": 3,
       "file": "src/frequensolve/simulation/jobs/run_state.py"
@@ -844,36 +834,6 @@
       "code": "return-value",
       "count": 1,
       "file": "src/frequensolve/simulation/jobs/run_state.py"
-    },
-    {
-      "code": "arg-type",
-      "count": 1,
-      "file": "src/frequensolve/simulation/jobs/serialization.py"
-    },
-    {
-      "code": "attr-defined",
-      "count": 25,
-      "file": "src/frequensolve/simulation/jobs/serialization.py"
-    },
-    {
-      "code": "no-untyped-def",
-      "count": 1,
-      "file": "src/frequensolve/simulation/jobs/serialization.py"
-    },
-    {
-      "code": "arg-type",
-      "count": 2,
-      "file": "src/frequensolve/simulation/jobs/timings.py"
-    },
-    {
-      "code": "assignment",
-      "count": 1,
-      "file": "src/frequensolve/simulation/jobs/timings.py"
-    },
-    {
-      "code": "attr-defined",
-      "count": 8,
-      "file": "src/frequensolve/simulation/jobs/timings.py"
     },
     {
       "code": "arg-type",
@@ -1086,6 +1046,7 @@
         "src/frequensolve/seismic/trace_geometry.py",
         "src/frequensolve/seismic/trace_record.py",
         "src/frequensolve/simulation/discretization.py",
+        "src/frequensolve/simulation/jobs/serialization.py",
         "src/frequensolve/simulation/sampling.py",
         "src/frequensolve/simulation/solver.py",
         "src/frequensolve/simulation/study.py",
@@ -1098,6 +1059,8 @@
       "order": 2,
       "remaining_prefixes": [],
       "strict_now": [
+        "src/frequensolve/simulation/jobs/remote.py",
+        "src/frequensolve/simulation/jobs/timings.py",
         "src/frequensolve/orchestrator/sites/base.py",
         "src/frequensolve/orchestrator/sites/local/",
         "src/frequensolve/orchestrator/utils/__init__.py",
@@ -1138,11 +1101,14 @@
     "src/frequensolve/seismic/trace_geometry.py",
     "src/frequensolve/seismic/trace_record.py",
     "src/frequensolve/simulation/discretization.py",
+    "src/frequensolve/simulation/jobs/serialization.py",
     "src/frequensolve/simulation/sampling.py",
     "src/frequensolve/simulation/solver.py",
     "src/frequensolve/simulation/study.py",
     "src/frequensolve/units.py",
     "src/frequensolve/validation/",
+    "src/frequensolve/simulation/jobs/remote.py",
+    "src/frequensolve/simulation/jobs/timings.py",
     "src/frequensolve/orchestrator/sites/base.py",
     "src/frequensolve/orchestrator/sites/local/",
     "src/frequensolve/orchestrator/utils/__init__.py",

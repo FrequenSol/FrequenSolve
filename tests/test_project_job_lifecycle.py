@@ -2570,3 +2570,72 @@ def test_per_task_timings_accept_matching_first_task_planner_metadata(tmp_path):
     assert job.task_timings()[0]["duration_seconds"] == 2.0
     assert job.phase_timings()[0]["total_seconds"] == 2.0
     assert job.frequency_summary()["succeeded"] == 0
+
+
+def test_job_loading_accepts_a_structural_saved_job_source(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job_file = job.save()
+    loaded = BaseJob.load(SimpleNamespace(job_file=job_file))
+    assert loaded.job_file == job_file
+    assert loaded.f_list == [1.0]
+
+
+def test_job_staging_rejects_a_simulation_without_save_before_writing(tmp_path):
+    job = BaseJob(
+        name="unsaveable",
+        simulation=SimpleNamespace(),
+        workflow="forward",
+        f_list=[1.0],
+    )
+    with pytest.raises(TypeError, match="must support saving before staging"):
+        job.save()
+    assert job._file is None
+    assert not list(tmp_path.iterdir())
+
+
+def test_timing_axis_preserves_all_rows_when_one_frequency_is_unknown():
+    from frequensolve.simulation.jobs.timings import JobTimingMixin
+
+    labels = []
+    axes = SimpleNamespace(set_xlabel=labels.append)
+    rows = [
+        {"task": 1, "frequency": 2.0},
+        {"task": 2, "frequency": None},
+        {"task": 3, "frequency": 1.0},
+    ]
+    xs, actual, integer_axis = JobTimingMixin._timing_x_values(
+        rows, x="frequency", ax=axes
+    )
+    assert xs.tolist() == [1.0, 2.0, 3.0]
+    assert actual == rows
+    assert integer_axis
+    assert labels == ["Frequency task"]
+    rows[1]["frequency"] = 3.0
+    xs, actual, integer_axis = JobTimingMixin._timing_x_values(
+        rows, x="frequency", ax=axes
+    )
+    assert xs.tolist() == [1.0, 2.0, 3.0]
+    assert [row["task"] for row in actual] == [3, 1, 2]
+    assert not integer_axis
+
+
+@pytest.mark.parametrize(
+    "loader", [BaseJob.load, lambda path: fs.load(path, kind="job")]
+)
+@pytest.mark.parametrize("path_kind", ["pure", "custom"])
+def test_job_loading_preserves_generic_pathlike_inputs(tmp_path, loader, path_kind):
+    from pathlib import PurePath
+
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job_file = job.save()
+
+    class SavedPath:
+        def __fspath__(self):
+            return str(job_file)
+
+    source = PurePath(job_file) if path_kind == "pure" else SavedPath()
+    loaded = loader(source)
+    assert loaded.job_file == job_file
+    assert loaded.f_list == [1.0]
