@@ -297,3 +297,12 @@ and negative fixtures that prove omitted modules, zero-covered new modules,
 branch regressions and malformed reports still fail. Optional visual failures
 must keep their actual failing result; do not regenerate baselines or increase
 tolerances just to satisfy these coverage gates.
+
+## Native elastic acceptance
+
+`tests/test_native_elastic_workflow.py` adds a bounded public-API 2D elastic
+reciprocity case for #80. Its authoring/contract round-trip is in the offline
+lane; native execution is explicitly opt-in. See
+[the physics evidence matrix and run instructions](../docs/source/user_guide/native_physics_acceptance.rst)
+for source/dimension limits, numerical calibration, resource bounds and the
+remaining release provenance/physics gaps.
