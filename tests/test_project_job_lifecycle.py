@@ -2618,3 +2618,24 @@ def test_timing_axis_preserves_all_rows_when_one_frequency_is_unknown():
     assert xs.tolist() == [1.0, 2.0, 3.0]
     assert [row["task"] for row in actual] == [3, 1, 2]
     assert not integer_axis
+
+
+@pytest.mark.parametrize(
+    "loader", [BaseJob.load, lambda path: fs.load(path, kind="job")]
+)
+@pytest.mark.parametrize("path_kind", ["pure", "custom"])
+def test_job_loading_preserves_generic_pathlike_inputs(tmp_path, loader, path_kind):
+    from pathlib import PurePath
+
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job_file = job.save()
+
+    class SavedPath:
+        def __fspath__(self):
+            return str(job_file)
+
+    source = PurePath(job_file) if path_kind == "pure" else SavedPath()
+    loaded = loader(source)
+    assert loaded.job_file == job_file
+    assert loaded.f_list == [1.0]

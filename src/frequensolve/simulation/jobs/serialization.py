@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from os import PathLike
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional, Protocol, Union
 
@@ -64,7 +65,7 @@ class JobSerializationMixin:
     @classmethod
     def load(
         cls,
-        path: Union[Path, str, JobFileSource],
+        path: Union[PathLike[str], str, JobFileSource],
         *,
         project_path: Optional[Union[str, Path]] = None,
     ) -> "BaseJob":
@@ -85,7 +86,7 @@ class JobSerializationMixin:
                 multiple ambiguous job JSON files.
         """
 
-        source_path = path if isinstance(path, (str, Path)) else path.job_file
+        source_path = path if isinstance(path, (str, PathLike)) else path.job_file
         path = cls._job_file_from_path(source_path)
         try:
             with open(path, "r") as f:
@@ -263,7 +264,7 @@ class JobSerializationMixin:
         return self._hash_payload(self.task_fingerprint_payload(task))
 
     @staticmethod
-    def _job_file_from_path(path: Union[Path, str]) -> Path:
+    def _job_file_from_path(path: Union[PathLike[str], str]) -> Path:
         path = Path(path).expanduser().resolve()
         if path.is_file():
             return path
