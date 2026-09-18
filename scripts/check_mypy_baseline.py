@@ -29,6 +29,7 @@ PHASE_ONE_STRICT_PATHS = (
     "src/frequensolve/seismic/trace_geometry.py",
     "src/frequensolve/seismic/trace_record.py",
     "src/frequensolve/simulation/discretization.py",
+    "src/frequensolve/simulation/jobs/serialization.py",
     "src/frequensolve/simulation/sampling.py",
     "src/frequensolve/simulation/solver.py",
     "src/frequensolve/simulation/study.py",
@@ -37,6 +38,8 @@ PHASE_ONE_STRICT_PATHS = (
 )
 
 PHASE_TWO_STRICT_PATHS = (
+    "src/frequensolve/simulation/jobs/remote.py",
+    "src/frequensolve/simulation/jobs/timings.py",
     "src/frequensolve/orchestrator/sites/base.py",
     "src/frequensolve/orchestrator/sites/local/",
     "src/frequensolve/orchestrator/utils/__init__.py",

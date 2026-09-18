@@ -7,7 +7,7 @@ and solver phase breakdowns when the fast solver records them.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -19,6 +19,23 @@ class JobTimingMixin:
     produces tabular summaries or matplotlib views of task and solver-phase
     runtimes.
     """
+
+    if TYPE_CHECKING:
+        name: str
+
+        def frequency_status(self) -> List[Dict[str, Any]]: ...
+
+        def _default_core_count(self) -> Optional[float]: ...
+
+        @classmethod
+        def _record_core_count(cls, record: Mapping[str, Any]) -> Optional[float]: ...
+
+        @classmethod
+        def _task_number_from_record(
+            cls, record: Mapping[str, Any]
+        ) -> Optional[int]: ...
+
+        def _task_records(self) -> List[Mapping[str, Any]]: ...
 
     def task_timings(self) -> List[Dict[str, Any]]:
         """Return frequency rows that include per-task runtime.
@@ -255,7 +272,9 @@ class JobTimingMixin:
                 invalid.
         """
 
-        rows = self.phase_timings(phases=phases, include_zero=include_zero)
+        rows: Sequence[Mapping[str, Any]] = self.phase_timings(
+            phases=phases, include_zero=include_zero
+        )
         if not rows:
             raise ValueError(
                 "No solver phase timings were found in run metadata for this job"
@@ -377,11 +396,11 @@ class JobTimingMixin:
             raise ValueError("x must be 'frequency' or 'task'")
 
         x_values = [cls._timing_frequency_value(row["frequency"]) for row in rows]
-        use_frequency_axis = x == "frequency" and all(
-            value is not None for value in x_values
-        )
-        if use_frequency_axis:
-            plot_rows = sorted(zip(x_values, rows), key=lambda item: float(item[0]))
+        frequency_rows = [
+            (value, row) for value, row in zip(x_values, rows) if value is not None
+        ]
+        if x == "frequency" and len(frequency_rows) == len(rows):
+            plot_rows = sorted(frequency_rows, key=lambda item: item[0])
             xs = np.asarray([float(value) for value, _row in plot_rows])
             ordered_rows = [row for _value, row in plot_rows]
             ax.set_xlabel("Frequency (Hz)")

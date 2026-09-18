@@ -807,7 +807,9 @@ class AWSSite(BaseSite):
             "bucket_error": bucket_error,
         }
 
-    def sync_s3(self, local_path: Union[str, Path], s3_key: str) -> str:
+    def sync_s3(
+        self, local_path: Union[str, Path], s3_key: Union[str, Path]
+    ) -> Union[str, Path]:
         """Sync files/directories with S3 using boto3.
 
         Args:

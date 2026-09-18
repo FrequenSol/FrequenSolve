@@ -260,3 +260,53 @@ def test_update_preserves_higher_ceiling_from_another_environment(
 
     assert run(["--update"]) == 0
     assert written == [expected | current]
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_saved_job_public_methods_keep_concrete_consumer_types(tmp_path, invalid):
+    root = Path(__file__).resolve().parents[1]
+    consumer = tmp_path / "job_consumer.py"
+    source = """from pathlib import Path
+from frequensolve.simulation.jobs.base import BaseJob
+class SavedJob:
+    @property
+    def job_file(self) -> Path:
+        return Path('job.json')
+loaded: BaseJob = BaseJob.load(SavedJob())
+path: Path = loaded.save()
+local, remote = loaded.save_for_remote('synthetic', Path('/remote'))
+local_path: Path = local
+remote_path: Path = remote
+count: int = loaded.n_tasks
+"""
+    if invalid:
+        source += "wrong: str = BaseJob.load(Path('job.json'))\nBaseJob.load(123)\nwrong_path: str = loaded.save()\n"
+    consumer.write_text(source)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--config-file",
+            str(root / "pyproject.toml"),
+            "--follow-imports=silent",
+            "-O",
+            "json",
+            str(consumer),
+        ],
+        cwd=root,
+        env={**os.environ, "MYPYPATH": str(root / "src")},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    diagnostics = [
+        json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")
+    ]
+    if invalid:
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert Counter(
+            row["code"] for row in diagnostics if row["severity"] == "error"
+        ) == Counter({"assignment": 2, "arg-type": 1})
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
