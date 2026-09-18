@@ -32,8 +32,10 @@ Do not point it at a repository, existing evidence, or valuable data. No cloud
 credentials, remote scheduler, network downloads, or provider records are
 required. Native init/task/pack must run; a missing solver fails instead of
 skipping. The case uses one worker, one thread and a 512 MB Dask worker limit.
-`LocalSite.run` has a 300-second wait timeout; use an external process/container
-watchdog as well for a release runner because setup precedes that wait.
+`LocalSite.run` has a 300-second wait timeout. The per-test 420-second deadline
+leaves 120 seconds of initialization/cleanup headroom above that inner wait,
+rather than inheriting the equal 300-second suite deadline. Use an external
+process/container watchdog as well for a release runner because setup precedes that wait.
 
 The test checks native identity against the run manifest, actual 3D `fs3d_s`
 execution, one successful task, convergence and packing. Public result loading

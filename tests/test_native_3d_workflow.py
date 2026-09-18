@@ -95,6 +95,7 @@ def test_public_3d_authoring_roundtrips(tmp_path):
 
 
 @pytest.mark.integration
+@pytest.mark.timeout(420)
 def test_native_3d_pressure_reciprocity(tmp_path):
     """Run init/task/pack and read packed results through the public SDK."""
     raw_solver = os.environ.get("LOCAL_SOLVER_EXECUTABLE")
