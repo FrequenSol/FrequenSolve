@@ -154,9 +154,12 @@ Imaging jobs use the :term:`RTM` workflow and are usually created with
        x1=[1.2, 0.5],
    )
 
+   observed_result = site.submit(observed_job).wait()
+   observed_traces = observed_result.traces()
+
    job = sim.imaging(
        name="rtm",
-       observed=observed_job_or_trace_path,
+       observed=observed_traces,
        grid=image_grid,
        parameters=["vp", "vs", "rho"],
        fields=["velocity"],
@@ -175,7 +178,11 @@ passed as image-condition names.
 Observed data may be supplied as a trace-producing job, a :term:`TraceDataset <trace dataset>`, or a
 filesystem path. Receiver-group names in the observed data must match the
 :term:`simulation` acquisition, because the imaging misfit pairs observed and simulated
-receiver groups by name.
+receiver groups by name. For results from a specific Cloud run, pass the
+dataset returned by ``observed_result.traces()``. It retains that run's directory
+and frequency metadata; the original job's legacy trace path may be absent or
+refer to a different run. Do not copy a run's artifacts into the legacy directory
+to make it discoverable.
 
 Successful imaging runs can be opened directly from local files with
 ``job.load_images()``. This does not contact an execution site:
@@ -187,9 +194,11 @@ Successful imaging runs can be opened directly from local files with
    raw = image_db.raw_images
    smoothed = image_db.smoothed_images
 
-For a remote run, call ``site.fetch_image(job)`` once to copy the image files
-locally. Subsequent sessions can reload the job and use ``job.load_images()``
-without reconnecting to the site.
+For a remote run, keep the returned result and call ``result.images()`` to
+fetch that run's image files. This checks terminal success before artifact
+lookup. ``site.fetch_image(job)`` remains available for explicit job-based
+retrieval. Subsequent sessions can load saved local image artifacts without
+reconnecting to the site.
 
 Both properties return :term:`xarray` ``Dataset`` objects on the requested image grid.
 The raw dataset reads the solver ``image/raw`` group; the smoothed dataset reads

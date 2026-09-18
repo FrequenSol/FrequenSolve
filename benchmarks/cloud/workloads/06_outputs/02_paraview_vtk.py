@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 06_outputs/02_paraview_vtk.ipynb
-Source SHA-256: 018ae1445a1e56a81d0a58c27344af5bc7bf0c370fe467dec300eac7ada2610e
+Source SHA-256: 5e72635cf4ae4786faf8f740c48aef8237d688e5c4eb5649d7d10ab5f43aba07
 """
 
 # %% source cell 4
@@ -104,6 +104,7 @@ job = fs.FrequencyDomainJob(
     outputs=[domain_output, surface_output, grid_output],
 )
 result = site.submit(job).wait()
+result.raise_for_status()
 
 # %% source cell 12
 volume_files = result.output_files(base="pv_volume", suffix=".vtu", existing=True)
