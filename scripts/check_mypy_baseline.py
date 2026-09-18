@@ -26,6 +26,8 @@ PHASE_ONE_STRICT_PATHS = (
     "src/frequensolve/model/layered/model.py",
     "src/frequensolve/model/layered/surfaces.py",
     "src/frequensolve/model/model.py",
+    "src/frequensolve/seismic/acquisition.py",
+    "src/frequensolve/seismic/sources.py",
     "src/frequensolve/seismic/trace_geometry.py",
     "src/frequensolve/seismic/trace_record.py",
     "src/frequensolve/simulation/discretization.py",
@@ -34,6 +36,7 @@ PHASE_ONE_STRICT_PATHS = (
     "src/frequensolve/simulation/solver.py",
     "src/frequensolve/simulation/study.py",
     "src/frequensolve/units.py",
+    "src/frequensolve/util/store.py",
     "src/frequensolve/validation/",
 )
 
