@@ -18,6 +18,7 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import normalize_slurm_st
 from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
 from frequensolve.orchestrator.utils import ssh as ssh_module
 from frequensolve.orchestrator.utils.ssh import SSHProxy
+from frequensolve.project import Project
 
 pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
 
@@ -789,6 +790,82 @@ def test_directory_upload_failure_cleans_remote_archive_and_hides_stderr(tmp_pat
 
     assert "private extraction detail" not in str(exc_info.value)
     assert any(command.startswith("rm -f /remote/tmp/") for command in commands)
+
+
+def test_project_resync_preserves_remote_jobs_through_atomic_sftp(tmp_path):
+    """Exercise project sync with real archive replacement, not captured targets."""
+    project = Project(name="project", path=tmp_path / "local" / "project")
+    project.new_simulation(name="acoustic", physics="acoustic", dimension=2)
+    remote = tmp_path / "remote" / "project"
+    remote_tmp = tmp_path / "remote-tmp"
+
+    class LocalSFTP:
+        put = staticmethod(shutil.copyfile)
+        get = staticmethod(shutil.copyfile)
+        stat = staticmethod(os.stat)
+        chmod = staticmethod(os.chmod)
+        posix_rename = staticmethod(os.replace)
+        remove = staticmethod(os.unlink)
+
+        def close(self):
+            pass
+
+    def run_cmd(command):
+        result = subprocess.run(command, shell=True, capture_output=True, check=False)
+        return (
+            None,
+            Stream(result.stdout.decode(), exit_status=result.returncode),
+            Stream(result.stderr.decode()),
+        )
+
+    def run(command):
+        _, stdout, stderr = run_cmd(command)
+        assert stdout.channel.recv_exit_status() == 0, stderr.read().decode()
+        return stdout.read().decode().strip()
+
+    site = _sftp_site(LocalSFTP())
+    site.work_dir = remote
+    site.remote_tmp_dir = remote_tmp
+    site.run_login = run
+    site.run_login_cmd = run_cmd
+    config = tmp_path / "site.toml"
+    config.write_text(f'[host]\ntmp_dir = "{tmp_path / "staging"}"\n')
+    site._site_config_path = config
+    manager = SlurmTransferManager(site)
+    site.put = manager.put
+
+    project._transfer(site)
+    stale_input = remote / "simulations" / "obsolete-input.txt"
+    stale_input.write_text("remove when replacing inputs")
+    completed = remote / "jobs" / "acoustic" / "first" / "results"
+    active = remote / "jobs" / "acoustic" / "second" / "results"
+    completed.mkdir(parents=True)
+    active.mkdir(parents=True)
+    log = completed / "solver.log"
+    trace = completed / "trace.bin"
+    log.write_text("completed first run\n")
+    trace.write_bytes(bytes(range(256)))
+    progress = active / "progress.log"
+    progress.write_text("second run still active\n")
+
+    for iteration in range(3):
+        new_input = project.path / "simulations" / "revision.txt"
+        new_input.write_text(str(iteration))
+        project._transfer(site)
+        assert (remote / "simulations" / "revision.txt").read_text() == str(iteration)
+        assert not stale_input.exists()
+        assert log.read_text() == "completed first run\n"
+        assert trace.read_bytes() == bytes(range(256))
+        assert progress.read_text() == "second run still active\n"
+
+    # Download only after the later syncs, matching submit(fetch=False).
+    downloaded = tmp_path / "downloaded"
+    manager.get(log, downloaded / "solver.log")
+    manager.get(trace, downloaded / "trace.bin")
+    assert (downloaded / "solver.log").read_bytes() == log.read_bytes()
+    assert (downloaded / "trace.bin").read_bytes() == trace.read_bytes()
+    assert list(remote.rglob("*.frequensolve-*")) == []
+    assert list(remote_tmp.iterdir()) == []
 
 
 def test_directory_upload_tar_failure_preserves_existing_remote_tree(tmp_path):
