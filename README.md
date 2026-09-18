@@ -196,6 +196,9 @@ python -m pytest -m hpc
 python -m pytest -m visual
 ```
 
+The [small native 3D acceptance guide](docs/guides/native-3d-acceptance.md)
+describes a focused local solver case and its remaining release-evidence limits.
+
 ## Documentation
 
 Build the Sphinx documentation locally with:
