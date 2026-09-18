@@ -38,7 +38,7 @@ def test_new_project_warning_fails_the_configured_pytest_lane(tmp_path, category
     assert category in result.stdout
 
 
-def test_third_party_warning_is_reported_without_a_blanket_project_exception(tmp_path):
+def test_third_party_warning_also_requires_an_explicit_narrow_exception(tmp_path):
     test_file = tmp_path / "test_vendor_warning.py"
     test_file.write_text(
         "import warnings\n"
@@ -63,5 +63,36 @@ def test_third_party_warning_is_reported_without_a_blanket_project_exception(tmp
         text=True,
         timeout=30,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 1, result.stdout + result.stderr
     assert "synthetic vendor warning" in result.stdout
+
+
+def test_real_sdk_warning_attributed_to_its_caller_fails(tmp_path):
+    test_file = tmp_path / "test_caller_warning.py"
+    test_file.write_text(
+        "from frequensolve.orchestrator.utils import credentials\n"
+        "def test_behavior(monkeypatch):\n"
+        "    def unavailable_store():\n"
+        "        raise credentials.CredentialStoreError('synthetic unavailable store')\n"
+        "    monkeypatch.setattr(credentials, 'KeyringCredentialStore', unavailable_store)\n"
+        "    credentials.Credentials(username='synthetic-user')\n"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-c",
+            str(Path(__file__).parents[1] / "pyproject.toml"),
+            "-o",
+            "addopts=",
+            "-q",
+            str(test_file),
+        ],
+        env={**os.environ, "PYTEST_ADDOPTS": ""},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "RuntimeWarning: synthetic unavailable store" in result.stdout

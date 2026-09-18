@@ -278,10 +278,12 @@ runs model/data packing, selected-run imaging and Hermitian dot/Taylor behavior
 with the installed PyLops extra, rather than relying only on an import/operator
 smoke test. Native scientific and image-baseline acceptance remain separate.
 
-The budget for unexpected warnings attributed to `frequensolve` is **zero**,
+The budget for unexpected warnings is **zero**,
 including runtime, resource and deprecation warnings. Expected warning behavior
-must be asserted explicitly in its test. Third-party warnings remain visible;
-there is no broad ignore rule. Fake local/SSH sites that do not contain a solver
+must be asserted explicitly in its test. The filter also catches SDK warnings
+that use `stacklevel` to point at caller code. Third-party warnings fail too; any
+exception must be narrowly scoped and documented. There are currently no third-party
+exceptions and no broad ignore rule. Fake local/SSH sites that do not contain a solver
 explicitly use the existing compatibility `off` policy in those transport-only
 test fixtures; real compatibility policy tests and product defaults are unchanged.
 An autouse fixture closes figures created by each test after assertions/image
