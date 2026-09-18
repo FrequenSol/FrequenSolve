@@ -315,6 +315,14 @@ extra.
    * - ``verbose``
      - Print user-facing status messages in addition to logging.
 
+With the ``parallel`` extra installed, default local worker sizing uses
+Dask's available CPU and memory limits, including process affinity and supported
+container limits. Physical host cores remain an upper bound. Explicit worker,
+thread and memory settings are retained, and configurations exceeding the
+available budget are rejected before workers start. Container detection follows
+the installed Dask/distributed version; unusual scheduler or cgroup layouts may
+still require explicit worker settings.
+
 Local Host Settings
 ~~~~~~~~~~~~~~~~~~~
 
