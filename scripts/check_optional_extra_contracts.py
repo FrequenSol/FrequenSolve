@@ -32,6 +32,7 @@ class Contract:
     coverage_floor: float
     coverage_branch_floor: float
     environment: Mapping[str, str]
+    module_floors: Mapping[str, Mapping[str, float]]
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -87,6 +88,28 @@ def contracts_from_manifest(payload: Mapping[str, Any]) -> tuple[Contract, ...]:
             raise ValueError(
                 f"Contract {name!r} requires a positive branch coverage floor"
             )
+        module_floors = row.get("module_floors", {})
+        if not isinstance(module_floors, dict):
+            raise ValueError(f"Contract {name!r} has invalid module floors")
+        for module, minima in module_floors.items():
+            if (
+                not isinstance(module, str)
+                or not module.startswith("frequensolve/")
+                or not module.endswith(".py")
+                or ".." in module.split("/")
+                or not any(
+                    module == prefix
+                    or (prefix.endswith("/") and module.startswith(prefix))
+                    for prefix in prefixes
+                )
+                or not isinstance(minima, dict)
+                or set(minima) != {"lines", "branches"}
+                or any(
+                    type(value) not in (int, float) or not 0 < value <= 100
+                    for value in minima.values()
+                )
+            ):
+                raise ValueError(f"Contract {name!r} has invalid module floors")
         contracts.append(
             Contract(
                 name=name,
@@ -97,6 +120,7 @@ def contracts_from_manifest(payload: Mapping[str, Any]) -> tuple[Contract, ...]:
                 coverage_prefixes=prefixes,
                 coverage_floor=floor,
                 coverage_branch_floor=float(branch_floor),
+                module_floors=module_floors,
                 environment={
                     str(key): str(value)
                     for key, value in row.get("environment", {}).items()
@@ -315,6 +339,22 @@ def _branch_coverage_percent(
     return 100.0 * covered / branches if branches else 100.0
 
 
+def module_coverage_failures(
+    report: Mapping[str, Any], floors: Mapping[str, Mapping[str, float]]
+) -> list[str]:
+    """Require each explicitly reviewed optional module to remain exercised."""
+    failures: list[str] = []
+    for module, minima in floors.items():
+        lines = _coverage_percent(report, (module,))
+        module_branches = _branch_coverage_percent(report, (module,))
+        if lines < minima["lines"] or module_branches < minima["branches"]:
+            failures.append(
+                f"{module}: lines={lines:.2f}% (floor {minima['lines']:.2f}%), "
+                f"branches={module_branches:.2f}% (floor {minima['branches']:.2f}%)"
+            )
+    return failures
+
+
 def run_contract(contract: Contract, coverage_output: Path) -> int:
     """Collect and run one contract against the currently installed package."""
 
@@ -358,6 +398,9 @@ def run_contract(contract: Contract, coverage_output: Path) -> int:
     report = json.loads(coverage_output.read_text(encoding="utf-8"))
     percent = _coverage_percent(report, contract.coverage_prefixes)
     branches = _branch_coverage_percent(report, contract.coverage_prefixes)
+    module_failures = module_coverage_failures(report, contract.module_floors)
+    for failure in module_failures:
+        print(f"Optional module coverage failed: {failure}", file=sys.stderr)
     print(
         f"{contract.name} optional-extra coverage: {percent:.2f}% "
         f"(line floor {contract.coverage_floor:.2f}%), "
@@ -368,6 +411,7 @@ def run_contract(contract: Contract, coverage_output: Path) -> int:
         if (
             percent >= contract.coverage_floor
             and branches >= contract.coverage_branch_floor
+            and not module_failures
         )
         else 1
     )

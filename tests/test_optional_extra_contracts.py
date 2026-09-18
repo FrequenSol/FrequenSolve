@@ -16,6 +16,7 @@ from scripts.check_optional_extra_contracts import (
     load_manifest,
     lower_bound_requirements,
     matrix_rows,
+    module_coverage_failures,
     run,
     validate_manifest,
 )
@@ -209,3 +210,57 @@ def test_optional_branch_floor_fails_on_missing_or_corrupt_evidence():
     }
     with pytest.raises(ValueError, match="invalid branch"):
         _branch_coverage_percent(report, ("frequensolve/example.py",))
+
+
+@pytest.mark.parametrize("minimum", [0, -1, 101, True, float("nan")])
+def test_optional_module_floors_cannot_be_disabled(minimum):
+    payload = load_manifest(DEFAULT_MANIFEST)
+    row = payload["contracts"][0]
+    row["module_floors"] = {
+        row["coverage_prefixes"][0]: {"lines": minimum, "branches": 5}
+    }
+    with pytest.raises(ValueError, match="invalid module floors"):
+        contracts_from_manifest(payload)
+
+
+def test_optional_module_floor_cannot_select_an_unowned_module():
+    payload = load_manifest(DEFAULT_MANIFEST)
+    payload["contracts"][0]["module_floors"] = {
+        "frequensolve/other.py": {"lines": 10, "branches": 5}
+    }
+    with pytest.raises(ValueError, match="invalid module floors"):
+        contracts_from_manifest(payload)
+
+
+def test_optional_module_gate_rejects_zero_coverage_despite_healthy_aggregate():
+    report = {
+        "meta": {"branch_coverage": True},
+        "files": {
+            "site-packages/frequensolve/plotting/a.py": {
+                "summary": {
+                    "num_statements": 1000,
+                    "covered_lines": 1000,
+                    "num_branches": 100,
+                    "covered_branches": 100,
+                }
+            },
+            "site-packages/frequensolve/plotting/b.py": {
+                "summary": {
+                    "num_statements": 10,
+                    "covered_lines": 0,
+                    "num_branches": 2,
+                    "covered_branches": 0,
+                }
+            },
+        },
+    }
+    floors = {"frequensolve/plotting/b.py": {"lines": 20, "branches": 10}}
+    assert _coverage_percent(report, ("frequensolve/plotting/",)) > 99
+    assert len(module_coverage_failures(report, floors)) == 1
+    report["files"]["site-packages/frequensolve/plotting/b.py"]["summary"].update(
+        covered_lines=3, covered_branches=1
+    )
+    assert module_coverage_failures(report, floors) == []
+    del report["files"]["site-packages/frequensolve/plotting/b.py"]
+    with pytest.raises(ValueError, match="no files"):
+        module_coverage_failures(report, floors)

@@ -1,7 +1,7 @@
 {
   "schema": "frequensolve-risk-coverage-1",
   "baseline": {
-    "source": "899e0b8",
+    "source": "a404daeebecf634876dec3c8878f42c2bae083da",
     "python": "3.10.17",
     "platform": "macOS arm64",
     "dependency_extras": [
@@ -9,7 +9,7 @@
       "parallel",
       "cloud"
     ],
-    "note": "Measured deterministic source coverage before adding this gate. Floors retain at least five percentage points of margin; these are regression floors, not sufficiency claims. Optional scientific coverage is separate."
+    "note": "Measured deterministic source coverage with the risk gate. Floors retain at least five percentage points of margin; these are regression floors, not sufficiency claims. Optional scientific coverage is separate."
   },
   "areas": [
     {
@@ -98,8 +98,8 @@
         "src/frequensolve/orchestrator/sites/aws/execution_profile.py"
       ],
       "baseline": {
-        "lines": 74.08,
-        "branches": 62.983
+        "lines": 76.841,
+        "branches": 67.033
       },
       "floors": {
         "lines": 65,

@@ -270,7 +270,9 @@ historical whole-package ratchet keeps its existing denominator and floors, so
 this change does not improve its score by deleting generated or difficult code.
 Optional scientific behavior has a separate denominator: each schema-v2
 `optional-extra-contracts.json` entry owns a line **and branch** floor and emits a
-separate coverage artifact. Do not add those percentages together or silently
+separate coverage artifact. Visual contracts additionally require each named plotting
+module to meet its own positive line and branch floors; one healthy plot module
+cannot hide a missing or untested required module. Do not add those percentages together or silently
 merge source and installed-package measurements. The inversion contract now also
 runs model/data packing, selected-run imaging and Hermitian dot/Taylor behavior
 with the installed PyLops extra, rather than relying only on an import/operator

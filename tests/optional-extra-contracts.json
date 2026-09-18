@@ -189,7 +189,29 @@
         "MPLBACKEND": "Agg",
         "PYVISTA_OFF_SCREEN": "true"
       },
-      "coverage_branch_floor": 45
+      "coverage_branch_floor": 45,
+      "module_floors": {
+        "frequensolve/plotting/analysis.py": {
+          "lines": 20,
+          "branches": 10
+        },
+        "frequensolve/plotting/animate.py": {
+          "lines": 20,
+          "branches": 10
+        },
+        "frequensolve/plotting/layered.py": {
+          "lines": 20,
+          "branches": 10
+        },
+        "frequensolve/plotting/traces.py": {
+          "lines": 20,
+          "branches": 10
+        },
+        "frequensolve/plotting/vtu.py": {
+          "lines": 20,
+          "branches": 10
+        }
+      }
     }
   ],
   "approval_markers": {
