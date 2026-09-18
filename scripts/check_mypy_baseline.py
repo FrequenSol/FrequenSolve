@@ -36,6 +36,7 @@ PHASE_ONE_STRICT_PATHS = (
     "src/frequensolve/simulation/solver.py",
     "src/frequensolve/simulation/study.py",
     "src/frequensolve/units.py",
+    "src/frequensolve/util/store.py",
     "src/frequensolve/validation/",
 )
 

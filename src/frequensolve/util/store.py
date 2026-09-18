@@ -8,12 +8,28 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Hashable,
+    Iterable,
+    Mapping,
+    Optional,
+    Sequence,
+    cast,
+)
 
 import blake3
 import h5py
 import numpy as np
 import xarray as xr
+
+if TYPE_CHECKING:
+    # NumPy arrays implement the buffer protocol; its older stubs omit that fact.
+    # A type-only import keeps this boundary free of new runtime dependencies.
+    from typing_extensions import Buffer
 
 __all__ = ["HDF5Reference", "SimulationStore", "hash_dataarray_payload"]
 
@@ -130,7 +146,16 @@ def _write_dimension_coordinates(
         dset.attrs[dim] = f"/{coordinate_dataset.name.strip('/')}"
 
 
-def _hash_update_json(hasher, value: Any) -> None:
+def _string_dimensions(dimensions: Iterable[Hashable]) -> tuple[str, ...]:
+    names = []
+    for dimension in dimensions:
+        if not isinstance(dimension, str):
+            raise ValueError("Simulation store dimension names must be strings")
+        names.append(dimension)
+    return tuple(names)
+
+
+def _hash_update_json(hasher: blake3.blake3, value: Any) -> None:
     payload = json.dumps(value, sort_keys=True, default=_json_default).encode("utf-8")
     hasher.update(payload)
 
@@ -166,7 +191,7 @@ def compact_hdf5_file(
     with h5py.File(path, "r") as source:
         raw_storage = 0
 
-        def add_storage(_name, obj):
+        def add_storage(_name: str, obj: h5py.Dataset | h5py.Group) -> None:
             nonlocal raw_storage
             if isinstance(obj, h5py.Dataset):
                 raw_storage += int(obj.id.get_storage_size())
@@ -224,7 +249,7 @@ def hash_dataarray_payload(
         values = values.astype(dtype, copy=False)
     hasher = blake3.blake3()
     _hash_update_json(hasher, {"dtype": str(values.dtype), "shape": values.shape})
-    hasher.update(memoryview(values).cast("B"))
+    hasher.update(memoryview(cast("Buffer", values)).cast("B"))
     _hash_update_json(hasher, {"dims": list(data.dims)})
     for dim in data.dims:
         coord = np.ascontiguousarray(data.coords[dim].values)
@@ -237,7 +262,7 @@ def hash_dataarray_payload(
                 "attrs": dict(data.coords[dim].attrs),
             },
         )
-        hasher.update(memoryview(coord).cast("B"))
+        hasher.update(memoryview(cast("Buffer", coord)).cast("B"))
     _hash_update_json(
         hasher, {"attrs": dict(data.attrs), "extra_attrs": dict(attrs or {})}
     )
@@ -377,8 +402,11 @@ class SimulationStore:
 
         dataset = dataset.strip("/")
         attrs = dict(attrs or {})
-        coordinate_dims = tuple(
-            data.dims if coordinate_dims is None else coordinate_dims
+        data_dims = _string_dimensions(data.dims)
+        coordinate_dims = (
+            data_dims
+            if coordinate_dims is None
+            else _string_dimensions(coordinate_dims)
         )
         unknown_dims = set(coordinate_dims) - set(data.dims)
         if unknown_dims:
@@ -495,7 +523,7 @@ class SimulationStore:
                     raise ValueError("Chunk iterator produced too many rows")
                 if dset is not None:
                     dset[offset:stop, ...] = values
-                hasher.update(memoryview(values).cast("B"))
+                hasher.update(memoryview(cast("Buffer", values)).cast("B"))
                 offset = stop
             if offset != shape[0]:
                 raise ValueError(
@@ -516,7 +544,7 @@ class SimulationStore:
                         "attrs": {},
                     },
                 )
-                hasher.update(memoryview(coord).cast("B"))
+                hasher.update(memoryview(cast("Buffer", coord)).cast("B"))
             _hash_update_json(hasher, {"attrs": {}, "extra_attrs": attrs})
             return hasher.hexdigest()
 
@@ -558,7 +586,7 @@ class SimulationStore:
                 dtype=dtype,
                 compression=compression,
             )
-            chunks = chunk_factory() if chunk_factory is not None else chunk_iter
+            chunks = chunk_iter() if callable(chunk_iter) else chunk_iter
             try:
                 digest = digest_chunks(chunks, dset=dset)
                 if dims:

@@ -946,16 +946,6 @@
       "file": "src/frequensolve/util/stochastic_fields.py"
     },
     {
-      "code": "arg-type",
-      "count": 6,
-      "file": "src/frequensolve/util/store.py"
-    },
-    {
-      "code": "no-untyped-def",
-      "count": 2,
-      "file": "src/frequensolve/util/store.py"
-    },
-    {
       "code": "assignment",
       "count": 4,
       "file": "src/frequensolve/util/system_info.py"
@@ -1003,6 +993,7 @@
         "src/frequensolve/simulation/solver.py",
         "src/frequensolve/simulation/study.py",
         "src/frequensolve/units.py",
+        "src/frequensolve/util/store.py",
         "src/frequensolve/validation/"
       ]
     },
@@ -1060,6 +1051,7 @@
     "src/frequensolve/simulation/solver.py",
     "src/frequensolve/simulation/study.py",
     "src/frequensolve/units.py",
+    "src/frequensolve/util/store.py",
     "src/frequensolve/validation/",
     "src/frequensolve/simulation/jobs/remote.py",
     "src/frequensolve/simulation/jobs/timings.py",
