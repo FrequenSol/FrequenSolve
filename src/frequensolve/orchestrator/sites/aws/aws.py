@@ -849,10 +849,16 @@ class AWSSite(BaseSite):
                         )
             return s3_key
 
-        except ClientError as e:
-            raise RuntimeError(f"Failed to sync {local_path} to S3: {e}")
-        except Exception as e:
-            raise RuntimeError(f"Unexpected error syncing {local_path} to S3: {e}")
+        except Exception:
+            # Managed boto3 uploads can wrap ClientError in S3UploadFailedError.
+            # Neither form is safe to expose: provider messages include private
+            # bucket/object identities and may contain credential material.
+            pass
+        # Raise outside the handler so telemetry cannot inspect a sensitive
+        # implicit __context__, even when normal traceback display suppresses it.
+        raise RuntimeError(
+            "Cloud file upload failed. Check your storage access and retry."
+        )
 
     def _ensure_storage_bucket(self) -> None:
         """Load or create the authenticated user's Cloud storage bucket."""
@@ -1653,10 +1659,13 @@ class AWSSite(BaseSite):
         local_path = Path(local_path)
         remote_path = Path(remote_path)
 
+        if not local_path.exists():
+            raise FileNotFoundError("Local upload path does not exist")
+
         # Construct full S3 key by combining work_dir (s3_prefix) with remote_path
         s3_key = str(self.work_dir / remote_path).replace("\\", "/")
 
-        logger.debug(f"Uploading {local_path} to s3://{self.config.s3_bucket}/{s3_key}")
+        logger.debug("Uploading files to Cloud storage")
 
         try:
             if local_path.is_file():
@@ -1673,10 +1682,12 @@ class AWSSite(BaseSite):
                         self.s3_client.upload_file(
                             str(file_path), self.config.s3_bucket, file_s3_key
                         )
-        except ClientError as e:
-            raise RuntimeError(f"Failed to upload {local_path} to S3: {e}")
-        except Exception as e:
-            raise RuntimeError(f"Unexpected error uploading {local_path} to S3: {e}")
+            return
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Cloud file upload failed. Check your storage access and retry."
+        )
 
     def get(
         self,

@@ -1,9 +1,11 @@
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 pytest.importorskip("boto3")
+from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import ClientError
 
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
@@ -873,3 +875,96 @@ def test_real_imaging_run_preserves_grid_and_fwi_metadata(tmp_path):
     assert second.job.images == {}
     assert first.job.grid is not second.job.grid
     assert job.save_path == job._result_path / "imaging"
+
+
+@pytest.mark.parametrize("method", ["sync_s3", "put"])
+@pytest.mark.parametrize("error_kind", ["client", "managed", "unexpected"])
+def test_upload_failure_sanitizes_provider_payload_and_traceback(
+    tmp_path, caplog, method, error_kind
+):
+    private = "private-bucket/private-account/private-key?token=synthetic-secret"
+    if error_kind == "client":
+        error = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": private}}, "PutObject"
+        )
+    elif error_kind == "managed":
+        error = S3UploadFailedError(private)
+    else:
+        error = OSError(private)
+    calls = []
+
+    def upload_file(*args):
+        calls.append(args)
+        raise error
+
+    site = make_site(SimpleNamespace(upload_file=upload_file))
+    site.config = SimpleNamespace(
+        s3_bucket="private-bucket", s3_prefix="private-account"
+    )
+    source = tmp_path / "input.json"
+    source.write_text("synthetic input")
+    with caplog.at_level("DEBUG"):
+        with pytest.raises(RuntimeError, match="Cloud file upload failed") as exc_info:
+            getattr(site, method)(source, "private-key")
+    rendered = "".join(traceback.format_exception(exc_info.value))
+    assert exc_info.value.__context__ is None
+    assert exc_info.value.__cause__ is None
+    assert "Check your storage access and retry" in str(exc_info.value)
+    assert "synthetic-secret" not in rendered
+    assert "AccessDenied" not in rendered
+    assert private not in rendered + caplog.text
+    assert "s3://private-bucket" not in caplog.text
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("method", ["sync_s3", "put"])
+def test_upload_stops_on_partial_failure_without_deleting_existing_objects(
+    tmp_path, method
+):
+    uploaded = []
+
+    def upload_file(path, bucket, key):
+        uploaded.append(key)
+        if len(uploaded) == 2:
+            raise S3UploadFailedError("synthetic private provider failure")
+
+    site = make_site(SimpleNamespace(upload_file=upload_file))
+    site.config = SimpleNamespace(s3_bucket="bucket", s3_prefix="tenant-prefix")
+    source = tmp_path / "inputs"
+    source.mkdir()
+    for name in ["a.json", "b.json", "c.json"]:
+        (source / name).write_text("synthetic input")
+    with pytest.raises(RuntimeError, match="Cloud file upload failed"):
+        getattr(site, method)(source, "project/inputs")
+    assert len(uploaded) == 2
+    # The SDK has no ownership proof permitting deletion of pre-existing keys.
+    # No delete API exists on this fake, so an invented rollback would fail.
+
+
+@pytest.mark.parametrize("method", ["sync_s3", "put"])
+def test_upload_preserves_file_and_nested_directory_destinations(tmp_path, method):
+    calls = []
+    site = make_site(SimpleNamespace(upload_file=lambda *args: calls.append(args)))
+    site.config = SimpleNamespace(s3_bucket="bucket", s3_prefix="tenant-prefix")
+    source = tmp_path / "inputs"
+    (source / "nested").mkdir(parents=True)
+    (source / "a.json").write_text("a")
+    (source / "nested/b.json").write_text("b")
+    prefix = "tenant-prefix/" if method == "put" else ""
+    result = getattr(site, method)(source / "a.json", "single.json")
+    assert calls == [(str(source / "a.json"), "bucket", prefix + "single.json")]
+    assert result == ("single.json" if method == "sync_s3" else None)
+    calls.clear()
+    getattr(site, method)(source, "project/inputs")
+    assert {call[2] for call in calls} == {
+        prefix + "project/inputs/a.json",
+        prefix + "project/inputs/nested/b.json",
+    }
+
+
+@pytest.mark.parametrize("method", ["sync_s3", "put"])
+def test_upload_rejects_missing_local_path_before_any_provider_call(tmp_path, method):
+    site = make_site(SimpleNamespace())
+    site.config = SimpleNamespace(s3_bucket="bucket", s3_prefix="tenant-prefix")
+    with pytest.raises(FileNotFoundError):
+        getattr(site, method)(tmp_path / "missing", "remote-key")
