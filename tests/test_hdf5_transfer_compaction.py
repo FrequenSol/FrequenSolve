@@ -347,3 +347,23 @@ def test_compaction_preserves_file_mode(tmp_path):
     compact_hdf5_file(path, min_reclaim_bytes=1, min_reclaim_fraction=0.01)
 
     assert path.stat().st_mode & 0o777 == 0o640
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("selection", [None, ["distance"]])
+def test_put_dataarray_rejects_non_string_dimensions_before_mutation(
+    tmp_path, existing, selection
+):
+    path = tmp_path / "store.h5"
+    store = SimulationStore(path)
+    if existing:
+        with h5py.File(path, "w") as h5:
+            h5.create_dataset("values", data=[42.0])
+        before = path.read_bytes()
+    data = xr.DataArray([1.0, 2.0], dims=[7])
+    with pytest.raises(ValueError, match="dimension names must be strings"):
+        store.put_dataarray("values", data, coordinate_dims=selection)
+    if existing:
+        assert path.read_bytes() == before
+    else:
+        assert not path.exists()

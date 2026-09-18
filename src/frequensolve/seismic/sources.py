@@ -6,7 +6,18 @@ import copy
 from dataclasses import dataclass, field
 from numbers import Number
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    SupportsFloat,
+    Union,
+    cast,
+)
 
 import numpy as np
 
@@ -44,7 +55,9 @@ __all__ = [
 _SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole"}
 
 
-def _path_to_fs(path: Union[str, Path], ctx: Optional[ExportContext]) -> str:
+def _path_to_fs(path: Optional[Union[str, Path]], ctx: Optional[ExportContext]) -> str:
+    if path is None:
+        raise ValueError("File-backed sources require a path before export")
     if ctx is None:
         return str(path)
     return str(ctx.relative_to_project(Path(path)))
@@ -300,7 +313,7 @@ def _complex_to_fs(value: Any) -> Any:
         imag = float(value.imag)
         return real if imag == 0.0 else [real, imag]
     if isinstance(value, Number):
-        return float(value)
+        return float(cast(SupportsFloat, value))
     if isinstance(value, np.ndarray):
         value = value.tolist()
     if (
@@ -320,7 +333,7 @@ def _coefficient_abs(value: Any) -> float:
     if isinstance(value, complex):
         return abs(value)
     if isinstance(value, Number):
-        return abs(float(value))
+        return abs(float(cast(SupportsFloat, value)))
     if isinstance(value, np.ndarray):
         value = value.tolist()
     if isinstance(value, (list, tuple)) and len(value) == 2:
@@ -1145,11 +1158,14 @@ class SourceEncoding(ExtraFieldsMixin):
                 refs.append(copy.deepcopy(explicit_ref))
                 continue
 
+            weights: np.ndarray
             if self.encoding_type == "Named":
                 weights = np.zeros(len(source_values), dtype=float)
                 for source, coefficient in field_obj.terms.items():
                     weights[index_by_name[str(source)]] += _coefficient_abs(coefficient)
             else:
+                if field_obj.coefficients is None:
+                    raise ValueError("Dense DistributedSource requires coefficients")
                 weights = np.asarray(
                     [_coefficient_abs(value) for value in field_obj.coefficients],
                     dtype=float,
@@ -1309,4 +1325,6 @@ class SourceGroup:
     @property
     def _path(self) -> Path:
         warn_deprecated_path_api(f"{self.__class__.__name__}._path")
+        if self._proj_path is None or self._rel_path is None:
+            raise ValueError("SourceGroup path has not been configured")
         return self._proj_path / self._rel_path
