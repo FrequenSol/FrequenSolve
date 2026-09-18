@@ -71,7 +71,7 @@ class DummyJob:
 
 def make_site(monkeypatch):
     monkeypatch.setattr(LocalSite, "_get_solver_path", lambda self: "/bin/echo")
-    site = LocalSite()
+    site = LocalSite(frequensolver_policy="off")
     closed = []
     site.close = lambda **kwargs: closed.append(kwargs)
     return site, closed

@@ -246,3 +246,54 @@ higher ceiling cannot be introduced silently.
 - Solver-backed integration tests are crucial for ensuring the solver works
   correctly in a production environment. The manual release-candidate workflow
   requires that exact-SHA evidence before it creates a tag.
+
+## Risk coverage and warning budgets
+
+`make test` also enforces `risk-coverage-baseline.json`. It covers validation,
+solver contracts, orchestration, Cloud, HPC, geometry/mesh and core seismic I/O.
+Each area has separate line and branch floors, named modules that cannot vanish
+from the report, and positive per-module minima. A newly untested module cannot
+hide behind a healthy area average. A report without branch data, a missing
+required module, invalid counters or an invalid/disabled floor fails closed.
+Modules without executable branches count as fully covered for that metric;
+their line floor still applies.
+
+The initial measurements use Python 3.10 and the CI dependency extras
+`dev,parallel,cloud` in a fresh macOS environment. Area floors retain at least
+five percentage points of margin. These are regression constraints, not a claim
+that a low-covered module is adequately tested. For example, grid helpers remain
+a low-coverage area even when their minimum passes. Hosted Linux confirmation is
+separate evidence; local passing does not claim that the CI workflow ran.
+
+The risk areas exclude generated Versioneer code and third-party packages. The
+historical whole-package ratchet keeps its existing denominator and floors, so
+this change does not improve its score by deleting generated or difficult code.
+Optional scientific behavior has a separate denominator: each schema-v2
+`optional-extra-contracts.json` entry owns a line **and branch** floor and emits a
+separate coverage artifact. Visual contracts additionally require each named plotting
+module to meet its own positive line and branch floors; one healthy plot module
+cannot hide a missing or untested required module. Do not add those percentages together or silently
+merge source and installed-package measurements. The inversion contract now also
+runs model/data packing, selected-run imaging and Hermitian dot/Taylor behavior
+with the installed PyLops extra, rather than relying only on an import/operator
+smoke test. Native scientific and image-baseline acceptance remain separate.
+
+The budget for unexpected warnings is **zero**,
+including runtime, resource and deprecation warnings. Expected warning behavior
+must be asserted explicitly in its test. The filter also catches SDK warnings
+that use `stacklevel` to point at caller code. Third-party warnings fail too; any
+exception must be narrowly scoped and documented. There are currently no third-party
+exceptions and no broad ignore rule. Fake local/SSH sites that do not contain a solver
+explicitly use the existing compatibility `off` policy in those transport-only
+test fixtures; real compatibility policy tests and product defaults are unchanged.
+An autouse fixture closes figures created by each test after assertions/image
+comparison without importing plotting dependencies into a lean installation.
+
+To review a rebaseline, retain the exact source, Python/dependency installation,
+selected lane, raw JSON coverage and test result. Explain every proposed decrease,
+missing-module change or warning exception in the PR and link its tracked risk.
+Prefer executable behavior coverage to lowering a floor. Run a positive candidate
+and negative fixtures that prove omitted modules, zero-covered new modules,
+branch regressions and malformed reports still fail. Optional visual failures
+must keep their actual failing result; do not regenerate baselines or increase
+tolerances just to satisfy these coverage gates.

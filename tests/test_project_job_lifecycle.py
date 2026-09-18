@@ -1015,7 +1015,7 @@ def test_local_submit_autosaves_job_and_simulation(monkeypatch, tmp_path):
     monkeypatch.setattr(LocalSite, "_get_solver_path", lambda self: "/bin/echo")
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
-    site = LocalSite()
+    site = LocalSite(frequensolver_policy="off")
 
     monkeypatch.setattr(site, "_submit_local_tasks", lambda job, **kwargs: [])
 

@@ -9,7 +9,8 @@ test:
 	-m "not integration and not cloud and not hpc and not interactive and not visual" \
 	--cov=src/ --cov-report=term --cov-report=xml --cov-report=json:tests/output/coverage.json \
 	tests/
-	python scripts/check_coverage_thresholds.py tests/output/coverage.json
+	python scripts/check_coverage_thresholds.py tests/output/coverage.json \
+		--risk-baseline tests/risk-coverage-baseline.json
 
 .PHONY: test-property-contracts
 test-property-contracts:
