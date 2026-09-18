@@ -1,5 +1,6 @@
 """Small public-API 2D elastic acceptance case; native execution is opt-in."""
 
+import importlib.metadata
 import json
 import os
 import warnings
@@ -35,9 +36,11 @@ def _author_elastic_job(root):
     model.add_layer(name="homogeneous", properties={"vp": 2.0, "vs": 1.0, "rho": 2.2})
     model.add_surface(name="bottom", depth=0.5)
     sim += model
-    sim += LayeredMeshGenerator(l_bound=[0.0, 0.0], u_bound=[1.0, 0.5], n=[8, 1])
+    sim += LayeredMeshGenerator(l_bound=[0.0, 0.0], u_bound=[1.0, 0.5], n=[16, 1])
+    # The order-2 / two-elements-per-wave probe had 21% reciprocity error.
+    # Use the refined fixture without relaxing the original 1e-3 bound.
     sim.mesh.set_adapt(
-        elems_per_wave=2.0, order=2, f_low=2.0, f_high=2.0, adapt_order=False
+        elems_per_wave=4.0, order=4, f_low=2.0, f_high=2.0, adapt_order=False
     )
     sim += BoundaryCondition(conditions=["free"], boundaries=["z_min"])
     sim += BoundaryCondition(
@@ -178,6 +181,7 @@ def test_native_elastic_velocity_reciprocity(tmp_path):
         assert relative_error < 1e-3
     receipt = {
         "schema": "frequensolve-native-elastic-acceptance-1",
+        "sdk_version": importlib.metadata.version("frequensolve"),
         "build": manifest["build"],
         "license": manifest.get("license"),
         "workflow": manifest["workflow"],
@@ -187,6 +191,12 @@ def test_native_elastic_velocity_reciprocity(tmp_path):
         },
         "velocity_shape": list(values.shape),
         "relative_reciprocity_error": relative_error,
+        "relative_reciprocity_limit": 1e-3,
+        "complex_velocity": {
+            "real": values.real.tolist(),
+            "imag": values.imag.tolist(),
+        },
+        "result_units": "not asserted; packed DataArray has no unit attribute",
         "compatibility_warnings": compatibility_warnings,
         "scope": "local native 2D elastic smoke; not full release or licensed customer acceptance",
     }
