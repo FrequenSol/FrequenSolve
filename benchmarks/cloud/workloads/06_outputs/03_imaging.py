@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 06_outputs/03_imaging.ipynb
-Source SHA-256: b1dcf384350c83c4d01a689829fec57b55845d2ecc36b73e660b8515d5d496eb
+Source SHA-256: 8d282a5126d6be373989d11f5a105b9136e0a4af2cf40961a7c6522db497a59a
 """
 
 # %% source cell 5
@@ -197,7 +197,7 @@ observed_traces.summary
 # %% source cell 27
 rtm_job = smooth_sim.imaging_job(
     name="rtm_from_true_data",
-    observed=observed_job,
+    observed=observed_traces,
     grid=image_grid,
     parameters=["vp", "vs", "rho"],
     fields=["velocity"],
@@ -206,7 +206,7 @@ rtm_job = smooth_sim.imaging_job(
     misfit_norm="L2",
 )
 rtm_result = site.submit(rtm_job).wait()
-solver_images = site.fetch_image(rtm_job)
+solver_images = rtm_result.images()
 solver_images.raw_images
 
 # %% source cell 28

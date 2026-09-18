@@ -11,7 +11,9 @@ from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
 from frequensolve.seismic.sources import SourceGeometry
+from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import BaseJob
+from frequensolve.simulation.jobs.artifacts import TraceManifest
 from frequensolve.simulation.jobs.fwi import DataSpace, ModelSpace
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
 from frequensolve.simulation.outputs import VtkOutput
@@ -155,6 +157,42 @@ def test_imaging_job_syntax_serializes_trace_store_roots(tmp_path):
         {"name": "pressure", "IC": "pressure"},
         {"name": "up_down", "IC": "up_down"},
     ]
+
+
+@pytest.mark.parametrize("run_id", ["first-run", "second-run"])
+def test_imaging_from_observed_dataset_preserves_selected_run(tmp_path, run_id):
+    sim = _elastic_simulation(tmp_path)
+    legacy = tmp_path / "jobs" / "observed" / "results" / "traces"
+    legacy.mkdir(parents=True)
+    run_root = legacy.parent / "runs" / run_id
+    trace_root = run_root / "traces"
+    trace_root.mkdir(parents=True)
+    # A concrete run manifest selects these artifacts, even with a legacy
+    # directory present. No native solve or Cloud submission is needed.
+    traces = TraceDataset(
+        TraceManifest(
+            files=[trace_root / "traces.h5"],
+            frequencies={2: 12.0, 1: 8.0, 3: 18.0},
+            groups=["surface"],
+            simulation=tmp_path / "observed.json",
+            result_path=run_root,
+            output_path=trace_root,
+            project_path=tmp_path,
+        )
+    )
+    job = sim.imaging_job(
+        name="rtm",
+        observed=traces,
+        parameters=["vp"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        weights=[1.0, 0.8, 0.45],
+    )
+    assert job.f_list == [8.0, 12.0, 18.0]
+    assert job.misfit.receiver_groups[0].observed == trace_root
+    loaded = BaseJob.load(job.save())
+    assert loaded.misfit.receiver_groups[0].observed == trace_root
+    assert loaded.misfit.receiver_groups[0].observed != legacy
+    assert loaded.to_fs()["Image"]["weights"] == [1.0, 0.8, 0.45]
 
 
 def test_imaging_job_outputs_use_canonical_top_level_contract(tmp_path):
