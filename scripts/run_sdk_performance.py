@@ -8,6 +8,7 @@ import gc
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import statistics
@@ -562,10 +563,28 @@ def validate_evidence(
         if not isinstance(samples, list) or not samples:
             raise ValueError(f"scenario {scenario.get('name')!r} has no measurements")
         for sample in samples:
-            if float(sample.get("wallTimeSeconds", 0.0)) <= 0.0:
+            if (
+                _finite_nonnegative_number(
+                    sample.get("wallTimeSeconds"), "measured wall-time sample"
+                )
+                == 0
+            ):
                 raise ValueError("scenario contains an empty wall-time measurement")
-            if int(sample.get("pythonHeapPeakBytes", 0)) <= 0:
-                raise ValueError("scenario contains an empty peak-memory measurement")
+            peak = sample.get("pythonHeapPeakBytes")
+            if type(peak) is not int or peak <= 0:
+                raise ValueError("peak-memory sample must be a positive integer")
+
+
+def _finite_nonnegative_number(value: Any, name: str) -> float:
+    if type(value) not in (int, float):
+        raise ValueError(f"{name} must be a finite nonnegative number")
+    try:
+        number = float(value)
+    except OverflowError as error:
+        raise ValueError(f"{name} must be a finite nonnegative number") from error
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"{name} must be a finite nonnegative number")
+    return number
 
 
 def compare_to_baseline(
@@ -608,10 +627,20 @@ def compare_to_baseline(
         scenario = scenarios[str(name)]
         if not isinstance(limits, Mapping):
             raise ValueError(f"baseline thresholds for {name!r} are invalid")
-        wall_limit = float(limits["maxMedianWallTimeSeconds"])
-        memory_limit = int(limits["maxMedianPythonHeapBytes"])
-        wall = float(scenario["wallTimeSeconds"]["median"])
-        memory = int(scenario["pythonHeapPeakBytes"]["median"])
+        wall_limit = _finite_nonnegative_number(
+            limits.get("maxMedianWallTimeSeconds"), f"{name}: wall-time budget"
+        )
+        if wall_limit == 0:
+            raise ValueError(f"{name}: wall-time budget must be positive")
+        memory_limit = limits.get("maxMedianPythonHeapBytes")
+        if type(memory_limit) is not int or memory_limit <= 0:
+            raise ValueError(f"{name}: Python-heap budget must be a positive integer")
+        wall = _finite_nonnegative_number(
+            scenario["wallTimeSeconds"]["median"], f"{name}: measured wall time"
+        )
+        memory = _finite_nonnegative_number(
+            scenario["pythonHeapPeakBytes"]["median"], f"{name}: measured Python heap"
+        )
         if wall > wall_limit:
             violations.append(
                 f"{name}: median wall time {wall:.6f}s exceeds {wall_limit:.6f}s"
