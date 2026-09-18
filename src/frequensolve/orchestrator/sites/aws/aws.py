@@ -853,9 +853,12 @@ class AWSSite(BaseSite):
             # Managed boto3 uploads can wrap ClientError in S3UploadFailedError.
             # Neither form is safe to expose: provider messages include private
             # bucket/object identities and may contain credential material.
-            raise RuntimeError(
-                "Cloud file upload failed. Check your storage access and retry."
-            ) from None
+            pass
+        # Raise outside the handler so telemetry cannot inspect a sensitive
+        # implicit __context__, even when normal traceback display suppresses it.
+        raise RuntimeError(
+            "Cloud file upload failed. Check your storage access and retry."
+        )
 
     def _ensure_storage_bucket(self) -> None:
         """Load or create the authenticated user's Cloud storage bucket."""
@@ -1679,10 +1682,12 @@ class AWSSite(BaseSite):
                         self.s3_client.upload_file(
                             str(file_path), self.config.s3_bucket, file_s3_key
                         )
+            return
         except Exception:
-            raise RuntimeError(
-                "Cloud file upload failed. Check your storage access and retry."
-            ) from None
+            pass
+        raise RuntimeError(
+            "Cloud file upload failed. Check your storage access and retry."
+        )
 
     def get(
         self,

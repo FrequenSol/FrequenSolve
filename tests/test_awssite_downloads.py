@@ -907,6 +907,8 @@ def test_upload_failure_sanitizes_provider_payload_and_traceback(
         with pytest.raises(RuntimeError, match="Cloud file upload failed") as exc_info:
             getattr(site, method)(source, "private-key")
     rendered = "".join(traceback.format_exception(exc_info.value))
+    assert exc_info.value.__context__ is None
+    assert exc_info.value.__cause__ is None
     assert "Check your storage access and retry" in str(exc_info.value)
     assert "synthetic-secret" not in rendered
     assert "AccessDenied" not in rendered
